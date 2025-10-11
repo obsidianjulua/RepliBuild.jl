@@ -12,6 +12,14 @@ A Julia-based build system that compiles C++ code to LLVM IR and generates Julia
 - **Julia Bindings**: Automatic generation of Julia wrappers for C++ code
 - **Project Templates**: Interactive wizard for quick project setup
 
+## Installation
+
+```julia
+# From the Julia REPL
+using Pkg
+Pkg.add("RepliBuild")
+```
+
 ## Quick Start
 
 ### Import a CMake Project

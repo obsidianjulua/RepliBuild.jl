@@ -19,7 +19,7 @@ println("="^60)
 build_dir = @__DIR__
 project_dir = dirname(build_dir)  # Parent directory (RepliBuild root)
 sysimage_path = joinpath(build_dir, "RepliBuildSysimage.so")
-precompile_file = joinpath(build_dir, "precompile_replibuild.jl")
+precompile_file = joinpath(build_dir, "precompile_jmake.jl")
 
 # Build sysimage
 println("📁 Project directory: $project_dir")

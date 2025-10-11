@@ -1,7 +1,6 @@
 #!/usr/bin/env julia
-# JuliaWrapItUp.jl - Universal binary wrapper generator (Stage 2)
+# JuliaWrapItUp.jl
 # Complements the RepliBuild LLVMake compiler by providing advanced binary introspection and wrapping
-# Part of the RepliBuild build system
 
 module JuliaWrapItUp
 
