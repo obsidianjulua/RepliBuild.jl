@@ -1,0 +1,149 @@
+# RepliBuild Configuration File
+# A TOML-based build system leveraging LLVM/Clang for Julia bindings
+
+[project]
+name = "MyProject"
+root = "."
+
+[paths]
+source = "src"
+output = "julia"
+build = "build"
+include = ["include", "third_party/include"]
+
+[bridge]
+# Let UnifiedBridge discover tools automatically
+auto_discover = true
+# Fallback paths if auto-discovery fails
+search_paths = ["/usr/bin", "/usr/local/bin", "~/.local/bin"]
+# Enable learning system for command patterns
+enable_learning = true
+# Cache discovered tools
+cache_tools = true
+
+[tools]
+# Leave empty to use UnifiedBridge auto-discovery
+# Or specify if you have custom paths
+# clang = "/usr/bin/clang++-15"
+# llvm_config = "/usr/local/bin/llvm-config"
+
+[compile]
+# Flags passed to clang via UnifiedBridge
+flags = ["-O2", "-fPIC", "-std=c++17", "-Wall"]
+defines = { NDEBUG = "1" }
+
+# Include directories for dependency walking
+include_dirs = ["include", "src", "/usr/include"]
+lib_dirs = ["lib", "/usr/lib", "/usr/local/lib"]
+libraries = ["pthread", "dl"]
+
+# Enable clang AST-based dependency walking
+walk_dependencies = true
+max_depth = 10  # Prevent circular includes
+
+[target]
+# Target configuration (empty = host)
+triple = ""
+cpu = "native"  # Use native for best performance
+features = ["+avx2", "+fma"]
+opt_level = "O2"
+debug = false
+lto = true
+
+[bindings]
+# Julia binding generation
+style = "advanced"  # simple, advanced, cxxwrap
+type_inference = "header"  # header, signature, auto
+generate_tests = true
+generate_docs = true
+
+# Symbol filtering
+exclude_patterns = [
+    "^_.*",           # Private symbols
+    ".*_impl$",       # Implementation details
+    "^test_.*",       # Test functions
+    ".*::internal::.*" # Internal namespaces
+]
+
+include_patterns = []  # Empty = include all (after exclusions)
+
+[bindings.type_mappings]
+# C++ to Julia type mappings
+"std::string" = "String"
+"std::vector<double>" = "Vector{Float64}"
+"std::vector<float>" = "Vector{Float32}"
+"std::vector<int>" = "Vector{Int32}"
+"std::shared_ptr" = "Ref"
+"std::unique_ptr" = "Ref"
+
+[symbols]
+# Symbol extraction via UnifiedBridge
+use_nm = true
+use_objdump = true
+demangle_cpp = true
+detect_abi = true  # Detect C vs C++ ABI
+
+[workflow]
+# Build pipeline stages
+stages = [
+    "discover_tools",     # Find compilers via UnifiedBridge
+    "walk_deps",          # Walk dependency tree with clang
+    "parse_ast",          # Extract function signatures
+    "compile_to_ir",      # Compile C++ → LLVM IR
+    "optimize_ir",        # Optimize with opt
+    "link_ir",            # Link IR modules
+    "create_library",     # Create shared library
+    "extract_symbols",    # Get exported symbols
+    "generate_bindings",  # Create Julia wrappers
+    "generate_tests",     # Create test suite
+    "generate_docs"       # Create documentation
+]
+
+# Parallel compilation
+parallel = true
+jobs = 0  # 0 = auto-detect CPU cores
+
+[cache]
+# Cache compilation artifacts
+enabled = true
+directory = ".bridge_cache"
+invalidate_on = ["source_change", "config_change"]
+ttl = 86400  # 24 hours
+
+[logging]
+level = "info"  # debug, info, warn, error
+show_commands = true  # Show executed commands
+show_learning = true  # Show UnifiedBridge learning stats
+log_file = "build.log"
+
+[integration]
+# Integration with RepliBuild components
+llvmake_enabled = true       # Use LLVMake.jl for C++ compilation
+wrapitup_enabled = true      # Use JuliaWrapItUp.jl for binary wrapping
+unifiedbridge_enabled = true # Use UnifiedBridge for command execution
+
+# Metadata sharing
+export_metadata = true
+metadata_format = "json"  # json, toml
+
+[learning]
+# Intelligent error correction with ErrorLearning.jl
+enabled = true                      # Enable error pattern learning
+auto_fix = true                     # Automatically apply high-confidence fixes
+max_retries = 3                     # Maximum auto-retry attempts
+confidence_threshold = 0.75         # Minimum confidence for auto-fix (0.0-1.0)
+error_db = "replibuild_errors.db"       # Database file (per-project or global)
+use_embeddings = true               # Use BERT embeddings (requires EngineT)
+bootstrap_on_init = true            # Bootstrap with common error patterns
+share_knowledge = false             # Share learned patterns across projects
+
+# Error categorization
+track_error_types = [
+    "compiler_error",
+    "linker_error",
+    "llvm_error",
+    "optimization_failure",
+    "missing_header",
+    "undefined_symbol",
+    "syntax_error"
+]
