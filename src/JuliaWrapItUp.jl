@@ -434,6 +434,15 @@ function get_binary_architecture(file_path::String)::String
 end
 
 """
+Enhance symbols with type information from headers (stub for future implementation)
+"""
+function enhance_symbols_with_headers(wrapper::BinaryWrapper, symbols::Vector{Dict{String,Any}})
+    # TODO: Parse headers to get accurate type information
+    # For now, this is a no-op
+    return symbols
+end
+
+"""
 Extract symbols from binary
 """
 function extract_symbols(wrapper::BinaryWrapper, file_path::String, binary_type::Symbol)::Vector{Dict{String,Any}}
@@ -561,6 +570,17 @@ function extract_symbols_objdump(wrapper::BinaryWrapper, file_path::String)::Vec
         @debug "objdump failed for $file_path: $e"
     end
 
+    return symbols
+end
+
+"""
+Extract symbols using libclang (stub for future implementation)
+"""
+function extract_symbols_libclang(wrapper::BinaryWrapper, file_path::String)::Vector{Dict{String,Any}}
+    symbols = Dict{String,Any}[]
+    # TODO: Implement libclang-based symbol extraction
+    # This would parse headers to get more accurate type information
+    @debug "libclang symbol extraction not yet implemented for $file_path"
     return symbols
 end
 
@@ -737,7 +757,7 @@ function generate_advanced_wrapper(wrapper::BinaryWrapper, binary::BinaryInfo)::
     function __init__()
         try
             _lib_handle[] = Libdl.dlopen(_lib_path, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-            @debug "Loaded $(binary.name) from $_lib_path"
+            @debug "Loaded $(binary.name) from \$_lib_path"
         catch e
             push!(_load_errors, string(e))
             @debug "Failed to load $(binary.name): \$e"
