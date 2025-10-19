@@ -34,6 +34,27 @@ end
 const PORT = 3003
 
 # ============================================================================
+# LLVM TOOLCHAIN INITIALIZATION
+# ============================================================================
+
+# Initialize LLVM toolchain on daemon startup
+const LLVM_INITIALIZED = Ref(false)
+
+function ensure_llvm_initialized()
+    if !LLVM_INITIALIZED[]
+        println("[COMPILE] Initializing LLVM toolchain...")
+        try
+            LLVMEnvironment.get_toolchain()
+            LLVM_INITIALIZED[] = true
+            println("[COMPILE] LLVM toolchain ready")
+        catch e
+            @error "Failed to initialize LLVM toolchain: $e"
+            throw(e)
+        end
+    end
+end
+
+# ============================================================================
 # PERSISTENT CACHES
 # ============================================================================
 
@@ -141,6 +162,9 @@ function compile_parallel(args::Dict)
 
     println("[COMPILE] Starting parallel compilation")
 
+    # Ensure LLVM is initialized
+    ensure_llvm_initialized()
+
     try
         # Load configuration
         config = ConfigurationManager.load_config(config_path)
@@ -168,8 +192,14 @@ function compile_parallel(args::Dict)
         include_dirs = ConfigurationManager.get_include_dirs(config)
         flags = get(config.compile, "flags", ["-std=c++17", "-fPIC"])
 
-        # Get clang path
-        clang_path = get(config.llvm, "tools", Dict())["clang++"]
+        # Get clang path from LLVMEnvironment
+        clang_path = LLVMEnvironment.get_tool("clang++")
+        if isempty(clang_path)
+            return Dict(
+                :success => false,
+                :error => "clang++ not found in LLVM toolchain. Run LLVMEnvironment.init_toolchain() first."
+            )
+        end
 
         println("[COMPILE] Compiling $(length(all_sources)) source files...")
         println("[COMPILE] Output: $output_dir")
@@ -456,10 +486,15 @@ function compile_full_pipeline(args::Dict)
 
         # Stage 2: Link IR files
         linked_ir_path = joinpath(config.project_root, get(config.link, "output_dir", "build/linked"), "linked.ll")
+        llvm_link_path = LLVMEnvironment.get_tool("llvm-link")
+        if isempty(llvm_link_path)
+            return Dict(:success => false, :error => "llvm-link not found in LLVM toolchain")
+        end
+
         link_result = link_ir(Dict(
             "ir_files" => ir_files,
             "output" => linked_ir_path,
-            "llvm_link" => config.llvm["tools"]["llvm-link"]
+            "llvm_link" => llvm_link_path
         ))
 
         if !link_result[:success]
@@ -469,12 +504,16 @@ function compile_full_pipeline(args::Dict)
         # Stage 3: Optimize
         opt_level = get(config.link, "opt_level", "O2")
         optimized_ir_path = joinpath(dirname(linked_ir_path), "optimized.ll")
+        opt_path = LLVMEnvironment.get_tool("opt")
+        if isempty(opt_path)
+            return Dict(:success => false, :error => "opt not found in LLVM toolchain")
+        end
 
         opt_result = optimize_ir(Dict(
             "ir_path" => linked_ir_path,
             "output" => optimized_ir_path,
             "opt_level" => opt_level,
-            "opt" => config.llvm["tools"]["opt"]
+            "opt" => opt_path
         ))
 
         if !opt_result[:success]
@@ -483,10 +522,15 @@ function compile_full_pipeline(args::Dict)
 
         # Stage 4: Compile to object
         object_path = joinpath(dirname(optimized_ir_path), "output.o")
+        llc_path = LLVMEnvironment.get_tool("llc")
+        if isempty(llc_path)
+            return Dict(:success => false, :error => "llc not found in LLVM toolchain")
+        end
+
         obj_result = compile_to_object(Dict(
             "ir_path" => optimized_ir_path,
             "output" => object_path,
-            "llc" => config.llvm["tools"]["llc"]
+            "llc" => llc_path
         ))
 
         if !obj_result[:success]
@@ -496,12 +540,16 @@ function compile_full_pipeline(args::Dict)
         # Stage 5: Link shared library
         library_name = get(config.binary, "library_name", "lib$(lowercase(config.project_name)).so")
         library_path = joinpath(config.project_root, get(config.binary, "output_dir", "julia"), library_name)
+        clangpp_path = LLVMEnvironment.get_tool("clang++")
+        if isempty(clangpp_path)
+            return Dict(:success => false, :error => "clang++ not found in LLVM toolchain")
+        end
 
         lib_result = link_shared_library(Dict(
             "object_files" => [object_path],
             "output" => library_path,
             "libraries" => get(config.binary, "link_libraries", String[]),
-            "clang" => config.llvm["tools"]["clang++"]
+            "clang" => clangpp_path
         ))
 
         if !lib_result[:success]
@@ -575,6 +623,9 @@ function main()
     println("Port: $PORT")
     println("Workers: $(nprocs())")
     println("="^70)
+
+    # Initialize LLVM toolchain
+    ensure_llvm_initialized()
 
     println()
     println("Available Functions:")

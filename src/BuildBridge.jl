@@ -5,13 +5,10 @@
 
 module BuildBridge
 
-using Pkg
-
-# Load required modules
-include("ErrorLearning.jl")
-include("LLVMEnvironment.jl")
-using .ErrorLearning
-using .LLVMEnvironment
+# Import modules already loaded by RepliBuild.jl
+import ..ErrorLearning
+import ..LLVMEnvironment
+import ..UXHelpers
 using SQLite
 
 # Global ErrorDB instance (lazy initialization)
@@ -334,6 +331,36 @@ function compile_with_learning(command::String, args::Vector{String};
 end
 
 """
+    throw_compilation_error(source_file::String, error_output::String, suggestions::Vector{String}=[])
+
+Throw a helpful compilation error with suggestions.
+"""
+function throw_compilation_error(source_file::String, error_output::String, suggestions::Vector{String}=String[])
+    # Build solution list
+    solutions = [
+        "Check the compiler output below for specific syntax or semantic errors",
+        "Ensure all #include paths are in your replibuild.toml [compile] section",
+        "Verify that required libraries are installed and linkable"
+    ]
+
+    # Add AI-generated suggestions from error learning
+    if !isempty(suggestions)
+        prepend!(solutions, suggestions)
+    else
+        push!(solutions, "Try adding -v to compiler flags for verbose output")
+        push!(solutions, "RepliBuild's error learning will auto-fix common issues on retry")
+    end
+
+    throw(UXHelpers.HelpfulError(
+        "Compilation Failed",
+        "Failed to compile: $source_file",
+        solutions,
+        docs_link="https://github.com/user/RepliBuild.jl#troubleshooting",
+        original_error=ErrorException(error_output)
+    ))
+end
+
+"""
 Export error log to Obsidian-friendly markdown
 """
 function export_error_log(db_path::String="replibuild_errors.db", output_path::String="error_log.md")
@@ -423,6 +450,7 @@ export
     analyze_compiler_error,
     compile_with_analysis,
     compile_with_learning,
+    throw_compilation_error,
 
     # Error learning & database
     get_error_db,

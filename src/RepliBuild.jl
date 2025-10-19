@@ -8,7 +8,8 @@ module RepliBuild
 const VERSION = v"0.1.0"
 
 # Load all submodules in the correct order
-include("LLVMEnvironment.jl")  # Load LLVM environment first for toolchain isolation
+include("UXHelpers.jl")  # Load UX helpers FIRST - needed by error handling
+include("LLVMEnvironment.jl")  # Load LLVM environment for toolchain isolation
 include("ConfigurationManager.jl")  # Configuration management
 include("Templates.jl")  # Project template initialization
 include("ASTWalker.jl")  # AST dependency analysis
@@ -24,6 +25,7 @@ include("ClangJLBridge.jl")  # Clang.jl binding integration
 include("DaemonManager.jl")  # Daemon lifecycle management
 
 # Re-export submodules
+using .UXHelpers
 using .LLVMEnvironment
 using .ConfigurationManager
 using .Templates
@@ -45,8 +47,8 @@ include("Bridge_LLVM.jl")
 
 # Export submodules themselves (production modules only)
 export LLVMEnvironment, ConfigurationManager, Templates, ASTWalker, Discovery
-export BuildHelpers, BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp, ClangJLBridge, DaemonManager
-# ErrorLearning is used internally, not exported to keep API surface small
+export BuildHelpers, BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp, ClangJLBridge, DaemonManager, ProjectWizard
+# ErrorLearning and UXHelpers are used internally, not exported to keep API surface small
 
 # Export key types from LLVMake
 export LLVMJuliaCompiler, CompilerConfig, TargetConfig

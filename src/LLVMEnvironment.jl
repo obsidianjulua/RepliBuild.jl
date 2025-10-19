@@ -7,6 +7,9 @@ module LLVMEnvironment
 
 using Pkg
 
+# Import UXHelpers for better error messages
+import ..UXHelpers
+
 # Conditional import - will try to use LLVM_full_assert_jll if available
 const LLVM_JLL_AVAILABLE = Ref{Bool}(false)
 
@@ -166,7 +169,8 @@ function get_llvm_root(source::Symbol=:auto; config=nothing)
         return (system_root, "system")
     end
 
-    error("No LLVM installation found! Tried: JLL artifact, in-tree, and system paths.")
+    # No LLVM found - throw helpful error
+    throw(UXHelpers.llvm_not_found_error())
 end
 
 """

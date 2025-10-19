@@ -9,6 +9,9 @@ using TOML
 using Dates
 using UUIDs
 
+# Import UXHelpers for better error messages
+import ..UXHelpers
+
 """
 Build stage definitions
 Each stage has its own section in the TOML for isolated data
@@ -164,8 +167,13 @@ function save_config(config::RepliBuildConfig)
     )
 
     # Stage-specific sections (only save non-empty)
+    # IMPORTANT: Don't serialize large dependency graphs to TOML - they're already in JSON
     if !isempty(config.discovery)
-        data["discovery"] = config.discovery
+        discovery_toml = copy(config.discovery)
+        # Remove heavy data structures that don't belong in TOML
+        # Dependency graph is saved separately as JSON
+        delete!(discovery_toml, "dependency_graph")
+        data["discovery"] = discovery_toml
     end
     if !isempty(config.reorganize)
         data["reorganize"] = config.reorganize
@@ -775,11 +783,24 @@ function validate_and_fix!(config::RepliBuildConfig)
     errors = validate_config(config)
 
     if !isempty(errors)
-        error_msg = "Configuration validation failed:\n" * join(errors, "\n")
+        # Build comprehensive error message
+        error_details = "Found $(length(errors)) validation error(s):\n" * join(errors, "\n")
         if !isempty(fixed)
-            error_msg *= "\n\nFixed issues:\n" * join(fixed, "\n")
+            error_details *= "\n\nFixed issues:\n" * join(fixed, "\n")
         end
-        error(error_msg)
+
+        # Throw helpful error with solutions
+        throw(UXHelpers.HelpfulError(
+            "Configuration Validation Failed",
+            error_details,
+            [
+                "Review and fix the errors listed above in your replibuild.toml",
+                "Run ConfigurationManager.validate_config(config) to see specific issues",
+                "Use ConfigurationManager.create_default_config() to start fresh",
+                "Check the documentation for correct configuration format"
+            ],
+            docs_link="https://github.com/user/RepliBuild.jl#configuration"
+        ))
     end
 
     if !isempty(fixed)

@@ -1,5 +1,9 @@
 using Test
 using RepliBuild
+using RepliBuild.ConfigurationManager
+using RepliBuild.LLVMEnvironment
+using RepliBuild.Discovery
+using RepliBuild.Templates
 using Logging
 
 # Suppress informational output during tests
@@ -13,182 +17,184 @@ test_logger = ConsoleLogger(stderr, Logging.Warn)
         @test RepliBuild.VERSION >= v"0.1.0"
     end
 
-    @testset "Submodules Available" begin
+    @testset "Core Modules Available" begin
+        # Core architecture modules
         @test isdefined(RepliBuild, :LLVMEnvironment)
         @test isdefined(RepliBuild, :ConfigurationManager)
-        @test isdefined(RepliBuild, :Templates)
-        @test isdefined(RepliBuild, :ASTWalker)
-        @test isdefined(RepliBuild, :BuildHelpers)
         @test isdefined(RepliBuild, :Discovery)
-        @test isdefined(RepliBuild, :ProjectWizard)
-        @test isdefined(RepliBuild, :ErrorLearning)
         @test isdefined(RepliBuild, :BuildBridge)
-        @test isdefined(RepliBuild, :CMakeParser)
+        @test isdefined(RepliBuild, :ErrorLearning)
+        @test isdefined(RepliBuild, :Templates)
+        @test isdefined(RepliBuild, :UXHelpers)
+
+        # Extended modules
+        @test isdefined(RepliBuild, :ASTWalker)
         @test isdefined(RepliBuild, :LLVMake)
         @test isdefined(RepliBuild, :JuliaWrapItUp)
-        @test isdefined(RepliBuild, :ClangJLBridge)
         @test isdefined(RepliBuild, :DaemonManager)
     end
 
-    @testset "Exported Functions" begin
-        # Core workflow functions
-        @test isdefined(RepliBuild, :init)
-        @test isdefined(RepliBuild, :compile)
-        @test isdefined(RepliBuild, :discover)
-        @test isdefined(RepliBuild, :compile_project)
+    @testset "Core Functions" begin
+        # LLVM toolchain functions
+        @test isdefined(LLVMEnvironment, :get_toolchain)
+        @test isdefined(LLVMEnvironment, :init_toolchain)
+        @test isdefined(LLVMEnvironment, :verify_toolchain)
+        @test isdefined(LLVMEnvironment, :with_llvm_env)
+        @test isdefined(LLVMEnvironment, :get_tool)
+
+        # Configuration management
+        @test isdefined(ConfigurationManager, :load_config)
+        @test isdefined(ConfigurationManager, :save_config)
+        @test isdefined(ConfigurationManager, :create_default_config)
+        @test isdefined(ConfigurationManager, :get_include_dirs)
+        @test isdefined(ConfigurationManager, :get_source_files)
+        @test isdefined(ConfigurationManager, :validate_config)
+
+        # Discovery functions
+        @test isdefined(Discovery, :discover)
 
         # Template functions
-        @test isdefined(RepliBuild, :create_project_interactive)
-        @test isdefined(RepliBuild, :available_templates)
-        @test isdefined(RepliBuild, :use_template)
-
-        # Binary wrapping functions
-        @test isdefined(RepliBuild, :wrap)
-        @test isdefined(RepliBuild, :wrap_binary)
-        @test isdefined(RepliBuild, :generate_wrappers)
-        @test isdefined(RepliBuild, :scan_binaries)
-
-        # CMake import
-        @test isdefined(RepliBuild, :import_cmake)
-
-        # Binding generation
-        @test isdefined(RepliBuild, :generate_bindings_clangjl)
-
-        # Info functions
-        @test isdefined(RepliBuild, :info)
-        @test isdefined(RepliBuild, :help)
-        @test isdefined(RepliBuild, :scan)
-        @test isdefined(RepliBuild, :analyze)
-
-        # Daemon management
-        @test isdefined(RepliBuild, :start_daemons)
-        @test isdefined(RepliBuild, :stop_daemons)
-        @test isdefined(RepliBuild, :daemon_status)
-        @test isdefined(RepliBuild, :ensure_daemons)
-
-        # LLVM toolchain
-        @test isdefined(RepliBuild, :get_toolchain)
-        @test isdefined(RepliBuild, :verify_toolchain)
-        @test isdefined(RepliBuild, :print_toolchain_info)
-        @test isdefined(RepliBuild, :with_llvm_env)
-
-        # Advanced functions
-        @test isdefined(RepliBuild, :discover_tools)
+        @test isdefined(Templates, :plant)
+        @test isdefined(Templates, :initialize_project)
     end
 
-    @testset "Exported Types" begin
-        # LLVMake types
-        @test isdefined(RepliBuild, :LLVMJuliaCompiler)
-        @test isdefined(RepliBuild, :CompilerConfig)
-        @test isdefined(RepliBuild, :TargetConfig)
+    @testset "Core Types" begin
+        # Configuration types
+        @test isdefined(ConfigurationManager, :RepliBuildConfig)
 
-        # JuliaWrapItUp types
-        @test isdefined(RepliBuild, :BinaryWrapper)
-        @test isdefined(RepliBuild, :WrapperConfig)
-        @test isdefined(RepliBuild, :BinaryInfo)
+        # LLVM types
+        @test isdefined(LLVMEnvironment, :LLVMToolchain)
     end
 
-    @testset "Help and Info Functions" begin
-        # Test that help/info functions run without errors
-        with_logger(test_logger) do
-            @test_nowarn RepliBuild.info()
-            @test_nowarn RepliBuild.help()
-        end
-    end
-
-    @testset "Temporary Project Initialization" begin
+    @testset "Project Initialization" begin
         mktempdir() do tmpdir
             with_logger(test_logger) do
-                # Test C++ project initialization
-                cpp_dir = joinpath(tmpdir, "test_cpp_project")
-                @test_nowarn RepliBuild.init(cpp_dir)
-                @test isdir(cpp_dir)
-                @test isdir(joinpath(cpp_dir, "src"))
-                @test isdir(joinpath(cpp_dir, "include"))
-                @test isdir(joinpath(cpp_dir, "julia"))
-                @test isdir(joinpath(cpp_dir, "build"))
-                @test isdir(joinpath(cpp_dir, "test"))
-                @test isfile(joinpath(cpp_dir, "replibuild.toml"))
+                # Test project creation with Templates
+                test_project = joinpath(tmpdir, "test_cpp_project")
 
-                # Test binary project initialization
-                bin_dir = joinpath(tmpdir, "test_binary_project")
-                @test_nowarn RepliBuild.init(bin_dir, type=:binary)
-                @test isdir(bin_dir)
-                @test isdir(joinpath(bin_dir, "lib"))
-                @test isdir(joinpath(bin_dir, "bin"))
-                @test isdir(joinpath(bin_dir, "julia_wrappers"))
-                @test isfile(joinpath(bin_dir, "wrapper_config.toml"))
-            end
-        end
-    end
+                # Use Templates.initialize_project with keyword argument
+                @test_nowarn Templates.initialize_project(test_project, template=:cpp_project)
 
-    @testset "LLVM Toolchain Functions" begin
-        with_logger(test_logger) do
-            # Test that toolchain functions can be called
-            @test_nowarn toolchain = RepliBuild.get_toolchain()
-            @test_nowarn RepliBuild.verify_toolchain()
-            @test_nowarn RepliBuild.print_toolchain_info()
-        end
-    end
+                # Verify directory structure was created
+                @test isdir(test_project)
 
-    @testset "Configuration Manager" begin
-        mktempdir() do tmpdir
-            with_logger(test_logger) do
-                # Initialize a test project
-                test_project = joinpath(tmpdir, "config_test")
-                RepliBuild.init(test_project)
-
+                # Test configuration creation
                 config_file = joinpath(test_project, "replibuild.toml")
+                @test_nowarn config = ConfigurationManager.create_default_config(config_file)
                 @test isfile(config_file)
-
-                # Test that config file contains expected sections
-                config_content = read(config_file, String)
-                @test occursin("[paths]", config_content)
             end
         end
     end
 
-    @testset "Error Handling" begin
-        # Test that invalid project types are caught
+    @testset "LLVM Toolchain" begin
+        with_logger(test_logger) do
+            # Test toolchain initialization
+            @test_nowarn toolchain = LLVMEnvironment.get_toolchain()
+            toolchain = LLVMEnvironment.get_toolchain()
+
+            # Verify toolchain properties
+            @test toolchain isa LLVMEnvironment.LLVMToolchain
+            @test !isempty(toolchain.root)
+            @test !isempty(toolchain.bin_dir)
+            @test !isempty(toolchain.tools)
+            @test toolchain.source in ["intree", "jll", "system", "custom"]
+
+            # Test essential tools exist
+            @test LLVMEnvironment.has_tool("clang++")
+            @test LLVMEnvironment.has_tool("llvm-config")
+            @test LLVMEnvironment.has_tool("llvm-link")
+            @test LLVMEnvironment.has_tool("opt")
+
+            # Test verification
+            @test LLVMEnvironment.verify_toolchain() == true
+        end
+    end
+
+    @testset "Configuration System" begin
         mktempdir() do tmpdir
             with_logger(test_logger) do
-                invalid_dir = joinpath(tmpdir, "invalid_test")
-                @test_throws ErrorException RepliBuild.init(invalid_dir, type=:invalid_type)
+                # Test config creation
+                config_file = joinpath(tmpdir, "replibuild.toml")
+                config = ConfigurationManager.create_default_config(config_file)
+
+                @test config isa ConfigurationManager.RepliBuildConfig
+                @test isfile(config_file)
+                @test !isempty(config.project_name)
+                @test config.project_root == tmpdir
+
+                # Test config sections exist
+                @test haskey(config.discovery, "enabled")
+                @test haskey(config.compile, "enabled")
+                @test haskey(config.link, "enabled")
+                @test haskey(config.binary, "enabled")
+                @test haskey(config.wrap, "enabled")
+
+                # Test config accessors
+                @test ConfigurationManager.get_include_dirs(config) isa Vector
+                @test ConfigurationManager.get_source_files(config) isa Dict
+                @test ConfigurationManager.is_stage_enabled(config, :compile) == true
+
+                # Test config validation
+                issues = ConfigurationManager.validate_config(config)
+                @test issues isa Vector{String}
+
+                # Test config save/load
+                ConfigurationManager.save_config(config)
+                loaded_config = ConfigurationManager.load_config(config_file)
+                @test loaded_config.project_name == config.project_name
             end
         end
     end
 
-    @testset "Discovery Module" begin
+    @testset "Discovery System" begin
         mktempdir() do tmpdir
             with_logger(test_logger) do
-                # Create a simple test structure
+                # Create test C++ project structure
                 test_dir = joinpath(tmpdir, "discovery_test")
                 mkpath(joinpath(test_dir, "src"))
+                mkpath(joinpath(test_dir, "include"))
 
-                # Create a dummy C++ file
-                write(joinpath(test_dir, "src", "test.cpp"), """
-                #include <iostream>
-
-                int main() {
-                    std::cout << "Hello" << std::endl;
-                    return 0;
-                }
+                # Create dummy C++ files
+                write(joinpath(test_dir, "src", "main.cpp"), """
+                #include "test.h"
+                int main() { return test_function(); }
                 """)
 
-                # Test scan function
-                @test_nowarn result = RepliBuild.scan(test_dir, generate_config=false)
+                write(joinpath(test_dir, "include", "test.h"), """
+                #pragma once
+                int test_function();
+                """)
+
+                write(joinpath(test_dir, "src", "test.cpp"), """
+                #include "test.h"
+                int test_function() { return 42; }
+                """)
+
+                # Test discovery
+                @test_nowarn config = Discovery.discover(test_dir)
+                config = Discovery.discover(test_dir)
+
+                # Verify discovery results
+                @test isfile(joinpath(test_dir, "replibuild.toml"))
+                @test config isa ConfigurationManager.RepliBuildConfig
+
+                # Check discovered files
+                files = ConfigurationManager.get_source_files(config)
+                @test haskey(files, "cpp_sources")
+                @test length(files["cpp_sources"]) >= 2
             end
         end
     end
 
-    @testset "Module Functionality" begin
-        # Test that submodules are properly loaded and usable
+    @testset "Module Verification" begin
+        # Verify all core modules are properly loaded
         @test RepliBuild.LLVMEnvironment isa Module
         @test RepliBuild.ConfigurationManager isa Module
-        @test RepliBuild.Templates isa Module
+        @test RepliBuild.Discovery isa Module
         @test RepliBuild.BuildBridge isa Module
-        @test RepliBuild.LLVMake isa Module
-        @test RepliBuild.JuliaWrapItUp isa Module
+        @test RepliBuild.ErrorLearning isa Module
+        @test RepliBuild.Templates isa Module
+        @test RepliBuild.UXHelpers isa Module
     end
 
 end

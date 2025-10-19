@@ -1,149 +1,198 @@
-# RepliBuild Configuration File
-# A TOML-based build system leveraging LLVM/Clang for Julia bindings
+# ============================================================================
+# RepliBuild Configuration Reference
+# ============================================================================
+# This is a comprehensive reference showing ALL available configuration options.
+# Most fields have sensible defaults - only override what you need.
+#
+# Configuration is read by ConfigurationManager.jl and used throughout the build pipeline.
+# See src/ConfigurationManager.jl for implementation details.
 
+# ============================================================================
+# [project] - Project Metadata
+# ============================================================================
 [project]
-name = "MyProject"
-root = "."
+name = "MyProject"              # Project name (auto-detected from directory)
+root = "."                       # Project root directory (absolute or relative)
+uuid = "00000000-0000-0000-0000-000000000000"  # Auto-generated UUID (leave empty for auto-gen)
 
-[paths]
-source = "src"
-output = "julia"
-build = "build"
-include = ["include", "third_party/include"]
-
-[bridge]
-# Let UnifiedBridge discover tools automatically
-auto_discover = true
-# Fallback paths if auto-discovery fails
-search_paths = ["/usr/bin", "/usr/local/bin", "~/.local/bin"]
-# Enable learning system for command patterns
-enable_learning = true
-# Cache discovered tools
-cache_tools = true
-
-[tools]
-# Leave empty to use UnifiedBridge auto-discovery
-# Or specify if you have custom paths
-# clang = "/usr/bin/clang++-15"
-# llvm_config = "/usr/local/bin/llvm-config"
-
-[compile]
-# Flags passed to clang via UnifiedBridge
-flags = ["-O2", "-fPIC", "-std=c++17", "-Wall"]
-defines = { NDEBUG = "1" }
-
-# Include directories for dependency walking
-include_dirs = ["include", "src", "/usr/include"]
-lib_dirs = ["lib", "/usr/lib", "/usr/local/lib"]
-libraries = ["pthread", "dl"]
-
-# Enable clang AST-based dependency walking
-walk_dependencies = true
-max_depth = 10  # Prevent circular includes
-
-[target]
-# Target configuration (empty = host)
-triple = ""
-cpu = "native"  # Use native for best performance
-features = ["+avx2", "+fma"]
-opt_level = "O2"
-debug = false
-lto = true
-
-[bindings]
-# Julia binding generation
-style = "advanced"  # simple, advanced, cxxwrap
-type_inference = "header"  # header, signature, auto
-generate_tests = true
-generate_docs = true
-
-# Symbol filtering
-exclude_patterns = [
-    "^_.*",           # Private symbols
-    ".*_impl$",       # Implementation details
-    "^test_.*",       # Test functions
-    ".*::internal::.*" # Internal namespaces
+# ============================================================================
+# [discovery] - File Scanning & Dependency Walking Stage
+# Used by: Discovery.jl, ASTWalker.jl
+# ============================================================================
+[discovery]
+enabled = true                   # Enable discovery stage
+scan_recursive = true            # Recursively scan subdirectories
+max_depth = 10                   # Maximum recursion depth
+exclude_dirs = [                 # Directories to skip
+    "build",
+    ".git",
+    ".cache",
+    "node_modules",
+    ".replibuild_cache"
 ]
+follow_symlinks = false          # Whether to follow symbolic links
+parse_ast = true                 # Parse C/C++ AST for function signatures
+walk_dependencies = true         # Walk #include dependencies with clang
+log_all_files = true             # Log all discovered files
 
-include_patterns = []  # Empty = include all (after exclusions)
+# Auto-populated by discovery (don't manually edit):
+# completed = true
+# timestamp = "2025-01-01T12:00:00"
+# files = { cpp_sources = [...], cpp_headers = [...], ... }
+# binaries = { executables = [...], static_libs = [...], shared_libs = [...] }
+# include_dirs = ["/abs/path/to/include", ...]
+# dependency_graph_file = ".replibuild_cache/dependency_graph.json"
 
-[bindings.type_mappings]
-# C++ to Julia type mappings
+# ============================================================================
+# [reorganize] - Optional File Organization Stage
+# Used by: (future reorganization module)
+# ============================================================================
+[reorganize]
+enabled = false                  # Disabled by default (optional stage)
+create_structure = true          # Create organized directory structure
+sort_by_type = true              # Sort files by type
+preserve_hierarchy = false       # Preserve original directory hierarchy
+
+[reorganize.target_structure]
+cpp_sources = "src"
+cpp_headers = "include"
+c_sources = "src"
+c_headers = "include"
+julia_files = "julia"
+config_files = "config"
+docs = "docs"
+
+# ============================================================================
+# [compile] - C/C++ → LLVM IR Compilation Stage
+# Used by: LLVMake.jl, compilation_daemon.jl, BuildBridge.jl
+# ============================================================================
+[compile]
+enabled = true                   # Enable compilation stage
+output_dir = "build/ir"          # Where to write LLVM IR files
+flags = [                        # Compiler flags passed to clang++
+    "-std=c++17",
+    "-fPIC",
+    "-O2"
+]
+include_dirs = []                # Include directories (populated by discovery)
+defines = {}                     # Preprocessor defines: { "KEY" = "value" }
+emit_ir = true                   # Emit LLVM IR (.ll files)
+emit_bc = false                  # Emit LLVM bitcode (.bc files)
+parallel = true                  # Compile files in parallel
+
+# Auto-populated during build (don't manually edit):
+# source_files = ["src/file1.cpp", "src/file2.cpp", ...]
+
+# ============================================================================
+# [link] - LLVM IR Linking & Optimization Stage
+# Used by: compilation_daemon.jl (link_ir function)
+# ============================================================================
+[link]
+enabled = true                   # Enable linking stage
+output_dir = "build/linked"      # Where to write linked IR
+optimize = true                  # Run optimization passes
+opt_level = "O2"                 # Optimization level: O0, O1, O2, O3, Os, Oz
+opt_passes = []                  # Custom opt passes (empty = default)
+lto = false                      # Enable Link-Time Optimization
+
+# ============================================================================
+# [binary] - Shared Library Creation Stage
+# Used by: compilation_daemon.jl (create_shared_library function)
+# ============================================================================
+[binary]
+enabled = true                   # Enable binary creation stage
+output_dir = "julia"             # Where to write shared library
+library_name = ""                # Library name (auto: "lib{project}.so")
+library_type = "shared"          # "shared" or "static"
+link_libraries = []              # External libraries to link: ["pthread", "dl"]
+rpath = true                     # Add rpath to library
+
+# ============================================================================
+# [symbols] - Symbol Extraction & Analysis Stage
+# Used by: (future symbol extraction module)
+# ============================================================================
+[symbols]
+enabled = true                   # Enable symbol extraction
+method = "nm"                    # Tool to use: "nm", "objdump", "llvm-nm"
+demangle = true                  # Demangle C++ symbols
+filter_internal = true           # Filter out internal symbols
+export_list = true               # Generate export list
+
+# ============================================================================
+# [wrap] - Julia Wrapper Generation Stage
+# Used by: JuliaWrapItUp.jl
+# ============================================================================
+[wrap]
+enabled = true                   # Enable wrapper generation
+output_dir = "julia"             # Where to write Julia files
+style = "auto"                   # "auto", "basic", "advanced", "clangjl"
+module_name = ""                 # Module name (auto: TitleCase(project))
+add_tests = true                 # Generate test suite
+add_docs = true                  # Generate documentation
+
+[wrap.type_mappings]
+# C++ → Julia type mappings (customize as needed):
 "std::string" = "String"
 "std::vector<double>" = "Vector{Float64}"
-"std::vector<float>" = "Vector{Float32}"
 "std::vector<int>" = "Vector{Int32}"
-"std::shared_ptr" = "Ref"
-"std::unique_ptr" = "Ref"
 
-[symbols]
-# Symbol extraction via UnifiedBridge
-use_nm = true
-use_objdump = true
-demangle_cpp = true
-detect_abi = true  # Detect C vs C++ ABI
+# ============================================================================
+# [test] - Testing & Verification Stage
+# Used by: (future test runner)
+# ============================================================================
+[test]
+enabled = false                  # Disabled by default
+test_dir = "test"                # Test directory
+run_tests = false                # Automatically run tests after build
 
+# ============================================================================
+# [llvm] - LLVM Toolchain Configuration
+# Used by: LLVMEnvironment.jl
+# Priority: TOML config > LLVM_full_assert_jll > in-tree LLVM > system LLVM
+# ============================================================================
+[llvm]
+root = ""                        # LLVM installation root (auto-detected if empty)
+source = ""                      # "intree", "jll", "system", "custom" (auto if empty)
+use_replibuild_llvm = true       # Prefer RepliBuild's in-tree LLVM
+isolated = true                  # Use isolated environment (recommended)
+
+[llvm.tools]
+# Auto-discovered tools (populated by init_toolchain)
+# Manual override example:
+# clang = "/usr/bin/clang-20"
+# "clang++" = "/usr/bin/clang++-20"
+# "llvm-config" = "/usr/bin/llvm-config-20"
+
+# ============================================================================
+# [target] - Target Architecture Configuration
+# Used by: LLVMake.jl, compilation_daemon.jl
+# ============================================================================
+[target]
+triple = ""                      # Target triple (empty = host)
+cpu = "generic"                  # Target CPU: "generic", "native", "x86-64", etc.
+features = []                    # CPU features: ["+avx2", "+fma", "+sse4.2"]
+
+# ============================================================================
+# [workflow] - Build Pipeline Orchestration
+# Used by: RepliBuild.jl main build functions
+# ============================================================================
 [workflow]
-# Build pipeline stages
-stages = [
-    "discover_tools",     # Find compilers via UnifiedBridge
-    "walk_deps",          # Walk dependency tree with clang
-    "parse_ast",          # Extract function signatures
-    "compile_to_ir",      # Compile C++ → LLVM IR
-    "optimize_ir",        # Optimize with opt
-    "link_ir",            # Link IR modules
-    "create_library",     # Create shared library
-    "extract_symbols",    # Get exported symbols
-    "generate_bindings",  # Create Julia wrappers
-    "generate_tests",     # Create test suite
-    "generate_docs"       # Create documentation
+stages = [                       # Build stages to execute (in order)
+    "discovery",
+    "compile",
+    "link",
+    "binary",
+    "symbols",
+    "wrap"
 ]
+stop_on_error = true             # Stop pipeline on first error
+parallel_stages = ["compile"]    # Stages that support parallelization
 
-# Parallel compilation
-parallel = true
-jobs = 0  # 0 = auto-detect CPU cores
-
+# ============================================================================
+# [cache] - Build Artifact Caching
+# Used by: ConfigurationManager.jl
+# ============================================================================
 [cache]
-# Cache compilation artifacts
-enabled = true
-directory = ".bridge_cache"
-invalidate_on = ["source_change", "config_change"]
-ttl = 86400  # 24 hours
-
-[logging]
-level = "info"  # debug, info, warn, error
-show_commands = true  # Show executed commands
-show_learning = true  # Show UnifiedBridge learning stats
-log_file = "build.log"
-
-[integration]
-# Integration with RepliBuild components
-llvmake_enabled = true       # Use LLVMake.jl for C++ compilation
-wrapitup_enabled = true      # Use JuliaWrapItUp.jl for binary wrapping
-unifiedbridge_enabled = true # Use UnifiedBridge for command execution
-
-# Metadata sharing
-export_metadata = true
-metadata_format = "json"  # json, toml
-
-[learning]
-# Intelligent error correction with ErrorLearning.jl
-enabled = true                      # Enable error pattern learning
-auto_fix = true                     # Automatically apply high-confidence fixes
-max_retries = 3                     # Maximum auto-retry attempts
-confidence_threshold = 0.75         # Minimum confidence for auto-fix (0.0-1.0)
-error_db = "replibuild_errors.db"       # Database file (per-project or global)
-use_embeddings = true               # Use BERT embeddings (requires EngineT)
-bootstrap_on_init = true            # Bootstrap with common error patterns
-share_knowledge = false             # Share learned patterns across projects
-
-# Error categorization
-track_error_types = [
-    "compiler_error",
-    "linker_error",
-    "llvm_error",
-    "optimization_failure",
-    "missing_header",
-    "undefined_symbol",
-    "syntax_error"
-]
+enabled = true                   # Enable caching
+directory = ".replibuild_cache"  # Cache directory
+invalidate_on_change = true      # Invalidate on source/config changes

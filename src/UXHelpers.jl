@@ -84,9 +84,11 @@ end
 
 Base.showerror(io::IO, err::HelpfulError) = show_helpful_error(io, err)
 
-"""
-Create a helpful LLVM not found error
-"""
+# Helpful error constructors - available for future use
+# Currently exported but not actively used - reserve for enhanced error handling
+
+export llvm_not_found_error, config_validation_error, compiler_error
+
 function llvm_not_found_error()
     return HelpfulError(
         "LLVM Toolchain Not Found",
@@ -103,9 +105,6 @@ function llvm_not_found_error()
     )
 end
 
-"""
-Create a helpful configuration error
-"""
 function config_validation_error(field::String, issue::String)
     return HelpfulError(
         "Configuration Validation Failed",
@@ -119,9 +118,6 @@ function config_validation_error(field::String, issue::String)
     )
 end
 
-"""
-Create a helpful compiler error with learning suggestions
-"""
 function compiler_error(source_file::String, error_output::String)
     return HelpfulError(
         "Compilation Failed",

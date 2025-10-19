@@ -53,33 +53,27 @@ function dir_hash(path::String)
 end
 
 """
-Initialize LLVM tool cache from RepliBuild's LLVM directory
+Initialize LLVM tool cache from LLVMEnvironment
 """
 function init_tool_cache!()
     println("[DISCOVERY] Initializing LLVM tool cache...")
 
-    llvm_root = "/home/grim/.julia/julia/RepliBuild/LLVM"
-    tools_dir = joinpath(llvm_root, "tools")
+    try
+        # Initialize LLVM toolchain through LLVMEnvironment
+        toolchain = LLVMEnvironment.get_toolchain()
 
-    if !isdir(tools_dir)
-        @warn "LLVM tools directory not found: $tools_dir"
-        return
-    end
-
-    # Cache all tools
-    for tool in readdir(tools_dir)
-        tool_path = joinpath(tools_dir, tool)
-        if isfile(tool_path) && !islink(tool_path)
-            TOOL_CACHE[tool] = tool_path
-            # Also cache without version suffixes
-            base_name = replace(tool, r"-\d+(\.\d+)*$" => "")
-            if base_name != tool
-                TOOL_CACHE[base_name] = tool_path
-            end
+        # Cache all discovered tools
+        for (tool_name, tool_path) in toolchain.tools
+            TOOL_CACHE[tool_name] = tool_path
         end
-    end
 
-    println("[DISCOVERY] Cached $(length(TOOL_CACHE)) LLVM tools")
+        println("[DISCOVERY] Cached $(length(TOOL_CACHE)) LLVM tools from $(toolchain.source)")
+        println("[DISCOVERY] LLVM Root: $(toolchain.root)")
+
+    catch e
+        @warn "Failed to initialize LLVM tool cache: $e"
+        println("[DISCOVERY] Daemon will attempt lazy tool resolution")
+    end
 end
 
 # ============================================================================

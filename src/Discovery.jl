@@ -7,18 +7,14 @@ module Discovery
 
 using Dates
 using ProgressMeter
-using UUIDs  # Add UUID import at module level
+using UUIDs
 
-# Import sibling modules
-include("LLVMEnvironment.jl")
-include("ConfigurationManager.jl")
-include("ASTWalker.jl")
-include("UXHelpers.jl")
-
-using .LLVMEnvironment
-using .ConfigurationManager
-using .ASTWalker
-using .UXHelpers
+# These modules are already loaded by RepliBuild.jl before Discovery.jl is included
+# We just need to import them from the parent module scope
+import ..LLVMEnvironment
+import ..ConfigurationManager
+import ..ASTWalker
+import ..UXHelpers
 
 # Use LLVMEnvironment to get correct LLVM path
 function get_replibuild_llvm_root()
@@ -132,10 +128,10 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     println("\n🔧 Stage 6: Initializing LLVM toolchain...")
     LLVMEnvironment.init_toolchain(config=config)
 
-    # Move discovered data to compile section for actual use
+    # Include directories are already in discovery section - no need to duplicate
+    # Use ConfigurationManager.get_include_dirs() to access them
     if haskey(config.discovery, "include_dirs") && !isempty(config.discovery["include_dirs"])
-        config.compile["include_dirs"] = config.discovery["include_dirs"]
-        println("   ✓ Copied $(length(config.discovery["include_dirs"])) include directories to compile section")
+        println("   ✓ Discovered $(length(config.discovery["include_dirs"])) include directories")
     end
 
     # Add discovered source files to compile section
@@ -159,17 +155,6 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     println("="^70)
 
     return config
-end
-
-"""
-    check_marker(target_dir::String) -> Bool
-
-DEPRECATED: Check if directory has .replibuild_project marker.
-Use ConfigurationManager.is_replibuild_project() instead.
-"""
-function check_marker(target_dir::String)
-    @warn "check_marker is deprecated. Use ConfigurationManager.is_replibuild_project() instead."
-    return ConfigurationManager.is_replibuild_project(target_dir)
 end
 
 """
