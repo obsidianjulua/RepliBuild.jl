@@ -176,12 +176,15 @@ function resolve_jll_package(package_name::String)
         # Try to install if not already installed
         if !check_jll_installed(jll_name)
             try
-                println("  📦 Adding JLL package: $jll_name")
+                println("  📦 Adding JLL package: $jll_name to project...")
                 Pkg.add(jll_name)
+                println("  ✓ JLL package installed: $jll_name")
             catch e
                 @warn "Could not install JLL package: $jll_name" exception=e
                 return nothing
             end
+        else
+            println("  ✓ JLL package already installed: $jll_name")
         end
 
         return resolve_jll_module(jll_name, package_name)
@@ -220,8 +223,63 @@ function resolve_jll_module(jll_name::String, cmake_name::String)
         # Try multiple methods to get artifact directory
         artifact_dir = ""
 
-        # Method 1: Check for artifact_dir function/constant
-        if isdefined(jll_mod, :artifact_dir)
+        # Method 1: Use Artifacts.jl to query the package's Artifacts.toml
+        # This is the most reliable method - directly read where the artifact is
+        try
+            pkg_info = Pkg.dependencies()
+            jll_uuid = nothing
+
+            for (uuid, info) in pkg_info
+                if info.name == jll_name
+                    jll_uuid = uuid
+                    break
+                end
+            end
+
+            if !isnothing(jll_uuid)
+                # Find the package directory
+                pkg_dir = Base.locate_package(Base.PkgId(jll_uuid, jll_name))
+                if !isnothing(pkg_dir)
+                    # Package source is in src/PackageName.jl, go up to package root
+                    pkg_root = dirname(dirname(pkg_dir))
+                    artifacts_toml = joinpath(pkg_root, "Artifacts.toml")
+
+                    if isfile(artifacts_toml)
+                        # Load and parse Artifacts.toml
+                        artifacts_dict = Artifacts.load_artifacts_toml(artifacts_toml)
+
+                        # JLL packages typically have one main artifact with the package name
+                        # Try common artifact names
+                        artifact_candidates = [
+                            replace(jll_name, "_jll" => ""),  # Qt5Base_jll → Qt5Base
+                            lowercase(replace(jll_name, "_jll" => "")),
+                            jll_name,
+                        ]
+
+                        for candidate in artifact_candidates
+                            if haskey(artifacts_dict, candidate)
+                                # Get the artifact hash and ensure it's downloaded
+                                artifact_hash = Artifacts.artifact_hash(candidate, artifacts_toml)
+                                if !isnothing(artifact_hash)
+                                    # Ensure artifact is installed
+                                    artifact_path = Artifacts.artifact_path(artifact_hash)
+                                    if isdir(artifact_path)
+                                        artifact_dir = artifact_path
+                                        println("  ✓ Found artifact via Artifacts.toml: $artifact_path")
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        catch e
+            @debug "Artifacts.toml method failed" exception=e
+        end
+
+        # Method 2: Check for artifact_dir function/constant (new JLL standard)
+        if isempty(artifact_dir) && isdefined(jll_mod, :artifact_dir)
             try
                 artifact_dir = string(jll_mod.artifact_dir)
             catch
@@ -233,31 +291,32 @@ function resolve_jll_module(jll_name::String, cmake_name::String)
             end
         end
 
-        # Method 2: Check PATH constants (Qt5_jll exposes these)
-        if isempty(artifact_dir) && isdefined(jll_mod, :PATH)
-            try
-                path = string(jll_mod.PATH[])
-                # PATH is usually .../bin, so go up one level
-                artifact_dir = dirname(path)
-            catch
-            end
-        end
-
-        # Method 3: Try to find artifact from library path
+        # Method 3: Check for libdir or PATH exported by the JLL
         if isempty(artifact_dir)
-            # Look for any _PATH variables (libdir_path, etc.)
-            for name in names(jll_mod; all=true)
-                if occursin("path", string(name)) || occursin("PATH", string(name))
+            # Many JLLs export a libdir_path or similar
+            for name in [:libdir, :artifact_dir, :PATH_list]
+                if isdefined(jll_mod, name)
                     try
                         val = getfield(jll_mod, name)
-                        if isa(val, String) && !isempty(val) && isdir(val)
-                            # Found a path - use parent as artifact root
+                        if isa(val, String) && isdir(val)
+                            # libdir is typically artifact_root/lib
                             artifact_dir = dirname(val)
                             break
-                        elseif isa(val, Ref) && isa(val[], String)
+                        elseif isa(val, Ref)
                             path_val = string(val[])
-                            if !isempty(path_val) && isdir(path_val)
+                            if isdir(path_val)
                                 artifact_dir = dirname(path_val)
+                                break
+                            end
+                        elseif isa(val, Vector)
+                            # PATH_list might be a vector of paths
+                            for p in val
+                                if isa(p, String) && isdir(p)
+                                    artifact_dir = dirname(p)
+                                    break
+                                end
+                            end
+                            if !isempty(artifact_dir)
                                 break
                             end
                         end
@@ -268,23 +327,25 @@ function resolve_jll_module(jll_name::String, cmake_name::String)
             end
         end
 
-        # Method 4: Search Artifacts directory directly
+        # Method 4: Look for library file paths in the module
         if isempty(artifact_dir)
-            # Search for the package in artifacts
-            artifacts_dir = joinpath(first(DEPOT_PATH), "artifacts")
-            if isdir(artifacts_dir)
-                # Look for recently created artifacts (this JLL was just loaded)
-                artifact_entries = readdir(artifacts_dir; join=true, sort=false)
-                # Sort by modification time (most recent first)
-                sort!(artifact_entries, by=mtime, rev=true)
-
-                for entry in artifact_entries[1:min(10, end)]
-                    if isdir(entry)
-                        # Check if this looks like our artifact (has lib/ or include/)
-                        if isdir(joinpath(entry, "lib")) || isdir(joinpath(entry, "include"))
-                            artifact_dir = entry
-                            break
+            # JLL packages often export library paths like libQt5Core_path
+            for name in names(jll_mod; all=true)
+                name_str = string(name)
+                if occursin("path", lowercase(name_str)) || endswith(name_str, "_PATH")
+                    try
+                        val = getfield(jll_mod, name)
+                        if isa(val, String) && (endswith(val, ".so") || endswith(val, ".dylib") || endswith(val, ".dll") || endswith(val, ".a"))
+                            if isfile(val)
+                                # Library file found - artifact root is typically ../.. from lib/file.so
+                                lib_dir = dirname(val)
+                                artifact_dir = dirname(lib_dir)
+                                println("  ✓ Found artifact via library path: $artifact_dir")
+                                break
+                            end
                         end
+                    catch
+                        continue
                     end
                 end
             end
