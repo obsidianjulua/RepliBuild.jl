@@ -73,8 +73,8 @@ test_logger = ConsoleLogger(stderr, Logging.Warn)
                 # Test project creation with Templates
                 test_project = joinpath(tmpdir, "test_cpp_project")
 
-                # Use Templates.initialize_project with keyword argument
-                @test_nowarn Templates.initialize_project(test_project, template=:cpp_project)
+                # Use Templates.initialize_project
+                @test_nowarn Templates.initialize_project(test_project)
 
                 # Verify directory structure was created
                 @test isdir(test_project)

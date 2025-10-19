@@ -5,7 +5,7 @@
 module RepliBuild
 
 # Version
-const VERSION = v"0.1.0"
+const VERSION = v"0.1.1"
 
 # Load all submodules in the correct order
 include("UXHelpers.jl")  # Load UX helpers FIRST - needed by error handling
@@ -14,6 +14,7 @@ include("ConfigurationManager.jl")  # Configuration management
 include("Templates.jl")  # Project template initialization
 include("ASTWalker.jl")  # AST dependency analysis
 include("BuildHelpers.jl")  # Smart build utilities (config.h, pkg-config, etc.)
+include("ModuleRegistry.jl")  # External library module system (NEW)
 include("Discovery.jl")  # Discovery pipeline
 include("ProjectWizard.jl")  # Template-based project creation
 include("ErrorLearning.jl")  # Error learning system (production-ready)
@@ -31,6 +32,7 @@ using .ConfigurationManager
 using .Templates
 using .ASTWalker
 using .BuildHelpers
+using .ModuleRegistry
 using .Discovery
 using .ProjectWizard
 using .ErrorLearning
@@ -48,6 +50,7 @@ include("Bridge_LLVM.jl")
 # Export submodules themselves (production modules only)
 export LLVMEnvironment, ConfigurationManager, Templates, ASTWalker, Discovery
 export BuildHelpers, BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp, ClangJLBridge, DaemonManager, ProjectWizard
+export ModuleRegistry  # NEW: External library module system
 # ErrorLearning and UXHelpers are used internally, not exported to keep API surface small
 
 # Export key types from LLVMake
@@ -55,6 +58,9 @@ export LLVMJuliaCompiler, CompilerConfig, TargetConfig
 
 # Export key types from JuliaWrapItUp
 export BinaryWrapper, WrapperConfig, BinaryInfo
+
+# Export key types and functions from ModuleRegistry
+export resolve_module, list_modules, register_module
 
 # ============================================================================
 # PRODUCTION API - Core user-facing functions for Julia/C++ workflows

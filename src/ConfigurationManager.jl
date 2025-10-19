@@ -262,7 +262,7 @@ Create default RepliBuild configuration with all stages defined.
 """
 function create_default_config(config_file::String)
     project_name = basename(dirname(abspath(config_file)))
-    project_root = pwd()
+    project_root = dirname(abspath(config_file))
     project_uuid = uuid4()  # Generate new UUID for new project
 
     config = RepliBuildConfig(

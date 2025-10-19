@@ -6,6 +6,9 @@ module CMakeParser
 
 using TOML
 
+# Import ModuleRegistry for external library resolution
+import ..ModuleRegistry
+
 # ============================================================================
 # DATA STRUCTURES
 # ============================================================================
@@ -668,6 +671,68 @@ function to_replibuild_config(cmake_project::CMakeProject, target_name::String="
     end
 
     config["compile"] = compile_config
+
+    # [dependencies] - Resolve find_package() calls to Julia modules
+    if !isempty(cmake_project.find_packages)
+        dependencies = Dict{String,Any}()
+        external_includes = String[]
+        external_libs = String[]
+        external_lib_dirs = String[]
+
+        for pkg_name in cmake_project.find_packages
+            println("🔍 Resolving external dependency: $pkg_name")
+
+            # Try to resolve via ModuleRegistry
+            mod_info = ModuleRegistry.resolve_module(pkg_name)
+
+            if !isnothing(mod_info)
+                # Add to dependencies section
+                dependencies[pkg_name] = Dict(
+                    "source" => string(mod_info.source),
+                    "version" => mod_info.version,
+                    "julia_package" => mod_info.julia_package
+                )
+
+                # Merge paths into compile config
+                append!(external_includes, mod_info.include_dirs)
+                append!(external_lib_dirs, mod_info.library_dirs)
+                append!(external_libs, mod_info.libraries)
+
+                println("  ✓ Resolved: $(mod_info.source) ($(mod_info.julia_package))")
+            else
+                @warn "Could not resolve dependency: $pkg_name (will need manual configuration)"
+                dependencies[pkg_name] = Dict(
+                    "source" => "unresolved",
+                    "note" => "Manual configuration required in replibuild.toml"
+                )
+            end
+        end
+
+        if !isempty(dependencies)
+            config["dependencies"] = dependencies
+        end
+
+        # Merge external library paths into compile config
+        if !isempty(external_includes)
+            if haskey(compile_config, "include_dirs")
+                append!(compile_config["include_dirs"], external_includes)
+            else
+                compile_config["include_dirs"] = external_includes
+            end
+        end
+
+        if !isempty(external_lib_dirs)
+            compile_config["library_dirs"] = external_lib_dirs
+        end
+
+        if !isempty(external_libs)
+            if haskey(compile_config, "link_libraries")
+                append!(compile_config["link_libraries"], external_libs)
+            else
+                compile_config["link_libraries"] = external_libs
+            end
+        end
+    end
 
     # [target]
     config["target"] = Dict{String,Any}(
