@@ -27,5 +27,7 @@ Manifest*.toml
 LocalPreferences.toml
 JuliaLocalPreferences.toml
 
-# Ai preferences
+# preferences
 *.claude
+*.vscode
+*.so
