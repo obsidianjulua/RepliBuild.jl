@@ -9,6 +9,36 @@ using TOML
 
 export detect_build_system, delegate_build, BuildSystemType
 export QtBuildDelegate, CMakeBuildDelegate, MesonBuildDelegate
+export is_julia_environment, should_use_jll
+
+# ============================================================================
+# ENVIRONMENT DETECTION
+# ============================================================================
+
+"""
+    is_julia_environment(project_dir::String) -> Bool
+
+Check if we're running in a Julia project environment.
+Returns true if Project.toml or JuliaProject.toml exists.
+"""
+function is_julia_environment(project_dir::String=".")
+    return isfile(joinpath(project_dir, "Project.toml")) ||
+           isfile(joinpath(project_dir, "JuliaProject.toml")) ||
+           haskey(ENV, "JULIA_PROJECT")
+end
+
+"""
+    should_use_jll() -> Bool
+
+Determine if we should use JLL packages (artifacts) or system tools.
+Returns true if:
+1. We're in a Julia environment
+2. Pkg is available
+"""
+function should_use_jll()
+    # Check if Pkg is available (we're in Julia ecosystem)
+    return isdefined(Main, :Pkg) || isdefined(Base, :Pkg)
+end
 
 # ============================================================================
 # BUILD SYSTEM DETECTION
@@ -64,18 +94,48 @@ Each delegate knows how to:
 abstract type BuildDelegate end
 
 """
-    delegate_build(project_dir::String; config::Dict=Dict()) -> Dict
+    delegate_build(project_dir::String; config::Dict=Dict(), toml_path::String="replibuild.toml") -> Dict
 
 Smart build delegation:
-1. Detect build system
-2. Create appropriate delegate
-3. Run build via JLL packages
-4. Return artifact locations
-"""
-function delegate_build(project_dir::String; config::Dict=Dict())
-    build_type = detect_build_system(project_dir)
+1. Read build system from replibuild.toml if available
+2. Otherwise detect build system automatically
+3. Create appropriate delegate
+4. Run build via JLL packages (if in Julia) or system tools (if standalone)
+5. Return artifact locations
 
-    println("🔍 Detected build system: $build_type")
+# TOML Configuration
+In your replibuild.toml, specify:
+```toml
+[build]
+system = "qmake"  # or "cmake", "meson", "autotools", "make"
+qt_version = "Qt5"  # optional, for Qt projects
+build_dir = "build"  # optional, default: "build"
+```
+"""
+function delegate_build(project_dir::String; config::Dict=Dict(), toml_path::String="replibuild.toml")
+    build_type = UNKNOWN
+
+    # Try to read build system from TOML first
+    full_toml_path = joinpath(project_dir, toml_path)
+    if isfile(full_toml_path)
+        toml_config = TOML.parsefile(full_toml_path)
+        if haskey(toml_config, "build") && haskey(toml_config["build"], "system")
+            system_str = lowercase(toml_config["build"]["system"])
+            build_type = parse_build_system_string(system_str)
+            println("📝 Build system from TOML: $build_type")
+
+            # Merge TOML config into provided config
+            if haskey(toml_config, "build")
+                merge!(config, toml_config["build"])
+            end
+        end
+    end
+
+    # Fall back to auto-detection if not specified in TOML
+    if build_type == UNKNOWN
+        build_type = detect_build_system(project_dir)
+        println("🔍 Auto-detected build system: $build_type")
+    end
 
     delegate = create_delegate(build_type, project_dir, config)
 
@@ -85,6 +145,27 @@ function delegate_build(project_dir::String; config::Dict=Dict())
 
     # Delegate does all the work!
     return execute_build(delegate)
+end
+
+"""
+Parse build system string from TOML to enum
+"""
+function parse_build_system_string(s::String)::BuildSystemType
+    if s == "cmake"
+        return CMAKE
+    elseif s == "qmake" || s == "qt"
+        return QMAKE
+    elseif s == "meson"
+        return MESON
+    elseif s == "autotools"
+        return AUTOTOOLS
+    elseif s == "make"
+        return MAKE
+    elseif s == "cargo"
+        return CARGO
+    else
+        return UNKNOWN
+    end
 end
 
 function create_delegate(build_type::BuildSystemType, project_dir::String, config::Dict)
@@ -126,33 +207,45 @@ mutable struct QtBuildDelegate <: BuildDelegate
 end
 
 """
-Execute Qt build by calling qmake and make from Qt JLL
+Execute Qt build by calling qmake and make from Qt JLL or system
 """
 function execute_build(delegate::QtBuildDelegate)
     println("🚀 Qt Build Delegation")
     println("   Project: $(delegate.project_dir)")
     println("   Qt Version: $(delegate.qt_version)")
 
-    # Step 1: Ensure Qt JLL packages are available
-    qt_jll = ensure_qt_tools(delegate.qt_version)
+    # Step 1: Determine tool source (JLL vs system)
+    use_jll = should_use_jll()
+    qmake_path = ""
 
-    # Step 2: Find qmake from JLL
-    qmake_path = get_qmake_path(qt_jll)
+    if use_jll
+        println("   📦 Using Julia artifacts (JLL packages)")
+        qt_jll = ensure_qt_tools(delegate.qt_version)
+        qmake_path = get_qmake_path(qt_jll)
+    else
+        println("   🔧 Using system tools")
+        qmake_path = find_system_qmake()
+        if isempty(qmake_path)
+            error("qmake not found in system PATH. Please install Qt or run from Julia environment.")
+        end
+    end
 
-    # Step 3: Create build directory
+    println("   qmake: $qmake_path")
+
+    # Step 2: Create build directory
     mkpath(delegate.build_dir)
 
-    # Step 4: Run qmake (delegate to Qt's build system!)
+    # Step 3: Run qmake (delegate to Qt's build system!)
     println("   Running qmake...")
     result = run_qt_command(qmake_path, delegate.project_dir, delegate.build_dir)
 
     if result[:success]
-        # Step 5: Run make
+        # Step 4: Run make
         println("   Running make...")
         make_result = run_make(delegate.build_dir)
 
         if make_result[:success]
-            # Step 6: Find and return built artifacts
+            # Step 5: Find and return built artifacts
             return extract_qt_artifacts(delegate.build_dir)
         else
             error("Make failed: $(make_result[:error])")
@@ -160,6 +253,20 @@ function execute_build(delegate::QtBuildDelegate)
     else
         error("qmake failed: $(result[:error])")
     end
+end
+
+"""
+Find qmake in system PATH (fallback when not using JLL)
+"""
+function find_system_qmake()
+    # Try common qmake names
+    for qmake_name in ["qmake", "qmake-qt5", "qmake-qt6"]
+        qmake_path = Sys.which(qmake_name)
+        if !isnothing(qmake_path)
+            return qmake_path
+        end
+    end
+    return ""
 end
 
 """

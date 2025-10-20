@@ -15,6 +15,7 @@ include("Templates.jl")  # Project template initialization
 include("ASTWalker.jl")  # AST dependency analysis
 include("BuildHelpers.jl")  # Smart build utilities (config.h, pkg-config, etc.)
 include("ModuleRegistry.jl")  # External library module system (NEW)
+include("BuildSystemDelegate.jl")  # Smart delegation to existing build systems (qmake, CMake, Meson)
 include("Discovery.jl")  # Discovery pipeline
 include("ProjectWizard.jl")  # Template-based project creation
 include("ErrorLearning.jl")  # Error learning system (production-ready)
@@ -33,6 +34,7 @@ using .Templates
 using .ASTWalker
 using .BuildHelpers
 using .ModuleRegistry
+using .BuildSystemDelegate
 using .Discovery
 using .ProjectWizard
 using .ErrorLearning
@@ -51,6 +53,7 @@ include("Bridge_LLVM.jl")
 export LLVMEnvironment, ConfigurationManager, Templates, ASTWalker, Discovery
 export BuildHelpers, BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp, ClangJLBridge, DaemonManager, ProjectWizard
 export ModuleRegistry  # NEW: External library module system
+export BuildSystemDelegate  # NEW: Smart build system delegation
 # ErrorLearning and UXHelpers are used internally, not exported to keep API surface small
 
 # Export key types from LLVMake
@@ -61,6 +64,9 @@ export BinaryWrapper, WrapperConfig, BinaryInfo
 
 # Export key types and functions from ModuleRegistry
 export resolve_module, list_modules, register_module
+
+# Export key functions from BuildSystemDelegate
+export detect_build_system, delegate_build
 
 # ============================================================================
 # PRODUCTION API - Core user-facing functions for Julia/C++ workflows
@@ -73,7 +79,7 @@ export init
 export create_project_interactive, available_templates, use_template
 
 # Discovery & compilation pipeline (main workflows)
-export discover, compile, compile_project
+export discover, compile, compile_project, build
 
 # CMake import (keep for convenience)
 export import_cmake
@@ -176,6 +182,56 @@ function compile(config_file::String="replibuild.toml")
     println("🚀 RepliBuild - Compiling project")
     config = BridgeCompilerConfig(config_file)
     compile_project(config)
+end
+
+"""
+    build(project_dir::String="."; config_file::String="replibuild.toml")
+
+Universal build function that intelligently delegates to the appropriate build system.
+
+This function:
+1. Reads `replibuild.toml` to determine the build system (qmake, cmake, meson, etc.)
+2. Uses Julia artifacts (JLL packages) when in Julia environment for reproducibility
+3. Falls back to system tools when running standalone
+4. Returns build artifacts (libraries, executables)
+
+# Arguments
+- `project_dir::String`: Project directory to build (default: current directory)
+- `config_file::String`: Configuration file name (default: "replibuild.toml")
+
+# TOML Configuration
+Add a `[build]` section to your replibuild.toml:
+```toml
+[build]
+system = "qmake"  # or "cmake", "meson", "autotools", "make"
+qt_version = "Qt5"  # for Qt/qmake projects
+build_dir = "build"  # optional, default: "build"
+```
+
+# Examples
+```julia
+# Build current project (auto-detect or use TOML)
+RepliBuild.build()
+
+# Build specific project
+RepliBuild.build("/path/to/qt/project")
+
+# Specify custom config
+RepliBuild.build(".", config_file="custom.toml")
+```
+
+# Returns
+Dict with keys:
+- `:libraries` - Array of built library paths
+- `:executables` - Array of built executable paths
+- `:build_dir` - Build directory path
+"""
+function build(project_dir::String="."; config_file::String="replibuild.toml")
+    println("🔨 RepliBuild - Universal Build System")
+    println("   Project: $project_dir")
+
+    # Delegate to BuildSystemDelegate
+    return BuildSystemDelegate.delegate_build(project_dir, toml_path=config_file)
 end
 
 """

@@ -1,3 +1,4 @@
+
 # ============================================================================
 # RepliBuild Configuration Reference
 # ============================================================================
@@ -61,6 +62,21 @@ c_headers = "include"
 julia_files = "julia"
 config_files = "config"
 docs = "docs"
+
+# ============================================================================
+# [build] - External Build System Delegation (NEW)
+# Used by: BuildSystemDelegate.jl
+# For projects that already use qmake, CMake, Meson, etc.
+# ============================================================================
+[build]
+# Optional: Specify build system explicitly (otherwise auto-detected)
+# system = "qmake"               # Options: "qmake", "cmake", "meson", "autotools", "make"
+# qt_version = "Qt5"             # For Qt projects: "Qt5" or "Qt6"
+# build_dir = "build"            # Build directory (default: "build")
+
+# Tool resolution:
+# - When in Julia environment → Uses JLL packages (Qt5Base_jll, CMake_jll, etc.)
+# - When standalone → Uses system tools (qmake, cmake from PATH)
 
 # ============================================================================
 # [compile] - C/C++ → LLVM IR Compilation Stage
