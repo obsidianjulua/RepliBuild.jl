@@ -25,7 +25,7 @@ RepliBuild is a build system that bridges the gap between Julia's JLL packages (
 
 ---
 
-## Current Status: Early Production (v1.1)
+## Current Status: Early Production (v1.2)
 
 **What Works:**
 - ✅ Module system with JLL integration
