@@ -1,0 +1,77 @@
+# Boost Module - Portable C++ source libraries
+# Auto-generated RepliBuild module descriptor
+
+[module]
+name = "Boost"
+cmake_name = "Boost"
+description = "Boost C++ Libraries - peer-reviewed portable C++ source libraries"
+version = "1.76.0"
+
+[resolution]
+prefer = "jll"
+fallback = ["system"]
+
+# JLL Package Resolution
+[jll]
+package = "boost_jll"
+auto_install = true
+
+# Boost has MANY components - list the most common ones
+[components]
+# Header-only libraries (no linking required)
+headers = { required = false, header_only = true, description = "Header-only Boost libraries" }
+
+# Compiled libraries (require linking)
+system = { jll_export = "libboost_system", required = false, description = "System utilities" }
+filesystem = { jll_export = "libboost_filesystem", required = false, description = "Filesystem operations" }
+thread = { jll_export = "libboost_thread", required = false, description = "Multithreading" }
+regex = { jll_export = "libboost_regex", required = false, description = "Regular expressions" }
+chrono = { jll_export = "libboost_chrono", required = false, description = "Time utilities" }
+date_time = { jll_export = "libboost_date_time", required = false, description = "Date and time" }
+atomic = { jll_export = "libboost_atomic", required = false, description = "Atomic operations" }
+program_options = { jll_export = "libboost_program_options", required = false, description = "Program options parsing" }
+iostreams = { jll_export = "libboost_iostreams", required = false, description = "IOStreams" }
+serialization = { jll_export = "libboost_serialization", required = false, description = "Serialization" }
+test = { jll_export = "libboost_unit_test_framework", required = false, description = "Unit testing framework" }
+
+# Component dependencies (e.g., filesystem needs system)
+[component_deps]
+filesystem = ["system"]
+thread = ["system", "chrono"]
+iostreams = ["system"]
+serialization = ["system"]
+
+# System fallback
+[system]
+pkg_config = "boost"
+header_check = "boost/version.hpp"
+search_paths = [
+    "/usr/lib",
+    "/usr/local/lib",
+    "/opt/boost",
+    "/usr/lib/x86_64-linux-gnu"
+]
+
+# Compiler/linker flags
+[flags]
+compile = ["-DBOOST_ALL_NO_LIB"]  # Disable auto-linking on Windows
+link = []
+defines = {}
+
+# Per-component flags
+[flags.per_component]
+thread = { compile = ["-pthread"], link = ["-lpthread"] }
+# Boost.Regex might need ICU on some platforms
+regex = { link = [] }  # Add "-licuuc -licudata" if ICU backend
+
+# Version constraints
+[version]
+minimum = "1.70.0"
+maximum = "1.99.99"
+recommended = "1.76.0"
+
+# Metadata
+[metadata]
+homepage = "https://www.boost.org/"
+documentation = "https://www.boost.org/doc/libs/"
+license = "Boost Software License 1.0"

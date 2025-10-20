@@ -142,6 +142,9 @@ function load_config(config_file::String="replibuild.toml")
         data
     )
 
+    # Load cached runtime data (tool paths, discovery results, etc.)
+    load_runtime_cache(config)
+
     return config
 end
 
@@ -150,6 +153,7 @@ end
 
 Save configuration back to TOML file.
 All component data flows back through this function.
+Only saves user-configurable settings - runtime data goes to cache.
 """
 function save_config(config::RepliBuildConfig)
     # Build TOML structure
@@ -166,20 +170,36 @@ function save_config(config::RepliBuildConfig)
         "uuid" => string(config.project_uuid)
     )
 
-    # Stage-specific sections (only save non-empty)
-    # IMPORTANT: Don't serialize large dependency graphs to TOML - they're already in JSON
+    # Stage-specific sections (only save USER-CONFIGURABLE settings)
+    # IMPORTANT: Don't serialize runtime discovery data or tool paths
     if !isempty(config.discovery)
-        discovery_toml = copy(config.discovery)
-        # Remove heavy data structures that don't belong in TOML
-        # Dependency graph is saved separately as JSON
-        delete!(discovery_toml, "dependency_graph")
-        data["discovery"] = discovery_toml
+        discovery_toml = Dict{String,Any}()
+        # Only save user settings, not runtime results
+        for key in ["enabled", "scan_recursive", "max_depth", "exclude_dirs",
+                    "follow_symlinks", "parse_ast", "walk_dependencies", "log_all_files"]
+            if haskey(config.discovery, key)
+                discovery_toml[key] = config.discovery[key]
+            end
+        end
+        if !isempty(discovery_toml)
+            data["discovery"] = discovery_toml
+        end
     end
     if !isempty(config.reorganize)
         data["reorganize"] = config.reorganize
     end
     if !isempty(config.compile)
-        data["compile"] = config.compile
+        compile_toml = Dict{String,Any}()
+        # Only save user settings, not runtime results like source_files
+        for key in ["enabled", "output_dir", "flags", "include_dirs", "defines",
+                    "emit_ir", "emit_bc", "parallel"]
+            if haskey(config.compile, key)
+                compile_toml[key] = config.compile[key]
+            end
+        end
+        if !isempty(compile_toml)
+            data["compile"] = compile_toml
+        end
     end
     if !isempty(config.link)
         data["link"] = config.link
@@ -197,9 +217,26 @@ function save_config(config::RepliBuildConfig)
         data["test"] = config.test
     end
 
-    # System sections
+    # System sections - CLEAN versions (no runtime data)
     if !isempty(config.llvm)
-        data["llvm"] = config.llvm
+        llvm_toml = Dict{String,Any}()
+        # Only save user-configurable LLVM settings, NOT discovered tool paths
+        for key in ["root", "source", "use_replibuild_llvm", "isolated"]
+            if haskey(config.llvm, key) && !isempty(string(config.llvm[key]))
+                llvm_toml[key] = config.llvm[key]
+            end
+        end
+        # Allow user-specified tool overrides (but not auto-discovered ones)
+        if haskey(config.llvm, "tools") && !isempty(config.llvm["tools"])
+            # Only save if tools were manually specified (have less than 10 entries)
+            # Auto-discovered toolchains have ~70+ tools
+            if length(config.llvm["tools"]) < 10
+                llvm_toml["tools"] = config.llvm["tools"]
+            end
+        end
+        if !isempty(llvm_toml)
+            data["llvm"] = llvm_toml
+        end
     end
     if !isempty(config.target)
         data["target"] = config.target
@@ -217,6 +254,86 @@ function save_config(config::RepliBuildConfig)
     end
 
     config.last_modified = now()
+
+    # Save runtime data to cache separately
+    save_runtime_cache(config)
+end
+
+"""
+    save_runtime_cache(config::RepliBuildConfig)
+
+Save runtime discovery data and tool paths to cache directory.
+This keeps replibuild.toml clean while caching expensive discovery results.
+"""
+function save_runtime_cache(config::RepliBuildConfig)
+    cache_dir = joinpath(config.project_root, get(config.cache, "directory", ".replibuild_cache"))
+    mkpath(cache_dir)
+
+    cache_data = Dict{String,Any}()
+
+    # Cache discovered tool paths
+    if haskey(config.llvm, "tools") && !isempty(config.llvm["tools"])
+        cache_data["llvm_tools"] = config.llvm["tools"]
+    end
+
+    # Cache discovery results (files, binaries, include_dirs)
+    if !isempty(config.discovery)
+        discovery_cache = Dict{String,Any}()
+        for key in ["completed", "timestamp", "files", "binaries", "include_dirs", "dependency_graph_file"]
+            if haskey(config.discovery, key)
+                discovery_cache[key] = config.discovery[key]
+            end
+        end
+        if !isempty(discovery_cache)
+            cache_data["discovery_results"] = discovery_cache
+        end
+    end
+
+    # Cache compile results (source files list)
+    if haskey(config.compile, "source_files") && !isempty(config.compile["source_files"])
+        cache_data["compile_sources"] = config.compile["source_files"]
+    end
+
+    # Write cache file
+    cache_file = joinpath(cache_dir, "build_cache.toml")
+    open(cache_file, "w") do io
+        TOML.print(io, cache_data)
+    end
+end
+
+"""
+    load_runtime_cache(config::RepliBuildConfig)
+
+Load runtime data from cache if available.
+"""
+function load_runtime_cache(config::RepliBuildConfig)
+    cache_dir = joinpath(config.project_root, get(config.cache, "directory", ".replibuild_cache"))
+    cache_file = joinpath(cache_dir, "build_cache.toml")
+
+    if !isfile(cache_file)
+        return
+    end
+
+    try
+        cache_data = TOML.parsefile(cache_file)
+
+        # Restore tool paths
+        if haskey(cache_data, "llvm_tools")
+            config.llvm["tools"] = cache_data["llvm_tools"]
+        end
+
+        # Restore discovery results
+        if haskey(cache_data, "discovery_results")
+            merge!(config.discovery, cache_data["discovery_results"])
+        end
+
+        # Restore compile sources
+        if haskey(cache_data, "compile_sources")
+            config.compile["source_files"] = cache_data["compile_sources"]
+        end
+    catch e
+        @warn "Failed to load runtime cache: $e"
+    end
 end
 
 """
@@ -813,6 +930,7 @@ end
 # Exports
 export RepliBuildConfig, BUILD_STAGES,
        load_config, save_config, create_default_config,
+       save_runtime_cache, load_runtime_cache,
        update_discovery_data, update_compile_data, update_link_data,
        update_binary_data, update_symbols_data, update_wrap_data,
        get_stage_config, is_stage_enabled,

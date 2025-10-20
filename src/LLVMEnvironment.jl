@@ -478,21 +478,21 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
 
     println("   Version: $version_str (LLVM $major.$minor.$patch)")
 
-    # Read tools from TOML or discover
+    # Read tools from cache/TOML or discover
     tools = if config !== nothing && haskey(config.llvm, "tools") && !isempty(config.llvm["tools"])
-        # TOML has tools specified - use them (user override)
-        println("   Tools: Reading from TOML")
+        # Tools already in config (loaded from cache or user override)
+        println("   Tools: Using cached paths ($(length(config.llvm["tools"])) tools)")
         config.llvm["tools"]
     else
-        # Auto-discover and update TOML
-        println("   Tools: Auto-discovering")
+        # Auto-discover and update config (will be cached by ConfigurationManager.save_config)
+        println("   Tools: Auto-discovering...")
         discovered = discover_llvm_tools(llvm_root, toolchain_source)
         if config !== nothing
             config.llvm["tools"] = discovered
         end
+        println("   Tools: Discovered $(length(discovered)) tools (cached for next run)")
         discovered
     end
-    println("   Tools: $(length(tools)) available")
 
     # Validate tools exist, warn if missing
     for (name, path) in tools

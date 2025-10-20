@@ -1,0 +1,69 @@
+# Qt5 Module - Cross-platform GUI framework
+# Auto-generated RepliBuild module descriptor
+
+[module]
+name = "Qt5"
+cmake_name = "Qt5"
+description = "Qt5 Cross-platform application framework"
+version = "5.15.2"
+
+[resolution]
+prefer = "jll"
+fallback = ["system", "custom"]
+
+# JLL Package Resolution
+[jll]
+package = "Qt5Base_jll"
+auto_install = true
+
+# Qt5 has many components, only load what's needed
+[components]
+Core = { jll_export = "libQt5Core", required = true, description = "Qt Core module" }
+Gui = { jll_export = "libQt5Gui", required = false, description = "Qt GUI module" }
+Widgets = { jll_export = "libQt5Widgets", required = false, description = "Qt Widgets module" }
+Network = { jll_export = "libQt5Network", required = false, description = "Qt Network module" }
+Sql = { jll_export = "libQt5Sql", required = false, description = "Qt SQL module" }
+Xml = { jll_export = "libQt5Xml", required = false, description = "Qt XML module" }
+DBus = { jll_export = "libQt5DBus", required = false, description = "Qt DBus module" }
+Concurrent = { jll_export = "libQt5Concurrent", required = false, description = "Qt Concurrent module" }
+
+# Component dependencies
+[component_deps]
+Widgets = ["Core", "Gui"]
+Network = ["Core"]
+Sql = ["Core"]
+
+# System fallback (for non-JLL environments)
+[system]
+pkg_config = "Qt5Core"
+header_check = "QtCore/qglobal.h"
+search_paths = [
+    "/usr/lib/qt5",
+    "/opt/qt5",
+    "/usr/local/opt/qt5",
+    "/usr/lib/x86_64-linux-gnu/qt5"
+]
+
+# Compiler/linker flags
+[flags]
+compile = ["-fPIC", "-DQT_CORE_LIB"]
+link = []
+defines = { QT_CORE_LIB = "1" }
+
+# Per-component flags
+[flags.per_component]
+Widgets = { compile = ["-DQT_WIDGETS_LIB"], defines = { QT_WIDGETS_LIB = "1" } }
+Gui = { compile = ["-DQT_GUI_LIB"], defines = { QT_GUI_LIB = "1" } }
+Network = { compile = ["-DQT_NETWORK_LIB"], defines = { QT_NETWORK_LIB = "1" } }
+
+# Version constraints
+[version]
+minimum = "5.12.0"
+maximum = "5.99.99"
+recommended = "5.15.2"
+
+# Metadata
+[metadata]
+homepage = "https://www.qt.io/"
+documentation = "https://doc.qt.io/qt-5/"
+license = "LGPL-3.0"

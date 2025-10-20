@@ -15,6 +15,7 @@ include("Templates.jl")  # Project template initialization
 include("ASTWalker.jl")  # AST dependency analysis
 include("BuildHelpers.jl")  # Smart build utilities (config.h, pkg-config, etc.)
 include("ModuleRegistry.jl")  # External library module system (NEW)
+include("ModuleTemplateGenerator.jl")  # Module template generator (NEW)
 include("BuildSystemDelegate.jl")  # Smart delegation to existing build systems (qmake, CMake, Meson)
 include("Discovery.jl")  # Discovery pipeline
 include("ProjectWizard.jl")  # Template-based project creation
@@ -34,6 +35,7 @@ using .Templates
 using .ASTWalker
 using .BuildHelpers
 using .ModuleRegistry
+using .ModuleTemplateGenerator
 using .BuildSystemDelegate
 using .Discovery
 using .ProjectWizard
@@ -53,6 +55,7 @@ include("Bridge_LLVM.jl")
 export LLVMEnvironment, ConfigurationManager, Templates, ASTWalker, Discovery
 export BuildHelpers, BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp, ClangJLBridge, DaemonManager, ProjectWizard
 export ModuleRegistry  # NEW: External library module system
+export ModuleTemplateGenerator  # NEW: Module template generator
 export BuildSystemDelegate  # NEW: Smart build system delegation
 # ErrorLearning and UXHelpers are used internally, not exported to keep API surface small
 
@@ -63,10 +66,13 @@ export LLVMJuliaCompiler, CompilerConfig, TargetConfig
 export BinaryWrapper, WrapperConfig, BinaryInfo
 
 # Export key types and functions from ModuleRegistry
-export resolve_module, list_modules, register_module
+export resolve_module, list_modules, register_module, get_module
 
 # Export key functions from BuildSystemDelegate
 export detect_build_system, delegate_build
+
+# Export module template functions
+export create_module_template, generate_from_pkg_config, generate_from_cmake
 
 # ============================================================================
 # PRODUCTION API - Core user-facing functions for Julia/C++ workflows

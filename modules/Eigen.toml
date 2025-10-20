@@ -1,0 +1,50 @@
+# Eigen Module - C++ template library for linear algebra
+# Header-only library
+
+[module]
+name = "Eigen"
+cmake_name = "Eigen3"
+description = "C++ template library for linear algebra: matrices, vectors, numerical solvers"
+version = "3.4.0"
+
+[resolution]
+prefer = "jll"
+fallback = ["system"]
+
+# JLL Package Resolution
+[jll]
+package = "Eigen_jll"
+auto_install = true
+
+# Eigen is header-only - no linking required!
+[components]
+headers = { required = true, header_only = true, description = "Eigen header-only library" }
+
+# System fallback
+[system]
+pkg_config = "eigen3"
+header_check = "Eigen/Core"
+search_paths = [
+    "/usr/include/eigen3",
+    "/usr/local/include/eigen3",
+    "/opt/eigen3/include"
+]
+
+# Compiler flags
+[flags]
+compile = []  # Eigen has no special compile flags
+link = []  # Header-only, no linking
+defines = { EIGEN_NO_DEBUG = "1" }  # Optional: disable debug checks
+
+# Version constraints
+[version]
+minimum = "3.3.0"
+maximum = "3.99.99"
+recommended = "3.4.0"
+
+# Metadata
+[metadata]
+homepage = "https://eigen.tuxfamily.org/"
+documentation = "https://eigen.tuxfamily.org/dox/"
+license = "MPL2"
+header_only = true  # Important marker
