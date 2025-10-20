@@ -4,7 +4,7 @@
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/user/RepliBuild.jl")
+Pkg.add(url="https://github.com/obsidianjulua/RepliBuild.jl")
 ```
 
 ## First Run
@@ -194,4 +194,3 @@ RepliBuild follows Julia's user-local conventions:
 ✅ Leverages Julia's Pkg and Artifacts ecosystem
 ✅ Reproducible builds with JLL packages
 
-This is **the Julia way** of handling C/C++ build systems!

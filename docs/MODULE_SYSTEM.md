@@ -1,10 +1,10 @@
 # RepliBuild Module System
 
-## Philosophy: The Julia Way of Building C/C++ Projects
+## Philosophy: The Julia Way
 
 The RepliBuild module system bridges **years of C/C++ build complexity** with **Julia's reproducible package ecosystem**.
 
-### The Problem We Solve
+### The Problem Solved
 
 Traditional C/C++ build systems require:
 - Manual installation of dependencies
@@ -354,5 +354,3 @@ RepliBuild modules solve the "build logic" gap:
 
 - JLL packages = **binaries** ✅
 - RepliBuild modules = **binaries + build flags + logic** ✅✅✅
-
-This is what Julia's C/C++ ecosystem has been missing.
