@@ -9,7 +9,10 @@ using Dates
 
 export get_replibuild_dir, get_module_search_paths, get_cache_dir
 export get_config_path, initialize_directories, ensure_initialized
-export get_registry_dir, get_logs_dir
+export get_registry_dir, get_logs_dir, print_paths_info
+export get_config_value, set_config_value, migrate_old_structure
+export get_project_replibuild_dir, get_project_cache_dir, get_project_modules_dir
+export initialize_project_directories
 
 """
 Get the main RepliBuild directory (~/.julia/replibuild/)

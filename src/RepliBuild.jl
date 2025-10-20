@@ -53,6 +53,28 @@ using .DaemonManager
 # (Bridge_LLVM uses the already-loaded modules above)
 include("Bridge_LLVM.jl")
 
+# ============================================================================
+# IMPORT FUNCTIONS FOR RE-EXPORT
+# ============================================================================
+
+# Import path management functions
+import .RepliBuildPaths: get_replibuild_dir, initialize_directories, ensure_initialized
+import .RepliBuildPaths: get_module_search_paths, get_cache_dir, print_paths_info
+import .RepliBuildPaths: get_config_value, set_config_value, migrate_old_structure
+
+# Import module registry functions
+import .ModuleRegistry: resolve_module, list_modules, register_module, get_module_info
+
+# Import module template functions
+import .ModuleTemplateGenerator: create_module_template, generate_from_pkg_config, generate_from_cmake
+
+# Import build system delegate functions
+import .BuildSystemDelegate: detect_build_system, delegate_build
+
+# ============================================================================
+# EXPORTS
+# ============================================================================
+
 # Export submodules themselves (production modules only)
 export RepliBuildPaths, LLVMEnvironment, ConfigurationManager, Templates, ASTWalker, Discovery
 export BuildHelpers, BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp, ClangJLBridge, DaemonManager, ProjectWizard
@@ -67,18 +89,13 @@ export LLVMJuliaCompiler, CompilerConfig, TargetConfig
 # Export key types from JuliaWrapItUp
 export BinaryWrapper, WrapperConfig, BinaryInfo
 
-# Export key types and functions from ModuleRegistry
-export resolve_module, list_modules, register_module, get_module
-
-# Export key functions from BuildSystemDelegate
+# Export functions from submodules (already imported above)
+export resolve_module, list_modules, register_module, get_module_info
 export detect_build_system, delegate_build
-
-# Export module template functions
 export create_module_template, generate_from_pkg_config, generate_from_cmake
-
-# Export path management functions
 export get_replibuild_dir, initialize_directories, ensure_initialized
 export get_module_search_paths, get_cache_dir, print_paths_info
+export get_config_value, set_config_value, migrate_old_structure
 
 # ============================================================================
 # PRODUCTION API - Core user-facing functions for Julia/C++ workflows
