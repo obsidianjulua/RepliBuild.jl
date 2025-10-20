@@ -4,7 +4,7 @@
 
 [![Julia](https://img.shields.io/badge/Julia-1.9+-blue.svg)](https://julialang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Early%20Production-yellow.svg)](https://github.com/yourusername/RepliBuild.jl)
+[![Status](https://img.shields.io/badge/Status-Early%20Production-yellow.svg)](https://github.com/obsidianjulua/RepliBuild.jl)
 
 ---
 
@@ -384,7 +384,7 @@ Found a library that needs special flags? Document it in the module file with co
 ### Development Setup
 
 ```bash
-git clone https://github.com/yourusername/RepliBuild.jl
+git clone https://github.com/obsidianjulua/RepliBuild.jl
 cd RepliBuild.jl
 
 # Install dependencies
@@ -503,7 +503,7 @@ If you use RepliBuild in research:
   title = {RepliBuild.jl: A Julia-native build system for C/C++ integration},
   author = {Your Name},
   year = {2025},
-  url = {https://github.com/yourusername/RepliBuild.jl}
+  url = {https://github.com/obsidianjulua/RepliBuild.jl}
 }
 ```
 
