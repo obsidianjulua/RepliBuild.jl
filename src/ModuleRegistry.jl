@@ -48,18 +48,23 @@ end
 # ============================================================================
 
 const REGISTRY = Dict{String,ModuleInfo}()
-const MODULE_SEARCH_PATHS = String[]
+
+# Import path management
+import ..RepliBuildPaths
 
 function __init__()
-    # Add default module search paths
-    builtin_modules = joinpath(@__DIR__, "..", "modules")
-    user_modules = joinpath(homedir(), ".replibuild", "modules")
+    # Ensure RepliBuild is initialized (creates ~/.julia/replibuild/ if needed)
+    RepliBuildPaths.ensure_initialized(verbose=false)
 
-    push!(MODULE_SEARCH_PATHS, builtin_modules)
-    push!(MODULE_SEARCH_PATHS, user_modules)
-
-    # Load builtin modules
+    # Load builtin modules from all search paths
     load_builtin_modules()
+end
+
+"""
+Get module search paths (dynamically from RepliBuildPaths).
+"""
+function get_module_search_paths()
+    return RepliBuildPaths.get_module_search_paths()
 end
 
 # ============================================================================
@@ -547,10 +552,10 @@ function load_module_from_toml(toml_file::String)
 end
 
 """
-Load all builtin module definitions
+Load all builtin module definitions from all search paths.
 """
 function load_builtin_modules()
-    for search_path in MODULE_SEARCH_PATHS
+    for search_path in get_module_search_paths()
         if !isdir(search_path)
             continue
         end

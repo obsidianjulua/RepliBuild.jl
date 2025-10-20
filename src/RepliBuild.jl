@@ -9,6 +9,7 @@ const VERSION = v"0.1.1"
 
 # Load all submodules in the correct order
 include("UXHelpers.jl")  # Load UX helpers FIRST - needed by error handling
+include("RepliBuildPaths.jl")  # Path management - user-local directories
 include("LLVMEnvironment.jl")  # Load LLVM environment for toolchain isolation
 include("ConfigurationManager.jl")  # Configuration management
 include("Templates.jl")  # Project template initialization
@@ -29,6 +30,7 @@ include("DaemonManager.jl")  # Daemon lifecycle management
 
 # Re-export submodules
 using .UXHelpers
+using .RepliBuildPaths
 using .LLVMEnvironment
 using .ConfigurationManager
 using .Templates
@@ -52,7 +54,7 @@ using .DaemonManager
 include("Bridge_LLVM.jl")
 
 # Export submodules themselves (production modules only)
-export LLVMEnvironment, ConfigurationManager, Templates, ASTWalker, Discovery
+export RepliBuildPaths, LLVMEnvironment, ConfigurationManager, Templates, ASTWalker, Discovery
 export BuildHelpers, BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp, ClangJLBridge, DaemonManager, ProjectWizard
 export ModuleRegistry  # NEW: External library module system
 export ModuleTemplateGenerator  # NEW: Module template generator
@@ -73,6 +75,10 @@ export detect_build_system, delegate_build
 
 # Export module template functions
 export create_module_template, generate_from_pkg_config, generate_from_cmake
+
+# Export path management functions
+export get_replibuild_dir, initialize_directories, ensure_initialized
+export get_module_search_paths, get_cache_dir, print_paths_info
 
 # ============================================================================
 # PRODUCTION API - Core user-facing functions for Julia/C++ workflows
