@@ -23,6 +23,26 @@ RepliBuild is a build system that bridges the gap between Julia's JLL packages (
 - Smart caching (tool discovery, module resolution)
 - TOML-based configuration
 
+## Comparison to Other Tools
+
+**vs. CMake:**
+- RepliBuild: Julia-native, JLL integration, module system
+- CMake: Industry standard, mature, complex, no Julia integration
+
+**vs. BinaryBuilder.jl:**
+- RepliBuild: Build system for projects using JLLs
+- BinaryBuilder: Creates JLL packages from source
+
+**vs. Clang.jl:**
+- RepliBuild: Full build system with module management
+- Clang.jl: Binding generator (RepliBuild can use Clang.jl)
+
+**vs. CxxWrap.jl:**
+- RepliBuild: Build system + binding generation
+- CxxWrap.jl: Runtime C++ wrapper (RepliBuild can target CxxWrap)
+
+**Unique Value:** RepliBuild is the only system that bridges JLL packages with build logic. The module system is unique.
+
 ---
 
 ## Current Status: Early Production (v1.2)
@@ -41,9 +61,9 @@ RepliBuild is a build system that bridges the gap between Julia's JLL packages (
 - ⚠️  Error learning system
 
 **What's Not Ready:**
-- ❌ Module registry (planned for v1.2)
 - ❌ CMake/pkg-config parsers (designed but not implemented)
 - ❌ Windows support (untested)
+- ❌ 
 
 **Be Honest:** This is a working prototype that solves real problems, but it's not battle-tested across hundreds of projects yet. The module system is the most mature part.
 
@@ -322,15 +342,9 @@ The module resolves correctly, gives you the right paths and flags. Compilation 
 5. ✅ Manage user-local configuration
 
 **Experimental:**
-6. ⚠️  Full build pipeline (works but needs testing)
-7. ⚠️  Julia binding generation (basic)
-8. ⚠️  Error learning (needs more data)
-
-**Recommended Workflow:**
-1. Use RepliBuild for module management
-2. Use the resolved paths in your own build scripts
-3. Contribute modules to help build the registry
-4. Test the compilation pipeline on simple projects
+6. Full build pipeline (works but needs testing)
+7. Julia binding generation (basic)
+8. Error learning (needs more data)
 
 ---
 
@@ -433,58 +447,13 @@ julia --project=. -e '
 
 ---
 
-## Comparison to Other Tools
-
-**vs. CMake:**
-- RepliBuild: Julia-native, JLL integration, module system
-- CMake: Industry standard, mature, complex, no Julia integration
-
-**vs. BinaryBuilder.jl:**
-- RepliBuild: Build system for projects using JLLs
-- BinaryBuilder: Creates JLL packages from source
-
-**vs. Clang.jl:**
-- RepliBuild: Full build system with module management
-- Clang.jl: Binding generator (RepliBuild can use Clang.jl)
-
-**vs. CxxWrap.jl:**
-- RepliBuild: Build system + binding generation
-- CxxWrap.jl: Runtime C++ wrapper (RepliBuild can target CxxWrap)
-
-**Unique Value:** RepliBuild is the only system that bridges JLL packages with build logic. The module system is unique.
-
----
-
 ## Known Issues
 
-1. **Precompilation warnings**: Harmless warnings about undeclared imports (Julia issue, not ours)
+1. **Precompilation warnings**: Harmless warnings about undeclared imports
 2. **Windows untested**: Path handling may need adjustments
 3. **Build pipeline experimental**: Module resolution is solid, full compilation needs more testing
-4. **No test suite yet**: Coming in v1.2
+4. **No test suite yet**: Coming soon
 5. **Documentation gaps**: Some features documented before implementation
-
----
-
-## FAQ
-
-**Q: Is this production-ready?**
-A: The module system is production-ready. The full build pipeline is experimental. Use it for module management, test the compilation features.
-
-**Q: Do I need to abandon CMake?**
-A: No! Use RepliBuild's module resolution to get paths, then use those in your CMake scripts if you want.
-
-**Q: What's the relationship with JLL packages?**
-A: JLL packages provide binaries. RepliBuild provides the build logic to use them. They complement each other.
-
-**Q: How do I report bugs?**
-A: Open an issue on GitHub with:
-- What you tried (exact commands)
-- What you expected
-- What actually happened
-- Your OS and Julia version
-
-**Q: Can I use this in production?**
-A: For module management: yes. For full automated builds: test thoroughly first. We're honest about maturity.
 
 ---
 
@@ -519,4 +488,4 @@ If you use RepliBuild in research:
 
 **Status:** Early production, actively developed, contributions welcome.
 
-**Focus:** Building the module registry is the top priority. Help us catalog the Julia C/C++ ecosystem!
+**Focus:** Building the module registry is the top priority. Help me catalog the Julia C/C++ ecosystem!

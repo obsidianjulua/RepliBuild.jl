@@ -2,7 +2,7 @@
 
 ## Julia-Local Philosophy
 
-RepliBuild follows Julia's user-local conventions. Everything lives in `~/.julia/` or project directories, **never system-wide**.
+RepliBuild follows Julia's local conventions.
 
 ## Directory Hierarchy
 

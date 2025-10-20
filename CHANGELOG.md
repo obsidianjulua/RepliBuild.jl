@@ -1,6 +1,6 @@
 # RepliBuild Changelog
 
-## v0.2.0 - Module System & Julia-Local Architecture (2025-10-20)
+## v1.2.0 - Module System & Julia-Local Architecture (2025-10-20)
 
 ### Major Features
 
@@ -130,7 +130,7 @@ Qt5 = { components = ["Core", "Widgets"] }
 
 ### Migration Guide
 
-**From v0.1.x to v0.2.0:**
+**From v1.x to v1.2:**
 
 1. **Directory migration** (automatic):
    ```julia
@@ -181,7 +181,7 @@ No new dependencies added.
 
 ---
 
-## v0.1.1 - Initial Release
+## v1.0 - Initial Release
 
 - Basic LLVM toolchain management
 - C++ to Julia compilation pipeline

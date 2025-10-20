@@ -4,7 +4,7 @@
 
 Similar to Julia's General registry for packages, we need a **General registry for build modules**.
 
-## Current State (v1.1)
+## Current State (v1.2)
 
 **Built-in Modules:**
 - Qt5, Boost, Eigen, Zlib (shipped with RepliBuild.jl)
@@ -370,25 +370,25 @@ For registry acceptance, modules must:
 
 ## Roadmap
 
-### v1.2 - Registry Infrastructure
+### - Registry Infrastructure
 - [ ] Registry.toml format specification
 - [ ] Registry management CLI
 - [ ] Module validation system
 - [ ] CI/CD for registry PRs
 
-### v1.3 - Auto-Generation
-- [ ] CMakeLists.txt parser
+### - Auto-Generation
+- [ ] CMake modules to RepliBuid and Julia bindings to jll automaticaly
 - [ ] pkg-config introspection
 - [ ] JLL package introspection
 - [ ] Bulk generation from Julia packages
 
-### v1.4 - Community Registry
+### - Community Registry
 - [ ] Launch official RepliBuild Modules registry
 - [ ] Auto-sync with Julia General (for JLLs)
 - [ ] Module rating/verification system
 - [ ] Community contribution guidelines
 
-### v2.0 - Advanced Features
+### - Advanced Features
 - [ ] Dependency resolution between modules
 - [ ] Module versioning with semantic constraints
 - [ ] Module inheritance (e.g., Qt6 extends Qt5)
@@ -431,5 +431,3 @@ Want to help build the registry?
 3. **Improve parsers** for better auto-generation
 4. **Write documentation** and examples
 5. **Join discussions** on GitHub
-
-The module registry will make RepliBuild the **standard** for C/C++ integration in Julia!
