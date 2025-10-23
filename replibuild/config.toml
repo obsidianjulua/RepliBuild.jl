@@ -1,0 +1,33 @@
+# RepliBuild Global Configuration
+# Created: 2025-10-20T14:25:39.419
+# Location: /home/grim/.julia/replibuild/config.toml
+
+last_updated = "2025-10-20T14:25:39.395"
+version = "0.1.0"
+
+[modules]
+registries = []
+search_paths = []
+
+[llvm]
+isolated = true
+prefer_source = "jll"
+
+[logging]
+level = "info"
+keep_logs = 100
+
+[cache]
+cleanup_after_days = 90
+enabled = true
+max_size_gb = 50
+
+[build]
+cache_objects = true
+default_optimization = "O2"
+cache_ir = true
+parallel_jobs = 4
+
+[error_learning]
+enabled = true
+share_anonymous_errors = false

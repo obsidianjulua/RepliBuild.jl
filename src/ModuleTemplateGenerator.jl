@@ -226,7 +226,7 @@ function generate_from_pkg_config(pkg_name::String; output_dir::String=".")
             module_name,
             output_dir=output_dir,
             pkg_config=pkg_name,
-            version=version_output,
+            version=String(version_output),
             description="Generated from pkg-config $pkg_name"
         )
 

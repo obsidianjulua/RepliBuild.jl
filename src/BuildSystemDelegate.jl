@@ -151,17 +151,18 @@ end
 Parse build system string from TOML to enum
 """
 function parse_build_system_string(s::String)::BuildSystemType
-    if s == "cmake"
+    s_lower = lowercase(s)
+    if s_lower == "cmake"
         return CMAKE
-    elseif s == "qmake" || s == "qt"
+    elseif s_lower == "qmake" || s_lower == "qt"
         return QMAKE
-    elseif s == "meson"
+    elseif s_lower == "meson"
         return MESON
-    elseif s == "autotools"
+    elseif s_lower == "autotools"
         return AUTOTOOLS
-    elseif s == "make"
+    elseif s_lower == "make"
         return MAKE
-    elseif s == "cargo"
+    elseif s_lower == "cargo"
         return CARGO
     else
         return UNKNOWN

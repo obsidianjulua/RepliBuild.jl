@@ -64,6 +64,7 @@ __pycache__/
 /test_projects/
 /examples/*/build/
 /examples/*/.replibuild/
+/*.code-workspace
 
 # Git conflict markers
 *.BACKUP.*
