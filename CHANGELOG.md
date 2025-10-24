@@ -1,6 +1,6 @@
 # RepliBuild Changelog
 
-## v1.2.0 - Module System & Julia-Local Architecture (2025-10-20)
+## v1.1.0 - Module System & Julia-Local Architecture (2025-10-24)
 
 ### Major Features
 
@@ -130,7 +130,7 @@ Qt5 = { components = ["Core", "Widgets"] }
 
 ### Migration Guide
 
-**From v1.x to v1.2:**
+**From v0.1.0 to v1.1.0:**
 
 1. **Directory migration** (automatic):
    ```julia
