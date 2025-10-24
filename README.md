@@ -32,7 +32,7 @@ RepliBuild orchestrates existing build systems (CMake, Make, qmake) instead of r
 
 ## Stress Test Results ⚡
 
-Just ran comprehensive stress tests—**all passing**:
+Comprehensive stress tests—**all passing**:
 
 ```
 Test Suite Results (103/103 Passing):
