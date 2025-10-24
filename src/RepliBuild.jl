@@ -5,7 +5,7 @@
 module RepliBuild
 
 # Version
-const VERSION = v"1.1.0"
+const VERSION = v"1.0.0"
 
 # Load all submodules in the correct order
 include("UXHelpers.jl")  # Load UX helpers FIRST - needed by error handling
