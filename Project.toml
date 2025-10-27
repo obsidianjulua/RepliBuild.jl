@@ -22,7 +22,6 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
-Artifacts = "1.11"
 Clang = "0.19"
 DBInterface = "2.6"
 DaemonMode = "0.1"
@@ -31,7 +30,6 @@ JSON = "0.21, 1"
 LLVM_full_assert_jll = "18, 19, 20, 21"
 ProgressMeter = "1.11"
 SQLite = "1.6"
-UUIDs = "1.11"
 julia = "1.9"
 
 [extras]
