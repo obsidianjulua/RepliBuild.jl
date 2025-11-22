@@ -24,8 +24,9 @@ include("ASTWalker.jl")
 include("Discovery.jl")
 include("CMakeParser.jl")
 include("ClangJLBridge.jl")
-include("Bridge_LLVM.jl")
-include("WorkspaceBuilder.jl")  # Must come after Bridge_LLVM
+include("Compiler.jl")      # New: replaces Bridge_LLVM
+include("Wrapper.jl")       # New: wrapper generation
+include("WorkspaceBuilder.jl")
 
 # REPL-friendly API
 include("REPL_API.jl")
@@ -39,7 +40,8 @@ using .ASTWalker
 using .Discovery
 using .CMakeParser
 using .ClangJLBridge
-# Note: Bridge_LLVM.jl is included directly (not a module), its functions are at this module level
+using .Compiler           # New module
+using .Wrapper            # New module
 using .WorkspaceBuilder
 using .REPL_API
 
@@ -415,10 +417,10 @@ function build_single_project(path::String)
         cd(path)
 
         # Load configuration
-        config = Bridge_LLVM.BridgeCompilerConfig("replibuild.toml")
+        config = ConfigurationManager.load_config("replibuild.toml")
 
         # Compile
-        result = Bridge_LLVM.compile_project(config)
+        result = Compiler.compile_project(config)
 
         # Find output files
         libraries = Dict{String,String}()

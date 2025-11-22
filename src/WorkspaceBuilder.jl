@@ -7,10 +7,9 @@ module WorkspaceBuilder
 using TOML
 using Distributed
 
-# Import necessary items from parent module namespace
-# Bridge_LLVM.jl functions are defined at RepliBuild module level
-import ..BridgeCompilerConfig
-import ..compile_project
+# Import from Compiler module
+import ..Compiler: compile_project
+import ..ConfigurationManager: RepliBuildConfig
 
 export build_workspace, discover_workspace
 
@@ -315,8 +314,8 @@ function build_single_target(target::LibraryTarget, built_libraries::Dict{String
     try
         cd(target.path)
 
-        # Build using Bridge_LLVM compile
-        config = BridgeCompilerConfig("replibuild.toml")
+        # Load config and build
+        config = ConfigurationManager.load_config("replibuild.toml")
 
         # Add library paths for dependencies
         if !isempty(target.link_dependencies)

@@ -20,11 +20,9 @@ import ..Discovery
 import ..ClangJLBridge
 import ..WorkspaceBuilder
 
-# Bridge_LLVM functions are defined at parent module level, not as separate module
-import ..BridgeCompilerConfig
-import ..compile_to_ir
-import ..link_optimize_ir
-import ..create_library
+# Import from Compiler and ConfigurationManager modules
+import ..Compiler: compile_to_ir, link_optimize_ir, create_library
+import ..ConfigurationManager: RepliBuildConfig, load_config
 
 export rbuild, rdiscover, rclean, rinfo, rwrap
 export rbuild_fast, rcompile, rparallel
@@ -146,10 +144,8 @@ function rbuild_fast(sources; output::String="libproject.so",
 
     println("⚡ Fast compilation: $(length(source_files)) files")
 
-    # Create minimal config
-    config = BridgeCompilerConfig("replibuild.toml")
-    config.parallel = parallel
-    config.compile_flags = flags
+    # Load config
+    config = load_config("replibuild.toml")
 
     # Compile
     ir_files = compile_to_ir(config, source_files)
@@ -179,8 +175,8 @@ rcompile("src/app.cpp", flags=["-std=c++20", "-O3"])
 function rcompile(files...; flags::Vector{String}=["-std=c++17"])
     source_files = collect(files)
 
-    config = BridgeCompilerConfig("replibuild.toml")
-    config.compile_flags = flags
+    config = load_config("replibuild.toml")
+    config = ConfigurationManager.merge_compile_flags(config, flags)
 
     ir_files = compile_to_ir(config, source_files)
 
