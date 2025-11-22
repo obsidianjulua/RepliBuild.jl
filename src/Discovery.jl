@@ -14,7 +14,6 @@ using UUIDs
 import ..LLVMEnvironment
 import ..ConfigurationManager
 import ..ASTWalker
-import ..UXHelpers
 
 # Use LLVMEnvironment to get correct LLVM path
 function get_replibuild_llvm_root()

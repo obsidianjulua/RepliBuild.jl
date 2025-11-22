@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 # Bridge_LLVM.jl - BuildBridge-powered LLVM compiler orchestrator
-# Complete integration: BuildBridge + LLVMake + JuliaWrapItUp
+# Complete integration: BuildBridge + ClangJLBridge for binding generation
 # NOTE: This file is meant to be included from RepliBuild.jl which handles module loading
 
 using Pkg
@@ -9,7 +9,7 @@ using JSON
 using Dates
 
 # Use already-loaded modules from parent RepliBuild module
-# (BuildBridge, CMakeParser, LLVMake, JuliaWrapItUp are loaded by RepliBuild.jl)
+# (BuildBridge, CMakeParser, ClangJLBridge, ASTWalker are loaded by RepliBuild.jl)
 
 """
 Enhanced compiler configuration with BuildBridge integration
@@ -32,6 +32,9 @@ mutable struct BridgeCompilerConfig
 
     # Discovered tools (populated by BuildBridge)
     tools::Dict{String,String}
+
+    # Toolchain cache (for performance)
+    toolchain_cached::Bool
 
     # Compilation settings
     compile_flags::Vector{String}
@@ -73,17 +76,31 @@ mutable struct BridgeCompilerConfig
         cache = get(data, "cache", Dict())
         binding = get(data, "binding", Dict())
 
+        # Load include_dirs from compile section or cache
+        include_dirs = get(compile, "include_dirs", String[])
+        if isempty(include_dirs) && get(cache, "enabled", true)
+            project_root = get(project, "root", ".")
+            cache_dir = get(cache, "directory", ".replibuild_cache")
+            cache_file = joinpath(project_root, cache_dir, "build_cache.toml")
+            if isfile(cache_file)
+                cache_data = TOML.parsefile(cache_file)
+                discovery_results = get(cache_data, "discovery_results", Dict())
+                include_dirs = get(discovery_results, "include_dirs", String[])
+            end
+        end
+
         config = new(
             get(project, "name", "MyProject"),
             get(project, "root", "."),
             get(paths, "source", "src"),
             get(paths, "output", "julia"),
             get(paths, "build", "build"),
-            get(compile, "include_dirs", String[]),  # Fixed: read from compile section
+            include_dirs,  # Loaded from compile section or cache
             get(bridge, "auto_discover", true),
             get(bridge, "enable_learning", true),
             get(bridge, "cache_tools", true),
             Dict{String,String}(),  # tools - populated later
+            false,  # toolchain_cached
             get(compile, "flags", String[]),
             get(compile, "defines", Dict{String,String}()),
             get(compile, "walk_dependencies", true),
@@ -104,9 +121,15 @@ mutable struct BridgeCompilerConfig
 end
 
 """
-Discover LLVM toolchain using BuildBridge
+Discover LLVM toolchain using BuildBridge (with caching)
 """
 function discover_tools!(config::BridgeCompilerConfig)
+    # Check if already cached
+    if config.toolchain_cached && !isempty(config.tools)
+        println("⚡ Using cached toolchain ($(length(config.tools)) tools)")
+        return
+    end
+
     println("🔍 Discovering LLVM tools via BuildBridge...")
 
     required_tools = [
@@ -134,6 +157,30 @@ function discover_tools!(config::BridgeCompilerConfig)
     end
 
     println("  📊 Found $(length(config.tools)) tools")
+
+    # Mark as cached
+    config.toolchain_cached = true
+end
+
+"""
+Check if source file needs recompilation (incremental build support)
+"""
+function needs_recompile(source_file::String, ir_file::String, cache_enabled::Bool)::Bool
+    # IR file doesn't exist - must compile
+    if !isfile(ir_file)
+        return true
+    end
+
+    # Cache disabled - always compile
+    if !cache_enabled
+        return true
+    end
+
+    # Check modification time
+    source_mtime = mtime(source_file)
+    ir_mtime = mtime(ir_file)
+
+    return source_mtime > ir_mtime
 end
 
 """
@@ -276,56 +323,110 @@ function extract_functions_from_ast(ast::Dict)
 end
 
 """
-Compile C++ to LLVM IR via BuildBridge
+Compile single C++ file to LLVM IR
+"""
+function compile_single_to_ir(config::BridgeCompilerConfig, cpp_file::String)
+    base = basename(cpp_file)
+    ir_file = joinpath(config.build_dir, "$base.ll")
+
+    # Build command
+    includes = ["-I$dir" for dir in config.include_dirs]
+    defines = ["-D$k=$v" for (k, v) in config.defines]
+
+    cmd_args = vcat(
+        ["-S", "-emit-llvm"],
+        config.compile_flags,
+        includes,
+        defines,
+        ["-o", ir_file, cpp_file]
+    )
+
+    # Use simple compilation (ErrorLearning removed)
+    (output, exitcode) = BuildBridge.execute("clang++", cmd_args)
+
+    if !isempty(output) && exitcode != 0
+        println("  ❌ $(basename(cpp_file)): $output")
+    end
+
+    success = isfile(ir_file)
+    return (ir_file, success, exitcode)
+end
+
+"""
+Compile C++ to LLVM IR via BuildBridge (with incremental build + parallel compilation)
 """
 function compile_to_ir(config::BridgeCompilerConfig, cpp_files::Vector{String})
     println("🔧 Compiling to LLVM IR...")
 
     mkpath(config.build_dir)
     ir_files = String[]
+    compiled_count = 0
+    cached_count = 0
+
+    # Separate files into cached vs needs-compilation
+    files_to_compile = Tuple{String,String}[]  # (cpp_file, ir_file)
 
     for cpp_file in cpp_files
         base = basename(cpp_file)
         ir_file = joinpath(config.build_dir, "$base.ll")
 
-        # Build command
-        includes = ["-I$dir" for dir in config.include_dirs]
-        defines = ["-D$k=$v" for (k, v) in config.defines]
+        # Check if recompilation needed (incremental build)
+        if !needs_recompile(cpp_file, ir_file, config.cache_enabled)
+            println("  ⚡ Cached: $(basename(cpp_file))")
+            push!(ir_files, ir_file)
+            cached_count += 1
+        else
+            push!(files_to_compile, (cpp_file, ir_file))
+        end
+    end
 
-        cmd_args = vcat(
-            ["-S", "-emit-llvm"],
-            config.compile_flags,
-            includes,
-            defines,
-            ["-o", ir_file, cpp_file]
-        )
+    # Compile needed files (parallel if enabled and multiple files)
+    if !isempty(files_to_compile)
+        if config.parallel && length(files_to_compile) > 1
+            println("  ⚡ Parallel compilation: $(length(files_to_compile)) files on $(Threads.nthreads()) threads")
 
-        # Use ErrorLearning-enabled compilation if enabled
-        if config.enable_learning
-            db_path = joinpath(config.build_dir, "replibuild_errors.db")
-            (output, exitcode, suggestions) = BuildBridge.compile_with_learning(
-                "clang++", cmd_args,
-                db_path=db_path,
-                project_path=config.project_root
-            )
+            # Parallel compilation using threads
+            results = Vector{Tuple{String,Bool,Int}}(undef, length(files_to_compile))
+            Threads.@threads for i in 1:length(files_to_compile)
+                cpp_file, _ = files_to_compile[i]
+                results[i] = compile_single_to_ir(config, cpp_file)
+            end
 
-            if exitcode != 0 && !isempty(suggestions)
-                println("  💡 Suggestions: $suggestions")
+            # Collect results
+            for (ir_file, success, exitcode) in results
+                if success
+                    push!(ir_files, ir_file)
+                    println("  ✅ $(basename(ir_file))")
+                    compiled_count += 1
+                else
+                    @warn "  ❌ Failed: $(basename(ir_file)) (exit code: $exitcode)"
+                end
             end
         else
-            (output, exitcode) = BuildBridge.execute("clang++", cmd_args)
-        end
+            # Sequential compilation
+            for (cpp_file, ir_file) in files_to_compile
+                (ir_result, success, exitcode) = compile_single_to_ir(config, cpp_file)
 
-        if !isempty(output)
-            println("Output: $output")
+                if success
+                    push!(ir_files, ir_result)
+                    println("  ✅ $(basename(cpp_file)) → $(basename(ir_result))")
+                    compiled_count += 1
+                else
+                    @warn "  ❌ Failed: $cpp_file (exit code: $exitcode)"
+                end
+            end
         end
-        println("Exitcode: $exitcode")
+    end
 
-        if isfile(ir_file)
-            push!(ir_files, ir_file)
-            println("  ✅ $(basename(cpp_file)) → $(basename(ir_file))")
-        else
-            @warn "  ❌ Failed: $cpp_file\n$output"
+    # Summary
+    total = compiled_count + cached_count
+    if total > 0
+        if cached_count > 0
+            cache_pct = round(100*cached_count/total, digits=1)
+            println("  📊 Compiled: $compiled_count, Cached: $cached_count (⚡ $cache_pct% cache hit)")
+        end
+        if config.parallel && compiled_count > 1
+            println("  ⚡ Used $(Threads.nthreads()) threads for parallel compilation")
         end
     end
 
@@ -748,13 +849,63 @@ function compile_project(config::BridgeCompilerConfig)
     # Find C++ sources - read from TOML source_files if available
     data = TOML.parsefile(joinpath(config.project_root, "replibuild.toml"))
     compile_section = get(data, "compile", Dict())
+    discovery_section = get(data, "discovery", Dict())
     source_files_from_toml = get(compile_section, "source_files", String[])
 
-    cpp_files = if !isempty(source_files_from_toml)
-        # Use source files from TOML (from discovery)
+    # Also try loading from cache if not in main TOML
+    if isempty(source_files_from_toml) && config.cache_enabled
+        cache_file = joinpath(config.cache_dir, "build_cache.toml")
+        if isfile(cache_file)
+            cache_data = TOML.parsefile(cache_file)
+            source_files_from_toml = get(cache_data, "compile_sources", String[])
+            if !isempty(source_files_from_toml)
+                println("   📦 Loaded $(length(source_files_from_toml)) source files from cache")
+            end
+        end
+    end
+
+    # Try to load dependency graph for intelligent compilation order
+    dep_graph_file = get(discovery_section, "dependency_graph_file", "")
+
+    # Also check cache for dependency_graph_file location
+    if isempty(dep_graph_file) && config.cache_enabled
+        cache_file = joinpath(config.cache_dir, "build_cache.toml")
+        if isfile(cache_file)
+            cache_data = TOML.parsefile(cache_file)
+            discovery_results = get(cache_data, "discovery_results", Dict())
+            dep_graph_file = get(discovery_results, "dependency_graph_file", "")
+        end
+    end
+
+    dep_graph = nothing
+
+    if !isempty(dep_graph_file)
+        dep_graph_path = joinpath(config.project_root, dep_graph_file)
+        if isfile(dep_graph_path)
+            println("\n📊 Loading dependency graph: $dep_graph_file")
+            dep_graph = ASTWalker.load_dependency_graph_json(dep_graph_path)
+
+            if !isnothing(dep_graph)
+                println("   ✓ Graph loaded: $(length(dep_graph.files)) files")
+                println("   ✓ Compilation order computed: $(length(dep_graph.compilation_order)) files")
+            end
+        else
+            @warn "Dependency graph file specified but not found: $dep_graph_path"
+        end
+    end
+
+    cpp_files = if !isnothing(dep_graph) && !isempty(dep_graph.compilation_order)
+        # Use compilation order from dependency graph (BEST - respects dependencies)
+        println("   ℹ️  Using dependency-aware compilation order")
+        # Filter to only .cpp and .cc files (exclude headers)
+        filter(f -> endswith(f, ".cpp") || endswith(f, ".cc"), dep_graph.compilation_order)
+    elseif !isempty(source_files_from_toml)
+        # Use source files from TOML (from discovery, but no order info)
+        println("   ℹ️  Using source files from discovery (no dependency order)")
         [joinpath(config.project_root, f) for f in source_files_from_toml]
     else
-        # Fallback: walk source_dir
+        # Fallback: walk source_dir (WORST - arbitrary order)
+        println("   ⚠️  No dependency info, using arbitrary file order")
         files = String[]
         for (root, dirs, file_list) in walkdir(config.source_dir)
             for file in file_list
@@ -766,7 +917,7 @@ function compile_project(config::BridgeCompilerConfig)
         files
     end
 
-    println("\n📊 Found $(length(cpp_files)) C++ files")
+    println("\n📊 Compiling $(length(cpp_files)) C++ files")
 
     if isempty(cpp_files)
         println("❌ No C++ files found")

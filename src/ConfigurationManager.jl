@@ -10,7 +10,6 @@ using Dates
 using UUIDs
 
 # Import UXHelpers for better error messages
-import ..UXHelpers
 
 """
 Build stage definitions
@@ -907,17 +906,7 @@ function validate_and_fix!(config::RepliBuildConfig)
         end
 
         # Throw helpful error with solutions
-        throw(UXHelpers.HelpfulError(
-            "Configuration Validation Failed",
-            error_details,
-            [
-                "Review and fix the errors listed above in your replibuild.toml",
-                "Run ConfigurationManager.validate_config(config) to see specific issues",
-                "Use ConfigurationManager.create_default_config() to start fresh",
-                "Check the documentation for correct configuration format"
-            ],
-            docs_link="https://github.com/user/RepliBuild.jl#configuration"
-        ))
+        error("Configuration validation failed:\n$error_details\n\nSuggestions:\n- Review and fix the errors listed above in your replibuild.toml\n- Run ConfigurationManager.validate_config(config) to see specific issues\n- Use ConfigurationManager.create_default_config() to start fresh")
     end
 
     if !isempty(fixed)
