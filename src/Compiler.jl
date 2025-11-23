@@ -694,6 +694,19 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
 
         # Detect function start (DW_TAG_subprogram)
         if contains(line, "DW_TAG_subprogram")
+            # Before starting new function, check if previous function had no return type (void)
+            if !isnothing(current_function_offset)
+                function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                if !isnothing(function_key) && !haskey(return_types, function_key)
+                    # No DW_AT_type found = void return
+                    return_types[function_key] = Dict(
+                        "c_type" => "void",
+                        "julia_type" => "Cvoid",
+                        "size" => 0
+                    )
+                end
+            end
+
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_function_offset = "0x" * offset_match.captures[1]
@@ -702,7 +715,16 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
             end
         end
 
-        # Extract linkage name (mangled name)
+        # Extract function name (for C functions without mangling)
+        # Example: <2f>   DW_AT_name        : (indexed string: 0xc): test_sin
+        if contains(line, "DW_AT_name") && !isnothing(current_function_offset) && isnothing(current_function_name)
+            name_match = match(r":\s*([^:]+)\s*$", line)
+            if !isnothing(name_match)
+                current_function_name = strip(name_match.captures[1])
+            end
+        end
+
+        # Extract linkage name (mangled name for C++ functions)
         # Example: <5c>   DW_AT_linkage_name: (indexed string: 0x8): _ZN10Calculator5powerEdd
         if contains(line, "DW_AT_linkage_name") && !isnothing(current_function_offset)
             # Extract just the mangled name after the last colon
@@ -723,9 +745,12 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
                 julia_type = dwarf_type_to_julia(c_type)
                 type_size = get_type_size(c_type)
 
-                # Store if we have linkage name
-                if !isnothing(current_function_linkage)
-                    return_types[current_function_linkage] = Dict(
+                # Use linkage name (C++) or fall back to function name (C)
+                function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+
+                # Store if we have a function identifier
+                if !isnothing(function_key)
+                    return_types[function_key] = Dict(
                         "c_type" => c_type,
                         "julia_type" => julia_type,
                         "size" => type_size
@@ -734,6 +759,19 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
 
                 current_function_offset = nothing  # Done with this function
             end
+        end
+    end
+
+    # Handle last function in file (might be void)
+    if !isnothing(current_function_offset)
+        function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+        if !isnothing(function_key) && !haskey(return_types, function_key)
+            # No DW_AT_type found = void return
+            return_types[function_key] = Dict(
+                "c_type" => "void",
+                "julia_type" => "Cvoid",
+                "size" => 0
+            )
         end
     end
 
