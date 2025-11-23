@@ -476,6 +476,159 @@ end
 # =============================================================================
 
 """
+Comprehensive C/C++ type to Julia type mapping.
+Handles all standard C/C++ types including sized integers, pointers, and qualifiers.
+"""
+function dwarf_type_to_julia(c_type::AbstractString)::String
+    # Clean up type (remove extra spaces, trailing qualifiers)
+    c_type = strip(c_type)
+
+    # Map based on comprehensive C/C++ type system
+    type_map = Dict(
+        # Void
+        "void" => "Cvoid",
+
+        # Boolean
+        "bool" => "Bool",
+        "_Bool" => "Bool",
+
+        # Character types
+        "char" => "Cchar",
+        "signed char" => "Cchar",
+        "unsigned char" => "Cuchar",
+        "wchar_t" => "Cwchar_t",
+        "char16_t" => "UInt16",
+        "char32_t" => "UInt32",
+
+        # Standard integers (platform-dependent sizes)
+        "short" => "Cshort",
+        "short int" => "Cshort",
+        "signed short" => "Cshort",
+        "signed short int" => "Cshort",
+        "unsigned short" => "Cushort",
+        "unsigned short int" => "Cushort",
+
+        "int" => "Cint",
+        "signed int" => "Cint",
+        "signed" => "Cint",
+        "unsigned int" => "Cuint",
+        "unsigned" => "Cuint",
+
+        "long" => "Clong",
+        "long int" => "Clong",
+        "signed long" => "Clong",
+        "signed long int" => "Clong",
+        "unsigned long" => "Culong",
+        "unsigned long int" => "Culong",
+
+        "long long" => "Clonglong",
+        "long long int" => "Clonglong",
+        "signed long long" => "Clonglong",
+        "signed long long int" => "Clonglong",
+        "unsigned long long" => "Culonglong",
+        "unsigned long long int" => "Culonglong",
+
+        # Fixed-width integers (stdint.h)
+        "int8_t" => "Int8",
+        "int16_t" => "Int16",
+        "int32_t" => "Int32",
+        "int64_t" => "Int64",
+        "uint8_t" => "UInt8",
+        "uint16_t" => "UInt16",
+        "uint32_t" => "UInt32",
+        "uint64_t" => "UInt64",
+
+        # Floating point
+        "float" => "Cfloat",
+        "double" => "Cdouble",
+        "long double" => "Float64",  # Julia doesn't have 80-bit float, use Float64
+
+        # Size types
+        "size_t" => "Csize_t",
+        "ssize_t" => "Cssize_t",
+        "ptrdiff_t" => "Cptrdiff_t",
+        "intptr_t" => "Cintptr_t",
+        "uintptr_t" => "Cuintptr_t",
+
+        # Time types
+        "time_t" => "Ctime_t",
+
+        # Special types
+        "__int128" => "Int128",
+        "__uint128_t" => "UInt128",
+    )
+
+    # Direct match
+    if haskey(type_map, c_type)
+        return type_map[c_type]
+    end
+
+    # Handle pointer types (T*)
+    if endswith(c_type, "*")
+        # Strip pointer and get base type
+        base_type = strip(replace(c_type, r"\*+$" => ""))
+        base_type = replace(base_type, "const" => "")
+        base_type = replace(base_type, "volatile" => "")
+        base_type = strip(base_type)
+
+        # Special case: char* is Cstring
+        if base_type == "char"
+            return "Cstring"
+        end
+
+        # General pointer
+        return "Ptr{Cvoid}"  # Generic pointer, could be refined based on base_type
+    end
+
+    # Handle reference types (T&)
+    if endswith(c_type, "&")
+        return "Ref{Cvoid}"  # Could be refined
+    end
+
+    # Handle const/volatile qualifiers
+    if startswith(c_type, "const ") || startswith(c_type, "volatile ")
+        clean_type = replace(c_type, "const " => "")
+        clean_type = replace(clean_type, "volatile " => "")
+        return dwarf_type_to_julia(strip(clean_type))
+    end
+
+    # Unknown type - return Any for safety
+    return "Any"
+end
+
+"""
+Get type size in bytes from C/C++ type name.
+"""
+function get_type_size(c_type::AbstractString)::Int
+    size_map = Dict(
+        "void" => 0,
+        "bool" => 1, "_Bool" => 1,
+        "char" => 1, "signed char" => 1, "unsigned char" => 1,
+        "int8_t" => 1, "uint8_t" => 1,
+        "short" => 2, "unsigned short" => 2,
+        "int16_t" => 2, "uint16_t" => 2,
+        "int" => 4, "unsigned int" => 4,
+        "int32_t" => 4, "uint32_t" => 4,
+        "long" => 8, "unsigned long" => 8,  # x86_64
+        "long long" => 8, "unsigned long long" => 8,
+        "int64_t" => 8, "uint64_t" => 8,
+        "float" => 4,
+        "double" => 8,
+        "long double" => 16,  # x86_64 extended precision
+        "size_t" => 8, "ssize_t" => 8,  # x86_64
+        "intptr_t" => 8, "uintptr_t" => 8,
+        "__int128" => 16, "__uint128_t" => 16,
+    )
+
+    # Check for pointers/references (always 8 bytes on x86_64)
+    if endswith(c_type, "*") || endswith(c_type, "&")
+        return 8
+    end
+
+    return get(size_map, strip(c_type), 0)
+end
+
+"""
 Extract return types from DWARF debug info.
 Returns: Dict{mangled_name => {c_type, julia_type, size}}
 """
@@ -566,27 +719,16 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
                 type_ref = type_match.captures[1]
                 c_type = get(type_refs, type_ref, "unknown")
 
-                # Map to Julia type
-                julia_type = if c_type == "int"
-                    "Cint"
-                elseif c_type == "double"
-                    "Cdouble"
-                elseif c_type == "float"
-                    "Cfloat"
-                elseif c_type == "char"
-                    "UInt8"
-                elseif c_type == "void"
-                    "Cvoid"
-                else
-                    "Any"
-                end
+                # Map to Julia type using comprehensive mapping
+                julia_type = dwarf_type_to_julia(c_type)
+                type_size = get_type_size(c_type)
 
                 # Store if we have linkage name
                 if !isnothing(current_function_linkage)
                     return_types[current_function_linkage] = Dict(
                         "c_type" => c_type,
                         "julia_type" => julia_type,
-                        "size" => if c_type == "int" 4 elseif c_type == "double" 8 elseif c_type == "float" 4 else 0 end
+                        "size" => type_size
                     )
                 end
 
