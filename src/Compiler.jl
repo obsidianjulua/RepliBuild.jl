@@ -373,7 +373,7 @@ function compile_project(config::RepliBuildConfig)
     elapsed = round(time() - start_time, digits=2)
 
     # Step 4: Extract and save compilation metadata
-    metadata_path = save_compilation_metadata(config, source_files, binary_path)
+    metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
 
     println()
     println("="^70)
@@ -394,39 +394,58 @@ Extract symbol information from compiled binary using nm.
 Returns vector of symbol dictionaries with mangled/demangled names.
 """
 function extract_symbols_from_binary(binary_path::String)
-    # Use nm to extract symbols
-    (output, exitcode) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
-
-    if exitcode != 0
-        @warn "Symbol extraction failed: $output"
+    # Run nm WITHOUT demangling to get mangled names
+    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+    if exitcode1 != 0
+        @warn "nm command failed: $mangled_output"
         return Dict{String,Any}[]
     end
 
-    symbols = Dict{String,Any}[]
+    # Run nm WITH demangling to get human-readable names
+    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    if exitcode2 != 0
+        @warn "nm demangled command failed: $demangled_output"
+        return Dict{String,Any}[]
+    end
 
-    for line in split(output, '\n')
+    # Build address → mangled mapping
+    address_to_mangled = Dict{String,String}()
+    for line in split(mangled_output, '\n')
+        line = strip(line)
+        if isempty(line)
+            continue
+        end
+        parts = split(line)
+        if length(parts) >= 3 && parts[2] == "T"
+            address = parts[1]
+            mangled = parts[3]
+            address_to_mangled[address] = mangled
+        end
+    end
+
+    # Build symbols array with both mangled and demangled
+    symbols = Dict{String,Any}[]
+    for line in split(demangled_output, '\n')
         line = strip(line)
         if isempty(line)
             continue
         end
 
-        # Parse nm output: address type symbol_name
         parts = split(line)
         if length(parts) >= 3
+            address = parts[1]
             symbol_type = parts[2]
             demangled_name = join(parts[3:end], " ")
 
             # Only export T (text/code) symbols
             if symbol_type == "T"
-                # Get mangled name too
-                (mangled_output, _) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
-                mangled_name = extract_mangled_name(mangled_output, demangled_name)
+                mangled_name = get(address_to_mangled, address, demangled_name)
 
                 push!(symbols, Dict(
                     "mangled" => mangled_name,
                     "demangled" => demangled_name,
                     "type" => symbol_type,
-                    "address" => parts[1]
+                    "address" => address
                 ))
             end
         end
@@ -587,7 +606,7 @@ end
 Infer return type from function signature (basic heuristic).
 In future: extract from debug info or DWARF.
 """
-function infer_return_type(demangled::String)::Dict{String,String}
+function infer_return_type(demangled::String)::Dict{String,Any}
     # Default: assume int return for now
     # TODO: Parse DWARF debug info for exact types
     return Dict(
@@ -601,8 +620,8 @@ end
 Parse parameter types from demangled signature.
 Example: "add(int, int)" -> [{"type": "int", "julia_type": "Cint"}, ...]
 """
-function parse_parameters(demangled::String)::Vector{Dict{String,String}}
-    params = Dict{String,String}[]
+function parse_parameters(demangled::String)::Vector{Dict{String,Any}}
+    params = Dict{String,Any}[]
 
     # Extract parameter list from signature
     if !contains(demangled, '(')
@@ -639,7 +658,7 @@ end
 Convert C++ type to Julia type.
 Basic type mapping - can be enhanced with type registry.
 """
-function cpp_to_julia_type(cpp_type::String)::String
+function cpp_to_julia_type(cpp_type::AbstractString)::String
     type_map = Dict(
         "int" => "Cint",
         "unsigned int" => "Cuint",
