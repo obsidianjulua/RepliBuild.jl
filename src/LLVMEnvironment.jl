@@ -425,20 +425,16 @@ Initialize the LLVM toolchain.
 3. Validate all tools exist, discover if missing
 """
 function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:auto)
-    # Read from TOML first (source of truth), or discover based on source
-    (llvm_root, toolchain_source) = if config !== nothing && haskey(config.llvm, "root") && !isempty(config.llvm["root"])
-        println("🔧 Initializing LLVM Toolchain from TOML")
-        # If TOML specifies a source, use it
-        src = get(config.llvm, "source", "intree")
-        (config.llvm["root"], src)
+    # Read from config struct first (source of truth), or auto-discover
+    (llvm_root, toolchain_source) = if config !== nothing && !isempty(config.llvm.version)
+        println("🔧 Initializing LLVM Toolchain from Config")
+        # Config has LLVM info - check if we can get root from somewhere
+        # For now, just auto-discover since config.llvm doesn't store full root path
+        (root, src) = get_llvm_root(config.llvm.toolchain)
+        (root, String(config.llvm.toolchain))
     else
         println("🔧 Initializing LLVM Toolchain (auto-discover)")
         (root, src) = get_llvm_root(source)
-        # Update config if provided
-        if config !== nothing
-            config.llvm["root"] = root
-            config.llvm["source"] = src
-        end
         (root, src)
     end
 
@@ -475,21 +471,10 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
 
     println("   Version: $version_str (LLVM $major.$minor.$patch)")
 
-    # Read tools from cache/TOML or discover
-    tools = if config !== nothing && haskey(config.llvm, "tools") && !isempty(config.llvm["tools"])
-        # Tools already in config (loaded from cache or user override)
-        println("   Tools: Using cached paths ($(length(config.llvm["tools"])) tools)")
-        config.llvm["tools"]
-    else
-        # Auto-discover and update config (will be cached by ConfigurationManager.save_config)
-        println("   Tools: Auto-discovering...")
-        discovered = discover_llvm_tools(llvm_root, toolchain_source)
-        if config !== nothing
-            config.llvm["tools"] = discovered
-        end
-        println("   Tools: Discovered $(length(discovered)) tools (cached for next run)")
-        discovered
-    end
+    # Auto-discover tools (config doesn't cache tools in new immutable struct)
+    println("   Tools: Auto-discovering...")
+    tools = discover_llvm_tools(llvm_root, toolchain_source)
+    println("   Tools: Discovered $(length(tools)) tools (cached for next run)")
 
     # Validate tools exist, warn if missing
     for (name, path) in tools

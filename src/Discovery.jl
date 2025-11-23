@@ -123,29 +123,23 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     println("\n📝 Stage 5: Generating replibuild.toml...")
     config = generate_config(target_dir, scan_results, binaries, include_dirs, dep_graph)
 
-    # Stage 6: Initialize toolchain and update config with discovered tools
+    # Stage 6: Initialize toolchain
     println("\n🔧 Stage 6: Initializing LLVM toolchain...")
     LLVMEnvironment.init_toolchain(config=config)
 
-    # Include directories are already in discovery section - no need to duplicate
-    # Use ConfigurationManager.get_include_dirs() to access them
-    if haskey(config.discovery, "include_dirs") && !isempty(config.discovery["include_dirs"])
-        println("   ✓ Discovered $(length(config.discovery["include_dirs"])) include directories")
+    # Diagnostic output (config is immutable, values already set during generation)
+    include_dirs = ConfigurationManager.get_include_dirs(config)
+    source_files = ConfigurationManager.get_source_files(config)
+
+    if !isempty(include_dirs)
+        println("   ✓ Configured $(length(include_dirs)) include directories")
     end
 
-    # Add discovered source files to compile section
-    if haskey(config.discovery, "files")
-        all_sources = vcat(
-            get(config.discovery["files"], "cpp_sources", String[]),
-            get(config.discovery["files"], "c_sources", String[])
-        )
-        if !isempty(all_sources)
-            config.compile["source_files"] = all_sources
-            println("   ✓ Added $(length(all_sources)) source files to compile section")
-        end
+    if !isempty(source_files)
+        println("   ✓ Configured $(length(source_files)) source files")
     end
 
-    # Save config with updated tool paths and include dirs
+    # Save config (writes TOML file)
     ConfigurationManager.save_config(config)
 
     println("\n✅ Discovery complete!")
@@ -436,119 +430,106 @@ end
 """
     generate_config(root_dir, scan, binaries, include_dirs, dep_graph) -> RepliBuildConfig
 
-Generate RepliBuild configuration from discovery results.
+Generate RepliBuild configuration from discovery results using new nested struct approach.
 """
 function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{BinaryInfo},
                         include_dirs::Vector{String}, dep_graph)
-    project_name = basename(abspath(root_dir))
+    # Get project name from absolute path (handles "." correctly)
+    abs_root = abspath(root_dir)
+    project_name = basename(abs_root)
+    # Fallback if basename is empty
+    if isempty(project_name)
+        project_name = "project"
+    end
+    project_uuid = uuid4()
 
-    # Create configuration with UUID
-    project_uuid = uuid4()  # Generate new UUID for discovered project
+    # Get source files from dependency graph if available
+    source_files = if !isnothing(dep_graph)
+        # Filter to .cpp files in compilation order
+        filter(f -> endswith(f, ".cpp") || endswith(f, ".cc") || endswith(f, ".cxx"),
+               dep_graph.compilation_order)
+    else
+        scan.cpp_sources
+    end
 
-    config = ConfigurationManager.RepliBuildConfig(
-        joinpath(root_dir, "replibuild.toml"),
-        now(),
-        "0.1.0",
+    # Create nested config structs following ConfigurationManager structure
+    project_config = ConfigurationManager.ProjectConfig(
         project_name,
         abspath(root_dir),
-        project_uuid,  # Add the missing UUID parameter
-        # Discovery stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "completed" => true,
-            "timestamp" => string(now()),
-            "files" => Dict(
-                "cpp_sources" => scan.cpp_sources,
-                "cpp_headers" => scan.cpp_headers,
-                "c_sources" => scan.c_sources,
-                "c_headers" => scan.c_headers,
-                "total_scanned" => scan.total_files
-            ),
-            "binaries" => Dict(
-                "executables" => [b.path for b in binaries if b.type == :executable],
-                "static_libs" => [b.path for b in binaries if b.type == :static_lib],
-                "shared_libs" => [b.path for b in binaries if b.type == :shared_lib],
-                "total" => length(binaries)
-            ),
-            "include_dirs" => include_dirs,
-            "dependency_graph_file" => isnothing(dep_graph) ? "" : ".replibuild_cache/dependency_graph.json"
-        ),
-        # Reorganize stage (disabled by default)
-        Dict{String,Any}(
-            "enabled" => false
-        ),
-        # Compile stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "build/ir",
-            "flags" => ["-std=c++17", "-fPIC", "-O2"],
-            "parallel" => true,
-            "emit_ir" => true
-        ),
-        # Link stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "build/linked",
-            "optimize" => true,
-            "opt_level" => "O2",
-            "lto" => false
-        ),
-        # Binary stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "julia",
-            "library_name" => "lib$(lowercase(project_name)).so",
-            "library_type" => "shared",
-            "rpath" => true
-        ),
-        # Symbols stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "method" => "nm",
-            "demangle" => true,
-            "filter_internal" => true
-        ),
-        # Wrap stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "julia",
-            "style" => "auto",
-            "module_name" => uppercasefirst(project_name),
-            "add_tests" => true,
-            "add_docs" => true
-        ),
-        # Test stage
-        Dict{String,Any}(
-            "enabled" => false
-        ),
-        # LLVM configuration (stub - will be populated by init_toolchain)
-        Dict{String,Any}(
-            "root" => "",  # Will be auto-detected
-            "source" => "",  # Will be set to "jll" or "intree"
-            "use_replibuild_llvm" => true,
-            "isolated" => true,
-            "tools" => Dict{String,String}()  # Will be discovered
-        ),
-        # Target
-        Dict{String,Any}(
-            "triple" => "",
-            "cpu" => "generic",
-            "features" => String[]
-        ),
-        # Workflow
-        Dict{String,Any}(
-            "stages" => ["discovery", "compile", "link", "binary", "symbols", "wrap"],
-            "stop_on_error" => true,
-            "parallel_stages" => ["compile"]
-        ),
-        # Cache
-        Dict{String,Any}(
-            "enabled" => true,
-            "directory" => ".replibuild_cache",
-            "invalidate_on_change" => true
-        ),
-        # Raw data
-        Dict{String,Any}()
+        project_uuid
+    )
+
+    paths_config = ConfigurationManager.PathsConfig(
+        "src",              # source
+        "include",          # include
+        "julia",            # output
+        "build",            # build
+        ".replibuild_cache" # cache
+    )
+
+    discovery_config = ConfigurationManager.DiscoveryConfig(
+        true,                                    # enabled
+        true,                                    # walk_dependencies
+        10,                                      # max_depth
+        ["build", ".git", ".cache"],            # ignore_patterns
+        true                                     # parse_ast
+    )
+
+    compile_config = ConfigurationManager.CompileConfig(
+        source_files,                            # source_files
+        include_dirs,                            # include_dirs
+        ["-std=c++17", "-fPIC", "-O2"],         # flags
+        Dict{String,String}(),                   # defines
+        true                                     # parallel
+    )
+
+    link_config = ConfigurationManager.LinkConfig(
+        "2",                                     # optimization_level
+        false,                                   # enable_lto
+        String[]                                 # link_libraries
+    )
+
+    binary_config = ConfigurationManager.BinaryConfig(
+        :shared,                                 # type
+        "",                                      # output_name (auto-generate)
+        false                                    # strip_symbols
+    )
+
+    wrap_config = ConfigurationManager.WrapConfig(
+        true,                                    # enabled
+        :clang,                                  # style
+        "",                                      # module_name (auto-generate)
+        true                                     # use_clang_jl
+    )
+
+    llvm_config = ConfigurationManager.LLVMConfig(
+        :auto,                                   # toolchain
+        ""                                       # version (auto-detect)
+    )
+
+    workflow_config = ConfigurationManager.WorkflowConfig(
+        [:discover, :compile, :link, :binary, :wrap]  # stages
+    )
+
+    cache_config = ConfigurationManager.CacheConfig(
+        true,                                    # enabled
+        ".replibuild_cache"                      # directory
+    )
+
+    # Construct RepliBuildConfig from nested structs
+    config = ConfigurationManager.RepliBuildConfig(
+        project_config,
+        paths_config,
+        discovery_config,
+        compile_config,
+        link_config,
+        binary_config,
+        wrap_config,
+        llvm_config,
+        workflow_config,
+        cache_config,
+        joinpath(root_dir, "replibuild.toml"),  # config_file
+        now()                                    # loaded_at
     )
 
     return config
