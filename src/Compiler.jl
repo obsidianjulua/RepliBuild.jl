@@ -471,6 +471,139 @@ function extract_mangled_name(nm_output::String, demangled::String)::String
     return demangled  # Fallback
 end
 
+# =============================================================================
+# DWARF DEBUG INFO PARSING - Perfect Type Extraction
+# =============================================================================
+
+"""
+Extract return types from DWARF debug info.
+Returns: Dict{mangled_name => {c_type, julia_type, size}}
+"""
+function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{String,Any}}
+    println("   🔍 Parsing DWARF debug info...")
+
+    # Run readelf to get DWARF debug info
+    (output, exitcode) = BuildBridge.execute("readelf", ["--debug-dump=info", binary_path])
+
+    if exitcode != 0
+        @warn "Failed to read DWARF info: $output"
+        return Dict{String,Dict{String,Any}}()
+    end
+
+    return_types = Dict{String,Dict{String,Any}}()
+
+    # Parse DWARF output to extract type information
+    # Strategy: Find DW_TAG_subprogram entries, extract linkage_name and return type
+
+    current_function = nothing
+    current_linkage_name = nothing
+    type_refs = Dict{String,String}()  # offset => type_name
+
+    # First pass: Build type reference table
+    for line in split(output, '\n')
+        line = strip(line)
+
+        # Extract base type definitions (DW_TAG_base_type)
+        # Example: <1><27>: Abbrev Number: 2 (DW_TAG_base_type)
+        if contains(line, "DW_TAG_base_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = "unknown"
+            end
+        end
+
+        # Extract type name
+        # Example: <28>   DW_AT_name        : (indexed string: 0x3): int
+        if contains(line, "DW_AT_name") && haskey(type_refs, get(type_refs, "last_offset", ""))
+            # Extract just the type name after the last colon
+            name_match = match(r":\s*([^:]+)\s*$", line)
+            if !isnothing(name_match)
+                type_name = strip(name_match.captures[1])
+                type_refs[type_refs["last_offset"]] = type_name
+            end
+        end
+
+        # Track last seen offset
+        offset_match = match(r"<\d+><([^>]+)>", line)
+        if !isnothing(offset_match)
+            type_refs["last_offset"] = "0x" * offset_match.captures[1]
+        end
+    end
+
+    # Second pass: Extract function return types
+    current_function_offset = nothing
+    current_function_name = nothing
+    current_function_linkage = nothing
+
+    for line in split(output, '\n')
+        line = strip(line)
+
+        # Detect function start (DW_TAG_subprogram)
+        if contains(line, "DW_TAG_subprogram")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_function_offset = "0x" * offset_match.captures[1]
+                current_function_name = nothing
+                current_function_linkage = nothing
+            end
+        end
+
+        # Extract linkage name (mangled name)
+        # Example: <5c>   DW_AT_linkage_name: (indexed string: 0x8): _ZN10Calculator5powerEdd
+        if contains(line, "DW_AT_linkage_name") && !isnothing(current_function_offset)
+            # Extract just the mangled name after the last colon
+            linkage_match = match(r":\s*([^:\s]+)\s*$", line)
+            if !isnothing(linkage_match)
+                current_function_linkage = strip(linkage_match.captures[1])
+            end
+        end
+
+        # Extract function return type reference
+        if contains(line, "DW_AT_type") && !isnothing(current_function_offset)
+            type_match = match(r"<(0x[^>]+)>", line)
+            if !isnothing(type_match)
+                type_ref = type_match.captures[1]
+                c_type = get(type_refs, type_ref, "unknown")
+
+                # Map to Julia type
+                julia_type = if c_type == "int"
+                    "Cint"
+                elseif c_type == "double"
+                    "Cdouble"
+                elseif c_type == "float"
+                    "Cfloat"
+                elseif c_type == "char"
+                    "UInt8"
+                elseif c_type == "void"
+                    "Cvoid"
+                else
+                    "Any"
+                end
+
+                # Store if we have linkage name
+                if !isnothing(current_function_linkage)
+                    return_types[current_function_linkage] = Dict(
+                        "c_type" => c_type,
+                        "julia_type" => julia_type,
+                        "size" => if c_type == "int" 4 elseif c_type == "double" 8 elseif c_type == "float" 4 else 0 end
+                    )
+                end
+
+                current_function_offset = nothing  # Done with this function
+            end
+        end
+    end
+
+    if !isempty(return_types)
+        println("   ✅ Extracted $(length(return_types)) return types from DWARF")
+    else
+        println("   ⚠️  No DWARF return type info found (compile with -g flag)")
+    end
+
+    return return_types
+end
+
 """
 Extract compilation metadata from source files and binary.
 This is the core of automatic wrapper generation!
@@ -483,8 +616,22 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     symbols = extract_symbols_from_binary(binary_path)
     println("   Found $(length(symbols)) exported symbols")
 
+    # Extract return types from DWARF debug info (if available)
+    dwarf_return_types = extract_dwarf_return_types(binary_path)
+
     # Parse function signatures (basic type inference from symbol names)
     functions = parse_function_signatures(symbols)
+
+    # Merge DWARF return types into function metadata (overrides inference)
+    for func in functions
+        mangled = func["mangled"]
+        if haskey(dwarf_return_types, mangled)
+            func["return_type"] = dwarf_return_types[mangled]
+            func["return_type_source"] = "dwarf"
+        else
+            func["return_type_source"] = "inferred"
+        end
+    end
 
     # Build type registry (basic types + inferred types)
     type_registry = build_type_registry(functions)
