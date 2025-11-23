@@ -1,19 +1,23 @@
 #!/usr/bin/env julia
 # Compiler.jl - C++ to LLVM IR compilation and linking
-# Uses centralized RepliBuildConfig (no TOML parsing here)
+# Full control over LLVM/Clang for Julia interoperability
+# Extracts metadata during compilation for automatic wrapper generation
 
 module Compiler
 
 using Dates
+using JSON
 
 # Import from parent RepliBuild module
 import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_dirs,
                                 get_compile_flags, get_build_path, get_output_path,
-                                get_library_name, is_parallel_enabled, is_cache_enabled
+                                get_library_name, get_module_name, is_parallel_enabled,
+                                is_cache_enabled
 import ..BuildBridge
 import ..LLVMEnvironment
 
-export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project
+export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
+       extract_compilation_metadata, save_compilation_metadata
 
 # =============================================================================
 # INCREMENTAL BUILD SUPPORT
@@ -149,10 +153,7 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
                 error("Compilation failed for $cpp_file (exit: $exitcode)")
             end
         end
-    end
-
-    println("  ✅ Compiled $(length(files_to_compile)) files")
-
+    end 
     return ir_files
 end
 
@@ -371,13 +372,369 @@ function compile_project(config::RepliBuildConfig)
 
     elapsed = round(time() - start_time, digits=2)
 
+    # Step 4: Extract and save compilation metadata
+    metadata_path = save_compilation_metadata(config, source_files, binary_path)
+
     println()
     println("="^70)
     println("✅ Build successful ($elapsed seconds)")
-    println("📦 Output: $binary_path")
+    println("📦 Binary: $binary_path")
+    println("📝 Metadata: $metadata_path")
     println("="^70)
 
     return binary_path
+end
+
+# =============================================================================
+# METADATA EXTRACTION - The Key to Automatic Wrapping
+# =============================================================================
+
+"""
+Extract symbol information from compiled binary using nm.
+Returns vector of symbol dictionaries with mangled/demangled names.
+"""
+function extract_symbols_from_binary(binary_path::String)
+    # Use nm to extract symbols
+    (output, exitcode) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+
+    if exitcode != 0
+        @warn "Symbol extraction failed: $output"
+        return Dict{String,Any}[]
+    end
+
+    symbols = Dict{String,Any}[]
+
+    for line in split(output, '\n')
+        line = strip(line)
+        if isempty(line)
+            continue
+        end
+
+        # Parse nm output: address type symbol_name
+        parts = split(line)
+        if length(parts) >= 3
+            symbol_type = parts[2]
+            demangled_name = join(parts[3:end], " ")
+
+            # Only export T (text/code) symbols
+            if symbol_type == "T"
+                # Get mangled name too
+                (mangled_output, _) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+                mangled_name = extract_mangled_name(mangled_output, demangled_name)
+
+                push!(symbols, Dict(
+                    "mangled" => mangled_name,
+                    "demangled" => demangled_name,
+                    "type" => symbol_type,
+                    "address" => parts[1]
+                ))
+            end
+        end
+    end
+
+    return symbols
+end
+
+"""
+Extract mangled symbol name from nm output.
+"""
+function extract_mangled_name(nm_output::String, demangled::String)::String
+    # Try to find the mangled version
+    for line in split(nm_output, '\n')
+        if contains(line, " T ")
+            parts = split(strip(line))
+            if length(parts) >= 3
+                # parts[3] is the mangled name
+                return parts[3]
+            end
+        end
+    end
+    return demangled  # Fallback
+end
+
+"""
+Extract compilation metadata from source files and binary.
+This is the core of automatic wrapper generation!
+"""
+function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
+                                      binary_path::String)::Dict{String,Any}
+    println("📊 Extracting compilation metadata...")
+
+    # Extract symbols from compiled binary
+    symbols = extract_symbols_from_binary(binary_path)
+    println("   Found $(length(symbols)) exported symbols")
+
+    # Parse function signatures (basic type inference from symbol names)
+    functions = parse_function_signatures(symbols)
+
+    # Build type registry (basic types + inferred types)
+    type_registry = build_type_registry(functions)
+
+    # Gather compiler info
+    llvm_version = try
+        (out, _) = BuildBridge.execute("llvm-config", ["--version"])
+        strip(out)
+    catch
+        "unknown"
+    end
+
+    clang_version = try
+        (out, _) = BuildBridge.execute("clang++", ["--version"])
+        first(split(out, '\n'))
+    catch
+        "unknown"
+    end
+
+    metadata = Dict{String,Any}(
+        "timestamp" => string(now()),
+        "project" => config.project.name,
+        "binary_path" => binary_path,
+        "binary_type" => string(config.binary.type),
+
+        # Source information
+        "source_files" => source_files,
+        "include_dirs" => get_include_dirs(config),
+        "compile_flags" => get_compile_flags(config),
+
+        # Symbols and functions
+        "symbols" => symbols,
+        "functions" => functions,
+        "function_count" => length(functions),
+
+        # Type mappings
+        "type_registry" => type_registry,
+
+        # Compiler information
+        "compiler_info" => Dict(
+            "llvm_version" => llvm_version,
+            "clang_version" => clang_version,
+            "target_triple" => "x86_64-unknown-linux-gnu",  # TODO: detect
+            "optimization_level" => config.link.optimization_level,
+            "lto_enabled" => config.link.enable_lto
+        ),
+
+        # Metadata version (for future compatibility)
+        "metadata_version" => "1.0"
+    )
+
+    return metadata
+end
+
+"""
+Parse function signatures from symbol information.
+Infers parameter types and return types from demangled names.
+"""
+function parse_function_signatures(symbols::Vector{Dict{String,Any}})::Vector{Dict{String,Any}}
+    functions = Dict{String,Any}[]
+
+    for sym in symbols
+        demangled = sym["demangled"]
+
+        # Skip vtables, typeinfo, etc.
+        if startswith(demangled, "vtable") || startswith(demangled, "typeinfo")
+            continue
+        end
+
+        func_info = Dict{String,Any}(
+            "name" => extract_function_name(demangled),
+            "mangled" => sym["mangled"],
+            "demangled" => demangled,
+            "return_type" => infer_return_type(demangled),
+            "parameters" => parse_parameters(demangled),
+            "is_method" => contains(demangled, "::"),
+            "class" => extract_class_name(demangled),
+            "exported" => true
+        )
+
+        push!(functions, func_info)
+    end
+
+    return functions
+end
+
+"""
+Extract function name from demangled signature.
+Example: "Calculator::compute(int, int, char)" -> "compute"
+"""
+function extract_function_name(demangled::String)::String
+    # Handle class methods
+    if contains(demangled, "::")
+        parts = split(demangled, "::")
+        if length(parts) >= 2
+            # Get last part before (
+            name_part = parts[end]
+            return split(name_part, '(')[1]
+        end
+    end
+
+    # Handle free functions
+    return split(demangled, '(')[1]
+end
+
+"""
+Extract class name from method signature.
+Example: "Calculator::compute(int, int)" -> "Calculator"
+"""
+function extract_class_name(demangled::String)::String
+    if contains(demangled, "::")
+        parts = split(demangled, "::")
+        return parts[1]
+    end
+    return ""
+end
+
+"""
+Infer return type from function signature (basic heuristic).
+In future: extract from debug info or DWARF.
+"""
+function infer_return_type(demangled::String)::Dict{String,String}
+    # Default: assume int return for now
+    # TODO: Parse DWARF debug info for exact types
+    return Dict(
+        "c_type" => "int",
+        "julia_type" => "Cint",
+        "size" => 4
+    )
+end
+
+"""
+Parse parameter types from demangled signature.
+Example: "add(int, int)" -> [{"type": "int", "julia_type": "Cint"}, ...]
+"""
+function parse_parameters(demangled::String)::Vector{Dict{String,String}}
+    params = Dict{String,String}[]
+
+    # Extract parameter list from signature
+    if !contains(demangled, '(')
+        return params
+    end
+
+    param_str = match(r"\((.*?)\)", demangled)
+    if isnothing(param_str)
+        return params
+    end
+
+    param_types = split(param_str.captures[1], ',')
+
+    for (i, ptype) in enumerate(param_types)
+        ptype = strip(ptype)
+        if isempty(ptype)
+            continue
+        end
+
+        julia_type = cpp_to_julia_type(ptype)
+
+        push!(params, Dict(
+            "name" => "arg$i",
+            "c_type" => ptype,
+            "julia_type" => julia_type,
+            "position" => i-1
+        ))
+    end
+
+    return params
+end
+
+"""
+Convert C++ type to Julia type.
+Basic type mapping - can be enhanced with type registry.
+"""
+function cpp_to_julia_type(cpp_type::String)::String
+    type_map = Dict(
+        "int" => "Cint",
+        "unsigned int" => "Cuint",
+        "long" => "Clong",
+        "unsigned long" => "Culong",
+        "short" => "Cshort",
+        "unsigned short" => "Cushort",
+        "char" => "UInt8",
+        "unsigned char" => "UInt8",
+        "float" => "Cfloat",
+        "double" => "Cdouble",
+        "bool" => "Bool",
+        "void" => "Cvoid",
+        "char*" => "Cstring",
+        "const char*" => "Cstring"
+    )
+
+    # Handle pointers
+    if endswith(cpp_type, "*")
+        return "Ptr{Cvoid}"
+    end
+
+    # Handle references
+    if endswith(cpp_type, "&")
+        base_type = strip(cpp_type[1:end-1])
+        return "Ref{$(cpp_to_julia_type(base_type))}"
+    end
+
+    return get(type_map, cpp_type, "Any")
+end
+
+"""
+Build type registry from functions.
+Collects all unique types used in the codebase.
+"""
+function build_type_registry(functions::Vector{Dict{String,Any}})::Dict{String,Any}
+    registry = Dict{String,Any}()
+
+    # Add standard types
+    standard_types = Dict(
+        "int" => Dict("size" => 4, "alignment" => 4, "julia_type" => "Cint"),
+        "float" => Dict("size" => 4, "alignment" => 4, "julia_type" => "Cfloat"),
+        "double" => Dict("size" => 8, "alignment" => 8, "julia_type" => "Cdouble"),
+        "char" => Dict("size" => 1, "alignment" => 1, "julia_type" => "UInt8"),
+        "bool" => Dict("size" => 1, "alignment" => 1, "julia_type" => "Bool"),
+        "void" => Dict("size" => 0, "alignment" => 0, "julia_type" => "Cvoid")
+    )
+
+    merge!(registry, standard_types)
+
+    # Collect types from functions
+    for func in functions
+        # Add return type
+        if haskey(func, "return_type")
+            rt = func["return_type"]
+            if haskey(rt, "c_type")
+                registry[rt["c_type"]] = rt
+            end
+        end
+
+        # Add parameter types
+        if haskey(func, "parameters")
+            for param in func["parameters"]
+                if haskey(param, "c_type")
+                    registry[param["c_type"]] = Dict(
+                        "julia_type" => get(param, "julia_type", "Any"),
+                        "inferred" => true
+                    )
+                end
+            end
+        end
+    end
+
+    return registry
+end
+
+"""
+Save compilation metadata to JSON file next to binary.
+This enables automatic wrapper generation!
+"""
+function save_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
+                                   binary_path::String)::String
+    # Extract metadata
+    metadata = extract_compilation_metadata(config, source_files, binary_path)
+
+    # Save to JSON file next to binary
+    output_dir = get_output_path(config)
+    metadata_path = joinpath(output_dir, "compilation_metadata.json")
+
+    open(metadata_path, "w") do io
+        JSON.print(io, metadata, 2)  # Pretty print with indent=2
+    end
+
+    println("   ✅ Saved metadata: $metadata_path")
+    return metadata_path
 end
 
 end # module Compiler
