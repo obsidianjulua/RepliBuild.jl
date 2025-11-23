@@ -19,10 +19,12 @@ import ..RepliBuild
 import ..Discovery
 import ..ClangJLBridge
 import ..WorkspaceBuilder
+import ..Wrapper
 
 # Import from Compiler and ConfigurationManager modules
 import ..Compiler: compile_to_ir, link_optimize_ir, create_library
-import ..ConfigurationManager: RepliBuildConfig, load_config
+import ..ConfigurationManager: RepliBuildConfig, load_config, get_output_path,
+                                get_library_name, get_module_name
 
 export rbuild, rdiscover, rclean, rinfo, rwrap
 export rbuild_fast, rcompile, rparallel
@@ -185,54 +187,89 @@ function rcompile(files...; flags::Vector{String}=["-std=c++17"])
 end
 
 """
-    rwrap(lib_path; style=:auto, headers=String[])
+    rwrap(lib_path; tier=:auto, headers=String[], generate_tests=false, generate_docs=true)
 
-Generate Julia wrappers for a compiled library.
+Generate Julia wrappers for a compiled library using the new 3-tier wrapper system.
 
 # Arguments
 - `lib_path::String`: Path to compiled library (.so, .dylib, .dll)
-- `style::Symbol`: Wrapper style - `:auto`, `:clang`, or `:binary`
-- `headers::Vector{String}`: Header files (for :clang style)
+- `tier::Symbol`: Wrapper tier - `:auto`, `:basic`, `:advanced`, or `:introspective`
+- `headers::Vector{String}`: Header files (for advanced/introspective tiers)
+- `generate_tests::Bool`: Generate test file (default: false)
+- `generate_docs::Bool`: Generate documentation (default: true)
+
+# Tier Descriptions
+- `:auto` - Automatically detect best tier based on available information
+- `:basic` - Symbol-only extraction (~40% quality, no headers needed)
+- `:advanced` - Header-aware with Clang.jl (~85% quality, requires headers)
+- `:introspective` - Metadata-rich from compilation (~95% quality, future)
 
 # Examples
 ```julia
-rwrap("libmyproject.so")                    # Auto-detect
-rwrap("libexternal.so", style=:binary)      # Binary-only wrapping
-rwrap("libapp.so", style=:clang, headers=["app.h"])
+rwrap("libmyproject.so")                                    # Auto-detect tier
+rwrap("libexternal.so", tier=:basic)                       # Basic symbol wrapping
+rwrap("libapp.so", tier=:advanced, headers=["app.h"])      # Advanced with headers
+rwrap("lib.so", headers=["lib.h"], generate_tests=true)    # With tests
 ```
 """
-function rwrap(lib_path::String; style::Symbol=:auto, headers::Vector{String}=String[])
+function rwrap(lib_path::String=""; tier::Symbol=:auto,
+               headers::Vector{String}=String[],
+               generate_tests::Bool=false,
+               generate_docs::Bool=true)
+
+    # If no lib_path provided, try to find one in output directory
+    if isempty(lib_path)
+        config = load_config("replibuild.toml")
+        output_dir = get_output_path(config)
+        lib_name = get_library_name(config)
+        lib_path = joinpath(output_dir, lib_name)
+
+        if !isfile(lib_path)
+            error("No library found at $lib_path. Build project first with rbuild()")
+        end
+
+        println("📦 Using: $lib_path")
+    end
+
     if !isfile(lib_path)
         error("Library not found: $lib_path")
     end
 
-    # Auto-detect style
-    if style == :auto
-        # Check if headers available
-        style = isempty(headers) ? :binary : :clang
-    end
-
-    if style == :clang
-        if isempty(headers)
-            error("Headers required for :clang style wrapping")
-        end
-
-        println("📝 Generating wrappers with Clang.jl...")
-
-        config = Dict(
-            "project" => Dict("name" => basename(dirname(lib_path))),
-            "compile" => Dict("include_dirs" => String[]),
+    # Load or create config
+    config = if isfile("replibuild.toml")
+        load_config("replibuild.toml")
+    else
+        # Create minimal config for external library
+        ConfigurationManager.create_default_config(
+            "replibuild.toml",
+            project_name=basename(dirname(lib_path))
         )
-
-        return ClangJLBridge.generate_bindings_clangjl(config, lib_path, headers)
-    else  # :binary
-        println("📝 Generating wrappers from binary symbols...")
-
-        @warn "Binary-only wrapping not yet implemented. Use style=:clang with headers instead."
-        println("  💡 Tip: Provide headers for better type-aware bindings:")
-        println("     rwrap(\"$lib_path\", style=:clang, headers=[\"myheader.h\"])")
-        return nothing
     end
+
+    # Convert tier symbol to WrapperTier enum if not :auto
+    wrapper_tier = if tier == :auto
+        nothing  # Let Wrapper module auto-detect
+    elseif tier == :basic
+        Wrapper.TIER_BASIC
+    elseif tier == :advanced
+        Wrapper.TIER_ADVANCED
+    elseif tier == :introspective
+        Wrapper.TIER_INTROSPECTIVE
+    else
+        error("Unknown tier: $tier. Use :auto, :basic, :advanced, or :introspective")
+    end
+
+    # Generate wrapper using new Wrapper module
+    output_file = Wrapper.wrap_library(
+        config,
+        lib_path,
+        headers=headers,
+        tier=wrapper_tier,
+        generate_tests=generate_tests,
+        generate_docs=generate_docs
+    )
+
+    return output_file
 end
 
 """
