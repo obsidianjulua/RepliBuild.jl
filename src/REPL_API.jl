@@ -397,8 +397,6 @@ function __init__()
       rbuild_fast(["src/main.cpp"])
       rcompile("file.cpp")
       rcache_status()
-
-    Tip: Start Julia with --threads=auto for parallel builds!
     """)
 end
 
