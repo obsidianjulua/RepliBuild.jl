@@ -684,40 +684,73 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         end
     end
 
+    # Debug: Show type refs collected
+    println("   📊 Type references collected: $(length(type_refs))")
+
     # Second pass: Extract function return types
     current_function_offset = nothing
     current_function_name = nothing
     current_function_linkage = nothing
+    current_function_level = nothing
+    function_processed = false  # State flag: true once we leave function's own level
+    functions_found = 0
+    linkage_names_found = 0
+
+    last_seen_level = nothing  # Track last level for attribute lines
 
     for line in split(output, '\n')
         line = strip(line)
 
-        # Detect function start (DW_TAG_subprogram)
-        if contains(line, "DW_TAG_subprogram")
-            # Before starting new function, check if previous function had no return type (void)
-            if !isnothing(current_function_offset)
+        # Extract nesting level from DWARF format: <level><offset>
+        # Tags have: <level><offset>: ...
+        # Attributes have: <offset>   DW_AT_...
+        level_match = match(r"^\s*<(\d+)><", line)
+        if !isnothing(level_match)
+            last_seen_level = parse(Int, level_match.captures[1])
+        end
+        # Use last seen level for attributes (which don't have level prefix)
+        current_level = last_seen_level
+
+        # Detect when we've left the function's own level (entered child tags)
+        if !isnothing(current_function_offset) && !isnothing(current_level) && !isnothing(current_function_level)
+            if current_level > current_function_level && !function_processed
+                # We've entered a child tag (like DW_TAG_formal_parameter)
+                # This means we've finished processing the function's own attributes
+                # If no return type was found, it's void
                 function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
                 if !isnothing(function_key) && !haskey(return_types, function_key)
-                    # No DW_AT_type found = void return
                     return_types[function_key] = Dict(
                         "c_type" => "void",
                         "julia_type" => "Cvoid",
                         "size" => 0
                     )
                 end
-            end
-
-            offset_match = match(r"<\d+><([^>]+)>", line)
-            if !isnothing(offset_match)
-                current_function_offset = "0x" * offset_match.captures[1]
-                current_function_name = nothing
-                current_function_linkage = nothing
+                function_processed = true
             end
         end
 
+        # Detect function start (DW_TAG_subprogram)
+        if contains(line, "DW_TAG_subprogram")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_function_offset = "0x" * offset_match.captures[1]
+                current_function_level = current_level
+                current_function_name = nothing
+                current_function_linkage = nothing
+                function_processed = false  # Reset flag for new function
+                functions_found += 1
+            end
+        end
+
+        # Only process attributes at the function level (not in child tags like parameters)
+        in_function_context = !isnothing(current_function_offset) &&
+                             !isnothing(current_level) &&
+                             !isnothing(current_function_level) &&
+                             current_level == current_function_level
+
         # Extract function name (for C functions without mangling)
         # Example: <2f>   DW_AT_name        : (indexed string: 0xc): test_sin
-        if contains(line, "DW_AT_name") && !isnothing(current_function_offset) && isnothing(current_function_name)
+        if contains(line, "DW_AT_name") && in_function_context && isnothing(current_function_name)
             name_match = match(r":\s*([^:]+)\s*$", line)
             if !isnothing(name_match)
                 current_function_name = strip(name_match.captures[1])
@@ -726,16 +759,18 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
 
         # Extract linkage name (mangled name for C++ functions)
         # Example: <5c>   DW_AT_linkage_name: (indexed string: 0x8): _ZN10Calculator5powerEdd
-        if contains(line, "DW_AT_linkage_name") && !isnothing(current_function_offset)
+        if contains(line, "DW_AT_linkage_name") && in_function_context
             # Extract just the mangled name after the last colon
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
             if !isnothing(linkage_match)
                 current_function_linkage = strip(linkage_match.captures[1])
+                linkage_names_found += 1
             end
         end
 
         # Extract function return type reference
-        if contains(line, "DW_AT_type") && !isnothing(current_function_offset)
+        # CRITICAL: Only match DW_AT_type at the function's own level, not from parameters!
+        if contains(line, "DW_AT_type") && in_function_context && !function_processed
             type_match = match(r"<(0x[^>]+)>", line)
             if !isnothing(type_match)
                 type_ref = type_match.captures[1]
@@ -756,8 +791,7 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
                         "size" => type_size
                     )
                 end
-
-                current_function_offset = nothing  # Done with this function
+                function_processed = true  # Mark as processed
             end
         end
     end
@@ -775,8 +809,13 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         end
     end
 
+    println("   📊 Functions scanned: $functions_found, Linkage names: $linkage_names_found")
+
     if !isempty(return_types)
         println("   ✅ Extracted $(length(return_types)) return types from DWARF")
+        # Show first few for debugging
+        void_count = count(rt -> rt["c_type"] == "void", values(return_types))
+        println("      - Void functions: $void_count")
     else
         println("   ⚠️  No DWARF return type info found (compile with -g flag)")
     end
