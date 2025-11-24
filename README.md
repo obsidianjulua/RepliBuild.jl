@@ -122,7 +122,7 @@ Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations
 
 ###  Direct, Zero-Overhead Bindings
 
-**Generated Julia code** (from examples/struct_test):
+**Generated Julia code** :
 ```julia
 # C++ struct automatically extracted
 mutable struct Point
@@ -160,8 +160,6 @@ p = create_point(3.0, 4.0)  #  Works, returns Point(3.0, 4.0)
 
 **Important:** Detection ≠ wrapping. Many Eigen types are not standard-layout and cannot be safely wrapped. The test validates DWARF parsing at scale, not FFI correctness for all types.
 
-See [docs/EIGEN_VALIDATION.md](docs/EIGEN_VALIDATION.md) for details.
-
 **Correctness boundary:** RepliBuild can extract types present in DWARF. It can only safely wrap standard-layout, trivially-copyable types.
 
 ---
@@ -175,7 +173,7 @@ Pkg.add("RepliBuild")
 
 Or from GitHub:
 ```julia
-Pkg.add(url="https://github.com/REPLACE_WITH_ACTUAL_REPO/RepliBuild.jl")
+Pkg.add(url="https://github.com/obsidianjulua/RepliBuild.jl")
 ```
 
 ---
@@ -246,18 +244,6 @@ dist = distance(p1, p2)  # 5.0
 
 ---
 
-## Examples
-
-Check the `examples/` directory for complete working examples:
-
-### Struct Operations
-`examples/struct_test/` - Basic struct handling with vector math
-
-### Linear Algebra (Eigen-style)
-`examples/eigen_test/` - Matrix/vector operations demonstrating complex struct handling
-
----
-
 ## How It Works
 
 ```
@@ -282,12 +268,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for technical details and [LIMITATIONS.md
 | Feature | RepliBuild | Clang.jl | CxxWrap.jl |
 |---------|------------|----------|------------|
 | **Approach** | DWARF extraction | Header parsing | Manual wrapping |
-| **Automatic** |  Yes |  Partial | ❌ No |
+| **Automatic** |  99% |  Partial | ❌ No |
 | **Type Source** |  Compiler DWARF |  Source headers |  Manual annotations |
 | **Struct Typing** |  Auto from DWARF |  Limited |  Manual |
 | **Struct Members** |  Auto extracted |  Limited |  Manual |
 | **Template Support** |  All instantiations | ❌ Limited |  Manual per instance |
-| **User Code Required** |  Zero lines |  ~100s lines | ❌ ~1000s lines |
+| **User Code Required** |  minimal |  ~100s lines | ❌ ~1000s lines |
 | **Handles Eigen** |  Yes (20K+ types) | ❌ Struggles |  Manual per function |
 | **Zero Overhead** |  Direct ccall |  Direct ccall |  Depends on usage |
 
@@ -385,7 +371,7 @@ Generated bindings have **zero runtime overhead** - direct ccall, no wrappers.
 
 ## License
 
-GPL-3.0 - See [LICENSE](LICENSE) for details.
+MIT - See [LICENSE](LICENSE) for details.
 
 ---
 
@@ -394,11 +380,11 @@ GPL-3.0 - See [LICENSE](LICENSE) for details.
 If you use RepliBuild in research, please cite:
 
 ```bibtex
-@software{replibuild2024,
+@software{replibuild2025,
   title = {RepliBuild: DWARF-Based Automatic FFI Generation for Julia},
-  author = {[Your Name/Organization]},
-  year = {2024},
-  url = {https://github.com/[your-org]/RepliBuild.jl}
+  author = {[Jonathon Mohr/Obsidianjulua]},
+  year = {2025},
+  url = {https://github.com/[obsidianjulua]/RepliBuild.jl}
 }
 ```
 
