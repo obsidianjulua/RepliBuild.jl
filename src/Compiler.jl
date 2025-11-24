@@ -684,17 +684,12 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         end
     end
 
-    # Debug: Show type refs collected
-    println("   📊 Type references collected: $(length(type_refs))")
-
     # Second pass: Extract function return types
     current_function_offset = nothing
     current_function_name = nothing
     current_function_linkage = nothing
     current_function_level = nothing
     function_processed = false  # State flag: true once we leave function's own level
-    functions_found = 0
-    linkage_names_found = 0
 
     last_seen_level = nothing  # Track last level for attribute lines
 
@@ -738,7 +733,6 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
                 current_function_name = nothing
                 current_function_linkage = nothing
                 function_processed = false  # Reset flag for new function
-                functions_found += 1
             end
         end
 
@@ -764,7 +758,6 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
             if !isnothing(linkage_match)
                 current_function_linkage = strip(linkage_match.captures[1])
-                linkage_names_found += 1
             end
         end
 
@@ -809,13 +802,8 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         end
     end
 
-    println("   📊 Functions scanned: $functions_found, Linkage names: $linkage_names_found")
-
     if !isempty(return_types)
         println("   ✅ Extracted $(length(return_types)) return types from DWARF")
-        # Show first few for debugging
-        void_count = count(rt -> rt["c_type"] == "void", values(return_types))
-        println("      - Void functions: $void_count")
     else
         println("   ⚠️  No DWARF return type info found (compile with -g flag)")
     end
