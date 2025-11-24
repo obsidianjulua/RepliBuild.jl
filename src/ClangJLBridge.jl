@@ -32,7 +32,7 @@ bindings = generate_bindings_clangjl(config, lib_path, headers)
 ```
 """
 function generate_bindings_clangjl(config::Dict, lib_path::String, headers::Vector{String})
-    println("📝 Generating Julia bindings with Clang.jl...")
+    println("Generating Julia bindings with Clang.jl...")
 
     # Extract configuration
     project = get(config, "project", Dict())
@@ -101,10 +101,10 @@ function generate_bindings_clangjl(config::Dict, lib_path::String, headers::Vect
         end
     end
 
-    println("  📂 Processing $(length(headers)) header files...")
-    println("  📁 Include dirs: $(length(include_dirs))")
-    println("  🎯 Module name: $module_name")
-    println("  📄 Output: $output_file")
+    println("  Processing $(length(headers)) header files...")
+    println("  Include dirs: $(length(include_dirs))")
+    println("  Module name: $module_name")
+    println("  Output: $output_file")
 
     try
         # Create Clang.jl context
@@ -116,13 +116,13 @@ function generate_bindings_clangjl(config::Dict, lib_path::String, headers::Vect
         # Add custom header/footer if needed
         add_replibuild_metadata(output_file, module_name, lib_path, headers)
 
-        println("  ✅ Generated: $output_file")
+        println("  Generated: $output_file")
 
         return output_file
 
     catch e
         @error "Failed to generate bindings with Clang.jl" exception=(e, catch_backtrace())
-        println("  ❌ Error: $e")
+        println("  Error: $e")
         return nothing
     end
 end
@@ -283,7 +283,7 @@ function generate_from_config(config_file::String; lib_path::String="", headers:
             headers = discover_headers(source_dir, recursive=true)
         end
 
-        println("  📂 Found $(length(headers)) headers")
+        println("  Found $(length(headers)) headers")
     end
 
     if isempty(headers)

@@ -120,7 +120,7 @@ Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations
 - Exception specifications
 - Function pointers with unknown calling conventions
 
-### ✅ Direct, Zero-Overhead Bindings
+###  Direct, Zero-Overhead Bindings
 
 **Generated Julia code** (from examples/struct_test):
 ```julia
@@ -137,7 +137,7 @@ function create_point(arg1::Cdouble, arg2::Cdouble)::Point
 end
 
 # Usage:
-p = create_point(3.0, 4.0)  # ✅ Works, returns Point(3.0, 4.0)
+p = create_point(3.0, 4.0)  #  Works, returns Point(3.0, 4.0)
 ```
 
 **What you get:**
@@ -282,14 +282,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for technical details and [LIMITATIONS.md
 | Feature | RepliBuild | Clang.jl | CxxWrap.jl |
 |---------|------------|----------|------------|
 | **Approach** | DWARF extraction | Header parsing | Manual wrapping |
-| **Automatic** | ✅ Yes | ⚠️ Partial | ❌ No |
-| **Type Source** | ✅ Compiler DWARF | ⚠️ Source headers | ✅ Manual annotations |
-| **Struct Typing** | ✅ Auto from DWARF | ⚠️ Limited | ✅ Manual |
-| **Struct Members** | ✅ Auto extracted | ⚠️ Limited | ✅ Manual |
-| **Template Support** | ✅ All instantiations | ❌ Limited | ✅ Manual per instance |
-| **User Code Required** | ✅ Zero lines | ⚠️ ~100s lines | ❌ ~1000s lines |
-| **Handles Eigen** | ✅ Yes (20K+ types) | ❌ Struggles | ⚠️ Manual per function |
-| **Zero Overhead** | ✅ Direct ccall | ✅ Direct ccall | ⚠️ Depends on usage |
+| **Automatic** |  Yes |  Partial | ❌ No |
+| **Type Source** |  Compiler DWARF |  Source headers |  Manual annotations |
+| **Struct Typing** |  Auto from DWARF |  Limited |  Manual |
+| **Struct Members** |  Auto extracted |  Limited |  Manual |
+| **Template Support** |  All instantiations | ❌ Limited |  Manual per instance |
+| **User Code Required** |  Zero lines |  ~100s lines | ❌ ~1000s lines |
+| **Handles Eigen** |  Yes (20K+ types) | ❌ Struggles |  Manual per function |
+| **Zero Overhead** |  Direct ccall |  Direct ccall |  Depends on usage |
 
 ---
 
@@ -318,9 +318,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for technical details and [LIMITATIONS.md
 - DWARF debug info (compile with `-g` flag)
 
 Works on:
-- ✅ Linux (tested on Arch)
-- ⚠️ macOS (should work, not tested)
-- ⚠️ Windows (WSL recommended)
+-  Linux (tested on Arch)
+-  macOS (should work, not tested)
+-  Windows (WSL recommended)
 
 ---
 

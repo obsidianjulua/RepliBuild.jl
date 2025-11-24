@@ -612,7 +612,7 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
                      generate_tests::Bool=false,
                      generate_docs::Bool=true)
 
-    println("📦 RepliBuild Wrapper Generator")
+    println(" RepliBuild Wrapper Generator")
     println("="^70)
     println("   Library: $(basename(library_path))")
 
@@ -655,9 +655,9 @@ Quality: ~40% - Conservative types, placeholder signatures, requires manual refi
 Use when: Headers not available, quick prototyping, binary-only distribution.
 """
 function wrap_basic(config::RepliBuildConfig, library_path::String; generate_docs::Bool=true)
-    println("🔧 Generating Tier 1 (Basic) wrapper...")
-    println("   Method: Symbol extraction (nm)")
-    println("   Type safety: ⚠️  Conservative placeholders")
+    println("Generating Tier 1 (Basic) wrapper...")
+    println("Method: Symbol extraction (nm)")
+    println("Type safety:   Conservative placeholders")
     println()
 
     if !isfile(library_path)
@@ -668,7 +668,7 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
     registry = create_type_registry(config)
 
     # Extract symbols
-    println("  📊 Extracting symbols...")
+    println("   Extracting symbols...")
     symbols = extract_symbols(library_path, registry, demangle=true, method=:nm)
 
     if isempty(symbols)
@@ -695,11 +695,11 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
 
     write(output_file, wrapper_content)
 
-    println("  ✅ Generated: $output_file")
-    println("  📝 Functions wrapped: $(min(length(functions), 50))")
+    println("   Generated: $output_file")
+    println("   Functions wrapped: $(min(length(functions), 50))")
 
     if length(functions) > 50
-        println("  ⚠️  Limited to first 50 functions ($(length(functions) - 50) omitted)")
+        println("    Limited to first 50 functions ($(length(functions) - 50) omitted)")
         println("     Consider using --tier=advanced with headers for complete wrapping")
     end
 
@@ -721,7 +721,7 @@ function generate_basic_module(config::RepliBuildConfig, lib_path::String,
     # Generator: RepliBuild Wrapper (Tier 1: Basic)
     # Library: $(basename(lib_path))
     #
-    # ⚠️  TYPE SAFETY: BASIC (40%)
+    #   TYPE SAFETY: BASIC (40%)
     # This wrapper uses conservative type placeholders extracted from binary symbols.
     # For production use, regenerate with headers: RepliBuild.wrap(lib, headers=["mylib.h"])
 
@@ -872,7 +872,7 @@ function generate_basic_function_wrapper(func::SymbolInfo, registry::TypeRegistr
 
         Wrapper for C/C++ function `$(func.demangled_name)`.
 
-        # Type Safety: ⚠️  BASIC
+        # Type Safety:   BASIC
         Signature uses placeholder types. Actual types unknown without headers.
         Return type and parameters may need manual adjustment.
 
@@ -907,9 +907,9 @@ Use when: Headers available, need type safety, production deployment.
 """
 function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers::Vector{String};
                         generate_docs::Bool=true)
-    println("🔧 Generating Tier 2 (Advanced) wrapper...")
+    println("  Generating Tier 2 (Advanced) wrapper...")
     println("   Method: Clang.jl header parsing")
-    println("   Type safety: ✅ Full (from headers)")
+    println("   Type safety:  Full (from headers)")
     println()
 
     if !isfile(library_path)
@@ -939,7 +939,7 @@ function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers
     )
 
     # Generate bindings via ClangJLBridge
-    println("  📝 Parsing headers with Clang.jl...")
+    println("  Parsing headers with Clang.jl...")
     output_file = ClangJLBridge.generate_bindings_clangjl(clang_config, library_path, headers)
 
     if isnothing(output_file)
@@ -949,7 +949,7 @@ function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers
     # TODO: Enhance generated file with our safety checks and metadata
     # For now, ClangJLBridge handles the generation
 
-    println("  ✅ Generated: $output_file")
+    println("   Generated: $output_file")
     println()
 
     return output_file
@@ -971,9 +971,9 @@ This is the culmination of RepliBuild's vision: automatic, accurate, language-ag
 """
 function wrap_introspective(config::RepliBuildConfig, library_path::String, headers::Vector{String};
                            generate_docs::Bool=true)
-    println("🔧 Generating Tier 3 (Introspective) wrapper...")
+    println("  Generating Tier 3 (Introspective) wrapper...")
     println("   Method: Compilation metadata + Clang.jl verification")
-    println("   Type safety: ✅ Perfect (from compilation)")
+    println("   Type safety:  Perfect (from compilation)")
     println()
 
     if !isfile(library_path)
@@ -986,7 +986,7 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         error("Compilation metadata not found: $metadata_file\nRun RepliBuild.build() first to generate metadata")
     end
 
-    println("  📊 Loading compilation metadata...")
+    println("   Loading compilation metadata...")
     metadata = JSON.parsefile(metadata_file)
 
     if !haskey(metadata, "functions")
@@ -1012,9 +1012,9 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
 
     write(output_file, wrapper_content)
 
-    println("  ✅ Generated: $output_file")
-    println("  📝 Functions wrapped: $(length(functions))")
-    println("  🎯 Type accuracy: ~95% (from compilation metadata)")
+    println("   Generated: $output_file")
+    println("   Functions wrapped: $(length(functions))")
+    println("   Type accuracy: ~95% (from compilation metadata)")
     println()
 
     return output_file
@@ -1035,7 +1035,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # Library: $(basename(lib_path))
     # Metadata: compilation_metadata.json
     #
-    # Type Safety: ✅ Perfect - Types extracted from compilation
+    # Type Safety:  Perfect - Types extracted from compilation
     # Language: Language-agnostic (via LLVM IR)
     # Manual edits: None required
 
@@ -1247,7 +1247,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
             # Metadata
             - Mangled symbol: `$mangled`
-            - Type safety: ✅ From compilation
+            - Type safety:  From compilation
             \"\"\"
             """
         end

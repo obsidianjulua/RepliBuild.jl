@@ -679,7 +679,7 @@ function to_replibuild_config(cmake_project::CMakeProject, target_name::String="
         external_lib_dirs = String[]
 
         for pkg_name in cmake_project.find_packages
-            println("🔍 External dependency detected: $pkg_name")
+            println("External dependency detected: $pkg_name")
 
             # TODO: ModuleRegistry was removed - implement external library resolution
             # For now, just add as system library
@@ -698,7 +698,7 @@ function to_replibuild_config(cmake_project::CMakeProject, target_name::String="
                 append!(external_lib_dirs, mod_info.library_dirs)
                 append!(external_libs, mod_info.libraries)
 
-                println("  ✓ Resolved: $(mod_info.source) ($(mod_info.julia_package))")
+                println("  Resolved: $(mod_info.source) ($(mod_info.julia_package))")
             else
                 @warn "Could not resolve dependency: $pkg_name (will need manual configuration)"
                 dependencies[pkg_name] = Dict(
@@ -794,7 +794,7 @@ function write_replibuild_config(cmake_project::CMakeProject, target_name::Strin
         TOML.print(io, config)
     end
 
-    println("✅ Generated replibuild.toml for target: $target_name")
+    println("Generated replibuild.toml for target: $target_name")
     return output_path
 end
 
@@ -822,9 +822,9 @@ Recursively replicate entire CMake build structure to RepliBuild.
 - Dictionary mapping directory paths to generated replibuild.toml content
 """
 function cmake_replicate(root_dir::String=pwd(); dry_run::Bool=false)
-    println("🔄 CMake → RepliBuild Replication")
+    println("CMake → RepliBuild Replication")
     println("="^70)
-    println("📁 Root: $root_dir")
+    println("Root: $root_dir")
     println()
 
     results = Dict{String,String}()
@@ -834,8 +834,8 @@ function cmake_replicate(root_dir::String=pwd(); dry_run::Bool=false)
 
     println()
     println("="^70)
-    println("✅ Replication complete!")
-    println("📊 Generated $(length(results)) replibuild.toml files")
+    println("Replication complete!")
+    println("Generated $(length(results)) replibuild.toml files")
 
     return results
 end
@@ -850,7 +850,7 @@ function _cmake_replicate_recursive!(results::Dict{String,String}, root_dir::Str
         return
     end
 
-    println("📄 Parsing: $(relpath(cmake_file, root_dir))")
+    println("Parsing: $(relpath(cmake_file, root_dir))")
 
     # Parse this directory's CMakeLists.txt
     project = parse_cmake_file(cmake_file)
@@ -871,7 +871,7 @@ function _cmake_replicate_recursive!(results::Dict{String,String}, root_dir::Str
                 open(toml_path, "w") do io
                     TOML.print(io, toml_content)
                 end
-                println("      ✓ Created: $(relpath(toml_path, root_dir))")
+                println("      Created: $(relpath(toml_path, root_dir))")
             end
 
             results[current_dir] = sprint(io -> TOML.print(io, toml_content))

@@ -77,52 +77,52 @@ Main discovery pipeline - scans project and generates configuration.
 - `RepliBuildConfig`: Complete project configuration
 """
 function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=false)
-    println("🔍 RepliBuild Discovery Pipeline")
+    println(" RepliBuild Discovery Pipeline")
     println("="^70)
-    println("📁 Target: $target_dir")
+    println(" Target: $target_dir")
 
     # SAFETY CHECK
     if !unsafe
         abs_target = abspath(target_dir)
         println("🔒 Safety: Scoped to $(abs_target) and subdirectories only")
     else
-        @warn "⚠️  UNSAFE MODE: Discovery safety checks bypassed!"
+        @warn "  UNSAFE MODE: Discovery safety checks bypassed!"
     end
     println()
 
     # Check if already configured
     config_path = joinpath(target_dir, "replibuild.toml")
     if isfile(config_path) && !force
-        println("⚠️  replibuild.toml already exists!")
+        println("  replibuild.toml already exists!")
         println("   Use discover(force=true) to regenerate")
         return ConfigurationManager.load_config(config_path)
     end
 
     # Stage 1: Scan files
-    println("📂 Stage 1: Scanning files...")
+    println(" Stage 1: Scanning files...")
     scan_results = scan_all_files(target_dir)
     print_scan_summary(scan_results)
 
     # Stage 2: Detect binaries
-    println("\n🔍 Stage 2: Detecting binaries...")
+    println("\n Stage 2: Detecting binaries...")
     binaries = detect_all_binaries(target_dir, scan_results)
     print_binary_summary(binaries)
 
     # Stage 3: Build include directories
-    println("\n📚 Stage 3: Building include paths...")
+    println("\n Stage 3: Building include paths...")
     include_dirs = build_include_dirs(target_dir, scan_results)
     println("   Found $(length(include_dirs)) include directories")
 
     # Stage 4: Walk AST dependencies
-    println("\n🌳 Stage 4: Walking AST dependencies...")
+    println("\n Stage 4: Walking AST dependencies...")
     dep_graph = walk_dependencies(target_dir, scan_results, include_dirs)
 
     # Stage 5: Generate configuration
-    println("\n📝 Stage 5: Generating replibuild.toml...")
+    println("\n Stage 5: Generating replibuild.toml...")
     config = generate_config(target_dir, scan_results, binaries, include_dirs, dep_graph)
 
     # Stage 6: Initialize toolchain
-    println("\n🔧 Stage 6: Initializing LLVM toolchain...")
+    println("\n Stage 6: Initializing LLVM toolchain...")
     LLVMEnvironment.init_toolchain(config=config)
 
     # Diagnostic output (config is immutable, values already set during generation)
@@ -140,9 +140,9 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     # Save config (writes TOML file)
     ConfigurationManager.save_config(config)
 
-    println("\n✅ Discovery complete!")
-    println("📄 Configuration: $config_path")
-    println("🚀 Next: julia -e 'using RepliBuild; RepliBuild.compile()'")
+    println("\n Discovery complete!")
+    println(" Configuration: $config_path")
+    println(" Next: julia -e 'using RepliBuild; RepliBuild.compile()'")
     println("="^70)
 
     return config
@@ -175,7 +175,7 @@ function scan_all_files(root_dir::String)
 
     abs_root = abspath(root_dir)
 
-    println("   🔒 Scanning scope: $abs_root")
+    println("   Scanning scope: $abs_root")
 
     for (root, dirs, files_list) in walkdir(root_dir, follow_symlinks=false)
         # SAFETY: Ensure we're still within project root
@@ -394,7 +394,7 @@ function walk_dependencies(root_dir::String, scan::ScanResults, include_dirs::Ve
     )
 
     if isempty(all_sources)
-        println("   ⚠️  No source files found")
+        println("     No source files found")
         return nothing
     end
 
@@ -539,7 +539,7 @@ end
 Print file scan summary.
 """
 function print_scan_summary(scan::ScanResults)
-    println("   📊 Scan Results:")
+    println("    Scan Results:")
     println("      C++ Sources:    $(length(scan.cpp_sources))")
     println("      C++ Headers:    $(length(scan.cpp_headers))")
     println("      C Sources:      $(length(scan.c_sources))")
@@ -558,15 +558,15 @@ Print binary detection summary.
 """
 function print_binary_summary(binaries::Vector{BinaryInfo})
     if isempty(binaries)
-        println("   📦 No binaries detected")
+        println("    No binaries detected")
         return
     end
 
-    println("   📦 Detected $(length(binaries)) binaries:")
+    println("    Detected $(length(binaries)) binaries:")
 
     for binary in binaries
         type_icon = binary.type == :executable ? "⚙️" :
-                   binary.type == :shared_lib ? "📚" : "📕"
+                   binary.type == :shared_lib ? "" : "📕"
         size_kb = round(binary.size / 1024, digits=1)
         println("      $type_icon $(binary.name) ($(binary.type), $(size_kb) KB)")
     end

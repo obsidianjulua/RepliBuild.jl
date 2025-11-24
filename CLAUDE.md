@@ -20,11 +20,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This three-way approach enables automatic C++ FFI without headers, for standard-layout types.
 
 **Current State (v1.1.0):**
-- ✅ DWARF extraction: base types, pointers, const, references, structs
-- ✅ Standard-layout struct support with member extraction
-- ✅ Function signature extraction (parameters and return types)
-- ✅ Validated on Eigen (20K+ type DIEs extracted)
-- ⚠️ **Supports only:** POD types, standard-layout structs, C functions
+-  DWARF extraction: base types, pointers, const, references, structs
+-  Standard-layout struct support with member extraction
+-  Function signature extraction (parameters and return types)
+-  Validated on Eigen (20K+ type DIEs extracted)
+-  **Supports only:** POD types, standard-layout structs, C functions
 
 **Correctness Boundary:**
 - **Guaranteed:** Types in DWARF that are standard-layout and trivially-copyable
@@ -130,24 +130,24 @@ Location: [Compiler.jl:475-900](src/Compiler.jl#L475-L900), function `extract_dw
 1. **Compile with debug info** (`-g` flag) - CRITICAL, this generates DWARF data
 2. **Extract DWARF using readelf** `--debug-dump=info` to get raw debug information
 3. **Parse DWARF tags** (the compiler's own type database):
-   - `DW_TAG_base_type` → int, double, bool, char (✅ Working)
-   - `DW_TAG_pointer_type` → T* (✅ Working)
-   - `DW_TAG_const_type` → const T (✅ Working)
-   - `DW_TAG_reference_type` → T& (✅ Working)
-   - `DW_TAG_structure_type` → struct definitions with members (✅ Working)
-   - `DW_TAG_class_type` → class definitions (✅ Detection works)
-   - `DW_TAG_subprogram` → function signatures (✅ Working)
-   - `DW_TAG_member` → struct/class member fields with offsets (✅ Working)
+   - `DW_TAG_base_type` → int, double, bool, char ( Working)
+   - `DW_TAG_pointer_type` → T* ( Working)
+   - `DW_TAG_const_type` → const T ( Working)
+   - `DW_TAG_reference_type` → T& ( Working)
+   - `DW_TAG_structure_type` → struct definitions with members ( Working)
+   - `DW_TAG_class_type` → class definitions ( Detection works)
+   - `DW_TAG_subprogram` → function signatures ( Working)
+   - `DW_TAG_member` → struct/class member fields with offsets ( Working)
 4. **Resolve type chains** - Follow offset references (e.g., const char* → pointer → const → base)
 5. **Map to Julia types** - Base types mapped, complex types in progress
 6. **Generate compilation_metadata.json** - Complete manifest for wrapper generation
 
 **Verified Working (struct_test example):**
-- ✅ Struct layout extraction: `Point { double x; double y; }` (standard-layout)
-- ✅ Function signatures: `create_point(double, double) -> Point`
-- ✅ Return type extraction via DWARF DIEs
-- ✅ Generated Julia struct with correct field types
-- ✅ Direct ccall with struct-by-value (x86_64 System V ABI)
+-  Struct layout extraction: `Point { double x; double y; }` (standard-layout)
+-  Function signatures: `create_point(double, double) -> Point`
+-  Return type extraction via DWARF DIEs
+-  Generated Julia struct with correct field types
+-  Direct ccall with struct-by-value (x86_64 System V ABI)
 
 **Assumptions:**
 - x86_64 Linux (System V ABI)
@@ -310,7 +310,7 @@ nm -gC --defined-only julia/libmylib.so
 ### Validated Examples
 
 **1. struct_test** ([examples/struct_test/](examples/struct_test/))
-- **Status:** ✅ WORKING
+- **Status:**  WORKING
 - **Tests:** Struct-by-value parameters, struct returns, basic arithmetic
 - **Verified:** Run this to confirm the system works:
 ```bash
@@ -323,7 +323,7 @@ julia -e 'include("julia/StructTest.jl"); using .StructTest;
 ```
 
 **2. Eigen Validation** (documented in [docs/EIGEN_VALIDATION.md](docs/EIGEN_VALIDATION.md))
-- **Status:** ✅ Type extraction successful (20,000+ types)
+- **Status:**  Type extraction successful (20,000+ types)
 - **Achievement:** Proves DWARF parsing scales to complex template-heavy codebases
 - **Note:** Full bindings generation is next phase
 
@@ -366,11 +366,11 @@ d = distance(p1, create_point(0.0, 0.0))
 - Module loading order documented and critical
 
 ### Current Capabilities (Verified)
-- ✅ DWARF extraction: base types, pointers, const, references, standard-layout structs
-- ✅ Struct layout extraction: members, types (for standard-layout types)
-- ✅ Function signature extraction: parameters and return types
-- ✅ Struct-by-value passing: works for trivially-copyable types
-- ✅ DWARF parsing scales: 20K+ DIEs from Eigen extracted
+-  DWARF extraction: base types, pointers, const, references, standard-layout structs
+-  Struct layout extraction: members, types (for standard-layout types)
+-  Function signature extraction: parameters and return types
+-  Struct-by-value passing: works for trivially-copyable types
+-  DWARF parsing scales: 20K+ DIEs from Eigen extracted
 
 ### Explicit Limitations (See LIMITATIONS.md)
 - ❌ Virtual methods, vtables, inheritance

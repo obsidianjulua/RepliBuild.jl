@@ -54,7 +54,7 @@ Discover all library targets in a multi-library workspace.
 WorkspaceGraph containing all targets and their build order
 """
 function discover_workspace(root_dir::String=".")
-    println("🔍 Discovering workspace structure...")
+    println(" Discovering workspace structure...")
     println("   Root: $root_dir")
 
     root_dir = abspath(root_dir)
@@ -204,7 +204,7 @@ Dict with:
 - `:build_order` - The computed build order levels
 """
 function build_workspace(root_dir::String="."; parallel::Bool=true)
-    println("🏗️  RepliBuild Workspace Build")
+    println("RepliBuild Workspace Build")
     println("="^70)
 
     # Discover workspace structure
@@ -216,7 +216,7 @@ function build_workspace(root_dir::String="."; parallel::Bool=true)
     end
 
     println()
-    println("🔨 Building $(length(workspace.targets)) targets...")
+    println("Building $(length(workspace.targets)) targets...")
     println()
 
     built_libraries = Dict{String,String}()
@@ -228,7 +228,7 @@ function build_workspace(root_dir::String="."; parallel::Bool=true)
             continue
         end
 
-        println("📦 Level $level_num: Building $(length(level_targets)) targets")
+        println(" Level $level_num: Building $(length(level_targets)) targets")
         println("   Targets: $(join(level_targets, ", "))")
 
         if parallel && length(level_targets) > 1
@@ -252,10 +252,10 @@ function build_workspace(root_dir::String="."; parallel::Bool=true)
                 if !isnothing(result)
                     if target.type == :library
                         built_libraries[target_name] = result
-                        println("      ✅ $target_name → $result")
+                        println("       $target_name → $result")
                     else
                         push!(built_executables, result)
-                        println("      ✅ $target_name (executable) → $result")
+                        println("       $target_name (executable) → $result")
                     end
                     target.built = true
                     target.output_file = result
@@ -272,10 +272,10 @@ function build_workspace(root_dir::String="."; parallel::Bool=true)
                 if !isnothing(result)
                     if target.type == :library
                         built_libraries[target_name] = result
-                        println("      ✅ $target_name → $result")
+                        println("       $target_name → $result")
                     else
                         push!(built_executables, result)
-                        println("      ✅ $target_name (executable) → $result")
+                        println("       $target_name (executable) → $result")
                     end
                     target.built = true
                     target.output_file = result
@@ -289,7 +289,7 @@ function build_workspace(root_dir::String="."; parallel::Bool=true)
     end
 
     println("="^70)
-    println("✅ Workspace build complete!")
+    println(" Workspace build complete!")
     println("   Libraries: $(length(built_libraries))")
     println("   Executables: $(length(built_executables))")
 
@@ -306,7 +306,7 @@ Build a single library target
 Returns the path to the built library (.so file) or nothing on failure
 """
 function build_single_target(target::LibraryTarget, built_libraries::Dict{String,String})
-    println("         🔨 Building $(target.name)...")
+    println("         Building $(target.name)...")
 
     # Change to target directory
     original_dir = pwd()

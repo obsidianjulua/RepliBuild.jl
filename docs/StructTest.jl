@@ -4,7 +4,7 @@
 # Library: libstruct_test.so
 # Metadata: compilation_metadata.json
 #
-# Type Safety: ✅ Perfect - Types extracted from compilation
+# Type Safety:  Perfect - Types extracted from compilation
 # Language: Language-agnostic (via LLVM IR)
 # Manual edits: None required
 
@@ -57,7 +57,7 @@ Wrapper for C++ function: `add_points(Point, Point)`
 
 # Metadata
 - Mangled symbol: `_Z10add_points5PointS_`
-- Type safety: ✅ From compilation
+- Type safety:  From compilation
 """
 
 function add_points(arg1::Point, arg2::Point)::Point
@@ -78,7 +78,7 @@ Wrapper for C++ function: `create_point(double, double)`
 
 # Metadata
 - Mangled symbol: `_Z12create_pointdd`
-- Type safety: ✅ From compilation
+- Type safety:  From compilation
 """
 
 function create_point(arg1::Cdouble, arg2::Cdouble)::Point
@@ -99,7 +99,7 @@ Wrapper for C++ function: `distance(Point, Point)`
 
 # Metadata
 - Mangled symbol: `_Z8distance5PointS_`
-- Type safety: ✅ From compilation
+- Type safety:  From compilation
 """
 
 function distance(arg1::Point, arg2::Point)::Cdouble

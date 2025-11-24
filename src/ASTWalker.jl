@@ -275,7 +275,7 @@ Build complete dependency graph for source files.
 """
 function build_dependency_graph(files::Vector{String}, include_dirs::Vector{String};
                                 use_clang::Bool=true, clang_path::String="")
-    println("🔍 Building dependency graph for $(length(files)) files...")
+    (" Building dependency graph for $(length(files)) files...")
 
     file_deps = Dict{String,FileDependencies}()
 
@@ -327,7 +327,7 @@ function build_dependency_graph(files::Vector{String}, include_dirs::Vector{Stri
     # Topological sort for compilation order
     compilation_order = topological_sort(include_graph)
 
-    println("   ✅ Dependency graph built:")
+    println("      Dependency graph built:")
     println("      Files analyzed: $(length(file_deps))")
     println("      Include relationships: $(sum(length(v) for v in values(include_graph)))")
 
@@ -418,7 +418,7 @@ function export_dependency_graph_json(graph::DependencyGraph, output_path::Strin
         JSON.print(f, data, 2)
     end
 
-    println("📝 Exported dependency graph: $output_path")
+    println("Exported dependency graph: $output_path")
 end
 
 """
@@ -481,7 +481,7 @@ function load_dependency_graph_json(json_path::String)
             compilation_order
         )
 
-        println("✅ Loaded dependency graph: $(length(files)) files, $(length(compilation_order)) in compilation order")
+        println("Loaded dependency graph: $(length(files)) files, $(length(compilation_order)) in compilation order")
         return graph
 
     catch e
@@ -511,26 +511,26 @@ function print_dependency_summary(graph::DependencyGraph)
 
     files_with_errors = count(d -> !isempty(d.parse_errors), values(graph.files))
 
-    println("\n📊 File Statistics:")
+    println("\n File Statistics:")
     println("   Total files:     $total_files")
     println("   Headers:         $header_count")
     println("   Sources:         $source_count")
     println("   With errors:     $files_with_errors")
 
-    println("\n📚 Dependency Statistics:")
+    println("\n Dependency Statistics:")
     println("   Total includes:  $total_includes")
     println("   Avg per file:    $(round(total_includes / max(total_files, 1), digits=1))")
 
-    println("\n🏗️  Structure Statistics:")
+    println("\n Structure Statistics:")
     println("   Namespaces:      $total_namespaces")
     println("   Classes:         $total_classes")
     println("   Functions:       $total_functions")
 
-    println("\n📋 Compilation Order:")
+    println("\n Compilation Order:")
     println("   $(length(graph.compilation_order)) files in dependency order")
 
     if files_with_errors > 0
-        println("\n⚠️  Errors:")
+        println("\n  Errors:")
         for (file, deps) in graph.files
             if !isempty(deps.parse_errors)
                 println("   ❌ $(basename(file)):")

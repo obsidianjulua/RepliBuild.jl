@@ -174,7 +174,7 @@ function create_default_config()
         TOML.print(io, config)
     end
 
-    println("📝 Created default config: $config_path")
+    println("Created default config: $config_path")
 end
 
 """
@@ -208,13 +208,13 @@ function initialize_directories(; verbose::Bool=true)
     create_default_config()
 
     if verbose && !isempty(newly_created)
-        println("🔧 Initialized RepliBuild directories:")
+        println("Initialized RepliBuild directories:")
         println("   Base: $base_dir")
         for dir in newly_created
             rel_path = relpath(dir, base_dir)
-            println("   📁 $rel_path")
+            println("    $rel_path")
         end
-        println("✅ RepliBuild ready")
+        println(" RepliBuild ready")
     end
 
     return base_dir
@@ -229,7 +229,7 @@ function ensure_initialized(; verbose::Bool=false)
 
     if !isdir(base_dir)
         if verbose
-            println("🔧 First-time setup: Initializing RepliBuild...")
+            println("First-time setup: Initializing RepliBuild...")
         end
         initialize_directories(verbose=verbose)
     end
@@ -281,7 +281,7 @@ function initialize_project_directories(project_root::String; verbose::Bool=true
     end
 
     if verbose && !isempty(newly_created)
-        println("📁 Initialized project RepliBuild directories:")
+        println(" Initialized project RepliBuild directories:")
         for dir in newly_created
             rel_path = relpath(dir, project_root)
             println("   $rel_path")
@@ -357,7 +357,7 @@ function set_config_value(key::String, value)
         TOML.print(io, config)
     end
 
-    println("✅ Config updated: $key = $value")
+    println(" Config updated: $key = $value")
 end
 
 """
@@ -370,7 +370,7 @@ function print_paths_info()
     println()
 
     base = get_replibuild_dir()
-    println("📁 Base directory: $base")
+    println(" Base directory: $base")
     println("   Exists: $(isdir(base))")
 
     if isdir(base)
@@ -379,7 +379,7 @@ function print_paths_info()
         modules_dir = joinpath(base, "modules")
 
         println()
-        println("📂 Subdirectories:")
+        println(" Subdirectories:")
         println("   Modules: $modules_dir")
         if isdir(modules_dir)
             n_modules = length(filter(f -> endswith(f, ".toml"), readdir(modules_dir)))
@@ -401,7 +401,7 @@ function print_paths_info()
     end
 
     println()
-    println("🔍 Module search paths:")
+    println(" Module search paths:")
     for (i, path) in enumerate(get_module_search_paths())
         exists = isdir(path)
         status = exists ? "✓" : "✗"
@@ -409,8 +409,8 @@ function print_paths_info()
     end
 
     println()
-    println("⚙️  Configuration: $(get_config_path())")
-    println("   Exists: $(isfile(get_config_path()))")
+    println("  Configuration: $(get_config_path())")
+    println("  Exists: $(isfile(get_config_path()))")
 
     println("="^70)
 end
@@ -428,7 +428,7 @@ function migrate_old_structure()
     end
 
     if isdir(new_dir)
-        println("⚠️  New directory already exists: $new_dir")
+        println("  New directory already exists: $new_dir")
         println("    Manual migration required")
         return false
     end
@@ -438,7 +438,7 @@ function migrate_old_structure()
     # Move entire directory
     try
         mv(old_dir, new_dir)
-        println("✅ Migration complete")
+        println(" Migration complete")
         println("   Old: $old_dir → New: $new_dir")
         return true
     catch e

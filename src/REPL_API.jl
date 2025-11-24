@@ -159,7 +159,7 @@ function rbuild_fast(sources; output::String="libproject.so",
     # Create library
     create_library(config, linked_ir, output)
 
-    println("✅ Built: $output")
+    println(" Built: $output")
     return output
 end
 
@@ -182,7 +182,7 @@ function rcompile(files...; flags::Vector{String}=["-std=c++17"])
 
     ir_files = compile_to_ir(config, source_files)
 
-    println("✅ Compiled $(length(ir_files)) files to IR")
+    println(" Compiled $(length(ir_files)) files to IR")
     return ir_files
 end
 
@@ -228,7 +228,7 @@ function rwrap(lib_path::String=""; tier::Symbol=:auto,
             error("No library found at $lib_path. Build project first with rbuild()")
         end
 
-        println("📦 Using: $lib_path")
+        println(" Using: $lib_path")
     end
 
     if !isfile(lib_path)
@@ -285,7 +285,7 @@ rparallel(false)   # Disable parallel builds
 """
 function rparallel(enabled::Bool=true)
     ENV["REPLIBUILD_PARALLEL"] = string(enabled)
-    println(enabled ? "✅ Parallel compilation enabled" : "⚠️  Parallel compilation disabled")
+    println(enabled ? " Parallel compilation enabled" : "  Parallel compilation disabled")
 end
 
 """
@@ -299,11 +299,11 @@ rthreads()  # Display thread count
 ```
 """
 function rthreads()
-    println("💻 Available threads: $(Threads.nthreads())")
+    println("Available threads: $(Threads.nthreads())")
     println("   CPU cores: $(Sys.CPU_THREADS)")
 
     if Threads.nthreads() == 1
-        println("⚠️  Running single-threaded. Start Julia with: julia --threads=auto")
+        println("  Running single-threaded. Start Julia with: julia --threads=auto")
     end
 
     return Threads.nthreads()
@@ -331,7 +331,7 @@ function rcache_status(path::String=".")
     # Count cached files
     ir_files = filter(f -> endswith(f, ".ll"), readdir(cache_dir, join=true))
 
-    println("📊 Build Cache Status")
+    println(" Build Cache Status")
     println("   Location: $cache_dir")
     println("   Cached IR files: $(length(ir_files))")
 
@@ -383,7 +383,7 @@ end
 
 function __init__()
     println("""
-    📦 RepliBuild REPL API loaded!
+     RepliBuild REPL API loaded!
 
     Quick commands:
       rbuild()      - Build project

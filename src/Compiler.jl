@@ -76,7 +76,7 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
     (output, exitcode) = BuildBridge.execute("clang++", cmd_args)
 
     if !isempty(output) && exitcode != 0
-        println("  ❌ $(basename(cpp_file)): $output")
+        println("  $(basename(cpp_file)): $output")
     end
 
     success = isfile(ir_file)
@@ -88,7 +88,7 @@ Compile multiple C++ files to LLVM IR (with parallel support).
 Returns vector of IR file paths.
 """
 function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
-    println("🔧 Compiling to LLVM IR...")
+    println("Compiling to LLVM IR...")
 
     if isempty(cpp_files)
         @warn "No source files to compile"
@@ -121,15 +121,15 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
     end
 
     if isempty(files_to_compile)
-        println("  ✅ All files cached, nothing to compile")
+        println("All files cached, nothing to compile")
         return ir_files
     end
 
-    println("  📝 Compiling $(length(files_to_compile)) files...")
+    println("Compiling $(length(files_to_compile)) files...")
 
     # Compile in parallel if enabled
     if is_parallel_enabled(config) && length(files_to_compile) > 1
-        println("  🔄 Using $(Threads.nthreads()) threads")
+        println("Using $(Threads.nthreads()) threads")
 
         results = Vector{Tuple{String,Bool,Int}}(undef, length(files_to_compile))
         Threads.@threads for i in 1:length(files_to_compile)
@@ -139,7 +139,7 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
         # Check for failures
         failures = [(file, res) for (file, res) in zip(files_to_compile, results) if !res[2]]
         if !isempty(failures)
-            println("  ❌ $(length(failures)) compilation failures")
+            println("  $(length(failures)) compilation failures")
             for (file, (_, _, exitcode)) in failures
                 println("     $(basename(file)) (exit: $exitcode)")
             end
@@ -166,7 +166,7 @@ Link multiple LLVM IR files and optimize.
 Returns path to linked IR file.
 """
 function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, output_name::String)
-    println("🔗 Linking and optimizing IR...")
+    println("Linking and optimizing IR...")
 
     if isempty(ir_files)
         error("No IR files to link")
@@ -187,12 +187,12 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         error("Linked IR file not created: $linked_ir")
     end
 
-    println("  ✅ Linked $(length(ir_files)) IR files → $(basename(linked_ir))")
+    println("Linked $(length(ir_files)) IR files → $(basename(linked_ir))")
 
     # Optimize if requested
     opt_level = config.link.optimization_level
     if opt_level != "0"
-        println("  🚀 Optimizing (O$opt_level)...")
+        println("Optimizing (O$opt_level)...")
 
         optimized_ir = joinpath(build_dir, output_name * "_opt.ll")
         opt_args = ["-S", "-O$opt_level"]
@@ -210,7 +210,7 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
             @warn "Optimization failed, using unoptimized IR: $output"
         elseif isfile(optimized_ir)
             linked_ir = optimized_ir
-            println("  ✅ Optimized")
+            println("Optimized")
         end
     end
 
@@ -226,7 +226,7 @@ Create shared library from LLVM IR.
 Returns path to library file.
 """
 function create_library(config::RepliBuildConfig, ir_file::String, lib_name::String="")
-    println("📦 Creating shared library...")
+    println("Creating shared library...")
 
     if !isfile(ir_file)
         error("IR file not found: $ir_file")
@@ -267,7 +267,7 @@ function create_library(config::RepliBuildConfig, ir_file::String, lib_name::Str
 
     # Get file size
     size_mb = round(filesize(lib_path) / 1024 / 1024, digits=2)
-    println("  ✅ Created: $lib_name ($size_mb MB)")
+    println("Created: $lib_name ($size_mb MB)")
 
     return lib_path
 end
@@ -279,7 +279,7 @@ Returns path to executable file.
 function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::String,
                           link_libraries::Vector{String}=String[],
                           lib_dirs::Vector{String}=String[])
-    println("🔨 Creating executable...")
+    println("Creating executable...")
 
     if !isfile(ir_file)
         error("IR file not found: $ir_file")
@@ -318,7 +318,7 @@ function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::
     chmod(exe_path, 0o755)
 
     size_kb = round(filesize(exe_path) / 1024, digits=1)
-    println("  ✅ Created: $exe_name ($size_kb KB)")
+    println("Created: $exe_name ($size_kb KB)")
 
     return exe_path
 end
@@ -333,10 +333,10 @@ This is the main entry point for building a project.
 """
 function compile_project(config::RepliBuildConfig)
     println("="^70)
-    println("🏗️  RepliBuild Compiler")
+    println("RepliBuild Compiler")
     println("="^70)
-    println("📦 Project: $(config.project.name)")
-    println("📁 Root:    $(config.project.root)")
+    println("Project: $(config.project.name)")
+    println("Root:    $(config.project.root)")
     println("="^70)
     println()
 
@@ -347,13 +347,13 @@ function compile_project(config::RepliBuildConfig)
 
     if isempty(cpp_files)
         @warn "No source files found in config"
-        println("💡 Run discover() first to find C++ sources")
+        println("Run discover() first to find C++ sources")
         return nothing
     end
 
-    println("📝 Source files: $(length(cpp_files))")
-    println("🔧 Compiler flags: $(join(get_compile_flags(config), " "))")
-    println("📂 Include dirs: $(length(get_include_dirs(config)))")
+    println("Source files: $(length(cpp_files))")
+    println("Compiler flags: $(join(get_compile_flags(config), " "))")
+    println("Include dirs: $(length(get_include_dirs(config)))")
     println()
 
     # Step 1: Compile C++ → IR
@@ -377,9 +377,9 @@ function compile_project(config::RepliBuildConfig)
 
     println()
     println("="^70)
-    println("✅ Build successful ($elapsed seconds)")
-    println("📦 Binary: $binary_path")
-    println("📝 Metadata: $metadata_path")
+    println("Build successful ($elapsed seconds)")
+    println("Binary: $binary_path")
+    println("Metadata: $metadata_path")
     println("="^70)
 
     return binary_path
@@ -635,7 +635,7 @@ Returns: (return_types_dict, struct_defs_dict)
   - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
 """
 function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}}
-    println("   🔍 Parsing DWARF debug info...")
+    println("Parsing DWARF debug info...")
 
     # Run readelf to get DWARF debug info
     (output, exitcode) = BuildBridge.execute("readelf", ["--debug-dump=info", binary_path])
@@ -875,8 +875,8 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
-    println("   📊 Types collected: $base_count base, $pointer_count pointer, $struct_count struct, $class_count class")
-    println("   📊 Struct/class members extracted: $total_members")
+    println("Types collected: $base_count base, $pointer_count pointer, $struct_count struct, $class_count class")
+    println("   Struct/class members extracted: $total_members")
 
     # Helper function to resolve type references (follows pointer/const/reference chains)
     function resolve_type(type_ref::String, type_refs::Dict, visited::Set{String}=Set{String}())::String
@@ -1057,9 +1057,9 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     end
 
     if !isempty(return_types)
-        println("   ✅ Extracted $(length(return_types)) return types from DWARF")
+        println("    Extracted $(length(return_types)) return types from DWARF")
     else
-        println("   ⚠️  No DWARF return type info found (compile with -g flag)")
+        println("     No DWARF return type info found (compile with -g flag)")
     end
 
     # Extract struct definitions with member information
@@ -1095,7 +1095,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     end
 
     if !isempty(struct_defs)
-        println("   ✅ Extracted $(length(struct_defs)) struct/class definitions with members")
+        println("    Extracted $(length(struct_defs)) struct/class definitions with members")
     end
 
     return (return_types, struct_defs)
@@ -1107,7 +1107,7 @@ This is the core of automatic wrapper generation!
 """
 function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
                                       binary_path::String)::Dict{String,Any}
-    println("📊 Extracting compilation metadata...")
+    println(" Extracting compilation metadata...")
 
     # Extract symbols from compiled binary
     symbols = extract_symbols_from_binary(binary_path)
@@ -1397,7 +1397,7 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
         JSON.print(io, metadata, 2)  # Pretty print with indent=2
     end
 
-    println("   ✅ Saved metadata: $metadata_path")
+    println("    Saved metadata: $metadata_path")
     return metadata_path
 end
 

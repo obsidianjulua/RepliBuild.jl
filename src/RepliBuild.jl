@@ -96,7 +96,7 @@ RepliBuild.discover(".", force=true)
 ```
 """
 function discover(path::String="."; force::Bool=false)
-    println("🔍 RepliBuild Discovery")
+    println(" RepliBuild Discovery")
     println("="^70)
     println("   Project: $path")
     println()
@@ -105,7 +105,7 @@ function discover(path::String="."; force::Bool=false)
 
     println()
     println("="^70)
-    println("✅ Discovery complete!")
+    println(" Discovery complete!")
 
     return result
 end
@@ -151,7 +151,7 @@ RepliBuild.build(parallel=false)
 ```
 """
 function build(path::String="."; parallel::Bool=true, clean_first::Bool=false)
-    println("🔨 RepliBuild - Build Orchestration")
+    println("RepliBuild - Build Orchestration")
     println("="^70)
     println("   Project: $path")
     println()
@@ -167,13 +167,13 @@ function build(path::String="."; parallel::Bool=true, clean_first::Bool=false)
 
     result = if !isempty(workspace_libs)
         # Multi-library workspace build
-        println("📦 Detected workspace with $(length(workspace_libs)) libraries")
+        println(" Detected workspace with $(length(workspace_libs)) libraries")
         println("   Libraries: $(join(workspace_libs, ", "))")
         println()
         WorkspaceBuilder.build_workspace(path, parallel=parallel)
     else
         # Single library/executable build
-        println("📦 Detected single library project")
+        println(" Detected single library project")
         println()
         build_single_project(path)
     end
@@ -182,7 +182,7 @@ function build(path::String="."; parallel::Bool=true, clean_first::Bool=false)
 
     println()
     println("="^70)
-    println("✅ Build complete! ($(round(build_time, digits=1))s)")
+    println(" Build complete! ($(round(build_time, digits=1))s)")
 
     result[:build_time] = build_time
     return result
@@ -216,7 +216,7 @@ RepliBuild.import_cmake(dry_run=true)
 ```
 """
 function import_cmake(path::String="."; dry_run::Bool=false)
-    println("📥 RepliBuild - CMake Import")
+    println("RepliBuild - CMake Import")
     println("="^70)
     println("   Project: $path")
     println()
@@ -225,7 +225,7 @@ function import_cmake(path::String="."; dry_run::Bool=false)
 
     println()
     println("="^70)
-    println("✅ Import complete!")
+    println(" Import complete!")
 
     return result
 end
@@ -252,7 +252,7 @@ RepliBuild.clean("/path/to/project")
 ```
 """
 function clean(path::String=".")
-    println("🧹 Cleaning build artifacts...")
+    println("Cleaning build artifacts...")
 
     dirs_to_remove = ["build", "julia", ".replibuild_cache"]
 
@@ -278,7 +278,7 @@ function clean(path::String=".")
         end
     end
 
-    println("   ✅ Clean complete!")
+    println("    Clean complete!")
     println()
 end
 
@@ -311,7 +311,7 @@ function info(path::String=".")
     if isfile(config_file)
         data = TOML.parsefile(config_file)
         project = get(data, "project", Dict())
-        println("📋 Configuration:")
+        println("Configuration:")
         println("   Name: $(get(project, "name", "unnamed"))")
         println("   Root: $(get(project, "root", path))")
         println()
@@ -325,7 +325,7 @@ function info(path::String=".")
             cache = TOML.parsefile(cache_file)
             discovery = get(cache, "discovery_results", Dict())
 
-            println("📊 Discovery Results:")
+            println(" Discovery Results:")
             files = get(discovery, "files", Dict())
             cpp_count = length(get(files, "cpp_sources", []))
             hdr_count = length(get(files, "cpp_headers", []))
@@ -347,7 +347,7 @@ function info(path::String=".")
     # Check for workspace
     workspace_libs = detect_workspace_structure(path)
     if !isempty(workspace_libs)
-        println("🏗️  Workspace Structure:")
+        println("   Workspace Structure:")
         println("   Type: Multi-library")
         println("   Libraries: $(length(workspace_libs))")
         for lib in workspace_libs
@@ -355,7 +355,7 @@ function info(path::String=".")
         end
         println()
     else
-        println("🏗️  Project Type: Single library")
+        println("   Project Type: Single library")
         println()
     end
 
@@ -366,8 +366,8 @@ function info(path::String=".")
         if isdir(ir_dir)
             ll_files = filter(f -> endswith(f, ".ll"), readdir(ir_dir))
             if !isempty(ll_files)
-                println("🔧 Build Artifacts:")
-                println("   LLVM IR files: $(length(ll_files))")
+                println("Build Artifacts:")
+                println("LLVM IR files: $(length(ll_files))")
             end
         end
     end

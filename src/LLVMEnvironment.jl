@@ -427,13 +427,13 @@ Initialize the LLVM toolchain.
 function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:auto)
     # Read from config struct first (source of truth), or auto-discover
     (llvm_root, toolchain_source) = if config !== nothing && !isempty(config.llvm.version)
-        println("🔧 Initializing LLVM Toolchain from Config")
+        println("Initializing LLVM Toolchain from Config")
         # Config has LLVM info - check if we can get root from somewhere
         # For now, just auto-discover since config.llvm doesn't store full root path
         (root, src) = get_llvm_root(config.llvm.toolchain)
         (root, String(config.llvm.toolchain))
     else
-        println("🔧 Initializing LLVM Toolchain (auto-discover)")
+        println("Initializing LLVM Toolchain (auto-discover)")
         (root, src) = get_llvm_root(source)
         (root, src)
     end
@@ -514,7 +514,7 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
         toolchain_source
     )
 
-    println("✅ LLVM Toolchain initialized")
+    println(" LLVM Toolchain initialized")
 
     return toolchain
 end
@@ -686,26 +686,26 @@ function print_toolchain_info()
     println()
     println("🎯 Source: $(toolchain.source)")
     println()
-    println("📁 Paths:")
+    println(" Paths:")
     println("   Root:       $(toolchain.root)")
     println("   Bin:        $(toolchain.bin_dir)")
     println("   Lib:        $(toolchain.lib_dir)")
     println("   Include:    $(toolchain.include_dir)")
     println()
-    println("📦 Version:")
+    println(" Version:")
     println("   $(toolchain.version)")
     println("   Major: $(toolchain.version_major)")
     println("   Minor: $(toolchain.version_minor)")
     println("   Patch: $(toolchain.version_patch)")
     println()
-    println("🔧 Tools: ($(length(toolchain.tools)) available)")
+    println("Tools: ($(length(toolchain.tools)) available)")
     for (name, path) in sort(collect(toolchain.tools))
         exists = isfile(path) || islink(path)
         status = exists ? "✓" : "✗"
         println("   $status $name")
     end
     println()
-    println("📚 Libraries: ($(length(toolchain.libraries)) available)")
+    println(" Libraries: ($(length(toolchain.libraries)) available)")
     count = 0
     for (name, path) in sort(collect(toolchain.libraries))
         if count < 10  # Limit output
@@ -719,14 +719,14 @@ function print_toolchain_info()
         println("   ... and $(length(toolchain.libraries) - 10) more")
     end
     println()
-    println("🌍 Environment Variables:")
+    println("Environment Variables:")
     for (key, value) in sort(collect(toolchain.env_vars))
         # Truncate long paths for display
         display_value = length(value) > 60 ? value[1:57] * "..." : value
         println("   $key = $display_value")
     end
     println()
-    println("🔒 Isolation: $(toolchain.isolated ? "Enabled" : "Disabled")")
+    println("Isolation: $(toolchain.isolated ? "Enabled" : "Disabled")")
     println("="^70)
 end
 
@@ -736,7 +736,7 @@ end
 Verify that the LLVM toolchain is properly installed and functional.
 """
 function verify_toolchain()
-    println("🔍 Verifying LLVM Toolchain...")
+    println(" Verifying LLVM Toolchain...")
 
     toolchain = get_toolchain()
     all_ok = true
@@ -746,7 +746,7 @@ function verify_toolchain()
 
     for tool in essential
         if has_tool(tool)
-            println("  ✅ $tool")
+            println("   $tool")
         else
             println("  ❌ $tool (missing)")
             all_ok = false
@@ -758,7 +758,7 @@ function verify_toolchain()
     (output, exitcode) = run_tool("clang++", ["--version"])
 
     if exitcode == 0
-        println("  ✅ clang++ is functional")
+        println("   clang++ is functional")
         println("     $(split(output, '\n')[1])")
     else
         println("  ❌ clang++ test failed")
@@ -766,11 +766,11 @@ function verify_toolchain()
     end
 
     # Test llvm-config
-    println("\n🧪 Testing llvm-config...")
+    println("\n Testing llvm-config...")
     (output, exitcode) = run_tool("llvm-config", ["--version"])
 
     if exitcode == 0
-        println("  ✅ llvm-config is functional")
+        println("   llvm-config is functional")
         println("     Version: $(strip(output))")
     else
         println("  ❌ llvm-config test failed")
@@ -778,7 +778,7 @@ function verify_toolchain()
     end
 
     if all_ok
-        println("\n✅ LLVM Toolchain verification PASSED")
+        println("\n LLVM Toolchain verification PASSED")
     else
         println("\n❌ LLVM Toolchain verification FAILED")
     end
