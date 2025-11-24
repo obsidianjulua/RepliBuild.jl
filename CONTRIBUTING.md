@@ -30,4 +30,4 @@ See full guidelines at: https://github.com/obsidianjulua/RepliBuild.jl/wiki/Cont
 
 ## License
 
-By contributing, you agree your contributions will be licensed under GPL-3.0.
+By contributing, you agree your contributions will be licensed under MIT.
