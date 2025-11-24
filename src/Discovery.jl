@@ -1,7 +1,5 @@
 #!/usr/bin/env julia
 # Discovery.jl - RepliBuild Discovery Pipeline
-# Orchestrates: file scanning, binary detection, AST dependency walking, config generation
-# Entry point: RepliBuild.discover() - called after Templates.jl plants the structure
 
 module Discovery
 

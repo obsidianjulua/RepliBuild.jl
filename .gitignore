@@ -35,6 +35,7 @@
 *.swo
 *~
 .DS_Store
+.claude
 
 # Test outputs
 /test/build/
