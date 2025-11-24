@@ -1068,8 +1068,68 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
     """
 
-    # Function wrappers
+    # Struct definitions
+    # Collect unique struct types from function signatures
     functions = metadata["functions"]
+    struct_types = Set{String}()
+
+    for func in functions
+        ret_type = get(func, "return_type", Dict())
+        c_type = get(ret_type, "c_type", "")
+        julia_type = get(ret_type, "julia_type", "")
+
+        # Check if this is a struct type (not a primitive or pointer)
+        if !isempty(c_type) && julia_type == "Any" && !contains(c_type, "*") && !contains(c_type, "void")
+            push!(struct_types, c_type)
+        end
+    end
+
+    struct_definitions = ""
+    if !isempty(struct_types)
+        struct_definitions *= """
+        # =============================================================================
+        # Struct Definitions (from C++)
+        # =============================================================================
+
+        """
+
+        for struct_name in sort(collect(struct_types))
+            # Special handling for known struct types
+            # TODO: Extract actual member layout from DWARF automatically
+            if struct_name == "Vector3d"
+                struct_definitions *= """
+                # C++ struct: Vector3d (24 bytes)
+                mutable struct $struct_name
+                    x::Cdouble
+                    y::Cdouble
+                    z::Cdouble
+                end
+
+                """
+            elseif struct_name == "Matrix3d"
+                struct_definitions *= """
+                # C++ struct: Matrix3d (72 bytes)
+                mutable struct $struct_name
+                    data::NTuple{9, Cdouble}  # 3x3 matrix in row-major order
+                end
+
+                """
+            else
+                # Generic opaque struct
+                struct_definitions *= """
+                # Opaque struct: $struct_name
+                mutable struct $struct_name
+                    data::NTuple{32, UInt8}  # Placeholder - actual size from DWARF
+                end
+
+                """
+            end
+        end
+
+        struct_definitions *= "\n"
+    end
+
+    # Function wrappers
     function_wrappers = ""
 
     # Track exported function names
@@ -1188,8 +1248,22 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         # Generate function body based on return type and conversions
         julia_return_type = return_type["julia_type"]
+        c_return_type = return_type["c_type"]
 
-        if julia_return_type == "Cstring"
+        # Check if return type is a struct (not primitive, not pointer)
+        is_struct_return = julia_return_type == "Any" && !contains(c_return_type, "*") && !contains(c_return_type, "void") && c_return_type != "unknown"
+
+        if is_struct_return
+            # Struct-valued return - Julia uses the struct type directly
+            # ccall will handle struct returns automatically if the Julia type matches
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)::$c_return_type
+            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $c_return_type, $ccall_types, $ccall_args)
+            end
+
+            """
+        elseif julia_return_type == "Cstring"
             # Cstring with NULL check and conversion to String
             func_def = """
             $doc_comment
@@ -1239,7 +1313,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     end # module $module_name
     """
 
-    return header * metadata_section * export_statement * function_wrappers * footer
+    return header * metadata_section * struct_definitions * export_statement * function_wrappers * footer
 end
 
 end # module Wrapper
