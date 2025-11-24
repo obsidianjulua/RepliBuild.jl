@@ -53,7 +53,7 @@
       "return_type": {
         "c_type": "Point",
         "size": 0,
-        "julia_type": "Any"
+        "julia_type": "Point"
       }
     },
     {
@@ -81,7 +81,7 @@
       "return_type": {
         "c_type": "Point",
         "size": 0,
-        "julia_type": "Any"
+        "julia_type": "Point"
       }
     },
     {
@@ -163,7 +163,7 @@
   },
   "metadata_version": "1.0",
   "include_dirs": [],
-  "timestamp": "2025-11-24T16:44:41.879",
+  "timestamp": "2025-11-24T16:55:00.674",
   "struct_definitions": {
     "Point": {
       "kind": "struct",

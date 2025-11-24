@@ -1017,7 +1017,14 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 c_type = resolve_type(type_ref, type_refs)
 
                 # Map to Julia type using comprehensive mapping
-                julia_type = dwarf_type_to_julia(c_type)
+                # Check if it's a struct/class type first
+                julia_type = if haskey(type_refs, type_ref) && isa(type_refs[type_ref], Dict) &&
+                               get(type_refs[type_ref], "kind", nothing) in ["struct", "class"]
+                    # It's a struct/class - use the struct name as the Julia type
+                    c_type
+                else
+                    dwarf_type_to_julia(c_type)
+                end
                 type_size = get_type_size(c_type)
 
                 # Use linkage name (C++) or fall back to function name (C)

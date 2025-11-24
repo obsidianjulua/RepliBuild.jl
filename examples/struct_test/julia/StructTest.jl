@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for struct_test
-# Generated: 2025-11-24 16:47:22
+# Generated: 2025-11-24 16:55:31
 # Generator: RepliBuild Wrapper (Tier 3: Introspective)
 # Library: libstruct_test.so
 # Metadata: compilation_metadata.json
@@ -27,7 +27,7 @@ const METADATA = Dict(
     "optimization" => "2",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 3,
-    "generated_at" => "2025-11-24T16:44:41.879"
+    "generated_at" => "2025-11-24T16:55:00.674"
 )
 
 # =============================================================================
@@ -44,7 +44,7 @@ end
 export add_points, create_point, distance
 
 """
-    add_points(arg1::Point, arg2::Point) -> Any
+    add_points(arg1::Point, arg2::Point) -> Point
 
 Wrapper for C++ function: `add_points(Point, Point)`
 
@@ -53,7 +53,7 @@ Wrapper for C++ function: `add_points(Point, Point)`
 - `arg2::Point`
 
 # Returns
-- `Any`
+- `Point`
 
 # Metadata
 - Mangled symbol: `_Z10add_points5PointS_`
@@ -61,11 +61,11 @@ Wrapper for C++ function: `add_points(Point, Point)`
 """
 
 function add_points(arg1::Point, arg2::Point)::Point
-    return ccall((:_Z10add_points5PointS_, LIBRARY_PATH), Point, (Point, Point,), arg1, arg2)
+    ccall((:_Z10add_points5PointS_, LIBRARY_PATH), Point, (Point, Point,), arg1, arg2)
 end
 
 """
-    create_point(arg1::Cdouble, arg2::Cdouble) -> Any
+    create_point(arg1::Cdouble, arg2::Cdouble) -> Point
 
 Wrapper for C++ function: `create_point(double, double)`
 
@@ -74,7 +74,7 @@ Wrapper for C++ function: `create_point(double, double)`
 - `arg2::Cdouble`
 
 # Returns
-- `Any`
+- `Point`
 
 # Metadata
 - Mangled symbol: `_Z12create_pointdd`
@@ -82,7 +82,7 @@ Wrapper for C++ function: `create_point(double, double)`
 """
 
 function create_point(arg1::Cdouble, arg2::Cdouble)::Point
-    return ccall((:_Z12create_pointdd, LIBRARY_PATH), Point, (Cdouble, Cdouble,), arg1, arg2)
+    ccall((:_Z12create_pointdd, LIBRARY_PATH), Point, (Cdouble, Cdouble,), arg1, arg2)
 end
 
 """
