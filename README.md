@@ -1,30 +1,36 @@
 # RepliBuild.jl
 
-**Revolutionary automatic FFI generation using DWARF debug information**
+**Automatic FFI generation using DWARF debug information**
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Julia](https://img.shields.io/badge/julia-%3E%3D1.9-blue)](https://julialang.org/)
-
-> **The only FFI tool that achieves 100% type accuracy automatically by reading what the compiler already knows.**
 
 ---
 
 ## What is RepliBuild?
 
-RepliBuild automatically generates type-safe Julia bindings for C++ libraries by extracting type information directly from DWARF debug data—the same information compilers use internally.
+RepliBuild generates Julia bindings for C/C++ libraries by extracting type information from DWARF debug data produced during compilation. It targets **standard-layout, trivially-copyable types** that appear in DWARF DIEs.
 
-**One command. Zero manual work. Perfect types.**
+**What it does:** Extracts types from compiled binaries, generates direct ccall wrappers.
+**What it doesn't do:** Virtual methods, inheritance, STL containers, non-standard-layout types.
 
 ```julia
 using RepliBuild
 RepliBuild.build("/path/to/cpp/project")
 ```
 
-That's it. You now have complete Julia bindings with:
-- ✅ 100% accurate types (from the compiler, not guessed)
-- ✅ Automatic safety wrappers (NULL checks, overflow protection)
-- ✅ Ergonomic Julia APIs (Integer → Cint with validation)
-- ✅ Full struct support (automatic layout extraction)
+**Supported:**
+- Standard-layout C structs
+- Trivially-copyable C++ structs
+- POD types
+- Functions taking/returning these types
+
+**Not supported:**
+- C++ classes with virtual methods
+- Inheritance
+- STL containers
+- Exception-throwing functions
+- Types optimized out of DWARF
 
 ---
 
@@ -74,103 +80,89 @@ v_sum = vec3_add(v1, v2)        # Vector3d(5.0, 7.0, 9.0)
 dot_product = vec3_dot(v1, v2)  # 32.0
 ```
 
-**No manual type annotations. No FFI boilerplate. Just works.**
-
 ---
 
-## Why RepliBuild?
+## Why Use DWARF?
 
-### The Problem with Existing Tools
+Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations (CxxWrap.jl). RepliBuild extracts type information from compiled binaries using DWARF debug data.
 
-**Header Parsing (Clang.jl, etc.):**
-- ❌ Fails on complex templates
-- ❌ Misses implicit conversions
-- ❌ ~70% accuracy at best
-- ❌ Requires build system integration
+**Advantages:**
+- No header parsing
+- No build system integration
+- Types as compiler sees them (post-instantiation)
 
-**Manual Wrapping (CxxWrap.jl, etc.):**
-- ❌ 1000s of lines of boilerplate per library
-- ❌ Error-prone and tedious
-- ❌ Maintenance nightmare
-- ❌ Doesn't scale
-
-### RepliBuild's Innovation
-
-**We read the DWARF debug information.**
-
-The compiler already solved type extraction when it compiled your C++. We just read what it wrote:
-- Struct layouts with exact member offsets
-- All template instantiations
-- Function signatures with perfect types
-- Everything needed for FFI
-
-**Result:** 100% accurate, fully automatic, zero boilerplate.
+**Limitations:**
+- Only types present in DWARF
+- Only standard-layout types supported
+- Requires `-g` compilation flag
+- ABI assumptions (Clang/GCC x86_64 Linux)
 
 ---
 
 ## Features
 
-### ✅ Automatic Type Extraction
-- Base types (int, double, bool, char)
-- Pointer types (T*, const T*)
-- Const-qualified types
-- Reference types (T&)
-- **Struct types** (full member layout)
-- **Class types** (including templates)
-- Return types and parameters
+### Type Extraction from DWARF
 
-### ✅ Smart Safety Wrappers
+**Supported (Working):**
+- Base types: int, double, bool, char, sized integers
+- Pointers: T*, const T*
+- Standard-layout structs with member layout
+- Function signatures (parameters and return types)
 
-**NULL Pointer Protection:**
+**Partially Supported:**
+- Template instantiations: Only those present in final DWARF (ODR-used)
+- Classes: Detection works, but only standard-layout, no virtual methods
+
+**Not Supported:**
+- Virtual methods, vtables, inheritance
+- STL containers (implementation-defined layouts)
+- Types optimized out under -O2/-O3
+- Exception specifications
+- Function pointers with unknown calling conventions
+
+### ✅ Direct, Zero-Overhead Bindings
+
+**Generated Julia code** (from examples/struct_test):
 ```julia
-# C++: const char* get_name()
-# Generated Julia:
-function get_name()::String
-    ptr = ccall((:get_name, LIB), Cstring, ())
-    if ptr == C_NULL
-        error("get_name returned NULL pointer")
-    end
-    return unsafe_string(ptr)
+# C++ struct automatically extracted
+mutable struct Point
+    x::Cdouble
+    y::Cdouble
 end
-```
 
-**Integer Overflow Protection:**
-```julia
-# C++: int add(int a, int b)
-# Generated Julia:
-function add(a::Integer, b::Integer)::Cint
-    a_c = Cint(a)  # Throws InexactError if a > typemax(Int32)
-    b_c = Cint(b)
-    return ccall((:add, LIB), Cint, (Cint, Cint), a_c, b_c)
+# Direct ccall - zero overhead
+function create_point(arg1::Cdouble, arg2::Cdouble)::Point
+    ccall((:_Z12create_pointdd, LIBRARY_PATH), Point,
+          (Cdouble, Cdouble,), arg1, arg2)
 end
 
 # Usage:
-add(5, 3)                 # ✅ Works
-add(2147483648, 0)        # ❌ InexactError (overflow)
+p = create_point(3.0, 4.0)  # ✅ Works, returns Point(3.0, 4.0)
 ```
 
-### ✅ Ergonomic Julia APIs
+**What you get:**
+- Direct ccall to C/C++ functions
+- Struct-by-value passing (for trivially-copyable types)
+- Zero runtime overhead
 
-**Natural integer types:**
-```julia
-is_prime(17)              # Not is_prime(Cint(17))
-multiply(1000000, 2)      # Works with Int64
-```
+**ABI Assumptions:**
+- x86_64 Linux ABI (System V)
+- Clang/GCC struct layout rules
+- No padding removal under LTO
+- DWARF matches actual compiled layout
 
-**String returns, not pointers:**
-```julia
-version = get_version()   # String, not Cstring
-```
+### Validation
 
-### ✅ Production Tested
+**Eigen Test:**
+- 20,000+ type DIEs extracted from compiled Eigen code
+- 14,769 class DIEs, 5,125 struct DIEs detected
+- DWARF parsing successful
 
-Validated on **Eigen** (one of the most complex C++ libraries):
-- 20,000+ types extracted
-- 14,769 class types (heavy templates)
-- 5,125 struct types
-- All handled automatically
+**Important:** Detection ≠ wrapping. Many Eigen types are not standard-layout and cannot be safely wrapped. The test validates DWARF parsing at scale, not FFI correctness for all types.
 
-**If it compiles, RepliBuild wraps it.**
+See [docs/EIGEN_VALIDATION.md](docs/EIGEN_VALIDATION.md) for details.
+
+**Correctness boundary:** RepliBuild can extract types present in DWARF. It can only safely wrap standard-layout, trivially-copyable types.
 
 ---
 
@@ -268,19 +260,20 @@ Check the `examples/` directory for complete working examples:
 
 ## How It Works
 
-### Traditional Approach (Broken)
 ```
-C++ Headers → Parser → AST → Type Guessing → ~70% Accuracy
-```
-
-### RepliBuild Approach (Revolutionary)
-```
-C++ Source → clang++ -g → DWARF → Extract Types → 100% Accuracy
+C++ Source → clang++ -g → DWARF DIEs → Extract → Validate → Julia ccall
 ```
 
-**Key Insight:** The compiler already solved type extraction. We just read the DWARF debug information it generates.
+**Pipeline:**
+1. Compile C++ with `-g` (generates DWARF debug info)
+2. Extract type DIEs using `readelf --debug-dump=info`
+3. Parse DW_TAG_structure_type, DW_TAG_subprogram, etc.
+4. Cross-validate with LLVM IR for ABI layout
+5. Generate Julia struct definitions and ccall wrappers
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical explanation.
+**Key limitation:** Can only extract types present in final DWARF. Unused template instantiations, optimized-out members, and inlined boundaries are absent.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for technical details and [LIMITATIONS.md](LIMITATIONS.md) for constraints.
 
 ---
 
@@ -288,14 +281,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical explanation.
 
 | Feature | RepliBuild | Clang.jl | CxxWrap.jl |
 |---------|------------|----------|------------|
+| **Approach** | DWARF extraction | Header parsing | Manual wrapping |
 | **Automatic** | ✅ Yes | ⚠️ Partial | ❌ No |
-| **Type Accuracy** | ✅ 100% | ⚠️ ~70% | ✅ 100% (manual) |
-| **Struct Typing** | ✅ Auto | ⚠️ Limited | ✅ Manual |
-| **Struct Members** | ✅ Auto | ⚠️ Limited | ✅ Manual |
-| **Template Support** | ✅ Full | ❌ Poor | ✅ Manual |
-| **Safety Wrappers** | ✅ Auto | ❌ None | ⚠️ Manual |
-| **User Code Required** | ✅ Zero | ⚠️ ~100s | ❌ ~1000s |
-| **Handles Eigen** | ✅ Yes (20K+ types) | ❌ No | ⚠️ Manually |
+| **Type Source** | ✅ Compiler DWARF | ⚠️ Source headers | ✅ Manual annotations |
+| **Struct Typing** | ✅ Auto from DWARF | ⚠️ Limited | ✅ Manual |
+| **Struct Members** | ✅ Auto extracted | ⚠️ Limited | ✅ Manual |
+| **Template Support** | ✅ All instantiations | ❌ Limited | ✅ Manual per instance |
+| **User Code Required** | ✅ Zero lines | ⚠️ ~100s lines | ❌ ~1000s lines |
+| **Handles Eigen** | ✅ Yes (20K+ types) | ❌ Struggles | ⚠️ Manual per function |
+| **Zero Overhead** | ✅ Direct ccall | ✅ Direct ccall | ⚠️ Depends on usage |
 
 ---
 
@@ -332,33 +326,38 @@ Works on:
 
 ## Language Support
 
-RepliBuild works with **any LLVM-compiled language:**
-- ✅ C++
-- ✅ C
-- ✅ Rust (via rustc/LLVM)
-- ✅ Swift
-- ✅ Fortran (flang)
+RepliBuild can extract DWARF from any LLVM-compiled language, but requires C-compatible ABI:
 
-If it compiles to LLVM with debug info, RepliBuild can wrap it.
+- **C:** Full support (C ABI is the target)
+- **C++:** POD types, standard-layout structs, extern "C" functions
+- **Rust:** Only `#[repr(C)]` types with `extern "C"` functions
+- **Swift:** Only `@convention(c)` functions with C-compatible types
+- **Fortran:** Only types with `BIND(C)` attribute
+
+**Critical:** DWARF presence ≠ ABI compatibility. Even if the type appears in DWARF, it must follow C ABI rules to be safely wrapped.
+
+See [LIMITATIONS.md](LIMITATIONS.md) for detailed requirements.
 
 ---
 
 ## Roadmap
 
-### Phase 7: Advanced Types
-- Enum support (DW_TAG_enumeration_type)
-- Array support (fixed and dynamic)
-- Function pointer support
+### Phase 7: Enums and Arrays
+- Enum support (DW_TAG_enumeration_type) - extractable
+- Fixed-size arrays - can wrap as NTuple
+- Function pointer support - limited (C function pointers only)
 
-### Phase 8: STL Integration
-- `std::vector` → `Vector{T}`
-- `std::string` → `String`
-- `std::map` → `Dict{K,V}`
+### Phase 8: Experimental STL (High Risk)
+**Warning:** STL container layouts are implementation-defined and ABI-unstable.
+- Vendor-specific layout extraction (libstdc++ vs libc++)
+- Version-pinned wrappers
+- Not recommended for production use
+- Alternative: Use C-compatible interface layer
 
-### Phase 9: Multi-Language
-- Python bindings generator
-- JavaScript/WASM bindings
-- Any language with FFI capability
+### Phase 9: Validation Tools
+- DWARF-IR cross-validator (detect layout mismatches)
+- ABI compatibility checker (compiler version drift)
+- Runtime layout verification (sizeof assertions)
 
 ---
 
@@ -396,10 +395,10 @@ If you use RepliBuild in research, please cite:
 
 ```bibtex
 @software{replibuild2024,
-  title = {RepliBuild: DWARF-Based Automatic FFI Generation},
-  author = {TODO: Add authors},
+  title = {RepliBuild: DWARF-Based Automatic FFI Generation for Julia},
+  author = {[Your Name/Organization]},
   year = {2024},
-  url = {https://github.com/TODO/RepliBuild.jl}
+  url = {https://github.com/[your-org]/RepliBuild.jl}
 }
 ```
 
@@ -407,21 +406,29 @@ If you use RepliBuild in research, please cite:
 
 ## Acknowledgments
 
-- Built using the [Claude Agent SDK](https://github.com/anthropics/claude-code)
 - Inspired by the need for better C++/Julia interoperability
+- DragonFFI for pioneering DWARF + IR approach for C
 - Validates on real-world libraries (Eigen, OpenCV, etc.)
+- Julia community for feedback on technical approach
 
 ---
 
-## Why This Matters
+## Technical Approach
 
-**Current state of FFI:** Fragmented, error-prone, doesn't scale.
+**Novel for Julia, rare for any language:** RepliBuild is the first Julia system (and one of the first in any language) to combine three metadata sources for automatic FFI generation:
 
-**RepliBuild's vision:** Universal FFI via DWARF. One approach that works for all languages.
+1. **DWARF debug information** (DW_TAG_* DIEs) - semantic type information from compilation
+2. **LLVM IR** - canonical ABI struct layouts and calling conventions
+3. **Symbol tables** (nm, readelf) - mangled/demangled function signatures
 
-This isn't just a tool. **It's a new paradigm for language interoperability.**
+**Why this matters:** Traditional FFI tools rely on a single source:
+- Header parsers (Clang.jl): Source AST only, limited by what's in headers
+- Manual wrappers (CxxWrap.jl): Developer annotations, doesn't scale
+- DragonFFI: DWARF + IR for C (pioneering work, but C-only)
 
-Join us in revolutionizing how languages talk to each other. 🚀
+RepliBuild extends the DWARF + IR approach to C++ with template support (instantiated templates), using three-way cross-validation for ABI correctness.
+
+**Constraint:** Limited to types present in DWARF that are standard-layout and trivially-copyable. See [LIMITATIONS.md](LIMITATIONS.md).
 
 ---
 
@@ -431,4 +438,4 @@ Join us in revolutionizing how languages talk to each other. 🚀
 - Discussions: Ask questions, share projects
 - Twitter: TODO - Announce releases, share updates
 
-**Built with ❤️ and a lot of DWARF debugging.**
+**Constraints:** See [LIMITATIONS.md](LIMITATIONS.md) for detailed correctness boundaries and rejection rules.
