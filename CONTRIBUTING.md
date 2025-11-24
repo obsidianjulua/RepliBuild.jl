@@ -21,12 +21,12 @@ Thank you for your interest in contributing! This project pioneers DWARF-based F
 ## Development Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/RepliBuild.jl
+git clone https://github.com/obsidianjulua/RepliBuild.jl
 cd RepliBuild.jl
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
 
-See full guidelines at: https://github.com/YOUR_REPO/RepliBuild.jl/wiki/Contributing
+See full guidelines at: https://github.com/obsidianjulua/RepliBuild.jl/wiki/Contributing
 
 ## License
 
