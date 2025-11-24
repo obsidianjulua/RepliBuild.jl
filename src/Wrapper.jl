@@ -1089,12 +1089,31 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             continue  # Constructor
         end
 
-        # Build parameter list
+        # Build parameter list with ergonomic types
         param_names = String[]
-        param_types = String[]
+        param_types = String[]  # C types for ccall
+        julia_param_types = String[]  # Julia types for function signature (may differ)
+        needs_conversion = Bool[]
+
         for (i, param) in enumerate(params)
             push!(param_names, param["name"])
-            push!(param_types, param["julia_type"])
+            c_type = param["julia_type"]
+            push!(param_types, c_type)
+
+            # Map C integer types to natural Julia types with range checking
+            if c_type == "Cint"  # Int32 in Julia
+                push!(julia_param_types, "Integer")  # Accept any Integer, will validate
+                push!(needs_conversion, true)
+            elseif c_type == "Clong"  # Platform-dependent
+                push!(julia_param_types, "Integer")
+                push!(needs_conversion, true)
+            elseif c_type == "Cshort"  # Int16
+                push!(julia_param_types, "Integer")
+                push!(needs_conversion, true)
+            else
+                push!(julia_param_types, c_type)
+                push!(needs_conversion, false)
+            end
         end
 
         # Julia function name (avoid conflicts and sanitize)
@@ -1111,8 +1130,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         julia_name = replace(julia_name, "," => "_")
         julia_name = replace(julia_name, " " => "_")
 
-        # Build function signature
-        param_sig = join(["$(name)::$(typ)" for (name, typ) in zip(param_names, param_types)], ", ")
+        # Build function signature using ergonomic Julia types
+        param_sig = join(["$(name)::$(typ)" for (name, typ) in zip(param_names, julia_param_types)], ", ")
 
         # Documentation
         doc_comment = ""
@@ -1136,8 +1155,30 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             """
         end
 
-        # Function definition
-        ccall_args = join(param_names, ", ")
+        # Build conversion logic for parameters
+        conversion_code = ""
+        ccall_param_names = String[]
+
+        for (i, (name, c_type, needs_conv)) in enumerate(zip(param_names, param_types, needs_conversion))
+            if needs_conv
+                converted_name = "$(name)_c"
+                push!(ccall_param_names, converted_name)
+
+                # Generate range-checked conversion
+                if c_type == "Cint"
+                    conversion_code *= "    $converted_name = Cint($name)  # Auto-converts with overflow check\n"
+                elseif c_type == "Clong"
+                    conversion_code *= "    $converted_name = Clong($name)\n"
+                elseif c_type == "Cshort"
+                    conversion_code *= "    $converted_name = Cshort($name)\n"
+                end
+            else
+                push!(ccall_param_names, name)
+            end
+        end
+
+        ccall_args = join(ccall_param_names, ", ")
+
         # ccall needs tuple expression (Type1, Type2) not Tuple{Type1, Type2}
         ccall_types = if isempty(param_types)
             "()"
@@ -1145,14 +1186,15 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             "($(join(param_types, ", ")),)"  # Note: trailing comma for single-element tuples
         end
 
-        # Special handling for Cstring returns - add safety wrapper
+        # Generate function body based on return type and conversions
         julia_return_type = return_type["julia_type"]
+
         if julia_return_type == "Cstring"
-            # Generate safe wrapper that converts Cstring -> String with NULL check
+            # Cstring with NULL check and conversion to String
             func_def = """
             $doc_comment
             function $julia_name($param_sig)::String
-                ptr = ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
+            $conversion_code    ptr = ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
                 if ptr == C_NULL
                     error("$julia_name returned NULL pointer")
                 end
@@ -1160,8 +1202,17 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             end
 
             """
+        elseif !isempty(conversion_code)
+            # Has parameter conversions
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)::$julia_return_type
+            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
+            end
+
+            """
         else
-            # Standard wrapper for non-Cstring returns
+            # Standard wrapper - no conversions needed
             func_def = """
             $doc_comment
             function $julia_name($param_sig)::$julia_return_type
