@@ -6,8 +6,7 @@ module CMakeParser
 
 using TOML
 
-# Import ModuleRegistry for external library resolution
-import ..ModuleRegistry
+# Note: ModuleRegistry was removed - external library resolution not yet implemented
 
 # ============================================================================
 # DATA STRUCTURES
@@ -680,10 +679,11 @@ function to_replibuild_config(cmake_project::CMakeProject, target_name::String="
         external_lib_dirs = String[]
 
         for pkg_name in cmake_project.find_packages
-            println("🔍 Resolving external dependency: $pkg_name")
+            println("🔍 External dependency detected: $pkg_name")
 
-            # Try to resolve via ModuleRegistry
-            mod_info = ModuleRegistry.resolve_module(pkg_name)
+            # TODO: ModuleRegistry was removed - implement external library resolution
+            # For now, just add as system library
+            mod_info = nothing  # ModuleRegistry.resolve_module(pkg_name) - removed
 
             if !isnothing(mod_info)
                 # Add to dependencies section

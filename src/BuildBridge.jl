@@ -6,28 +6,7 @@
 module BuildBridge
 
 # Import modules already loaded by RepliBuild.jl
-import ..ErrorLearning
 import ..LLVMEnvironment
-import ..UXHelpers
-using SQLite
-
-# Global ErrorDB instance (lazy initialization)
-const GLOBAL_ERROR_DB = Ref{Union{SQLite.DB,Nothing}}(nothing)
-
-"""
-Get or initialize the global error database
-"""
-function get_error_db(db_path::String="replibuild_errors.db")
-    if GLOBAL_ERROR_DB[] === nothing
-        # Ensure directory exists
-        db_dir = dirname(abspath(db_path))
-        if !isempty(db_dir) && !isdir(db_dir)
-            mkpath(db_dir)
-        end
-        GLOBAL_ERROR_DB[] = ErrorLearning.init_db(db_path)
-    end
-    return GLOBAL_ERROR_DB[]
-end
 
 # ============================================================================
 # SIMPLE COMMAND EXECUTION
@@ -238,97 +217,6 @@ function compile_with_analysis(command::String, args::Vector{String})
     return (output, exitcode, String[])
 end
 
-"""
-Execute compiler command with intelligent error correction (uses ErrorLearning)
-"""
-function compile_with_learning(command::String, args::Vector{String};
-                               max_retries::Int=3,
-                               confidence_threshold::Float64=0.70,
-                               db_path::String="replibuild_errors.db",
-                               project_path::String="",
-                               config_modifier::Union{Function,Nothing}=nothing)
-    db = get_error_db(db_path)
-    cmd_string = "$command $(join(args, " "))"
-    error_id = nothing
-
-    for attempt in 1:max_retries
-        output, exitcode = execute(command, args)
-
-        if exitcode == 0
-            # Record successful fix if this was a retry
-            if !isnothing(error_id) && attempt > 1
-                ErrorLearning.record_fix(db, error_id,
-                    "Retry successful after $(attempt-1) attempts",
-                    "retry", "automatic", true)
-            end
-            return (output, exitcode, attempt, String[])
-        end
-
-        # Compilation failed - record error
-        (error_id, pattern_name, description) = ErrorLearning.record_error(
-            db, cmd_string, output, project_path=project_path)
-
-        println("❌ Compilation Error (attempt $attempt/$max_retries)")
-        println("   Pattern: $pattern_name - $description")
-
-        # Get fix suggestions
-        suggested_fixes = ErrorLearning.suggest_fixes(db, output, project_path=project_path)
-
-        if isempty(suggested_fixes)
-            # Record that we found no fixes
-            ErrorLearning.record_fix(db, error_id, "No automatic fix available",
-                "none", "manual", false)
-
-            # Fallback to basic pattern matching
-            basic_suggestions = analyze_compiler_error(output)
-            return (output, exitcode, attempt, basic_suggestions)
-        end
-
-        # Try to apply the highest confidence fix
-        best_fix = suggested_fixes[1]
-        println("   💡 Suggested: $(best_fix["description"]) (confidence: $(round(best_fix["confidence"], digits=2)))")
-
-        if best_fix["confidence"] >= confidence_threshold && !isnothing(config_modifier)
-            println("   🔧 Attempting automatic fix...")
-
-            try
-                success = config_modifier(best_fix)
-
-                # Record fix attempt
-                ErrorLearning.record_fix(db, error_id,
-                    best_fix["description"],
-                    best_fix["action"],
-                    best_fix["type"],
-                    success)
-
-                if success
-                    println("   ✅ Fix applied, retrying...")
-                    continue
-                else
-                    println("   ⚠️  Fix could not be applied automatically")
-                end
-            catch e
-                println("   ❌ Error applying fix: $e")
-                ErrorLearning.record_fix(db, error_id, best_fix["description"],
-                    best_fix["action"], best_fix["type"], false)
-            end
-        end
-
-        # Return suggestions to user
-        suggestions = [
-            "$(best_fix["description"]) (confidence: $(round(best_fix["confidence"], digits=2)))"
-        ]
-
-        for (i, fix) in enumerate(suggested_fixes[2:min(3, length(suggested_fixes))])
-            push!(suggestions, "Alternative $i: $(fix["description"]) ($(round(fix["confidence"], digits=2)))")
-        end
-
-        return (output, exitcode, attempt, suggestions)
-    end
-
-    # Max retries exceeded
-    return (output, exitcode, max_retries, ["Max retry attempts exceeded"])
-end
 
 """
     throw_compilation_error(source_file::String, error_output::String, suggestions::Vector{String}=[])
@@ -348,33 +236,11 @@ function throw_compilation_error(source_file::String, error_output::String, sugg
         prepend!(solutions, suggestions)
     else
         push!(solutions, "Try adding -v to compiler flags for verbose output")
-        push!(solutions, "RepliBuild's error learning will auto-fix common issues on retry")
     end
 
-    throw(UXHelpers.HelpfulError(
-        "Compilation Failed",
-        "Failed to compile: $source_file",
-        solutions,
-        docs_link="https://github.com/user/RepliBuild.jl#troubleshooting",
-        original_error=ErrorException(error_output)
-    ))
+    error("Compilation failed for: $source_file\n$error_output\nSuggestions: $(join(solutions, "\n"))")
 end
 
-"""
-Export error log to Obsidian-friendly markdown
-"""
-function export_error_log(db_path::String="replibuild_errors.db", output_path::String="error_log.md")
-    db = get_error_db(db_path)
-    ErrorLearning.export_to_markdown(db, output_path)
-end
-
-"""
-Get error statistics
-"""
-function get_error_stats(db_path::String="replibuild_errors.db")
-    db = get_error_db(db_path)
-    return ErrorLearning.get_error_stats(db)
-end
 
 # ============================================================================
 # RETRY LOGIC
@@ -449,13 +315,7 @@ export
     # Compiler error handling
     analyze_compiler_error,
     compile_with_analysis,
-    compile_with_learning,
     throw_compilation_error,
-
-    # Error learning & database
-    get_error_db,
-    export_error_log,
-    get_error_stats,
 
     # Retry logic
     execute_with_retry,

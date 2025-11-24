@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
-# ConfigurationManager.jl - Unified TOML configuration management for RepliBuild
-# Single source of truth for all build stages and component data flow
-# All modules read/write through this manager to ensure consistency
+# ConfigurationManager.jl - Centralized immutable configuration for RepliBuild
+# Single source of truth for all build configuration
+# All TOML parsing happens here - other modules receive pre-parsed config
 
 module ConfigurationManager
 
@@ -9,858 +9,650 @@ using TOML
 using Dates
 using UUIDs
 
-# Import UXHelpers for better error messages
-import ..UXHelpers
+# =============================================================================
+# IMMUTABLE CONFIGURATION STRUCTS
+# =============================================================================
 
-"""
-Build stage definitions
-Each stage has its own section in the TOML for isolated data
-"""
-const BUILD_STAGES = [
-    :discovery,      # File scanning, dependency walking, AST parsing
-    :reorganize,     # File sorting and directory structure creation
-    :compile,        # C++ to LLVM IR compilation
-    :link,           # IR linking and optimization
-    :binary,         # Shared library creation
-    :symbols,        # Symbol extraction and analysis
-    :wrap,           # Julia wrapper generation
-    :test,           # Testing and verification
-]
+"""Nested struct for [project] section"""
+struct ProjectConfig
+    name::String
+    root::String
+    uuid::UUID
+end
 
-"""
-Configuration structure with stage-specific data
-"""
-mutable struct RepliBuildConfig
-    # Metadata
-    config_file::String
-    last_modified::DateTime
-    version::String
+"""Nested struct for [paths] section"""
+struct PathsConfig
+    source::String
+    include::String
+    output::String
+    build::String
+    cache::String
+end
 
-    # Project information
-    project_name::String
-    project_root::String
-    project_uuid::UUID
+"""Nested struct for [discovery] section"""
+struct DiscoveryConfig
+    enabled::Bool
+    walk_dependencies::Bool
+    max_depth::Int
+    ignore_patterns::Vector{String}
+    parse_ast::Bool
+end
 
-    # Stage: Discovery
-    discovery::Dict{String,Any}
+"""Nested struct for [compile] section"""
+struct CompileConfig
+    source_files::Vector{String}  # Can be empty (auto-discovered)
+    include_dirs::Vector{String}  # Can be empty (auto-discovered)
+    flags::Vector{String}
+    defines::Dict{String,String}
+    parallel::Bool
+end
 
-    # Stage: Reorganize
-    reorganize::Dict{String,Any}
+"""Nested struct for [link] section"""
+struct LinkConfig
+    optimization_level::String
+    enable_lto::Bool
+    link_libraries::Vector{String}
+end
 
-    # Stage: Compile
-    compile::Dict{String,Any}
+"""Nested struct for [binary] section"""
+struct BinaryConfig
+    type::Symbol  # :shared, :static, :executable
+    output_name::String  # Empty = auto from project.name
+    strip_symbols::Bool
+end
 
-    # Stage: Link
-    link::Dict{String,Any}
+"""Nested struct for [wrap] section"""
+struct WrapConfig
+    enabled::Bool
+    style::Symbol  # :clang, :basic, :none
+    module_name::String  # Empty = auto from project.name
+    use_clang_jl::Bool
+end
 
-    # Stage: Binary
-    binary::Dict{String,Any}
+"""Nested struct for [llvm] section"""
+struct LLVMConfig
+    toolchain::Symbol  # :auto, :system, :jll
+    version::String  # Empty = auto-detect
+end
 
-    # Stage: Symbols
-    symbols::Dict{String,Any}
+"""Nested struct for [workflow] section"""
+struct WorkflowConfig
+    stages::Vector{Symbol}
+end
 
-    # Stage: Wrap
-    wrap::Dict{String,Any}
-
-    # Stage: Test
-    test::Dict{String,Any}
-
-    # LLVM toolchain settings
-    llvm::Dict{String,Any}
-
-    # Target configuration
-    target::Dict{String,Any}
-
-    # Workflow settings
-    workflow::Dict{String,Any}
-
-    # Cache settings
-    cache::Dict{String,Any}
-
-    # Raw TOML data (for custom sections)
-    raw_data::Dict{String,Any}
+"""Nested struct for [cache] section"""
+struct CacheConfig
+    enabled::Bool
+    directory::String
 end
 
 """
-    load_config(config_file::String="replibuild.toml") -> RepliBuildConfig
-
-Load RepliBuild configuration from TOML file.
-Creates default if not exists.
+Main immutable configuration structure.
+All modules receive this struct - it's the single source of truth.
 """
-function load_config(config_file::String="replibuild.toml")
-    if !isfile(config_file)
-        println("📝 Creating default configuration: $config_file")
-        return create_default_config(config_file)
+struct RepliBuildConfig
+    # Nested configs
+    project::ProjectConfig
+    paths::PathsConfig
+    discovery::DiscoveryConfig
+    compile::CompileConfig
+    link::LinkConfig
+    binary::BinaryConfig
+    wrap::WrapConfig
+    llvm::LLVMConfig
+    workflow::WorkflowConfig
+    cache::CacheConfig
+
+    # Metadata
+    config_file::String
+    loaded_at::DateTime
+end
+
+# =============================================================================
+# TOML PARSING (Single place where TOML is read)
+# =============================================================================
+
+"""
+Load RepliBuildConfig from TOML file.
+This is the ONLY function that parses TOML - all other modules use this.
+"""
+function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
+    if !isfile(toml_path)
+        @warn "Config file not found: $toml_path - creating default"
+        return create_default_config(toml_path)
     end
 
-    data = TOML.parsefile(config_file)
+    data = TOML.parsefile(toml_path)
 
-    # Extract sections with defaults
-    project = get(data, "project", Dict())
-    discovery = get(data, "discovery", Dict())
-    reorganize = get(data, "reorganize", Dict())
-    compile = get(data, "compile", Dict())
-    link = get(data, "link", Dict())
-    binary = get(data, "binary", Dict())
-    symbols = get(data, "symbols", Dict())
-    wrap = get(data, "wrap", Dict())
-    test_section = get(data, "test", Dict())
-    llvm = get(data, "llvm", Dict())
-    target = get(data, "target", Dict())
-    workflow = get(data, "workflow", Dict())
-    cache = get(data, "cache", Dict())
+    # Validate required sections
+    validate_toml_data(data, toml_path)
 
-    # Extract project root from config file location
-    config_dir = dirname(abspath(config_file))
-
-    # Get or generate UUID
-    project_uuid = if haskey(project, "uuid")
-        UUID(project["uuid"])
-    else
-        uuid4()  # Generate new UUID if missing
-    end
-
+    # Parse each section with defaults
     config = RepliBuildConfig(
-        config_file,
-        now(),
-        get(data, "version", "0.1.0"),
-        get(project, "name", basename(config_dir)),
-        get(project, "root", config_dir),
-        project_uuid,
-        discovery,
-        reorganize,
-        compile,
-        link,
-        binary,
-        symbols,
-        wrap,
-        test_section,
-        llvm,
-        target,
-        workflow,
-        cache,
-        data
+        parse_project_config(data, toml_path),
+        parse_paths_config(data),
+        parse_discovery_config(data),
+        parse_compile_config(data),
+        parse_link_config(data),
+        parse_binary_config(data),
+        parse_wrap_config(data),
+        parse_llvm_config(data),
+        parse_workflow_config(data),
+        parse_cache_config(data),
+        toml_path,
+        now()
     )
 
-    # Load cached runtime data (tool paths, discovery results, etc.)
-    load_runtime_cache(config)
+    return config
+end
+
+"""Parse [project] section"""
+function parse_project_config(data::Dict, toml_path::String)::ProjectConfig
+    project = get(data, "project", Dict())
+
+    # Defaults
+    default_root = dirname(abspath(toml_path))
+    default_name = basename(default_root)
+
+    name = get(project, "name", default_name)
+    root = get(project, "root", default_root)
+
+    # Parse or generate UUID
+    uuid = if haskey(project, "uuid")
+        try
+            UUID(project["uuid"])
+        catch
+            @warn "Invalid UUID in config, generating new one"
+            uuid4()
+        end
+    else
+        uuid4()
+    end
+
+    return ProjectConfig(name, root, uuid)
+end
+
+"""Parse [paths] section"""
+function parse_paths_config(data::Dict)::PathsConfig
+    paths = get(data, "paths", Dict())
+
+    return PathsConfig(
+        get(paths, "source", "src"),
+        get(paths, "include", "include"),
+        get(paths, "output", "julia"),
+        get(paths, "build", "build"),
+        get(paths, "cache", ".replibuild_cache")
+    )
+end
+
+"""Parse [discovery] section"""
+function parse_discovery_config(data::Dict)::DiscoveryConfig
+    discovery = get(data, "discovery", Dict())
+
+    return DiscoveryConfig(
+        get(discovery, "enabled", true),
+        get(discovery, "walk_dependencies", true),
+        get(discovery, "max_depth", 10),
+        get(discovery, "ignore_patterns", ["build", ".git", ".cache"]),
+        get(discovery, "parse_ast", true)
+    )
+end
+
+"""Parse [compile] section"""
+function parse_compile_config(data::Dict)::CompileConfig
+    compile = get(data, "compile", Dict())
+
+    return CompileConfig(
+        get(compile, "source_files", String[]),
+        get(compile, "include_dirs", String[]),
+        get(compile, "flags", ["-std=c++17", "-fPIC"]),
+        get(compile, "defines", Dict{String,String}()),
+        get(compile, "parallel", true)
+    )
+end
+
+"""Parse [link] section"""
+function parse_link_config(data::Dict)::LinkConfig
+    link = get(data, "link", Dict())
+
+    return LinkConfig(
+        get(link, "optimization_level", "2"),
+        get(link, "enable_lto", false),
+        get(link, "link_libraries", String[])
+    )
+end
+
+"""Parse [binary] section"""
+function parse_binary_config(data::Dict)::BinaryConfig
+    binary = get(data, "binary", Dict())
+
+    # Parse type as symbol
+    type_str = get(binary, "type", "shared")
+    binary_type = Symbol(type_str)
+
+    # Validate type
+    if !(binary_type in [:shared, :static, :executable])
+        @warn "Invalid binary.type: $type_str, using :shared"
+        binary_type = :shared
+    end
+
+    return BinaryConfig(
+        binary_type,
+        get(binary, "output_name", ""),  # Empty = auto-generate
+        get(binary, "strip_symbols", false)
+    )
+end
+
+"""Parse [wrap] section"""
+function parse_wrap_config(data::Dict)::WrapConfig
+    wrap = get(data, "wrap", Dict())
+
+    # Parse style as symbol
+    style_str = get(wrap, "style", "clang")
+    wrap_style = Symbol(style_str)
+
+    # Validate style
+    if !(wrap_style in [:clang, :basic, :none])
+        @warn "Invalid wrap.style: $style_str, using :clang"
+        wrap_style = :clang
+    end
+
+    return WrapConfig(
+        get(wrap, "enabled", true),
+        wrap_style,
+        get(wrap, "module_name", ""),  # Empty = auto-generate
+        get(wrap, "use_clang_jl", true)
+    )
+end
+
+"""Parse [llvm] section"""
+function parse_llvm_config(data::Dict)::LLVMConfig
+    llvm = get(data, "llvm", Dict())
+
+    # Parse toolchain as symbol
+    toolchain_str = get(llvm, "toolchain", "auto")
+    toolchain = Symbol(toolchain_str)
+
+    # Validate toolchain
+    if !(toolchain in [:auto, :system, :jll])
+        @warn "Invalid llvm.toolchain: $toolchain_str, using :auto"
+        toolchain = :auto
+    end
+
+    return LLVMConfig(
+        toolchain,
+        get(llvm, "version", "")  # Empty = auto-detect
+    )
+end
+
+"""Parse [workflow] section"""
+function parse_workflow_config(data::Dict)::WorkflowConfig
+    workflow = get(data, "workflow", Dict())
+
+    # Parse stages as symbols
+    stages_raw = get(workflow, "stages", ["discover", "compile", "link", "binary", "wrap"])
+    stages = Symbol[Symbol(s) for s in stages_raw]
+
+    return WorkflowConfig(stages)
+end
+
+"""Parse [cache] section"""
+function parse_cache_config(data::Dict)::CacheConfig
+    cache = get(data, "cache", Dict())
+
+    return CacheConfig(
+        get(cache, "enabled", true),
+        get(cache, "directory", ".replibuild_cache")
+    )
+end
+
+"""Validate TOML data has minimum required fields"""
+function validate_toml_data(data::Dict, toml_path::String)
+    # Project name is the only truly required field
+    if !haskey(data, "project")
+        @warn "Missing [project] section in $toml_path"
+    elseif !haskey(data["project"], "name")
+        @warn "Missing project.name in $toml_path"
+    end
+end
+
+# =============================================================================
+# CONFIGURATION CREATION
+# =============================================================================
+
+"""
+Create a default configuration and save to file.
+"""
+function create_default_config(toml_path::String="replibuild.toml")::RepliBuildConfig
+    project_root = dirname(abspath(toml_path))
+    project_name = basename(project_root)
+
+    config = RepliBuildConfig(
+        ProjectConfig(project_name, project_root, uuid4()),
+        PathsConfig("src", "include", "julia", "build", ".replibuild_cache"),
+        DiscoveryConfig(true, true, 10, ["build", ".git", ".cache"], true),
+        CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true),
+        LinkConfig("2", false, String[]),
+        BinaryConfig(:shared, "", false),
+        WrapConfig(true, :clang, "", true),
+        LLVMConfig(:auto, ""),
+        WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
+        CacheConfig(true, ".replibuild_cache"),
+        toml_path,
+        now()
+    )
+
+    save_config(config)
+    println("✅ Created default configuration: $toml_path")
 
     return config
 end
 
 """
-    save_config(config::RepliBuildConfig)
-
-Save configuration back to TOML file.
-All component data flows back through this function.
-Only saves user-configurable settings - runtime data goes to cache.
+Save configuration to TOML file.
+Only saves user-configurable settings (not runtime data).
 """
 function save_config(config::RepliBuildConfig)
-    # Build TOML structure
     data = Dict{String,Any}()
 
-    # Metadata
-    data["version"] = config.version
-    data["last_updated"] = string(now())
-
-    # Project
+    # [project]
     data["project"] = Dict(
-        "name" => config.project_name,
-        "root" => config.project_root,
-        "uuid" => string(config.project_uuid)
+        "name" => config.project.name,
+        "root" => config.project.root,
+        "uuid" => string(config.project.uuid)
     )
 
-    # Stage-specific sections (only save USER-CONFIGURABLE settings)
-    # IMPORTANT: Don't serialize runtime discovery data or tool paths
-    if !isempty(config.discovery)
-        discovery_toml = Dict{String,Any}()
-        # Only save user settings, not runtime results
-        for key in ["enabled", "scan_recursive", "max_depth", "exclude_dirs",
-                    "follow_symlinks", "parse_ast", "walk_dependencies", "log_all_files"]
-            if haskey(config.discovery, key)
-                discovery_toml[key] = config.discovery[key]
-            end
-        end
-        if !isempty(discovery_toml)
-            data["discovery"] = discovery_toml
-        end
-    end
-    if !isempty(config.reorganize)
-        data["reorganize"] = config.reorganize
-    end
-    if !isempty(config.compile)
-        compile_toml = Dict{String,Any}()
-        # Only save user settings, not runtime results like source_files
-        for key in ["enabled", "output_dir", "flags", "include_dirs", "defines",
-                    "emit_ir", "emit_bc", "parallel"]
-            if haskey(config.compile, key)
-                compile_toml[key] = config.compile[key]
-            end
-        end
-        if !isempty(compile_toml)
-            data["compile"] = compile_toml
-        end
-    end
-    if !isempty(config.link)
-        data["link"] = config.link
-    end
-    if !isempty(config.binary)
-        data["binary"] = config.binary
-    end
-    if !isempty(config.symbols)
-        data["symbols"] = config.symbols
-    end
-    if !isempty(config.wrap)
-        data["wrap"] = config.wrap
-    end
-    if !isempty(config.test)
-        data["test"] = config.test
-    end
+    # [paths]
+    data["paths"] = Dict(
+        "source" => config.paths.source,
+        "include" => config.paths.include,
+        "output" => config.paths.output,
+        "build" => config.paths.build,
+        "cache" => config.paths.cache
+    )
 
-    # System sections - CLEAN versions (no runtime data)
-    if !isempty(config.llvm)
-        llvm_toml = Dict{String,Any}()
-        # Only save user-configurable LLVM settings, NOT discovered tool paths
-        for key in ["root", "source", "use_replibuild_llvm", "isolated"]
-            if haskey(config.llvm, key) && !isempty(string(config.llvm[key]))
-                llvm_toml[key] = config.llvm[key]
-            end
-        end
-        # Allow user-specified tool overrides (but not auto-discovered ones)
-        if haskey(config.llvm, "tools") && !isempty(config.llvm["tools"])
-            # Only save if tools were manually specified (have less than 10 entries)
-            # Auto-discovered toolchains have ~70+ tools
-            if length(config.llvm["tools"]) < 10
-                llvm_toml["tools"] = config.llvm["tools"]
-            end
-        end
-        if !isempty(llvm_toml)
-            data["llvm"] = llvm_toml
-        end
+    # [discovery]
+    data["discovery"] = Dict(
+        "enabled" => config.discovery.enabled,
+        "walk_dependencies" => config.discovery.walk_dependencies,
+        "max_depth" => config.discovery.max_depth,
+        "ignore_patterns" => config.discovery.ignore_patterns,
+        "parse_ast" => config.discovery.parse_ast
+    )
+
+    # [compile]
+    compile_dict = Dict(
+        "flags" => config.compile.flags,
+        "parallel" => config.compile.parallel
+    )
+    # Only save if non-empty
+    if !isempty(config.compile.source_files)
+        compile_dict["source_files"] = config.compile.source_files
     end
-    if !isempty(config.target)
-        data["target"] = config.target
+    if !isempty(config.compile.include_dirs)
+        compile_dict["include_dirs"] = config.compile.include_dirs
     end
-    if !isempty(config.workflow)
-        data["workflow"] = config.workflow
+    if !isempty(config.compile.defines)
+        compile_dict["defines"] = config.compile.defines
     end
-    if !isempty(config.cache)
-        data["cache"] = config.cache
+    data["compile"] = compile_dict
+
+    # [link]
+    link_dict = Dict(
+        "optimization_level" => config.link.optimization_level,
+        "enable_lto" => config.link.enable_lto
+    )
+    if !isempty(config.link.link_libraries)
+        link_dict["link_libraries"] = config.link.link_libraries
     end
+    data["link"] = link_dict
+
+    # [binary]
+    binary_dict = Dict(
+        "type" => string(config.binary.type),
+        "strip_symbols" => config.binary.strip_symbols
+    )
+    if !isempty(config.binary.output_name)
+        binary_dict["output_name"] = config.binary.output_name
+    end
+    data["binary"] = binary_dict
+
+    # [wrap]
+    wrap_dict = Dict(
+        "enabled" => config.wrap.enabled,
+        "style" => string(config.wrap.style),
+        "use_clang_jl" => config.wrap.use_clang_jl
+    )
+    if !isempty(config.wrap.module_name)
+        wrap_dict["module_name"] = config.wrap.module_name
+    end
+    data["wrap"] = wrap_dict
+
+    # [llvm]
+    llvm_dict = Dict(
+        "toolchain" => string(config.llvm.toolchain)
+    )
+    if !isempty(config.llvm.version)
+        llvm_dict["version"] = config.llvm.version
+    end
+    data["llvm"] = llvm_dict
+
+    # [workflow]
+    data["workflow"] = Dict(
+        "stages" => [string(s) for s in config.workflow.stages]
+    )
+
+    # [cache]
+    data["cache"] = Dict(
+        "enabled" => config.cache.enabled,
+        "directory" => config.cache.directory
+    )
 
     # Write to file
     open(config.config_file, "w") do io
         TOML.print(io, data)
     end
-
-    config.last_modified = now()
-
-    # Save runtime data to cache separately
-    save_runtime_cache(config)
 end
 
-"""
-    save_runtime_cache(config::RepliBuildConfig)
-
-Save runtime discovery data and tool paths to cache directory.
-This keeps replibuild.toml clean while caching expensive discovery results.
-"""
-function save_runtime_cache(config::RepliBuildConfig)
-    cache_dir = joinpath(config.project_root, get(config.cache, "directory", ".replibuild_cache"))
-    mkpath(cache_dir)
-
-    cache_data = Dict{String,Any}()
-
-    # Cache discovered tool paths
-    if haskey(config.llvm, "tools") && !isempty(config.llvm["tools"])
-        cache_data["llvm_tools"] = config.llvm["tools"]
-    end
-
-    # Cache discovery results (files, binaries, include_dirs)
-    if !isempty(config.discovery)
-        discovery_cache = Dict{String,Any}()
-        for key in ["completed", "timestamp", "files", "binaries", "include_dirs", "dependency_graph_file"]
-            if haskey(config.discovery, key)
-                discovery_cache[key] = config.discovery[key]
-            end
-        end
-        if !isempty(discovery_cache)
-            cache_data["discovery_results"] = discovery_cache
-        end
-    end
-
-    # Cache compile results (source files list)
-    if haskey(config.compile, "source_files") && !isempty(config.compile["source_files"])
-        cache_data["compile_sources"] = config.compile["source_files"]
-    end
-
-    # Write cache file
-    cache_file = joinpath(cache_dir, "build_cache.toml")
-    open(cache_file, "w") do io
-        TOML.print(io, cache_data)
-    end
-end
+# =============================================================================
+# CONFIGURATION HELPERS (Overrides and Merging)
+# =============================================================================
 
 """
-    load_runtime_cache(config::RepliBuildConfig)
-
-Load runtime data from cache if available.
+Merge compile flags into config (creates new config).
+Used for runtime overrides like: compile(sources, flags=["-O3"])
 """
-function load_runtime_cache(config::RepliBuildConfig)
-    cache_dir = joinpath(config.project_root, get(config.cache, "directory", ".replibuild_cache"))
-    cache_file = joinpath(cache_dir, "build_cache.toml")
+function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{String})::RepliBuildConfig
+    new_flags = vcat(config.compile.flags, additional_flags)
 
-    if !isfile(cache_file)
-        return
-    end
-
-    try
-        cache_data = TOML.parsefile(cache_file)
-
-        # Restore tool paths
-        if haskey(cache_data, "llvm_tools")
-            config.llvm["tools"] = cache_data["llvm_tools"]
-        end
-
-        # Restore discovery results
-        if haskey(cache_data, "discovery_results")
-            merge!(config.discovery, cache_data["discovery_results"])
-        end
-
-        # Restore compile sources
-        if haskey(cache_data, "compile_sources")
-            config.compile["source_files"] = cache_data["compile_sources"]
-        end
-    catch e
-        @warn "Failed to load runtime cache: $e"
-    end
-end
-
-"""
-    merge_config_section!(target::Dict, source::Dict)
-
-Smart merge that preserves existing data:
-- Arrays: append unique values
-- Dicts: recursively merge
-- Values: update only if different
-"""
-function merge_config_section!(target::Dict, source::Dict)
-    for (key, new_value) in source
-        if !haskey(target, key)
-            # New key - just add it
-            target[key] = new_value
-        else
-            existing_value = target[key]
-
-            # Smart merge based on type
-            if isa(existing_value, Vector) && isa(new_value, Vector)
-                # Append unique array elements
-                for item in new_value
-                    if !(item in existing_value)
-                        push!(existing_value, item)
-                    end
-                end
-            elseif isa(existing_value, Dict) && isa(new_value, Dict)
-                # Recursively merge dicts
-                merge_config_section!(existing_value, new_value)
-            else
-                # Scalar value - update
-                target[key] = new_value
-            end
-        end
-    end
-    return target
-end
-
-"""
-    create_default_config(config_file::String) -> RepliBuildConfig
-
-Create default RepliBuild configuration with all stages defined.
-"""
-function create_default_config(config_file::String)
-    project_name = basename(dirname(abspath(config_file)))
-    project_root = dirname(abspath(config_file))
-    project_uuid = uuid4()  # Generate new UUID for new project
-
-    config = RepliBuildConfig(
-        config_file,
-        now(),
-        "0.1.0",
-        project_name,
-        project_root,
-        project_uuid,
-        # Discovery stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "scan_recursive" => true,
-            "max_depth" => 10,
-            "exclude_dirs" => ["build", ".git", ".cache", "node_modules"],
-            "follow_symlinks" => false,
-            "parse_ast" => true,
-            "walk_dependencies" => true,
-            "log_all_files" => true
-        ),
-        # Reorganize stage
-        Dict{String,Any}(
-            "enabled" => false,  # Optional stage
-            "create_structure" => true,
-            "sort_by_type" => true,
-            "preserve_hierarchy" => false,
-            "target_structure" => Dict(
-                "cpp_sources" => "src",
-                "cpp_headers" => "include",
-                "c_sources" => "src",
-                "c_headers" => "include",
-                "julia_files" => "julia",
-                "config_files" => "config",
-                "docs" => "docs"
-            )
-        ),
-        # Compile stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "build/ir",
-            "flags" => ["-std=c++17", "-fPIC"],
-            "include_dirs" => String[],  # Populated by discovery
-            "defines" => Dict{String,String}(),
-            "emit_ir" => true,
-            "emit_bc" => false,
-            "parallel" => true
-        ),
-        # Link stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "build/linked",
-            "optimize" => true,
-            "opt_level" => "O2",
-            "opt_passes" => String[],  # Custom optimization passes
-            "lto" => false
-        ),
-        # Binary stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "julia",
-            "library_name" => "",  # Auto-generated from project name
-            "library_type" => "shared",  # shared, static
-            "link_libraries" => String[],
-            "rpath" => true
-        ),
-        # Symbols stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "method" => "nm",  # nm, objdump, llvm-nm
-            "demangle" => true,
-            "filter_internal" => true,
-            "export_list" => true
-        ),
-        # Wrap stage
-        Dict{String,Any}(
-            "enabled" => true,
-            "output_dir" => "julia",
-            "style" => "auto",  # auto, basic, advanced, clangjl
-            "module_name" => "",  # Auto-generated
-            "add_tests" => true,
-            "add_docs" => true,
-            "type_mappings" => Dict{String,String}()
-        ),
-        # Test stage
-        Dict{String,Any}(
-            "enabled" => false,
-            "test_dir" => "test",
-            "run_tests" => false
-        ),
-        # LLVM settings
-        Dict{String,Any}(
-            "use_replibuild_llvm" => true,
-            "isolated" => true
-        ),
-        # Target settings
-        Dict{String,Any}(
-            "triple" => "",
-            "cpu" => "generic",
-            "features" => String[]
-        ),
-        # Workflow
-        Dict{String,Any}(
-            "stages" => ["discovery", "compile", "link", "binary", "symbols", "wrap"],
-            "stop_on_error" => true,
-            "parallel_stages" => ["compile"]
-        ),
-        # Cache
-        Dict{String,Any}(
-            "enabled" => true,
-            "directory" => ".replibuild_cache",
-            "invalidate_on_change" => true
-        ),
-        # Raw data
-        Dict{String,Any}()
+    new_compile = CompileConfig(
+        config.compile.source_files,
+        config.compile.include_dirs,
+        new_flags,  # Updated
+        config.compile.defines,
+        config.compile.parallel
     )
 
-    save_config(config)
-    println("✅ Created default configuration: $config_file")
-
-    return config
+    return RepliBuildConfig(
+        config.project, config.paths, config.discovery,
+        new_compile,  # Updated
+        config.link, config.binary, config.wrap,
+        config.llvm, config.workflow, config.cache,
+        config.config_file, config.loaded_at
+    )
 end
 
 """
-    update_discovery_data(config::RepliBuildConfig, discovery_results::Dict)
-
-Update discovery stage with scan results.
-All discovered files, dependencies, and AST data flow here.
-Merges intelligently - appends arrays, updates values, preserves existing data.
+Update source files in config (creates new config).
+Used after discovery finds C++ sources.
 """
-function update_discovery_data(config::RepliBuildConfig, discovery_results::Dict)
-    merge_config_section!(config.discovery, discovery_results)
-    config.last_modified = now()
+function with_source_files(config::RepliBuildConfig, source_files::Vector{String})::RepliBuildConfig
+    new_compile = CompileConfig(
+        source_files,  # Updated
+        config.compile.include_dirs,
+        config.compile.flags,
+        config.compile.defines,
+        config.compile.parallel
+    )
+
+    return RepliBuildConfig(
+        config.project, config.paths, config.discovery,
+        new_compile,  # Updated
+        config.link, config.binary, config.wrap,
+        config.llvm, config.workflow, config.cache,
+        config.config_file, config.loaded_at
+    )
 end
 
 """
-    update_compile_data(config::RepliBuildConfig, compile_results::Dict)
-
-Update compile stage with IR generation results.
-Merges intelligently - appends arrays, updates values, preserves existing data.
+Update include directories in config (creates new config).
+Used after discovery finds include paths.
 """
-function update_compile_data(config::RepliBuildConfig, compile_results::Dict)
-    merge_config_section!(config.compile, compile_results)
-    config.last_modified = now()
+function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String})::RepliBuildConfig
+    new_compile = CompileConfig(
+        config.compile.source_files,
+        include_dirs,  # Updated
+        config.compile.flags,
+        config.compile.defines,
+        config.compile.parallel
+    )
+
+    return RepliBuildConfig(
+        config.project, config.paths, config.discovery,
+        new_compile,  # Updated
+        config.link, config.binary, config.wrap,
+        config.llvm, config.workflow, config.cache,
+        config.config_file, config.loaded_at
+    )
 end
 
 """
-    update_link_data(config::RepliBuildConfig, link_results::Dict)
-
-Update link stage with optimization and linking results.
-Merges intelligently - appends arrays, updates values, preserves existing data.
+Update both source files and include dirs (creates new config).
+Used after discovery completes.
 """
-function update_link_data(config::RepliBuildConfig, link_results::Dict)
-    merge_config_section!(config.link, link_results)
-    config.last_modified = now()
+function with_discovery_results(config::RepliBuildConfig;
+                                 source_files::Vector{String}=String[],
+                                 include_dirs::Vector{String}=String[])::RepliBuildConfig
+    new_compile = CompileConfig(
+        isempty(source_files) ? config.compile.source_files : source_files,
+        isempty(include_dirs) ? config.compile.include_dirs : include_dirs,
+        config.compile.flags,
+        config.compile.defines,
+        config.compile.parallel
+    )
+
+    return RepliBuildConfig(
+        config.project, config.paths, config.discovery,
+        new_compile,  # Updated
+        config.link, config.binary, config.wrap,
+        config.llvm, config.workflow, config.cache,
+        config.config_file, config.loaded_at
+    )
 end
 
-"""
-    update_binary_data(config::RepliBuildConfig, binary_results::Dict)
+# =============================================================================
+# ACCESSOR HELPERS
+# =============================================================================
 
-Update binary stage with shared library creation results.
-Merges intelligently - appends arrays, updates values, preserves existing data.
-"""
-function update_binary_data(config::RepliBuildConfig, binary_results::Dict)
-    merge_config_section!(config.binary, binary_results)
-    config.last_modified = now()
-end
+"""Get full output path (project_root + paths.output)"""
+get_output_path(c::RepliBuildConfig) = joinpath(c.project.root, c.paths.output)
 
-"""
-    update_symbols_data(config::RepliBuildConfig, symbol_results::Dict)
+"""Get full build path (project_root + paths.build)"""
+get_build_path(c::RepliBuildConfig) = joinpath(c.project.root, c.paths.build)
 
-Update symbols stage with extracted symbols and metadata.
-Merges intelligently - appends arrays, updates values, preserves existing data.
-"""
-function update_symbols_data(config::RepliBuildConfig, symbol_results::Dict)
-    merge_config_section!(config.symbols, symbol_results)
-    config.last_modified = now()
-end
+"""Get full cache path (project_root + cache.directory)"""
+get_cache_path(c::RepliBuildConfig) = joinpath(c.project.root, c.cache.directory)
 
-"""
-    update_wrap_data(config::RepliBuildConfig, wrap_results::Dict)
+"""Get library output name (uses config or auto-generates)"""
+function get_library_name(c::RepliBuildConfig)::String
+    if !isempty(c.binary.output_name)
+        return c.binary.output_name
+    end
 
-Update wrap stage with Julia binding generation results.
-Merges intelligently - appends arrays, updates values, preserves existing data.
-"""
-function update_wrap_data(config::RepliBuildConfig, wrap_results::Dict)
-    merge_config_section!(config.wrap, wrap_results)
-    config.last_modified = now()
-end
-
-"""
-    get_stage_config(config::RepliBuildConfig, stage::Symbol) -> Dict
-
-Get configuration for a specific build stage.
-"""
-function get_stage_config(config::RepliBuildConfig, stage::Symbol)
-    if stage == :discovery
-        return config.discovery
-    elseif stage == :reorganize
-        return config.reorganize
-    elseif stage == :compile
-        return config.compile
-    elseif stage == :link
-        return config.link
-    elseif stage == :binary
-        return config.binary
-    elseif stage == :symbols
-        return config.symbols
-    elseif stage == :wrap
-        return config.wrap
-    elseif stage == :test
-        return config.test
+    # Auto-generate: lib<project_name>.so
+    prefix = c.binary.type == :static ? "lib" : "lib"
+    suffix = if c.binary.type == :static
+        ".a"
+    elseif Sys.isapple()
+        ".dylib"
+    elseif Sys.iswindows()
+        ".dll"
     else
-        error("Unknown stage: $stage")
-    end
-end
-
-"""
-    is_stage_enabled(config::RepliBuildConfig, stage::Symbol) -> Bool
-
-Check if a build stage is enabled.
-"""
-function is_stage_enabled(config::RepliBuildConfig, stage::Symbol)
-    stage_config = get_stage_config(config, stage)
-    return get(stage_config, "enabled", false)
-end
-
-"""
-    get_include_dirs(config::RepliBuildConfig) -> Vector{String}
-
-Get include directories from discovery/compile stage.
-Centralized accessor to fix the include_dirs confusion.
-"""
-function get_include_dirs(config::RepliBuildConfig)
-    # Priority: discovery results > compile config
-    discovery_includes = get(config.discovery, "include_dirs", String[])
-    if !isempty(discovery_includes)
-        return discovery_includes
+        ".so"
     end
 
-    compile_includes = get(config.compile, "include_dirs", String[])
-    return compile_includes
+    return prefix * c.project.name * suffix
 end
 
-"""
-    set_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String})
-
-Set include directories (stored in discovery stage).
-"""
-function set_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String})
-    config.discovery["include_dirs"] = include_dirs
-    config.last_modified = now()
-end
-
-"""
-    get_source_files(config::RepliBuildConfig) -> Dict{String,Vector{String}}
-
-Get categorized source files from discovery stage.
-"""
-function get_source_files(config::RepliBuildConfig)
-    return get(config.discovery, "files", Dict{String,Vector{String}}())
-end
-
-"""
-    set_source_files(config::RepliBuildConfig, files::Dict{String,Vector{String}})
-
-Set categorized source files in discovery stage.
-"""
-function set_source_files(config::RepliBuildConfig, files::Dict{String,Vector{String}})
-    config.discovery["files"] = files
-    config.last_modified = now()
-end
-
-"""
-    get_dependency_graph(config::RepliBuildConfig) -> Dict
-
-Get dependency graph from discovery stage.
-"""
-function get_dependency_graph(config::RepliBuildConfig)
-    return get(config.discovery, "dependency_graph", Dict())
-end
-
-"""
-    set_dependency_graph(config::RepliBuildConfig, graph::Dict)
-
-Set dependency graph in discovery stage.
-"""
-function set_dependency_graph(config::RepliBuildConfig, graph::Dict)
-    config.discovery["dependency_graph"] = graph
-    config.last_modified = now()
-end
-
-"""
-    is_replibuild_project(path::String) -> Bool
-
-Check if directory is a RepliBuild project (has replibuild.toml).
-"""
-function is_replibuild_project(path::String)
-    return isfile(joinpath(path, "replibuild.toml"))
-end
-
-"""
-    get_project_uuid(path::String) -> Union{UUID,Nothing}
-
-Get UUID from replibuild.toml if it exists.
-"""
-function get_project_uuid(path::String)
-    config_path = joinpath(path, "replibuild.toml")
-    if !isfile(config_path)
-        return nothing
+"""Get wrapper module name (uses config or auto-generates)"""
+function get_module_name(c::RepliBuildConfig)::String
+    if !isempty(c.wrap.module_name)
+        return c.wrap.module_name
     end
 
-    try
-        data = TOML.parsefile(config_path)
-        project = get(data, "project", Dict())
-        if haskey(project, "uuid")
-            return UUID(project["uuid"])
-        end
-    catch
-    end
-
-    return nothing
+    # Auto-generate: CamelCase from project name
+    name = replace(c.project.name, r"[^a-zA-Z0-9]" => "_")
+    parts = split(name, "_")
+    return join([uppercasefirst(p) for p in parts if !isempty(p)], "")
 end
 
-"""
-    find_replibuild_projects(search_path::String=pwd(); max_depth::Int=3) -> Vector{Tuple{String,UUID,String}}
+"""Check if a stage is in the workflow"""
+is_stage_enabled(c::RepliBuildConfig, stage::Symbol) = stage in c.workflow.stages
 
-Recursively find all RepliBuild projects under search_path.
-Returns vector of (path, uuid, project_name) tuples.
-"""
-function find_replibuild_projects(search_path::String=pwd(); max_depth::Int=3)
-    projects = Tuple{String,UUID,String}[]
+"""Get all C++ source files (from config)"""
+get_source_files(c::RepliBuildConfig) = c.compile.source_files
 
-    function scan_dir(path::String, depth::Int)
-        if depth > max_depth
-            return
-        end
+"""Get all include directories (from config)"""
+get_include_dirs(c::RepliBuildConfig) = c.compile.include_dirs
 
-        # Check if current directory is a RepliBuild project
-        if is_replibuild_project(path)
-            uuid = get_project_uuid(path)
-            config = load_config(joinpath(path, "replibuild.toml"))
-            if !isnothing(uuid)
-                push!(projects, (path, uuid, config.project_name))
-            end
-        end
+"""Get compiler flags"""
+get_compile_flags(c::RepliBuildConfig) = c.compile.flags
 
-        # Scan subdirectories
-        try
-            for entry in readdir(path)
-                subpath = joinpath(path, entry)
-                if isdir(subpath) && !startswith(entry, ".") && entry != "build"
-                    scan_dir(subpath, depth + 1)
-                end
-            end
-        catch
-            # Permission denied or other error - skip
-        end
-    end
+"""Should run parallel compilation?"""
+is_parallel_enabled(c::RepliBuildConfig) = c.compile.parallel
 
-    scan_dir(search_path, 0)
-    return projects
-end
+"""Should use cache?"""
+is_cache_enabled(c::RepliBuildConfig) = c.cache.enabled
+
+# =============================================================================
+# VALIDATION
+# =============================================================================
 
 """
-    print_config_summary(config::RepliBuildConfig)
-
-Print summary of configuration.
+Validate configuration and return list of errors (empty if valid).
 """
-function print_config_summary(config::RepliBuildConfig)
-    println("="^70)
-    println("RepliBuild Configuration Summary")
-    println("="^70)
-    println()
-    println("📦 Project: $(config.project_name)")
-    println("🔑 UUID:    $(config.project_uuid)")
-    println("📁 Root:    $(config.project_root)")
-    println("📄 Config:  $(config.config_file)")
-    println("🕐 Updated: $(config.last_modified)")
-    println()
-    println("🔧 Build Stages:")
-
-    for stage in BUILD_STAGES
-        enabled = is_stage_enabled(config, stage)
-        status = enabled ? "✅" : "⬜"
-        println("   $status $(stage)")
-    end
-
-    println()
-    println("📊 Discovery Results:")
-    files = get_source_files(config)
-    if !isempty(files)
-        for (file_type, file_list) in files
-            println("   $(file_type): $(length(file_list)) files")
-        end
-    else
-        println("   No files discovered yet")
-    end
-
-    println()
-    println("📂 Include Directories:")
-    includes = get_include_dirs(config)
-    if !isempty(includes)
-        for dir in includes
-            println("   • $dir")
-        end
-    else
-        println("   None specified")
-    end
-
-    println("="^70)
-end
-
-"""
-    validate_config(config::RepliBuildConfig) -> Vector{String}
-
-Validate configuration and return a list of errors (empty if valid).
-"""
-function validate_config(config::RepliBuildConfig)
+function validate_config(config::RepliBuildConfig)::Vector{String}
     errors = String[]
 
-    # Check required fields
-    if isempty(config.project_name)
+    # Required fields
+    if isempty(config.project.name)
         push!(errors, "project.name cannot be empty")
     end
 
-    if !isdir(config.project_root)
-        push!(errors, "project.root must be a valid directory: $(config.project_root)")
+    if !isdir(config.project.root)
+        push!(errors, "project.root must exist: $(config.project.root)")
     end
 
-    # Validate paths exist and are within project
-    for stage in [:compile, :link, :binary, :wrap]
-        stage_config = getproperty(config, stage)
-        if haskey(stage_config, "output_dir")
-            outdir = stage_config["output_dir"]
-            if !isempty(outdir) && !startswith(abspath(outdir), abspath(config.project_root))
-                # Relative paths are ok
-                if !startswith(outdir, ".")
-                    push!(errors, "$stage.output_dir outside project root: $outdir")
-                end
-            end
-        end
+    # Validate binary type
+    if !(config.binary.type in [:shared, :static, :executable])
+        push!(errors, "binary.type must be :shared, :static, or :executable")
     end
 
-    # Validate compiler flags are reasonable
-    if haskey(config.compile, "flags")
-        flags = config.compile["flags"]
-        if !isa(flags, Vector)
-            push!(errors, "compile.flags must be a vector of strings")
-        else
-            for flag in flags
-                if !isa(flag, String)
-                    push!(errors, "compile.flags must contain only strings, got: $(typeof(flag))")
-                elseif startswith(flag, "-f") && contains(flag, "/")
-                    # Suspicious flag with path
-                    @warn "Suspicious compiler flag (contains path): $flag"
-                end
-            end
-        end
+    # Validate wrap style
+    if !(config.wrap.style in [:clang, :basic, :none])
+        push!(errors, "wrap.style must be :clang, :basic, or :none")
     end
 
-    # Validate include directories exist
-    if haskey(config.compile, "include_dirs")
-        for inc_dir in config.compile["include_dirs"]
-            if !isempty(inc_dir) && !startswith(inc_dir, ".")
-                abs_inc = isabspath(inc_dir) ? inc_dir : joinpath(config.project_root, inc_dir)
-                if !isdir(abs_inc)
-                    push!(errors, "Include directory does not exist: $inc_dir")
-                end
-            end
-        end
+    # Validate llvm toolchain
+    if !(config.llvm.toolchain in [:auto, :system, :jll])
+        push!(errors, "llvm.toolchain must be :auto, :system, or :jll")
     end
 
-    # Validate source files exist
-    if haskey(config.compile, "sources")
-        for src in config.compile["sources"]
-            if !isempty(src)
-                abs_src = isabspath(src) ? src : joinpath(config.project_root, src)
-                if !isfile(abs_src)
-                    push!(errors, "Source file does not exist: $src")
-                end
-            end
+    # Validate workflow stages
+    valid_stages = [:discover, :compile, :link, :binary, :wrap]
+    for stage in config.workflow.stages
+        if !(stage in valid_stages)
+            push!(errors, "Unknown workflow stage: $stage")
         end
     end
 
@@ -868,78 +660,62 @@ function validate_config(config::RepliBuildConfig)
 end
 
 """
-    validate_and_fix!(config::RepliBuildConfig)
-
-Validate configuration and attempt to fix common issues.
-Throws an error if validation fails and cannot be fixed.
+Validate config and throw error if invalid.
 """
-function validate_and_fix!(config::RepliBuildConfig)
+function validate_config!(config::RepliBuildConfig)
     errors = validate_config(config)
-
-    if isempty(errors)
-        return true
-    end
-
-    # Try to fix some common issues
-    fixed = String[]
-
-    # Ensure output directories are relative
-    for stage in [:compile, :link, :binary, :wrap]
-        stage_config = getproperty(config, stage)
-        if haskey(stage_config, "output_dir")
-            outdir = stage_config["output_dir"]
-            if !isempty(outdir) && !startswith(outdir, ".") && !startswith(abspath(outdir), abspath(config.project_root))
-                # Make it relative to build/
-                stage_config["output_dir"] = joinpath("build", String(stage))
-                push!(fixed, "Fixed $stage.output_dir to be within project")
-            end
-        end
-    end
-
-    # Re-validate after fixes
-    errors = validate_config(config)
-
     if !isempty(errors)
-        # Build comprehensive error message
-        error_details = "Found $(length(errors)) validation error(s):\n" * join(errors, "\n")
-        if !isempty(fixed)
-            error_details *= "\n\nFixed issues:\n" * join(fixed, "\n")
-        end
-
-        # Throw helpful error with solutions
-        throw(UXHelpers.HelpfulError(
-            "Configuration Validation Failed",
-            error_details,
-            [
-                "Review and fix the errors listed above in your replibuild.toml",
-                "Run ConfigurationManager.validate_config(config) to see specific issues",
-                "Use ConfigurationManager.create_default_config() to start fresh",
-                "Check the documentation for correct configuration format"
-            ],
-            docs_link="https://github.com/user/RepliBuild.jl#configuration"
-        ))
+        error("Configuration validation failed:\n" * join(errors, "\n"))
     end
-
-    if !isempty(fixed)
-        @info "Configuration fixes applied:\n" * join(fixed, "\n")
-    end
-
-    return true
 end
 
-# Exports
-export RepliBuildConfig, BUILD_STAGES,
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
+"""Print configuration summary"""
+function print_config(config::RepliBuildConfig)
+    println("="^70)
+    println("RepliBuild Configuration")
+    println("="^70)
+    println()
+    println("📦 Project:    $(config.project.name)")
+    println("🔑 UUID:       $(config.project.uuid)")
+    println("📁 Root:       $(config.project.root)")
+    println("📄 Config:     $(config.config_file)")
+    println("🕐 Loaded:     $(config.loaded_at)")
+    println()
+    println("🔧 Workflow:   $(join([string(s) for s in config.workflow.stages], " → "))")
+    println("🏗️  Binary:     $(config.binary.type)")
+    println("📝 Wrapper:    $(config.wrap.style)")
+    println("⚙️  LLVM:       $(config.llvm.toolchain)")
+    println("🔄 Parallel:   $(config.compile.parallel)")
+    println("💾 Cache:      $(config.cache.enabled)")
+    println()
+    println("📂 Paths:")
+    println("   Source:     $(config.paths.source)")
+    println("   Include:    $(config.paths.include)")
+    println("   Output:     $(config.paths.output)")
+    println("   Build:      $(config.paths.build)")
+    println("   Cache:      $(config.paths.cache)")
+    println("="^70)
+end
+
+# =============================================================================
+# EXPORTS
+# =============================================================================
+
+export RepliBuildConfig,
+       ProjectConfig, PathsConfig, DiscoveryConfig, CompileConfig,
+       LinkConfig, BinaryConfig, WrapConfig, LLVMConfig,
+       WorkflowConfig, CacheConfig,
        load_config, save_config, create_default_config,
-       save_runtime_cache, load_runtime_cache,
-       update_discovery_data, update_compile_data, update_link_data,
-       update_binary_data, update_symbols_data, update_wrap_data,
-       get_stage_config, is_stage_enabled,
-       get_include_dirs, set_include_dirs,
-       get_source_files, set_source_files,
-       get_dependency_graph, set_dependency_graph,
-       print_config_summary,
-       is_replibuild_project, get_project_uuid, find_replibuild_projects,
-       merge_config_section!,
-       validate_config, validate_and_fix!
+       merge_compile_flags, with_source_files, with_include_dirs, with_discovery_results,
+       get_output_path, get_build_path, get_cache_path,
+       get_library_name, get_module_name,
+       is_stage_enabled, get_source_files, get_include_dirs, get_compile_flags,
+       is_parallel_enabled, is_cache_enabled,
+       validate_config, validate_config!,
+       print_config
 
 end # module ConfigurationManager

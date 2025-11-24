@@ -422,6 +422,75 @@ function export_dependency_graph_json(graph::DependencyGraph, output_path::Strin
 end
 
 """
+    load_dependency_graph_json(json_path::String) -> Union{DependencyGraph, Nothing}
+
+Load dependency graph from JSON file previously exported.
+Returns nothing if file doesn't exist or is invalid.
+"""
+function load_dependency_graph_json(json_path::String)
+    if !isfile(json_path)
+        @warn "Dependency graph file not found: $json_path"
+        return nothing
+    end
+
+    try
+        data = JSON.parsefile(json_path)
+
+        # Reconstruct FileDependencies for each file
+        files = Dict{String,FileDependencies}()
+
+        if haskey(data, "files")
+            for (filepath, file_data) in data["files"]
+                deps = FileDependencies(
+                    filepath,
+                    Vector{String}(get(file_data, "includes", [])),
+                    Vector{String}(get(file_data, "resolved_includes", [])),
+                    Vector{String}(get(file_data, "symbols_defined", [])),
+                    Vector{String}(get(file_data, "symbols_used", [])),
+                    Vector{String}(get(file_data, "namespaces", [])),
+                    Vector{String}(get(file_data, "classes", [])),
+                    Vector{String}(get(file_data, "functions", [])),
+                    get(file_data, "is_header", false),
+                    Vector{String}(get(file_data, "errors", []))
+                )
+                files[filepath] = deps
+            end
+        end
+
+        # Reconstruct graphs
+        include_graph = Dict{String,Vector{String}}()
+        if haskey(data, "include_graph")
+            for (k, v) in data["include_graph"]
+                include_graph[String(k)] = Vector{String}(v)
+            end
+        end
+
+        reverse_graph = Dict{String,Vector{String}}()
+        if haskey(data, "reverse_graph")
+            for (k, v) in data["reverse_graph"]
+                reverse_graph[String(k)] = Vector{String}(v)
+            end
+        end
+
+        compilation_order = Vector{String}(get(data, "compilation_order", []))
+
+        graph = DependencyGraph(
+            files,
+            include_graph,
+            reverse_graph,
+            compilation_order
+        )
+
+        println("✅ Loaded dependency graph: $(length(files)) files, $(length(compilation_order)) in compilation order")
+        return graph
+
+    catch e
+        @warn "Failed to load dependency graph from $json_path" exception=e
+        return nothing
+    end
+end
+
+"""
     print_dependency_summary(graph::DependencyGraph)
 
 Print summary statistics of the dependency graph.
@@ -482,6 +551,7 @@ export FileDependencies, DependencyGraph,
        parse_source_structure,
        resolve_include_path,
        export_dependency_graph_json,
+       load_dependency_graph_json,
        print_dependency_summary
 
 end # module ASTWalker

@@ -1,0 +1,14 @@
+[project]
+name = "struct_test"
+root = "."
+uuid = "struct-test"
+
+[compile]
+source_files = ["simple_struct_test.cpp"]
+flags = ["-std=c++17", "-fPIC", "-O2", "-g"]
+
+[binary]
+type = "shared"
+
+[paths]
+output = "julia"
