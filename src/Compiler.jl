@@ -650,11 +650,24 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
 
     current_function = nothing
     current_linkage_name = nothing
-    type_refs = Dict{String,String}()  # offset => type_name
+    type_refs = Dict{String,Any}()  # offset => type_name (String) or type_info (Dict)
 
     # First pass: Build type reference table
+    # We need to handle: base types, pointer types, const types, reference types
+    offset_to_kind = Dict{String,Symbol}()  # Track what kind each offset is
+
     for line in split(output, '\n')
         line = strip(line)
+
+        # Track ANY tag to avoid attribute pollution
+        # Tags have format: <level><offset>: Abbrev Number: N (DW_TAG_*)
+        if contains(line, "DW_TAG_")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                tag_offset = "0x" * offset_match.captures[1]
+                type_refs["last_tag_offset"] = tag_offset  # Always update for ANY tag
+            end
+        end
 
         # Extract base type definitions (DW_TAG_base_type)
         # Example: <1><27>: Abbrev Number: 2 (DW_TAG_base_type)
@@ -663,25 +676,123 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
                 type_refs[current_type_offset] = "unknown"
+                offset_to_kind[current_type_offset] = :base
             end
         end
 
-        # Extract type name
+        # Extract pointer type definitions (DW_TAG_pointer_type)
+        # Example: <1><9f6>: Abbrev Number: 40 (DW_TAG_pointer_type)
+        #          <9f7>   DW_AT_type        : <0x41>
+        if contains(line, "DW_TAG_pointer_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "pointer", "target" => nothing)
+                offset_to_kind[current_type_offset] = :pointer
+            end
+        end
+
+        # Extract const type definitions (DW_TAG_const_type)
+        # Example: <1><41>: Abbrev Number: 5 (DW_TAG_const_type)
+        #          <42>   DW_AT_type        : <0x46>
+        if contains(line, "DW_TAG_const_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "const", "target" => nothing)
+                offset_to_kind[current_type_offset] = :const
+            end
+        end
+
+        # Extract reference type definitions (DW_TAG_reference_type)
+        if contains(line, "DW_TAG_reference_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "reference", "target" => nothing)
+                offset_to_kind[current_type_offset] = :reference
+            end
+        end
+
+        # Extract type name for base types (comes after the tag line)
         # Example: <28>   DW_AT_name        : (indexed string: 0x3): int
-        if contains(line, "DW_AT_name") && haskey(type_refs, get(type_refs, "last_offset", ""))
-            # Extract just the type name after the last colon
-            name_match = match(r":\s*([^:]+)\s*$", line)
-            if !isnothing(name_match)
-                type_name = strip(name_match.captures[1])
-                type_refs[type_refs["last_offset"]] = type_name
+        if contains(line, "DW_AT_name") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :base
+                # Extract just the type name after the last colon
+                name_match = match(r":\s*([^:]+)\s*$", line)
+                if !isnothing(name_match)
+                    type_name = String(strip(name_match.captures[1]))  # Convert SubString to String
+                    type_refs[tag_offset] = type_name
+                end
             end
         end
 
-        # Track last seen offset
-        offset_match = match(r"<\d+><([^>]+)>", line)
-        if !isnothing(offset_match)
-            type_refs["last_offset"] = "0x" * offset_match.captures[1]
+        # Extract DW_AT_type for pointer/const/reference types (what they point/refer to)
+        # Example: <9f7>   DW_AT_type        : <0x41>
+        if contains(line, "DW_AT_type") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference]
+                type_match = match(r"<(0x[^>]+)>", line)
+                if !isnothing(type_match)
+                    target_offset = String(type_match.captures[1])  # Convert SubString to String
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        type_refs[tag_offset]["target"] = target_offset
+                    end
+                end
+            end
         end
+    end
+
+    # Debug: Show type refs collected
+    base_count = count(v -> isa(v, String) && v != "unknown" && v != "last_offset" && v != "last_tag_offset", values(type_refs))
+    pointer_count = count(v -> isa(v, Dict) && get(v, "kind", "") == "pointer", values(type_refs))
+    println("   📊 Types collected: $base_count base, $pointer_count pointer")
+
+    # Helper function to resolve type references (follows pointer/const/reference chains)
+    function resolve_type(type_ref::String, type_refs::Dict, visited::Set{String}=Set{String}())::String
+        # Avoid infinite loops
+        if type_ref in visited
+            return "unknown"
+        end
+        push!(visited, type_ref)
+
+        if !haskey(type_refs, type_ref)
+            # Type not found in our table - likely a forward reference or external type
+            return "unknown"
+        end
+
+        type_info = type_refs[type_ref]
+
+        # Base type - just return the name
+        if isa(type_info, String)
+            return type_info
+        end
+
+        # Pointer/const/reference type - follow the chain
+        if isa(type_info, Dict)
+            kind = get(type_info, "kind", nothing)
+            target = get(type_info, "target", nothing)
+
+            if isnothing(target)
+                # Pointer/const/reference without target (shouldn't happen but handle it)
+                return kind == "pointer" ? "void*" : "unknown"
+            end
+
+            # Recursively resolve the target type
+            target_type = resolve_type(target, type_refs, visited)
+
+            # Build the full type string
+            if kind == "pointer"
+                return target_type * "*"
+            elseif kind == "const"
+                return "const " * target_type
+            elseif kind == "reference"
+                return target_type * "&"
+            end
+        end
+
+        return "unknown"
     end
 
     # Second pass: Extract function return types
@@ -747,7 +858,7 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         if contains(line, "DW_AT_name") && in_function_context && isnothing(current_function_name)
             name_match = match(r":\s*([^:]+)\s*$", line)
             if !isnothing(name_match)
-                current_function_name = strip(name_match.captures[1])
+                current_function_name = String(strip(name_match.captures[1]))  # Convert SubString to String
             end
         end
 
@@ -757,7 +868,7 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
             # Extract just the mangled name after the last colon
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
             if !isnothing(linkage_match)
-                current_function_linkage = strip(linkage_match.captures[1])
+                current_function_linkage = String(strip(linkage_match.captures[1]))  # Convert SubString to String
             end
         end
 
@@ -766,8 +877,9 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         if contains(line, "DW_AT_type") && in_function_context && !function_processed
             type_match = match(r"<(0x[^>]+)>", line)
             if !isnothing(type_match)
-                type_ref = type_match.captures[1]
-                c_type = get(type_refs, type_ref, "unknown")
+                type_ref = String(type_match.captures[1])  # Convert SubString to String
+                # Resolve the type reference (follows pointer/const/reference chains)
+                c_type = resolve_type(type_ref, type_refs)
 
                 # Map to Julia type using comprehensive mapping
                 julia_type = dwarf_type_to_julia(c_type)
