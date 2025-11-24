@@ -1,6 +1,13 @@
 # RepliBuild Architecture: DWARF-Based FFI Generation
 
+**Version:** 2.0.0
+**Status:** Production-ready
 **Novel Architecture:** Combines DWARF + LLVM IR + Symbol tables for automatic FFI generation targeting standard-layout types
+
+**Quick Links:**
+- [User Guide](docs/QUICKSTART.md) - How to use RepliBuild
+- [Examples](docs/examples/) - Real working examples
+- [API Reference](#module-structure-v20) - Current module structure
 
 ---
 
@@ -336,12 +343,217 @@ This is not just a tool. **This is a new paradigm for language interoperability.
 
 ---
 
+## Module Structure (v2.0)
+
+### User-Facing API (What You Actually Use)
+
+```julia
+# Setup (one time)
+RepliBuild.Discovery.discover()  # Auto-generate replibuild.toml
+RepliBuild.Discovery.discover(force=true)  # Force regenerate
+
+# Build & Wrap workflow
+RepliBuild.build()  # Compile C++ → library + extract metadata
+RepliBuild.wrap()   # Generate Julia wrapper
+
+# Utilities
+RepliBuild.info()   # Check project status
+RepliBuild.clean()  # Remove build artifacts
+```
+
+### Internal Modules (12 files)
+
+**Architecture Layers:**
+```
+src/
+├── RepliBuild.jl           # Main module - exports public API
+│
+├── Infrastructure (4 modules)
+│   ├── RepliBuildPaths.jl      # Path management
+│   ├── LLVMEnvironment.jl      # LLVM toolchain detection
+│   ├── ConfigurationManager.jl # Config (replibuild.toml) parsing
+│   └── BuildBridge.jl          # External command execution
+│
+├── Core Build (5 modules)
+│   ├── Discovery.jl            # Project scanning, config generation
+│   ├── ASTWalker.jl            # C++ dependency parsing
+│   ├── CMakeParser.jl          # CMake project import
+│   ├── Compiler.jl             # C++ → IR → binary + DWARF extraction ⭐
+│   └── ClangJLBridge.jl        # Clang.jl integration (headers)
+│
+└── Wrapper Generation (2 modules)
+    ├── Wrapper.jl              # Julia binding generation (3-tier system) ⭐
+    └── WorkspaceBuilder.jl     # Multi-library builds
+```
+
+**⭐ Core Innovation Modules:**
+- **Compiler.jl** - DWARF extraction, three-way validation
+- **Wrapper.jl** - Type-safe binding generation
+
+### Data Flow (v2.0)
+
+```
+User runs:
+  RepliBuild.Discovery.discover()
+        ↓
+  Creates: replibuild.toml
+        ↓
+  RepliBuild.build()
+        ↓
+  Discovery → finds C++ files
+  Compiler  → compiles with -g flag
+  DWARF     → extracts type info
+  LLVM IR   → verifies ABI layout
+  Symbols   → gets function names
+        ↓
+  Outputs:
+    - julia/libproject.so
+    - julia/compilation_metadata.json
+        ↓
+  RepliBuild.wrap()
+        ↓
+  Wrapper reads metadata
+  Generates Julia module
+        ↓
+  Output: julia/Project.jl
+```
+
+---
+
+## API Evolution
+
+### v1.x (Deprecated)
+- 50+ exported functions
+- Confusing workflow (rbuild, rwrap, rdiscover)
+- REPL_API module with shortcuts
+- Unclear what to call
+
+### v2.0 (Current)
+- 9 exports (4 functions + 4 modules + package name)
+- Clear workflow (Discovery.discover → build → wrap)
+- No REPL shortcuts
+- Crystal clear API
+
+**Breaking changes documented in:** [RELEASE_NOTES.md](RELEASE_NOTES.md)
+
+---
+
 ## Key Takeaways
 
 1. **Three-way validation** - DWARF + IR + symbols (to our knowledge, novel for C++)
-2. **Zero manual wrappers** - One command: `RepliBuild.build(".")`
+2. **Simple API** - 3 commands: `Discovery.discover()`, `build()`, `wrap()`
 3. **Scales to complex codebases** - Successfully extracts 20K+ DIEs from Eigen
 4. **Headerless extraction** - No source parsing, uses compilation artifacts
 5. **Standard-layout focus** - Correctness guaranteed for POD and trivially-copyable types
+6. **Production-ready** - 27 passing tests, comprehensive documentation
 
 **Constraint:** This approach works only for types present in DWARF that follow C ABI rules.
+
+---
+
+## Testing & Validation
+
+### Test Suite (v2.0)
+```julia
+# Run tests
+using Pkg
+Pkg.test("RepliBuild")
+```
+
+**Coverage:**
+- End-to-end C++ → Julia workflow (27 tests)
+- Real struct extraction
+- Type-safe wrapper generation
+- API correctness
+- Module loading
+
+**Example Test:**
+```julia
+# Creates temp C++ project
+# Compiles with RepliBuild.build()
+# Generates wrapper with RepliBuild.wrap()
+# Verifies wrapper is valid Julia code
+# ✓ All 27 tests pass
+```
+
+### Real-World Validation
+
+**Example:** [docs/examples/StructTest.jl](docs/examples/StructTest.jl)
+- Real generated wrapper (111 lines)
+- Extracted from actual C++ code
+- Complete with DWARF metadata
+- Proven to work
+
+**Try it:**
+```julia
+include("docs/examples/StructTest.jl")
+using .StructTest
+
+p1 = create_point(1.0, 2.0)
+p2 = create_point(4.0, 6.0)
+distance(p1, p2)  # 5.0 ✓
+```
+
+---
+
+## For Maintainers & Contributors
+
+### Code Organization
+- **src/RepliBuild.jl** - Main entry point, exports public API
+- **src/Compiler.jl:475-900** - DWARF extraction (core innovation)
+- **src/Wrapper.jl** - 3-tier wrapper generation system
+- **src/Discovery.jl** - Project scanning and config generation
+- **test/runtests.jl** - Complete test suite
+
+### Key Functions
+```julia
+# In Compiler.jl
+extract_dwarf_return_types()  # DWARF DIE traversal
+extract_symbols_from_binary() # Symbol table parsing
+save_compilation_metadata()   # Metadata serialization
+
+# In Wrapper.jl
+wrap_library()      # Main wrapper generator
+wrap_introspective() # Tier 3: metadata-rich wrappers
+detect_wrapper_tier() # Auto-select best tier
+
+# In Discovery.jl
+discover()  # Scan C++ project, generate config
+```
+
+### Adding Features
+
+**1. New DWARF type support:**
+   - Edit `Compiler.jl:extract_dwarf_return_types()`
+   - Add DW_TAG handling
+   - Update type mapping
+
+**2. New wrapper features:**
+   - Edit `Wrapper.jl`
+   - Modify tier 3 (introspective) generator
+   - Add to metadata
+
+**3. New language support:**
+   - Same DWARF approach works
+   - Add language-specific type mappings
+   - Keep validation logic
+
+### Documentation Structure
+```
+docs/
+├── QUICKSTART.md           - User guide
+├── REAL_OUTPUT.md          - Showcase real wrappers
+├── examples/               - Working tutorials
+│   ├── README.md
+│   ├── 01_simple_math.md
+│   ├── 02_structs_and_classes.md
+│   └── StructTest.jl       - Real generated output
+└── ARCHITECTURE.md         - This file
+
+Root:
+├── README.md               - Main page
+├── USAGE.md                - Complete usage
+├── LIMITATIONS.md          - Boundaries
+├── CHANGELOG.md            - Version history
+└── RELEASE_NOTES.md        - Breaking changes
+```

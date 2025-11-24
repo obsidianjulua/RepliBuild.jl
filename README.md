@@ -16,7 +16,17 @@ RepliBuild generates Julia bindings for C/C++ libraries by extracting type infor
 
 ```julia
 using RepliBuild
-RepliBuild.build("/path/to/cpp/project")
+
+# 0. First time? Create config
+RepliBuild.Discovery.discover()  # Auto-generates replibuild.toml
+
+# 1. Compile C++ → library
+RepliBuild.build()
+
+# 2. Generate Julia wrapper
+RepliBuild.wrap()
+
+# 3. Use your C++ functions from Julia!
 ```
 
 **Supported:**
@@ -79,6 +89,19 @@ v2 = vec3_create(4.0, 5.0, 6.0)
 v_sum = vec3_add(v1, v2)        # Vector3d(5.0, 7.0, 9.0)
 dot_product = vec3_dot(v1, v2)  # 32.0
 ```
+
+---
+
+## 📚 Examples & Documentation
+
+**See real, working examples:**
+- [docs/examples/](docs/examples/) - Complete examples with explanations
+- [docs/examples/StructTest.jl](docs/examples/StructTest.jl) - **Real generated wrapper** you can inspect
+
+**Quick links:**
+- [01_simple_math.md](docs/examples/01_simple_math.md) - Simplest usage (5 min)
+- [02_structs_and_classes.md](docs/examples/02_structs_and_classes.md) - DWARF extraction (10 min)
+- [USAGE.md](USAGE.md) - Complete usage guide
 
 ---
 

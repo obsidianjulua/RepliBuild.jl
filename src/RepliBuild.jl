@@ -28,8 +28,7 @@ include("Compiler.jl")      # New: replaces Bridge_LLVM
 include("Wrapper.jl")       # New: wrapper generation
 include("WorkspaceBuilder.jl")
 
-# REPL-friendly API
-include("REPL_API.jl")
+# REPL_API.jl removed in v2.0 - deprecated
 
 # Import submodules for internal use
 using .RepliBuildPaths
@@ -43,217 +42,205 @@ using .ClangJLBridge
 using .Compiler           # New module
 using .Wrapper            # New module
 using .WorkspaceBuilder
-using .REPL_API
 
 # ============================================================================
 # EXPORTS - Clean Build Orchestration API
 # ============================================================================
 
-# Core 5-function API
-export discover, build, import_cmake, clean, info
+# Core 3-function user API (THIS IS ALL YOU NEED)
+export build, wrap, info
 
-# Advanced modules (for power users)
-export ASTWalker, Discovery, CMakeParser, WorkspaceBuilder, LLVMEnvironment
+# Utility functions
+export clean
 
-# REPL API - re-export all convenience commands
-export REPL_API, rbuild, rdiscover, rclean, rinfo, rwrap,
-       rbuild_fast, rcompile, rparallel, rthreads, rcache_status
+# Advanced modules (for power users who know what they're doing)
+export Compiler, Wrapper, Discovery, ConfigurationManager
+
+# INTERNAL: Not for end users - these are deprecated/confusing
+# export discover, import_cmake, ASTWalker, CMakeParser, WorkspaceBuilder, LLVMEnvironment
+# export REPL_API, rbuild, rdiscover, rclean, rinfo, rwrap, rbuild_fast, rcompile, rparallel, rthreads, rcache_status
 
 # ============================================================================
 # PUBLIC API - Build Orchestration
 # ============================================================================
 
-"""
-    discover(path::String="."; force::Bool=false) -> Dict
-
-Analyze C++ project structure and generate dependency graph.
-
-# Process
-1. Scan for C++ source files (.cpp, .cc, .cxx)
-2. Parse #include directives and build dependency graph
-3. Detect include directories
-4. Find link libraries
-5. Cache results for incremental builds
-
-# Arguments
-- `path`: Project root directory (default: current directory)
-- `force`: Force re-discovery even if cache exists (default: false)
-
-# Returns
-Dictionary with:
-- `:source_files` - List of C++ source files
-- `:include_dirs` - Include directories
-- `:dependency_graph` - File dependency graph
-- `:build_order` - Topologically sorted compilation order
-
-# Examples
-```julia
-# Analyze current project
-RepliBuild.discover()
-
-# Force re-analysis
-RepliBuild.discover(".", force=true)
-```
-"""
+# Note: discover() is now INTERNAL ONLY - build() calls it automatically
 function discover(path::String="."; force::Bool=false)
-    println(" RepliBuild Discovery")
-    println("="^70)
-    println("   Project: $path")
-    println()
-
     result = Discovery.discover(path, force=force)
-
-    println()
-    println("="^70)
-    println(" Discovery complete!")
-
     return result
 end
 
 """
-    build(path::String="."; parallel::Bool=true, clean_first::Bool=false) -> Dict
+    build(path="."; clean=false)
 
-Build C++ project with intelligent orchestration.
+Compile C++ project → library (.so/.dylib/.dll)
 
-# Auto-Detection
-- Single library: Compile → Link → Generate .so
-- Multi-library workspace: Parallel compilation with dependency ordering
-- Uses cached dependency graph for optimal build order
+**What it does:**
+1. Compiles your C++ code to LLVM IR
+2. Links and optimizes IR
+3. Generates library file
+4. Extracts metadata (DWARF + symbols) for wrapping
 
-# Process
-1. Load cached discovery results
-2. Detect project structure (single/multi-library)
-3. Build with dependency-aware parallel compilation
-4. Link libraries and executables
-5. Return paths to built artifacts
+**What it does NOT do:**
+- Does NOT generate Julia wrappers (use `wrap()` for that)
 
 # Arguments
-- `path`: Project root directory (default: current directory)
-- `parallel`: Enable parallel compilation (default: true)
-- `clean_first`: Clean before building (default: false)
+- `path`: Project directory (default: ".")
+- `clean`: Clean before building (default: false)
 
 # Returns
-Dictionary with:
-- `:libraries` - Dict mapping library names to .so paths
-- `:executables` - List of executable paths
-- `:build_time` - Total build time in seconds
+Library path (String) or Dict with `:library` key
 
 # Examples
 ```julia
-# Build current project
+# Build C++ library
 RepliBuild.build()
 
-# Build with full rebuild
-RepliBuild.build(clean_first=true)
+# Clean build
+RepliBuild.build(clean=true)
 
-# Sequential build (no parallelism)
-RepliBuild.build(parallel=false)
+# Then generate Julia wrappers:
+RepliBuild.wrap()
 ```
 """
-function build(path::String="."; parallel::Bool=true, clean_first::Bool=false)
-    println("RepliBuild - Build Orchestration")
-    println("="^70)
-    println("   Project: $path")
-    println()
+function build(path::String="."; clean::Bool=false)
+    println("═"^70)
+    println(" RepliBuild - Compile C++")
+    println("═"^70)
 
-    start_time = time()
+    original_dir = pwd()
 
-    if clean_first
-        clean(path)
-    end
+    try
+        cd(path)
 
-    # Check if workspace (multi-library) or single library
-    workspace_libs = detect_workspace_structure(path)
+        if clean
+            clean_internal(path)
+        end
 
-    result = if !isempty(workspace_libs)
-        # Multi-library workspace build
-        println(" Detected workspace with $(length(workspace_libs)) libraries")
-        println("   Libraries: $(join(workspace_libs, ", "))")
+        # Load config
+        config = ConfigurationManager.load_config("replibuild.toml")
+
+        # Compile the project (C++ → IR → library + metadata)
+        library_path = Compiler.compile_project(config)
+
         println()
-        WorkspaceBuilder.build_workspace(path, parallel=parallel)
-    else
-        # Single library/executable build
-        println(" Detected single library project")
+        println("✓ Library: $library_path")
+        println("✓ Metadata saved")
         println()
-        build_single_project(path)
+        println("Next: RepliBuild.wrap() to generate Julia bindings")
+        println("═"^70)
+
+        return library_path
+
+    finally
+        cd(original_dir)
     end
-
-    build_time = time() - start_time
-
-    println()
-    println("="^70)
-    println(" Build complete! ($(round(build_time, digits=1))s)")
-
-    result[:build_time] = build_time
-    return result
 end
 
 """
-    import_cmake(path::String="."; dry_run::Bool=false) -> Dict
+    wrap(path="."; headers=String[])
 
-Import CMake project and generate replibuild.toml files.
+Generate Julia wrapper from compiled library
 
-# Process
-1. Parse CMakeLists.txt recursively
-2. Extract targets, dependencies, and build settings
-3. Generate replibuild.toml for each library
-4. Create workspace structure
+**What it does:**
+1. Loads metadata from build (DWARF + symbols)
+2. Generates Julia module with ccall wrappers
+3. Creates type definitions from C++ structs
+4. Saves to julia/ directory
+
+**Requirements:**
+- Must run `build()` first
+- Metadata must exist in julia/compilation_metadata.json
 
 # Arguments
-- `path`: Project root containing CMakeLists.txt (default: current directory)
-- `dry_run`: Preview without creating files (default: false)
+- `path`: Project directory (default: ".")
+- `headers`: C++ headers for advanced wrapping (optional)
 
 # Returns
-Dictionary mapping directories to generated configs
+Path to generated Julia wrapper file
 
 # Examples
 ```julia
-# Import CMake project
-RepliBuild.import_cmake()
+# Generate wrapper from metadata
+RepliBuild.wrap()
 
-# Preview without writing files
-RepliBuild.import_cmake(dry_run=true)
+# With headers for better type info
+RepliBuild.wrap(headers=["mylib.h"])
 ```
 """
-function import_cmake(path::String="."; dry_run::Bool=false)
-    println("RepliBuild - CMake Import")
-    println("="^70)
-    println("   Project: $path")
-    println()
+function wrap(path::String="."; headers::Vector{String}=String[])
+    println("═"^70)
+    println(" RepliBuild - Generate Julia Wrappers")
+    println("═"^70)
 
-    result = CMakeParser.cmake_replicate(path, dry_run=dry_run)
+    original_dir = pwd()
 
-    println()
-    println("="^70)
-    println(" Import complete!")
+    try
+        cd(path)
 
-    return result
+        # Load config
+        config = ConfigurationManager.load_config("replibuild.toml")
+
+        # Find library
+        output_dir = ConfigurationManager.get_output_path(config)
+        lib_name = ConfigurationManager.get_library_name(config)
+        library_path = joinpath(output_dir, lib_name)
+
+        if !isfile(library_path)
+            error("Library not found: $library_path\nRun RepliBuild.build() first!")
+        end
+
+        # Check for metadata
+        metadata_path = joinpath(output_dir, "compilation_metadata.json")
+        if !isfile(metadata_path)
+            @warn "No metadata found. Wrapper quality may be limited."
+        end
+
+        println(" Library: $(basename(library_path))")
+        println()
+
+        # Generate wrapper
+        wrapper_path = Wrapper.wrap_library(
+            config,
+            library_path,
+            headers=headers,
+            tier=nothing,  # Auto-detect
+            generate_tests=false,
+            generate_docs=true
+        )
+
+        println()
+        println("✓ Wrapper: $wrapper_path")
+        println()
+        println("Usage:")
+        module_name = ConfigurationManager.get_module_name(config)
+        println("  include(\"$wrapper_path\")")
+        println("  using .$module_name")
+        println("═"^70)
+
+        return wrapper_path
+
+    finally
+        cd(original_dir)
+    end
 end
 
 """
-    clean(path::String=".")
+    clean(path=".")
 
-Remove all build artifacts and caches.
-
-# Removes
-- build/ directory
-- julia/ directory (generated bindings)
-- .replibuild_cache/ directory
-- *.ll (LLVM IR files)
-- *.o (object files)
+Remove build artifacts (build/, julia/, caches)
 
 # Examples
 ```julia
-# Clean current project
 RepliBuild.clean()
-
-# Clean specific project
-RepliBuild.clean("/path/to/project")
 ```
 """
 function clean(path::String=".")
-    println("Cleaning build artifacts...")
+    clean_internal(path)
+end
 
+# Internal clean function
+function clean_internal(path::String)
     dirs_to_remove = ["build", "julia", ".replibuild_cache"]
 
     for dir in dirs_to_remove
@@ -263,202 +250,68 @@ function clean(path::String=".")
             println("   ✓ Removed $dir/")
         end
     end
-
-    # Also clean in subdirectories (workspace)
-    for entry in readdir(path)
-        entry_path = joinpath(path, entry)
-        if isdir(entry_path) && !startswith(entry, ".")
-            for dir in dirs_to_remove
-                subdir_path = joinpath(entry_path, dir)
-                if isdir(subdir_path)
-                    rm(subdir_path, recursive=true, force=true)
-                    println("   ✓ Removed $entry/$dir/")
-                end
-            end
-        end
-    end
-
-    println("    Clean complete!")
-    println()
 end
 
 """
-    info(path::String=".")
+    info(path=".")
 
-Display project build status and configuration.
-
-# Shows
-- Project structure (single/multi-library)
-- Cached discovery results
-- Build artifacts
-- Dependency graph statistics
-- Last build time
+Show project status (config, library, wrapper)
 
 # Examples
 ```julia
-# Show current project info
 RepliBuild.info()
 ```
 """
 function info(path::String=".")
-    println("ℹ️  RepliBuild - Project Information")
-    println("="^70)
-    println("   Project: $path")
+    println("═"^70)
+    println(" RepliBuild - Project Info")
+    println("═"^70)
+
+    # Load config
+    config_file = joinpath(path, "replibuild.toml")
+    if !isfile(config_file)
+        println("❌ No replibuild.toml found")
+        println("   Create one with RepliBuild.Discovery.discover()")
+        println("═"^70)
+        return
+    end
+
+    data = TOML.parsefile(config_file)
+    project = get(data, "project", Dict())
+
+    println("Project: $(get(project, "name", "unnamed"))")
     println()
 
-    # Load config if exists
-    config_file = joinpath(path, "replibuild.toml")
-    if isfile(config_file)
-        data = TOML.parsefile(config_file)
-        project = get(data, "project", Dict())
-        println("Configuration:")
-        println("   Name: $(get(project, "name", "unnamed"))")
-        println("   Root: $(get(project, "root", path))")
-        println()
-    end
-
-    # Check for cache
-    cache_dir = joinpath(path, ".replibuild_cache")
-    if isdir(cache_dir)
-        cache_file = joinpath(cache_dir, "build_cache.toml")
-        if isfile(cache_file)
-            cache = TOML.parsefile(cache_file)
-            discovery = get(cache, "discovery_results", Dict())
-
-            println(" Discovery Results:")
-            files = get(discovery, "files", Dict())
-            cpp_count = length(get(files, "cpp_sources", []))
-            hdr_count = length(get(files, "cpp_headers", []))
-            println("   C++ Sources: $cpp_count")
-            println("   Headers: $hdr_count")
-
-            # Show dependency graph stats
-            graph_file = get(discovery, "dependency_graph_file", "")
-            if !isempty(graph_file)
-                graph_path = joinpath(path, graph_file)
-                if isfile(graph_path)
-                    println("   Dependency graph: ✓ $(basename(graph_file))")
-                end
-            end
-            println()
+    # Check library
+    julia_dir = joinpath(path, "julia")
+    if isdir(julia_dir)
+        lib_files = filter(f -> endswith(f, ".so") || endswith(f, ".dylib") || endswith(f, ".dll"),
+                          readdir(julia_dir))
+        if !isempty(lib_files)
+            println("✓ Library: $(lib_files[1])")
+        else
+            println("❌ No library built yet - run RepliBuild.build()")
         end
-    end
 
-    # Check for workspace
-    workspace_libs = detect_workspace_structure(path)
-    if !isempty(workspace_libs)
-        println("   Workspace Structure:")
-        println("   Type: Multi-library")
-        println("   Libraries: $(length(workspace_libs))")
-        for lib in workspace_libs
-            println("      • $lib")
+        # Check wrapper
+        jl_files = filter(f -> endswith(f, ".jl"), readdir(julia_dir))
+        if !isempty(jl_files)
+            println("✓ Wrapper: $(jl_files[1])")
+        else
+            println("❌ No wrapper yet - run RepliBuild.wrap()")
         end
-        println()
     else
-        println("   Project Type: Single library")
-        println()
+        println("❌ No build output - run RepliBuild.build()")
     end
 
-    # Check for build artifacts
-    build_dir = joinpath(path, "build")
-    if isdir(build_dir)
-        ir_dir = joinpath(build_dir, "ir")
-        if isdir(ir_dir)
-            ll_files = filter(f -> endswith(f, ".ll"), readdir(ir_dir))
-            if !isempty(ll_files)
-                println("Build Artifacts:")
-                println("LLVM IR files: $(length(ll_files))")
-            end
-        end
-    end
-
-    println("="^70)
+    println("═"^70)
 end
 
 # ============================================================================
-# INTERNAL HELPERS
+# INTERNAL HELPERS - NOT FOR PUBLIC USE
 # ============================================================================
-
-"""
-Detect if path contains a multi-library workspace
-"""
-function detect_workspace_structure(path::String)
-    libraries = String[]
-
-    if !isdir(path)
-        return libraries
-    end
-
-    for entry in readdir(path)
-        # Skip hidden directories
-        if startswith(entry, ".")
-            continue
-        end
-
-        entry_path = joinpath(path, entry)
-        if isdir(entry_path)
-            toml_path = joinpath(entry_path, "replibuild.toml")
-            if isfile(toml_path)
-                push!(libraries, entry)
-            end
-        end
-    end
-
-    return libraries
-end
-
-"""
-Build a single library/executable project
-"""
-function build_single_project(path::String)
-    original_dir = pwd()
-
-    try
-        cd(path)
-
-        # Load configuration
-        config = ConfigurationManager.load_config("replibuild.toml")
-
-        # Compile
-        result = Compiler.compile_project(config)
-
-        # Find output files
-        libraries = Dict{String,String}()
-        executables = String[]
-
-        # Scan output directories
-        for dir in ["julia", "build", "."]
-            full_dir = joinpath(path, dir)
-            if isdir(full_dir)
-                for file in readdir(full_dir)
-                    full_path = joinpath(full_dir, file)
-                    if isfile(full_path)
-                        if endswith(file, ".so") || endswith(file, ".dylib") || endswith(file, ".dll")
-                            libraries[basename(file)] = full_path
-                        elseif !endswith(file, ".ll") && !endswith(file, ".o") && !endswith(file, ".toml")
-                            # Check if executable
-                            try
-                                stat_result = stat(full_path)
-                                if stat_result.mode & 0o111 != 0
-                                    push!(executables, full_path)
-                                end
-                            catch
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        return Dict(
-            :libraries => libraries,
-            :executables => executables
-        )
-
-    finally
-        cd(original_dir)
-    end
-end
+# Old build_single_project() and detect_workspace_structure() removed
+# These are replaced by simple build() + wrap() API
 
 # ============================================================================
 # MODULE INITIALIZATION

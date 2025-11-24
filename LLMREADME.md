@@ -33,39 +33,58 @@ This three-way approach enables automatic C++ FFI without headers, for standard-
 
 ## Development Commands
 
-### Testing the Package
-```bash
-# Load package in Julia REPL
-julia --project=.
-using RepliBuild
+### Simple 3-Command API
 
-# Run tests (when available)
-julia --project=. -e 'using Pkg; Pkg.test()'
-```
+**RepliBuild has EXACTLY 3 commands you need:**
 
-### Building Examples
-```bash
-# Navigate to an example
-cd examples/struct_test/
-
-# In Julia REPL:
-using RepliBuild
-RepliBuild.build(".")                           # Build C++ and generate bindings
-RepliBuild.wrap("julia/libstruct_test.so", tier=:introspective)  # Generate Julia wrappers
-
-# Use the generated bindings:
-include("julia/StructTest.jl")
-using .StructTest
-```
-
-### Development Workflow
 ```julia
-# REPL API shortcuts (defined in REPL_API.jl):
-rbuild()              # Quick build current project
-rdiscover()           # Discover project structure
-rclean()              # Clean build artifacts
-rinfo()               # Show project info
-rwrap(lib_path)       # Generate wrappers
+using RepliBuild
+
+# 1. Compile C++ code → library
+RepliBuild.build()
+
+# 2. Generate Julia wrapper
+RepliBuild.wrap()
+
+# 3. Check status
+RepliBuild.info()
+```
+
+That's it! Everything else is internal.
+
+### Complete Example
+```bash
+# Test with the test project
+cd test_cpp_project/
+
+# In Julia:
+julia --project=..
+```
+
+```julia
+using RepliBuild
+
+# Build C++ library
+RepliBuild.build()   # → julia/libmathlib.so + metadata
+
+# Generate Julia wrapper
+RepliBuild.wrap()    # → julia/Mathlib.jl
+
+# Use it!
+include("julia/Mathlib.jl")
+using .Mathlib
+result = add(5, 3)  # Call C++ function from Julia
+```
+
+### Utility Commands
+```julia
+# Clean build artifacts
+RepliBuild.clean()
+
+# For advanced users only
+RepliBuild.Compiler.compile_to_ir(config, files)
+RepliBuild.Wrapper.wrap_library(config, lib_path)
+RepliBuild.Discovery.discover(".", force=true)
 ```
 
 ## Architecture
@@ -75,12 +94,12 @@ rwrap(lib_path)       # Generate wrappers
 C++ Source → Compile with -g → DWARF Debug Info → Extract Types → Generate Julia Bindings
 ```
 
-### Module Structure (13 files, 11 modules + 2 utilities)
+### Module Structure (12 files, 10 modules + 2 utilities)
 
 **Actual Source Files:**
 ```
 src/
-├── RepliBuild.jl           # Main module, orchestration
+├── RepliBuild.jl           # Main module with 3-command API (build, wrap, info)
 ├── RepliBuildPaths.jl      # Module: Path management
 ├── LLVMEnvironment.jl      # Module: LLVM toolchain detection
 ├── ConfigurationManager.jl # Module: Config loading (replibuild.toml)
@@ -91,8 +110,7 @@ src/
 ├── ClangJLBridge.jl        # Module: Clang.jl integration
 ├── Compiler.jl             # Module: C++ → IR → binary + DWARF extraction
 ├── Wrapper.jl              # Module: Julia binding generation
-├── WorkspaceBuilder.jl     # Module: Multi-library builds
-└── REPL_API.jl             # Module: User-friendly commands
+└── WorkspaceBuilder.jl     # Module: Multi-library builds
 ```
 
 **Module Roles:**
@@ -116,8 +134,8 @@ src/
 *Build Orchestration (1 module):*
 - `WorkspaceBuilder`: Multi-library workspace builds with dependency ordering
 
-*User Interface (1 module):*
-- `REPL_API`: User-friendly convenience functions (rbuild, rdiscover, etc.)
+*User Interface:*
+- Simple 3-command API in main module: `build()`, `wrap()`, `info()`
 
 **Historical Note:** Bridge_LLVM.jl was removed and replaced by Compiler.jl during Phase 1 cleanup. If you see references to Bridge_LLVM, they are outdated.
 
