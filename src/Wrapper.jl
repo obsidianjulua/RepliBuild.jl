@@ -1099,38 +1099,54 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     if !isempty(struct_types)
         struct_definitions *= """
         # =============================================================================
-        # Struct Definitions (from C++)
+        # Struct Definitions (from DWARF debug info)
         # =============================================================================
 
         """
 
+        # Get struct definitions from metadata (extracted from DWARF)
+        dwarf_structs = get(metadata, "struct_definitions", Dict())
+
         for struct_name in sort(collect(struct_types))
-            # Special handling for known struct types
-            # TODO: Extract actual member layout from DWARF automatically
-            if struct_name == "Vector3d"
-                struct_definitions *= """
-                # C++ struct: Vector3d (24 bytes)
-                mutable struct $struct_name
-                    x::Cdouble
-                    y::Cdouble
-                    z::Cdouble
-                end
+            # Check if we have DWARF member information for this struct
+            if haskey(dwarf_structs, struct_name)
+                struct_info = dwarf_structs[struct_name]
+                members = get(struct_info, "members", [])
 
-                """
-            elseif struct_name == "Matrix3d"
-                struct_definitions *= """
-                # C++ struct: Matrix3d (72 bytes)
-                mutable struct $struct_name
-                    data::NTuple{9, Cdouble}  # 3x3 matrix in row-major order
-                end
+                if !isempty(members)
+                    # Generate struct with actual member layout from DWARF
+                    member_count = length(members)
+                    struct_definitions *= """
+                    # C++ struct: $struct_name ($member_count members)
+                    mutable struct $struct_name
+                    """
 
-                """
+                    for member in members
+                        member_name = get(member, "name", "unknown")
+                        julia_type = get(member, "julia_type", "Any")
+                        struct_definitions *= "    $member_name::$julia_type\n"
+                    end
+
+                    struct_definitions *= """
+                    end
+
+                    """
+                else
+                    # Struct found but no members (empty struct or incomplete info)
+                    struct_definitions *= """
+                    # Opaque struct: $struct_name (no member info available)
+                    mutable struct $struct_name
+                        data::NTuple{8, UInt8}  # Placeholder
+                    end
+
+                    """
+                end
             else
-                # Generic opaque struct
+                # No DWARF info available - generate opaque struct
                 struct_definitions *= """
-                # Opaque struct: $struct_name
+                # Opaque struct: $struct_name (no DWARF info)
                 mutable struct $struct_name
-                    data::NTuple{32, UInt8}  # Placeholder - actual size from DWARF
+                    data::NTuple{32, UInt8}  # Placeholder - compile with -g for member info
                 end
 
                 """

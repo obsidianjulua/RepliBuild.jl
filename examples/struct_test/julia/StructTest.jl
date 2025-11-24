@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for struct_test
-# Generated: 2025-11-24 16:21:38
+# Generated: 2025-11-24 16:47:22
 # Generator: RepliBuild Wrapper (Tier 3: Introspective)
 # Library: libstruct_test.so
 # Metadata: compilation_metadata.json
@@ -27,16 +27,17 @@ const METADATA = Dict(
     "optimization" => "2",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 3,
-    "generated_at" => "2025-11-24T16:21:23.218"
+    "generated_at" => "2025-11-24T16:44:41.879"
 )
 
 # =============================================================================
-# Struct Definitions (from C++)
+# Struct Definitions (from DWARF debug info)
 # =============================================================================
 
-# Opaque struct: Point
+# C++ struct: Point (2 members)
 mutable struct Point
-    data::NTuple{32, UInt8}  # Placeholder - actual size from DWARF
+    x::Cdouble
+    y::Cdouble
 end
 
 

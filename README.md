@@ -290,13 +290,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical explanation.
 |---------|------------|----------|------------|
 | **Automatic** | ✅ Yes | ⚠️ Partial | ❌ No |
 | **Type Accuracy** | ✅ 100% | ⚠️ ~70% | ✅ 100% (manual) |
-| **Struct Support** | ✅ Auto | ⚠️ Limited | ✅ Manual |
+| **Struct Typing** | ✅ Auto | ⚠️ Limited | ✅ Manual |
+| **Struct Members** | ✅ Auto | ⚠️ Limited | ✅ Manual |
 | **Template Support** | ✅ Full | ❌ Poor | ✅ Manual |
 | **Safety Wrappers** | ✅ Auto | ❌ None | ⚠️ Manual |
-| **User Code Required** | ✅ 0 lines | ⚠️ ~100s | ❌ ~1000s |
+| **User Code Required** | ✅ Zero | ⚠️ ~100s | ❌ ~1000s |
 | **Handles Eigen** | ✅ Yes (20K+ types) | ❌ No | ⚠️ Manually |
-
-**RepliBuild is the only tool that is both automatic AND accurate.**
 
 ---
 
@@ -306,14 +305,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical explanation.
 - [x] Pointers (T*)
 - [x] Const types (const T, const T*)
 - [x] References (T&)
-- [x] Structs (full layout extraction)
-- [x] Classes (including templates)
+- [x] Struct names (detection and typing)
+- [x] **Struct members** (automatic extraction from DWARF)
 - [x] Return types
 - [x] Function parameters
-- [ ] Enums (coming in Phase 7)
-- [ ] Arrays (coming in Phase 7)
-- [ ] Function pointers (coming in Phase 7)
-- [ ] STL containers (coming in Phase 8)
+- [ ] Classes (including templates) - detection works, members TODO
+- [ ] Enums (Phase 7)
+- [ ] Arrays (Phase 7)
+- [ ] Function pointers (Phase 7)
+- [ ] STL containers (Phase 8)
 
 ---
 

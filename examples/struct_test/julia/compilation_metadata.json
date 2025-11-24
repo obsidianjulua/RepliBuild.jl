@@ -163,5 +163,24 @@
   },
   "metadata_version": "1.0",
   "include_dirs": [],
-  "timestamp": "2025-11-24T16:21:23.218"
+  "timestamp": "2025-11-24T16:44:41.879",
+  "struct_definitions": {
+    "Point": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double",
+          "name": "x",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "y",
+          "offset": null,
+          "julia_type": "Cdouble"
+        }
+      ]
+    }
+  }
 }

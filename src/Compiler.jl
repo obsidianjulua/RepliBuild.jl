@@ -629,10 +629,12 @@ function get_type_size(c_type::AbstractString)::Int
 end
 
 """
-Extract return types from DWARF debug info.
-Returns: Dict{mangled_name => {c_type, julia_type, size}}
+Extract return types and struct definitions from DWARF debug info.
+Returns: (return_types_dict, struct_defs_dict)
+  - return_types: Dict{mangled_name => {c_type, julia_type, size}}
+  - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
 """
-function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{String,Any}}
+function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}}
     println("   🔍 Parsing DWARF debug info...")
 
     # Run readelf to get DWARF debug info
@@ -655,6 +657,8 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
     # First pass: Build type reference table
     # We need to handle: base types, pointer types, const types, reference types
     offset_to_kind = Dict{String,Symbol}()  # Track what kind each offset is
+    current_type_offset = nothing  # Track current type/struct being processed
+    current_struct_context = nothing  # Track parent struct for members
 
     for line in split(output, '\n')
         line = strip(line)
@@ -722,7 +726,13 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
-                type_refs[current_type_offset] = "unknown_struct"  # Will be updated with name
+                current_struct_context = current_type_offset  # Set context for members
+                # Store struct info as a dict with members array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "struct",
+                    "name" => "unknown_struct",
+                    "members" => []
+                )
                 offset_to_kind[current_type_offset] = :struct
             end
         end
@@ -733,7 +743,13 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
-                type_refs[current_type_offset] = "unknown_class"  # Will be updated with name
+                current_struct_context = current_type_offset  # Set context for members
+                # Store class info as a dict with members array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "class",
+                    "name" => "unknown_class",
+                    "members" => []
+                )
                 offset_to_kind[current_type_offset] = :class
             end
         end
@@ -747,7 +763,15 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
                 name_match = match(r":\s*([^:]+)\s*$", line)
                 if !isnothing(name_match)
                     type_name = String(strip(name_match.captures[1]))  # Convert SubString to String
-                    type_refs[tag_offset] = type_name
+                    if offset_to_kind[tag_offset] == :base
+                        # Base types are stored as simple strings
+                        type_refs[tag_offset] = type_name
+                    elseif offset_to_kind[tag_offset] in [:struct, :class]
+                        # Struct/class types are dicts - update the name field
+                        if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                            type_refs[tag_offset]["name"] = type_name
+                        end
+                    end
                 end
             end
         end
@@ -766,14 +790,93 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
                 end
             end
         end
+
+        # Extract struct/class members (DW_TAG_member)
+        # Example: <2><aa>: DW_TAG_member
+        #          DW_AT_name: "x"
+        #          DW_AT_type: <0xbd>
+        #          DW_AT_data_member_location: 0x00
+        if contains(line, "DW_TAG_member")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                member_offset = "0x" * offset_match.captures[1]
+                type_refs[member_offset] = Dict{String,Any}(
+                    "kind" => "member",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "offset" => nothing,
+                    "parent" => current_struct_context  # Track which struct/class this belongs to
+                )
+                offset_to_kind[member_offset] = :member
+            end
+        end
+
+        # Extract member attributes
+        if haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :member
+                member_info = type_refs[tag_offset]
+
+                # Member name
+                if contains(line, "DW_AT_name")
+                    name_match = match(r":\s*([^:]+)\s*$", line)
+                    if !isnothing(name_match)
+                        member_info["name"] = String(strip(name_match.captures[1]))
+                    end
+                end
+
+                # Member type reference
+                if contains(line, "DW_AT_type")
+                    type_match = match(r"<(0x[^>]+)>", line)
+                    if !isnothing(type_match)
+                        member_info["type"] = String(type_match.captures[1])
+                    end
+                end
+
+                # Member byte offset within struct
+                if contains(line, "DW_AT_data_member_location")
+                    offset_match = match(r"(0x[0-9a-fA-F]+)", line)
+                    if !isnothing(offset_match)
+                        member_info["offset"] = String(offset_match.captures[1])
+                    end
+                end
+
+                # When we have all info, add to parent struct/class
+                parent_offset = get(member_info, "parent", nothing)
+                if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
+                   isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "members")
+                    if !isnothing(member_info["name"]) && !isnothing(member_info["type"])
+                        # Only add if we haven't already added this member
+                        existing_names = [m["name"] for m in type_refs[parent_offset]["members"]]
+                        if !(member_info["name"] in existing_names)
+                            push!(type_refs[parent_offset]["members"], Dict(
+                                "name" => member_info["name"],
+                                "type" => member_info["type"],
+                                "offset" => get(member_info, "offset", "0x00")
+                            ))
+                        end
+                    end
+                end
+            end
+        end
     end
 
     # Debug: Show type refs collected
     base_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :base && isa(type_refs[k], String), keys(type_refs))
     pointer_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :pointer, keys(type_refs))
-    struct_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :struct && isa(type_refs[k], String), keys(type_refs))
-    class_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :class && isa(type_refs[k], String), keys(type_refs))
+    struct_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :struct && isa(type_refs[k], Dict), keys(type_refs))
+    class_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :class && isa(type_refs[k], Dict), keys(type_refs))
+
+    # Count total members extracted
+    total_members = 0
+    for (k, v) in type_refs
+        if isa(v, Dict) && haskey(v, "members")
+            total_members += length(v["members"])
+        end
+    end
+
     println("   📊 Types collected: $base_count base, $pointer_count pointer, $struct_count struct, $class_count class")
+    println("   📊 Struct/class members extracted: $total_members")
 
     # Helper function to resolve type references (follows pointer/const/reference chains)
     function resolve_type(type_ref::String, type_refs::Dict, visited::Set{String}=Set{String}())::String
@@ -798,6 +901,12 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         # Pointer/const/reference type - follow the chain
         if isa(type_info, Dict)
             kind = get(type_info, "kind", nothing)
+
+            # Struct or class - return the name
+            if kind in ["struct", "class"]
+                return get(type_info, "name", "unknown")
+            end
+
             target = get(type_info, "target", nothing)
 
             if isnothing(target)
@@ -946,7 +1055,43 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
         println("   ⚠️  No DWARF return type info found (compile with -g flag)")
     end
 
-    return return_types
+    # Extract struct definitions with member information
+    struct_defs = Dict{String,Dict{String,Any}}()
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class"]
+            struct_name = get(type_info, "name", "unknown")
+            if struct_name != "unknown" && struct_name != "unknown_struct" && struct_name != "unknown_class"
+                # Resolve member types to Julia types
+                resolved_members = []
+                for member in get(type_info, "members", [])
+                    member_type_ref = get(member, "type", nothing)
+                    if !isnothing(member_type_ref)
+                        c_type = resolve_type(member_type_ref, type_refs)
+                        julia_type = cpp_to_julia_type(c_type)
+                        push!(resolved_members, Dict(
+                            "name" => get(member, "name", "unknown"),
+                            "c_type" => c_type,
+                            "julia_type" => julia_type,
+                            "offset" => get(member, "offset", "0x00")
+                        ))
+                    end
+                end
+
+                if !isempty(resolved_members)
+                    struct_defs[struct_name] = Dict(
+                        "kind" => get(type_info, "kind", "struct"),
+                        "members" => resolved_members
+                    )
+                end
+            end
+        end
+    end
+
+    if !isempty(struct_defs)
+        println("   ✅ Extracted $(length(struct_defs)) struct/class definitions with members")
+    end
+
+    return (return_types, struct_defs)
 end
 
 """
@@ -961,8 +1106,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     symbols = extract_symbols_from_binary(binary_path)
     println("   Found $(length(symbols)) exported symbols")
 
-    # Extract return types from DWARF debug info (if available)
-    dwarf_return_types = extract_dwarf_return_types(binary_path)
+    # Extract return types and struct definitions from DWARF debug info (if available)
+    (dwarf_return_types, struct_defs) = extract_dwarf_return_types(binary_path)
 
     # Parse function signatures (basic type inference from symbol names)
     functions = parse_function_signatures(symbols)
@@ -1014,6 +1159,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
 
         # Type mappings
         "type_registry" => type_registry,
+        "struct_definitions" => struct_defs,  # NEW: Struct member layout from DWARF
 
         # Compiler information
         "compiler_info" => Dict(
