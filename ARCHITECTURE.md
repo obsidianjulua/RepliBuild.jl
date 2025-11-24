@@ -280,13 +280,13 @@ Tested on **Eigen** (20,000+ types):
 
 | Feature | RepliBuild | Clang.jl | CxxWrap.jl |
 |---------|------------|----------|------------|
-| **Approach** | DWARF extraction | Header parsing | Manual wrapping |
+| **Approach** | DWARF, AST, IR | Header parsing | Manual wrapping |
 | **Type Source** | Compiler metadata | Source headers | Manual annotations |
-| **Automation** | Full | Partial | None |
+| **Automation** | 99% | Partial | None |
 | **Struct Support** | Auto from DWARF | Limited | Manual |
 | **Template Support** | All instantiations | Limited | Manual per instance |
-| **Lines of Code (User)** | 0 | ~100s | ~1000s |
-| **Maintenance** | Zero | Medium | High |
+| **Lines of Code (User)** | Minimal | ~100s | ~1000s |
+| **Maintenance** | Minimal | Medium | High |
 
 **RepliBuild's unique advantage:**
 1. ✅ Fully automatic type extraction
