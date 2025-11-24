@@ -1,0 +1,295 @@
+{
+  "symbols": [
+    {
+      "mangled": "_Z10vec3_cross8Vector3dS_",
+      "demangled": "vec3_cross(Vector3d, Vector3d)",
+      "type": "T",
+      "address": "00000000000011a0"
+    },
+    {
+      "mangled": "_Z11vec3_createddd",
+      "demangled": "vec3_create(double, double, double)",
+      "type": "T",
+      "address": "0000000000001110"
+    },
+    {
+      "mangled": "_Z12mat3_mul_vec8Matrix3d8Vector3d",
+      "demangled": "mat3_mul_vec(Matrix3d, Vector3d)",
+      "type": "T",
+      "address": "0000000000001260"
+    },
+    {
+      "mangled": "_Z13mat3_identityv",
+      "demangled": "mat3_identity()",
+      "type": "T",
+      "address": "0000000000001240"
+    },
+    {
+      "mangled": "_Z8vec3_add8Vector3dS_",
+      "demangled": "vec3_add(Vector3d, Vector3d)",
+      "type": "T",
+      "address": "0000000000001130"
+    },
+    {
+      "mangled": "_Z8vec3_dot8Vector3dS_",
+      "demangled": "vec3_dot(Vector3d, Vector3d)",
+      "type": "T",
+      "address": "0000000000001160"
+    },
+    {
+      "mangled": "_Z9vec3_norm8Vector3d",
+      "demangled": "vec3_norm(Vector3d)",
+      "type": "T",
+      "address": "0000000000001210"
+    }
+  ],
+  "compile_flags": [
+    "-std=c++17",
+    "-fPIC",
+    "-O2",
+    "-g"
+  ],
+  "binary_path": "./julia/libeigen_wrapper.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "name": "vec3_cross",
+      "parameters": [
+        {
+          "c_type": "Vector3d",
+          "name": "arg1",
+          "position": 0,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "Vector3d",
+          "name": "arg2",
+          "position": 1,
+          "julia_type": "Any"
+        }
+      ],
+      "class": "",
+      "exported": true,
+      "mangled": "_Z10vec3_cross8Vector3dS_",
+      "is_method": false,
+      "demangled": "vec3_cross(Vector3d, Vector3d)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Vector3d",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "vec3_create",
+      "parameters": [
+        {
+          "c_type": "double",
+          "name": "arg1",
+          "position": 0,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "arg2",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "arg3",
+          "position": 2,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "class": "",
+      "exported": true,
+      "mangled": "_Z11vec3_createddd",
+      "is_method": false,
+      "demangled": "vec3_create(double, double, double)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Vector3d",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "mat3_mul_vec",
+      "parameters": [
+        {
+          "c_type": "Matrix3d",
+          "name": "arg1",
+          "position": 0,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "Vector3d",
+          "name": "arg2",
+          "position": 1,
+          "julia_type": "Any"
+        }
+      ],
+      "class": "",
+      "exported": true,
+      "mangled": "_Z12mat3_mul_vec8Matrix3d8Vector3d",
+      "is_method": false,
+      "demangled": "mat3_mul_vec(Matrix3d, Vector3d)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Vector3d",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "mat3_identity",
+      "parameters": [],
+      "class": "",
+      "exported": true,
+      "mangled": "_Z13mat3_identityv",
+      "is_method": false,
+      "demangled": "mat3_identity()",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Matrix3d",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "vec3_add",
+      "parameters": [
+        {
+          "c_type": "Vector3d",
+          "name": "arg1",
+          "position": 0,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "Vector3d",
+          "name": "arg2",
+          "position": 1,
+          "julia_type": "Any"
+        }
+      ],
+      "class": "",
+      "exported": true,
+      "mangled": "_Z8vec3_add8Vector3dS_",
+      "is_method": false,
+      "demangled": "vec3_add(Vector3d, Vector3d)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Vector3d",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "vec3_dot",
+      "parameters": [
+        {
+          "c_type": "Vector3d",
+          "name": "arg1",
+          "position": 0,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "Vector3d",
+          "name": "arg2",
+          "position": 1,
+          "julia_type": "Any"
+        }
+      ],
+      "class": "",
+      "exported": true,
+      "mangled": "_Z8vec3_dot8Vector3dS_",
+      "is_method": false,
+      "demangled": "vec3_dot(Vector3d, Vector3d)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "vec3_norm",
+      "parameters": [
+        {
+          "c_type": "Vector3d",
+          "name": "arg1",
+          "position": 0,
+          "julia_type": "Any"
+        }
+      ],
+      "class": "",
+      "exported": true,
+      "mangled": "_Z9vec3_norm8Vector3d",
+      "is_method": false,
+      "demangled": "vec3_norm(Vector3d)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    }
+  ],
+  "project": "eigen_wrapper",
+  "source_files": [
+    "eigen_wrapper.cpp"
+  ],
+  "type_registry": {
+    "int": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "Matrix3d": {
+      "c_type": "Matrix3d",
+      "size": 0,
+      "julia_type": "Any"
+    },
+    "char": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "UInt8"
+    },
+    "double": {
+      "c_type": "double",
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "alignment": 0,
+      "size": 0,
+      "julia_type": "Cvoid"
+    },
+    "Vector3d": {
+      "julia_type": "Any",
+      "inferred": true
+    }
+  },
+  "function_count": 7,
+  "compiler_info": {
+    "lto_enabled": false,
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "clang_version": "clang version 21.1.5",
+    "optimization_level": "2",
+    "llvm_version": "21.1.5"
+  },
+  "metadata_version": "1.0",
+  "include_dirs": [],
+  "timestamp": "2025-11-24T16:22:49.491"
+}

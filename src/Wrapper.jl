@@ -1069,18 +1069,29 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     """
 
     # Struct definitions
-    # Collect unique struct types from function signatures
+    # Collect unique struct types from function signatures (returns AND parameters)
     functions = metadata["functions"]
     struct_types = Set{String}()
 
     for func in functions
+        # Check return type
         ret_type = get(func, "return_type", Dict())
         c_type = get(ret_type, "c_type", "")
         julia_type = get(ret_type, "julia_type", "")
 
-        # Check if this is a struct type (not a primitive or pointer)
         if !isempty(c_type) && julia_type == "Any" && !contains(c_type, "*") && !contains(c_type, "void")
             push!(struct_types, c_type)
+        end
+
+        # Check parameter types
+        params = get(func, "parameters", [])
+        for param in params
+            param_c_type = get(param, "c_type", "")
+            param_julia_type = get(param, "julia_type", "")
+
+            if !isempty(param_c_type) && param_julia_type == "Any" && !contains(param_c_type, "*") && !contains(param_c_type, "void")
+                push!(struct_types, param_c_type)
+            end
         end
     end
 
@@ -1157,21 +1168,31 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         for (i, param) in enumerate(params)
             push!(param_names, param["name"])
-            c_type = param["julia_type"]
-            push!(param_types, c_type)
+            julia_type = param["julia_type"]
+            c_type_name = get(param, "c_type", "")
+
+            # Determine the actual C type for ccall
+            # If julia_type is "Any" but c_type has a name, it's likely a struct
+            actual_c_type = if julia_type == "Any" && !isempty(c_type_name) && c_type_name in struct_types
+                c_type_name  # Use the struct name directly
+            else
+                julia_type
+            end
+
+            push!(param_types, actual_c_type)
 
             # Map C integer types to natural Julia types with range checking
-            if c_type == "Cint"  # Int32 in Julia
+            if actual_c_type == "Cint"  # Int32 in Julia
                 push!(julia_param_types, "Integer")  # Accept any Integer, will validate
                 push!(needs_conversion, true)
-            elseif c_type == "Clong"  # Platform-dependent
+            elseif actual_c_type == "Clong"  # Platform-dependent
                 push!(julia_param_types, "Integer")
                 push!(needs_conversion, true)
-            elseif c_type == "Cshort"  # Int16
+            elseif actual_c_type == "Cshort"  # Int16
                 push!(julia_param_types, "Integer")
                 push!(needs_conversion, true)
             else
-                push!(julia_param_types, c_type)
+                push!(julia_param_types, actual_c_type)
                 push!(needs_conversion, false)
             end
         end
