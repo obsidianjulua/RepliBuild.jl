@@ -1097,11 +1097,19 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             push!(param_types, param["julia_type"])
         end
 
-        # Julia function name (avoid conflicts)
+        # Julia function name (avoid conflicts and sanitize)
         julia_name = func_name
         if is_method && !isempty(class_name)
             julia_name = "$(class_name)_$(func_name)"
         end
+
+        # Sanitize function name - remove invalid characters
+        julia_name = replace(julia_name, "~" => "destroy_")  # Destructor
+        julia_name = replace(julia_name, "::" => "_")
+        julia_name = replace(julia_name, "<" => "_")
+        julia_name = replace(julia_name, ">" => "_")
+        julia_name = replace(julia_name, "," => "_")
+        julia_name = replace(julia_name, " " => "_")
 
         # Build function signature
         param_sig = join(["$(name)::$(typ)" for (name, typ) in zip(param_names, param_types)], ", ")
@@ -1137,13 +1145,31 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             "($(join(param_types, ", ")),)"  # Note: trailing comma for single-element tuples
         end
 
-        func_def = """
-        $doc_comment
-        function $julia_name($param_sig)::$(return_type["julia_type"])
-            ccall((:$mangled, LIBRARY_PATH), $(return_type["julia_type"]), $ccall_types, $ccall_args)
-        end
+        # Special handling for Cstring returns - add safety wrapper
+        julia_return_type = return_type["julia_type"]
+        if julia_return_type == "Cstring"
+            # Generate safe wrapper that converts Cstring -> String with NULL check
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)::String
+                ptr = ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
+                if ptr == C_NULL
+                    error("$julia_name returned NULL pointer")
+                end
+                return unsafe_string(ptr)
+            end
 
-        """
+            """
+        else
+            # Standard wrapper for non-Cstring returns
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)::$julia_return_type
+                ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
+            end
+
+            """
+        end
 
         function_wrappers *= func_def
         push!(exports, julia_name)
