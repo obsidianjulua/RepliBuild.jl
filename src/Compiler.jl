@@ -714,11 +714,35 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
             end
         end
 
-        # Extract type name for base types (comes after the tag line)
+        # Extract struct type definitions (DW_TAG_structure_type)
+        # Example: <1><1f5f3e>: DW_TAG_structure_type
+        #          DW_AT_name: "Vector3d"
+        #          DW_AT_byte_size: 0x18
+        if contains(line, "DW_TAG_structure_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = "unknown_struct"  # Will be updated with name
+                offset_to_kind[current_type_offset] = :struct
+            end
+        end
+
+        # Extract class type definitions (DW_TAG_class_type)
+        # Similar to struct, C++ distinguishes but for our purposes treat the same
+        if contains(line, "DW_TAG_class_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = "unknown_class"  # Will be updated with name
+                offset_to_kind[current_type_offset] = :class
+            end
+        end
+
+        # Extract type name for base types, structs, and classes
         # Example: <28>   DW_AT_name        : (indexed string: 0x3): int
         if contains(line, "DW_AT_name") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :base
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:base, :struct, :class]
                 # Extract just the type name after the last colon
                 name_match = match(r":\s*([^:]+)\s*$", line)
                 if !isnothing(name_match)
@@ -745,9 +769,11 @@ function extract_dwarf_return_types(binary_path::String)::Dict{String,Dict{Strin
     end
 
     # Debug: Show type refs collected
-    base_count = count(v -> isa(v, String) && v != "unknown" && v != "last_offset" && v != "last_tag_offset", values(type_refs))
-    pointer_count = count(v -> isa(v, Dict) && get(v, "kind", "") == "pointer", values(type_refs))
-    println("   📊 Types collected: $base_count base, $pointer_count pointer")
+    base_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :base && isa(type_refs[k], String), keys(type_refs))
+    pointer_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :pointer, keys(type_refs))
+    struct_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :struct && isa(type_refs[k], String), keys(type_refs))
+    class_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :class && isa(type_refs[k], String), keys(type_refs))
+    println("   📊 Types collected: $base_count base, $pointer_count pointer, $struct_count struct, $class_count class")
 
     # Helper function to resolve type references (follows pointer/const/reference chains)
     function resolve_type(type_ref::String, type_refs::Dict, visited::Set{String}=Set{String}())::String
