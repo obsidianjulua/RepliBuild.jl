@@ -2,7 +2,7 @@
 
 **Automatic FFI generation using DWARF debug information**
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Julia](https://img.shields.io/badge/julia-%3E%3D1.9-blue)](https://julialang.org/)
 
 ---
