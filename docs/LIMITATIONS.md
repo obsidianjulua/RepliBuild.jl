@@ -1,4 +1,4 @@
-# RepliBuild Limitations
+9# RepliBuild Limitations
 
 This document defines the correctness boundaries and rejection rules for RepliBuild's FFI generation.
 
@@ -23,9 +23,6 @@ This document defines the correctness boundaries and rejection rules for RepliBu
 **Innovation:** Extends DragonFFI's DWARF + IR approach (pioneering work for C) to C++ with template instantiation support, struct member extraction, and three-way cross-validation for ABI correctness.
 
 **Acknowledgment:** DragonFFI pioneered DWARF + IR for automatic FFI (C). RepliBuild builds on this foundation for C++ and Julia.
-
-**Validation:** Approach confirmed as novel for Julia by JuliaHub developers.
-
 ---
 
 ## Supported Types
