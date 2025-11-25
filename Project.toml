@@ -1,6 +1,6 @@
 name = "RepliBuild"
 uuid = "4450f29b-7b71-45c6-8742-e7520a479938"
-version = "2.0.0"
+version = "2.0.1"
 authors = ["grim <archjulialua@gmail.com>"]
 
 [deps]
