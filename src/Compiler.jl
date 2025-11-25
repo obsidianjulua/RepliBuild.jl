@@ -754,11 +754,102 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
-        # Extract type name for base types, structs, and classes
+        # Extract enum type definitions (DW_TAG_enumeration_type)
+        # Example: <1><abc>: DW_TAG_enumeration_type
+        #          DW_AT_name: "Color"
+        #          DW_AT_type: <0x27>  (underlying type, e.g., int)
+        #          DW_AT_byte_size: 0x04
+        if contains(line, "DW_TAG_enumeration_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                current_struct_context = current_type_offset  # Use for enumerators
+                # Store enum info as a dict with enumerators array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "enum",
+                    "name" => "unknown_enum",
+                    "underlying_type" => nothing,
+                    "byte_size" => nothing,
+                    "enumerators" => []
+                )
+                offset_to_kind[current_type_offset] = :enum
+            end
+        end
+
+        # Extract array type definitions (DW_TAG_array_type)
+        # Example: <1><def>: DW_TAG_array_type
+        #          DW_AT_type: <0x27>  (element type)
+        if contains(line, "DW_TAG_array_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                # Store array info with element type and dimensions
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "array",
+                    "element_type" => nothing,
+                    "dimensions" => []
+                )
+                offset_to_kind[current_type_offset] = :array
+            end
+        end
+
+        # Extract array subrange (dimensions)
+        # Example: <2><xyz>: DW_TAG_subrange_type
+        #          DW_AT_type: <0x123>  (index type)
+        #          DW_AT_upper_bound: 8  (for array[9])
+        if contains(line, "DW_TAG_subrange_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                subrange_offset = "0x" * offset_match.captures[1]
+                type_refs[subrange_offset] = Dict{String,Any}(
+                    "kind" => "subrange",
+                    "upper_bound" => nothing,
+                    "parent" => current_type_offset  # Link to parent array
+                )
+                offset_to_kind[subrange_offset] = :subrange
+            end
+        end
+
+        # Extract enumerator (enum member)
+        # Example: <2><ghi>: DW_TAG_enumerator
+        #          DW_AT_name: "Red"
+        #          DW_AT_const_value: 0
+        if contains(line, "DW_TAG_enumerator")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                enumerator_offset = "0x" * offset_match.captures[1]
+                type_refs[enumerator_offset] = Dict{String,Any}(
+                    "kind" => "enumerator",
+                    "name" => nothing,
+                    "value" => nothing,
+                    "parent" => current_struct_context  # Track which enum this belongs to
+                )
+                offset_to_kind[enumerator_offset] = :enumerator
+            end
+        end
+
+        # Extract subroutine type (function pointer signature)
+        # Example: <1><jkl>: DW_TAG_subroutine_type
+        #          DW_AT_type: <0x27>  (return type)
+        if contains(line, "DW_TAG_subroutine_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                # Store function signature info
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "subroutine",
+                    "return_type" => nothing,
+                    "parameters" => []
+                )
+                offset_to_kind[current_type_offset] = :subroutine
+            end
+        end
+
+        # Extract type name for base types, structs, classes, and enums
         # Example: <28>   DW_AT_name        : (indexed string: 0x3): int
         if contains(line, "DW_AT_name") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:base, :struct, :class]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:base, :struct, :class, :enum, :enumerator]
                 # Extract just the type name after the last colon
                 name_match = match(r":\s*([^:]+)\s*$", line)
                 if !isnothing(name_match)
@@ -766,8 +857,13 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     if offset_to_kind[tag_offset] == :base
                         # Base types are stored as simple strings
                         type_refs[tag_offset] = type_name
-                    elseif offset_to_kind[tag_offset] in [:struct, :class]
-                        # Struct/class types are dicts - update the name field
+                    elseif offset_to_kind[tag_offset] in [:struct, :class, :enum]
+                        # Struct/class/enum types are dicts - update the name field
+                        if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                            type_refs[tag_offset]["name"] = type_name
+                        end
+                    elseif offset_to_kind[tag_offset] == :enumerator
+                        # Enumerator: store name
                         if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
                             type_refs[tag_offset]["name"] = type_name
                         end
@@ -776,16 +872,101 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
-        # Extract DW_AT_type for pointer/const/reference types (what they point/refer to)
+        # Extract DW_AT_type for pointer/const/reference/enum/array/subroutine types
         # Example: <9f7>   DW_AT_type        : <0x41>
         if contains(line, "DW_AT_type") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :enum, :array, :subroutine]
                 type_match = match(r"<(0x[^>]+)>", line)
                 if !isnothing(type_match)
                     target_offset = String(type_match.captures[1])  # Convert SubString to String
                     if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
-                        type_refs[tag_offset]["target"] = target_offset
+                        # Pointer/const/reference: target
+                        if offset_to_kind[tag_offset] in [:pointer, :const, :reference]
+                            type_refs[tag_offset]["target"] = target_offset
+                        # Enum: underlying type
+                        elseif offset_to_kind[tag_offset] == :enum
+                            type_refs[tag_offset]["underlying_type"] = target_offset
+                        # Array: element type
+                        elseif offset_to_kind[tag_offset] == :array
+                            type_refs[tag_offset]["element_type"] = target_offset
+                        # Subroutine: return type
+                        elseif offset_to_kind[tag_offset] == :subroutine
+                            type_refs[tag_offset]["return_type"] = target_offset
+                        end
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_byte_size for enums
+        if contains(line, "DW_AT_byte_size") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :enum
+                size_match = match(r"(0x[0-9a-fA-F]+)", line)
+                if !isnothing(size_match)
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        type_refs[tag_offset]["byte_size"] = String(size_match.captures[1])
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_const_value for enumerators
+        if contains(line, "DW_AT_const_value") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :enumerator
+                # Value can be decimal or hex
+                value_match = match(r":\s*(-?\d+)", line)
+                if !isnothing(value_match)
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        type_refs[tag_offset]["value"] = parse(Int, value_match.captures[1])
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_upper_bound for array subranges (DWARF 4 and earlier)
+        if contains(line, "DW_AT_upper_bound") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :subrange
+                # Upper bound can be decimal or hex
+                bound_match = match(r":\s*(\d+)", line)
+                if !isnothing(bound_match)
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        # Upper bound is size-1, so actual size is upper_bound + 1
+                        type_refs[tag_offset]["upper_bound"] = parse(Int, bound_match.captures[1])
+
+                        # Add dimension to parent array
+                        parent_offset = get(type_refs[tag_offset], "parent", nothing)
+                        if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
+                           isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "dimensions")
+                            size = parse(Int, bound_match.captures[1]) + 1  # Array[9] has upper_bound=8
+                            push!(type_refs[parent_offset]["dimensions"], size)
+                        end
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_count for array subranges (DWARF 5+, more common)
+        if contains(line, "DW_AT_count") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :subrange
+                # Count is the actual array size
+                count_match = match(r":\s*(\d+)", line)
+                if !isnothing(count_match)
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        # Count is the actual size
+                        size = parse(Int, count_match.captures[1])
+                        type_refs[tag_offset]["count"] = size
+
+                        # Add dimension to parent array
+                        parent_offset = get(type_refs[tag_offset], "parent", nothing)
+                        if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
+                           isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "dimensions")
+                            push!(type_refs[parent_offset]["dimensions"], size)
+                        end
                     end
                 end
             end
@@ -858,6 +1039,27 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     end
                 end
             end
+
+            # Extract enumerator attributes and add to parent enum
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :enumerator
+                enumerator_info = type_refs[tag_offset]
+
+                # When we have all info, add to parent enum
+                parent_offset = get(enumerator_info, "parent", nothing)
+                if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
+                   isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "enumerators")
+                    if !isnothing(enumerator_info["name"]) && !isnothing(enumerator_info["value"])
+                        # Only add if we haven't already added this enumerator
+                        existing_names = [e["name"] for e in type_refs[parent_offset]["enumerators"]]
+                        if !(enumerator_info["name"] in existing_names)
+                            push!(type_refs[parent_offset]["enumerators"], Dict(
+                                "name" => enumerator_info["name"],
+                                "value" => enumerator_info["value"]
+                            ))
+                        end
+                    end
+                end
+            end
         end
     end
 
@@ -866,17 +1068,27 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     pointer_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :pointer, keys(type_refs))
     struct_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :struct && isa(type_refs[k], Dict), keys(type_refs))
     class_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :class && isa(type_refs[k], Dict), keys(type_refs))
+    enum_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :enum && isa(type_refs[k], Dict), keys(type_refs))
+    array_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :array && isa(type_refs[k], Dict), keys(type_refs))
+    subroutine_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :subroutine && isa(type_refs[k], Dict), keys(type_refs))
 
-    # Count total members extracted
+    # Count total members/enumerators extracted
     total_members = 0
+    total_enumerators = 0
     for (k, v) in type_refs
-        if isa(v, Dict) && haskey(v, "members")
-            total_members += length(v["members"])
+        if isa(v, Dict)
+            if haskey(v, "members")
+                total_members += length(v["members"])
+            end
+            if haskey(v, "enumerators")
+                total_enumerators += length(v["enumerators"])
+            end
         end
     end
 
     println("Types collected: $base_count base, $pointer_count pointer, $struct_count struct, $class_count class")
-    println("   Struct/class members extracted: $total_members")
+    println("   Advanced types: $enum_count enum, $array_count array, $subroutine_count function_pointer")
+    println("   Struct/class members: $total_members, Enum enumerators: $total_enumerators")
 
     # Helper function to resolve type references (follows pointer/const/reference chains)
     function resolve_type(type_ref::String, type_refs::Dict, visited::Set{String}=Set{String}())::String
@@ -898,13 +1110,48 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             return type_info
         end
 
-        # Pointer/const/reference type - follow the chain
+        # Pointer/const/reference/enum/array/subroutine type - follow the chain
         if isa(type_info, Dict)
             kind = get(type_info, "kind", nothing)
 
             # Struct or class - return the name
             if kind in ["struct", "class"]
                 return get(type_info, "name", "unknown")
+            end
+
+            # Enum - return the name
+            if kind == "enum"
+                return get(type_info, "name", "unknown_enum")
+            end
+
+            # Array - return element_type[size] or element_type[size1][size2]...
+            if kind == "array"
+                element_type_ref = get(type_info, "element_type", nothing)
+                dimensions = get(type_info, "dimensions", [])
+
+                if !isnothing(element_type_ref)
+                    element_type = resolve_type(element_type_ref, type_refs, visited)
+                    if !isempty(dimensions)
+                        # Build array notation: type[size1][size2]...
+                        dim_str = join(["[$d]" for d in dimensions], "")
+                        return element_type * dim_str
+                    else
+                        # No dimensions specified (incomplete DWARF)
+                        return element_type * "[]"
+                    end
+                end
+                return "unknown[]"
+            end
+
+            # Subroutine (function pointer) - return simplified signature
+            if kind == "subroutine"
+                return_type_ref = get(type_info, "return_type", nothing)
+                if !isnothing(return_type_ref)
+                    return_type = resolve_type(return_type_ref, type_refs, visited)
+                    return "function_ptr($return_type)"
+                else
+                    return "function_ptr(void)"
+                end
             end
 
             target = get(type_info, "target", nothing)
@@ -930,12 +1177,16 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         return "unknown"
     end
 
-    # Second pass: Extract function return types
+    # Second pass: Extract function return types and parameters
     current_function_offset = nothing
     current_function_name = nothing
     current_function_linkage = nothing
     current_function_level = nothing
     function_processed = false  # State flag: true once we leave function's own level
+    current_function_params = []  # Collect parameters for current function
+
+    # Track formal parameters (similar to struct members)
+    current_param_offset = nothing
 
     last_seen_level = nothing  # Track last level for attribute lines
 
@@ -979,6 +1230,23 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 current_function_name = nothing
                 current_function_linkage = nothing
                 function_processed = false  # Reset flag for new function
+                current_function_params = []  # Reset parameters for new function
+            end
+        end
+
+        # Detect formal parameter (child of subprogram)
+        # Example: <2><7a>: DW_TAG_formal_parameter
+        if contains(line, "DW_TAG_formal_parameter")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_param_offset = "0x" * offset_match.captures[1]
+                type_refs[current_param_offset] = Dict{String,Any}(
+                    "kind" => "parameter",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "position" => length(current_function_params)  # Track position
+                )
+                offset_to_kind[current_param_offset] = :parameter
             end
         end
 
@@ -1035,10 +1303,55 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     return_types[function_key] = Dict(
                         "c_type" => c_type,
                         "julia_type" => julia_type,
-                        "size" => type_size
+                        "size" => type_size,
+                        "parameters" => current_function_params  # Add parameters from DWARF
                     )
                 end
                 function_processed = true  # Mark as processed
+            end
+        end
+
+        # Extract parameter attributes (name and type)
+        # Parameters are child tags (level > function_level)
+        if !isnothing(current_param_offset) && haskey(type_refs, current_param_offset) &&
+           haskey(offset_to_kind, current_param_offset) && offset_to_kind[current_param_offset] == :parameter
+
+            param_info = type_refs[current_param_offset]
+
+            # Extract parameter name
+            if contains(line, "DW_AT_name") && !isnothing(current_level) &&
+               !isnothing(current_function_level) && current_level > current_function_level
+                name_match = match(r":\s*([^:]+)\s*$", line)
+                if !isnothing(name_match)
+                    param_info["name"] = String(strip(name_match.captures[1]))
+                end
+            end
+
+            # Extract parameter type
+            if contains(line, "DW_AT_type") && !isnothing(current_level) &&
+               !isnothing(current_function_level) && current_level > current_function_level
+                type_match = match(r"<(0x[^>]+)>", line)
+                if !isnothing(type_match)
+                    param_info["type"] = String(type_match.captures[1])
+
+                    # If we have both name and type, add to function's parameter list
+                    if !isnothing(param_info["name"]) && !isnothing(param_info["type"])
+                        # Resolve type
+                        type_ref = param_info["type"]
+                        c_type = resolve_type(type_ref, type_refs)
+                        julia_type = cpp_to_julia_type(c_type)
+
+                        push!(current_function_params, Dict(
+                            "name" => param_info["name"],
+                            "c_type" => c_type,
+                            "julia_type" => julia_type,
+                            "position" => param_info["position"]
+                        ))
+
+                        # Reset param offset to avoid re-processing
+                        current_param_offset = nothing
+                    end
+                end
             end
         end
     end
@@ -1051,8 +1364,14 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             return_types[function_key] = Dict(
                 "c_type" => "void",
                 "julia_type" => "Cvoid",
-                "size" => 0
+                "size" => 0,
+                "parameters" => current_function_params
             )
+        elseif !isnothing(function_key) && haskey(return_types, function_key)
+            # Function already has return type, but may need parameters added
+            if !haskey(return_types[function_key], "parameters")
+                return_types[function_key]["parameters"] = current_function_params
+            end
         end
     end
 
@@ -1098,6 +1417,46 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         println("    Extracted $(length(struct_defs)) struct/class definitions with members")
     end
 
+    # Extract enum definitions with enumerator information
+    enum_defs = Dict{String,Dict{String,Any}}()
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict) && get(type_info, "kind", nothing) == "enum"
+            enum_name = get(type_info, "name", "unknown")
+            if enum_name != "unknown" && enum_name != "unknown_enum"
+                # Get underlying type
+                underlying_type_ref = get(type_info, "underlying_type", nothing)
+                underlying_c_type = "int"  # Default
+                if !isnothing(underlying_type_ref)
+                    underlying_c_type = resolve_type(underlying_type_ref, type_refs)
+                end
+                underlying_julia_type = cpp_to_julia_type(underlying_c_type)
+
+                # Get enumerators
+                enumerators = get(type_info, "enumerators", [])
+
+                if !isempty(enumerators)
+                    enum_defs[enum_name] = Dict(
+                        "kind" => "enum",
+                        "underlying_type" => underlying_c_type,
+                        "julia_type" => underlying_julia_type,
+                        "byte_size" => get(type_info, "byte_size", "0x04"),
+                        "enumerators" => enumerators
+                    )
+                end
+            end
+        end
+    end
+
+    if !isempty(enum_defs)
+        println("    Extracted $(length(enum_defs)) enum definitions with enumerators")
+    end
+
+    # Store enum_defs in struct_defs with special marker (for now, to maintain API compatibility)
+    # Later we can extend the return type
+    for (enum_name, enum_info) in enum_defs
+        struct_defs["__enum__" * enum_name] = enum_info
+    end
+
     return (return_types, struct_defs)
 end
 
@@ -1119,14 +1478,30 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # Parse function signatures (basic type inference from symbol names)
     functions = parse_function_signatures(symbols)
 
-    # Merge DWARF return types into function metadata (overrides inference)
+    # Merge DWARF return types and parameters into function metadata (overrides inference)
     for func in functions
         mangled = func["mangled"]
         if haskey(dwarf_return_types, mangled)
-            func["return_type"] = dwarf_return_types[mangled]
+            dwarf_info = dwarf_return_types[mangled]
+
+            # Merge return type (only the return type fields, not parameters)
+            func["return_type"] = Dict(
+                "c_type" => get(dwarf_info, "c_type", "void"),
+                "julia_type" => get(dwarf_info, "julia_type", "Cvoid"),
+                "size" => get(dwarf_info, "size", 0)
+            )
             func["return_type_source"] = "dwarf"
+
+            # Merge parameters if available from DWARF (at function level, not in return_type)
+            if haskey(dwarf_info, "parameters") && !isempty(dwarf_info["parameters"])
+                func["parameters"] = dwarf_info["parameters"]
+                func["parameters_source"] = "dwarf"
+            else
+                func["parameters_source"] = "inferred"
+            end
         else
             func["return_type_source"] = "inferred"
+            func["parameters_source"] = "inferred"
         end
     end
 
@@ -1321,6 +1696,42 @@ function cpp_to_julia_type(cpp_type::AbstractString)::String
         "const char*" => "Cstring"
     )
 
+    # Handle arrays: type[size] or type[size1][size2]
+    # Examples: "double[3]" -> "NTuple{3, Cdouble}"
+    #           "int[3][4]" -> "NTuple{12, Cint}"  (flattened)
+    if contains(cpp_type, "[") && contains(cpp_type, "]")
+        # Extract element type and dimensions
+        array_match = match(r"^(.+?)(\[.+\])$", cpp_type)
+        if !isnothing(array_match)
+            element_type_str = strip(array_match.captures[1])
+            dims_str = array_match.captures[2]
+
+            # Parse dimensions: [3][4] -> [3, 4]
+            dims = Int[]
+            for dim_match in eachmatch(r"\[(\d+)\]", dims_str)
+                push!(dims, parse(Int, dim_match.captures[1]))
+            end
+
+            if !isempty(dims)
+                # Calculate total size (product of dimensions)
+                total_size = prod(dims)
+
+                # Map element type to Julia
+                element_julia_type = cpp_to_julia_type(element_type_str)
+
+                # Return as NTuple (flattened)
+                return "NTuple{$total_size, $element_julia_type}"
+            end
+        end
+    end
+
+    # Handle function pointers: function_ptr(return_type)
+    if startswith(cpp_type, "function_ptr(")
+        # For now, treat all function pointers as Ptr{Cvoid}
+        # TODO: Generate typed function pointer wrappers
+        return "Ptr{Cvoid}"
+    end
+
     # Handle pointers
     if endswith(cpp_type, "*")
         return "Ptr{Cvoid}"
@@ -1331,6 +1742,11 @@ function cpp_to_julia_type(cpp_type::AbstractString)::String
         base_type = strip(cpp_type[1:end-1])
         return "Ref{$(cpp_to_julia_type(base_type))}"
     end
+
+    # Handle enums (will appear as their name)
+    # For now, map to their underlying type (Int32 by default)
+    # This will be refined when we generate @enum definitions
+    # Unknown types default to Any, which is fine for enums for now
 
     return get(type_map, cpp_type, "Any")
 end

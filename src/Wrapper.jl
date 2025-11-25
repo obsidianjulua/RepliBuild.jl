@@ -1068,32 +1068,77 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
     """
 
-    # Struct definitions
-    # Collect unique struct types from function signatures (returns AND parameters)
+    # Extract metadata
     functions = metadata["functions"]
+    dwarf_structs = get(metadata, "struct_definitions", Dict())
+
+    # Struct definitions
+    # Collect all struct names from DWARF (excluding enums which have __enum__ prefix)
     struct_types = Set{String}()
-
-    for func in functions
-        # Check return type
-        ret_type = get(func, "return_type", Dict())
-        c_type = get(ret_type, "c_type", "")
-        julia_type = get(ret_type, "julia_type", "")
-
-        if !isempty(c_type) && julia_type == "Any" && !contains(c_type, "*") && !contains(c_type, "void")
-            push!(struct_types, c_type)
-        end
-
-        # Check parameter types
-        params = get(func, "parameters", [])
-        for param in params
-            param_c_type = get(param, "c_type", "")
-            param_julia_type = get(param, "julia_type", "")
-
-            if !isempty(param_c_type) && param_julia_type == "Any" && !contains(param_c_type, "*") && !contains(param_c_type, "void")
-                push!(struct_types, param_c_type)
-            end
+    for (name, info) in dwarf_structs
+        if !startswith(name, "__enum__") && haskey(info, "members")
+            push!(struct_types, name)
         end
     end
+
+    # =============================================================================
+    # ENUM GENERATION (from DWARF)
+    # =============================================================================
+
+    enum_definitions = ""
+
+    # Extract enums (stored with __enum__ prefix)
+    enum_types = filter(k -> startswith(k, "__enum__"), keys(dwarf_structs))
+
+    # Build set of enum names (without prefix) to exclude from struct generation
+    enum_names = Set{String}()
+    for enum_key in enum_types
+        enum_name = replace(enum_key, "__enum__" => "")
+        push!(enum_names, enum_name)
+    end
+
+    if !isempty(enum_types)
+        enum_definitions *= """
+        # =============================================================================
+        # Enum Definitions (from DWARF debug info)
+        # =============================================================================
+
+        """
+
+        for enum_key in sort(collect(enum_types))
+            enum_name = replace(enum_key, "__enum__" => "")
+            enum_info = dwarf_structs[enum_key]
+
+            # Get enum metadata
+            underlying_type = get(enum_info, "underlying_type", "int")
+            julia_underlying = get(enum_info, "julia_type", "Int32")
+            enumerators = get(enum_info, "enumerators", [])
+
+            if !isempty(enumerators)
+                enum_definitions *= """
+                # C++ enum: $enum_name (underlying type: $underlying_type)
+                @enum $enum_name::$julia_underlying begin
+                """
+
+                for (i, enumerator) in enumerate(enumerators)
+                    name = get(enumerator, "name", "Unknown")
+                    value = get(enumerator, "value", 0)
+                    enum_definitions *= "    $name = $value\n"
+                end
+
+                enum_definitions *= """
+                end
+
+                """
+            end
+        end
+
+        enum_definitions *= "\n"
+    end
+
+    # =============================================================================
+    # STRUCT GENERATION (from DWARF)
+    # =============================================================================
 
     struct_definitions = ""
     if !isempty(struct_types)
@@ -1104,10 +1149,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         """
 
-        # Get struct definitions from metadata (extracted from DWARF)
-        dwarf_structs = get(metadata, "struct_definitions", Dict())
-
         for struct_name in sort(collect(struct_types))
+            # Skip if this is actually an enum (enums are generated separately)
+            if struct_name in enum_names
+                continue
+            end
+
             # Check if we have DWARF member information for this struct
             if haskey(dwarf_structs, struct_name)
                 struct_info = dwarf_structs[struct_name]
@@ -1350,7 +1397,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     end # module $module_name
     """
 
-    return header * metadata_section * struct_definitions * export_statement * function_wrappers * footer
+    return header * metadata_section * enum_definitions * struct_definitions * export_statement * function_wrappers * footer
 end
 
 end # module Wrapper

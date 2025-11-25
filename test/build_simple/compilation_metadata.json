@@ -1,0 +1,3661 @@
+{
+  "symbols": [
+    {
+      "mangled": "_Z10matrix_sum9Matrix3x3",
+      "demangled": "matrix_sum(Matrix3x3)",
+      "type": "T",
+      "address": "0000000000001240"
+    },
+    {
+      "mangled": "_Z12add_callbackdd",
+      "demangled": "add_callback(double, double)",
+      "type": "T",
+      "address": "0000000000001330"
+    },
+    {
+      "mangled": "_Z12check_status6Status",
+      "demangled": "check_status(Status)",
+      "type": "T",
+      "address": "00000000000011c0"
+    },
+    {
+      "mangled": "_Z12color_to_int5Color",
+      "demangled": "color_to_int(Color)",
+      "type": "T",
+      "address": "00000000000011b0"
+    },
+    {
+      "mangled": "_Z14apply_callbackPFiddEdd",
+      "demangled": "apply_callback(int (*)(double, double), double, double)",
+      "type": "T",
+      "address": "00000000000012e0"
+    },
+    {
+      "mangled": "_Z14create_complex5Color6StatusPFiddE",
+      "demangled": "create_complex(Color, Status, int (*)(double, double))",
+      "type": "T",
+      "address": "0000000000001350"
+    },
+    {
+      "mangled": "_Z17get_primary_colorv",
+      "demangled": "get_primary_color()",
+      "type": "T",
+      "address": "00000000000011a0"
+    },
+    {
+      "mangled": "_Z22create_identity_matrixv",
+      "demangled": "create_identity_matrix()",
+      "type": "T",
+      "address": "00000000000011d0"
+    },
+    {
+      "mangled": "_Z8grid_get4Gridii",
+      "demangled": "grid_get(Grid, int, int)",
+      "type": "T",
+      "address": "0000000000001290"
+    },
+    {
+      "mangled": "_Z9run_testsv",
+      "demangled": "run_tests()",
+      "type": "T",
+      "address": "0000000000001400"
+    }
+  ],
+  "return_types": {
+    "acosl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "powl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "nexttowardl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "llround": {
+      "c_type": "long long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clonglong"
+    },
+    "asin": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "nearbyint": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "erfcf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "round": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "remainderf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "floor": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "lgammaf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "roundl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "asinh": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "atan2l": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "tanhf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "fabs": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "ilogbf": {
+      "c_type": "int",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "exp": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "expm1f": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "cbrtl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "remquo": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "cbrt": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "atanhl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "acosf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "fmal": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "llrintf": {
+      "c_type": "long long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clonglong"
+    },
+    "coshf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "nearbyintf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "tgammal": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "cosf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "hypot": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "erff": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "_Z10matrix_sum9Matrix3x3": {
+      "c_type": "double",
+      "parameters": [
+        {
+          "c_type": "Matrix3x3",
+          "name": "m",
+          "position": 0,
+          "julia_type": "Any"
+        }
+      ],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "cosh": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "scalblnf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "lround": {
+      "c_type": "long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clong"
+    },
+    "fmaf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "copysign": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "fminl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "pow": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "hypotl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "sinf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "erfl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "erfc": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "scalbln": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "acoshl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "nexttoward": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "fabsf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "atan2": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "fmin": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "lrintl": {
+      "c_type": "long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clong"
+    },
+    "log1p": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "atanh": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "floorf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "copysignf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "expf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "cbrtf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "ilogbl": {
+      "c_type": "int",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "frexpl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "llrintl": {
+      "c_type": "long long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clonglong"
+    },
+    "asinf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "nexttowardf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "tanl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "log10f": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "ldexpl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "truncl": {
+      "c_type": "long double",
+      "parameters": [
+        {
+          "c_type": "double[9]",
+          "name": "data",
+          "position": 0,
+          "julia_type": "NTuple{9, Cdouble}"
+        },
+        {
+          "c_type": "int[4][4]",
+          "name": "cells",
+          "position": 1,
+          "julia_type": "NTuple{16, Cint}"
+        }
+      ],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "_Z12add_callbackdd": {
+      "c_type": "int",
+      "parameters": [
+        {
+          "c_type": "double",
+          "name": "x",
+          "position": 0,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "y",
+          "position": 1,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "sqrt": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "lrintf": {
+      "c_type": "long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clong"
+    },
+    "log2l": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "fdim": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "fmod": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "log2f": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "lroundf": {
+      "c_type": "long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clong"
+    },
+    "ceilf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "lrint": {
+      "c_type": "long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clong"
+    },
+    "log": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "trunc": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "acos": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "scalbnl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "asinhl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "powf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "fmodf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "remainderl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "abs": {
+      "c_type": "int",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "log1pl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "fdiml": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "modf": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "cos": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "erfcl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "remquof": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "fma": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "coshl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "logl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "tanhl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "asinhf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "_Z12check_status6Status": {
+      "c_type": "Status",
+      "parameters": [
+        {
+          "c_type": "Status",
+          "name": "s",
+          "position": 0,
+          "julia_type": "Any"
+        }
+      ],
+      "size": 0,
+      "julia_type": "Any"
+    },
+    "remainder": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "lgammal": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "log2": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "lroundl": {
+      "c_type": "long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clong"
+    },
+    "tanf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "asinl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "nextafterl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "fmaxl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "acosh": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "llrint": {
+      "c_type": "long long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clonglong"
+    },
+    "scalbn": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "exp2l": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "frexpf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "copysignl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "rintf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "roundf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "log1pf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "lgamma": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "_Z9run_testsv": {
+      "c_type": "int",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "_Z17get_primary_colorv": {
+      "c_type": "Color",
+      "parameters": [],
+      "size": 0,
+      "julia_type": "Any"
+    },
+    "fminf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "sinh": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "ceil": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "llroundf": {
+      "c_type": "long long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clonglong"
+    },
+    "expm1": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "atanhf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "llroundl": {
+      "c_type": "long long",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Clonglong"
+    },
+    "nearbyintl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "tgamma": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "cosl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "expm1l": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "ceill": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "exp2f": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "sinhf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "expl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "tan": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "rintl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "floorl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "ldexpf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "frexp": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "nanf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "rint": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "atanf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "_Z14apply_callbackPFiddEdd": {
+      "c_type": "int",
+      "parameters": [
+        {
+          "c_type": "unknown",
+          "name": "cb",
+          "position": 0,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "double",
+          "name": "x",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "y",
+          "position": 2,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "logf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "ilogb": {
+      "c_type": "int",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "hypotf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "nan": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "fmax": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "acoshf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "atan2f": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "nanl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "ldexp": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "atanl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "truncf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "exp2": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "atan": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "_Z12color_to_int5Color": {
+      "c_type": "int",
+      "parameters": [
+        {
+          "c_type": "Color",
+          "name": "c",
+          "position": 0,
+          "julia_type": "Any"
+        }
+      ],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "fmaxf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "nextafter": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "nextafterf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "remquol": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "sinhl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "_Z22create_identity_matrixv": {
+      "c_type": "Matrix3x3",
+      "parameters": [],
+      "size": 0,
+      "julia_type": "Matrix3x3"
+    },
+    "tanh": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "log10l": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "_Z8grid_get4Gridii": {
+      "c_type": "int",
+      "parameters": [
+        {
+          "c_type": "Grid",
+          "name": "g",
+          "position": 0,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "int",
+          "name": "row",
+          "position": 1,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "col",
+          "position": 2,
+          "julia_type": "Cint"
+        }
+      ],
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "scalblnl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "fmodl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "log10": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "logbl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "erf": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "fabsl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "modff": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "sqrtf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "scalbnf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "logb": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "tgammaf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "sqrtl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "sinl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "logbf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "modfl": {
+      "c_type": "long double",
+      "parameters": [],
+      "size": 16,
+      "julia_type": "Float64"
+    },
+    "_Z14create_complex5Color6StatusPFiddE": {
+      "c_type": "ComplexType",
+      "parameters": [
+        {
+          "c_type": "Color",
+          "name": "c",
+          "position": 0,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "Status",
+          "name": "s",
+          "position": 1,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "unknown",
+          "name": "cb",
+          "position": 2,
+          "julia_type": "Any"
+        }
+      ],
+      "size": 0,
+      "julia_type": "ComplexType"
+    },
+    "fdimf": {
+      "c_type": "float",
+      "parameters": [],
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "sin": {
+      "c_type": "double",
+      "parameters": [],
+      "size": 8,
+      "julia_type": "Cdouble"
+    }
+  },
+  "functions": [
+    {
+      "name": "acosl",
+      "parameters": [],
+      "mangled": "acosl",
+      "demangled": "acosl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "powl",
+      "parameters": [],
+      "mangled": "powl",
+      "demangled": "powl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "nexttowardl",
+      "parameters": [],
+      "mangled": "nexttowardl",
+      "demangled": "nexttowardl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "llround",
+      "parameters": [],
+      "mangled": "llround",
+      "demangled": "llround",
+      "return_type": {
+        "c_type": "long long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clonglong"
+      }
+    },
+    {
+      "name": "asin",
+      "parameters": [],
+      "mangled": "asin",
+      "demangled": "asin",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "nearbyint",
+      "parameters": [],
+      "mangled": "nearbyint",
+      "demangled": "nearbyint",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "erfcf",
+      "parameters": [],
+      "mangled": "erfcf",
+      "demangled": "erfcf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "round",
+      "parameters": [],
+      "mangled": "round",
+      "demangled": "round",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "remainderf",
+      "parameters": [],
+      "mangled": "remainderf",
+      "demangled": "remainderf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "floor",
+      "parameters": [],
+      "mangled": "floor",
+      "demangled": "floor",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "lgammaf",
+      "parameters": [],
+      "mangled": "lgammaf",
+      "demangled": "lgammaf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "roundl",
+      "parameters": [],
+      "mangled": "roundl",
+      "demangled": "roundl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "asinh",
+      "parameters": [],
+      "mangled": "asinh",
+      "demangled": "asinh",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "atan2l",
+      "parameters": [],
+      "mangled": "atan2l",
+      "demangled": "atan2l",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "tanhf",
+      "parameters": [],
+      "mangled": "tanhf",
+      "demangled": "tanhf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "fabs",
+      "parameters": [],
+      "mangled": "fabs",
+      "demangled": "fabs",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "ilogbf",
+      "parameters": [],
+      "mangled": "ilogbf",
+      "demangled": "ilogbf",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "exp",
+      "parameters": [],
+      "mangled": "exp",
+      "demangled": "exp",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "expm1f",
+      "parameters": [],
+      "mangled": "expm1f",
+      "demangled": "expm1f",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "cbrtl",
+      "parameters": [],
+      "mangled": "cbrtl",
+      "demangled": "cbrtl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "remquo",
+      "parameters": [],
+      "mangled": "remquo",
+      "demangled": "remquo",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "cbrt",
+      "parameters": [],
+      "mangled": "cbrt",
+      "demangled": "cbrt",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "atanhl",
+      "parameters": [],
+      "mangled": "atanhl",
+      "demangled": "atanhl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "acosf",
+      "parameters": [],
+      "mangled": "acosf",
+      "demangled": "acosf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "fmal",
+      "parameters": [],
+      "mangled": "fmal",
+      "demangled": "fmal",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "llrintf",
+      "parameters": [],
+      "mangled": "llrintf",
+      "demangled": "llrintf",
+      "return_type": {
+        "c_type": "long long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clonglong"
+      }
+    },
+    {
+      "name": "coshf",
+      "parameters": [],
+      "mangled": "coshf",
+      "demangled": "coshf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "nearbyintf",
+      "parameters": [],
+      "mangled": "nearbyintf",
+      "demangled": "nearbyintf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "tgammal",
+      "parameters": [],
+      "mangled": "tgammal",
+      "demangled": "tgammal",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "cosf",
+      "parameters": [],
+      "mangled": "cosf",
+      "demangled": "cosf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "hypot",
+      "parameters": [],
+      "mangled": "hypot",
+      "demangled": "hypot",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "erff",
+      "parameters": [],
+      "mangled": "erff",
+      "demangled": "erff",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "_Z10matrix_sum9Matrix3x3",
+      "parameters": [],
+      "mangled": "_Z10matrix_sum9Matrix3x3",
+      "demangled": "_Z10matrix_sum9Matrix3x3",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [
+          {
+            "c_type": "Matrix3x3",
+            "name": "m",
+            "position": 0,
+            "julia_type": "Any"
+          }
+        ],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "cosh",
+      "parameters": [],
+      "mangled": "cosh",
+      "demangled": "cosh",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "scalblnf",
+      "parameters": [],
+      "mangled": "scalblnf",
+      "demangled": "scalblnf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "lround",
+      "parameters": [],
+      "mangled": "lround",
+      "demangled": "lround",
+      "return_type": {
+        "c_type": "long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clong"
+      }
+    },
+    {
+      "name": "fmaf",
+      "parameters": [],
+      "mangled": "fmaf",
+      "demangled": "fmaf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "copysign",
+      "parameters": [],
+      "mangled": "copysign",
+      "demangled": "copysign",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "fminl",
+      "parameters": [],
+      "mangled": "fminl",
+      "demangled": "fminl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "pow",
+      "parameters": [],
+      "mangled": "pow",
+      "demangled": "pow",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "hypotl",
+      "parameters": [],
+      "mangled": "hypotl",
+      "demangled": "hypotl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "sinf",
+      "parameters": [],
+      "mangled": "sinf",
+      "demangled": "sinf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "erfl",
+      "parameters": [],
+      "mangled": "erfl",
+      "demangled": "erfl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "erfc",
+      "parameters": [],
+      "mangled": "erfc",
+      "demangled": "erfc",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "scalbln",
+      "parameters": [],
+      "mangled": "scalbln",
+      "demangled": "scalbln",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "acoshl",
+      "parameters": [],
+      "mangled": "acoshl",
+      "demangled": "acoshl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "nexttoward",
+      "parameters": [],
+      "mangled": "nexttoward",
+      "demangled": "nexttoward",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "fabsf",
+      "parameters": [],
+      "mangled": "fabsf",
+      "demangled": "fabsf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "atan2",
+      "parameters": [],
+      "mangled": "atan2",
+      "demangled": "atan2",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "fmin",
+      "parameters": [],
+      "mangled": "fmin",
+      "demangled": "fmin",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "lrintl",
+      "parameters": [],
+      "mangled": "lrintl",
+      "demangled": "lrintl",
+      "return_type": {
+        "c_type": "long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clong"
+      }
+    },
+    {
+      "name": "log1p",
+      "parameters": [],
+      "mangled": "log1p",
+      "demangled": "log1p",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "atanh",
+      "parameters": [],
+      "mangled": "atanh",
+      "demangled": "atanh",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "floorf",
+      "parameters": [],
+      "mangled": "floorf",
+      "demangled": "floorf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "copysignf",
+      "parameters": [],
+      "mangled": "copysignf",
+      "demangled": "copysignf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "expf",
+      "parameters": [],
+      "mangled": "expf",
+      "demangled": "expf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "cbrtf",
+      "parameters": [],
+      "mangled": "cbrtf",
+      "demangled": "cbrtf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "ilogbl",
+      "parameters": [],
+      "mangled": "ilogbl",
+      "demangled": "ilogbl",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "frexpl",
+      "parameters": [],
+      "mangled": "frexpl",
+      "demangled": "frexpl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "llrintl",
+      "parameters": [],
+      "mangled": "llrintl",
+      "demangled": "llrintl",
+      "return_type": {
+        "c_type": "long long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clonglong"
+      }
+    },
+    {
+      "name": "asinf",
+      "parameters": [],
+      "mangled": "asinf",
+      "demangled": "asinf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "nexttowardf",
+      "parameters": [],
+      "mangled": "nexttowardf",
+      "demangled": "nexttowardf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "tanl",
+      "parameters": [],
+      "mangled": "tanl",
+      "demangled": "tanl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "log10f",
+      "parameters": [],
+      "mangled": "log10f",
+      "demangled": "log10f",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "ldexpl",
+      "parameters": [],
+      "mangled": "ldexpl",
+      "demangled": "ldexpl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "truncl",
+      "parameters": [],
+      "mangled": "truncl",
+      "demangled": "truncl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [
+          {
+            "c_type": "double[9]",
+            "name": "data",
+            "position": 0,
+            "julia_type": "NTuple{9, Cdouble}"
+          },
+          {
+            "c_type": "int[4][4]",
+            "name": "cells",
+            "position": 1,
+            "julia_type": "NTuple{16, Cint}"
+          }
+        ],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "_Z12add_callbackdd",
+      "parameters": [],
+      "mangled": "_Z12add_callbackdd",
+      "demangled": "_Z12add_callbackdd",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [
+          {
+            "c_type": "double",
+            "name": "x",
+            "position": 0,
+            "julia_type": "Cdouble"
+          },
+          {
+            "c_type": "double",
+            "name": "y",
+            "position": 1,
+            "julia_type": "Cdouble"
+          }
+        ],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "sqrt",
+      "parameters": [],
+      "mangled": "sqrt",
+      "demangled": "sqrt",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "lrintf",
+      "parameters": [],
+      "mangled": "lrintf",
+      "demangled": "lrintf",
+      "return_type": {
+        "c_type": "long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clong"
+      }
+    },
+    {
+      "name": "log2l",
+      "parameters": [],
+      "mangled": "log2l",
+      "demangled": "log2l",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "fdim",
+      "parameters": [],
+      "mangled": "fdim",
+      "demangled": "fdim",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "fmod",
+      "parameters": [],
+      "mangled": "fmod",
+      "demangled": "fmod",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "log2f",
+      "parameters": [],
+      "mangled": "log2f",
+      "demangled": "log2f",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "lroundf",
+      "parameters": [],
+      "mangled": "lroundf",
+      "demangled": "lroundf",
+      "return_type": {
+        "c_type": "long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clong"
+      }
+    },
+    {
+      "name": "ceilf",
+      "parameters": [],
+      "mangled": "ceilf",
+      "demangled": "ceilf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "lrint",
+      "parameters": [],
+      "mangled": "lrint",
+      "demangled": "lrint",
+      "return_type": {
+        "c_type": "long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clong"
+      }
+    },
+    {
+      "name": "log",
+      "parameters": [],
+      "mangled": "log",
+      "demangled": "log",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "trunc",
+      "parameters": [],
+      "mangled": "trunc",
+      "demangled": "trunc",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "acos",
+      "parameters": [],
+      "mangled": "acos",
+      "demangled": "acos",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "scalbnl",
+      "parameters": [],
+      "mangled": "scalbnl",
+      "demangled": "scalbnl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "asinhl",
+      "parameters": [],
+      "mangled": "asinhl",
+      "demangled": "asinhl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "powf",
+      "parameters": [],
+      "mangled": "powf",
+      "demangled": "powf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "fmodf",
+      "parameters": [],
+      "mangled": "fmodf",
+      "demangled": "fmodf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "remainderl",
+      "parameters": [],
+      "mangled": "remainderl",
+      "demangled": "remainderl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "abs",
+      "parameters": [],
+      "mangled": "abs",
+      "demangled": "abs",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "log1pl",
+      "parameters": [],
+      "mangled": "log1pl",
+      "demangled": "log1pl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "fdiml",
+      "parameters": [],
+      "mangled": "fdiml",
+      "demangled": "fdiml",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "modf",
+      "parameters": [],
+      "mangled": "modf",
+      "demangled": "modf",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "cos",
+      "parameters": [],
+      "mangled": "cos",
+      "demangled": "cos",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "erfcl",
+      "parameters": [],
+      "mangled": "erfcl",
+      "demangled": "erfcl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "remquof",
+      "parameters": [],
+      "mangled": "remquof",
+      "demangled": "remquof",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "fma",
+      "parameters": [],
+      "mangled": "fma",
+      "demangled": "fma",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "coshl",
+      "parameters": [],
+      "mangled": "coshl",
+      "demangled": "coshl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "logl",
+      "parameters": [],
+      "mangled": "logl",
+      "demangled": "logl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "tanhl",
+      "parameters": [],
+      "mangled": "tanhl",
+      "demangled": "tanhl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "asinhf",
+      "parameters": [],
+      "mangled": "asinhf",
+      "demangled": "asinhf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "_Z12check_status6Status",
+      "parameters": [],
+      "mangled": "_Z12check_status6Status",
+      "demangled": "_Z12check_status6Status",
+      "return_type": {
+        "c_type": "Status",
+        "parameters": [
+          {
+            "c_type": "Status",
+            "name": "s",
+            "position": 0,
+            "julia_type": "Any"
+          }
+        ],
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "remainder",
+      "parameters": [],
+      "mangled": "remainder",
+      "demangled": "remainder",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "lgammal",
+      "parameters": [],
+      "mangled": "lgammal",
+      "demangled": "lgammal",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "log2",
+      "parameters": [],
+      "mangled": "log2",
+      "demangled": "log2",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "lroundl",
+      "parameters": [],
+      "mangled": "lroundl",
+      "demangled": "lroundl",
+      "return_type": {
+        "c_type": "long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clong"
+      }
+    },
+    {
+      "name": "tanf",
+      "parameters": [],
+      "mangled": "tanf",
+      "demangled": "tanf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "asinl",
+      "parameters": [],
+      "mangled": "asinl",
+      "demangled": "asinl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "nextafterl",
+      "parameters": [],
+      "mangled": "nextafterl",
+      "demangled": "nextafterl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "fmaxl",
+      "parameters": [],
+      "mangled": "fmaxl",
+      "demangled": "fmaxl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "acosh",
+      "parameters": [],
+      "mangled": "acosh",
+      "demangled": "acosh",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "llrint",
+      "parameters": [],
+      "mangled": "llrint",
+      "demangled": "llrint",
+      "return_type": {
+        "c_type": "long long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clonglong"
+      }
+    },
+    {
+      "name": "scalbn",
+      "parameters": [],
+      "mangled": "scalbn",
+      "demangled": "scalbn",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "exp2l",
+      "parameters": [],
+      "mangled": "exp2l",
+      "demangled": "exp2l",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "frexpf",
+      "parameters": [],
+      "mangled": "frexpf",
+      "demangled": "frexpf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "copysignl",
+      "parameters": [],
+      "mangled": "copysignl",
+      "demangled": "copysignl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "rintf",
+      "parameters": [],
+      "mangled": "rintf",
+      "demangled": "rintf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "roundf",
+      "parameters": [],
+      "mangled": "roundf",
+      "demangled": "roundf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "log1pf",
+      "parameters": [],
+      "mangled": "log1pf",
+      "demangled": "log1pf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "lgamma",
+      "parameters": [],
+      "mangled": "lgamma",
+      "demangled": "lgamma",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "_Z9run_testsv",
+      "parameters": [],
+      "mangled": "_Z9run_testsv",
+      "demangled": "_Z9run_testsv",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "_Z17get_primary_colorv",
+      "parameters": [],
+      "mangled": "_Z17get_primary_colorv",
+      "demangled": "_Z17get_primary_colorv",
+      "return_type": {
+        "c_type": "Color",
+        "parameters": [],
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "fminf",
+      "parameters": [],
+      "mangled": "fminf",
+      "demangled": "fminf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "sinh",
+      "parameters": [],
+      "mangled": "sinh",
+      "demangled": "sinh",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "ceil",
+      "parameters": [],
+      "mangled": "ceil",
+      "demangled": "ceil",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "llroundf",
+      "parameters": [],
+      "mangled": "llroundf",
+      "demangled": "llroundf",
+      "return_type": {
+        "c_type": "long long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clonglong"
+      }
+    },
+    {
+      "name": "expm1",
+      "parameters": [],
+      "mangled": "expm1",
+      "demangled": "expm1",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "atanhf",
+      "parameters": [],
+      "mangled": "atanhf",
+      "demangled": "atanhf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "llroundl",
+      "parameters": [],
+      "mangled": "llroundl",
+      "demangled": "llroundl",
+      "return_type": {
+        "c_type": "long long",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Clonglong"
+      }
+    },
+    {
+      "name": "nearbyintl",
+      "parameters": [],
+      "mangled": "nearbyintl",
+      "demangled": "nearbyintl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "tgamma",
+      "parameters": [],
+      "mangled": "tgamma",
+      "demangled": "tgamma",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "cosl",
+      "parameters": [],
+      "mangled": "cosl",
+      "demangled": "cosl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "expm1l",
+      "parameters": [],
+      "mangled": "expm1l",
+      "demangled": "expm1l",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "ceill",
+      "parameters": [],
+      "mangled": "ceill",
+      "demangled": "ceill",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "exp2f",
+      "parameters": [],
+      "mangled": "exp2f",
+      "demangled": "exp2f",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "sinhf",
+      "parameters": [],
+      "mangled": "sinhf",
+      "demangled": "sinhf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "expl",
+      "parameters": [],
+      "mangled": "expl",
+      "demangled": "expl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "tan",
+      "parameters": [],
+      "mangled": "tan",
+      "demangled": "tan",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "rintl",
+      "parameters": [],
+      "mangled": "rintl",
+      "demangled": "rintl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "floorl",
+      "parameters": [],
+      "mangled": "floorl",
+      "demangled": "floorl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "ldexpf",
+      "parameters": [],
+      "mangled": "ldexpf",
+      "demangled": "ldexpf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "frexp",
+      "parameters": [],
+      "mangled": "frexp",
+      "demangled": "frexp",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "nanf",
+      "parameters": [],
+      "mangled": "nanf",
+      "demangled": "nanf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "rint",
+      "parameters": [],
+      "mangled": "rint",
+      "demangled": "rint",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "atanf",
+      "parameters": [],
+      "mangled": "atanf",
+      "demangled": "atanf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "_Z14apply_callbackPFiddEdd",
+      "parameters": [],
+      "mangled": "_Z14apply_callbackPFiddEdd",
+      "demangled": "_Z14apply_callbackPFiddEdd",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [
+          {
+            "c_type": "unknown",
+            "name": "cb",
+            "position": 0,
+            "julia_type": "Any"
+          },
+          {
+            "c_type": "double",
+            "name": "x",
+            "position": 1,
+            "julia_type": "Cdouble"
+          },
+          {
+            "c_type": "double",
+            "name": "y",
+            "position": 2,
+            "julia_type": "Cdouble"
+          }
+        ],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "logf",
+      "parameters": [],
+      "mangled": "logf",
+      "demangled": "logf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "ilogb",
+      "parameters": [],
+      "mangled": "ilogb",
+      "demangled": "ilogb",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "hypotf",
+      "parameters": [],
+      "mangled": "hypotf",
+      "demangled": "hypotf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "nan",
+      "parameters": [],
+      "mangled": "nan",
+      "demangled": "nan",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "fmax",
+      "parameters": [],
+      "mangled": "fmax",
+      "demangled": "fmax",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "acoshf",
+      "parameters": [],
+      "mangled": "acoshf",
+      "demangled": "acoshf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "atan2f",
+      "parameters": [],
+      "mangled": "atan2f",
+      "demangled": "atan2f",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "nanl",
+      "parameters": [],
+      "mangled": "nanl",
+      "demangled": "nanl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "ldexp",
+      "parameters": [],
+      "mangled": "ldexp",
+      "demangled": "ldexp",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "atanl",
+      "parameters": [],
+      "mangled": "atanl",
+      "demangled": "atanl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "truncf",
+      "parameters": [],
+      "mangled": "truncf",
+      "demangled": "truncf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "exp2",
+      "parameters": [],
+      "mangled": "exp2",
+      "demangled": "exp2",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "atan",
+      "parameters": [],
+      "mangled": "atan",
+      "demangled": "atan",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "_Z12color_to_int5Color",
+      "parameters": [],
+      "mangled": "_Z12color_to_int5Color",
+      "demangled": "_Z12color_to_int5Color",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [
+          {
+            "c_type": "Color",
+            "name": "c",
+            "position": 0,
+            "julia_type": "Any"
+          }
+        ],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "fmaxf",
+      "parameters": [],
+      "mangled": "fmaxf",
+      "demangled": "fmaxf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "nextafter",
+      "parameters": [],
+      "mangled": "nextafter",
+      "demangled": "nextafter",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "nextafterf",
+      "parameters": [],
+      "mangled": "nextafterf",
+      "demangled": "nextafterf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "remquol",
+      "parameters": [],
+      "mangled": "remquol",
+      "demangled": "remquol",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "sinhl",
+      "parameters": [],
+      "mangled": "sinhl",
+      "demangled": "sinhl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "_Z22create_identity_matrixv",
+      "parameters": [],
+      "mangled": "_Z22create_identity_matrixv",
+      "demangled": "_Z22create_identity_matrixv",
+      "return_type": {
+        "c_type": "Matrix3x3",
+        "parameters": [],
+        "size": 0,
+        "julia_type": "Matrix3x3"
+      }
+    },
+    {
+      "name": "tanh",
+      "parameters": [],
+      "mangled": "tanh",
+      "demangled": "tanh",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "log10l",
+      "parameters": [],
+      "mangled": "log10l",
+      "demangled": "log10l",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "_Z8grid_get4Gridii",
+      "parameters": [],
+      "mangled": "_Z8grid_get4Gridii",
+      "demangled": "_Z8grid_get4Gridii",
+      "return_type": {
+        "c_type": "int",
+        "parameters": [
+          {
+            "c_type": "Grid",
+            "name": "g",
+            "position": 0,
+            "julia_type": "Any"
+          },
+          {
+            "c_type": "int",
+            "name": "row",
+            "position": 1,
+            "julia_type": "Cint"
+          },
+          {
+            "c_type": "int",
+            "name": "col",
+            "position": 2,
+            "julia_type": "Cint"
+          }
+        ],
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "scalblnl",
+      "parameters": [],
+      "mangled": "scalblnl",
+      "demangled": "scalblnl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "fmodl",
+      "parameters": [],
+      "mangled": "fmodl",
+      "demangled": "fmodl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "log10",
+      "parameters": [],
+      "mangled": "log10",
+      "demangled": "log10",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "logbl",
+      "parameters": [],
+      "mangled": "logbl",
+      "demangled": "logbl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "erf",
+      "parameters": [],
+      "mangled": "erf",
+      "demangled": "erf",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "fabsl",
+      "parameters": [],
+      "mangled": "fabsl",
+      "demangled": "fabsl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "modff",
+      "parameters": [],
+      "mangled": "modff",
+      "demangled": "modff",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "sqrtf",
+      "parameters": [],
+      "mangled": "sqrtf",
+      "demangled": "sqrtf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "scalbnf",
+      "parameters": [],
+      "mangled": "scalbnf",
+      "demangled": "scalbnf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "logb",
+      "parameters": [],
+      "mangled": "logb",
+      "demangled": "logb",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "tgammaf",
+      "parameters": [],
+      "mangled": "tgammaf",
+      "demangled": "tgammaf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "sqrtl",
+      "parameters": [],
+      "mangled": "sqrtl",
+      "demangled": "sqrtl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "sinl",
+      "parameters": [],
+      "mangled": "sinl",
+      "demangled": "sinl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "logbf",
+      "parameters": [],
+      "mangled": "logbf",
+      "demangled": "logbf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "modfl",
+      "parameters": [],
+      "mangled": "modfl",
+      "demangled": "modfl",
+      "return_type": {
+        "c_type": "long double",
+        "parameters": [],
+        "size": 16,
+        "julia_type": "Float64"
+      }
+    },
+    {
+      "name": "_Z14create_complex5Color6StatusPFiddE",
+      "parameters": [],
+      "mangled": "_Z14create_complex5Color6StatusPFiddE",
+      "demangled": "_Z14create_complex5Color6StatusPFiddE",
+      "return_type": {
+        "c_type": "ComplexType",
+        "parameters": [
+          {
+            "c_type": "Color",
+            "name": "c",
+            "position": 0,
+            "julia_type": "Any"
+          },
+          {
+            "c_type": "Status",
+            "name": "s",
+            "position": 1,
+            "julia_type": "Any"
+          },
+          {
+            "c_type": "unknown",
+            "name": "cb",
+            "position": 2,
+            "julia_type": "Any"
+          }
+        ],
+        "size": 0,
+        "julia_type": "ComplexType"
+      }
+    },
+    {
+      "name": "fdimf",
+      "parameters": [],
+      "mangled": "fdimf",
+      "demangled": "fdimf",
+      "return_type": {
+        "c_type": "float",
+        "parameters": [],
+        "size": 4,
+        "julia_type": "Cfloat"
+      }
+    },
+    {
+      "name": "sin",
+      "parameters": [],
+      "mangled": "sin",
+      "demangled": "sin",
+      "return_type": {
+        "c_type": "double",
+        "parameters": [],
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    }
+  ],
+  "struct_definitions": {
+    "Grid": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "int[4][4]",
+          "name": "cells",
+          "offset": null,
+          "julia_type": "NTuple{16, Cint}"
+        },
+        {
+          "c_type": "double[3]",
+          "name": "values",
+          "offset": null,
+          "julia_type": "NTuple{3, Cdouble}"
+        }
+      ]
+    },
+    "ComplexType": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "Color",
+          "name": "color",
+          "offset": null,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "Status",
+          "name": "status",
+          "offset": null,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "double[3]",
+          "name": "coords",
+          "offset": null,
+          "julia_type": "NTuple{3, Cdouble}"
+        },
+        {
+          "c_type": "unknown",
+          "name": "handler",
+          "offset": null,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "int[2][3]",
+          "name": "matrix",
+          "offset": null,
+          "julia_type": "NTuple{6, Cint}"
+        }
+      ]
+    },
+    "__enum__Color": {
+      "kind": "enum",
+      "byte_size": null,
+      "enumerators": [
+        {
+          "name": "Red",
+          "value": 0
+        },
+        {
+          "name": "Green",
+          "value": 1
+        },
+        {
+          "name": "Blue",
+          "value": 2
+        }
+      ],
+      "underlying_type": "unsigned int",
+      "julia_type": "Cuint"
+    },
+    "__enum__Status": {
+      "kind": "enum",
+      "byte_size": null,
+      "enumerators": [
+        {
+          "name": "Idle",
+          "value": 0
+        },
+        {
+          "name": "Running",
+          "value": 100
+        },
+        {
+          "name": "Stopped",
+          "value": 200
+        },
+        {
+          "name": "Error",
+          "value": 999
+        }
+      ],
+      "underlying_type": "unsigned int",
+      "julia_type": "Cuint"
+    },
+    "Matrix3x3": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double[9]",
+          "name": "data",
+          "offset": null,
+          "julia_type": "NTuple{9, Cdouble}"
+        }
+      ]
+    }
+  }
+}
