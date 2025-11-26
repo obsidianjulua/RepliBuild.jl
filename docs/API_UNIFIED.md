@@ -2,17 +2,20 @@
 
 ## Problem Solved
 
-**Before:** Confusing mess of 50+ exported functions, unclear workflow, even the creator struggled to use it
+**Before:** Confusing mess of 50+ exported functions, unclear workflow
 **After:** Clean 3-command API that anyone can understand
 
 ## The New API
 
-### Core Functions (ONLY 3!)
+### Core Functions
 
 ```julia
 using RepliBuild
 
-# 1. Compile C++ → library
+# 1. Discover source and write to Toml
+ReipliBuild.discover(force=true)
+
+# 1. Compile C++ → library from Toml
 RepliBuild.build()
 
 # 2. Generate Julia wrapper

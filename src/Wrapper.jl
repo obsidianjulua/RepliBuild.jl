@@ -14,10 +14,27 @@ import ..BuildBridge
 
 export wrap_library, wrap_with_clang, wrap_basic, extract_symbols
 export TypeRegistry, SymbolInfo, ParamInfo, WrapperTier
+export TypeStrictness, STRICT, WARN, PERMISSIVE
+export is_struct_like, is_enum_like, is_function_pointer_like
 
 # =============================================================================
 # TYPE SYSTEM - Comprehensive C/C++ to Julia Type Mapping
 # =============================================================================
+
+"""
+    TypeStrictness
+
+Controls how unknown/unmapped types are handled during FFI generation.
+
+- `STRICT`: Error on any unmapped type (recommended for production)
+- `WARN`: Warn and fallback to Any (useful for debugging)
+- `PERMISSIVE`: Silent Any fallback (legacy compatibility)
+"""
+@enum TypeStrictness begin
+    STRICT = 1
+    WARN = 2
+    PERMISSIVE = 3
+end
 
 """
     TypeRegistry
@@ -38,14 +55,59 @@ struct TypeRegistry
 
     # Metadata
     compilation_metadata::Union{Nothing,Dict}
+
+    # NEW: Type validation settings
+    strictness::TypeStrictness           # How to handle unknown types
+    allow_unknown_structs::Bool          # Treat unknown types as opaque structs
+    allow_unknown_enums::Bool            # Treat unknown enums as Cint
+    allow_function_pointers::Bool        # Map function pointers to Ptr{Cvoid}
 end
 
 """
-    create_type_registry(config::RepliBuildConfig; custom_types::Dict{String,String}=Dict{String,String}())
+    create_type_registry(config::RepliBuildConfig; custom_types::Dict{String,String}=Dict{String,String}(),
+                        strictness::Union{TypeStrictness,Nothing}=nothing,
+                        allow_unknown_structs::Union{Bool,Nothing}=nothing,
+                        allow_unknown_enums::Union{Bool,Nothing}=nothing,
+                        allow_function_pointers::Union{Bool,Nothing}=nothing)
 
 Create a TypeRegistry with comprehensive default mappings plus custom overrides.
+
+# Arguments
+- `config`: RepliBuild configuration (reads from config.types if parameters not provided)
+- `custom_types`: Additional user-defined type mappings (merged with config.types.custom_mappings)
+- `strictness`: Override - how to handle unknown types (defaults to config.types.strictness)
+- `allow_unknown_structs`: Override - treat unknown types as opaque structs (defaults to config.types)
+- `allow_unknown_enums`: Override - treat unknown enums as Cint (defaults to config.types)
+- `allow_function_pointers`: Override - map function pointers to Ptr{Cvoid} (defaults to config.types)
 """
-function create_type_registry(config::RepliBuildConfig; custom_types::Dict{String,String}=Dict{String,String}())
+function create_type_registry(config::RepliBuildConfig;
+                              custom_types::Dict{String,String}=Dict{String,String}(),
+                              strictness::Union{TypeStrictness,Nothing}=nothing,
+                              allow_unknown_structs::Union{Bool,Nothing}=nothing,
+                              allow_unknown_enums::Union{Bool,Nothing}=nothing,
+                              allow_function_pointers::Union{Bool,Nothing}=nothing)
+    # Read from config.types, allow function parameters to override
+    types_cfg = config.types
+
+    # Convert Symbol to TypeStrictness
+    final_strictness = if !isnothing(strictness)
+        strictness
+    elseif types_cfg.strictness == :strict
+        STRICT
+    elseif types_cfg.strictness == :permissive
+        PERMISSIVE
+    else
+        WARN
+    end
+
+    # Use config values or provided overrides
+    final_allow_structs = isnothing(allow_unknown_structs) ? types_cfg.allow_unknown_structs : allow_unknown_structs
+    final_allow_enums = isnothing(allow_unknown_enums) ? types_cfg.allow_unknown_enums : allow_unknown_enums
+    final_allow_fptrs = isnothing(allow_function_pointers) ? types_cfg.allow_function_pointers : allow_function_pointers
+
+    # Merge custom types from config and parameters
+    merged_custom = merge(types_cfg.custom_mappings, custom_types)
+
     # Base C types
     base_types = Dict{String,String}(
         # Void
@@ -142,16 +204,182 @@ function create_type_registry(config::RepliBuildConfig; custom_types::Dict{Strin
     return TypeRegistry(
         base_types,
         stl_types,
-        custom_types,
-        "Ptr",      # pointer_suffix
-        "Ref",      # reference_suffix
-        :strip,     # const_handling
-        nothing     # compilation_metadata (TODO: load from config)
+        merged_custom,              # custom_types (merged from config and params)
+        "Ptr",                      # pointer_suffix
+        "Ref",                      # reference_suffix
+        :strip,                     # const_handling
+        nothing,                    # compilation_metadata (TODO: load from config)
+        final_strictness,           # strictness
+        final_allow_structs,        # allow_unknown_structs
+        final_allow_enums,          # allow_unknown_enums
+        final_allow_fptrs           # allow_function_pointers
     )
 end
 
+# =============================================================================
+# TYPE HEURISTICS - Smart detection of type categories
+# =============================================================================
+
 """
-    infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
+    is_struct_like(cpp_type::String)::Bool
+
+Check if a C++ type looks like a struct/class based on naming conventions.
+Structs typically: start with uppercase, contain only alphanumeric + underscore.
+"""
+function is_struct_like(cpp_type::String)::Bool
+    # Remove pointers, references, and whitespace
+    base = strip(replace(replace(cpp_type, "*" => ""), "&" => ""))
+
+    # Empty or primitive types are not structs
+    if isempty(base) || base == "void"
+        return false
+    end
+
+    # Struct names typically match: UpperCamelCase or snake_case with uppercase first letter
+    # Examples: Matrix3x3, Grid, ComplexType, My_Struct
+    return occursin(r"^[A-Z][A-Za-z0-9_]*$", base)
+end
+
+"""
+    is_enum_like(cpp_type::String)::Bool
+
+Check if a C++ type looks like an enum (similar heuristics to struct for now).
+Future: enhance with DWARF metadata lookup.
+"""
+function is_enum_like(cpp_type::String)::Bool
+    # For now, use same heuristics as struct
+    # In future: check against extracted enum names from DWARF
+    return is_struct_like(cpp_type)
+end
+
+"""
+    is_function_pointer_like(cpp_type::String)::Bool
+
+Check if a C++ type contains function pointer syntax.
+Looks for patterns: (*name), (*)(args), (^name) (blocks)
+"""
+function is_function_pointer_like(cpp_type::String)::Bool
+    # Function pointer patterns:
+    # - int (*callback)(double, double)
+    # - void (*cleanup)()
+    # - typedef int (*IntCallback)(double, double)
+    return occursin(r"\(\s*\*", cpp_type) || occursin(r"\(\s*\^", cpp_type)
+end
+
+# =============================================================================
+# UNKNOWN TYPE HANDLING - Smart fallbacks with validation
+# =============================================================================
+
+"""
+    handle_unknown_type(registry::TypeRegistry, cpp_type::String, context::String)::String
+
+Handle unknown/unmapped C++ types based on registry strictness settings.
+
+# Behavior
+- `STRICT` mode: Error with helpful suggestions
+- `WARN` mode: Warn and fallback to Any
+- `PERMISSIVE` mode: Silent Any fallback
+
+# Smart fallbacks (when enabled)
+- Struct-like types → Use C++ name as opaque struct
+- Enum-like types → Map to Cint
+- Function pointers → Map to Ptr{Cvoid}
+"""
+function handle_unknown_type(registry::TypeRegistry, cpp_type::String, context::String)::String
+    # Check if it looks like a struct
+    if is_struct_like(cpp_type)
+        if registry.allow_unknown_structs
+            if registry.strictness == WARN
+                @warn "Treating unknown type '$cpp_type' as opaque struct in $context"
+            end
+            # Remove pointer/reference markers for struct name
+            base_type = strip(replace(replace(cpp_type, "*" => ""), "&" => ""))
+            return base_type  # Use C++ name directly
+        end
+    end
+
+    # Check if it looks like an enum
+    if is_enum_like(cpp_type)
+        if registry.allow_unknown_enums
+            if registry.strictness == WARN
+                @warn "Treating enum '$cpp_type' as Cint in $context"
+            end
+            return "Cint"
+        end
+    end
+
+    # Check if it's a function pointer
+    if is_function_pointer_like(cpp_type)
+        if registry.allow_function_pointers
+            if registry.strictness == WARN
+                @warn "Treating function pointer '$cpp_type' as Ptr{Cvoid} in $context"
+            end
+            return "Ptr{Cvoid}"
+        end
+    end
+
+    # Apply strictness policy
+    if registry.strictness == STRICT
+        error("""
+        ═══════════════════════════════════════════════════════════════
+        FFI Type Mapping Error: Unknown C/C++ Type
+        ═══════════════════════════════════════════════════════════════
+
+        Unknown C/C++ type: '$cpp_type'
+        Context: $context
+
+        This type could not be mapped to a Julia type.
+
+        ───────────────────────────────────────────────────────────────
+        Suggestions:
+        ───────────────────────────────────────────────────────────────
+
+        1. Add custom type mapping in your code:
+           registry = create_type_registry(config,
+               custom_types=Dict("$cpp_type" => "YourJuliaType"))
+
+        2. If this is a struct/class:
+           - Ensure it's defined in your headers with debug info (-g flag)
+           - Check that DWARF metadata extraction is working
+           - Consider allowing unknown structs: allow_unknown_structs=true
+
+        3. If this is an enum:
+           - Verify enum extraction from DWARF is working
+           - Enable enum fallback: allow_unknown_enums=true
+
+        4. If this is a function pointer:
+           - Enable function pointer support: allow_function_pointers=true
+           - This will map to Ptr{Cvoid}
+
+        5. If this is a template type:
+           - Add template mapping for this specific instantiation
+           - Example: "std::vector<$cpp_type>" => "Vector{JuliaType}"
+
+        ───────────────────────────────────────────────────────────────
+        Temporary Workaround:
+        ───────────────────────────────────────────────────────────────
+
+        To allow unmapped types temporarily (not recommended):
+
+           registry = create_type_registry(config, strictness=WARN)
+
+        Or for complete permissiveness (legacy mode):
+
+           registry = create_type_registry(config, strictness=PERMISSIVE)
+
+        ═══════════════════════════════════════════════════════════════
+        """)
+    elseif registry.strictness == WARN
+        @warn """Unknown C/C++ type '$cpp_type' in $context, falling back to Any.
+        This may cause runtime type errors. Consider adding a custom type mapping."""
+        return "Any"
+    else  # PERMISSIVE
+        return "Any"
+    end
+end
+
+"""
+    infer_julia_type(registry::TypeRegistry, cpp_type::String; context::String="")::String
 
 Infer Julia type from C/C++ type string using comprehensive rules.
 
@@ -164,7 +392,12 @@ Infer Julia type from C/C++ type string using comprehensive rules.
 6. Parse const pointer types (const T* → Ptr{T})
 7. Parse array types (T[N] → NTuple{N,T})
 8. Parse template types (std::vector<T> → Vector{T})
-9. Conservative fallback: Ptr{Cvoid} for pointers, Any for unknown
+9. Smart fallback via handle_unknown_type() based on strictness
+
+# Arguments
+- `registry`: TypeRegistry with type mappings and validation settings
+- `cpp_type`: C/C++ type string to map
+- `context`: Optional context string for error messages (e.g., "parameter 1 of function foo")
 
 # Examples
 ```julia
@@ -173,11 +406,12 @@ infer_julia_type(reg, "const char*") # => "Cstring"
 infer_julia_type(reg, "double*") # => "Ptr{Cdouble}"
 infer_julia_type(reg, "std::string") # => "String"
 infer_julia_type(reg, "std::vector<int>") # => "Vector{Cint}"
+infer_julia_type(reg, "Matrix3x3", context="parameter 1") # => "Matrix3x3" or error in STRICT mode
 ```
 """
-function infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
+function infer_julia_type(registry::TypeRegistry, cpp_type::String; context::String="")::String
     if isempty(cpp_type)
-        return "Any"
+        return handle_unknown_type(registry, "", context == "" ? "empty type string" : context)
     end
 
     # Clean up the type string
@@ -221,14 +455,16 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
         end
 
         # Recursive inference for base type
-        julia_base = infer_julia_type(registry, base_type)
+        ptr_context = context == "" ? "pointer base type" : "$context (pointer to $base_type)"
+        julia_base = infer_julia_type(registry, String(base_type); context=ptr_context)
         return "Ptr{$julia_base}"
     end
 
     # Parse reference types: T& or T &
     if endswith(clean_type, "&")
         base_type = strip(replace(clean_type, r"&$" => ""))
-        julia_base = infer_julia_type(registry, base_type)
+        ref_context = context == "" ? "reference base type" : "$context (reference to $base_type)"
+        julia_base = infer_julia_type(registry, String(base_type); context=ref_context)
         return "Ref{$julia_base}"
     end
 
@@ -237,7 +473,8 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
     if !isnothing(array_match)
         elem_type = strip(array_match.captures[1])
         size = parse(Int, array_match.captures[2])
-        julia_elem = infer_julia_type(registry, elem_type)
+        arr_context = context == "" ? "array element type" : "$context (array of $elem_type)"
+        julia_elem = infer_julia_type(registry, String(elem_type); context=arr_context)
         return "NTuple{$size,$julia_elem}"
     end
 
@@ -249,7 +486,8 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
 
         # Handle std::vector<T> → Vector{T}
         if template_name == "std::vector"
-            elem_type = infer_julia_type(registry, template_args)
+            vec_context = context == "" ? "std::vector element type" : "$context (std::vector element)"
+            elem_type = infer_julia_type(registry, String(template_args); context=vec_context)
             return "Vector{$elem_type}"
         end
 
@@ -258,7 +496,8 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
             # Parse "T, N"
             parts = split(template_args, ",")
             if !isempty(parts)
-                elem_type = infer_julia_type(registry, strip(parts[1]))
+                arr_context = context == "" ? "std::array element type" : "$context (std::array element)"
+                elem_type = infer_julia_type(registry, String(strip(parts[1])); context=arr_context)
                 return "Vector{$elem_type}"
             end
         end
@@ -267,8 +506,10 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
         if template_name == "std::pair"
             parts = split(template_args, ",", limit=2)
             if length(parts) == 2
-                t1 = infer_julia_type(registry, strip(parts[1]))
-                t2 = infer_julia_type(registry, strip(parts[2]))
+                pair_ctx1 = context == "" ? "std::pair first type" : "$context (std::pair first)"
+                pair_ctx2 = context == "" ? "std::pair second type" : "$context (std::pair second)"
+                t1 = infer_julia_type(registry, String(strip(parts[1])); context=pair_ctx1)
+                t2 = infer_julia_type(registry, String(strip(parts[2])); context=pair_ctx2)
                 return "Tuple{$t1,$t2}"
             end
         end
@@ -277,18 +518,22 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String)::String
         if template_name == "std::map" || template_name == "std::unordered_map"
             parts = split(template_args, ",", limit=2)
             if length(parts) == 2
-                k = infer_julia_type(registry, strip(parts[1]))
-                v = infer_julia_type(registry, strip(parts[2]))
+                map_ctx_k = context == "" ? "std::map key type" : "$context (std::map key)"
+                map_ctx_v = context == "" ? "std::map value type" : "$context (std::map value)"
+                k = infer_julia_type(registry, String(strip(parts[1])); context=map_ctx_k)
+                v = infer_julia_type(registry, String(strip(parts[2])); context=map_ctx_v)
                 return "Dict{$k,$v}"
             end
         end
 
-        # Generic template fallback
-        return "Any"  # Conservative for unknown templates
+        # Generic template fallback - unknown template type
+        ctx = context == "" ? "unknown template type '$clean_type'" : "$context (unknown template '$clean_type')"
+        return handle_unknown_type(registry, String(clean_type), ctx)
     end
 
-    # Unknown type - conservative fallback
-    return "Any"
+    # Unknown type - no matching rules
+    ctx = context == "" ? "type inference" : context
+    return handle_unknown_type(registry, String(clean_type), ctx)
 end
 
 # =============================================================================

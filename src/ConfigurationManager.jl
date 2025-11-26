@@ -86,6 +86,15 @@ struct CacheConfig
     directory::String
 end
 
+"""Nested struct for [types] section - Type validation settings"""
+struct TypesConfig
+    strictness::Symbol              # :strict, :warn, :permissive
+    allow_unknown_structs::Bool
+    allow_unknown_enums::Bool
+    allow_function_pointers::Bool
+    custom_mappings::Dict{String,String}  # User-defined type mappings
+end
+
 """
 Main immutable configuration structure.
 All modules receive this struct - it's the single source of truth.
@@ -102,6 +111,7 @@ struct RepliBuildConfig
     llvm::LLVMConfig
     workflow::WorkflowConfig
     cache::CacheConfig
+    types::TypesConfig
 
     # Metadata
     config_file::String
@@ -139,6 +149,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
         parse_llvm_config(data),
         parse_workflow_config(data),
         parse_cache_config(data),
+        parse_types_config(data),
         toml_path,
         now()
     )
@@ -303,6 +314,36 @@ function parse_cache_config(data::Dict)::CacheConfig
     return CacheConfig(
         get(cache, "enabled", true),
         get(cache, "directory", ".replibuild_cache")
+    )
+end
+
+"""Parse [types] section - Type validation settings for FFI generation"""
+function parse_types_config(data::Dict)::TypesConfig
+    types = get(data, "types", Dict())
+
+    # Parse strictness mode
+    strictness_str = get(types, "strictness", "warn")
+    strictness = if strictness_str == "strict"
+        :strict
+    elseif strictness_str == "permissive"
+        :permissive
+    else
+        :warn  # Default
+    end
+
+    # Parse custom type mappings from [types.custom] table
+    custom = get(types, "custom", Dict())
+    custom_mappings = Dict{String,String}()
+    for (k, v) in custom
+        custom_mappings[String(k)] = String(v)
+    end
+
+    return TypesConfig(
+        strictness,
+        get(types, "allow_unknown_structs", true),
+        get(types, "allow_unknown_enums", false),
+        get(types, "allow_function_pointers", true),
+        custom_mappings
     )
 end
 
@@ -708,7 +749,7 @@ end
 export RepliBuildConfig,
        ProjectConfig, PathsConfig, DiscoveryConfig, CompileConfig,
        LinkConfig, BinaryConfig, WrapConfig, LLVMConfig,
-       WorkflowConfig, CacheConfig,
+       WorkflowConfig, CacheConfig, TypesConfig,
        load_config, save_config, create_default_config,
        merge_compile_flags, with_source_files, with_include_dirs, with_discovery_results,
        get_output_path, get_build_path, get_cache_path,

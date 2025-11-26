@@ -87,6 +87,39 @@ generate_tests = false          # Default: false
 generate_docs = true            # Default: true
 
 # ==============================================================================
+# TYPE MAPPING & VALIDATION SETTINGS (FFI Generation)
+# ==============================================================================
+[types]
+
+# Type strictness mode: "strict", "warn", or "permissive"
+# - strict: Error on any unmapped type (recommended for production)
+# - warn: Warn and fallback to Any or best guess (useful for development)
+# - permissive: Silent fallback to Any (legacy compatibility)
+strictness = "warn"             # Default: "warn"
+
+# Allow unknown struct-like types to be treated as opaque structs
+# When true: "Matrix3x3" (unknown) → Matrix3x3 (Julia struct name)
+# When false: Unknown structs cause error in strict mode
+allow_unknown_structs = true    # Default: true
+
+# Allow unknown enums to be mapped to Cint
+# When true: Unknown enums → Cint
+# When false: Enums must be explicitly extracted from DWARF
+allow_unknown_enums = false     # Default: false
+
+# Allow function pointers to be mapped to Ptr{Cvoid}
+# When true: "int (*callback)(double)" → Ptr{Cvoid}
+# When false: Function pointers cause error in strict mode
+allow_function_pointers = true  # Default: true
+
+# Custom type mappings (C/C++ type → Julia type)
+[types.custom]
+"MyCustomType" = "MyJuliaStruct"
+"ErrorCode" = "Cint"
+"Handle" = "Ptr{Cvoid}"
+"Matrix3x3" = "Matrix3x3"       # Explicitly map custom struct
+
+# ==============================================================================
 # WORKFLOW SETTINGS
 # ==============================================================================
 [workflow]
