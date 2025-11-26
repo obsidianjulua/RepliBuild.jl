@@ -587,14 +587,14 @@ struct SymbolInfo
 end
 
 """
-    create_symbol_info(name::String, type::Symbol, registry::TypeRegistry)
+    create_symbol_info(name::String, type::Symbol, registry::TypeRegistry, demangled::String, return_type::String, params::Vector{ParamInfo})
 
 Create a SymbolInfo with basic information and inferred types.
 """
-function create_symbol_info(name::String, type::Symbol, registry::TypeRegistry;
+function create_symbol_info(name::String, type::Symbol, registry::TypeRegistry,
                            demangled::String="",
                            return_type::String="void",
-                           params::Vector{ParamInfo}=ParamInfo[])
+                           params::Vector{ParamInfo}=Vector{ParamInfo}())
 
     # Generate Julia identifier
     julia_name = make_julia_identifier(isempty(demangled) ? name : demangled)
@@ -700,7 +700,7 @@ Extract symbols using nm command.
 function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangle::Bool=true)
     symbols = SymbolInfo[]
 
-    try
+    #try  # TEMP: Disabled to see actual error
         # Run nm twice: once for mangled names, once for demangled
         mangled_output = read(`nm -D --defined-only $binary_path`, String)
         demangled_output = read(`nm -D --defined-only --demangle $binary_path`, String)
@@ -750,13 +750,19 @@ function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangl
             end
 
             # Create symbol info with MANGLED name as primary, demangled as secondary
+            empty_params = Vector{ParamInfo}()
+            @show typeof(mangled_name)
+            @show typeof(symbol_type)
+            @show typeof(registry)
+            @show typeof(demangled_name)
+            @show typeof(empty_params)
             info = create_symbol_info(
-                mangled_name,           # Use mangled name for ccall
+                String(mangled_name),           # Use mangled name for ccall - convert SubString to String!
                 symbol_type,
                 registry,
-                demangled=demangled_name,  # Demangled for documentation
-                return_type=(symbol_type == :function ? "void" : "char"),
-                params=ParamInfo[]  # nm doesn't provide parameter info
+                String(demangled_name),  # Demangled for documentation
+                (symbol_type == :function ? "void" : "char"),  # return_type
+                empty_params  # nm doesn't provide parameter info
             )
 
             # Skip internal/private symbols (starting with _) in Julia name
@@ -769,10 +775,10 @@ function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangl
         end
 
         return symbols
-    catch e
-        @warn "Symbol extraction failed: $e"
-        return SymbolInfo[]
-    end
+    #catch e  # TEMP: Disabled
+    #    @warn "Symbol extraction failed: $e"
+    #    return SymbolInfo[]
+    #end
 end
 
 # =============================================================================
