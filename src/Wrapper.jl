@@ -700,25 +700,36 @@ Extract symbols using nm command.
 function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangle::Bool=true)
     symbols = SymbolInfo[]
 
-    # Use nm to extract symbols
-    nm_cmd = demangle ? `nm -D --defined-only --demangle $binary_path` : `nm -D --defined-only $binary_path`
-
     try
-        output = read(nm_cmd, String)
+        # Run nm twice: once for mangled names, once for demangled
+        mangled_output = read(`nm -D --defined-only $binary_path`, String)
+        demangled_output = read(`nm -D --defined-only --demangle $binary_path`, String)
 
-        for line in split(output, '\n')
-            if isempty(strip(line))
+        # Parse both outputs line by line
+        mangled_lines = split(mangled_output, '\n')
+        demangled_lines = split(demangled_output, '\n')
+
+        if length(mangled_lines) != length(demangled_lines)
+            @warn "Mangled and demangled output line counts don't match, falling back to mangled only"
+            demangled_lines = mangled_lines
+        end
+
+        for (mangled_line, demangled_line) in zip(mangled_lines, demangled_lines)
+            if isempty(strip(mangled_line)) || isempty(strip(demangled_line))
                 continue
             end
 
-            parts = split(strip(line))
-            if length(parts) < 3
+            mangled_parts = split(strip(mangled_line))
+            demangled_parts = split(strip(demangled_line))
+
+            if length(mangled_parts) < 3 || length(demangled_parts) < 3
                 continue
             end
 
             # Parse nm output: address type name
-            symbol_type_char = parts[2]
-            symbol_name = join(parts[3:end], " ")  # Handle demangled names with spaces
+            symbol_type_char = mangled_parts[2]
+            mangled_name = mangled_parts[3]  # Mangled name (no spaces)
+            demangled_name = join(demangled_parts[3:end], " ")  # Demangled name (may have spaces)
 
             # Map nm symbol type to our enum
             symbol_type = if symbol_type_char in ["T", "t"]
@@ -738,19 +749,19 @@ function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangl
                 continue
             end
 
-            # Create symbol info
-            # For nm, we don't have type information, so we use conservative defaults
+            # Create symbol info with MANGLED name as primary, demangled as secondary
             info = create_symbol_info(
-                symbol_name,
+                mangled_name,           # Use mangled name for ccall
                 symbol_type,
                 registry,
-                demangled=symbol_name,
+                demangled=demangled_name,  # Demangled for documentation
                 return_type=(symbol_type == :function ? "void" : "char"),
                 params=ParamInfo[]  # nm doesn't provide parameter info
             )
 
-            # Skip internal/private symbols (starting with _)
-            if startswith(info.julia_name, "_") || isempty(info.julia_name)
+            # Skip internal/private symbols (starting with _) in Julia name
+            # But keep the symbol itself since it might be needed
+            if isempty(info.julia_name)
                 continue
             end
 
