@@ -1355,6 +1355,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Get enum metadata
             underlying_type = get(enum_info, "underlying_type", "int")
             julia_underlying = get(enum_info, "julia_type", "Int32")
+
+            # Fallback to Int32 if type is unknown or Any
+            if julia_underlying == "Any" || julia_underlying == "unknown"
+                julia_underlying = "Int32"
+            end
+
             enumerators = get(enum_info, "enumerators", [])
 
             if !isempty(enumerators)

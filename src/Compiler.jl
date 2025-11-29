@@ -1096,6 +1096,23 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     println("   Advanced types: $enum_count enum, $array_count array, $subroutine_count function_pointer")
     println("   Struct/class members: $total_members, Enum enumerators: $total_enumerators")
 
+    # Collect all struct/class/enum names for type resolution
+    struct_names = Set{String}()
+    enum_names = Set{String}()
+
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict)
+            kind = get(type_info, "kind", "")
+            name = get(type_info, "name", "")
+
+            if kind in ["struct", "class"] && !isempty(name) && name != "unknown" && name != "unknown_struct" && name != "unknown_class"
+                push!(struct_names, name)
+            elseif kind == "enum" && !isempty(name) && name != "unknown" && name != "unknown_enum"
+                push!(enum_names, name)
+            end
+        end
+    end
+
     # Helper function to resolve type references (follows pointer/const/reference chains)
     function resolve_type(type_ref::String, type_refs::Dict, visited::Set{String}=Set{String}())::String
         # Avoid infinite loops
@@ -1345,7 +1362,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         # Resolve type
                         type_ref = param_info["type"]
                         c_type = resolve_type(type_ref, type_refs)
-                        julia_type = cpp_to_julia_type(c_type)
+                        julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
 
                         push!(current_function_params, Dict(
                             "name" => param_info["name"],
@@ -1399,7 +1416,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     member_type_ref = get(member, "type", nothing)
                     if !isnothing(member_type_ref)
                         c_type = resolve_type(member_type_ref, type_refs)
-                        julia_type = cpp_to_julia_type(c_type)
+                        julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
                         push!(resolved_members, Dict(
                             "name" => get(member, "name", "unknown"),
                             "c_type" => c_type,
@@ -1435,7 +1452,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 if !isnothing(underlying_type_ref)
                     underlying_c_type = resolve_type(underlying_type_ref, type_refs)
                 end
-                underlying_julia_type = cpp_to_julia_type(underlying_c_type)
+                underlying_julia_type = cpp_to_julia_type(underlying_c_type, struct_names, enum_names)
 
                 # Get enumerators
                 enumerators = get(type_info, "enumerators", [])
@@ -1481,8 +1498,20 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # Extract return types and struct definitions from DWARF debug info (if available)
     (dwarf_return_types, struct_defs) = extract_dwarf_return_types(binary_path)
 
+    # Collect struct/enum names for type resolution in function signatures
+    sig_struct_names = Set{String}()
+    sig_enum_names = Set{String}()
+    for (name, info) in struct_defs
+        if startswith(name, "__enum__")
+            enum_name = replace(name, "__enum__" => "")
+            push!(sig_enum_names, enum_name)
+        else
+            push!(sig_struct_names, name)
+        end
+    end
+
     # Parse function signatures (basic type inference from symbol names)
-    functions = parse_function_signatures(symbols)
+    functions = parse_function_signatures(symbols, sig_struct_names, sig_enum_names)
 
     # Merge DWARF return types and parameters into function metadata (overrides inference)
     for func in functions
@@ -1569,7 +1598,9 @@ end
 Parse function signatures from symbol information.
 Infers parameter types and return types from demangled names.
 """
-function parse_function_signatures(symbols::Vector{Dict{String,Any}})::Vector{Dict{String,Any}}
+function parse_function_signatures(symbols::Vector{Dict{String,Any}},
+                                   struct_names::Set{String}=Set{String}(),
+                                   enum_names::Set{String}=Set{String}())::Vector{Dict{String,Any}}
     functions = Dict{String,Any}[]
 
     for sym in symbols
@@ -1585,7 +1616,7 @@ function parse_function_signatures(symbols::Vector{Dict{String,Any}})::Vector{Di
             "mangled" => sym["mangled"],
             "demangled" => demangled,
             "return_type" => infer_return_type(demangled),
-            "parameters" => parse_parameters(demangled),
+            "parameters" => parse_parameters(demangled, struct_names, enum_names),
             "is_method" => contains(demangled, "::"),
             "class" => extract_class_name(demangled),
             "exported" => true
@@ -1646,7 +1677,9 @@ end
 Parse parameter types from demangled signature.
 Example: "add(int, int)" -> [{"type": "int", "julia_type": "Cint"}, ...]
 """
-function parse_parameters(demangled::String)::Vector{Dict{String,Any}}
+function parse_parameters(demangled::String,
+                         struct_names::Set{String}=Set{String}(),
+                         enum_names::Set{String}=Set{String}())::Vector{Dict{String,Any}}
     params = Dict{String,Any}[]
 
     # Extract parameter list from signature
@@ -1667,7 +1700,7 @@ function parse_parameters(demangled::String)::Vector{Dict{String,Any}}
             continue
         end
 
-        julia_type = cpp_to_julia_type(ptype)
+        julia_type = cpp_to_julia_type(ptype, struct_names, enum_names)
 
         push!(params, Dict(
             "name" => "arg$i",
@@ -1683,8 +1716,20 @@ end
 """
 Convert C++ type to Julia type.
 Basic type mapping - can be enhanced with type registry.
+
+# Arguments
+- `cpp_type`: C++ type string
+- `struct_names`: Set of known struct/class names from DWARF
+- `enum_names`: Set of known enum names from DWARF
 """
-function cpp_to_julia_type(cpp_type::AbstractString)::String
+function cpp_to_julia_type(cpp_type::AbstractString,
+                           struct_names::Set{String}=Set{String}(),
+                           enum_names::Set{String}=Set{String}())::String
+    # Strip qualifiers
+    cpp_type = strip(cpp_type)
+    cpp_type = replace(cpp_type, r"^const\s+" => "")
+    cpp_type = replace(cpp_type, r"^volatile\s+" => "")
+
     type_map = Dict(
         "int" => "Cint",
         "unsigned int" => "Cuint",
@@ -1722,8 +1767,8 @@ function cpp_to_julia_type(cpp_type::AbstractString)::String
                 # Calculate total size (product of dimensions)
                 total_size = prod(dims)
 
-                # Map element type to Julia
-                element_julia_type = cpp_to_julia_type(element_type_str)
+                # Map element type to Julia (with struct/enum awareness)
+                element_julia_type = cpp_to_julia_type(element_type_str, struct_names, enum_names)
 
                 # Return as NTuple (flattened)
                 return "NTuple{$total_size, $element_julia_type}"
@@ -1738,22 +1783,39 @@ function cpp_to_julia_type(cpp_type::AbstractString)::String
         return "Ptr{Cvoid}"
     end
 
-    # Handle pointers
+    # Check if it's a user-defined struct/class (before pointer handling)
+    base_type = replace(cpp_type, r"[*&\s]+$" => "")  # Strip pointer/ref/spaces
+    base_type = strip(base_type)
+
+    if base_type in struct_names
+        # Handle pointers: Vector3* → Ptr{Vector3}
+        if contains(cpp_type, "*")
+            return "Ptr{$base_type}"
+        elseif contains(cpp_type, "&")
+            return "Ref{$base_type}"
+        else
+            return base_type  # Use struct name directly
+        end
+    end
+
+    # Check for enums
+    if base_type in enum_names
+        # Enums are used directly by name (will be @enum in Julia)
+        return base_type
+    end
+
+    # Handle pointers (for non-struct types)
     if endswith(cpp_type, "*")
         return "Ptr{Cvoid}"
     end
 
-    # Handle references
+    # Handle references (for non-struct types)
     if endswith(cpp_type, "&")
-        base_type = strip(cpp_type[1:end-1])
-        return "Ref{$(cpp_to_julia_type(base_type))}"
+        base = strip(cpp_type[1:end-1])
+        return "Ref{$(cpp_to_julia_type(base, struct_names, enum_names))}"
     end
 
-    # Handle enums (will appear as their name)
-    # For now, map to their underlying type (Int32 by default)
-    # This will be refined when we generate @enum definitions
-    # Unknown types default to Any, which is fine for enums for now
-
+    # Fallback to type map or Any
     return get(type_map, cpp_type, "Any")
 end
 
