@@ -379,6 +379,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
+        TypesConfig(:warn, true, false, true, Dict{String,String}()),
         toml_path,
         now()
     )
@@ -489,6 +490,18 @@ function save_config(config::RepliBuildConfig)
         "directory" => config.cache.directory
     )
 
+    # [types]
+    types_dict = Dict(
+        "strictness" => string(config.types.strictness),
+        "allow_unknown_structs" => config.types.allow_unknown_structs,
+        "allow_unknown_enums" => config.types.allow_unknown_enums,
+        "allow_function_pointers" => config.types.allow_function_pointers
+    )
+    if !isempty(config.types.custom_mappings)
+        types_dict["custom"] = config.types.custom_mappings
+    end
+    data["types"] = types_dict
+
     # Write to file
     open(config.config_file, "w") do io
         TOML.print(io, data)
@@ -518,7 +531,7 @@ function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache,
+        config.llvm, config.workflow, config.cache, config.types,
         config.config_file, config.loaded_at
     )
 end
@@ -540,7 +553,7 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache,
+        config.llvm, config.workflow, config.cache, config.types,
         config.config_file, config.loaded_at
     )
 end
@@ -562,7 +575,7 @@ function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache,
+        config.llvm, config.workflow, config.cache, config.types,
         config.config_file, config.loaded_at
     )
 end
@@ -586,7 +599,7 @@ function with_discovery_results(config::RepliBuildConfig;
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache,
+        config.llvm, config.workflow, config.cache, config.types,
         config.config_file, config.loaded_at
     )
 end

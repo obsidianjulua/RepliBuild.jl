@@ -64,9 +64,15 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
     end
 
     # Build compiler command
+    # Ensure -g is always present for DWARF metadata extraction
+    base_flags = get_compile_flags(config)
+    if !("-g" in base_flags)
+        base_flags = vcat(base_flags, ["-g"])
+    end
+
     cmd_args = vcat(
         ["-S", "-emit-llvm"],  # Emit LLVM IR
-        get_compile_flags(config),
+        base_flags,
         ["-I$dir" for dir in get_include_dirs(config)],
         ["-D$k=$v" for (k, v) in config.compile.defines],
         ["-o", ir_file, cpp_file]

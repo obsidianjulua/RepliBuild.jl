@@ -650,7 +650,9 @@ function detect_wrapper_tier(config::RepliBuildConfig, library_path::String, hea
     # Check for headers
     has_headers = !isempty(headers)
 
-    if has_metadata && has_headers
+    # Priority: Metadata > Headers > Basic
+    # Metadata provides the richest information from actual compilation
+    if has_metadata
         return TIER_INTROSPECTIVE
     elseif has_headers
         return TIER_ADVANCED
@@ -865,26 +867,22 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
         error("Library not found: $library_path")
     end
 
-    # Detect or use specified tier
-    actual_tier = isnothing(tier) ? detect_wrapper_tier(config, library_path, headers) : tier
+    # Check for metadata
+    metadata_file = joinpath(dirname(library_path), "compilation_metadata.json")
+    has_metadata = isfile(metadata_file)
 
-    tier_name = actual_tier == TIER_BASIC ? "Basic (Symbol-only)" :
-                actual_tier == TIER_ADVANCED ? "Advanced (Header-aware)" :
-                "Introspective (Metadata-rich)"
-
-    println("   Tier: $tier_name")
-    println()
-
-    # Route to appropriate wrapper generator
-    if actual_tier == TIER_BASIC
-        return wrap_basic(config, library_path, generate_docs=generate_docs)
-    elseif actual_tier == TIER_ADVANCED && !isempty(headers)
-        return wrap_with_clang(config, library_path, headers, generate_docs=generate_docs)
-    elseif actual_tier == TIER_INTROSPECTIVE
-        return wrap_introspective(config, library_path, headers, generate_docs=generate_docs)
-    else
+    if !has_metadata
+        @warn "No compilation metadata found. Did you compile with -g flag?"
+        @warn "Falling back to basic symbol-only wrapper (low quality)"
+        println("   Tier: Basic (Symbol-only - fallback)")
+        println()
         return wrap_basic(config, library_path, generate_docs=generate_docs)
     end
+
+    # Always use introspective wrapper when metadata is available
+    println("   Tier: Introspective (Metadata-rich)")
+    println()
+    return wrap_introspective(config, library_path, headers, generate_docs=generate_docs)
 end
 
 # =============================================================================

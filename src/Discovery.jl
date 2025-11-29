@@ -573,6 +573,14 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         ".replibuild_cache"                      # directory
     )
 
+    types_config = ConfigurationManager.TypesConfig(
+        :warn,                                   # strictness
+        true,                                    # allow_unknown_structs
+        false,                                   # allow_unknown_enums
+        true,                                    # allow_function_pointers
+        Dict{String,String}()                    # custom_mappings
+    )
+
     # Construct RepliBuildConfig from nested structs
     config = ConfigurationManager.RepliBuildConfig(
         project_config,
@@ -585,6 +593,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         llvm_config,
         workflow_config,
         cache_config,
+        types_config,
         joinpath(root_dir, "replibuild.toml"),  # config_file
         now()                                    # loaded_at
     )
