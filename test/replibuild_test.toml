@@ -1,0 +1,20 @@
+[project]
+name = "DwarfTest"
+root = "/home/grim/Desktop/Projects/RepliBuild.jl/test"
+
+[paths]
+source = "."
+output = "julia_bindings"
+build = "build"
+
+[compile]
+source_files = ["dwarf_test.cpp"]
+flags = ["-std=c++17", "-fPIC", "-g", "-O0"]
+
+[binary]
+type = "shared"
+
+[wrap]
+enabled = true
+style = "clang"
+module_name = "DwarfTestBindings"

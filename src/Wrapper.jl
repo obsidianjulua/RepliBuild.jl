@@ -1398,11 +1398,70 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         """
 
-        for struct_name in sort(collect(struct_types))
+        # Topologically sort structs by dependencies
+        # Build dependency graph: struct_name => [dependencies]
+        struct_deps = Dict{String, Set{String}}()
+
+        for struct_name in struct_types
+            deps = Set{String}()
+
+            if haskey(dwarf_structs, struct_name)
+                struct_info = dwarf_structs[struct_name]
+                members = get(struct_info, "members", [])
+
+                for member in members
+                    julia_type = get(member, "julia_type", "Any")
+
+                    # Extract type name (handle Ptr{Foo} -> Foo)
+                    type_match = match(r"Ptr\{([^}]+)\}", julia_type)
+                    if !isnothing(type_match)
+                        dep_type = type_match.captures[1]
+                        # Check both original and sanitized forms
+                        if dep_type in struct_types && dep_type != struct_name
+                            push!(deps, dep_type)
+                        end
+                    elseif julia_type in struct_types && julia_type != struct_name
+                        push!(deps, julia_type)
+                    end
+                end
+            end
+
+            struct_deps[struct_name] = deps
+        end
+
+        # Topological sort using Kahn's algorithm
+        sorted_structs = String[]
+        remaining = Dict(k => copy(v) for (k, v) in struct_deps)
+
+        while !isempty(remaining)
+            # Find structs with no dependencies
+            ready = [name for (name, deps) in remaining if isempty(deps)]
+
+            if isempty(ready)
+                # Circular dependency - just take alphabetically first
+                ready = [sort(collect(keys(remaining)))[1]]
+            end
+
+            for name in sort(ready)
+                push!(sorted_structs, name)
+                delete!(remaining, name)
+
+                # Remove this struct from all dependency lists
+                for deps in values(remaining)
+                    delete!(deps, name)
+                end
+            end
+        end
+
+        for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
                 continue
             end
+
+            # Sanitize struct name for Julia (replace < > , with _)
+            julia_struct_name = replace(replace(replace(struct_name, "<" => "_"), ">" => ""), "," => "_")
+            julia_struct_name = replace(julia_struct_name, " " => "")  # Remove spaces
 
             # Check if we have DWARF member information for this struct
             if haskey(dwarf_structs, struct_name)
@@ -1414,13 +1473,45 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     member_count = length(members)
                     struct_definitions *= """
                     # C++ struct: $struct_name ($member_count members)
-                    mutable struct $struct_name
+                    mutable struct $julia_struct_name
                     """
 
                     for member in members
                         member_name = get(member, "name", "unknown")
                         julia_type = get(member, "julia_type", "Any")
-                        struct_definitions *= "    $member_name::$julia_type\n"
+
+                        # Sanitize member name for Julia (replace invalid characters)
+                        sanitized_name = replace(member_name, '$' => '_')
+
+                        # Sanitize member types that reference other structs with template syntax
+                        # Only sanitize custom struct names, not built-in Julia types like NTuple
+                        sanitized_type = julia_type
+
+                        # Don't sanitize built-in Julia types (NTuple, Ptr{Cint}, etc.)
+                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cdouble", "Cfloat", "Clong", "Culonglong", "Cvoid"]
+                        is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
+
+                        if !is_builtin
+                            if occursin(r"Ptr\{[^}]+\}", julia_type)
+                                # Extract type from Ptr{Type} for custom struct references
+                                type_match = match(r"Ptr\{([^}]+)\}", julia_type)
+                                if !isnothing(type_match)
+                                    inner_type = type_match.captures[1]
+                                    # Only sanitize if inner type is a custom struct (contains template chars)
+                                    if occursin(r"[<>]", inner_type)
+                                        sanitized_inner = replace(replace(replace(inner_type, "<" => "_"), ">" => ""), "," => "_")
+                                        sanitized_inner = replace(sanitized_inner, " " => "")
+                                        sanitized_type = "Ptr{$sanitized_inner}"
+                                    end
+                                end
+                            elseif occursin(r"[<>]", julia_type)
+                                # Direct custom struct reference with template syntax
+                                sanitized_type = replace(replace(replace(julia_type, "<" => "_"), ">" => ""), "," => "_")
+                                sanitized_type = replace(sanitized_type, " " => "")
+                            end
+                        end
+
+                        struct_definitions *= "    $sanitized_name::$sanitized_type\n"
                     end
 
                     struct_definitions *= """
@@ -1431,7 +1522,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     # Struct found but no members (empty struct or incomplete info)
                     struct_definitions *= """
                     # Opaque struct: $struct_name (no member info available)
-                    mutable struct $struct_name
+                    mutable struct $julia_struct_name
                         data::NTuple{8, UInt8}  # Placeholder
                     end
 
@@ -1441,7 +1532,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 # No DWARF info available - generate opaque struct
                 struct_definitions *= """
                 # Opaque struct: $struct_name (no DWARF info)
-                mutable struct $struct_name
+                mutable struct $julia_struct_name
                     data::NTuple{32, UInt8}  # Placeholder - compile with -g for member info
                 end
 
@@ -1522,6 +1613,11 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         julia_name = replace(julia_name, ">" => "_")
         julia_name = replace(julia_name, "," => "_")
         julia_name = replace(julia_name, " " => "_")
+        julia_name = replace(julia_name, "+" => "plus")
+        julia_name = replace(julia_name, "=" => "assign")
+        julia_name = replace(julia_name, "-" => "minus")
+        julia_name = replace(julia_name, "*" => "mul")
+        julia_name = replace(julia_name, "/" => "div")
 
         # Build function signature using ergonomic Julia types
         param_sig = join(["$(name)::$(typ)" for (name, typ) in zip(param_names, julia_param_types)], ", ")
@@ -1633,9 +1729,40 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         push!(exports, julia_name)
     end
 
-    # Export statement
-    export_statement = if !isempty(exports)
-        "export " * join(exports, ", ") * "\n\n"
+    # Export statement (unique to handle overloaded functions)
+    # Include enum types, enum values, struct types, and functions
+    all_exports = copy(exports)
+
+    # Add enum types
+    for enum_key in enum_types
+        enum_name = replace(enum_key, "__enum__" => "")
+        push!(all_exports, enum_name)
+
+        # Add enum constants
+        if haskey(dwarf_structs, enum_key)
+            enum_info = dwarf_structs[enum_key]
+            enumerators = get(enum_info, "enumerators", [])
+            for enumerator in enumerators
+                enum_const_name = get(enumerator, "name", "")
+                if !isempty(enum_const_name)
+                    push!(all_exports, enum_const_name)
+                end
+            end
+        end
+    end
+
+    # Add struct types
+    for struct_name in struct_types
+        if !(struct_name in enum_names)
+            # Sanitize struct name for export
+            julia_struct_name = replace(replace(replace(struct_name, "<" => "_"), ">" => ""), "," => "_")
+            julia_struct_name = replace(julia_struct_name, " " => "")
+            push!(all_exports, julia_struct_name)
+        end
+    end
+
+    export_statement = if !isempty(all_exports)
+        "export " * join(unique(all_exports), ", ") * "\n\n"
     else
         ""
     end

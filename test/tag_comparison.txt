@@ -1,0 +1,32 @@
+DWARF Tag Analysis
+======================================================================
+
+Format: <tag_name> <count> <% of total>
+----------------------------------------------------------------------
+formal_parameter                       457  (37.9%)
+subprogram                             252  (20.9%)
+imported_declaration                   221  (18.3%)
+typedef                                 63  (5.2%)
+pointer_type                            49  (4.1%)
+member                                  33  (2.7%)
+base_type                               17  (1.4%)
+structure_type                          15  (1.2%)
+unspecified_parameters                  15  (1.2%)
+restrict_type                           15  (1.2%)
+const_type                              12  (1.0%)
+variable                                11  (0.9%)
+enumerator                              11  (0.9%)
+namespace                                6  (0.5%)
+subroutine_type                          5  (0.4%)
+class_type                               4  (0.3%)
+array_type                               3  (0.2%)
+subrange_type                            3  (0.2%)
+enumeration_type                         3  (0.2%)
+reference_type                           2  (0.2%)
+template_type_parameter                  2  (0.2%)
+inheritance                              2  (0.2%)
+volatile_type                            1  (0.1%)
+union_type                               1  (0.1%)
+template_value_parameter                 1  (0.1%)
+compile_unit                             1  (0.1%)
+imported_module                          1  (0.1%)

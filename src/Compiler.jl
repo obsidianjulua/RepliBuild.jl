@@ -851,11 +851,102 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
-        # Extract type name for base types, structs, classes, and enums
+        # Extract typedef (type aliases)
+        # Example: <1><390>: Abbrev Number: 34 (DW_TAG_typedef)
+        #          <391>   DW_AT_type        : <0x398>
+        #          <395>   DW_AT_name        : int32_t
+        if contains(line, "DW_TAG_typedef")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                # Store typedef info - will resolve to underlying type
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "typedef",
+                    "name" => nothing,
+                    "target" => nothing
+                )
+                offset_to_kind[current_type_offset] = :typedef
+            end
+        end
+
+        # Extract inheritance (base class)
+        # Example: <2><218>: DW_TAG_inheritance
+        #          <219>   DW_AT_type        : <0x135>  (base class ref)
+        #          <21d>   DW_AT_data_member_location: 0
+        #          <21e>   DW_AT_accessibility: DW_ACCESS_public
+        if contains(line, "DW_TAG_inheritance")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                inheritance_offset = "0x" * offset_match.captures[1]
+                type_refs[inheritance_offset] = Dict{String,Any}(
+                    "kind" => "inheritance",
+                    "base_type" => nothing,
+                    "offset" => 0,
+                    "accessibility" => "public",  # default
+                    "parent" => current_struct_context
+                )
+                offset_to_kind[inheritance_offset] = :inheritance
+            end
+        end
+
+        # Extract template type parameter
+        # Example: <2><2448>: DW_TAG_template_type_parameter
+        #          <2449>   DW_AT_type        : <0x1d9>  (actual type in instantiation)
+        #          <244d>   DW_AT_name        : T
+        if contains(line, "DW_TAG_template_type_parameter")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                template_offset = "0x" * offset_match.captures[1]
+                type_refs[template_offset] = Dict{String,Any}(
+                    "kind" => "template_type",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "parent" => current_struct_context
+                )
+                offset_to_kind[template_offset] = :template_type
+            end
+        end
+
+        # Extract template value parameter
+        # Example: <2><247b>: DW_TAG_template_value_parameter
+        #          <247c>   DW_AT_type        : <0x1d9>
+        #          <2480>   DW_AT_name        : N
+        #          <2481>   DW_AT_const_value : 10
+        if contains(line, "DW_TAG_template_value_parameter")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                template_offset = "0x" * offset_match.captures[1]
+                type_refs[template_offset] = Dict{String,Any}(
+                    "kind" => "template_value",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "value" => nothing,
+                    "parent" => current_struct_context
+                )
+                offset_to_kind[template_offset] = :template_value
+            end
+        end
+
+        # Extract namespace
+        # Example: <1><8bf>: DW_TAG_namespace
+        #          <8c0>   DW_AT_name        : math
+        if contains(line, "DW_TAG_namespace")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                ns_offset = "0x" * offset_match.captures[1]
+                type_refs[ns_offset] = Dict{String,Any}(
+                    "kind" => "namespace",
+                    "name" => nothing
+                )
+                offset_to_kind[ns_offset] = :namespace
+            end
+        end
+
+        # Extract type name for base types, structs, classes, enums, and new types
         # Example: <28>   DW_AT_name        : (indexed string: 0x3): int
         if contains(line, "DW_AT_name") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:base, :struct, :class, :enum, :enumerator]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:base, :struct, :class, :enum, :enumerator, :typedef, :template_type, :template_value, :namespace]
                 # Extract just the type name after the last colon
                 name_match = match(r":\s*([^:]+)\s*$", line)
                 if !isnothing(name_match)
@@ -863,8 +954,8 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     if offset_to_kind[tag_offset] == :base
                         # Base types are stored as simple strings
                         type_refs[tag_offset] = type_name
-                    elseif offset_to_kind[tag_offset] in [:struct, :class, :enum]
-                        # Struct/class/enum types are dicts - update the name field
+                    elseif offset_to_kind[tag_offset] in [:struct, :class, :enum, :typedef, :template_type, :template_value, :namespace]
+                        # These types are dicts - update the name field
                         if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
                             type_refs[tag_offset]["name"] = type_name
                         end
@@ -878,11 +969,11 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
-        # Extract DW_AT_type for pointer/const/reference/enum/array/subroutine types
+        # Extract DW_AT_type for pointer/const/reference/enum/array/subroutine/typedef/template/inheritance types
         # Example: <9f7>   DW_AT_type        : <0x41>
         if contains(line, "DW_AT_type") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :enum, :array, :subroutine]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :enum, :array, :subroutine, :typedef, :template_type, :template_value, :inheritance]
                 type_match = match(r"<(0x[^>]+)>", line)
                 if !isnothing(type_match)
                     target_offset = String(type_match.captures[1])  # Convert SubString to String
@@ -899,6 +990,15 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         # Subroutine: return type
                         elseif offset_to_kind[tag_offset] == :subroutine
                             type_refs[tag_offset]["return_type"] = target_offset
+                        # Typedef: target type
+                        elseif offset_to_kind[tag_offset] == :typedef
+                            type_refs[tag_offset]["target"] = target_offset
+                        # Template type/value parameter: actual type
+                        elseif offset_to_kind[tag_offset] in [:template_type, :template_value]
+                            type_refs[tag_offset]["type"] = target_offset
+                        # Inheritance: base class type
+                        elseif offset_to_kind[tag_offset] == :inheritance
+                            type_refs[tag_offset]["base_type"] = target_offset
                         end
                     end
                 end
@@ -918,10 +1018,10 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
-        # Extract DW_AT_const_value for enumerators
+        # Extract DW_AT_const_value for enumerators and template value parameters
         if contains(line, "DW_AT_const_value") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :enumerator
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enumerator, :template_value]
                 # Value can be decimal or hex
                 value_match = match(r":\s*(-?\d+)", line)
                 if !isnothing(value_match)
@@ -1427,10 +1527,59 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 end
 
                 if !isempty(resolved_members)
-                    struct_defs[struct_name] = Dict(
+                    struct_def = Dict{String,Any}(
                         "kind" => get(type_info, "kind", "struct"),
                         "members" => resolved_members
                     )
+
+                    # Add inheritance information if available
+                    base_classes = []
+                    for (inh_offset, inh_info) in type_refs
+                        if isa(inh_info, Dict) && get(inh_info, "kind", nothing) == "inheritance" &&
+                           get(inh_info, "parent", nothing) == offset
+                            base_type_ref = get(inh_info, "base_type", nothing)
+                            if !isnothing(base_type_ref)
+                                base_type = resolve_type(base_type_ref, type_refs)
+                                push!(base_classes, Dict(
+                                    "type" => base_type,
+                                    "accessibility" => get(inh_info, "accessibility", "public")
+                                ))
+                            end
+                        end
+                    end
+                    if !isempty(base_classes)
+                        struct_def["base_classes"] = base_classes
+                    end
+
+                    # Add template parameters if available
+                    template_params = []
+                    for (tmpl_offset, tmpl_info) in type_refs
+                        if isa(tmpl_info, Dict) && get(tmpl_info, "parent", nothing) == offset
+                            if get(tmpl_info, "kind", nothing) == "template_type"
+                                type_ref = get(tmpl_info, "type", nothing)
+                                param_type = !isnothing(type_ref) ? resolve_type(type_ref, type_refs) : "Any"
+                                push!(template_params, Dict(
+                                    "kind" => "type",
+                                    "name" => get(tmpl_info, "name", "T"),
+                                    "type" => param_type
+                                ))
+                            elseif get(tmpl_info, "kind", nothing) == "template_value"
+                                type_ref = get(tmpl_info, "type", nothing)
+                                param_type = !isnothing(type_ref) ? resolve_type(type_ref, type_refs) : "Int"
+                                push!(template_params, Dict(
+                                    "kind" => "value",
+                                    "name" => get(tmpl_info, "name", "N"),
+                                    "type" => param_type,
+                                    "value" => get(tmpl_info, "value", nothing)
+                                ))
+                            end
+                        end
+                    end
+                    if !isempty(template_params)
+                        struct_def["template_params"] = template_params
+                    end
+
+                    struct_defs[struct_name] = struct_def
                 end
             end
         end

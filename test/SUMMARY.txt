@@ -1,0 +1,51 @@
+=============================================================================
+DWARF EXTRACTION - UPDATED RESULTS
+=============================================================================
+
+COVERAGE: 78.0% (941/1206 DWARF tag instances) - UP FROM 71.9%!
+
+NEWLY IMPLEMENTED:
+  ✅ typedef - Type alias resolution (63 instances)
+  ✅ inheritance - Class hierarchies extracted (2 instances)  
+  ✅ template_type_parameter - Template tracking (2 instances)
+  ✅ template_value_parameter - Template value params (1 instance)
+  ✅ namespace - Namespace information (6 instances)
+
+REMAINING GAPS (NOT CRITICAL FOR FFI):
+  • imported_declaration (221×) - Using statements (namespace imports)
+  • unspecified_parameters (15×) - Variadic functions
+  • variable (11×) - Global variables
+  • restrict_type (15×) - C99 restrict qualifier
+
+WHAT WORKS (COMPLETE):
+  ✅ Functions: 239 with full signatures
+  ✅ Structs: 9 with members + inheritance info
+  ✅ Enums: 3 with values
+  ✅ Primitives, pointers, arrays, const types
+  ✅ Class hierarchies (Circle → Shape, Rectangle → Shape)
+  ✅ Template types (Pair<int>, FixedArray<float, 10>)
+
+EXTRACTION QUALITY:
+  • Type mapping: Accurate for all C++ primitives and pointers
+  • Struct layout: Member offsets and types extracted
+  • Inheritance: Base classes tracked with accessibility
+  • Templates: Instantiated types captured in struct names
+
+READELF vs LLVM-DWARFDUMP:
+  • Using readelf (current) ✓ Portable, reliable, sufficient
+  • llvm-dwarfdump: Better formatting but not always available
+  • Recommendation: Stick with readelf for production
+
+NEXT STEPS:
+  1. ✅ DONE - typedef, inheritance, templates, namespaces extracted
+  2. Optional - variadic function detection (low priority)
+  3. Optional - global variable wrapping (rarely needed)
+  4. Focus on wrapper generation quality with new metadata
+
+FILES:
+  test_dwarf.jl                - Test runner
+  dwarf_test.cpp               - Comprehensive C++ test cases
+  replibuild_extraction.json   - Extraction output with new fields
+  tag_comparison.txt           - Updated tag analysis
+  FINDINGS.md                  - Analysis (now outdated, see this file)
+=============================================================================
