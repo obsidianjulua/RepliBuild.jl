@@ -587,14 +587,14 @@ struct SymbolInfo
 end
 
 """
-    create_symbol_info(name::String, type::Symbol, registry::TypeRegistry, demangled::String, return_type::String, params::Vector{ParamInfo})
+    create_symbol_info(name::String, type::Symbol, registry::TypeRegistry)
 
 Create a SymbolInfo with basic information and inferred types.
 """
-function create_symbol_info(name::String, type::Symbol, registry::TypeRegistry,
+function create_symbol_info(name::String, type::Symbol, registry::TypeRegistry;
                            demangled::String="",
                            return_type::String="void",
-                           params::Vector{ParamInfo}=Vector{ParamInfo}())
+                           params::Vector{ParamInfo}=ParamInfo[])
 
     # Generate Julia identifier
     julia_name = make_julia_identifier(isempty(demangled) ? name : demangled)
@@ -700,36 +700,25 @@ Extract symbols using nm command.
 function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangle::Bool=true)
     symbols = SymbolInfo[]
 
-    #try  # TEMP: Disabled to see actual error
-        # Run nm twice: once for mangled names, once for demangled
-        mangled_output = read(`nm -D --defined-only $binary_path`, String)
-        demangled_output = read(`nm -D --defined-only --demangle $binary_path`, String)
+    # Use nm to extract symbols
+    nm_cmd = demangle ? `nm -D --defined-only --demangle $binary_path` : `nm -D --defined-only $binary_path`
 
-        # Parse both outputs line by line
-        mangled_lines = split(mangled_output, '\n')
-        demangled_lines = split(demangled_output, '\n')
+    try
+        output = read(nm_cmd, String)
 
-        if length(mangled_lines) != length(demangled_lines)
-            @warn "Mangled and demangled output line counts don't match, falling back to mangled only"
-            demangled_lines = mangled_lines
-        end
-
-        for (mangled_line, demangled_line) in zip(mangled_lines, demangled_lines)
-            if isempty(strip(mangled_line)) || isempty(strip(demangled_line))
+        for line in split(output, '\n')
+            if isempty(strip(line))
                 continue
             end
 
-            mangled_parts = split(strip(mangled_line))
-            demangled_parts = split(strip(demangled_line))
-
-            if length(mangled_parts) < 3 || length(demangled_parts) < 3
+            parts = split(strip(line))
+            if length(parts) < 3
                 continue
             end
 
             # Parse nm output: address type name
-            symbol_type_char = mangled_parts[2]
-            mangled_name = mangled_parts[3]  # Mangled name (no spaces)
-            demangled_name = join(demangled_parts[3:end], " ")  # Demangled name (may have spaces)
+            symbol_type_char = parts[2]
+            symbol_name = join(parts[3:end], " ")  # Handle demangled names with spaces
 
             # Map nm symbol type to our enum
             symbol_type = if symbol_type_char in ["T", "t"]
@@ -749,25 +738,19 @@ function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangl
                 continue
             end
 
-            # Create symbol info with MANGLED name as primary, demangled as secondary
-            empty_params = Vector{ParamInfo}()
-            @show typeof(mangled_name)
-            @show typeof(symbol_type)
-            @show typeof(registry)
-            @show typeof(demangled_name)
-            @show typeof(empty_params)
+            # Create symbol info
+            # For nm, we don't have type information, so we use conservative defaults
             info = create_symbol_info(
-                String(mangled_name),           # Use mangled name for ccall - convert SubString to String!
+                symbol_name,
                 symbol_type,
                 registry,
-                String(demangled_name),  # Demangled for documentation
-                (symbol_type == :function ? "void" : "char"),  # return_type
-                empty_params  # nm doesn't provide parameter info
+                demangled=symbol_name,
+                return_type=(symbol_type == :function ? "void" : "char"),
+                params=ParamInfo[]  # nm doesn't provide parameter info
             )
 
-            # Skip internal/private symbols (starting with _) in Julia name
-            # But keep the symbol itself since it might be needed
-            if isempty(info.julia_name)
+            # Skip internal/private symbols (starting with _)
+            if startswith(info.julia_name, "_") || isempty(info.julia_name)
                 continue
             end
 
@@ -775,10 +758,10 @@ function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangl
         end
 
         return symbols
-    #catch e  # TEMP: Disabled
-    #    @warn "Symbol extraction failed: $e"
-    #    return SymbolInfo[]
-    #end
+    catch e
+        @warn "Symbol extraction failed: $e"
+        return SymbolInfo[]
+    end
 end
 
 # =============================================================================

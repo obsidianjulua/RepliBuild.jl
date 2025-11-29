@@ -8,7 +8,7 @@ output = "build_advanced/julia"
 
 [compile]
 source_files = ["test_advanced_types.cpp"]
-flags = ["-std=c++17", "-O0", "-g", "-fPIC"]
+flags = ["-std=c++17", "-O0", "-g"]
 
 [binary]
 type = "shared"

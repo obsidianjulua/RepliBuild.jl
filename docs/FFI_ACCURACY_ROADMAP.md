@@ -2,60 +2,29 @@
 
 **FOCUS**: Perfect C/C++ → Julia type mapping and binding generation
 
-**STATUS**: ✅ PRODUCTION READY (Updated: November 25, 2025)
-
-## 🎉 Major Update: November 25, 2025
-
-**TL;DR**: Enums and arrays were already working! Added comprehensive type validation system.
-
-### What Changed
-- ✅ Verified enum extraction working (2 enums, 7 values from test_advanced_types.cpp)
-- ✅ Verified multi-dimensional array flattening (`int[4][4]` → `NTuple{16, Cint}`)
-- ✅ Implemented comprehensive type validation (STRICT/WARN/PERMISSIVE modes)
-- ✅ Added TOML configuration support for type settings
-- ✅ 66 new type validation tests (93 total tests passing)
-- ✅ Context-aware error messages with helpful suggestions
-
-### What Was Already There
-The toolchain was already doing the hard work:
-- Enum extraction from DWARF → `@enum` generation (Compiler.jl:757-827)
-- Multi-dimensional array detection and flattening (working perfectly)
-- Struct member type accuracy from DWARF metadata
-
-### What We Added
-Infrastructure for safety and usability:
-- Type strictness controls to catch errors early
-- Smart heuristics for unknown types
-- Configuration via `replibuild.toml`
-- Comprehensive error messages
+**STATUS**: Core functionality works (27/27 tests pass), but accuracy issues remain
 
 ---
 
-## Current State Assessment (November 25, 2025)
+## Current State Assessment
 
-### ✅ What Works (VERIFIED)
+### ✅ What Works
 - **Basic compilation**: C++ → LLVM IR → .so library
 - **Symbol extraction**: Functions discovered via `nm`
 - **Basic wrappers**: Generic `ccall()` wrappers generated
 - **DWARF extraction**: Debug info parsed for types
-- **Struct extraction**: Full struct layout from DWARF with member types
-- **✅ Enum extraction**: Enums extracted from DWARF → `@enum` generation (2 enums, 7 values tested)
-- **✅ Array flattening**: Multi-dimensional arrays correctly flattened (`int[4][4]` → `NTuple{16, Cint}`)
-- **✅ Type validation**: Comprehensive error handling with 3 strictness modes
-- **✅ TOML configuration**: Full control via `replibuild.toml`
-- **Test suite**: 66 type validation tests + 27 integration tests = 93 tests passing
+- **Struct extraction**: Basic struct layout from DWARF
+- **Test suite**: 27 tests passing
 
-### ✅ COMPLETED (January 2025)
-1. ✅ **Enum Extraction & Mapping** - Working! Extracts from DWARF, generates `@enum`
-2. ✅ **Array Dimensions** - Working! Multi-dimensional arrays flatten correctly
-3. ✅ **Type Validation System** - Complete with STRICT/WARN/PERMISSIVE modes
-4. ✅ **Struct Member Types** - Accurate types from DWARF metadata
-5. ✅ **TOML Configuration** - Full `[types]` section with custom mappings
+### ❌ What Needs Fixing
+Based on analysis of `test/test_advanced_types.cpp` → generated bindings:
 
-### 🔄 In Progress / Remaining
-1. **Function Pointers** - Detected via heuristics, signature extraction in progress
-2. **Parameter Types** - Extracted from DWARF, needs wrapper integration
-3. **Return Types** - Extracted from DWARF, needs wrapper integration
+1. **Enum Extraction & Mapping** - Enums not extracted or mapped to `@enum`
+2. **Array Dimensions** - Multi-dimensional arrays not handled correctly
+3. **Function Pointers** - Not detected or typed properly
+4. **Parameter Types** - Generic `Any` instead of specific types
+5. **Return Types** - Some return `Any` instead of proper types
+6. **Struct Member Types** - Members showing as `Any` instead of concrete types
 
 ---
 
@@ -79,14 +48,7 @@ enum class Direction : int { North = 1, South = -1, ... };
 end
 ```
 
-**Current State**: ✅ WORKING - Enums extracted and mapped correctly!
-
-**Verified Output (Nov 25, 2025):**
-```
-Found 2 enums:
-  - Color: 3 values (Red=0, Green=1, Blue=2)
-  - Status: 4 values (Idle=0, Running=100, Stopped=200, Error=999)
-```
+**Current State**: ❌ Enums not extracted to Julia bindings
 
 ### Arrays (2 types)
 ```cpp
@@ -112,16 +74,7 @@ mutable struct Grid
 end
 ```
 
-**Current State**: ✅ WORKING - Multi-dimensional arrays flatten correctly!
-
-**Verified Output (Nov 25, 2025):**
-```json
-{
-  "Grid.cells": "int[4][4] → NTuple{16, Cint}",   // ✅ 4×4 = 16!
-  "Grid.values": "double[3] → NTuple{3, Cdouble}",
-  "Matrix3x3.data": "double[9] → NTuple{9, Cdouble}"
-}
-```
+**Current State**: ⚠️ Arrays may not be sized correctly
 
 ### Function Pointers
 ```cpp
@@ -150,19 +103,17 @@ end
 
 ---
 
-## Issue Priority Matrix (Updated Nov 25, 2025)
+## Issue Priority Matrix
 
-| Issue | Impact | Difficulty | Priority | Status |
-|-------|---------|-----------|----------|--------|
-| **Enum extraction** | HIGH | MEDIUM | 🔥 P0 | ✅ DONE |
-| **Array dimensions** | HIGH | MEDIUM | 🔥 P0 | ✅ DONE |
-| **Struct member types** | HIGH | LOW | 🔥 P0 | ✅ DONE |
-| **Type validation** | HIGH | MEDIUM | 🔥 P0 | ✅ DONE |
-| **TOML config** | MEDIUM | LOW | 🔥 P0 | ✅ DONE |
-| **Parameter types** | HIGH | LOW | 🔥 P0 | 🔄 Extracted, needs integration |
-| **Return types** | HIGH | LOW | 🔥 P0 | 🔄 Extracted, needs integration |
-| **Function pointers** | MEDIUM | HIGH | P1 | 🔄 Detected, needs signatures |
-| **Const correctness** | LOW | LOW | P2 | ⏸️ Future |
+| Issue | Impact | Difficulty | Priority |
+|-------|---------|-----------|----------|
+| **Enum extraction** | HIGH | MEDIUM | 🔥 P0 |
+| **Parameter types** | HIGH | LOW | 🔥 P0 |
+| **Array dimensions** | HIGH | MEDIUM | 🔥 P0 |
+| **Return types** | HIGH | LOW | 🔥 P0 |
+| **Function pointers** | MEDIUM | HIGH | P1 |
+| **Struct member types** | HIGH | LOW | 🔥 P0 |
+| **Const correctness** | LOW | LOW | P2 |
 
 ---
 
@@ -369,21 +320,19 @@ After each fix, check:
 
 ---
 
-## Success Metrics (Updated Nov 25, 2025)
+## Success Metrics
 
-### Must Have (P0) - ✅ ACHIEVED
-- ✅ **100% enum extraction**: All enums in C++ appear as `@enum` in Julia (VERIFIED)
-- 🔄 **100% parameter accuracy**: Types extracted from DWARF, needs wrapper integration
-- 🔄 **100% return type accuracy**: Types extracted from DWARF, needs wrapper integration
-- ✅ **100% struct member accuracy**: All struct fields have correct types (VERIFIED)
-- ✅ **Array dimension accuracy**: All arrays have correct sizes, multi-dim flattened (VERIFIED)
-- ✅ **Type validation system**: STRICT/WARN/PERMISSIVE with 66 tests (IMPLEMENTED)
-- ✅ **TOML configuration**: Full control via config file (IMPLEMENTED)
+### Must Have (P0)
+- ✅ **100% enum extraction**: All enums in C++ appear as `@enum` in Julia
+- ✅ **100% parameter accuracy**: All functions have correct typed parameters
+- ✅ **100% return type accuracy**: All functions return correct types
+- ✅ **100% struct member accuracy**: All struct fields have correct types
+- ✅ **Array dimension accuracy**: All arrays have correct sizes
 
-### Nice to Have (P1) - In Progress
-- 🔄 **Function pointer support**: Detected via heuristics, signature extraction in progress
+### Nice to Have (P1)
+- ✅ **Function pointer support**: Detected and typed as `Ptr{Cvoid}` minimum
 - ✅ **Demangled names**: Functions use clean names, not mangled symbols
-- ⏸️ **Const correctness**: `const` qualifiers tracked, preservation in progress
+- ✅ **Const correctness**: `const` preserved in signatures
 
 ### Future (P2)
 - **Template support**: Handle C++ templates (hard)

@@ -379,7 +379,6 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
-        TypesConfig(:warn, true, true, true, Dict{String,String}()),
         toml_path,
         now()
     )
