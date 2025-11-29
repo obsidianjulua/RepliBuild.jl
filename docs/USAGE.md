@@ -489,4 +489,129 @@ Discovery.discover() → build() → wrap() → include() + using
 
 ---
 
+## TOML-Centric Workflow (v2.1+)
+
+**NEW in v2.1:** All functions now target `replibuild.toml` directly to avoid confusion!
+
+### Why TOML-Centric?
+
+Before v2.1, you could call functions in confusing ways:
+- `build()` - works
+- `build(".")` - confusing, same as above?
+- `build("replibuild.toml")` - would fail!
+
+**Now everything targets the TOML file directly:**
+
+```julia
+# Step 1: Discovery creates the TOML and returns its path
+toml_path = RepliBuild.discover()  # Returns path to replibuild.toml
+
+# Step 2: Build uses the TOML path
+RepliBuild.build(toml_path)
+
+# Step 3: Wrap uses the TOML path
+RepliBuild.wrap(toml_path)
+```
+
+### Benefits
+
+✅ **No confusion** - clear what file is being used
+✅ **Chain pipelines** - discovery can auto-build and wrap
+✅ **Multiple projects** - easily work with different configs
+✅ **Explicit** - no guessing about directories
+
+### Discover with Chaining
+
+Discovery can now automatically run build and wrap:
+
+```julia
+# Just discover (returns TOML path)
+toml_path = RepliBuild.discover()
+
+# Discover + build
+toml_path = RepliBuild.discover(build=true)
+
+# Full pipeline: discover → build → wrap
+toml_path = RepliBuild.discover(build=true, wrap=true)
+```
+
+### Using TOML Paths
+
+All functions accept the TOML path as first argument:
+
+```julia
+# Build with specific TOML
+RepliBuild.build("replibuild.toml")
+RepliBuild.build("../other_project/replibuild.toml")
+RepliBuild.build("custom_config.toml")
+
+# Same for wrap, clean, info
+RepliBuild.wrap("replibuild.toml")
+RepliBuild.clean("replibuild.toml")
+RepliBuild.info("replibuild.toml")
+
+# Default is "replibuild.toml" in current directory
+RepliBuild.build()  # Same as build("replibuild.toml")
+```
+
+### Multi-Project Workflow
+
+Working with multiple C++ projects? Use the TOML paths:
+
+```julia
+# Project A
+toml_a = RepliBuild.discover("project_a")
+RepliBuild.build(toml_a)
+RepliBuild.wrap(toml_a)
+
+# Project B
+toml_b = RepliBuild.discover("project_b")
+RepliBuild.build(toml_b)
+RepliBuild.wrap(toml_b)
+
+# Check both
+RepliBuild.info(toml_a)
+RepliBuild.info(toml_b)
+```
+
+### Complete Example
+
+```julia
+using RepliBuild
+
+# Discover C++ project (creates replibuild.toml)
+toml = RepliBuild.discover("my_cpp_lib")
+
+# Edit the TOML if needed
+# vim my_cpp_lib/replibuild.toml
+
+# Build the library
+lib_path = RepliBuild.build(toml)
+
+# Generate Julia wrapper
+wrapper_path = RepliBuild.wrap(toml)
+
+# Or do it all at once:
+toml = RepliBuild.discover("my_cpp_lib", build=true, wrap=true)
+```
+
+### Backwards Compatibility
+
+The old path-based workflow still works:
+
+```julia
+# Old way (still works, but not recommended)
+cd("my_project")
+RepliBuild.Discovery.discover()
+RepliBuild.build()
+RepliBuild.wrap()
+
+# New way (recommended)
+toml = RepliBuild.discover("my_project", build=true, wrap=true)
+```
+
+But we recommend using the TOML-centric approach for clarity!
+
+---
+
 **That's everything! Go from C++ to Julia in 3 commands.** 🚀

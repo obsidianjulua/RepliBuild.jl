@@ -17,16 +17,17 @@ RepliBuild generates Julia bindings for C/C++ libraries by extracting type infor
 ```julia
 using RepliBuild
 
-# 0. First time? Create config
-RepliBuild.Discovery.discover()  # Auto-generates replibuild.toml
+# Step 1: Discover and create config (generates replibuild.toml)
+toml_path = RepliBuild.discover()
 
-# 1. Compile C++ → library
-RepliBuild.build()
+# Step 2: Build C++ library
+RepliBuild.build(toml_path)
 
-# 2. Generate Julia wrapper
-RepliBuild.wrap()
+# Step 3: Generate Julia wrapper
+RepliBuild.wrap(toml_path)
 
-# 3. Use your C++ functions from Julia!
+# Or do it all in one step:
+RepliBuild.discover(build=true, wrap=true)
 ```
 
 **Supported:**

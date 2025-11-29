@@ -51,7 +51,7 @@ struct BinaryInfo
 end
 
 """
-    discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=false) -> RepliBuildConfig
+    discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=false, build::Bool=false, wrap::Bool=false) -> String
 
 Main discovery pipeline - scans project and generates configuration.
 
@@ -61,12 +61,14 @@ Main discovery pipeline - scans project and generates configuration.
 3. Detect and analyze binaries
 4. Walk AST dependencies using clang
 5. Generate or update replibuild.toml with discovered data
-6. Return configuration
+6. Optionally run build and wrap pipeline
 
 # Arguments
 - `target_dir`: Project directory (default: current directory)
 - `force`: Force rediscovery even if replibuild.toml exists
 - `unsafe`: Bypass safety checks (use with extreme caution)
+- `build`: Automatically run build() after discovery (default: false)
+- `wrap`: Automatically run wrap() after build (requires build=true, default: false)
 
 # Safety Features
 - Discovery is scoped ONLY to target_dir and subdirectories
@@ -74,9 +76,25 @@ Main discovery pipeline - scans project and generates configuration.
 - Skips .git, build, node_modules, .cache directories
 
 # Returns
-- `RepliBuildConfig`: Complete project configuration
+- Path to generated `replibuild.toml` file
+
+# Examples
+```julia
+# Discover only
+toml_path = RepliBuild.Discovery.discover()
+
+# Discover and build
+toml_path = RepliBuild.Discovery.discover(build=true)
+
+# Full pipeline: discover → build → wrap
+toml_path = RepliBuild.Discovery.discover(build=true, wrap=true)
+
+# Then use the TOML path:
+RepliBuild.build(toml_path)
+RepliBuild.wrap(toml_path)
+```
 """
-function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=false)
+function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=false, build::Bool=false, wrap::Bool=false)
     println(" RepliBuild Discovery Pipeline")
     println("="^70)
     println(" Target: $target_dir")
@@ -95,7 +113,8 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     if isfile(config_path) && !force
         println("  replibuild.toml already exists!")
         println("   Use discover(force=true) to regenerate")
-        return ConfigurationManager.load_config(config_path)
+        println("="^70)
+        return config_path
     end
 
     # Stage 1: Scan files
@@ -142,10 +161,50 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
 
     println("\n Discovery complete!")
     println(" Configuration: $config_path")
-    println(" Next: julia -e 'using RepliBuild; RepliBuild.compile()'")
-    println("="^70)
 
-    return config
+    # Chain build and wrap if requested
+    if build
+        println()
+        println(" Running build pipeline...")
+        println("="^70)
+
+        # Need to access parent module's build function
+        # Import from parent RepliBuild module
+        build_func = getfield(parentmodule(@__MODULE__), :build)
+        library_path = build_func(config_path)
+
+        if wrap
+            println()
+            println(" Running wrap pipeline...")
+            println("="^70)
+
+            wrap_func = getfield(parentmodule(@__MODULE__), :wrap)
+            wrapper_path = wrap_func(config_path)
+
+            println()
+            println("="^70)
+            println(" Full pipeline complete!")
+            println(" - Config:  $config_path")
+            println(" - Library: $library_path")
+            println(" - Wrapper: $wrapper_path")
+            println("="^70)
+        else
+            println()
+            println("="^70)
+            println(" Discovery + Build complete!")
+            println(" - Config:  $config_path")
+            println(" - Library: $library_path")
+            println()
+            println(" Next: RepliBuild.wrap(\"$config_path\") to generate Julia bindings")
+            println("="^70)
+        end
+    else
+        println()
+        println(" Next: RepliBuild.build(\"$config_path\") to compile C++ library")
+        println("="^70)
+    end
+
+    return config_path
 end
 
 """
