@@ -29,7 +29,7 @@ replibuild.toml already exists!
 build("replibuild.toml")
 
 # 2. Generate Julia wrapper
-RepliBuild.wrap()
+wrap()
 
 # 3. Use your C++ functions from Julia!
 ```
