@@ -535,7 +535,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
     compile_config = ConfigurationManager.CompileConfig(
         source_files,                            # source_files
         include_dirs,                            # include_dirs
-        ["-std=c++17", "-fPIC", "-O2"],         # flags
+        ["-std=c++17", "-fPIC"],         # flags
         Dict{String,String}(),                   # defines
         true                                     # parallel
     )

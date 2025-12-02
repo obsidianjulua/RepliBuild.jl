@@ -43,11 +43,9 @@ include("BuildBridge.jl")
 # Core build system modules
 include("ASTWalker.jl")
 include("Discovery.jl")
-include("CMakeParser.jl")
 include("ClangJLBridge.jl")
 include("Compiler.jl")      # New: replaces Bridge_LLVM
 include("Wrapper.jl")       # New: wrapper generation
-include("WorkspaceBuilder.jl")
 
 # REPL_API.jl removed in v2.0 - deprecated
 
@@ -58,11 +56,9 @@ using .ConfigurationManager
 using .BuildBridge
 using .ASTWalker
 using .Discovery
-using .CMakeParser
 using .ClangJLBridge
 using .Compiler           # New module
 using .Wrapper            # New module
-using .WorkspaceBuilder
 
 # ============================================================================
 # EXPORTS - Clean Build Orchestration API
@@ -303,7 +299,6 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
             config,
             library_path,
             headers=headers,
-            tier=nothing,  # Auto-detect
             generate_tests=false,
             generate_docs=true
         )

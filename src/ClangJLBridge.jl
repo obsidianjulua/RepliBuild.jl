@@ -8,7 +8,7 @@ using Clang.Generators
 using TOML
 using Dates
 
-export generate_bindings_clangjl
+export generate_bindings_clangjl, extract_header_types
 
 """
     generate_bindings_clangjl(config::Dict, lib_path::String, headers::Vector{String})
@@ -291,6 +291,137 @@ function generate_from_config(config_file::String; lib_path::String="", headers:
     end
 
     return generate_bindings_clangjl(config, lib_path, headers)
+end
+
+"""
+    extract_header_types(headers::Vector{String}, include_dirs::Vector{String}) -> Dict
+
+Extract supplementary type information from C/C++ headers using Clang.jl.
+
+This function complements DWARF extraction by finding types that may be
+optimized away (unused enums, constants, etc.).
+
+# Returns
+Dictionary with:
+- `enums`: Dict{String, Vector{Tuple{String,Int}}} - enum name => [(member, value), ...]
+- `constants`: Dict{String, Any} - #define constants
+- `typedefs`: Dict{String, String} - typedef mappings
+- `structs`: Vector{String} - struct names found in headers
+- `function_pointers`: Dict{String, Dict} - function pointer typedef signatures
+"""
+function extract_header_types(headers::Vector{String}, include_dirs::Vector{String}=String[])
+    if isempty(headers)
+        return Dict(
+            "enums" => Dict{String,Vector{Tuple{String,Int}}}(),
+            "constants" => Dict{String,Any}(),
+            "typedefs" => Dict{String,String}(),
+            "structs" => String[],
+            "function_pointers" => Dict{String,Dict}()
+        )
+    end
+
+    println("  Extracting supplementary types from headers...")
+
+    result = Dict(
+        "enums" => Dict{String,Vector{Tuple{String,Int}}}(),
+        "constants" => Dict{String,Any}(),
+        "typedefs" => Dict{String,String}(),
+        "structs" => String[],
+        "function_pointers" => Dict{String,Dict}()
+    )
+
+    # Simple regex-based extraction as fallback
+    # TODO: Use Clang.jl AST for more accurate parsing
+    for header in headers
+        if !isfile(header)
+            continue
+        end
+
+        try
+            content = read(header, String)
+
+            # Extract enum definitions
+            enum_pattern = r"enum\s+(?:class\s+)?(\w+)\s*\{([^}]+)\}"s
+            for m in eachmatch(enum_pattern, content)
+                enum_name = m.captures[1]
+                enum_body = m.captures[2]
+
+                members = Tuple{String,Int}[]
+                current_value = 0
+
+                # Parse enum members
+                member_pattern = r"(\w+)\s*(?:=\s*(\d+))?"
+                for mem in eachmatch(member_pattern, enum_body)
+                    member_name = mem.captures[1]
+                    if !isnothing(mem.captures[2])
+                        current_value = parse(Int, mem.captures[2])
+                    end
+                    push!(members, (member_name, current_value))
+                    current_value += 1
+                end
+
+                if !isempty(members)
+                    result["enums"][enum_name] = members
+                end
+            end
+
+            # Extract struct names (for completeness)
+            struct_pattern = r"struct\s+(\w+)\s*\{"
+            for m in eachmatch(struct_pattern, content)
+                struct_name = m.captures[1]
+                if !in(struct_name, result["structs"])
+                    push!(result["structs"], struct_name)
+                end
+            end
+
+            # Extract function pointer typedefs
+            # Pattern: typedef return_type (*TypeName)(param1, param2, ...);
+            # Example: typedef void (*TransformCallback)(const Transform* transform);
+            fp_typedef_pattern = r"typedef\s+([\w\s\*]+?)\s*\(\s*\*\s*(\w+)\s*\)\s*\(([^)]*)\)\s*;"s
+            for m in eachmatch(fp_typedef_pattern, content)
+                return_type = strip(m.captures[1])
+                typedef_name = m.captures[2]
+                params_str = strip(m.captures[3])
+
+                # Parse parameters
+                params = String[]
+                if !isempty(params_str)
+                    for param in split(params_str, ",")
+                        param_cleaned = strip(param)
+                        # Extract just the type (remove parameter name if present)
+                        # Match: "const Type* name" -> "const Type*"
+                        type_match = match(r"^((?:const\s+)?[\w\s]+[\*&]*)", param_cleaned)
+                        if !isnothing(type_match)
+                            push!(params, strip(type_match.captures[1]))
+                        else
+                            push!(params, param_cleaned)
+                        end
+                    end
+                end
+
+                result["function_pointers"][typedef_name] = Dict(
+                    "return_type" => return_type,
+                    "parameters" => params,
+                    "signature" => "$(return_type) (*)($(params_str))"
+                )
+            end
+
+        catch e
+            @warn "Failed to parse header: $header" exception=e
+        end
+    end
+
+    enum_count = length(result["enums"])
+    fp_count = length(result["function_pointers"])
+
+    if enum_count > 0
+        println("  ✓ Extracted $enum_count enums from headers")
+    end
+    if fp_count > 0
+        println("  ✓ Extracted $fp_count function pointer typedefs from headers")
+    end
+
+    return result
 end
 
 end # module ClangJLBridge

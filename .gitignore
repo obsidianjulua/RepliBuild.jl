@@ -72,3 +72,6 @@ __pycache__/
 *.BASE.*
 *.LOCAL.*
 *.REMOTE.*
+
+# AI
+CLAUDE.md

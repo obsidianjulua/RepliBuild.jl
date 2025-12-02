@@ -478,7 +478,7 @@ function extract_mangled_name(nm_output::String, demangled::String)::String
 end
 
 # =============================================================================
-# DWARF DEBUG INFO PARSING - Perfect Type Extraction
+# DWARF DEBUG INFO PARSING - Type Extraction
 # =============================================================================
 
 """
@@ -665,6 +665,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     offset_to_kind = Dict{String,Symbol}()  # Track what kind each offset is
     current_type_offset = nothing  # Track current type/struct being processed
     current_struct_context = nothing  # Track parent struct for members
+    current_subroutine_offset = nothing  # Track current subroutine type for parameters
 
     for line in split(output, '\n')
         line = strip(line)
@@ -841,6 +842,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
+                current_subroutine_offset = current_type_offset  # Track for param collection
                 # Store function signature info
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "subroutine",
@@ -1266,14 +1268,70 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 return "unknown[]"
             end
 
-            # Subroutine (function pointer) - return simplified signature
+            # Subroutine (function pointer) - return detailed signature with parameters
             if kind == "subroutine"
                 return_type_ref = get(type_info, "return_type", nothing)
-                if !isnothing(return_type_ref)
-                    return_type = resolve_type(return_type_ref, type_refs, visited)
-                    return "function_ptr($return_type)"
+                param_refs = get(type_info, "parameters", [])
+
+                # Resolve return type
+                ret_type_str = if !isnothing(return_type_ref)
+                    resolve_type(return_type_ref, type_refs, visited)
                 else
-                    return "function_ptr(void)"
+                    "void"
+                end
+
+                # Resolve parameter types
+                param_type_strs = String[]
+                for param_ref in param_refs
+                    if isa(param_ref, String)
+                        param_type = resolve_type(param_ref, type_refs, visited)
+                        push!(param_type_strs, param_type)
+                    elseif isa(param_ref, Dict)
+                        # Parameter might have additional info (name, etc.)
+                        param_type_ref = get(param_ref, "type", nothing)
+                        if !isnothing(param_type_ref)
+                            param_type = resolve_type(param_type_ref, type_refs, visited)
+                            push!(param_type_strs, param_type)
+                        end
+                    end
+                end
+
+                # Build signature: function_ptr(return_type; param1, param2, ...)
+                # Using semicolon to separate return from params for easier parsing
+                if isempty(param_type_strs)
+                    return "function_ptr($ret_type_str)"
+                else
+                    param_list = join(param_type_strs, ", ")
+                    return "function_ptr($ret_type_str; $param_list)"
+                end
+            end
+
+            # Typedef - special handling for well-known types
+            if kind == "typedef"
+                typedef_name = get(type_info, "name", "")
+
+                # Preserve well-known typedefs that have portable Julia mappings
+                # These should NOT be resolved to their underlying type
+                well_known_typedefs = [
+                    "size_t", "ssize_t", "ptrdiff_t",
+                    "intptr_t", "uintptr_t",
+                    "int8_t", "int16_t", "int32_t", "int64_t",
+                    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+                    "wchar_t", "char16_t", "char32_t"
+                ]
+
+                if typedef_name in well_known_typedefs
+                    # Preserve the typedef name for portable mapping
+                    return typedef_name
+                end
+
+                # For other typedefs, resolve to underlying type
+                target_ref = get(type_info, "target", nothing)
+                if !isnothing(target_ref)
+                    return resolve_type(target_ref, type_refs, visited)
+                else
+                    # If no target, return the typedef name itself
+                    return typedef_name == "" ? "unknown" : typedef_name
                 end
             end
 
@@ -1306,7 +1364,9 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     current_function_linkage = nothing
     current_function_level = nothing
     function_processed = false  # State flag: true once we leave function's own level
-    current_function_params = []  # Collect parameters for current function
+    params_for_this_function = []  # Collect parameters for current function, NEW name and usage
+
+    params_for_this_function = [] # NEW: Temporary storage for parameters of the current function being parsed
 
     # Track formal parameters (similar to struct members)
     current_param_offset = nothing
@@ -1329,6 +1389,13 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         # Detect when we've left the function's own level (entered child tags)
         if !isnothing(current_function_offset) && !isnothing(current_level) && !isnothing(current_function_level)
             if current_level > current_function_level && !function_processed
+                # If a function was just processed and its parameters haven't been associated
+                # (e.g., if it was a void function without DW_AT_type), associate them now.
+                function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                if !isnothing(function_key_prev) && haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
+                     return_types[function_key_prev]["parameters"] = params_for_this_function
+                end
+
                 # We've entered a child tag (like DW_TAG_formal_parameter)
                 # This means we've finished processing the function's own attributes
                 # If no return type was found, it's void
@@ -1337,7 +1404,8 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     return_types[function_key] = Dict(
                         "c_type" => "void",
                         "julia_type" => "Cvoid",
-                        "size" => 0
+                        "size" => 0,
+                        "parameters" => params_for_this_function # Ensure parameters are passed here too
                     )
                 end
                 function_processed = true
@@ -1348,26 +1416,47 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         if contains(line, "DW_TAG_subprogram")
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
+                # Before resetting for new function, if a function was just parsed, ensure its parameters are stored
+                # This handles cases where a function might not have DW_AT_type (void return)
+                if !isnothing(current_function_offset)
+                    function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                    if !isnothing(function_key_prev) && haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
+                        return_types[function_key_prev]["parameters"] = params_for_this_function
+                    end
+                end
+
                 current_function_offset = "0x" * offset_match.captures[1]
                 current_function_level = current_level
                 current_function_name = nothing
                 current_function_linkage = nothing
                 function_processed = false  # Reset flag for new function
-                current_function_params = []  # Reset parameters for new function
+                params_for_this_function = []  # NEW: Reset for the new function
+                current_subroutine_offset = nothing  # Reset subroutine context when entering function
             end
         end
 
-        # Detect formal parameter (child of subprogram)
+        # Detect formal parameter (child of subprogram or subroutine_type)
         # Example: <2><7a>: DW_TAG_formal_parameter
         if contains(line, "DW_TAG_formal_parameter")
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_param_offset = "0x" * offset_match.captures[1]
+
+                # Determine position based on context (function or subroutine type)
+                position = if !isnothing(current_subroutine_offset) && haskey(type_refs, current_subroutine_offset)
+                    # Parameter belongs to subroutine type
+                    length(type_refs[current_subroutine_offset]["parameters"])
+                else
+                    # Parameter belongs to function
+                    length(params_for_this_function)
+                end
+
                 type_refs[current_param_offset] = Dict{String,Any}(
                     "kind" => "parameter",
                     "name" => nothing,
                     "type" => nothing,
-                    "position" => length(current_function_params)  # Track position
+                    "position" => position,
+                    "parent_subroutine" => current_subroutine_offset  # Track which subroutine this belongs to
                 )
                 offset_to_kind[current_param_offset] = :parameter
             end
@@ -1427,7 +1516,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         "c_type" => c_type,
                         "julia_type" => julia_type,
                         "size" => type_size,
-                        "parameters" => current_function_params  # Add parameters from DWARF
+                        "parameters" => params_for_this_function  # NEW: Use params_for_this_function
                     )
                 end
                 function_processed = true  # Mark as processed
@@ -1457,19 +1546,35 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 if !isnothing(type_match)
                     param_info["type"] = String(type_match.captures[1])
 
-                    # If we have both name and type, add to function's parameter list
-                    if !isnothing(param_info["name"]) && !isnothing(param_info["type"])
+                    # Check if this parameter belongs to a subroutine type or a function
+                    parent_subroutine = get(param_info, "parent_subroutine", nothing)
+
+                    if !isnothing(parent_subroutine) && haskey(type_refs, parent_subroutine)
+                        # Add to subroutine type's parameter list
+                        type_ref = param_info["type"]
+                        # Store just the type reference for now, will resolve later
+                        push!(type_refs[parent_subroutine]["parameters"], type_ref)
+                        current_param_offset = nothing
+                    elseif !isnothing(param_info["name"]) && !isnothing(param_info["type"])
+                        # Add to function's parameter list (needs both name and type)
                         # Resolve type
                         type_ref = param_info["type"]
                         c_type = resolve_type(type_ref, type_refs)
                         julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
 
-                        push!(current_function_params, Dict(
+                        param_dict = Dict(
                             "name" => param_info["name"],
                             "c_type" => c_type,
                             "julia_type" => julia_type,
                             "position" => param_info["position"]
-                        ))
+                        )
+
+                        # If this is a function pointer, preserve the full signature
+                        if startswith(c_type, "function_ptr(")
+                            param_dict["function_pointer_signature"] = c_type
+                        end
+
+                        push!(params_for_this_function, param_dict)
 
                         # Reset param offset to avoid re-processing
                         current_param_offset = nothing
@@ -1482,18 +1587,18 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     # Handle last function in file (might be void)
     if !isnothing(current_function_offset)
         function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
-        if !isnothing(function_key) && !haskey(return_types, function_key)
-            # No DW_AT_type found = void return
-            return_types[function_key] = Dict(
-                "c_type" => "void",
-                "julia_type" => "Cvoid",
-                "size" => 0,
-                "parameters" => current_function_params
-            )
-        elseif !isnothing(function_key) && haskey(return_types, function_key)
-            # Function already has return type, but may need parameters added
-            if !haskey(return_types[function_key], "parameters")
-                return_types[function_key]["parameters"] = current_function_params
+        if !isnothing(function_key)
+            if !haskey(return_types, function_key)
+                # No DW_AT_type found = void return
+                return_types[function_key] = Dict(
+                    "c_type" => "void",
+                    "julia_type" => "Cvoid",
+                    "size" => 0,
+                    "parameters" => params_for_this_function # NEW: Use params_for_this_function
+                )
+            elseif !haskey(return_types[function_key], "parameters")
+                # Function already has return type, but may need parameters added
+                return_types[function_key]["parameters"] = params_for_this_function # NEW: Use params_for_this_function
             end
         end
     end
@@ -1893,7 +1998,8 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         "bool" => "Bool",
         "void" => "Cvoid",
         "char*" => "Cstring",
-        "const char*" => "Cstring"
+        "const char*" => "Cstring",
+        "size_t" => "Csize_t" # Added for correct type mapping
     )
 
     # Handle arrays: type[size] or type[size1][size2]
@@ -1925,10 +2031,10 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         end
     end
 
-    # Handle function pointers: function_ptr(return_type)
-    if startswith(cpp_type, "function_ptr(")
-        # For now, treat all function pointers as Ptr{Cvoid}
-        # TODO: Generate typed function pointer wrappers
+    # Handle function pointers (and pointers to function pointers)
+    # First, strip trailing '*' if present, and then check for "function_ptr("
+    temp_cpp_type = replace(cpp_type, r"\*+$" => "") # Temporarily strip pointers for the check
+    if startswith(temp_cpp_type, "function_ptr(")
         return "Ptr{Cvoid}"
     end
 
@@ -1955,7 +2061,15 @@ function cpp_to_julia_type(cpp_type::AbstractString,
 
     # Handle pointers (for non-struct types)
     if endswith(cpp_type, "*")
-        return "Ptr{Cvoid}"
+        # Map the base type first, then wrap in Ptr{}
+        base = strip(cpp_type[1:end-1])
+        base_julia = cpp_to_julia_type(base, struct_names, enum_names)
+        # If base mapped to a specific type, use it; otherwise fall back to Ptr{Cvoid}
+        if base_julia != "Any" && base_julia != base
+            return "Ptr{$base_julia}"
+        else
+            return "Ptr{Cvoid}"
+        end
     end
 
     # Handle references (for non-struct types)
