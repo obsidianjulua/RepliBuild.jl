@@ -44,6 +44,12 @@ Replibuild.Discovery.discover(force=true, build=true, wrap=true)
 # Load the module in julia and use the bindings
 using .Bindings
 
+# Clean build
+RepliBuild.build(clean=true)
+
+# Toolchain, and build stats
+RepliBuild.info()
+
 ```
 
 
