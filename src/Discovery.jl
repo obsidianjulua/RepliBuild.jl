@@ -541,7 +541,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
     )
 
     link_config = ConfigurationManager.LinkConfig(
-        "2",                                     # optimization_level
+        "0",                                     # optimization_level (O0 for safety and DWARF accuracy)
         false,                                   # enable_lto
         String[]                                 # link_libraries
     )

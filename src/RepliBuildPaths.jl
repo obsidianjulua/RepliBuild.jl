@@ -145,7 +145,7 @@ function create_default_config()
 
         "build" => Dict(
             "parallel_jobs" => Sys.CPU_THREADS,
-            "default_optimization" => "O2",
+            "default_optimization" => "0",
             "cache_ir" => true,
             "cache_objects" => true
         ),

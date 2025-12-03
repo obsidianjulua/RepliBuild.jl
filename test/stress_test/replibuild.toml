@@ -12,7 +12,7 @@ include_dirs = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test", "/
 
 [link]
 enable_lto = false
-optimization_level = "2"
+optimization_level = "0"
 
 [binary]
 strip_symbols = false

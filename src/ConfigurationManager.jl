@@ -226,8 +226,14 @@ end
 function parse_link_config(data::Dict)::LinkConfig
     link = get(data, "link", Dict())
 
+    # Parse optimization level (strip "O" prefix if present)
+    opt_level = get(link, "optimization_level", "0")
+    if startswith(opt_level, "O") || startswith(opt_level, "o")
+        opt_level = opt_level[2:end]
+    end
+
     return LinkConfig(
-        get(link, "optimization_level", "2"),
+        opt_level,
         get(link, "enable_lto", false),
         get(link, "link_libraries", String[])
     )
