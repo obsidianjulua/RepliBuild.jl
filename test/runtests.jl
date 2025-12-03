@@ -84,7 +84,8 @@ using RepliBuild
         println("="^70)
 
         include(wrapper_path)
-        @test isdefined(Main, :Numerics) || isdefined(Main, :NumericsLib)
+        # The module name is based on the project name (stress_test → StressTest)
+        @test isdefined(Main, :StressTest)
     end
 
     # Test basic functionality of wrapped library
@@ -93,15 +94,15 @@ using RepliBuild
         println("Testing wrapped library functions")
         println("="^70)
 
-        # Test vector operations if available
-        # Note: The exact module name depends on the wrapper generation
-        # This is a basic smoke test
+        # Verify the module was loaded and has functions
+        @test isdefined(Main, :StressTest)
 
-        wrapper_path = joinpath(test_dir, "julia", "Numerics.jl")
-        if isfile(wrapper_path)
-            # The wrapper should be loadable and expose functions
-            @test true  # If we got here, basic wrapping worked
-            println("✓ Wrapper successfully generated and loadable")
+        # Check that the module has some expected functions
+        if isdefined(Main, :StressTest)
+            mod = Main.StressTest
+            # These functions should exist based on the stress test
+            @test isdefined(mod, :vector_dot) || isdefined(mod, :dense_matrix_create)
+            println("✓ Wrapper successfully generated and loadable with functions")
         end
     end
 

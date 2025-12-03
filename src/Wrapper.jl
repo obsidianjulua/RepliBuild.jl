@@ -1226,7 +1226,25 @@ function parse_function_pointer_signature(fp_sig::String)::Union{String, Nothing
         for p in param_types
             p_stripped = String(strip(p))
             if !isempty(p_stripped)
-                julia_p = infer_julia_type(registry, p_stripped, context="callback parameter")
+                # Extract just the type by removing the parameter name
+                # For "const double* x" or "size_t n", we need just the type part
+                # Split by whitespace and take all but the last token (which is the param name)
+                tokens = split(p_stripped)
+                if length(tokens) > 1
+                    # Check if last token looks like a parameter name (alphanumeric, not a type modifier)
+                    last_token = tokens[end]
+                    # If it doesn't end with *, &, or [], it's likely a parameter name
+                    if !endswith(last_token, '*') && !endswith(last_token, '&') && !occursin('[', last_token)
+                        # Remove the parameter name, keep the type
+                        p_type = join(tokens[1:end-1], " ")
+                    else
+                        p_type = p_stripped
+                    end
+                else
+                    p_type = p_stripped
+                end
+
+                julia_p = infer_julia_type(registry, p_type, context="callback parameter")
                 push!(julia_params, julia_p)
             end
         end

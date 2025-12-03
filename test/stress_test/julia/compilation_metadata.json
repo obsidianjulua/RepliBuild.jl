@@ -1,0 +1,3072 @@
+{
+  "symbols": [
+    {
+      "mangled": "compute_eigen",
+      "demangled": "compute_eigen",
+      "type": "T",
+      "address": "0000000000005740"
+    },
+    {
+      "mangled": "compute_fft",
+      "demangled": "compute_fft",
+      "type": "T",
+      "address": "0000000000006a50"
+    },
+    {
+      "mangled": "compute_histogram",
+      "demangled": "compute_histogram",
+      "type": "T",
+      "address": "0000000000007330"
+    },
+    {
+      "mangled": "compute_ifft",
+      "demangled": "compute_ifft",
+      "type": "T",
+      "address": "0000000000006c10"
+    },
+    {
+      "mangled": "compute_lu",
+      "demangled": "compute_lu",
+      "type": "T",
+      "address": "0000000000005400"
+    },
+    {
+      "mangled": "compute_mean",
+      "demangled": "compute_mean",
+      "type": "T",
+      "address": "0000000000006fa0"
+    },
+    {
+      "mangled": "compute_median",
+      "demangled": "compute_median",
+      "type": "T",
+      "address": "0000000000007110"
+    },
+    {
+      "mangled": "compute_qr",
+      "demangled": "compute_qr",
+      "type": "T",
+      "address": "0000000000005680"
+    },
+    {
+      "mangled": "compute_quantiles",
+      "demangled": "compute_quantiles",
+      "type": "T",
+      "address": "00000000000071a0"
+    },
+    {
+      "mangled": "compute_stddev",
+      "demangled": "compute_stddev",
+      "type": "T",
+      "address": "00000000000070e0"
+    },
+    {
+      "mangled": "compute_variance",
+      "demangled": "compute_variance",
+      "type": "T",
+      "address": "0000000000007020"
+    },
+    {
+      "mangled": "convolve",
+      "demangled": "convolve",
+      "type": "T",
+      "address": "0000000000006e10"
+    },
+    {
+      "mangled": "correlate",
+      "demangled": "correlate",
+      "type": "T",
+      "address": "0000000000006ef0"
+    },
+    {
+      "mangled": "create_cubic_spline",
+      "demangled": "create_cubic_spline",
+      "type": "T",
+      "address": "0000000000007670"
+    },
+    {
+      "mangled": "dense_matrix_copy",
+      "demangled": "dense_matrix_copy",
+      "type": "T",
+      "address": "00000000000047b0"
+    },
+    {
+      "mangled": "dense_matrix_create",
+      "demangled": "dense_matrix_create",
+      "type": "T",
+      "address": "0000000000004700"
+    },
+    {
+      "mangled": "dense_matrix_destroy",
+      "demangled": "dense_matrix_destroy",
+      "type": "T",
+      "address": "0000000000004760"
+    },
+    {
+      "mangled": "dense_matrix_resize",
+      "demangled": "dense_matrix_resize",
+      "type": "T",
+      "address": "00000000000048d0"
+    },
+    {
+      "mangled": "dense_matrix_set_identity",
+      "demangled": "dense_matrix_set_identity",
+      "type": "T",
+      "address": "0000000000004850"
+    },
+    {
+      "mangled": "dense_matrix_set_zero",
+      "demangled": "dense_matrix_set_zero",
+      "type": "T",
+      "address": "0000000000004810"
+    },
+    {
+      "mangled": "fft_result_destroy",
+      "demangled": "fft_result_destroy",
+      "type": "T",
+      "address": "0000000000006dd0"
+    },
+    {
+      "mangled": "fill_random_normal",
+      "demangled": "fill_random_normal",
+      "type": "T",
+      "address": "00000000000079d0"
+    },
+    {
+      "mangled": "fill_random_uniform",
+      "demangled": "fill_random_uniform",
+      "type": "T",
+      "address": "0000000000007930"
+    },
+    {
+      "mangled": "histogram_destroy",
+      "demangled": "histogram_destroy",
+      "type": "T",
+      "address": "0000000000007510"
+    },
+    {
+      "mangled": "line_search_backtracking",
+      "demangled": "line_search_backtracking",
+      "type": "T",
+      "address": "00000000000060c0"
+    },
+    {
+      "mangled": "matrix_add",
+      "demangled": "matrix_add",
+      "type": "T",
+      "address": "0000000000004f50"
+    },
+    {
+      "mangled": "matrix_determinant",
+      "demangled": "matrix_determinant",
+      "type": "T",
+      "address": "0000000000005140"
+    },
+    {
+      "mangled": "matrix_multiply",
+      "demangled": "matrix_multiply",
+      "type": "T",
+      "address": "0000000000004e10"
+    },
+    {
+      "mangled": "matrix_trace",
+      "demangled": "matrix_trace",
+      "type": "T",
+      "address": "00000000000050b0"
+    },
+    {
+      "mangled": "matrix_transpose",
+      "demangled": "matrix_transpose",
+      "type": "T",
+      "address": "0000000000004ff0"
+    },
+    {
+      "mangled": "matrix_vector_mult",
+      "demangled": "matrix_vector_mult",
+      "type": "T",
+      "address": "0000000000004ca0"
+    },
+    {
+      "mangled": "matrix_vector_mult_add",
+      "demangled": "matrix_vector_mult_add",
+      "type": "T",
+      "address": "0000000000004d60"
+    },
+    {
+      "mangled": "ode_result_destroy",
+      "demangled": "ode_result_destroy",
+      "type": "T",
+      "address": "00000000000069d0"
+    },
+    {
+      "mangled": "optimize_minimize",
+      "demangled": "optimize_minimize",
+      "type": "T",
+      "address": "0000000000005da0"
+    },
+    {
+      "mangled": "optimize_minimize_numerical_gradient",
+      "demangled": "optimize_minimize_numerical_gradient",
+      "type": "T",
+      "address": "0000000000006200"
+    },
+    {
+      "mangled": "polynomial_destroy",
+      "demangled": "polynomial_destroy",
+      "type": "T",
+      "address": "0000000000007640"
+    },
+    {
+      "mangled": "polynomial_eval",
+      "demangled": "polynomial_eval",
+      "type": "T",
+      "address": "00000000000075b0"
+    },
+    {
+      "mangled": "polynomial_fit",
+      "demangled": "polynomial_fit",
+      "type": "T",
+      "address": "0000000000007550"
+    },
+    {
+      "mangled": "print_matrix",
+      "demangled": "print_matrix",
+      "type": "T",
+      "address": "0000000000007b00"
+    },
+    {
+      "mangled": "print_vector",
+      "demangled": "print_vector",
+      "type": "T",
+      "address": "0000000000007ba0"
+    },
+    {
+      "mangled": "set_random_seed",
+      "demangled": "set_random_seed",
+      "type": "T",
+      "address": "0000000000007900"
+    },
+    {
+      "mangled": "solve_conjugate_gradient",
+      "demangled": "solve_conjugate_gradient",
+      "type": "T",
+      "address": "0000000000005b00"
+    },
+    {
+      "mangled": "solve_least_squares",
+      "demangled": "solve_least_squares",
+      "type": "T",
+      "address": "0000000000005a70"
+    },
+    {
+      "mangled": "solve_linear_system_lu",
+      "demangled": "solve_linear_system_lu",
+      "type": "T",
+      "address": "0000000000005870"
+    },
+    {
+      "mangled": "solve_linear_system_qr",
+      "demangled": "solve_linear_system_qr",
+      "type": "T",
+      "address": "0000000000005a50"
+    },
+    {
+      "mangled": "solve_ode_adaptive",
+      "demangled": "solve_ode_adaptive",
+      "type": "T",
+      "address": "0000000000006960"
+    },
+    {
+      "mangled": "solve_ode_rk4",
+      "demangled": "solve_ode_rk4",
+      "type": "T",
+      "address": "0000000000006460"
+    },
+    {
+      "mangled": "sparse_matrix_create",
+      "demangled": "sparse_matrix_create",
+      "type": "T",
+      "address": "0000000000004a40"
+    },
+    {
+      "mangled": "sparse_matrix_destroy",
+      "demangled": "sparse_matrix_destroy",
+      "type": "T",
+      "address": "0000000000004ad0"
+    },
+    {
+      "mangled": "spline_destroy",
+      "demangled": "spline_destroy",
+      "type": "T",
+      "address": "00000000000078c0"
+    },
+    {
+      "mangled": "spline_eval",
+      "demangled": "spline_eval",
+      "type": "T",
+      "address": "00000000000077c0"
+    },
+    {
+      "mangled": "status_to_string",
+      "demangled": "status_to_string",
+      "type": "T",
+      "address": "0000000000007a70"
+    },
+    {
+      "mangled": "vector_axpy",
+      "demangled": "vector_axpy",
+      "type": "T",
+      "address": "0000000000004c00"
+    },
+    {
+      "mangled": "vector_copy",
+      "demangled": "vector_copy",
+      "type": "T",
+      "address": "0000000000004c70"
+    },
+    {
+      "mangled": "vector_dot",
+      "demangled": "vector_dot",
+      "type": "T",
+      "address": "0000000000004b10"
+    },
+    {
+      "mangled": "vector_norm",
+      "demangled": "vector_norm",
+      "type": "T",
+      "address": "0000000000004b80"
+    },
+    {
+      "mangled": "vector_scale",
+      "demangled": "vector_scale",
+      "type": "T",
+      "address": "0000000000004bb0"
+    }
+  ],
+  "compile_flags": [
+    "-std=c++17",
+    "-fPIC"
+  ],
+  "binary_path": "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libstress_test.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "name": "compute_eigen",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_eigen",
+      "is_method": false,
+      "demangled": "compute_eigen",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "EigenDecomposition",
+        "size": 0,
+        "julia_type": "EigenDecomposition"
+      }
+    },
+    {
+      "name": "compute_fft",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "signal",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_fft",
+      "is_method": false,
+      "demangled": "compute_fft",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "FFTResult",
+        "size": 0,
+        "julia_type": "FFTResult"
+      }
+    },
+    {
+      "name": "compute_histogram",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n_bins",
+          "position": 2,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double",
+          "name": "min_val",
+          "position": 3,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "max_val",
+          "position": 4,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_histogram",
+      "is_method": false,
+      "demangled": "compute_histogram",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Histogram",
+        "size": 0,
+        "julia_type": "Histogram"
+      }
+    },
+    {
+      "name": "compute_ifft",
+      "parameters": [
+        {
+          "c_type": "const FFTResult*",
+          "name": "fft_data",
+          "position": 0,
+          "julia_type": "Ptr{FFTResult}"
+        },
+        {
+          "c_type": "double*",
+          "name": "signal_out",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_ifft",
+      "is_method": false,
+      "demangled": "compute_ifft",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "compute_lu",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_lu",
+      "is_method": false,
+      "demangled": "compute_lu",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "LUDecomposition",
+        "size": 0,
+        "julia_type": "LUDecomposition"
+      }
+    },
+    {
+      "name": "compute_mean",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_mean",
+      "is_method": false,
+      "demangled": "compute_mean",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "compute_median",
+      "parameters": [
+        {
+          "c_type": "double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_median",
+      "is_method": false,
+      "demangled": "compute_median",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "compute_qr",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_qr",
+      "is_method": false,
+      "demangled": "compute_qr",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "QRDecomposition",
+        "size": 0,
+        "julia_type": "QRDecomposition"
+      }
+    },
+    {
+      "name": "compute_quantiles",
+      "parameters": [
+        {
+          "c_type": "double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "const double*",
+          "name": "probabilities",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "quantiles",
+          "position": 3,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n_quantiles",
+          "position": 4,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_quantiles",
+      "is_method": false,
+      "demangled": "compute_quantiles",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "compute_stddev",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_stddev",
+      "is_method": false,
+      "demangled": "compute_stddev",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "compute_variance",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "compute_variance",
+      "is_method": false,
+      "demangled": "compute_variance",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "convolve",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "signal1",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n1",
+          "position": 1,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "const double*",
+          "name": "signal2",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n2",
+          "position": 3,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double*",
+          "name": "result",
+          "position": 4,
+          "julia_type": "Ptr{Cdouble}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "convolve",
+      "is_method": false,
+      "demangled": "convolve",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "correlate",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "signal1",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "signal2",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 2,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double*",
+          "name": "result",
+          "position": 3,
+          "julia_type": "Ptr{Cdouble}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "correlate",
+      "is_method": false,
+      "demangled": "correlate",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "create_cubic_spline",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "y",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "create_cubic_spline",
+      "is_method": false,
+      "demangled": "create_cubic_spline",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "SplineInterpolation",
+        "size": 0,
+        "julia_type": "SplineInterpolation"
+      }
+    },
+    {
+      "name": "dense_matrix_copy",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "src",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "dense_matrix_copy",
+      "is_method": false,
+      "demangled": "dense_matrix_copy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "DenseMatrix",
+        "size": 0,
+        "julia_type": "DenseMatrix"
+      }
+    },
+    {
+      "name": "dense_matrix_create",
+      "parameters": [
+        {
+          "c_type": "size_t",
+          "name": "rows",
+          "position": 0,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "cols",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "dense_matrix_create",
+      "is_method": false,
+      "demangled": "dense_matrix_create",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "DenseMatrix",
+        "size": 0,
+        "julia_type": "DenseMatrix"
+      }
+    },
+    {
+      "name": "dense_matrix_destroy",
+      "parameters": [
+        {
+          "c_type": "DenseMatrix*",
+          "name": "mat",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "dense_matrix_destroy",
+      "is_method": false,
+      "demangled": "dense_matrix_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "dense_matrix_resize",
+      "parameters": [
+        {
+          "c_type": "DenseMatrix*",
+          "name": "mat",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "new_rows",
+          "position": 1,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "new_cols",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "dense_matrix_resize",
+      "is_method": false,
+      "demangled": "dense_matrix_resize",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Status",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "dense_matrix_set_identity",
+      "parameters": [
+        {
+          "c_type": "DenseMatrix*",
+          "name": "mat",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "dense_matrix_set_identity",
+      "is_method": false,
+      "demangled": "dense_matrix_set_identity",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "dense_matrix_set_zero",
+      "parameters": [
+        {
+          "c_type": "DenseMatrix*",
+          "name": "mat",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "dense_matrix_set_zero",
+      "is_method": false,
+      "demangled": "dense_matrix_set_zero",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "fft_result_destroy",
+      "parameters": [
+        {
+          "c_type": "FFTResult*",
+          "name": "result",
+          "position": 0,
+          "julia_type": "Ptr{FFTResult}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "fft_result_destroy",
+      "is_method": false,
+      "demangled": "fft_result_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "fill_random_normal",
+      "parameters": [
+        {
+          "c_type": "double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double",
+          "name": "mean",
+          "position": 2,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "stddev",
+          "position": 3,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "fill_random_normal",
+      "is_method": false,
+      "demangled": "fill_random_normal",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "fill_random_uniform",
+      "parameters": [
+        {
+          "c_type": "double*",
+          "name": "data",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double",
+          "name": "min_val",
+          "position": 2,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "max_val",
+          "position": 3,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "fill_random_uniform",
+      "is_method": false,
+      "demangled": "fill_random_uniform",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "histogram_destroy",
+      "parameters": [
+        {
+          "c_type": "Histogram*",
+          "name": "hist",
+          "position": 0,
+          "julia_type": "Ptr{Histogram}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "histogram_destroy",
+      "is_method": false,
+      "demangled": "histogram_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "line_search_backtracking",
+      "parameters": [
+        {
+          "c_type": "function_ptr(double)*",
+          "name": "objective",
+          "position": 0,
+          "function_pointer_signature": "function_ptr(double)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "direction",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "x_new",
+          "position": 3,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 4,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double",
+          "name": "initial_step",
+          "position": 5,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "void*",
+          "name": "user_data",
+          "position": 6,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "line_search_backtracking",
+      "is_method": false,
+      "demangled": "line_search_backtracking",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "matrix_add",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        },
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "B",
+          "position": 1,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "matrix_add",
+      "is_method": false,
+      "demangled": "matrix_add",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "DenseMatrix",
+        "size": 0,
+        "julia_type": "DenseMatrix"
+      }
+    },
+    {
+      "name": "matrix_determinant",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "matrix_determinant",
+      "is_method": false,
+      "demangled": "matrix_determinant",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "matrix_multiply",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        },
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "B",
+          "position": 1,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "matrix_multiply",
+      "is_method": false,
+      "demangled": "matrix_multiply",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "DenseMatrix",
+        "size": 0,
+        "julia_type": "DenseMatrix"
+      }
+    },
+    {
+      "name": "matrix_trace",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "matrix_trace",
+      "is_method": false,
+      "demangled": "matrix_trace",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "matrix_transpose",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "matrix_transpose",
+      "is_method": false,
+      "demangled": "matrix_transpose",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "DenseMatrix",
+        "size": 0,
+        "julia_type": "DenseMatrix"
+      }
+    },
+    {
+      "name": "matrix_vector_mult",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "y",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "matrix_vector_mult",
+      "is_method": false,
+      "demangled": "matrix_vector_mult",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "matrix_vector_mult_add",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "y",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double",
+          "name": "alpha",
+          "position": 3,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "beta",
+          "position": 4,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "matrix_vector_mult_add",
+      "is_method": false,
+      "demangled": "matrix_vector_mult_add",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "ode_result_destroy",
+      "parameters": [
+        {
+          "c_type": "ODEResult*",
+          "name": "result",
+          "position": 0,
+          "julia_type": "Ptr{ODEResult}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "ode_result_destroy",
+      "is_method": false,
+      "demangled": "ode_result_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "optimize_minimize",
+      "parameters": [
+        {
+          "c_type": "function_ptr(double)*",
+          "name": "objective",
+          "position": 0,
+          "function_pointer_signature": "function_ptr(double)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "function_ptr(void)*",
+          "name": "gradient",
+          "position": 1,
+          "function_pointer_signature": "function_ptr(void)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "double*",
+          "name": "x",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 3,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "const OptimizationOptions*",
+          "name": "options",
+          "position": 4,
+          "julia_type": "Ptr{OptimizationOptions}"
+        },
+        {
+          "c_type": "OptimizationState*",
+          "name": "final_state",
+          "position": 5,
+          "julia_type": "Ptr{OptimizationState}"
+        },
+        {
+          "c_type": "function_ptr(bool)*",
+          "name": "callback",
+          "position": 6,
+          "function_pointer_signature": "function_ptr(bool)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "void*",
+          "name": "user_data",
+          "position": 7,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "optimize_minimize",
+      "is_method": false,
+      "demangled": "optimize_minimize",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Status",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "optimize_minimize_numerical_gradient",
+      "parameters": [
+        {
+          "c_type": "function_ptr(double)*",
+          "name": "objective",
+          "position": 0,
+          "function_pointer_signature": "function_ptr(double)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "double*",
+          "name": "x",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 2,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "const OptimizationOptions*",
+          "name": "options",
+          "position": 3,
+          "julia_type": "Ptr{OptimizationOptions}"
+        },
+        {
+          "c_type": "OptimizationState*",
+          "name": "final_state",
+          "position": 4,
+          "julia_type": "Ptr{OptimizationState}"
+        },
+        {
+          "c_type": "function_ptr(bool)*",
+          "name": "callback",
+          "position": 5,
+          "function_pointer_signature": "function_ptr(bool)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "void*",
+          "name": "user_data",
+          "position": 6,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "optimize_minimize_numerical_gradient",
+      "is_method": false,
+      "demangled": "optimize_minimize_numerical_gradient",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Status",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "polynomial_destroy",
+      "parameters": [
+        {
+          "c_type": "Polynomial*",
+          "name": "poly",
+          "position": 0,
+          "julia_type": "Ptr{Polynomial}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "polynomial_destroy",
+      "is_method": false,
+      "demangled": "polynomial_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "polynomial_eval",
+      "parameters": [
+        {
+          "c_type": "const Polynomial*",
+          "name": "poly",
+          "position": 0,
+          "julia_type": "Ptr{Polynomial}"
+        },
+        {
+          "c_type": "double",
+          "name": "x",
+          "position": 1,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "polynomial_eval",
+      "is_method": false,
+      "demangled": "polynomial_eval",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "polynomial_fit",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "y",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 2,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "degree",
+          "position": 3,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "polynomial_fit",
+      "is_method": false,
+      "demangled": "polynomial_fit",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Polynomial",
+        "size": 0,
+        "julia_type": "Polynomial"
+      }
+    },
+    {
+      "name": "print_matrix",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "mat",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "print_matrix",
+      "is_method": false,
+      "demangled": "print_matrix",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "print_vector",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "vec",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "print_vector",
+      "is_method": false,
+      "demangled": "print_vector",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "set_random_seed",
+      "parameters": [
+        {
+          "c_type": "uint64_t",
+          "name": "seed",
+          "position": 0,
+          "julia_type": "Any"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "set_random_seed",
+      "is_method": false,
+      "demangled": "set_random_seed",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "solve_conjugate_gradient",
+      "parameters": [
+        {
+          "c_type": "function_ptr(void)*",
+          "name": "matvec",
+          "position": 0,
+          "function_pointer_signature": "function_ptr(void)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "x",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 3,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double",
+          "name": "tolerance",
+          "position": 4,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "int32_t",
+          "name": "max_iterations",
+          "position": 5,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "void*",
+          "name": "user_data",
+          "position": 6,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "solve_conjugate_gradient",
+      "is_method": false,
+      "demangled": "solve_conjugate_gradient",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Status",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "solve_least_squares",
+      "parameters": [
+        {
+          "c_type": "const DenseMatrix*",
+          "name": "A",
+          "position": 0,
+          "julia_type": "Ptr{DenseMatrix}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "x",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "solve_least_squares",
+      "is_method": false,
+      "demangled": "solve_least_squares",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Status",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "solve_linear_system_lu",
+      "parameters": [
+        {
+          "c_type": "const LUDecomposition*",
+          "name": "lu",
+          "position": 0,
+          "julia_type": "Ptr{LUDecomposition}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "x",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 3,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "solve_linear_system_lu",
+      "is_method": false,
+      "demangled": "solve_linear_system_lu",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Status",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "solve_linear_system_qr",
+      "parameters": [
+        {
+          "c_type": "const QRDecomposition*",
+          "name": "qr",
+          "position": 0,
+          "julia_type": "Ptr{QRDecomposition}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "x",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "solve_linear_system_qr",
+      "is_method": false,
+      "demangled": "solve_linear_system_qr",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Status",
+        "size": 0,
+        "julia_type": "Any"
+      }
+    },
+    {
+      "name": "solve_ode_adaptive",
+      "parameters": [
+        {
+          "c_type": "function_ptr(void)*",
+          "name": "ode_func",
+          "position": 0,
+          "function_pointer_signature": "function_ptr(void)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "double",
+          "name": "t0",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "t_final",
+          "position": 2,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "const double*",
+          "name": "y0",
+          "position": 3,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 4,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double",
+          "name": "tolerance",
+          "position": 5,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "function_ptr(double)*",
+          "name": "event_func",
+          "position": 6,
+          "function_pointer_signature": "function_ptr(double)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "void*",
+          "name": "user_data",
+          "position": 7,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "solve_ode_adaptive",
+      "is_method": false,
+      "demangled": "solve_ode_adaptive",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "ODEResult",
+        "size": 0,
+        "julia_type": "ODEResult"
+      }
+    },
+    {
+      "name": "solve_ode_rk4",
+      "parameters": [
+        {
+          "c_type": "function_ptr(void)*",
+          "name": "ode_func",
+          "position": 0,
+          "function_pointer_signature": "function_ptr(void)*",
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "double",
+          "name": "t0",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "t_final",
+          "position": 2,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "const double*",
+          "name": "y0",
+          "position": 3,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 4,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "double",
+          "name": "dt",
+          "position": 5,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "void*",
+          "name": "user_data",
+          "position": 6,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "solve_ode_rk4",
+      "is_method": false,
+      "demangled": "solve_ode_rk4",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "ODEResult",
+        "size": 0,
+        "julia_type": "ODEResult"
+      }
+    },
+    {
+      "name": "sparse_matrix_create",
+      "parameters": [
+        {
+          "c_type": "size_t",
+          "name": "rows",
+          "position": 0,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "cols",
+          "position": 1,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "nnz",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "sparse_matrix_create",
+      "is_method": false,
+      "demangled": "sparse_matrix_create",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "SparseMatrix",
+        "size": 0,
+        "julia_type": "SparseMatrix"
+      }
+    },
+    {
+      "name": "sparse_matrix_destroy",
+      "parameters": [
+        {
+          "c_type": "SparseMatrix*",
+          "name": "mat",
+          "position": 0,
+          "julia_type": "Ptr{SparseMatrix}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "sparse_matrix_destroy",
+      "is_method": false,
+      "demangled": "sparse_matrix_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "spline_destroy",
+      "parameters": [
+        {
+          "c_type": "SplineInterpolation*",
+          "name": "spline",
+          "position": 0,
+          "julia_type": "Ptr{SplineInterpolation}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "spline_destroy",
+      "is_method": false,
+      "demangled": "spline_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "spline_eval",
+      "parameters": [
+        {
+          "c_type": "const SplineInterpolation*",
+          "name": "spline",
+          "position": 0,
+          "julia_type": "Ptr{SplineInterpolation}"
+        },
+        {
+          "c_type": "double",
+          "name": "x",
+          "position": 1,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "spline_eval",
+      "is_method": false,
+      "demangled": "spline_eval",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "status_to_string",
+      "parameters": [
+        {
+          "c_type": "Status",
+          "name": "status",
+          "position": 0,
+          "julia_type": "Status"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "status_to_string",
+      "is_method": false,
+      "demangled": "status_to_string",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "const char*",
+        "size": 8,
+        "julia_type": "Cstring"
+      }
+    },
+    {
+      "name": "vector_axpy",
+      "parameters": [
+        {
+          "c_type": "double*",
+          "name": "y",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double",
+          "name": "alpha",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 2,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 3,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "vector_axpy",
+      "is_method": false,
+      "demangled": "vector_axpy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "vector_copy",
+      "parameters": [
+        {
+          "c_type": "double*",
+          "name": "dest",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "src",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "vector_copy",
+      "is_method": false,
+      "demangled": "vector_copy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "vector_dot",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "const double*",
+          "name": "y",
+          "position": 1,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "vector_dot",
+      "is_method": false,
+      "demangled": "vector_dot",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "vector_norm",
+      "parameters": [
+        {
+          "c_type": "const double*",
+          "name": "x",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 1,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "vector_norm",
+      "is_method": false,
+      "demangled": "vector_norm",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "vector_scale",
+      "parameters": [
+        {
+          "c_type": "double*",
+          "name": "x",
+          "position": 0,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double",
+          "name": "alpha",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "vector_scale",
+      "is_method": false,
+      "demangled": "vector_scale",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    }
+  ],
+  "project": "stress_test",
+  "source_files": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp"
+  ],
+  "type_registry": {
+    "LUDecomposition": {
+      "c_type": "LUDecomposition",
+      "size": 0,
+      "julia_type": "LUDecomposition"
+    },
+    "FFTResult*": {
+      "julia_type": "Ptr{FFTResult}",
+      "inferred": true
+    },
+    "ODEResult": {
+      "c_type": "ODEResult",
+      "size": 0,
+      "julia_type": "ODEResult"
+    },
+    "EigenDecomposition": {
+      "c_type": "EigenDecomposition",
+      "size": 0,
+      "julia_type": "EigenDecomposition"
+    },
+    "DenseMatrix": {
+      "c_type": "DenseMatrix",
+      "size": 0,
+      "julia_type": "DenseMatrix"
+    },
+    "const char*": {
+      "c_type": "const char*",
+      "size": 8,
+      "julia_type": "Cstring"
+    },
+    "double*": {
+      "julia_type": "Ptr{Cdouble}",
+      "inferred": true
+    },
+    "OptimizationState*": {
+      "julia_type": "Ptr{OptimizationState}",
+      "inferred": true
+    },
+    "SparseMatrix": {
+      "c_type": "SparseMatrix",
+      "size": 0,
+      "julia_type": "SparseMatrix"
+    },
+    "SparseMatrix*": {
+      "julia_type": "Ptr{SparseMatrix}",
+      "inferred": true
+    },
+    "FFTResult": {
+      "c_type": "FFTResult",
+      "size": 0,
+      "julia_type": "FFTResult"
+    },
+    "QRDecomposition": {
+      "c_type": "QRDecomposition",
+      "size": 0,
+      "julia_type": "QRDecomposition"
+    },
+    "Histogram*": {
+      "julia_type": "Ptr{Histogram}",
+      "inferred": true
+    },
+    "Status": {
+      "julia_type": "Status",
+      "inferred": true
+    },
+    "size_t": {
+      "julia_type": "Csize_t",
+      "inferred": true
+    },
+    "function_ptr(bool)*": {
+      "julia_type": "Ptr{Cvoid}",
+      "inferred": true
+    },
+    "uint64_t": {
+      "julia_type": "Any",
+      "inferred": true
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "c_type": "void",
+      "size": 0,
+      "julia_type": "Cvoid"
+    },
+    "const FFTResult*": {
+      "julia_type": "Ptr{FFTResult}",
+      "inferred": true
+    },
+    "int": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "int32_t": {
+      "julia_type": "Any",
+      "inferred": true
+    },
+    "SplineInterpolation*": {
+      "julia_type": "Ptr{SplineInterpolation}",
+      "inferred": true
+    },
+    "const DenseMatrix*": {
+      "julia_type": "Ptr{DenseMatrix}",
+      "inferred": true
+    },
+    "Histogram": {
+      "c_type": "Histogram",
+      "size": 0,
+      "julia_type": "Histogram"
+    },
+    "Polynomial": {
+      "c_type": "Polynomial",
+      "size": 0,
+      "julia_type": "Polynomial"
+    },
+    "const Polynomial*": {
+      "julia_type": "Ptr{Polynomial}",
+      "inferred": true
+    },
+    "DenseMatrix*": {
+      "julia_type": "Ptr{DenseMatrix}",
+      "inferred": true
+    },
+    "const OptimizationOptions*": {
+      "julia_type": "Ptr{OptimizationOptions}",
+      "inferred": true
+    },
+    "const QRDecomposition*": {
+      "julia_type": "Ptr{QRDecomposition}",
+      "inferred": true
+    },
+    "function_ptr(void)*": {
+      "julia_type": "Ptr{Cvoid}",
+      "inferred": true
+    },
+    "function_ptr(double)*": {
+      "julia_type": "Ptr{Cvoid}",
+      "inferred": true
+    },
+    "char": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "UInt8"
+    },
+    "SplineInterpolation": {
+      "c_type": "SplineInterpolation",
+      "size": 0,
+      "julia_type": "SplineInterpolation"
+    },
+    "void*": {
+      "julia_type": "Ptr{Cvoid}",
+      "inferred": true
+    },
+    "const SplineInterpolation*": {
+      "julia_type": "Ptr{SplineInterpolation}",
+      "inferred": true
+    },
+    "ODEResult*": {
+      "julia_type": "Ptr{ODEResult}",
+      "inferred": true
+    },
+    "double": {
+      "julia_type": "Cdouble",
+      "inferred": true
+    },
+    "const LUDecomposition*": {
+      "julia_type": "Ptr{LUDecomposition}",
+      "inferred": true
+    },
+    "Polynomial*": {
+      "julia_type": "Ptr{Polynomial}",
+      "inferred": true
+    },
+    "const double*": {
+      "julia_type": "Ptr{Cdouble}",
+      "inferred": true
+    }
+  },
+  "function_count": 57,
+  "compiler_info": {
+    "lto_enabled": false,
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "clang_version": "clang version 21.1.6",
+    "optimization_level": "0",
+    "llvm_version": "21.1.6"
+  },
+  "metadata_version": "1.0",
+  "include_dirs": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/include",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src"
+  ],
+  "timestamp": "2025-12-03T13:40:27.355",
+  "struct_definitions": {
+    "LUDecomposition": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "DenseMatrix",
+          "name": "L",
+          "offset": null,
+          "julia_type": "DenseMatrix"
+        },
+        {
+          "c_type": "DenseMatrix",
+          "name": "U",
+          "offset": null,
+          "julia_type": "DenseMatrix"
+        },
+        {
+          "c_type": "int32_t*",
+          "name": "permutation",
+          "offset": null,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "size",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "Status",
+          "name": "status",
+          "offset": null,
+          "julia_type": "Status"
+        }
+      ]
+    },
+    "ODEResult": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "y",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "t_values",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double**",
+          "name": "y_values",
+          "offset": null,
+          "julia_type": "Ptr{Ptr{Cdouble}}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n_steps",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "dimension",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "Status",
+          "name": "status",
+          "offset": null,
+          "julia_type": "Status"
+        }
+      ]
+    },
+    "EigenDecomposition": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "eigenvalues",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "eigenvalues_imag",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "DenseMatrix",
+          "name": "eigenvectors",
+          "offset": null,
+          "julia_type": "DenseMatrix"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "Status",
+          "name": "status",
+          "offset": null,
+          "julia_type": "Status"
+        }
+      ]
+    },
+    "DenseMatrix": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "data",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "rows",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "cols",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "bool",
+          "name": "owns_data",
+          "offset": null,
+          "julia_type": "Bool"
+        }
+      ]
+    },
+    "SparseMatrix": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "values",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "int32_t*",
+          "name": "row_indices",
+          "offset": null,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "int32_t*",
+          "name": "col_pointers",
+          "offset": null,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "nnz",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "rows",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "cols",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "unsigned long[312]",
+          "name": "_M_x",
+          "offset": null,
+          "julia_type": "NTuple{312, Culong}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "_M_p",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "QRDecomposition": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "DenseMatrix",
+          "name": "Q",
+          "offset": null,
+          "julia_type": "DenseMatrix"
+        },
+        {
+          "c_type": "DenseMatrix",
+          "name": "R",
+          "offset": null,
+          "julia_type": "DenseMatrix"
+        },
+        {
+          "c_type": "size_t",
+          "name": "m",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "Status",
+          "name": "status",
+          "offset": null,
+          "julia_type": "Status"
+        }
+      ]
+    },
+    "uniform_real_distribution<double>": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "param_type",
+          "name": "_M_param",
+          "offset": null,
+          "julia_type": "param_type"
+        }
+      ]
+    },
+    "FFTResult": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "real",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "imag",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>, double>": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>&",
+          "name": "_M_g",
+          "offset": null,
+          "julia_type": "Ref{mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>}"
+        }
+      ]
+    },
+    "__va_list_tag": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "unsigned int",
+          "name": "gp_offset",
+          "offset": null,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "unsigned int",
+          "name": "fp_offset",
+          "offset": null,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "void*",
+          "name": "overflow_arg_area",
+          "offset": null,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "void*",
+          "name": "reg_save_area",
+          "offset": null,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ]
+    },
+    "OptimizationOptions": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double",
+          "name": "tolerance",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "step_size",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "int32_t",
+          "name": "max_iterations",
+          "offset": null,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "int32_t",
+          "name": "max_function_evals",
+          "offset": null,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "OptimizationAlgorithm",
+          "name": "algorithm",
+          "offset": null,
+          "julia_type": "OptimizationAlgorithm"
+        },
+        {
+          "c_type": "bool",
+          "name": "verbose",
+          "offset": null,
+          "julia_type": "Bool"
+        }
+      ]
+    },
+    "Histogram": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "bin_edges",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "int32_t*",
+          "name": "counts",
+          "offset": null,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n_bins",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "normal_distribution<double>": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "param_type",
+          "name": "_M_param",
+          "offset": null,
+          "julia_type": "param_type"
+        }
+      ]
+    },
+    "Polynomial": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "coefficients",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "degree",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "OptimizationState": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "x",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "gradient",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double",
+          "name": "f_value",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "gradient_norm",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "int32_t",
+          "name": "iteration",
+          "offset": null,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "int32_t",
+          "name": "n_evals",
+          "offset": null,
+          "julia_type": "Any"
+        },
+        {
+          "c_type": "Status",
+          "name": "status",
+          "offset": null,
+          "julia_type": "Status"
+        },
+        {
+          "c_type": "size_t",
+          "name": "dimension",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "param_type": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double",
+          "name": "_M_mean",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "_M_stddev",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "_M_saved",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "bool",
+          "name": "_M_saved_available",
+          "offset": null,
+          "julia_type": "Bool"
+        }
+      ]
+    },
+    "SplineInterpolation": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "double*",
+          "name": "x_points",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "y_points",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "double*",
+          "name": "coefficients",
+          "offset": null,
+          "julia_type": "Ptr{Cdouble}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n_points",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "n_coeffs",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "__enum__OptimizationAlgorithm": {
+      "kind": "enum",
+      "byte_size": null,
+      "enumerators": [
+        {
+          "name": "GRADIENT_DESCENT",
+          "value": 0
+        },
+        {
+          "name": "CONJUGATE_GRADIENT",
+          "value": 1
+        },
+        {
+          "name": "LBFGS",
+          "value": 2
+        },
+        {
+          "name": "NEWTON",
+          "value": 3
+        }
+      ],
+      "underlying_type": "unsigned int",
+      "julia_type": "Cuint"
+    },
+    "__enum__Status": {
+      "kind": "enum",
+      "byte_size": null,
+      "enumerators": [
+        {
+          "name": "SUCCESS",
+          "value": 0
+        },
+        {
+          "name": "ERROR_INVALID_INPUT",
+          "value": -1
+        },
+        {
+          "name": "ERROR_SINGULAR_MATRIX",
+          "value": -2
+        },
+        {
+          "name": "ERROR_NOT_CONVERGED",
+          "value": -3
+        },
+        {
+          "name": "ERROR_OUT_OF_MEMORY",
+          "value": -4
+        },
+        {
+          "name": "ERROR_DIMENSION_MISMATCH",
+          "value": -5
+        }
+      ],
+      "underlying_type": "int32_t",
+      "julia_type": "Any"
+    }
+  }
+}
