@@ -12,7 +12,8 @@
 
 ::mlir::jlcs::GetFieldOp,
 ::mlir::jlcs::SetFieldOp,
-::mlir::jlcs::TypeInfoOp
+::mlir::jlcs::TypeInfoOp,
+::mlir::jlcs::VirtualCallOp
 #endif  // GET_OP_LIST
 
 #ifdef GET_OP_CLASSES
@@ -32,6 +33,16 @@ static ::llvm::LogicalResult __mlir_ods_local_type_constraint_JLCSOps1(
   if (!((true))) {
     return op->emitOpError(valueKind) << " #" << valueIndex
         << " must be any type, but got " << type;
+  }
+  return ::mlir::success();
+}
+
+static ::llvm::LogicalResult __mlir_ods_local_type_constraint_JLCSOps2(
+    ::mlir::Operation *op, ::mlir::Type type, ::llvm::StringRef valueKind,
+    unsigned valueIndex) {
+  if (!((true))) {
+    return op->emitOpError(valueKind) << " #" << valueIndex
+        << " must be variadic of any type, but got " << type;
   }
   return ::mlir::success();
 }
@@ -74,6 +85,20 @@ static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCSOps3(
 static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCSOps3(
     ::mlir::Operation *op, ::mlir::Attribute attr, ::llvm::StringRef attrName) {
   return __mlir_ods_local_attr_constraint_JLCSOps3(attr, attrName, [op]() {
+    return op->emitOpError();
+  });
+}
+
+static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCSOps4(
+    ::mlir::Attribute attr, ::llvm::StringRef attrName, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  if (attr && !((::llvm::isa<::mlir::SymbolRefAttr>(attr))))
+    return emitError() << "attribute '" << attrName
+        << "' failed to satisfy constraint: symbol reference attribute";
+  return ::mlir::success();
+}
+static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCSOps4(
+    ::mlir::Operation *op, ::mlir::Attribute attr, ::llvm::StringRef attrName) {
+  return __mlir_ods_local_attr_constraint_JLCSOps4(attr, attrName, [op]() {
     return op->emitOpError();
   });
 }
@@ -868,6 +893,448 @@ void TypeInfoOp::getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectI
 } // namespace jlcs
 } // namespace mlir
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::TypeInfoOp)
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
+// ::mlir::jlcs::VirtualCallOp definitions
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+VirtualCallOpGenericAdaptorBase::VirtualCallOpGenericAdaptorBase(VirtualCallOp op) : odsAttrs(op->getRawDictionaryAttrs()), odsOpName(op->getName()), properties(op.getProperties()), odsRegions(op->getRegions()) {}
+
+std::pair<unsigned, unsigned> VirtualCallOpGenericAdaptorBase::getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize) {
+  bool isVariadic[] = {true};
+  int prevVariadicCount = 0;
+  for (unsigned i = 0; i < index; ++i)
+    if (isVariadic[i]) ++prevVariadicCount;
+
+  // Calculate how many dynamic values a static variadic operand corresponds to.
+  // This assumes all static variadic operands have the same dynamic value count.
+  int variadicSize = (odsOperandsSize - 0) / 1;
+  // `index` passed in as the parameter is the static index which counts each
+  // operand (variadic or not) as size 1. So here for each previous static variadic
+  // operand, we need to offset by (variadicSize - 1) to get where the dynamic
+  // value pack for this static operand starts.
+  int start = index + (variadicSize - 1) * prevVariadicCount;
+  int size = isVariadic[index] ? variadicSize : 1;
+  return {start, size};
+}
+
+::mlir::SymbolRefAttr VirtualCallOpGenericAdaptorBase::getClassName() {
+  auto attr = getClassNameAttr();
+  return attr;
+}
+
+uint64_t VirtualCallOpGenericAdaptorBase::getVtableOffset() {
+  auto attr = getVtableOffsetAttr();
+  return attr.getValue().getZExtValue();
+}
+
+uint64_t VirtualCallOpGenericAdaptorBase::getSlot() {
+  auto attr = getSlotAttr();
+  return attr.getValue().getZExtValue();
+}
+
+} // namespace detail
+VirtualCallOpAdaptor::VirtualCallOpAdaptor(VirtualCallOp op) : VirtualCallOpGenericAdaptor(op->getOperands(), op) {}
+
+::llvm::LogicalResult VirtualCallOpAdaptor::verify(::mlir::Location loc) {
+  auto tblgen_class_name = getProperties().class_name; (void)tblgen_class_name;
+  if (!tblgen_class_name) return emitError(loc, "'jlcs.vcall' op ""requires attribute 'class_name'");
+  auto tblgen_slot = getProperties().slot; (void)tblgen_slot;
+  if (!tblgen_slot) return emitError(loc, "'jlcs.vcall' op ""requires attribute 'slot'");
+  auto tblgen_vtable_offset = getProperties().vtable_offset; (void)tblgen_vtable_offset;
+  if (!tblgen_vtable_offset) return emitError(loc, "'jlcs.vcall' op ""requires attribute 'vtable_offset'");
+
+  if (tblgen_class_name && !((::llvm::isa<::mlir::SymbolRefAttr>(tblgen_class_name))))
+    return emitError(loc, "'jlcs.vcall' op ""attribute 'class_name' failed to satisfy constraint: symbol reference attribute");
+
+  if (tblgen_vtable_offset && !(((::llvm::isa<::mlir::IntegerAttr>(tblgen_vtable_offset))) && ((::llvm::cast<::mlir::IntegerAttr>(tblgen_vtable_offset).getType().isSignlessInteger(64)))))
+    return emitError(loc, "'jlcs.vcall' op ""attribute 'vtable_offset' failed to satisfy constraint: 64-bit signless integer attribute");
+
+  if (tblgen_slot && !(((::llvm::isa<::mlir::IntegerAttr>(tblgen_slot))) && ((::llvm::cast<::mlir::IntegerAttr>(tblgen_slot).getType().isSignlessInteger(64)))))
+    return emitError(loc, "'jlcs.vcall' op ""attribute 'slot' failed to satisfy constraint: 64-bit signless integer attribute");
+  return ::mlir::success();
+}
+
+std::pair<unsigned, unsigned> VirtualCallOp::getODSOperandIndexAndLength(unsigned index) {
+  bool isVariadic[] = {true};
+  int prevVariadicCount = 0;
+  for (unsigned i = 0; i < index; ++i)
+    if (isVariadic[i]) ++prevVariadicCount;
+
+  // Calculate how many dynamic values a static variadic operand corresponds to.
+  // This assumes all static variadic operands have the same dynamic value count.
+  int variadicSize = (getOperation()->getNumOperands() - 0) / 1;
+  // `index` passed in as the parameter is the static index which counts each
+  // operand (variadic or not) as size 1. So here for each previous static variadic
+  // operand, we need to offset by (variadicSize - 1) to get where the dynamic
+  // value pack for this static operand starts.
+  int start = index + (variadicSize - 1) * prevVariadicCount;
+  int size = isVariadic[index] ? variadicSize : 1;
+  return {start, size};
+}
+
+::mlir::MutableOperandRange VirtualCallOp::getArgsMutable() {
+  auto range = getODSOperandIndexAndLength(0);
+  auto mutableRange = ::mlir::MutableOperandRange(getOperation(), range.first, range.second);
+  return mutableRange;
+}
+
+std::pair<unsigned, unsigned> VirtualCallOp::getODSResultIndexAndLength(unsigned index) {
+  bool isVariadic[] = {true};
+  int prevVariadicCount = 0;
+  for (unsigned i = 0; i < index; ++i)
+    if (isVariadic[i]) ++prevVariadicCount;
+
+  // Calculate how many dynamic values a static variadic operand corresponds to.
+  // This assumes all static variadic operands have the same dynamic value count.
+  int variadicSize = (getOperation()->getNumResults() - 0) / 1;
+  // `index` passed in as the parameter is the static index which counts each
+  // operand (variadic or not) as size 1. So here for each previous static variadic
+  // operand, we need to offset by (variadicSize - 1) to get where the dynamic
+  // value pack for this static operand starts.
+  int start = index + (variadicSize - 1) * prevVariadicCount;
+  int size = isVariadic[index] ? variadicSize : 1;
+  return {start, size};
+}
+
+::llvm::LogicalResult VirtualCallOp::setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+
+  {
+    auto &propStorage = prop.class_name;
+       auto attr = dict.get("class_name");
+    if (attr) {
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `class_name` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+
+  {
+    auto &propStorage = prop.slot;
+       auto attr = dict.get("slot");
+    if (attr) {
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `slot` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+
+  {
+    auto &propStorage = prop.vtable_offset;
+       auto attr = dict.get("vtable_offset");
+    if (attr) {
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `vtable_offset` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+  return ::mlir::success();
+}
+
+::mlir::Attribute VirtualCallOp::getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop) {
+    ::mlir::SmallVector<::mlir::NamedAttribute> attrs;
+    ::mlir::Builder odsBuilder{ctx};
+
+    {
+      const auto &propStorage = prop.class_name;
+      if (propStorage)
+        attrs.push_back(odsBuilder.getNamedAttr("class_name",
+                                       propStorage));
+    }
+
+    {
+      const auto &propStorage = prop.slot;
+      if (propStorage)
+        attrs.push_back(odsBuilder.getNamedAttr("slot",
+                                       propStorage));
+    }
+
+    {
+      const auto &propStorage = prop.vtable_offset;
+      if (propStorage)
+        attrs.push_back(odsBuilder.getNamedAttr("vtable_offset",
+                                       propStorage));
+    }
+
+  if (!attrs.empty())
+    return odsBuilder.getDictionaryAttr(attrs);
+  return {};
+}
+
+llvm::hash_code VirtualCallOp::computePropertiesHash(const Properties &prop) {
+  using llvm::hash_value;
+  return llvm::hash_combine(
+    llvm::hash_value(prop.class_name.getAsOpaquePointer()), 
+    llvm::hash_value(prop.slot.getAsOpaquePointer()), 
+    llvm::hash_value(prop.vtable_offset.getAsOpaquePointer()));
+}
+
+std::optional<mlir::Attribute> VirtualCallOp::getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name) {
+    if (name == "class_name")
+      return prop.class_name;
+
+    if (name == "slot")
+      return prop.slot;
+
+    if (name == "vtable_offset")
+      return prop.vtable_offset;
+  return std::nullopt;
+}
+
+void VirtualCallOp::setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value) {
+    if (name == "class_name") {
+       prop.class_name = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.class_name)>>(value);
+       return;
+    }
+
+    if (name == "slot") {
+       prop.slot = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.slot)>>(value);
+       return;
+    }
+
+    if (name == "vtable_offset") {
+       prop.vtable_offset = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.vtable_offset)>>(value);
+       return;
+    }
+}
+
+void VirtualCallOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs) {
+    if (prop.class_name) attrs.append("class_name", prop.class_name);
+
+    if (prop.slot) attrs.append("slot", prop.slot);
+
+    if (prop.vtable_offset) attrs.append("vtable_offset", prop.vtable_offset);
+}
+
+::llvm::LogicalResult VirtualCallOp::verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+    {
+      ::mlir::Attribute attr = attrs.get(getClassNameAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCSOps4(attr, "class_name", emitError)))
+        return ::mlir::failure();
+    }
+
+    {
+      ::mlir::Attribute attr = attrs.get(getSlotAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCSOps1(attr, "slot", emitError)))
+        return ::mlir::failure();
+    }
+
+    {
+      ::mlir::Attribute attr = attrs.get(getVtableOffsetAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCSOps1(attr, "vtable_offset", emitError)))
+        return ::mlir::failure();
+    }
+    return ::mlir::success();
+}
+
+::llvm::LogicalResult VirtualCallOp::readProperties(::mlir::DialectBytecodeReader &reader, ::mlir::OperationState &state) {
+  auto &prop = state.getOrAddProperties<Properties>(); (void)prop;
+  if (::mlir::failed(reader.readAttribute(prop.class_name)))
+    return ::mlir::failure();
+
+  if (::mlir::failed(reader.readAttribute(prop.slot)))
+    return ::mlir::failure();
+
+  if (::mlir::failed(reader.readAttribute(prop.vtable_offset)))
+    return ::mlir::failure();
+  return ::mlir::success();
+}
+
+void VirtualCallOp::writeProperties(::mlir::DialectBytecodeWriter &writer) {
+  auto &prop = getProperties(); (void)prop;
+  writer.writeAttribute(prop.class_name);
+  writer.writeAttribute(prop.slot);
+  writer.writeAttribute(prop.vtable_offset);
+}
+
+::mlir::SymbolRefAttr VirtualCallOp::getClassName() {
+  auto attr = getClassNameAttr();
+  return attr;
+}
+
+uint64_t VirtualCallOp::getVtableOffset() {
+  auto attr = getVtableOffsetAttr();
+  return attr.getValue().getZExtValue();
+}
+
+uint64_t VirtualCallOp::getSlot() {
+  auto attr = getSlotAttr();
+  return attr.getValue().getZExtValue();
+}
+
+void VirtualCallOp::setVtableOffset(uint64_t attrValue) {
+  getProperties().vtable_offset = ::mlir::Builder((*this)->getContext()).getIntegerAttr(::mlir::Builder((*this)->getContext()).getIntegerType(64), attrValue);
+}
+
+void VirtualCallOp::setSlot(uint64_t attrValue) {
+  getProperties().slot = ::mlir::Builder((*this)->getContext()).getIntegerAttr(::mlir::Builder((*this)->getContext()).getIntegerType(64), attrValue);
+}
+
+VirtualCallOp VirtualCallOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, SymbolRefAttr class_name, ValueRange args, IntegerAttr vtable_offset, IntegerAttr slot, Type resultType) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, class_name, args, vtable_offset, slot, resultType);
+  auto __res__ = ::llvm::dyn_cast<VirtualCallOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+VirtualCallOp VirtualCallOp::create(::mlir::ImplicitLocOpBuilder &builder, SymbolRefAttr class_name, ValueRange args, IntegerAttr vtable_offset, IntegerAttr slot, Type resultType) {
+  return create(builder, builder.getLoc(), class_name, args, vtable_offset, slot, resultType);
+}
+
+::llvm::LogicalResult VirtualCallOp::verifyInvariantsImpl() {
+  auto tblgen_class_name = getProperties().class_name; (void)tblgen_class_name;
+  if (!tblgen_class_name) return emitOpError("requires attribute 'class_name'");
+  auto tblgen_slot = getProperties().slot; (void)tblgen_slot;
+  if (!tblgen_slot) return emitOpError("requires attribute 'slot'");
+  auto tblgen_vtable_offset = getProperties().vtable_offset; (void)tblgen_vtable_offset;
+  if (!tblgen_vtable_offset) return emitOpError("requires attribute 'vtable_offset'");
+
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCSOps4(*this, tblgen_class_name, "class_name")))
+    return ::mlir::failure();
+
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCSOps1(*this, tblgen_vtable_offset, "vtable_offset")))
+    return ::mlir::failure();
+
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCSOps1(*this, tblgen_slot, "slot")))
+    return ::mlir::failure();
+  {
+    unsigned index = 0; (void)index;
+    auto valueGroup0 = getODSOperands(0);
+
+    for (auto v : valueGroup0) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps2(*this, v.getType(), "operand", index++)))
+        return ::mlir::failure();
+    }
+  }
+  {
+    unsigned index = 0; (void)index;
+    auto valueGroup0 = getODSResults(0);
+
+    if (valueGroup0.size() > 1) {
+      return emitOpError("result group starting at #") << index
+          << " requires 0 or 1 element, but found " << valueGroup0.size();
+    }
+
+    for (auto v : valueGroup0) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps1(*this, v.getType(), "result", index++)))
+        return ::mlir::failure();
+    }
+  }
+  return ::mlir::success();
+}
+
+::llvm::LogicalResult VirtualCallOp::verifyInvariants() {
+  return verifyInvariantsImpl();
+}
+
+::llvm::LogicalResult VirtualCallOp::setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+  // keep track of used keys in the input dictionary to be able to error out
+  // if there are some unknown ones.
+  ::mlir::DenseSet<::mlir::StringAttr> usedKeys;
+  ::mlir::MLIRContext *ctx = dict.getContext();
+  (void)ctx;
+  {
+
+    auto &propStorage = prop.class_name;
+    auto class_nameAttrName = ::mlir::StringAttr::get(ctx, "class_name");
+    auto attr = dict.get(class_nameAttrName);
+    usedKeys.insert(class_nameAttrName);
+    if (attr || /*isRequired=*/true) {
+      if (!attr) {
+        emitError() << "expected key entry for class_name in DictionaryAttr to set "
+                   "Properties.";
+        return ::mlir::failure();
+      }
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `class_name` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+  {
+
+    auto &propStorage = prop.vtable_offset;
+    auto vtable_offsetAttrName = ::mlir::StringAttr::get(ctx, "vtable_offset");
+    auto attr = dict.get(vtable_offsetAttrName);
+    usedKeys.insert(vtable_offsetAttrName);
+    if (attr || /*isRequired=*/true) {
+      if (!attr) {
+        emitError() << "expected key entry for vtable_offset in DictionaryAttr to set "
+                   "Properties.";
+        return ::mlir::failure();
+      }
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `vtable_offset` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+  {
+
+    auto &propStorage = prop.slot;
+    auto slotAttrName = ::mlir::StringAttr::get(ctx, "slot");
+    auto attr = dict.get(slotAttrName);
+    usedKeys.insert(slotAttrName);
+    if (attr || /*isRequired=*/true) {
+      if (!attr) {
+        emitError() << "expected key entry for slot in DictionaryAttr to set "
+                   "Properties.";
+        return ::mlir::failure();
+      }
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `slot` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+
+  for (::mlir::NamedAttribute attr : dict) {
+    if (!usedKeys.contains(attr.getName()))
+      return emitError() << "unknown key '" << attr.getName() <<
+          "' when parsing properties dictionary";
+  }
+  return ::mlir::success();
+}
+
+} // namespace jlcs
+} // namespace mlir
+MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::VirtualCallOp)
 
 
 #endif  // GET_OP_CLASSES

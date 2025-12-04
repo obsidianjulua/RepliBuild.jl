@@ -21,7 +21,7 @@ struct LowerJLCSToLLVMPass : public PassWrapper<LowerJLCSToLLVMPass, OperationPa
     ConversionTarget target(getContext());
 
     // 1. Define what is ILLEGAL (Source Dialect Ops)
-    target.addIllegalOp<GetFieldOp, SetFieldOp>();
+    target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp>();
 
     // 2. Define what is LEGAL (Target Dialect Ops)
     target.addLegalDialect<LLVM::LLVMDialect, arith::ArithmeticDialect>();
@@ -29,6 +29,7 @@ struct LowerJLCSToLLVMPass : public PassWrapper<LowerJLCSToLLVMPass, OperationPa
     // 3. Define the Rewrite Patterns
     RewritePatternSet patterns(&getContext());
     patterns.add<GetFieldOpLowering>(&getContext()); // Our custom pattern
+    patterns.add<VirtualCallOpLowering>(&getContext()); // Virtual call lowering
     // patterns.add<SetFieldOpLowering>(&getContext()); // The set_field pattern
 
     // 4. Execute the Conversion
@@ -83,6 +84,69 @@ struct GetFieldOpLowering : public ConversionPattern {
 
     // 6. Replace the original jlcs.get_field operation with the loaded value
     rewriter.replaceOp(op, loadedVal);
+
+    return success();
+  }
+};
+
+// Pseudocode: The VirtualCallOpLowering Pattern
+// Lowers jlcs.vcall to LLVM IR: load vptr, index vtable, call function
+
+struct VirtualCallOpLowering : public ConversionPattern {
+  VirtualCallOpLowering(MLIRContext *ctx)
+      : ConversionPattern(VirtualCallOp::getOperationName(), 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto vcallOp = cast<VirtualCallOp>(op);
+    Location loc = vcallOp.getLoc();
+
+    // Get attributes
+    int64_t vtableOffset = vcallOp.getVtableOffset();
+    int64_t slot = vcallOp.getSlot();
+    ValueRange args = vcallOp.getArgs();
+
+    if (args.empty()) {
+      return op->emitError("VirtualCallOp requires at least object pointer argument");
+    }
+
+    Value objPtr = args[0];  // First arg is always the object pointer
+    Type resultType = vcallOp.getResult().getType();
+
+    // Create pointer type for vtable operations
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i64Type = rewriter.getI64Type();
+
+    // Step 1: Load vtable pointer from object
+    // vtable_ptr = *(objPtr + vtableOffset)
+    Value vtableOffsetVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(vtableOffset));
+
+    Value vtablePtrAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptrType, rewriter.getI8Type(), objPtr,
+        ArrayRef<LLVM::GEPArg>({vtableOffsetVal}));
+
+    Value vtablePtr = rewriter.create<LLVM::LoadOp>(loc, ptrType, vtablePtrAddr);
+
+    // Step 2: Index into vtable to get function pointer
+    // func_ptr = vtable[slot]
+    Value slotVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(slot));
+
+    Value funcPtrAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptrType, ptrType, vtablePtr,
+        ArrayRef<LLVM::GEPArg>({slotVal}));
+
+    Value funcPtr = rewriter.create<LLVM::LoadOp>(loc, ptrType, funcPtrAddr);
+
+    // Step 3: Call the function pointer with arguments
+    SmallVector<Value, 4> callArgs(args.begin(), args.end());
+
+    Value result = rewriter.create<LLVM::CallOp>(
+        loc, resultType, funcPtr, callArgs).getResult();
+
+    // Step 4: Replace the jlcs.vcall with the call result
+    rewriter.replaceOp(op, result);
 
     return success();
   }

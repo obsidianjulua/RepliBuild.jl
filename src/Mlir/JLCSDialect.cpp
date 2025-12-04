@@ -8,6 +8,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir-c/IR.h"
+#include "mlir/CAPI/IR.h"
 
 // Include generated dialect declarations
 #include "JLCSDialect.h.inc"
@@ -47,7 +48,7 @@ extern "C" {
 
 // Register dialect with an MLIR context
 void registerJLCSDialect(MlirContext context) {
-  mlir::MLIRContext *ctx = mlir::unwrap(context);
+  mlir::MLIRContext *ctx = unwrap(context);
   mlir::DialectRegistry registry;
   registry.insert<mlir::jlcs::JLCSDialect>();
   ctx->appendDialectRegistry(registry);

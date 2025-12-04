@@ -13,7 +13,7 @@ namespace jlcs {
 /// Julia C-Struct Layout and FFI Dialect.
 /// The Julia C-Struct Dialect (JLCS) is designed to model Julia struct
 ///     types in a C-ABI-compatible, flattened layout for interoperability
-///     with C++ and FFI tools like Julia's ccall.
+///     with C++ and FFI tools like Julia ccall.
 class JLCSDialect : public ::mlir::Dialect {
   explicit JLCSDialect(::mlir::MLIRContext *context);
 

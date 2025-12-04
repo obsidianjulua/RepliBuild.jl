@@ -13,7 +13,7 @@ export test_dialect, print_module
 # =============================================================================
 
 # Library paths
-const libMLIR = "libMLIRPublicAPI"  # MLIR C API library
+const libMLIR = "libMLIR"  # MLIR C API library
 const libJLCS_path = joinpath(@__DIR__, "Mlir", "build", "libJLCS.so")
 
 # Check if JLCS library exists
@@ -103,21 +103,21 @@ function create_module(ctx::MlirContext)
 end
 
 """
-    get_module_operation(module::MlirModule) -> MlirOperation
+    get_module_operation(mlir_module::MlirModule) -> MlirOperation
 
 Get the operation backing a module.
 """
-function get_module_operation(module::MlirModule)
-    return ccall((:mlirModuleGetOperation, libMLIR), MlirOperation, (MlirModule,), module)
+function get_module_operation(mlir_module::MlirModule)
+    return ccall((:mlirModuleGetOperation, libMLIR), MlirOperation, (MlirModule,), mlir_module)
 end
 
 """
-    print_module(module::MlirModule)
+    print_module(mlir_module::MlirModule)
 
 Print an MLIR module to stdout.
 """
-function print_module(module::MlirModule)
-    op = get_module_operation(module)
+function print_module(mlir_module::MlirModule)
+    op = get_module_operation(mlir_module)
     ccall((:mlirOperationDump, libMLIR), Cvoid, (MlirOperation,), op)
 end
 

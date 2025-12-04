@@ -25,6 +25,23 @@ namespace jlcs {
 class TypeInfoOp;
 } // namespace jlcs
 } // namespace mlir
+namespace mlir {
+namespace jlcs {
+/// Call a C++ virtual method through vtable dispatch.
+/// Calls a C++ virtual method by:
+///     1. Reading the vtable pointer from the object (at vtable_offset)
+///     2. Loading the function pointer from vtable[slot]
+///     3. Calling the function with the object pointer + arguments
+/// 
+///     Example:
+///     ```mlir
+///     %result = jlcs.vcall @Base::foo(%obj)
+///       { vtable_offset = 0 : i64, slot = 0 : i64 }
+///       : (!llvm.ptr) -> i32
+///     ```
+class VirtualCallOp;
+} // namespace jlcs
+} // namespace mlir
 #ifdef GET_OP_CLASSES
 #undef GET_OP_CLASSES
 
@@ -724,6 +741,278 @@ public:
 } // namespace jlcs
 } // namespace mlir
 MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::TypeInfoOp)
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
+// ::mlir::jlcs::VirtualCallOp declarations
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+class VirtualCallOpGenericAdaptorBase {
+public:
+  struct Properties {
+    using class_nameTy = ::mlir::SymbolRefAttr;
+    class_nameTy class_name;
+
+    auto getClassName() const {
+      auto &propStorage = this->class_name;
+      return ::llvm::cast<::mlir::SymbolRefAttr>(propStorage);
+    }
+    void setClassName(const ::mlir::SymbolRefAttr &propValue) {
+      this->class_name = propValue;
+    }
+    using slotTy = ::mlir::IntegerAttr;
+    slotTy slot;
+
+    auto getSlot() const {
+      auto &propStorage = this->slot;
+      return ::llvm::cast<::mlir::IntegerAttr>(propStorage);
+    }
+    void setSlot(const ::mlir::IntegerAttr &propValue) {
+      this->slot = propValue;
+    }
+    using vtable_offsetTy = ::mlir::IntegerAttr;
+    vtable_offsetTy vtable_offset;
+
+    auto getVtableOffset() const {
+      auto &propStorage = this->vtable_offset;
+      return ::llvm::cast<::mlir::IntegerAttr>(propStorage);
+    }
+    void setVtableOffset(const ::mlir::IntegerAttr &propValue) {
+      this->vtable_offset = propValue;
+    }
+    bool operator==(const Properties &rhs) const {
+      return 
+        rhs.class_name == this->class_name &&
+        rhs.slot == this->slot &&
+        rhs.vtable_offset == this->vtable_offset &&
+        true;
+    }
+    bool operator!=(const Properties &rhs) const {
+      return !(*this == rhs);
+    }
+  };
+protected:
+  ::mlir::DictionaryAttr odsAttrs;
+  ::std::optional<::mlir::OperationName> odsOpName;
+  Properties properties;
+  ::mlir::RegionRange odsRegions;
+public:
+  VirtualCallOpGenericAdaptorBase(::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : odsAttrs(attrs), properties(properties), odsRegions(regions) {  if (odsAttrs)
+      odsOpName.emplace("jlcs.vcall", odsAttrs.getContext());
+  }
+
+  VirtualCallOpGenericAdaptorBase(VirtualCallOp op);
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize);
+  const Properties &getProperties() {
+    return properties;
+  }
+
+  ::mlir::DictionaryAttr getAttributes() {
+    return odsAttrs;
+  }
+
+  ::mlir::SymbolRefAttr getClassNameAttr() {
+    auto attr = ::llvm::cast<::mlir::SymbolRefAttr>(getProperties().class_name);
+    return attr;
+  }
+
+  ::mlir::SymbolRefAttr getClassName();
+  ::mlir::IntegerAttr getVtableOffsetAttr() {
+    auto attr = ::llvm::cast<::mlir::IntegerAttr>(getProperties().vtable_offset);
+    return attr;
+  }
+
+  uint64_t getVtableOffset();
+  ::mlir::IntegerAttr getSlotAttr() {
+    auto attr = ::llvm::cast<::mlir::IntegerAttr>(getProperties().slot);
+    return attr;
+  }
+
+  uint64_t getSlot();
+};
+} // namespace detail
+template <typename RangeT>
+class VirtualCallOpGenericAdaptor : public detail::VirtualCallOpGenericAdaptorBase {
+  using ValueT = ::llvm::detail::ValueOfRange<RangeT>;
+  using Base = detail::VirtualCallOpGenericAdaptorBase;
+  static constexpr int odsIndex_args = 0;
+public:
+  VirtualCallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : Base(attrs, properties, regions), odsOperands(values) {}
+
+  VirtualCallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions = {}) : VirtualCallOpGenericAdaptor(values, attrs, (properties ? *properties.as<Properties *>() : Properties{}), regions) {}
+
+  VirtualCallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs = nullptr) : VirtualCallOpGenericAdaptor(values, attrs, Properties{}, {}) {}
+
+  VirtualCallOpGenericAdaptor(RangeT values, const VirtualCallOpGenericAdaptorBase &base) : Base(base), odsOperands(values) {}
+
+  template <typename LateInst = VirtualCallOp, typename = std::enable_if_t<std::is_same_v<LateInst, VirtualCallOp>>>
+  VirtualCallOpGenericAdaptor(RangeT values, LateInst op) : Base(op), odsOperands(values) {}
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index) {
+    return Base::getODSOperandIndexAndLength(index, odsOperands.size());
+  }
+
+  RangeT getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(odsOperands.begin(), valueRange.first),
+             std::next(odsOperands.begin(), valueRange.first + valueRange.second)};
+  }
+
+  RangeT getArgs() {
+    return getODSOperands(0);
+  }
+
+  RangeT getOperands() {
+    return odsOperands;
+  }
+
+private:
+  RangeT odsOperands;
+};
+class VirtualCallOpAdaptor : public VirtualCallOpGenericAdaptor<::mlir::ValueRange> {
+public:
+  using VirtualCallOpGenericAdaptor::VirtualCallOpGenericAdaptor;
+  VirtualCallOpAdaptor(VirtualCallOp op);
+
+  ::llvm::LogicalResult verify(::mlir::Location loc);
+};
+class VirtualCallOp : public ::mlir::Op<VirtualCallOp, ::mlir::OpTrait::ZeroRegions, ::mlir::OpTrait::VariadicResults, ::mlir::OpTrait::ZeroSuccessors, ::mlir::OpTrait::VariadicOperands, ::mlir::OpTrait::OpInvariants, ::mlir::BytecodeOpInterface::Trait> {
+public:
+  using Op::Op;
+  using Op::print;
+  using Adaptor = VirtualCallOpAdaptor;
+  template <typename RangeT>
+  using GenericAdaptor = VirtualCallOpGenericAdaptor<RangeT>;
+  using FoldAdaptor = GenericAdaptor<::llvm::ArrayRef<::mlir::Attribute>>;
+  static constexpr int odsIndex_args = 0;
+  using Properties = FoldAdaptor::Properties;
+  static ::llvm::ArrayRef<::llvm::StringRef> getAttributeNames() {
+    static ::llvm::StringRef attrNames[] = {::llvm::StringRef("class_name"), ::llvm::StringRef("slot"), ::llvm::StringRef("vtable_offset")};
+    return ::llvm::ArrayRef(attrNames);
+  }
+
+  ::mlir::StringAttr getClassNameAttrName() {
+    return getAttributeNameForIndex(0);
+  }
+
+  static ::mlir::StringAttr getClassNameAttrName(::mlir::OperationName name) {
+    return getAttributeNameForIndex(name, 0);
+  }
+
+  ::mlir::StringAttr getSlotAttrName() {
+    return getAttributeNameForIndex(1);
+  }
+
+  static ::mlir::StringAttr getSlotAttrName(::mlir::OperationName name) {
+    return getAttributeNameForIndex(name, 1);
+  }
+
+  ::mlir::StringAttr getVtableOffsetAttrName() {
+    return getAttributeNameForIndex(2);
+  }
+
+  static ::mlir::StringAttr getVtableOffsetAttrName(::mlir::OperationName name) {
+    return getAttributeNameForIndex(name, 2);
+  }
+
+  static constexpr ::llvm::StringLiteral getOperationName() {
+    return ::llvm::StringLiteral("jlcs.vcall");
+  }
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index);
+  ::mlir::Operation::operand_range getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(getOperation()->operand_begin(), valueRange.first),
+             std::next(getOperation()->operand_begin(), valueRange.first + valueRange.second)};
+  }
+
+  ::mlir::Operation::operand_range getArgs() {
+    return getODSOperands(0);
+  }
+
+  ::mlir::MutableOperandRange getArgsMutable();
+  std::pair<unsigned, unsigned> getODSResultIndexAndLength(unsigned index);
+  ::mlir::Operation::result_range getODSResults(unsigned index) {
+    auto valueRange = getODSResultIndexAndLength(index);
+    return {std::next(getOperation()->result_begin(), valueRange.first),
+             std::next(getOperation()->result_begin(), valueRange.first + valueRange.second)};
+  }
+
+  ::mlir::TypedValue<::mlir::Type> getResult() {
+    auto results = getODSResults(0);
+    return results.empty() ? ::mlir::TypedValue<::mlir::Type>() : ::llvm::cast<::mlir::TypedValue<::mlir::Type>>(*results.begin());
+  }
+
+  static ::llvm::LogicalResult setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static ::mlir::Attribute getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop);
+  static llvm::hash_code computePropertiesHash(const Properties &prop);
+  static std::optional<mlir::Attribute> getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name);
+  static void setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value);
+  static void populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs);
+  static ::llvm::LogicalResult verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static ::llvm::LogicalResult readProperties(::mlir::DialectBytecodeReader &reader, ::mlir::OperationState &state);
+  void writeProperties(::mlir::DialectBytecodeWriter &writer);
+  ::mlir::SymbolRefAttr getClassNameAttr() {
+    return ::llvm::cast<::mlir::SymbolRefAttr>(getProperties().class_name);
+  }
+
+  ::mlir::SymbolRefAttr getClassName();
+  ::mlir::IntegerAttr getVtableOffsetAttr() {
+    return ::llvm::cast<::mlir::IntegerAttr>(getProperties().vtable_offset);
+  }
+
+  uint64_t getVtableOffset();
+  ::mlir::IntegerAttr getSlotAttr() {
+    return ::llvm::cast<::mlir::IntegerAttr>(getProperties().slot);
+  }
+
+  uint64_t getSlot();
+  void setClassNameAttr(::mlir::SymbolRefAttr attr) {
+    getProperties().class_name = attr;
+  }
+
+  void setVtableOffsetAttr(::mlir::IntegerAttr attr) {
+    getProperties().vtable_offset = attr;
+  }
+
+  void setVtableOffset(uint64_t attrValue);
+  void setSlotAttr(::mlir::IntegerAttr attr) {
+    getProperties().slot = attr;
+  }
+
+  void setSlot(uint64_t attrValue);
+  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, SymbolRefAttr class_name, ValueRange args, IntegerAttr vtable_offset, IntegerAttr slot, Type resultType);
+  static VirtualCallOp create(::mlir::OpBuilder &builder, ::mlir::Location location, SymbolRefAttr class_name, ValueRange args, IntegerAttr vtable_offset, IntegerAttr slot, Type resultType);
+  static VirtualCallOp create(::mlir::ImplicitLocOpBuilder &builder, SymbolRefAttr class_name, ValueRange args, IntegerAttr vtable_offset, IntegerAttr slot, Type resultType);
+  ::llvm::LogicalResult verifyInvariantsImpl();
+  ::llvm::LogicalResult verifyInvariants();
+  static ::llvm::LogicalResult setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+private:
+  ::mlir::StringAttr getAttributeNameForIndex(unsigned index) {
+    return getAttributeNameForIndex((*this)->getName(), index);
+  }
+
+  static ::mlir::StringAttr getAttributeNameForIndex(::mlir::OperationName name, unsigned index) {
+    assert(index < 3 && "invalid attribute index");
+    assert(name.getStringRef() == getOperationName() && "invalid operation name");
+    assert(name.isRegistered() && "Operation isn't registered, missing a "
+          "dependent dialect loading?");
+    return name.getAttributeNames()[index];
+  }
+
+public:
+  VirtualCallOp(::mlir::Operation *op) : Op(op) {}
+
+  // Helper to get the object pointer (first argument)
+  Value getObject() { return getArgs()[0]; }
+};
+} // namespace jlcs
+} // namespace mlir
+MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::VirtualCallOp)
 
 
 #endif  // GET_OP_CLASSES

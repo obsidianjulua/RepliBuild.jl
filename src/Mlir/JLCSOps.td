@@ -79,3 +79,48 @@ def SetFieldOp : JLCS_Op<"set_field", [Pure]> {
     SetFieldOp(::mlir::Operation *op) : Op(op) {}
   }];
 }
+
+// ====================================================================
+// Virtual Method Call Operation
+// ====================================================================
+
+// 4. Virtual Call Op (Call C++ virtual method via vtable)
+def VirtualCallOp : JLCS_Op<"vcall"> {
+  let summary = "Call a C++ virtual method through vtable dispatch.";
+  let description = [{
+    Calls a C++ virtual method by:
+    1. Reading the vtable pointer from the object (at vtable_offset)
+    2. Loading the function pointer from vtable[slot]
+    3. Calling the function with the object pointer + arguments
+
+    Example:
+    ```mlir
+    %result = jlcs.vcall @Base::foo(%obj)
+      { vtable_offset = 0 : i64, slot = 0 : i64 }
+      : (!llvm.ptr) -> i32
+    ```
+  }];
+
+  let arguments = (ins
+    SymbolRefAttr:$class_name,    // Class name (e.g., @Base)
+    Variadic<AnyType>:$args,      // Arguments (first is always object pointer)
+    I64Attr:$vtable_offset,       // Offset of vptr in object
+    I64Attr:$slot                 // Vtable slot index
+  );
+
+  let results = (outs Optional<AnyType>:$result);
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "SymbolRefAttr":$class_name, "ValueRange":$args,
+                   "IntegerAttr":$vtable_offset, "IntegerAttr":$slot,
+                   "Type":$resultType)>
+  ];
+
+  let extraClassDeclaration = [{
+    VirtualCallOp(::mlir::Operation *op) : Op(op) {}
+
+    // Helper to get the object pointer (first argument)
+    Value getObject() { return getArgs()[0]; }
+  }];
+}

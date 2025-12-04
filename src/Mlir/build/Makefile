@@ -356,6 +356,30 @@ install-JLCS-stripped/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/install-JLCS-stripped.dir/build.make CMakeFiles/install-JLCS-stripped.dir/build
 .PHONY : install-JLCS-stripped/fast
 
+JLCSCHelpers.o: JLCSCHelpers.cpp.o
+.PHONY : JLCSCHelpers.o
+
+# target to build an object file
+JLCSCHelpers.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/JLCS.dir/build.make CMakeFiles/JLCS.dir/JLCSCHelpers.cpp.o
+.PHONY : JLCSCHelpers.cpp.o
+
+JLCSCHelpers.i: JLCSCHelpers.cpp.i
+.PHONY : JLCSCHelpers.i
+
+# target to preprocess a source file
+JLCSCHelpers.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/JLCS.dir/build.make CMakeFiles/JLCS.dir/JLCSCHelpers.cpp.i
+.PHONY : JLCSCHelpers.cpp.i
+
+JLCSCHelpers.s: JLCSCHelpers.cpp.s
+.PHONY : JLCSCHelpers.s
+
+# target to generate assembly for a file
+JLCSCHelpers.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/JLCS.dir/build.make CMakeFiles/JLCS.dir/JLCSCHelpers.cpp.s
+.PHONY : JLCSCHelpers.cpp.s
+
 JLCSDialect.o: JLCSDialect.cpp.o
 .PHONY : JLCSDialect.o
 
@@ -455,6 +479,9 @@ help:
 	@echo "... target_parser_gen"
 	@echo "... vt_gen"
 	@echo "... JLCS"
+	@echo "... JLCSCHelpers.o"
+	@echo "... JLCSCHelpers.i"
+	@echo "... JLCSCHelpers.s"
 	@echo "... JLCSDialect.o"
 	@echo "... JLCSDialect.i"
 	@echo "... JLCSDialect.s"

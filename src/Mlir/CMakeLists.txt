@@ -60,6 +60,9 @@ add_llvm_library(JLCS SHARED
   JLCSDialect.cpp
   JLCSOps.cpp
   JLCSTypes.cpp
+  JLCSCHelpers.cpp
+
+  PARTIAL_SOURCES_INTENDED
 
   DEPENDS
   JLCSDialectIncGen
