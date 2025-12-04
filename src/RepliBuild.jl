@@ -23,10 +23,9 @@ include("BuildBridge.jl")
 include("ASTWalker.jl")
 include("Discovery.jl")
 include("ClangJLBridge.jl")
-include("Compiler.jl")      # New: replaces Bridge_LLVM
-include("Wrapper.jl")       # New: wrapper generation
-
-# REPL_API.jl removed in v2.0 - deprecated
+include("Compiler.jl")
+include("Wrapper.jl")
+include("MLIRNative.jl")
 
 # Import submodules for internal use
 using .RepliBuildPaths
@@ -36,8 +35,9 @@ using .BuildBridge
 using .ASTWalker
 using .Discovery
 using .ClangJLBridge
-using .Compiler           # New module
-using .Wrapper            # New module
+using .Compiler
+using .Wrapper
+using .MLIRNative
 
 # ============================================================================
 # EXPORTS - Clean Build Orchestration API
@@ -54,6 +54,10 @@ export clean
 
 # Advanced modules (for power users who know what they're doing)
 export Compiler, Wrapper, Discovery, ConfigurationManager
+
+# INTERNAL: Not for end users - these are deprecated/confusing
+# export discover, import_cmake, ASTWalker, CMakeParser, WorkspaceBuilder, LLVMEnvironment
+# export REPL_API, rbuild, rdiscover, rclean, rinfo, rwrap, rbuild_fast, rcompile, rparallel, rthreads, rcache_status
 
 # ============================================================================
 # PUBLIC API - Build Orchestration
@@ -80,22 +84,22 @@ Path to generated `replibuild.toml` file
 ## Basic workflow (step-by-step):
 ```julia
 # 1. Discover and create config
-RepliBuild.discover(build=true, wrap=true)
+toml_path = RepliBuild.discover()
 
 # 2. Build the library
 RepliBuild.build(toml_path)
 
 # 3. Generate Julia wrappers
-RepliBuild.wrap()
+RepliBuild.wrap(toml_path)
 ```
 
 ## Chained workflow (automated):
 ```julia
 # Discover → Build → Wrap (all at once)
-RepliBuild.discover(build=true, wrap=true)
+toml_path = RepliBuild.discover(build=true, wrap=true)
 
 # Or just discover and build
-RepliBuild.discover(build=true)
+toml_path = RepliBuild.discover(build=true)
 ```
 
 # Examples
