@@ -55,10 +55,6 @@ export clean
 # Advanced modules (for power users who know what they're doing)
 export Compiler, Wrapper, Discovery, ConfigurationManager
 
-# INTERNAL: Not for end users - these are deprecated/confusing
-# export discover, import_cmake, ASTWalker, CMakeParser, WorkspaceBuilder, LLVMEnvironment
-# export REPL_API, rbuild, rdiscover, rclean, rinfo, rwrap, rbuild_fast, rcompile, rparallel, rthreads, rcache_status
-
 # ============================================================================
 # PUBLIC API - Build Orchestration
 # ============================================================================
