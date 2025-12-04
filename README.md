@@ -35,7 +35,7 @@ Pkg.add(url="https://github.com/obsidianjulua/RepliBuild.jl")
 # First run, use this command in your project root directory.
 Replibuild.discover(build=true, wrap=true)
 
-# Add force=true param if toml exist but you want to overwrite it
+# use force to overide saftey for existing toml
 Replibuild.discover(force=true, build=true, wrap=true)
 
 # Load the module in julia and use the bindings
@@ -56,7 +56,7 @@ Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations
 
 **Advantages:**
 - No header parsing
-- No build system integration
+- build system integration(Pure Julia)
 - Types as compiler sees them (post-instantiation)
 
 **Limitations:**
@@ -75,13 +75,11 @@ Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations
 - Base types: int, double, bool, char, sized integers
 - Pointers: T*, const T*
 - Standard-layout structs with member layout
-- Function signatures (parameters and return types)
-
-**Partially Supported:**
+- Function signatures (parameters and return types
 - Template instantiations: Only those present in final DWARF (ODR-used)
 - Classes: Detection works, but only standard-layout, no virtual methods
 
-**Not Supported:**
+**Supported: ## With Julia Dialect | MLIR**
 - Virtual methods, vtables, inheritance
 - STL containers (implementation-defined layouts)
 - Exception specifications
