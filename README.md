@@ -35,7 +35,7 @@ Pkg.add(url="https://github.com/obsidianjulua/RepliBuild.jl")
 # First run, use this command in your project root directory.
 Replibuild.discover(build=true, wrap=true)
 
-# Add force=true param if toml exist but you want to overwrite it
+# use force to overide saftey for existing toml
 Replibuild.discover(force=true, build=true, wrap=true)
 
 # Load the module in julia and use the bindings
