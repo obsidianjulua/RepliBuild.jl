@@ -80,22 +80,22 @@ Path to generated `replibuild.toml` file
 ## Basic workflow (step-by-step):
 ```julia
 # 1. Discover and create config
-toml_path = RepliBuild.discover()
+RepliBuild.discover(build=true, wrap=true)
 
 # 2. Build the library
 RepliBuild.build(toml_path)
 
 # 3. Generate Julia wrappers
-RepliBuild.wrap(toml_path)
+RepliBuild.wrap()
 ```
 
 ## Chained workflow (automated):
 ```julia
 # Discover → Build → Wrap (all at once)
-toml_path = RepliBuild.discover(build=true, wrap=true)
+RepliBuild.discover(build=true, wrap=true)
 
 # Or just discover and build
-toml_path = RepliBuild.discover(build=true)
+RepliBuild.discover(build=true)
 ```
 
 # Examples
@@ -402,12 +402,6 @@ function info(toml_path::String="replibuild.toml")
 
     println("═"^70)
 end
-
-# ============================================================================
-# INTERNAL HELPERS - NOT FOR PUBLIC USE
-# ============================================================================
-# Old build_single_project() and detect_workspace_structure() removed
-# These are replaced by simple build() + wrap() API
 
 # ============================================================================
 # MODULE INITIALIZATION
