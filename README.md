@@ -6,9 +6,6 @@
 [![Julia](https://img.shields.io/badge/julia-%3E%3D1.9-blue)](https://julialang.org/)
 
 RepliBuild generates Julia bindings for C/C++ libraries by extracting type information from DWARF debug data produced during compilation.
-**What it does:** Extracts types from compiled binaries, generates direct ccall wrappers.
-**What it doesn't do:** Virtual methods, inheritance, STL containers, non-standard-layout types. <--- IMPORTANT!
-**Not perfect but will save alot of time for making bindings**
 
 ## Requirements
 
