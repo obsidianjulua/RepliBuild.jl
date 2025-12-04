@@ -75,13 +75,11 @@ Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations
 - Base types: int, double, bool, char, sized integers
 - Pointers: T*, const T*
 - Standard-layout structs with member layout
-- Function signatures (parameters and return types)
-
-**Partially Supported:**
+- Function signatures (parameters and return types
 - Template instantiations: Only those present in final DWARF (ODR-used)
 - Classes: Detection works, but only standard-layout, no virtual methods
 
-**Not Supported:**
+**Supported: ## With Julia Dialect | MLIR**
 - Virtual methods, vtables, inheritance
 - STL containers (implementation-defined layouts)
 - Exception specifications
