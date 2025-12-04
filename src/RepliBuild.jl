@@ -1,34 +1,13 @@
 #!/usr/bin/env julia
 # RepliBuild.jl - C++ → Julia Build Orchestration System
 # Focus: Dependency-aware parallel compilation for single and multi-library C++ projects
-#
-# ============================================================================
-# QUICK START - User-Friendly Workflow
-# ============================================================================
-#
-# All functions now use `replibuild.toml` as the source of truth:
-#
-# Step 1: Discovery (creates replibuild.toml)
-#   toml_path = RepliBuild.discover()
-#
-# Step 2: Build (uses replibuild.toml)
-#   RepliBuild.build(toml_path)
-#
-# Step 3: Wrap (uses replibuild.toml)
-#   RepliBuild.wrap(toml_path)
-#
-# Or chain it all together:
-#   RepliBuild.discover(build=true, wrap=true)
-#
-# No more confusion about paths! Everything targets the TOML file directly.
-# ============================================================================
 
 module RepliBuild
 
 using TOML
 
 # Version
-const VERSION = v"1.1.0"
+const VERSION = v"2.0.1"
 
 # ============================================================================
 # LOAD CORE MODULES
