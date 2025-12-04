@@ -402,10 +402,13 @@ Result: Zero-overhead C++ interop without wrappers!
    - ❌ Not yet: Need MLIR ExecutionEngine bindings
    - ✅ But: Lowering pass is complete and correct
 
-2. **"Production-ready library"**
+2. **"Is MLIR Production-ready library"**
    - ❌ Not yet: Proof of concept stage
    - ❌ Not yet: Error handling incomplete
-   - ❌ Not yet: Limited type support
+   - ❌ Not yet: MLIR isnt easy this was a very hard build
+   - ❌ Not yet: Still have the task of making more julia dialects for other languages like rust, python, swift, go, and ruby all use llvm.
+
+3. **DWARF is 100% for c abi and auto generated** 
 
 ---
 
@@ -487,7 +490,7 @@ JLCS fills this gap by providing high-level FFI operations that lower to correct
 
 ```bash
 # Arch Linux
-pacman -S llvm mlir cmake ninja
+pacman -S llvm cmake ninja # You gotta find mlir or use llvm mlir, or MLIR.jl 
 
 # Ubuntu/Debian
 apt-get install llvm-21-dev mlir-21-dev cmake ninja-build
