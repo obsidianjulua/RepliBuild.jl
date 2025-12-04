@@ -56,7 +56,7 @@ Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations
 
 **Advantages:**
 - No header parsing
-- No build system integration
+- build system integration(Pure Julia)
 - Types as compiler sees them (post-instantiation)
 
 **Limitations:**
