@@ -428,6 +428,30 @@ JLCSOps.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/JLCS.dir/build.make CMakeFiles/JLCS.dir/JLCSOps.cpp.s
 .PHONY : JLCSOps.cpp.s
 
+JLCSPasses.o: JLCSPasses.cpp.o
+.PHONY : JLCSPasses.o
+
+# target to build an object file
+JLCSPasses.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/JLCS.dir/build.make CMakeFiles/JLCS.dir/JLCSPasses.cpp.o
+.PHONY : JLCSPasses.cpp.o
+
+JLCSPasses.i: JLCSPasses.cpp.i
+.PHONY : JLCSPasses.i
+
+# target to preprocess a source file
+JLCSPasses.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/JLCS.dir/build.make CMakeFiles/JLCS.dir/JLCSPasses.cpp.i
+.PHONY : JLCSPasses.cpp.i
+
+JLCSPasses.s: JLCSPasses.cpp.s
+.PHONY : JLCSPasses.s
+
+# target to generate assembly for a file
+JLCSPasses.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/JLCS.dir/build.make CMakeFiles/JLCS.dir/JLCSPasses.cpp.s
+.PHONY : JLCSPasses.cpp.s
+
 JLCSTypes.o: JLCSTypes.cpp.o
 .PHONY : JLCSTypes.o
 
@@ -488,6 +512,9 @@ help:
 	@echo "... JLCSOps.o"
 	@echo "... JLCSOps.i"
 	@echo "... JLCSOps.s"
+	@echo "... JLCSPasses.o"
+	@echo "... JLCSPasses.i"
+	@echo "... JLCSPasses.s"
 	@echo "... JLCSTypes.o"
 	@echo "... JLCSTypes.i"
 	@echo "... JLCSTypes.s"

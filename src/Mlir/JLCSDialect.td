@@ -16,6 +16,11 @@ def JLCS_Dialect : Dialect
     with C++ and FFI tools like Julia ccall.
   }];
     let cppNamespace = "::mlir::jlcs";
+
+    let extraClassDeclaration = [{
+      // Register types (defined in JLCSTypes.cpp)
+      void registerTypes();
+    }];
 }
 
 #endif // JULIA_C_STRUCT_DIALECT_TD

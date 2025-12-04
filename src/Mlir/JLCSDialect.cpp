@@ -33,11 +33,8 @@ void JLCSDialect::initialize() {
 #include "JLCSOps.cpp.inc"
   >();
 
-  // TODO: Register custom types once storage definition is resolved
-  // addTypes<
-  // #define GET_TYPEDEF_LIST
-  // #include "JLCSTypes.cpp.inc"
-  // >();
+  // Register types (defined in JLCSTypes.cpp to avoid circular deps)
+  registerTypes();
 }
 
 //===----------------------------------------------------------------------===//

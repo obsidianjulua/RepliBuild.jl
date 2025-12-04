@@ -27,3 +27,15 @@ using namespace mlir::jlcs;
 
 #define GET_TYPEDEF_CLASSES
 #include "JLCSTypes.cpp.inc"
+
+//===----------------------------------------------------------------------===//
+// Type Registration
+//===----------------------------------------------------------------------===//
+
+// Called from JLCSDialect constructor to register types
+void JLCSDialect::registerTypes() {
+  addTypes<
+#define GET_TYPEDEF_LIST
+#include "JLCSTypes.cpp.inc"
+  >();
+}

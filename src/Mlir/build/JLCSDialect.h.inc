@@ -24,7 +24,10 @@ public:
   static constexpr ::llvm::StringLiteral getDialectNamespace() {
     return ::llvm::StringLiteral("jlcs");
   }
-};
+
+      // Register types (defined in JLCSTypes.cpp)
+      void registerTypes();
+    };
 } // namespace jlcs
 } // namespace mlir
 MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::JLCSDialect)

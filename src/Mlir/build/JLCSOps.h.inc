@@ -15,8 +15,44 @@ class GetFieldOp;
 } // namespace mlir
 namespace mlir {
 namespace jlcs {
+/// Load element from strided array view.
+/// Loads an element from a multi-dimensional array using strided indexing.
+///     Computes the linearized offset as: sum(index_i * stride_i) for all dimensions.
+///     Then performs: data_ptr[linear_offset]
+/// 
+///     The array view must be a pointer to an ArrayView struct containing:
+///     - data_ptr (offset 0)
+///     - dims_ptr (offset 8)
+///     - strides_ptr (offset 16)
+///     - rank (offset 24)
+/// 
+///     Example:
+///     ```mlir
+///     %elem = jlcs.load_array_element %view[%i, %j, %k]
+///       : !jlcs.array_view<f64, 3> -> f64
+///     ```
+class LoadArrayElementOp;
+} // namespace jlcs
+} // namespace mlir
+namespace mlir {
+namespace jlcs {
 /// Generic operation to write a field into a C-compatible struct.
 class SetFieldOp;
+} // namespace jlcs
+} // namespace mlir
+namespace mlir {
+namespace jlcs {
+/// Store element to strided array view.
+/// Stores an element to a multi-dimensional array using strided indexing.
+///     Computes the linearized offset as: sum(index_i * stride_i) for all dimensions.
+///     Then performs: data_ptr[linear_offset] = value
+/// 
+///     Example:
+///     ```mlir
+///     jlcs.store_array_element %value, %view[%i, %j, %k]
+///       : f64, !jlcs.array_view<f64, 3>
+///     ```
+class StoreArrayElementOp;
 } // namespace jlcs
 } // namespace mlir
 namespace mlir {
@@ -261,6 +297,164 @@ namespace mlir {
 namespace jlcs {
 
 //===----------------------------------------------------------------------===//
+// ::mlir::jlcs::LoadArrayElementOp declarations
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+class LoadArrayElementOpGenericAdaptorBase {
+public:
+  using Properties = ::mlir::EmptyProperties;
+protected:
+  ::mlir::DictionaryAttr odsAttrs;
+  ::std::optional<::mlir::OperationName> odsOpName;
+  Properties properties;
+  ::mlir::RegionRange odsRegions;
+public:
+  LoadArrayElementOpGenericAdaptorBase(::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : odsAttrs(attrs), properties(properties), odsRegions(regions) {  if (odsAttrs)
+      odsOpName.emplace("jlcs.load_array_element", odsAttrs.getContext());
+  }
+
+  LoadArrayElementOpGenericAdaptorBase(LoadArrayElementOp op);
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize);
+  const Properties &getProperties() {
+    return properties;
+  }
+
+  ::mlir::DictionaryAttr getAttributes() {
+    return odsAttrs;
+  }
+
+};
+} // namespace detail
+template <typename RangeT>
+class LoadArrayElementOpGenericAdaptor : public detail::LoadArrayElementOpGenericAdaptorBase {
+  using ValueT = ::llvm::detail::ValueOfRange<RangeT>;
+  using Base = detail::LoadArrayElementOpGenericAdaptorBase;
+  static constexpr int odsIndex_view = 0;
+  static constexpr int odsIndex_indices = 1;
+public:
+  LoadArrayElementOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : Base(attrs, properties, regions), odsOperands(values) {}
+
+  LoadArrayElementOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions = {}) : LoadArrayElementOpGenericAdaptor(values, attrs, (properties ? *properties.as<Properties *>() : Properties{}), regions) {}
+
+  LoadArrayElementOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs = nullptr) : LoadArrayElementOpGenericAdaptor(values, attrs, Properties{}, {}) {}
+
+  LoadArrayElementOpGenericAdaptor(RangeT values, const LoadArrayElementOpGenericAdaptorBase &base) : Base(base), odsOperands(values) {}
+
+  template <typename LateInst = LoadArrayElementOp, typename = std::enable_if_t<std::is_same_v<LateInst, LoadArrayElementOp>>>
+  LoadArrayElementOpGenericAdaptor(RangeT values, LateInst op) : Base(op), odsOperands(values) {}
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index) {
+    return Base::getODSOperandIndexAndLength(index, odsOperands.size());
+  }
+
+  RangeT getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(odsOperands.begin(), valueRange.first),
+             std::next(odsOperands.begin(), valueRange.first + valueRange.second)};
+  }
+
+  ValueT getView() {
+    return (*getODSOperands(0).begin());
+  }
+
+  RangeT getIndices() {
+    return getODSOperands(1);
+  }
+
+  RangeT getOperands() {
+    return odsOperands;
+  }
+
+private:
+  RangeT odsOperands;
+};
+class LoadArrayElementOpAdaptor : public LoadArrayElementOpGenericAdaptor<::mlir::ValueRange> {
+public:
+  using LoadArrayElementOpGenericAdaptor::LoadArrayElementOpGenericAdaptor;
+  LoadArrayElementOpAdaptor(LoadArrayElementOp op);
+
+  ::llvm::LogicalResult verify(::mlir::Location loc);
+};
+class LoadArrayElementOp : public ::mlir::Op<LoadArrayElementOp, ::mlir::OpTrait::ZeroRegions, ::mlir::OpTrait::OneResult, ::mlir::OpTrait::OneTypedResult<::mlir::Type>::Impl, ::mlir::OpTrait::ZeroSuccessors, ::mlir::OpTrait::AtLeastNOperands<1>::Impl, ::mlir::OpTrait::OpInvariants> {
+public:
+  using Op::Op;
+  using Op::print;
+  using Adaptor = LoadArrayElementOpAdaptor;
+  template <typename RangeT>
+  using GenericAdaptor = LoadArrayElementOpGenericAdaptor<RangeT>;
+  using FoldAdaptor = GenericAdaptor<::llvm::ArrayRef<::mlir::Attribute>>;
+  static constexpr int odsIndex_view = 0;
+  static constexpr int odsIndex_indices = 1;
+  using Properties = FoldAdaptor::Properties;
+  static ::llvm::ArrayRef<::llvm::StringRef> getAttributeNames() {
+    return {};
+  }
+
+  static constexpr ::llvm::StringLiteral getOperationName() {
+    return ::llvm::StringLiteral("jlcs.load_array_element");
+  }
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index);
+  ::mlir::Operation::operand_range getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(getOperation()->operand_begin(), valueRange.first),
+             std::next(getOperation()->operand_begin(), valueRange.first + valueRange.second)};
+  }
+
+  ::mlir::TypedValue<::mlir::Type> getView() {
+    return ::llvm::cast<::mlir::TypedValue<::mlir::Type>>(*getODSOperands(0).begin());
+  }
+
+  ::mlir::Operation::operand_range getIndices() {
+    return getODSOperands(1);
+  }
+
+  ::mlir::OpOperand &getViewMutable() {
+    auto range = getODSOperandIndexAndLength(0);
+    return getOperation()->getOpOperand(range.first);
+  }
+
+  ::mlir::MutableOperandRange getIndicesMutable();
+  std::pair<unsigned, unsigned> getODSResultIndexAndLength(unsigned index) {
+    return {index, 1};
+  }
+
+  ::mlir::Operation::result_range getODSResults(unsigned index) {
+    auto valueRange = getODSResultIndexAndLength(index);
+    return {std::next(getOperation()->result_begin(), valueRange.first),
+             std::next(getOperation()->result_begin(), valueRange.first + valueRange.second)};
+  }
+
+  ::mlir::TypedValue<::mlir::Type> getResult() {
+    return ::llvm::cast<::mlir::TypedValue<::mlir::Type>>(*getODSResults(0).begin());
+  }
+
+  static ::llvm::LogicalResult setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static ::mlir::Attribute getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop);
+  static llvm::hash_code computePropertiesHash(const Properties &prop);
+  static std::optional<mlir::Attribute> getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name);
+  static void setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value);
+  static void populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs);
+  static ::llvm::LogicalResult verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, Value view, ValueRange indices, Type resultType);
+  static LoadArrayElementOp create(::mlir::OpBuilder &builder, ::mlir::Location location, Value view, ValueRange indices, Type resultType);
+  static LoadArrayElementOp create(::mlir::ImplicitLocOpBuilder &builder, Value view, ValueRange indices, Type resultType);
+  ::llvm::LogicalResult verifyInvariantsImpl();
+  ::llvm::LogicalResult verifyInvariants();
+  static ::llvm::LogicalResult setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+public:
+  LoadArrayElementOp(::mlir::Operation *op) : Op(op) {}
+};
+} // namespace jlcs
+} // namespace mlir
+MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::LoadArrayElementOp)
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
 // ::mlir::jlcs::SetFieldOp declarations
 //===----------------------------------------------------------------------===//
 
@@ -480,6 +674,175 @@ public:
 } // namespace jlcs
 } // namespace mlir
 MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::SetFieldOp)
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
+// ::mlir::jlcs::StoreArrayElementOp declarations
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+class StoreArrayElementOpGenericAdaptorBase {
+public:
+  using Properties = ::mlir::EmptyProperties;
+protected:
+  ::mlir::DictionaryAttr odsAttrs;
+  ::std::optional<::mlir::OperationName> odsOpName;
+  Properties properties;
+  ::mlir::RegionRange odsRegions;
+public:
+  StoreArrayElementOpGenericAdaptorBase(::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : odsAttrs(attrs), properties(properties), odsRegions(regions) {  if (odsAttrs)
+      odsOpName.emplace("jlcs.store_array_element", odsAttrs.getContext());
+  }
+
+  StoreArrayElementOpGenericAdaptorBase(StoreArrayElementOp op);
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize);
+  const Properties &getProperties() {
+    return properties;
+  }
+
+  ::mlir::DictionaryAttr getAttributes() {
+    return odsAttrs;
+  }
+
+};
+} // namespace detail
+template <typename RangeT>
+class StoreArrayElementOpGenericAdaptor : public detail::StoreArrayElementOpGenericAdaptorBase {
+  using ValueT = ::llvm::detail::ValueOfRange<RangeT>;
+  using Base = detail::StoreArrayElementOpGenericAdaptorBase;
+  static constexpr int odsIndex_value = 0;
+  static constexpr int odsIndex_view = 1;
+  static constexpr int odsIndex_indices = 2;
+public:
+  StoreArrayElementOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : Base(attrs, properties, regions), odsOperands(values) {}
+
+  StoreArrayElementOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions = {}) : StoreArrayElementOpGenericAdaptor(values, attrs, (properties ? *properties.as<Properties *>() : Properties{}), regions) {}
+
+  StoreArrayElementOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs = nullptr) : StoreArrayElementOpGenericAdaptor(values, attrs, Properties{}, {}) {}
+
+  StoreArrayElementOpGenericAdaptor(RangeT values, const StoreArrayElementOpGenericAdaptorBase &base) : Base(base), odsOperands(values) {}
+
+  template <typename LateInst = StoreArrayElementOp, typename = std::enable_if_t<std::is_same_v<LateInst, StoreArrayElementOp>>>
+  StoreArrayElementOpGenericAdaptor(RangeT values, LateInst op) : Base(op), odsOperands(values) {}
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index) {
+    return Base::getODSOperandIndexAndLength(index, odsOperands.size());
+  }
+
+  RangeT getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(odsOperands.begin(), valueRange.first),
+             std::next(odsOperands.begin(), valueRange.first + valueRange.second)};
+  }
+
+  ValueT getValue() {
+    return (*getODSOperands(0).begin());
+  }
+
+  ValueT getView() {
+    return (*getODSOperands(1).begin());
+  }
+
+  RangeT getIndices() {
+    return getODSOperands(2);
+  }
+
+  RangeT getOperands() {
+    return odsOperands;
+  }
+
+private:
+  RangeT odsOperands;
+};
+class StoreArrayElementOpAdaptor : public StoreArrayElementOpGenericAdaptor<::mlir::ValueRange> {
+public:
+  using StoreArrayElementOpGenericAdaptor::StoreArrayElementOpGenericAdaptor;
+  StoreArrayElementOpAdaptor(StoreArrayElementOp op);
+
+  ::llvm::LogicalResult verify(::mlir::Location loc);
+};
+class StoreArrayElementOp : public ::mlir::Op<StoreArrayElementOp, ::mlir::OpTrait::ZeroRegions, ::mlir::OpTrait::ZeroResults, ::mlir::OpTrait::ZeroSuccessors, ::mlir::OpTrait::AtLeastNOperands<2>::Impl, ::mlir::OpTrait::OpInvariants> {
+public:
+  using Op::Op;
+  using Op::print;
+  using Adaptor = StoreArrayElementOpAdaptor;
+  template <typename RangeT>
+  using GenericAdaptor = StoreArrayElementOpGenericAdaptor<RangeT>;
+  using FoldAdaptor = GenericAdaptor<::llvm::ArrayRef<::mlir::Attribute>>;
+  static constexpr int odsIndex_value = 0;
+  static constexpr int odsIndex_view = 1;
+  static constexpr int odsIndex_indices = 2;
+  using Properties = FoldAdaptor::Properties;
+  static ::llvm::ArrayRef<::llvm::StringRef> getAttributeNames() {
+    return {};
+  }
+
+  static constexpr ::llvm::StringLiteral getOperationName() {
+    return ::llvm::StringLiteral("jlcs.store_array_element");
+  }
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index);
+  ::mlir::Operation::operand_range getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(getOperation()->operand_begin(), valueRange.first),
+             std::next(getOperation()->operand_begin(), valueRange.first + valueRange.second)};
+  }
+
+  ::mlir::TypedValue<::mlir::Type> getValue() {
+    return ::llvm::cast<::mlir::TypedValue<::mlir::Type>>(*getODSOperands(0).begin());
+  }
+
+  ::mlir::TypedValue<::mlir::Type> getView() {
+    return ::llvm::cast<::mlir::TypedValue<::mlir::Type>>(*getODSOperands(1).begin());
+  }
+
+  ::mlir::Operation::operand_range getIndices() {
+    return getODSOperands(2);
+  }
+
+  ::mlir::OpOperand &getValueMutable() {
+    auto range = getODSOperandIndexAndLength(0);
+    return getOperation()->getOpOperand(range.first);
+  }
+
+  ::mlir::OpOperand &getViewMutable() {
+    auto range = getODSOperandIndexAndLength(1);
+    return getOperation()->getOpOperand(range.first);
+  }
+
+  ::mlir::MutableOperandRange getIndicesMutable();
+  std::pair<unsigned, unsigned> getODSResultIndexAndLength(unsigned index) {
+    return {index, 1};
+  }
+
+  ::mlir::Operation::result_range getODSResults(unsigned index) {
+    auto valueRange = getODSResultIndexAndLength(index);
+    return {std::next(getOperation()->result_begin(), valueRange.first),
+             std::next(getOperation()->result_begin(), valueRange.first + valueRange.second)};
+  }
+
+  static ::llvm::LogicalResult setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static ::mlir::Attribute getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop);
+  static llvm::hash_code computePropertiesHash(const Properties &prop);
+  static std::optional<mlir::Attribute> getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name);
+  static void setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value);
+  static void populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs);
+  static ::llvm::LogicalResult verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, Value value, Value view, ValueRange indices);
+  static StoreArrayElementOp create(::mlir::OpBuilder &builder, ::mlir::Location location, Value value, Value view, ValueRange indices);
+  static StoreArrayElementOp create(::mlir::ImplicitLocOpBuilder &builder, Value value, Value view, ValueRange indices);
+  ::llvm::LogicalResult verifyInvariantsImpl();
+  ::llvm::LogicalResult verifyInvariants();
+  static ::llvm::LogicalResult setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+public:
+  StoreArrayElementOp(::mlir::Operation *op) : Op(op) {}
+};
+} // namespace jlcs
+} // namespace mlir
+MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::StoreArrayElementOp)
 
 namespace mlir {
 namespace jlcs {

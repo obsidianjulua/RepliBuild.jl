@@ -61,6 +61,7 @@ add_llvm_library(JLCS SHARED
   JLCSOps.cpp
   JLCSTypes.cpp
   JLCSCHelpers.cpp
+  JLCSPasses.cpp
 
   PARTIAL_SOURCES_INTENDED
 
@@ -73,6 +74,19 @@ add_llvm_library(JLCS SHARED
   MLIRIR
   MLIRSupport
   MLIRInferTypeOpInterface
+  MLIRFuncDialect
+  MLIRArithDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  MLIRControlFlowDialect
+  MLIRLLVMDialect
+  MLIRLLVMCommonConversion
+  MLIRTransforms
+  MLIRExecutionEngine
+  MLIRCAPIIR
+  MLIRCAPIExecutionEngine
+  MLIRTargetLLVMIRExport
+  MLIRToLLVMIRTranslation
 )
 
 # Install the library

@@ -11,7 +11,9 @@
 #undef GET_OP_LIST
 
 ::mlir::jlcs::GetFieldOp,
+::mlir::jlcs::LoadArrayElementOp,
 ::mlir::jlcs::SetFieldOp,
+::mlir::jlcs::StoreArrayElementOp,
 ::mlir::jlcs::TypeInfoOp,
 ::mlir::jlcs::VirtualCallOp
 #endif  // GET_OP_LIST
@@ -38,6 +40,16 @@ static ::llvm::LogicalResult __mlir_ods_local_type_constraint_JLCSOps1(
 }
 
 static ::llvm::LogicalResult __mlir_ods_local_type_constraint_JLCSOps2(
+    ::mlir::Operation *op, ::mlir::Type type, ::llvm::StringRef valueKind,
+    unsigned valueIndex) {
+  if (!((::llvm::isa<::mlir::IndexType>(type)))) {
+    return op->emitOpError(valueKind) << " #" << valueIndex
+        << " must be variadic of index, but got " << type;
+  }
+  return ::mlir::success();
+}
+
+static ::llvm::LogicalResult __mlir_ods_local_type_constraint_JLCSOps3(
     ::mlir::Operation *op, ::mlir::Type type, ::llvm::StringRef valueKind,
     unsigned valueIndex) {
   if (!((true))) {
@@ -315,6 +327,170 @@ namespace mlir {
 namespace jlcs {
 
 //===----------------------------------------------------------------------===//
+// ::mlir::jlcs::LoadArrayElementOp definitions
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+LoadArrayElementOpGenericAdaptorBase::LoadArrayElementOpGenericAdaptorBase(LoadArrayElementOp op) : odsAttrs(op->getRawDictionaryAttrs()), odsOpName(op->getName()), properties(op.getProperties()), odsRegions(op->getRegions()) {}
+
+std::pair<unsigned, unsigned> LoadArrayElementOpGenericAdaptorBase::getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize) {
+  bool isVariadic[] = {false, true};
+  int prevVariadicCount = 0;
+  for (unsigned i = 0; i < index; ++i)
+    if (isVariadic[i]) ++prevVariadicCount;
+
+  // Calculate how many dynamic values a static variadic operand corresponds to.
+  // This assumes all static variadic operands have the same dynamic value count.
+  int variadicSize = (odsOperandsSize - 1) / 1;
+  // `index` passed in as the parameter is the static index which counts each
+  // operand (variadic or not) as size 1. So here for each previous static variadic
+  // operand, we need to offset by (variadicSize - 1) to get where the dynamic
+  // value pack for this static operand starts.
+  int start = index + (variadicSize - 1) * prevVariadicCount;
+  int size = isVariadic[index] ? variadicSize : 1;
+  return {start, size};
+}
+
+} // namespace detail
+LoadArrayElementOpAdaptor::LoadArrayElementOpAdaptor(LoadArrayElementOp op) : LoadArrayElementOpGenericAdaptor(op->getOperands(), op) {}
+
+::llvm::LogicalResult LoadArrayElementOpAdaptor::verify(::mlir::Location loc) {
+  return ::mlir::success();
+}
+
+std::pair<unsigned, unsigned> LoadArrayElementOp::getODSOperandIndexAndLength(unsigned index) {
+  bool isVariadic[] = {false, true};
+  int prevVariadicCount = 0;
+  for (unsigned i = 0; i < index; ++i)
+    if (isVariadic[i]) ++prevVariadicCount;
+
+  // Calculate how many dynamic values a static variadic operand corresponds to.
+  // This assumes all static variadic operands have the same dynamic value count.
+  int variadicSize = (getOperation()->getNumOperands() - 1) / 1;
+  // `index` passed in as the parameter is the static index which counts each
+  // operand (variadic or not) as size 1. So here for each previous static variadic
+  // operand, we need to offset by (variadicSize - 1) to get where the dynamic
+  // value pack for this static operand starts.
+  int start = index + (variadicSize - 1) * prevVariadicCount;
+  int size = isVariadic[index] ? variadicSize : 1;
+  return {start, size};
+}
+
+::mlir::MutableOperandRange LoadArrayElementOp::getIndicesMutable() {
+  auto range = getODSOperandIndexAndLength(1);
+  auto mutableRange = ::mlir::MutableOperandRange(getOperation(), range.first, range.second);
+  return mutableRange;
+}
+
+::llvm::LogicalResult LoadArrayElementOp::setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+      return ::mlir::success();
+}
+
+::mlir::Attribute LoadArrayElementOp::getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop) {
+    ::mlir::SmallVector<::mlir::NamedAttribute> attrs;
+    ::mlir::Builder odsBuilder{ctx};
+
+  if (!attrs.empty())
+    return odsBuilder.getDictionaryAttr(attrs);
+  return {};
+}
+
+llvm::hash_code LoadArrayElementOp::computePropertiesHash(const Properties &prop) {
+  using llvm::hash_value;
+  return llvm::hash_combine();
+}
+
+std::optional<mlir::Attribute> LoadArrayElementOp::getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name) {
+  return std::nullopt;
+}
+
+void LoadArrayElementOp::setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value) {
+}
+
+void LoadArrayElementOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs) {
+}
+
+::llvm::LogicalResult LoadArrayElementOp::verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+    return ::mlir::success();
+}
+
+LoadArrayElementOp LoadArrayElementOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, Value view, ValueRange indices, Type resultType) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, view, indices, resultType);
+  auto __res__ = ::llvm::dyn_cast<LoadArrayElementOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+LoadArrayElementOp LoadArrayElementOp::create(::mlir::ImplicitLocOpBuilder &builder, Value view, ValueRange indices, Type resultType) {
+  return create(builder, builder.getLoc(), view, indices, resultType);
+}
+
+::llvm::LogicalResult LoadArrayElementOp::verifyInvariantsImpl() {
+  {
+    unsigned index = 0; (void)index;
+    auto valueGroup0 = getODSOperands(0);
+
+    for (auto v : valueGroup0) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps1(*this, v.getType(), "operand", index++)))
+        return ::mlir::failure();
+    }
+    auto valueGroup1 = getODSOperands(1);
+
+    for (auto v : valueGroup1) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps2(*this, v.getType(), "operand", index++)))
+        return ::mlir::failure();
+    }
+  }
+  {
+    unsigned index = 0; (void)index;
+    auto valueGroup0 = getODSResults(0);
+
+    for (auto v : valueGroup0) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps1(*this, v.getType(), "result", index++)))
+        return ::mlir::failure();
+    }
+  }
+  return ::mlir::success();
+}
+
+::llvm::LogicalResult LoadArrayElementOp::verifyInvariants() {
+  return verifyInvariantsImpl();
+}
+
+::llvm::LogicalResult LoadArrayElementOp::setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+  // keep track of used keys in the input dictionary to be able to error out
+  // if there are some unknown ones.
+  ::mlir::DenseSet<::mlir::StringAttr> usedKeys;
+  ::mlir::MLIRContext *ctx = dict.getContext();
+  (void)ctx;
+
+  for (::mlir::NamedAttribute attr : dict) {
+    if (!usedKeys.contains(attr.getName()))
+      return emitError() << "unknown key '" << attr.getName() <<
+          "' when parsing properties dictionary";
+  }
+  return ::mlir::success();
+}
+
+} // namespace jlcs
+} // namespace mlir
+MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::LoadArrayElementOp)
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
 // ::mlir::jlcs::SetFieldOp definitions
 //===----------------------------------------------------------------------===//
 
@@ -517,6 +693,167 @@ void SetFieldOp::getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectI
 } // namespace jlcs
 } // namespace mlir
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::SetFieldOp)
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
+// ::mlir::jlcs::StoreArrayElementOp definitions
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+StoreArrayElementOpGenericAdaptorBase::StoreArrayElementOpGenericAdaptorBase(StoreArrayElementOp op) : odsAttrs(op->getRawDictionaryAttrs()), odsOpName(op->getName()), properties(op.getProperties()), odsRegions(op->getRegions()) {}
+
+std::pair<unsigned, unsigned> StoreArrayElementOpGenericAdaptorBase::getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize) {
+  bool isVariadic[] = {false, false, true};
+  int prevVariadicCount = 0;
+  for (unsigned i = 0; i < index; ++i)
+    if (isVariadic[i]) ++prevVariadicCount;
+
+  // Calculate how many dynamic values a static variadic operand corresponds to.
+  // This assumes all static variadic operands have the same dynamic value count.
+  int variadicSize = (odsOperandsSize - 2) / 1;
+  // `index` passed in as the parameter is the static index which counts each
+  // operand (variadic or not) as size 1. So here for each previous static variadic
+  // operand, we need to offset by (variadicSize - 1) to get where the dynamic
+  // value pack for this static operand starts.
+  int start = index + (variadicSize - 1) * prevVariadicCount;
+  int size = isVariadic[index] ? variadicSize : 1;
+  return {start, size};
+}
+
+} // namespace detail
+StoreArrayElementOpAdaptor::StoreArrayElementOpAdaptor(StoreArrayElementOp op) : StoreArrayElementOpGenericAdaptor(op->getOperands(), op) {}
+
+::llvm::LogicalResult StoreArrayElementOpAdaptor::verify(::mlir::Location loc) {
+  return ::mlir::success();
+}
+
+std::pair<unsigned, unsigned> StoreArrayElementOp::getODSOperandIndexAndLength(unsigned index) {
+  bool isVariadic[] = {false, false, true};
+  int prevVariadicCount = 0;
+  for (unsigned i = 0; i < index; ++i)
+    if (isVariadic[i]) ++prevVariadicCount;
+
+  // Calculate how many dynamic values a static variadic operand corresponds to.
+  // This assumes all static variadic operands have the same dynamic value count.
+  int variadicSize = (getOperation()->getNumOperands() - 2) / 1;
+  // `index` passed in as the parameter is the static index which counts each
+  // operand (variadic or not) as size 1. So here for each previous static variadic
+  // operand, we need to offset by (variadicSize - 1) to get where the dynamic
+  // value pack for this static operand starts.
+  int start = index + (variadicSize - 1) * prevVariadicCount;
+  int size = isVariadic[index] ? variadicSize : 1;
+  return {start, size};
+}
+
+::mlir::MutableOperandRange StoreArrayElementOp::getIndicesMutable() {
+  auto range = getODSOperandIndexAndLength(2);
+  auto mutableRange = ::mlir::MutableOperandRange(getOperation(), range.first, range.second);
+  return mutableRange;
+}
+
+::llvm::LogicalResult StoreArrayElementOp::setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+      return ::mlir::success();
+}
+
+::mlir::Attribute StoreArrayElementOp::getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop) {
+    ::mlir::SmallVector<::mlir::NamedAttribute> attrs;
+    ::mlir::Builder odsBuilder{ctx};
+
+  if (!attrs.empty())
+    return odsBuilder.getDictionaryAttr(attrs);
+  return {};
+}
+
+llvm::hash_code StoreArrayElementOp::computePropertiesHash(const Properties &prop) {
+  using llvm::hash_value;
+  return llvm::hash_combine();
+}
+
+std::optional<mlir::Attribute> StoreArrayElementOp::getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name) {
+  return std::nullopt;
+}
+
+void StoreArrayElementOp::setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value) {
+}
+
+void StoreArrayElementOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs) {
+}
+
+::llvm::LogicalResult StoreArrayElementOp::verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+    return ::mlir::success();
+}
+
+StoreArrayElementOp StoreArrayElementOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, Value value, Value view, ValueRange indices) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, value, view, indices);
+  auto __res__ = ::llvm::dyn_cast<StoreArrayElementOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+StoreArrayElementOp StoreArrayElementOp::create(::mlir::ImplicitLocOpBuilder &builder, Value value, Value view, ValueRange indices) {
+  return create(builder, builder.getLoc(), value, view, indices);
+}
+
+::llvm::LogicalResult StoreArrayElementOp::verifyInvariantsImpl() {
+  {
+    unsigned index = 0; (void)index;
+    auto valueGroup0 = getODSOperands(0);
+
+    for (auto v : valueGroup0) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps1(*this, v.getType(), "operand", index++)))
+        return ::mlir::failure();
+    }
+    auto valueGroup1 = getODSOperands(1);
+
+    for (auto v : valueGroup1) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps1(*this, v.getType(), "operand", index++)))
+        return ::mlir::failure();
+    }
+    auto valueGroup2 = getODSOperands(2);
+
+    for (auto v : valueGroup2) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps2(*this, v.getType(), "operand", index++)))
+        return ::mlir::failure();
+    }
+  }
+  return ::mlir::success();
+}
+
+::llvm::LogicalResult StoreArrayElementOp::verifyInvariants() {
+  return verifyInvariantsImpl();
+}
+
+::llvm::LogicalResult StoreArrayElementOp::setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+  // keep track of used keys in the input dictionary to be able to error out
+  // if there are some unknown ones.
+  ::mlir::DenseSet<::mlir::StringAttr> usedKeys;
+  ::mlir::MLIRContext *ctx = dict.getContext();
+  (void)ctx;
+
+  for (::mlir::NamedAttribute attr : dict) {
+    if (!usedKeys.contains(attr.getName()))
+      return emitError() << "unknown key '" << attr.getName() <<
+          "' when parsing properties dictionary";
+  }
+  return ::mlir::success();
+}
+
+} // namespace jlcs
+} // namespace mlir
+MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::StoreArrayElementOp)
 
 namespace mlir {
 namespace jlcs {
@@ -1224,7 +1561,7 @@ VirtualCallOp VirtualCallOp::create(::mlir::ImplicitLocOpBuilder &builder, Symbo
     auto valueGroup0 = getODSOperands(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps2(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCSOps3(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
   }

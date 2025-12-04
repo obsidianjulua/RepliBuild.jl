@@ -124,3 +124,78 @@ def VirtualCallOp : JLCS_Op<"vcall"> {
     Value getObject() { return getArgs()[0]; }
   }];
 }
+
+// ====================================================================
+// Array Operations
+// ====================================================================
+
+// 5. Load Array Element Op (Strided Array Access)
+def LoadArrayElementOp : JLCS_Op<"load_array_element"> {
+  let summary = "Load element from strided array view.";
+  let description = [{
+    Loads an element from a multi-dimensional array using strided indexing.
+    Computes the linearized offset as: sum(index_i * stride_i) for all dimensions.
+    Then performs: data_ptr[linear_offset]
+
+    The array view must be a pointer to an ArrayView struct containing:
+    - data_ptr (offset 0)
+    - dims_ptr (offset 8)
+    - strides_ptr (offset 16)
+    - rank (offset 24)
+
+    Example:
+    ```mlir
+    %elem = jlcs.load_array_element %view[%i, %j, %k]
+      : !jlcs.array_view<f64, 3> -> f64
+    ```
+  }];
+
+  let arguments = (ins
+    AnyType:$view,               // Pointer to ArrayView struct
+    Variadic<Index>:$indices     // Multi-dimensional indices (must match rank)
+  );
+
+  let results = (outs AnyType:$result);
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "Value":$view, "ValueRange":$indices, "Type":$resultType)>
+  ];
+
+  let extraClassDeclaration = [{
+    LoadArrayElementOp(::mlir::Operation *op) : Op(op) {}
+  }];
+}
+
+// 6. Store Array Element Op (Strided Array Mutation)
+def StoreArrayElementOp : JLCS_Op<"store_array_element"> {
+  let summary = "Store element to strided array view.";
+  let description = [{
+    Stores an element to a multi-dimensional array using strided indexing.
+    Computes the linearized offset as: sum(index_i * stride_i) for all dimensions.
+    Then performs: data_ptr[linear_offset] = value
+
+    Example:
+    ```mlir
+    jlcs.store_array_element %value, %view[%i, %j, %k]
+      : f64, !jlcs.array_view<f64, 3>
+    ```
+  }];
+
+  let arguments = (ins
+    AnyType:$value,              // Value to store
+    AnyType:$view,               // Pointer to ArrayView struct
+    Variadic<Index>:$indices     // Multi-dimensional indices
+  );
+
+  let results = (outs);
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "Value":$value, "Value":$view, "ValueRange":$indices)>
+  ];
+
+  let extraClassDeclaration = [{
+    StoreArrayElementOp(::mlir::Operation *op) : Op(op) {}
+  }];
+}
