@@ -36,6 +36,11 @@
 *~
 .DS_Store
 .claude
+libJLCS++.so
+libJLCS.so
+Makefile
+*.cmake
+/CMakeFiles/
 
 # Test outputs
 /test/build/
