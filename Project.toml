@@ -4,7 +4,7 @@ version = "2.0.1"
 authors = ["grim <archjulialua@gmail.com>"]
 
 [deps]
-Clang = "40e3b903-d033-50b4-a0cc-940c62c95e31"
+# Clang = "40e3b903-d033-50b4-a0cc-940c62c95e31"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
@@ -14,7 +14,7 @@ Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
 
 [compat]
-Clang = "0.19"
+# Clang = "0.19"
 JSON = "0.21, 1"
 TOML = "1"
 Dates = ">=1.9"

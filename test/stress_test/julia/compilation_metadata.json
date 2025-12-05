@@ -347,7 +347,7 @@
     "-std=c++17",
     "-fPIC"
   ],
-  "binary_path": "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libstress_test.so",
+  "binary_path": "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libproject.so",
   "binary_type": "shared",
   "functions": [
     {
@@ -2290,7 +2290,7 @@
       }
     }
   ],
-  "project": "stress_test",
+  "project": "project",
   "source_files": [
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp"
   ],
@@ -2490,11 +2490,11 @@
   },
   "metadata_version": "1.0",
   "include_dirs": [
-    "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/",
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/include",
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src"
   ],
-  "timestamp": "2025-12-03T13:40:27.355",
+  "timestamp": "2025-12-05T05:06:25.406",
   "struct_definitions": {
     "LUDecomposition": {
       "kind": "struct",

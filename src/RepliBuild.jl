@@ -25,7 +25,6 @@ include("Discovery.jl")
 include("ClangJLBridge.jl")
 include("Compiler.jl")
 include("Wrapper.jl")
-include("MLIRNative.jl")
 
 # Import submodules for internal use
 using .RepliBuildPaths
@@ -37,7 +36,6 @@ using .Discovery
 using .ClangJLBridge
 using .Compiler
 using .Wrapper
-using .MLIRNative
 
 # ============================================================================
 # EXPORTS - Clean Build Orchestration API
@@ -54,10 +52,6 @@ export clean
 
 # Advanced modules (for power users who know what they're doing)
 export Compiler, Wrapper, Discovery, ConfigurationManager
-
-# INTERNAL: Not for end users - these are deprecated/confusing
-# export discover, import_cmake, ASTWalker, CMakeParser, WorkspaceBuilder, LLVMEnvironment
-# export REPL_API, rbuild, rdiscover, rclean, rinfo, rwrap, rbuild_fast, rcompile, rparallel, rthreads, rcache_status
 
 # ============================================================================
 # PUBLIC API - Build Orchestration

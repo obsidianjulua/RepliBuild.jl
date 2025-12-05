@@ -8,7 +8,7 @@ allow_function_pointers = true
 parallel = true
 flags = ["-std=c++17", "-fPIC"]
 source_files = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp"]
-include_dirs = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/include", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src"]
+include_dirs = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/include", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src"]
 
 [link]
 enable_lto = false
@@ -34,9 +34,9 @@ enabled = true
 toolchain = "auto"
 
 [project]
-name = "stress_test"
-root = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test"
-uuid = "4f6e3f0a-9b3c-412a-a705-dfd53843e277"
+name = "project"
+root = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/"
+uuid = "b8794ca7-f87a-41c2-8472-b5517f39a6cf"
 
 [paths]
 build = "build"
