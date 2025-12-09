@@ -59,12 +59,14 @@ add_llvm_library(JLCS SHARED
   impl/JLCSTypes.cpp
   impl/JLCSCHelpers.cpp
   impl/JLCSPasses.cpp
+  impl/JLCSCAPIWrappers.cpp
 
   DEPENDS
   JLCSIncGen
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRCAPIIR
   MLIRSupport
   MLIRInferTypeOpInterface
   MLIRFuncDialect
@@ -79,7 +81,7 @@ add_llvm_library(JLCS SHARED
   MLIRCAPIIR
   MLIRCAPIExecutionEngine
   MLIRTargetLLVMIRExport
-  MLIRToLLVMIRTranslation
+  MLIRToLLVMIRTranslationRegistration
 )
 
 # Install the library

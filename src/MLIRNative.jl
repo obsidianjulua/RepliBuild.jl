@@ -14,8 +14,10 @@ export test_dialect, print_module
 # =============================================================================
 
 # Library paths
-const libMLIR = "libMLIR"  # MLIR C API library (system)
+# Note: We use libJLCS for C API functions since it includes wrappers
+# that link against the static MLIRCAPIIR library
 const libJLCS_path = joinpath(@__DIR__, "mlir", "build", "libJLCS.so")
+const libJLCS = libJLCS_path  # Alias for convenience
 
 # Check if JLCS library exists
 function check_library()
@@ -54,19 +56,15 @@ The context must be destroyed with `destroy_context()` when done.
 function create_context()
     check_library()
 
-    # Create MLIR context
-    ctx = ccall((:mlirContextCreate, libMLIR), MlirContext, ())
+    # Create MLIR context (using C API wrapper in libJLCS)
+    ctx = ccall((:mlirContextCreate, libJLCS), MlirContext, ())
 
     if ctx == C_NULL
         error("Failed to create MLIR context")
     end
 
-    # Load JLCS dialect library dynamically
-    # This makes the registerJLCSDialect function available
-    dlopen(libJLCS_path, RTLD_GLOBAL)
-
     # Register JLCS dialect with context
-    ccall((:registerJLCSDialect, libJLCS_path), Cvoid, (MlirContext,), ctx)
+    ccall((:registerJLCSDialect, libJLCS), Cvoid, (MlirContext,), ctx)
 
     return ctx
 end
@@ -77,7 +75,7 @@ end
 Destroy an MLIR context and free its resources.
 """
 function destroy_context(ctx::MlirContext)
-    ccall((:mlirContextDestroy, libMLIR), Cvoid, (MlirContext,), ctx)
+    ccall((:mlirContextDestroy, libJLCS), Cvoid, (MlirContext,), ctx)
 end
 
 # =============================================================================
@@ -90,7 +88,7 @@ end
 Create an empty MLIR module in the given context.
 """
 function create_module(ctx::MlirContext, location::MlirLocation)
-    return ccall((:mlirModuleCreateEmpty, libMLIR), MlirModule, (MlirLocation,), location)
+    return ccall((:mlirModuleCreateEmpty, libJLCS), MlirModule, (MlirLocation,), location)
 end
 
 """
@@ -100,7 +98,7 @@ Create an empty MLIR module with unknown location.
 """
 function create_module(ctx::MlirContext)
     # Get unknown location
-    loc = ccall((:mlirLocationUnknownGet, libMLIR), MlirLocation, (MlirContext,), ctx)
+    loc = ccall((:mlirLocationUnknownGet, libJLCS), MlirLocation, (MlirContext,), ctx)
     return create_module(ctx, loc)
 end
 
@@ -110,7 +108,7 @@ end
 Get the operation backing a module.
 """
 function get_module_operation(mlir_module::MlirModule)
-    return ccall((:mlirModuleGetOperation, libMLIR), MlirOperation, (MlirModule,), mlir_module)
+    return ccall((:mlirModuleGetOperation, libJLCS), MlirOperation, (MlirModule,), mlir_module)
 end
 
 """
@@ -120,7 +118,7 @@ Print an MLIR module to stdout.
 """
 function print_module(mlir_module::MlirModule)
     op = get_module_operation(mlir_module)
-    ccall((:mlirOperationDump, libMLIR), Cvoid, (MlirOperation,), op)
+    ccall((:mlirOperationDump, libJLCS), Cvoid, (MlirOperation,), op)
 end
 
 # =============================================================================

@@ -134,19 +134,30 @@ struct VirtualCallOpLowering : public ConversionPattern {
         // Step 3: Call the function pointer with arguments (indirect call)
         SmallVector<Value, 4> callArgs(args.begin(), args.end());
 
-        // Build indirect call - CallOp takes (location, resultTypes, callee, operands)
-        TypeRange resultTypes;
-        if (vcallOp.getResult() && !vcallOp.getResult().getType().isa<NoneType>()) {
-            resultTypes = TypeRange(vcallOp.getResult().getType());
+        // Determine result types
+        SmallVector<Type, 1> resultTypeVec;
+        if (vcallOp.getResult()) {
+            resultTypeVec.push_back(vcallOp.getResult().getType());
         }
 
-        // Use CallIndirectOp for function pointer calls
-        auto callOp = rewriter.create<LLVM::CallOp>(
-            loc, resultTypes, funcPtr, callArgs, ArrayRef<NamedAttribute>());
+        // LLVM 21 API: Build CallOp manually with OperationState for indirect calls
+        // First arg should be the function pointer
+        SmallVector<Value> allOperands;
+        allOperands.push_back(funcPtr);
+        allOperands.append(callArgs.begin(), callArgs.end());
+
+        OperationState state(loc, LLVM::CallOp::getOperationName());
+        state.addOperands(allOperands);
+        state.addTypes(resultTypeVec);
+
+        // Add required attributes for indirect call
+        state.addAttribute("callee", FlatSymbolRefAttr());  // empty for indirect
+
+        Operation *callOp = rewriter.create(state);
 
         // Replace the jlcs.vcall with the call result
-        if (vcallOp.getResult()) {
-            rewriter.replaceOp(op, callOp.getResult(0));
+        if (!resultTypeVec.empty()) {
+            rewriter.replaceOp(op, callOp->getResult(0));
         } else {
             rewriter.eraseOp(op);
         }
@@ -329,7 +340,13 @@ struct LowerJLCSToLLVMPass
 // Pass Registration
 //===----------------------------------------------------------------------===//
 
-std::unique_ptr<Pass> mlir::jlcs::createLowerJLCSToLLVMPass()
+namespace mlir {
+namespace jlcs {
+
+std::unique_ptr<Pass> createLowerJLCSToLLVMPass()
 {
     return std::make_unique<LowerJLCSToLLVMPass>();
 }
+
+} // namespace jlcs
+} // namespace mlir

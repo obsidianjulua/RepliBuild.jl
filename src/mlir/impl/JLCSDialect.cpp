@@ -2,11 +2,19 @@
 #include "JLCSDialect.h"
 #include "JLCSOps.h"
 #include "JLCSTypes.h"
-
-#include "JLCSDialect.cpp.inc"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 using namespace mlir::jlcs;
+
+// IMPORTANT: Include type storage definitions BEFORE registering
+// This makes the complete storage class visible for registration
+#define GET_TYPEDEF_CLASSES
+#include "JLCSTypes.cpp.inc"
+
+#include "JLCSDialect.cpp.inc"
 
 void JLCSDialect::initialize()
 {
@@ -16,9 +24,6 @@ void JLCSDialect::initialize()
 #include "JLCSOps.cpp.inc"
         >();
 
-    // Register types
-    addTypes<
-#define GET_TYPEDEF_LIST
-#include "JLCSTypes.cpp.inc"
-        >();
+    // Register types (storage already included above)
+    addTypes<CStructType, ArrayViewType>();
 }
