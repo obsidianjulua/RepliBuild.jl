@@ -105,7 +105,7 @@ julia
 ```
 
 ```julia
-# Load the MLIR bindings
+# Load the MLIR bindings. Use RepliBuild.jl to compile ffi bindings to get c++ types and structure for faster workflow.
 include("../../src/MLIRNative.jl")
 using .MLIRNative
 
