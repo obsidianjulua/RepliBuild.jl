@@ -1,5 +1,5 @@
 [types]
-allow_unknown_enums = false
+allow_unknown_enums = true
 strictness = "warn"
 allow_unknown_structs = true
 allow_function_pointers = true
@@ -36,7 +36,7 @@ toolchain = "auto"
 [project]
 name = "project"
 root = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/"
-uuid = "b8794ca7-f87a-41c2-8472-b5517f39a6cf"
+uuid = "6087e1c4-6014-4463-a148-a326e6e1bb43"
 
 [paths]
 build = "build"

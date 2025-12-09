@@ -1,0 +1,188 @@
+//===--- LowerToLLVMPass.cpp ----------------------------------*- C++ -*-===//
+
+#include "JLCSDialect.h" // Assuming this contains your dialect and ops
+#include "JLCSLoweringUtils.h" // Contains getStructField/setStructField helpers
+#include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
+#include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Pass/Pass.h"
+
+using namespace mlir;
+using namespace mlir::jlcs;
+
+namespace {
+
+//--- 1. SetFieldOp Lowering (Completes C-Struct Mutability) ------------------
+
+struct SetFieldOpLowering : public ConversionPattern {
+    SetFieldOpLowering(MLIRContext* ctx)
+        : ConversionPattern(SetFieldOp::getOperationName(), 1, ctx)
+    {
+    }
+
+    LogicalResult matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto setFieldOp = cast<SetFieldOp>(op);
+        Location loc = setFieldOp.getLoc();
+
+        Value structPtr = setFieldOp.getStructValue();
+        Value newValue = setFieldOp.getNewValue();
+        int64_t offset = setFieldOp.getFieldOffset();
+
+        // Uses the utility to perform the low-level store operation.
+        // Generates: *(T*)((i8*)structPtr + offset) = newValue
+        jlcs::setStructField(loc, rewriter, structPtr, offset, newValue);
+
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+//--- 2. ArrayLoadOp Lowering (Core Array Indexing) --------------------------
+
+struct ArrayLoadOpLowering : public ConversionPattern {
+    ArrayLoadOpLowering(MLIRContext* ctx, const LLVMTypeConverter& typeConverter)
+        : ConversionPattern(ArrayLoadOp::getOperationName(), 1, ctx)
+        , typeConverter(typeConverter)
+    {
+    }
+
+    const LLVMTypeConverter& typeConverter;
+
+    LogicalResult matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto loadOp = cast<ArrayLoadOp>(op);
+        Location loc = loadOp.getLoc();
+        auto arrayViewType = cast<jlcs::ArrayViewType>(loadOp.getArray().getType());
+        unsigned rank = arrayViewType.getRank();
+
+        Type i64PtrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+        Type i64Type = rewriter.getI64Type();
+
+        // 1. Extract the base data pointer (T*) and strides pointer (i64*)
+        Value arrayPtr = loadOp.getArray();
+
+        // Offset 0: data_ptr (T*)
+        // We use the type converter to get the *element* pointer type (e.g., f64*).
+        Value dataPtr = jlcs::getStructField(loc, rewriter, arrayPtr, 0,
+            typeConverter.convertType(arrayViewType.getElementType()));
+
+        // Offset 16: strides_ptr (i64*)
+        Value stridesPtr = jlcs::getStructField(loc, rewriter, arrayPtr, 16, i64PtrType);
+
+        // 2. Linear Index Calculation: linearOffset = SUM(index_i * stride_i)
+        Value linearOffset = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+
+        for (unsigned i = 0; i < rank; ++i) {
+            // Load current stride: stride_i = stridesPtr[i]
+            Value strideIndex = rewriter.create<arith::ConstantIntOp>(loc, i, 64);
+            Value strideAddr = rewriter.create<LLVM::GEPOp>(loc, i64PtrType, i64Type, stridesPtr,
+                ArrayRef<LLVM::GEPArg>({ strideIndex }));
+            Value strideVal = rewriter.create<LLVM::LoadOp>(loc, i64Type, strideAddr);
+
+            // Get the input index for this dimension: index_i
+            Value indexVal = rewriter.create<arith::IndexCastOp>(loc, i64Type, loadOp.getIndices()[i]);
+
+            // Multiply and Accumulate
+            Value partialOffset = rewriter.create<arith::MulIOp>(loc, indexVal, strideVal);
+            linearOffset = rewriter.create<arith::AddIOp>(loc, linearOffset, partialOffset);
+        }
+
+        // 3. Final GEP and Load
+        Type elementLLVMType = typeConverter.convertType(arrayViewType.getElementType());
+        Type finalPtrType = LLVM::LLVMPointerType::get(elementLLVMType);
+
+        // GEP on base dataPtr using the linear offset (in elements, not bytes)
+        Value finalAddr = rewriter.create<LLVM::GEPOp>(loc, finalPtrType, elementLLVMType, dataPtr,
+            ArrayRef<LLVM::GEPArg>({ linearOffset }));
+
+        Value loadedVal = rewriter.create<LLVM::LoadOp>(loc, elementLLVMType, finalAddr);
+        rewriter.replaceOp(op, loadedVal);
+        return success();
+    }
+};
+
+//--- 3. The Main Lowering Pass ----------------------------------------------
+
+struct LowerJLCSToLLVMPass : public PassWrapper<LowerJLCSToLLVMPass, OperationPass<ModuleOp>> {
+    MLIR_DEFIN
+    typeConverter.addConversion([&](jlcs::ArrayViewType arrayType) -> std::optional<Type> {
+        E_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerJLCSToLLVMPass)
+
+        StringRef getArgument() const override { return "jlcs-lower-to-llvm"; }
+        StringRef getDescription() const override { return "Lowers the JLCS dialect to the LLVM dialect."; }
+
+        void runOnOperation() override
+        {
+            MLIRContext& ctx = getContext();
+            LLVMTypeConverter typeConverter(&ctx);
+            ConversionTarget target(ctx);
+            OpBuilder rewriter(&ctx); // Used for type conversion utility
+
+            // ** TYPE CONVERSION (The zero-wrapper contract) **
+
+            // 1. CStructType Conversion: Maps to an LLVM Struct with converted field types.
+            typeConverter.addConversion([&](jlcs::CStructType structType) -> std::optional<Type> {
+                SmallVector<Type> fieldLLVMTypes;
+                for (Type fieldType : structType.getFieldTypes())
+                    fieldLLVMTypes.push_back(typeConverter.convertType(fieldType));
+
+                // The CStruct itself is translated into a pointer-to-struct
+                return LLVM::LLVMStructType::getLiteral(&ctx, fieldLLVMTypes);
+            });
+
+            // 2. ArrayViewType Conversion: Maps to the four-field C-ABI descriptor struct.
+            typeConverter.addConversion([&](jlcs::ArrayViewType arrayType) -> std::optional<Type> {
+                Type convertedElementType = typeConverter.convertType(arrayType.getElementType());
+
+                Type dataPtrType = LLVM::LLVMPointerType::get(convertedElementType); // T*
+                Type i64PtrType = LLVM::LLVMPointerType::get(&ctx); // int64_t* (opaque)
+                Type i64Type = rewriter.getI64Type(); // int64_t (for rank)
+
+                // Matches the C-ABI layout: {T*, i64*, i64*, i64}
+                return LLVM::LLVMStructType::getLiteral(&ctx, {
+                                                                  dataPtrType, // Offset 0: data_ptr
+                                                                  i64PtrType, // Offset 8: dims_ptr
+                                                                  i64PtrType, // Offset 16: strides_ptr
+                                                                  i64Type // Offset 24: rank
+                                                              });
+            });
+
+            // ** OPERATION CONVERSION **
+
+            // 1. Define what is ILLEGAL (Source Dialect Ops)
+            // NOTE: Assuming ArrayLoadOp exists in your dialect.
+            target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp, ArrayLoadOp>();
+
+            // 2. Define what is LEGAL (Target Dialect Ops)
+            target.addLegalDialect<LLVM::LLVMDialect, arith::ArithmeticDialect>();
+
+            // 3. Define the Rewrite Patterns
+            RewritePatternSet patterns(&ctx);
+            patterns.add<GetFieldOpLowering>(&ctx);
+            patterns.add<VirtualCallOpLowering>(&ctx);
+            patterns.add<SetFieldOpLowering>(&ctx); // ADDED: Struct field setter
+            patterns.add<ArrayLoadOpLowering>(&ctx, typeConverter); // ADDED: Array access
+
+            // 4. Execute the Conversion
+            if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
+                signalPassFailure();
+        }
+};
+
+} // end anonymous namespace
+
+// Pass registration utility
+std::unique_ptr<Pass> createLowerJLCSToLLVMPass()
+{
+    return std::make_unique<LowerJLCSToLLVMPass>();
+}
+
+// NOTE: The user's original implementations for GetFieldOpLowering and
+// VirtualCallOpLowering are omitted here for brevity but are assumed to exist
+// and be correct in the final file, although GetFieldOpLowering can be
+// simplified using jlcs::getStructField.

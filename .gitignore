@@ -19,8 +19,7 @@
 .replibuild/
 .replibuild_cache/
 
-# User-local RepliBuild data (should not be committed)
-# Note: User modules in ~/.julia/replibuild/ are not in repo
+# User-local RepliBuild data (should not be committed
 
 # Cache and temporary files
 *.log

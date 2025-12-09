@@ -79,11 +79,39 @@ Traditional FFI tools parse C++ headers (Clang.jl) or require manual annotations
 - Template instantiations: Only those present in final DWARF (ODR-used)
 - Classes: Detection works, but only standard-layout, no virtual methods
 
-**Supported: ## With Julia Dialect | MLIR**
+**In Development (MLIR Dialect):**
 - Virtual methods, vtables, inheritance
 - STL containers (implementation-defined layouts)
 - Exception specifications
 - Function pointers with unknown calling conventions
+
+**[→ See MLIR Dialect Documentation](examples/Mlir/README.md)**
+
+---
+
+## MLIR Dialect for Advanced FFI
+
+RepliBuild includes a custom MLIR dialect (JLCS) for handling complex C++ constructs that DWARF alone cannot fully represent. This enables:
+
+- **Virtual method dispatch** through vtable analysis
+- **C++ class hierarchies** with proper ABI handling
+- **Strided arrays** for cross-language data sharing
+- **JIT compilation** of FFI glue code
+
+### Getting Started with MLIR
+
+```bash
+cd examples/Mlir
+./build_dialect.sh
+
+julia -e 'include("../../src/MLIRNative.jl"); using .MLIRNative; test_dialect()'
+```
+
+### Documentation
+
+- **[Complete MLIR Guide](examples/Mlir/README.md)** - Architecture and setup for Julia developers
+- **[TableGen Tutorial](examples/Mlir/TABLEGEN_GUIDE.md)** - Deep dive into MLIR's code generation DSL
+- **[Practical Examples](examples/Mlir/EXAMPLES.md)** - Working code samples and patterns
 
 ---
 

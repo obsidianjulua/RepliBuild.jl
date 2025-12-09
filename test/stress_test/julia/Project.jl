@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for project
-# Generated: 2025-12-05 05:06:27
+# Generated: 2025-12-06 01:08:14
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libproject.so
 # Metadata: compilation_metadata.json
@@ -27,7 +27,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2025-12-05T05:06:25.406"
+    "generated_at" => "2025-12-06T01:08:12.456"
 )
 
 # =============================================================================
@@ -229,9 +229,7 @@ function compute_eigen(A::DenseMatrix)::EigenDecomposition
 end
 
 """
-    compute_fft(signal::Ptr{Cdouble}, n::Csize_t) -> FFTResult
-
-Wrapper for C++ function: `compute_fft`
+    compute_fft(signal::Ptr{Cdouble}, n::Csize_t)
 
 # Arguments
 - `signal::Ptr{Cdouble}`
@@ -249,10 +247,10 @@ function compute_fft(signal::Ptr{Cdouble}, n::Csize_t)::FFTResult
     ccall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), signal, n)
 end
 
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
+
 function compute_fft(signal::Vector{Float64}, n::Csize_t)::FFTResult
     return GC.@preserve signal begin
-        ccall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), pointer(signal), n)
+        vcall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), pointer(signal), n)
     end
 end
 

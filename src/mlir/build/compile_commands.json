@@ -1,0 +1,32 @@
+[
+{
+  "directory": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build",
+  "command": "/usr/bin/c++ -DEXPERIMENTAL_KEY_INSTRUCTIONS -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/IR -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build -O3 -DNDEBUG -std=gnu++17 -fPIC  -fno-exceptions -funwind-tables -o CMakeFiles/JLCS.dir/impl/JLCSDialect.cpp.o -c /home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSDialect.cpp",
+  "file": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSDialect.cpp",
+  "output": "CMakeFiles/JLCS.dir/impl/JLCSDialect.cpp.o"
+},
+{
+  "directory": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build",
+  "command": "/usr/bin/c++ -DEXPERIMENTAL_KEY_INSTRUCTIONS -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/IR -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build -O3 -DNDEBUG -std=gnu++17 -fPIC  -fno-exceptions -funwind-tables -o CMakeFiles/JLCS.dir/impl/JLCSOps.cpp.o -c /home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSOps.cpp",
+  "file": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSOps.cpp",
+  "output": "CMakeFiles/JLCS.dir/impl/JLCSOps.cpp.o"
+},
+{
+  "directory": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build",
+  "command": "/usr/bin/c++ -DEXPERIMENTAL_KEY_INSTRUCTIONS -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/IR -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build -O3 -DNDEBUG -std=gnu++17 -fPIC  -fno-exceptions -funwind-tables -o CMakeFiles/JLCS.dir/impl/JLCSTypes.cpp.o -c /home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSTypes.cpp",
+  "file": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSTypes.cpp",
+  "output": "CMakeFiles/JLCS.dir/impl/JLCSTypes.cpp.o"
+},
+{
+  "directory": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build",
+  "command": "/usr/bin/c++ -DEXPERIMENTAL_KEY_INSTRUCTIONS -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/IR -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build -O3 -DNDEBUG -std=gnu++17 -fPIC  -fno-exceptions -funwind-tables -o CMakeFiles/JLCS.dir/impl/JLCSCHelpers.cpp.o -c /home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSCHelpers.cpp",
+  "file": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSCHelpers.cpp",
+  "output": "CMakeFiles/JLCS.dir/impl/JLCSCHelpers.cpp.o"
+},
+{
+  "directory": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build",
+  "command": "/usr/bin/c++ -DEXPERIMENTAL_KEY_INSTRUCTIONS -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/IR -I/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/build -O3 -DNDEBUG -std=gnu++17 -fPIC  -fno-exceptions -funwind-tables -o CMakeFiles/JLCS.dir/impl/JLCSPasses.cpp.o -c /home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSPasses.cpp",
+  "file": "/home/grim/Desktop/Projects/RepliBuild.jl/src/mlir/impl/JLCSPasses.cpp",
+  "output": "CMakeFiles/JLCS.dir/impl/JLCSPasses.cpp.o"
+}
+]

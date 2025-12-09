@@ -2,6 +2,7 @@
 # MLIRNative.jl - Julia bindings to JLCS MLIR Dialect
 #
 # Low-level ccall interface to MLIR C API and custom JLCS dialect
+# Part of RepliBuild.jl toolchain for advanced FFI code generation
 
 module MLIRNative
 
@@ -13,8 +14,8 @@ export test_dialect, print_module
 # =============================================================================
 
 # Library paths
-const libMLIR = "libMLIR"  # MLIR C API library
-const libJLCS_path = joinpath(@__DIR__, "Mlir", "build", "libJLCS.so")
+const libMLIR = "libMLIR"  # MLIR C API library (system)
+const libJLCS_path = joinpath(@__DIR__, "mlir", "build", "libJLCS.so")
 
 # Check if JLCS library exists
 function check_library()
@@ -23,10 +24,11 @@ function check_library()
         JLCS dialect library not found at: $libJLCS_path
 
         Build it first with:
-            cd src/Mlir
-            mkdir -p build && cd build
-            cmake ..
-            cmake --build .
+            cd src/mlir
+            ./build.sh
+
+        For more information, see:
+            docs/mlir/README.md
         """)
     end
 end
