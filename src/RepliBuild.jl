@@ -26,6 +26,9 @@ include("ClangJLBridge.jl")
 include("Compiler.jl")
 include("Wrapper.jl")
 
+# Introspection module
+include("Introspect.jl")
+
 # Import submodules for internal use
 using .RepliBuildPaths
 using .LLVMEnvironment
@@ -36,6 +39,7 @@ using .Discovery
 using .ClangJLBridge
 using .Compiler
 using .Wrapper
+using .Introspect
 
 # ============================================================================
 # EXPORTS - Clean Build Orchestration API
@@ -52,6 +56,9 @@ export clean
 
 # Advanced modules (for power users who know what they're doing)
 export Compiler, Wrapper, Discovery, ConfigurationManager
+
+# Introspection API
+export Introspect
 
 # ============================================================================
 # PUBLIC API - Build Orchestration
