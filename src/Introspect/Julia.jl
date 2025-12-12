@@ -31,8 +31,14 @@ println("Instructions: \$(length(info.code))")
 ```
 """
 function code_lowered(func, types::Tuple)
-    # Get lowered code
-    ci = @code_lowered func(zeros(types[1])...)  # Dummy call
+    # Get lowered code using InteractiveUtils
+    results = InteractiveUtils.code_lowered(func, types)
+
+    if isempty(results)
+        error("Could not get lowered code for $func$types")
+    end
+
+    ci = results[1]
 
     # Extract function name
     func_name = string(func)

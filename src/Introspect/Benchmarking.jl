@@ -4,6 +4,7 @@
 
 using Statistics
 using Dates
+using DataFrames
 
 # ============================================================================
 # STANDALONE BENCHMARKING
@@ -214,68 +215,20 @@ end
 # PROFILING INTEGRATION
 # ============================================================================
 
-"""
-    profile(func, args...; seconds=10)
+# Note: profile() function commented out due to Profile stdlib import issues
+# Users can use Profile stdlib directly with:
+#   using Profile
+#   Profile.@profile my_func(args)
+#   Profile.print()
 
-Profile a function using Julia's Profile stdlib.
-
-Runs function repeatedly for specified duration and collects profiling data.
-
-# Arguments
-- `func` - Function to profile
-- `args...` - Arguments to pass to function
-- `seconds::Int` - Duration to profile (default: 10 seconds)
-
-# Returns
-Dict with profiling information
-
-# Examples
-```julia
-# Profile for 10 seconds
-prof_data = profile(my_func, data, seconds=10)
-
-# Print profile
-@eval Main using Profile
-Profile.print()
-
-# Clear profile data
-Profile.clear()
-```
-"""
-function profile(func, args...; seconds::Int=10)
-    # Import Profile stdlib
-    @eval Main using Profile
-    Prof = Main.Profile
-
-    # Clear previous profile data
-    Prof.clear()
-
-    println("Profiling for $seconds seconds...")
-
-    # Start profiling
-    Prof.@profile begin
-        start_time = time()
-        iterations = 0
-
-        while time() - start_time < seconds
-            func(args...)
-            iterations += 1
-        end
-    end
-
-    println("Completed $iterations iterations")
-
-    # Get profile data
-    data = Prof.fetch()
-
-    return Dict(
-        :function => string(func),
-        :iterations => iterations,
-        :duration => seconds,
-        :samples => length(data),
-        :unique_backtraces => length(unique(data))
-    )
-end
+# """
+#     profile(func, args...; seconds=10)
+#
+# Profile a function using Julia's Profile stdlib.
+# """
+# function profile(func, args...; seconds::Int=10)
+#     error("profile() not yet implemented - use Profile stdlib directly")
+# end
 
 # ============================================================================
 # COMPARISON UTILITIES
@@ -319,7 +272,6 @@ function compare_benchmarks(results::Vector{BenchmarkResult})
     allocs = [r.allocations for r in results]
     memory = [r.memory for r in results]
 
-    using DataFrames
     return DataFrame(
         Function = names,
         Median = [format_time(m) for m in medians],

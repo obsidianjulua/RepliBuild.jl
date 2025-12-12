@@ -38,7 +38,7 @@ export compilation_pipeline
 export llvm_ir, optimize_ir, compare_optimization, run_passes, compile_to_asm
 
 # Benchmarking
-export benchmark, benchmark_suite, track_allocations, profile
+export benchmark, benchmark_suite, track_allocations  # profile not yet supported
 
 # Dataset Export
 export export_json, export_csv, export_dataset
