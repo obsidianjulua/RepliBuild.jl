@@ -135,55 +135,79 @@ function dwarf_info(binary_path::String)
 
     # Use existing Compiler function to extract DWARF info
     try
-        # This returns (functions_dict, types_dict)
-        (func_metadata, type_metadata) = Compiler.extract_dwarf_return_types(binary_path)
+        # This returns (return_types, struct_defs)
+        # return_types: Dict{String, Dict{String,Any}} - indexed by function name
+        # struct_defs: Dict{String, Dict{String,Any}} - indexed by struct/enum name
+        (return_types, struct_defs) = Compiler.extract_dwarf_return_types(binary_path)
 
         # Convert to structured types
         functions_map = Dict{String,FunctionInfo}()
         structs_map = Dict{String,StructInfo}()
         enums_map = Dict{String,Vector{Tuple{String,Int}}}()
 
-        # Process functions
-        if haskey(func_metadata, "functions") && func_metadata["functions"] isa Vector
-            for func_dict in func_metadata["functions"]
-                name = get(func_dict, "name", "")
-                if isempty(name)
-                    continue
+        # Process functions - return_types is already a Dict indexed by function name
+        for (func_name, func_dict) in return_types
+            # Extract mangled and demangled names
+            mangled = get(func_dict, "mangled_name", func_name)
+            demangled = get(func_dict, "linkage_name", func_name)
+
+            # Extract return type
+            return_type_dict = get(func_dict, "return_type", Dict())
+            return_type = get(return_type_dict, "c_type", "void")
+
+            # Process parameters
+            params = Tuple{String,String}[]
+            if haskey(func_dict, "parameters") && func_dict["parameters"] isa Vector
+                for (idx, param) in enumerate(func_dict["parameters"])
+                    param_name = get(param, "name", "arg$idx")
+                    param_type = get(param, "c_type", "unknown")
+                    push!(params, (param_name, param_type))
                 end
+            end
 
-                mangled = get(func_dict, "mangled", name)
-                demangled = get(func_dict, "demangled", name)
-                return_type_dict = get(func_dict, "return_type", Dict())
-                return_type = get(return_type_dict, "c_type", "void")
+            is_method = get(func_dict, "is_method", false)
+            class = get(func_dict, "parent_class", nothing)
 
-                # Process parameters
-                params = Tuple{String,String}[]
-                if haskey(func_dict, "parameters") && func_dict["parameters"] isa Vector
-                    for (idx, param) in enumerate(func_dict["parameters"])
-                        param_name = get(param, "name", "arg$idx")
-                        param_type = get(param, "c_type", "unknown")
-                        push!(params, (param_name, param_type))
+            functions_map[func_name] = FunctionInfo(
+                func_name, mangled, demangled,
+                return_type, params,
+                is_method, class
+            )
+        end
+
+        # Process structs and enums - struct_defs is already a Dict indexed by struct/enum name
+        for (type_name, type_dict) in struct_defs
+            kind = get(type_dict, "kind", "struct")
+
+            # Check if this is an enum (prefixed with __enum__)
+            if startswith(type_name, "__enum__")
+                # Extract enum name without prefix
+                enum_name = type_name[9:end]  # Remove "__enum__" prefix
+
+                # Extract enumerators
+                enumerators = Tuple{String,Int}[]
+                if haskey(type_dict, "enumerators") && type_dict["enumerators"] isa Vector
+                    for enumerator in type_dict["enumerators"]
+                        name = get(enumerator, "name", "")
+                        value = get(enumerator, "value", 0)
+                        if value isa String
+                            value = tryparse(Int, value, base=16)
+                            if value === nothing
+                                value = 0
+                            end
+                        end
+                        push!(enumerators, (name, value))
                     end
                 end
 
-                is_method = get(func_dict, "is_method", false)
-                class = get(func_dict, "class", nothing)
+                enums_map[enum_name] = enumerators
 
-                functions_map[name] = FunctionInfo(
-                    name, mangled, demangled,
-                    return_type, params,
-                    is_method, class
-                )
-            end
-        end
-
-        # Process structs from type registry
-        if haskey(type_metadata, "struct_definitions")
-            for (struct_name, struct_dict) in type_metadata["struct_definitions"]
+            elseif kind == "struct" || kind == "class"
+                # Process struct members
                 members = MemberInfo[]
 
-                if haskey(struct_dict, "members") && struct_dict["members"] isa Vector
-                    for member_dict in struct_dict["members"]
+                if haskey(type_dict, "members") && type_dict["members"] isa Vector
+                    for member_dict in type_dict["members"]
                         member_name = get(member_dict, "name", "")
                         c_type = get(member_dict, "c_type", "unknown")
                         julia_type = get(member_dict, "julia_type", "Any")
@@ -191,13 +215,23 @@ function dwarf_info(binary_path::String)
 
                         # Parse offset if it's a string like "0x00"
                         if offset isa String
-                            offset = tryparse(Int, offset, base=16)
-                            if offset === nothing
+                            offset_parsed = tryparse(Int, offset, base=16)
+                            if offset_parsed === nothing
                                 offset = 0
+                            else
+                                offset = offset_parsed
                             end
                         end
 
                         size = get(member_dict, "size", 0)
+                        if size isa String
+                            size_parsed = tryparse(Int, size, base=16)
+                            if size_parsed === nothing
+                                size = 0
+                            else
+                                size = size_parsed
+                            end
+                        end
 
                         push!(members, MemberInfo(
                             member_name, c_type, julia_type, offset, size
@@ -205,28 +239,50 @@ function dwarf_info(binary_path::String)
                     end
                 end
 
+                # Parse byte_size
+                struct_size = get(type_dict, "byte_size", 0)
+                if struct_size isa String
+                    size_parsed = tryparse(Int, struct_size, base=16)
+                    if size_parsed === nothing
+                        struct_size = 0
+                    else
+                        struct_size = size_parsed
+                    end
+                end
+
                 # Calculate size from members if not provided
-                struct_size = get(struct_dict, "size", 0)
                 if struct_size == 0 && !isempty(members)
                     # Size = last member offset + last member size
                     last_member = members[end]
                     struct_size = last_member.offset + last_member.size
                 end
 
-                structs_map[struct_name] = StructInfo(
-                    struct_name,
+                # Extract base classes
+                base_classes = String[]
+                if haskey(type_dict, "base_classes") && type_dict["base_classes"] isa Vector
+                    for base_class in type_dict["base_classes"]
+                        base_name = get(base_class, "type", "")
+                        if !isempty(base_name)
+                            push!(base_classes, base_name)
+                        end
+                    end
+                end
+
+                # Determine if polymorphic (has vtable)
+                is_polymorphic = haskey(type_dict, "vtable") ||
+                                any(m -> m.name == "_vptr" || startswith(m.name, "_vptr."), members)
+
+                structs_map[type_name] = StructInfo(
+                    type_name,
                     struct_size,
-                    get(struct_dict, "alignment", 1),
+                    get(type_dict, "alignment", 1),
                     members,
-                    String[],  # base_classes not in current metadata
-                    false,     # is_polymorphic not in current metadata
-                    nothing    # vtable_offset not in current metadata
+                    base_classes,
+                    is_polymorphic,
+                    nothing  # vtable_offset not tracked currently
                 )
             end
         end
-
-        # Process enums if available
-        # (Current Compiler.jl doesn't extract enums, so this is empty for now)
 
         return DWARFInfo(
             binary_path,
