@@ -1,11 +1,15 @@
-// JLCSTypes.cpp - JLCS dialect type implementations
-// NOTE: The actual type storage and methods are defined in JLCSDialect.cpp
-// to ensure they're visible during type registration.
-// This file exists to satisfy the build system but contains no implementation.
+//===- JLCSTypes.cpp - JLCS dialect type implementations ------------------===//
+//
+// Minimal wrapper to include TableGen-generated type classes.
+//
+//===----------------------------------------------------------------------===//
 
 #include "JLCSTypes.h"
+#include "JLCSDialect.h"
 
 using namespace mlir;
 using namespace mlir::jlcs;
 
-// Empty - all definitions are in JLCSDialect.cpp
+// Bring in the TableGen generated type class definitions.
+#define GET_TYPEDEF_CLASSES
+#include "JLCSTypes.cpp.inc"
