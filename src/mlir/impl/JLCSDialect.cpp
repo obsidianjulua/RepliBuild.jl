@@ -3,12 +3,14 @@
 #include "JLCSDialect.h"
 #include "JLCSOps.h"
 #include "JLCSTypes.h"
-
-// Include the generated dialect class BEFORE defining methods that depend on it.
-#include "JLCSDialect.cpp.inc"
+#include "mlir-c/IR.h"  // For MlirContext
+#include "mlir/CAPI/IR.h"  // For unwrap
 
 using namespace mlir;
 using namespace mlir::jlcs;
+
+// Include the generated dialect definitions
+#include "JLCSDialect.cpp.inc"
 
 void JLCSDialect::initialize()
 {
@@ -25,46 +27,7 @@ void JLCSDialect::initialize()
         >();
 }
 
-// Use the generated parser/printer helpers where available.
-// Parse a type token (delegates to generated parser functions).
-Type JLCSDialect::parseType(DialectAsmParser& parser) const
-{
-    StringRef mnemonic;
-    if (parser.parseKeyword(&mnemonic))
-        return Type();
-    // generatedTypeParser is provided by TableGen when -gen-type-decls/defs were run
-    return generatedTypeParser(parser, mnemonic);
-}
+// LLVM 21: parseType/printType are auto-generated when useDefaultTypePrinterParser = 1
+// No need to implement them manually
 
-void JLCSDialect::printType(Type type, DialectAsmPrinter& printer) const
-{
-    // generatedTypePrinter is provided by TableGen when -gen-type-decls/defs were run
-    if (failed(generatedTypePrinter(type, printer)))
-        printer << "<invalid jlcs type>";
-}
-
-// Minimal attribute stubs (no custom attributes yet)
-Attribute JLCSDialect::parseAttribute(DialectAsmParser& parser, Type type) const
-{
-    parser.emitError(parser.getNameLoc(), "JLCS dialect: no attributes implemented");
-    return Attribute();
-}
-
-void JLCSDialect::printAttribute(Attribute attr, DialectAsmPrinter& printer) const
-{
-    (void)attr;
-    // nothing for now
-}
-
-// C API: keep the exported registration helper for Julia bindings.
-extern "C" {
-void registerJLCSDialect(MlirContext context)
-{
-    mlir::MLIRContext* ctx = unwrap(context);
-    mlir::DialectRegistry registry;
-    registry.insert<mlir::jlcs::JLCSDialect>();
-    ctx->appendDialectRegistry(registry);
-    ctx->loadDialect<mlir::jlcs::JLCSDialect>();
-}
-} // extern "C"
-//
+// C API: exported registration helper is in JLCSCAPIWrappers.cpp

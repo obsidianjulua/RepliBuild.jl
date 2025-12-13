@@ -17,6 +17,10 @@ def JLCS_Dialect : Dialect {
     Dialect that models C-layouted Julia structs and FFE (Foreign Function Execution)
     semantics for interop and ABI-aware lowering.
   }];
+
+  // LLVM 21: Use auto-generated type parser/printer
+  let useDefaultTypePrinterParser = 1;
+
   let extraClassDeclaration = [{
     void registerTypes();
     void registerOps();
@@ -47,7 +51,10 @@ def CStructType : JLCS_Type<"CStruct", "c_struct"> {
     "ArrayAttr":$fieldOffsets
   );
   let assemblyFormat = "`<` $juliaTypeName `,` `[` $fieldTypes `]` `,` `[` $fieldOffsets `]` `>`";
-  let genStorageClass = 1;
+  // LLVM 21: Manual storage to avoid include ordering issues
+  let genStorageClass = 0;
+  let storageClass = "CStructTypeStorage";
+  let storageNamespace = "detail";
 }
 
 def ArrayViewType : JLCS_Type<"ArrayView", "array_view"> {
@@ -57,7 +64,10 @@ def ArrayViewType : JLCS_Type<"ArrayView", "array_view"> {
     "unsigned":$rank
   );
   let assemblyFormat = "`<` $elementType `,` $rank `>`";
-  let genStorageClass = 1;
+  // LLVM 21: Manual storage to avoid include ordering issues
+  let genStorageClass = 0;
+  let storageClass = "ArrayViewTypeStorage";
+  let storageNamespace = "detail";
 }
 
 //===----------------------------------------------------------------------===//

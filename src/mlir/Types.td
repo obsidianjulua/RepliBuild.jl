@@ -29,8 +29,10 @@ def CStructType : JLCS_Type<"CStruct", "c_struct"> {
   // Assembly format for MLIR text: !jlcs.c_struct<"Name", [T1, T2], [O1, O2]>
   let assemblyFormat = "`<` $juliaTypeName `,` `[` $fieldTypes `]` `,` `[` $fieldOffsets `]` `>`";
 
-  // Generate storage class
-  let genStorageClass = 1;
+  // LLVM 21: Manual storage definition to avoid include ordering issues
+  let genStorageClass = 0;
+  let storageClass = "CStructTypeStorage";
+  let storageNamespace = "detail";
 }
 
 // ====================================================================
@@ -66,6 +68,8 @@ def ArrayViewType : JLCS_Type<"ArrayView", "array_view"> {
   // Assembly format: !jlcs.array_view<f64, 3>
   let assemblyFormat = "`<` $elementType `,` $rank `>`";
 
-  // Generate storage class
-  let genStorageClass = 1;
+  // LLVM 21: Manual storage definition to avoid include ordering issues
+  let genStorageClass = 0;
+  let storageClass = "ArrayViewTypeStorage";
+  let storageNamespace = "detail";
 }
