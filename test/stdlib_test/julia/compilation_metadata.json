@@ -1,0 +1,1223 @@
+{
+  "symbols": [
+    {
+      "mangled": "file_close",
+      "demangled": "file_close",
+      "type": "T",
+      "address": "00000000000027d0"
+    },
+    {
+      "mangled": "file_flush",
+      "demangled": "file_flush",
+      "type": "T",
+      "address": "00000000000028f0"
+    },
+    {
+      "mangled": "file_open",
+      "demangled": "file_open",
+      "type": "T",
+      "address": "0000000000002740"
+    },
+    {
+      "mangled": "file_read",
+      "demangled": "file_read",
+      "type": "T",
+      "address": "0000000000002890"
+    },
+    {
+      "mangled": "file_seek",
+      "demangled": "file_seek",
+      "type": "T",
+      "address": "0000000000002980"
+    },
+    {
+      "mangled": "file_tell",
+      "demangled": "file_tell",
+      "type": "T",
+      "address": "0000000000002930"
+    },
+    {
+      "mangled": "file_write",
+      "demangled": "file_write",
+      "type": "T",
+      "address": "0000000000002830"
+    },
+    {
+      "mangled": "list_clear",
+      "demangled": "list_clear",
+      "type": "T",
+      "address": "0000000000002e10"
+    },
+    {
+      "mangled": "list_create",
+      "demangled": "list_create",
+      "type": "T",
+      "address": "0000000000002dc0"
+    },
+    {
+      "mangled": "list_destroy",
+      "demangled": "list_destroy",
+      "type": "T",
+      "address": "0000000000002de0"
+    },
+    {
+      "mangled": "list_find",
+      "demangled": "list_find",
+      "type": "T",
+      "address": "0000000000003100"
+    },
+    {
+      "mangled": "list_pop_back",
+      "demangled": "list_pop_back",
+      "type": "T",
+      "address": "0000000000002fc0"
+    },
+    {
+      "mangled": "list_pop_front",
+      "demangled": "list_pop_front",
+      "type": "T",
+      "address": "0000000000003060"
+    },
+    {
+      "mangled": "list_push_back",
+      "demangled": "list_push_back",
+      "type": "T",
+      "address": "0000000000002e80"
+    },
+    {
+      "mangled": "list_push_front",
+      "demangled": "list_push_front",
+      "type": "T",
+      "address": "0000000000002f20"
+    },
+    {
+      "mangled": "string_append",
+      "demangled": "string_append",
+      "type": "T",
+      "address": "0000000000002570"
+    },
+    {
+      "mangled": "string_compare",
+      "demangled": "string_compare",
+      "type": "T",
+      "address": "00000000000026c0"
+    },
+    {
+      "mangled": "string_concat",
+      "demangled": "string_concat",
+      "type": "T",
+      "address": "0000000000002650"
+    },
+    {
+      "mangled": "string_create",
+      "demangled": "string_create",
+      "type": "T",
+      "address": "0000000000002440"
+    },
+    {
+      "mangled": "string_destroy",
+      "demangled": "string_destroy",
+      "type": "T",
+      "address": "00000000000024e0"
+    },
+    {
+      "mangled": "string_duplicate",
+      "demangled": "string_duplicate",
+      "type": "T",
+      "address": "0000000000002690"
+    },
+    {
+      "mangled": "string_get",
+      "demangled": "string_get",
+      "type": "T",
+      "address": "0000000000002540"
+    },
+    {
+      "mangled": "time_diff_seconds",
+      "demangled": "time_diff_seconds",
+      "type": "T",
+      "address": "0000000000002c10"
+    },
+    {
+      "mangled": "time_get_current_local",
+      "demangled": "time_get_current_local",
+      "type": "T",
+      "address": "0000000000002af0"
+    },
+    {
+      "mangled": "time_get_current_utc",
+      "demangled": "time_get_current_utc",
+      "type": "T",
+      "address": "00000000000029d0"
+    },
+    {
+      "mangled": "time_sleep_ms",
+      "demangled": "time_sleep_ms",
+      "type": "T",
+      "address": "0000000000002d70"
+    }
+  ],
+  "compile_flags": [
+    "-std=c++17",
+    "-fPIC"
+  ],
+  "binary_path": "./julia/libStdLibTest.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "name": "file_close",
+      "parameters": [
+        {
+          "c_type": "FileHandle*",
+          "name": "handle",
+          "position": 0,
+          "julia_type": "Ptr{FileHandle}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "file_close",
+      "is_method": false,
+      "demangled": "file_close",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "file_flush",
+      "parameters": [
+        {
+          "c_type": "FileHandle*",
+          "name": "handle",
+          "position": 0,
+          "julia_type": "Ptr{FileHandle}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "file_flush",
+      "is_method": false,
+      "demangled": "file_flush",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "file_open",
+      "parameters": [
+        {
+          "c_type": "const char*",
+          "name": "path",
+          "position": 0,
+          "julia_type": "Ptr{UInt8}"
+        },
+        {
+          "c_type": "const char*",
+          "name": "mode",
+          "position": 1,
+          "julia_type": "Ptr{UInt8}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "file_open",
+      "is_method": false,
+      "demangled": "file_open",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "FileHandle*",
+        "size": 8,
+        "julia_type": "Ptr{Cvoid}"
+      }
+    },
+    {
+      "name": "file_read",
+      "parameters": [
+        {
+          "c_type": "FileHandle*",
+          "name": "handle",
+          "position": 0,
+          "julia_type": "Ptr{FileHandle}"
+        },
+        {
+          "c_type": "char*",
+          "name": "buffer",
+          "position": 1,
+          "julia_type": "Ptr{UInt8}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "size",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "file_read",
+      "is_method": false,
+      "demangled": "file_read",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "size_t",
+        "size": 8,
+        "julia_type": "Csize_t"
+      }
+    },
+    {
+      "name": "file_seek",
+      "parameters": [
+        {
+          "c_type": "FileHandle*",
+          "name": "handle",
+          "position": 0,
+          "julia_type": "Ptr{FileHandle}"
+        },
+        {
+          "c_type": "long",
+          "name": "offset",
+          "position": 1,
+          "julia_type": "Clong"
+        },
+        {
+          "c_type": "int",
+          "name": "origin",
+          "position": 2,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "file_seek",
+      "is_method": false,
+      "demangled": "file_seek",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "file_tell",
+      "parameters": [
+        {
+          "c_type": "FileHandle*",
+          "name": "handle",
+          "position": 0,
+          "julia_type": "Ptr{FileHandle}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "file_tell",
+      "is_method": false,
+      "demangled": "file_tell",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "long",
+        "size": 8,
+        "julia_type": "Clong"
+      }
+    },
+    {
+      "name": "file_write",
+      "parameters": [
+        {
+          "c_type": "FileHandle*",
+          "name": "handle",
+          "position": 0,
+          "julia_type": "Ptr{FileHandle}"
+        },
+        {
+          "c_type": "const char*",
+          "name": "data",
+          "position": 1,
+          "julia_type": "Ptr{UInt8}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "size",
+          "position": 2,
+          "julia_type": "Csize_t"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "file_write",
+      "is_method": false,
+      "demangled": "file_write",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "size_t",
+        "size": 8,
+        "julia_type": "Csize_t"
+      }
+    },
+    {
+      "name": "list_clear",
+      "parameters": [
+        {
+          "c_type": "LinkedList*",
+          "name": "list",
+          "position": 0,
+          "julia_type": "Ptr{LinkedList}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "list_clear",
+      "is_method": false,
+      "demangled": "list_clear",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "list_create",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "exported": true,
+      "mangled": "list_create",
+      "is_method": false,
+      "demangled": "list_create",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "LinkedList",
+        "size": 0,
+        "julia_type": "LinkedList"
+      }
+    },
+    {
+      "name": "list_destroy",
+      "parameters": [
+        {
+          "c_type": "LinkedList*",
+          "name": "list",
+          "position": 0,
+          "julia_type": "Ptr{LinkedList}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "list_destroy",
+      "is_method": false,
+      "demangled": "list_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "list_find",
+      "parameters": [
+        {
+          "c_type": "LinkedList*",
+          "name": "list",
+          "position": 0,
+          "julia_type": "Ptr{LinkedList}"
+        },
+        {
+          "c_type": "int",
+          "name": "value",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "list_find",
+      "is_method": false,
+      "demangled": "list_find",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "ListNode*",
+        "size": 8,
+        "julia_type": "Ptr{Cvoid}"
+      }
+    },
+    {
+      "name": "list_pop_back",
+      "parameters": [
+        {
+          "c_type": "LinkedList*",
+          "name": "list",
+          "position": 0,
+          "julia_type": "Ptr{LinkedList}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "list_pop_back",
+      "is_method": false,
+      "demangled": "list_pop_back",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "list_pop_front",
+      "parameters": [
+        {
+          "c_type": "LinkedList*",
+          "name": "list",
+          "position": 0,
+          "julia_type": "Ptr{LinkedList}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "list_pop_front",
+      "is_method": false,
+      "demangled": "list_pop_front",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "list_push_back",
+      "parameters": [
+        {
+          "c_type": "LinkedList*",
+          "name": "list",
+          "position": 0,
+          "julia_type": "Ptr{LinkedList}"
+        },
+        {
+          "c_type": "int",
+          "name": "value",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "list_push_back",
+      "is_method": false,
+      "demangled": "list_push_back",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "list_push_front",
+      "parameters": [
+        {
+          "c_type": "LinkedList*",
+          "name": "list",
+          "position": 0,
+          "julia_type": "Ptr{LinkedList}"
+        },
+        {
+          "c_type": "int",
+          "name": "value",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "list_push_front",
+      "is_method": false,
+      "demangled": "list_push_front",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "string_append",
+      "parameters": [
+        {
+          "c_type": "StringWrapper*",
+          "name": "dest",
+          "position": 0,
+          "julia_type": "Ptr{StringWrapper}"
+        },
+        {
+          "c_type": "const char*",
+          "name": "suffix",
+          "position": 1,
+          "julia_type": "Ptr{UInt8}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "string_append",
+      "is_method": false,
+      "demangled": "string_append",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "string_compare",
+      "parameters": [
+        {
+          "c_type": "const StringWrapper*",
+          "name": "s1",
+          "position": 0,
+          "julia_type": "Ptr{StringWrapper}"
+        },
+        {
+          "c_type": "const StringWrapper*",
+          "name": "s2",
+          "position": 1,
+          "julia_type": "Ptr{StringWrapper}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "string_compare",
+      "is_method": false,
+      "demangled": "string_compare",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "string_concat",
+      "parameters": [
+        {
+          "c_type": "StringWrapper*",
+          "name": "dest",
+          "position": 0,
+          "julia_type": "Ptr{StringWrapper}"
+        },
+        {
+          "c_type": "const StringWrapper*",
+          "name": "src",
+          "position": 1,
+          "julia_type": "Ptr{StringWrapper}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "string_concat",
+      "is_method": false,
+      "demangled": "string_concat",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "string_create",
+      "parameters": [
+        {
+          "c_type": "const char*",
+          "name": "initial_str",
+          "position": 0,
+          "julia_type": "Ptr{UInt8}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "string_create",
+      "is_method": false,
+      "demangled": "string_create",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "StringWrapper",
+        "size": 0,
+        "julia_type": "StringWrapper"
+      }
+    },
+    {
+      "name": "string_destroy",
+      "parameters": [
+        {
+          "c_type": "StringWrapper*",
+          "name": "s",
+          "position": 0,
+          "julia_type": "Ptr{StringWrapper}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "string_destroy",
+      "is_method": false,
+      "demangled": "string_destroy",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "string_duplicate",
+      "parameters": [
+        {
+          "c_type": "const StringWrapper*",
+          "name": "src",
+          "position": 0,
+          "julia_type": "Ptr{StringWrapper}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "string_duplicate",
+      "is_method": false,
+      "demangled": "string_duplicate",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "StringWrapper",
+        "size": 0,
+        "julia_type": "StringWrapper"
+      }
+    },
+    {
+      "name": "string_get",
+      "parameters": [
+        {
+          "c_type": "const StringWrapper*",
+          "name": "s",
+          "position": 0,
+          "julia_type": "Ptr{StringWrapper}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "string_get",
+      "is_method": false,
+      "demangled": "string_get",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "const char*",
+        "size": 8,
+        "julia_type": "Cstring"
+      }
+    },
+    {
+      "name": "time_diff_seconds",
+      "parameters": [
+        {
+          "c_type": "DateInfo",
+          "name": "start",
+          "position": 0,
+          "julia_type": "DateInfo"
+        },
+        {
+          "c_type": "DateInfo",
+          "name": "end",
+          "position": 1,
+          "julia_type": "DateInfo"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "time_diff_seconds",
+      "is_method": false,
+      "demangled": "time_diff_seconds",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "time_get_current_local",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "exported": true,
+      "mangled": "time_get_current_local",
+      "is_method": false,
+      "demangled": "time_get_current_local",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "DateInfo",
+        "size": 0,
+        "julia_type": "DateInfo"
+      }
+    },
+    {
+      "name": "time_get_current_utc",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "exported": true,
+      "mangled": "time_get_current_utc",
+      "is_method": false,
+      "demangled": "time_get_current_utc",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "DateInfo",
+        "size": 0,
+        "julia_type": "DateInfo"
+      }
+    },
+    {
+      "name": "time_sleep_ms",
+      "parameters": [
+        {
+          "c_type": "unsigned int",
+          "name": "milliseconds",
+          "position": 0,
+          "julia_type": "Cuint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "time_sleep_ms",
+      "is_method": false,
+      "demangled": "time_sleep_ms",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    }
+  ],
+  "project": "StdLibTest",
+  "source_files": [
+    "src/std_wrapper.cpp"
+  ],
+  "type_registry": {
+    "StringWrapper*": {
+      "julia_type": "Ptr{StringWrapper}",
+      "inferred": true
+    },
+    "unsigned int": {
+      "julia_type": "Cuint",
+      "inferred": true
+    },
+    "const StringWrapper*": {
+      "julia_type": "Ptr{StringWrapper}",
+      "inferred": true
+    },
+    "const char*": {
+      "c_type": "const char*",
+      "size": 8,
+      "julia_type": "Cstring"
+    },
+    "ListNode*": {
+      "c_type": "ListNode*",
+      "size": 8,
+      "julia_type": "Ptr{Cvoid}"
+    },
+    "long": {
+      "c_type": "long",
+      "size": 8,
+      "julia_type": "Clong"
+    },
+    "size_t": {
+      "julia_type": "Csize_t",
+      "inferred": true
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "c_type": "void",
+      "size": 0,
+      "julia_type": "Cvoid"
+    },
+    "LinkedList*": {
+      "julia_type": "Ptr{LinkedList}",
+      "inferred": true
+    },
+    "int": {
+      "c_type": "int",
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "FileHandle*": {
+      "julia_type": "Ptr{FileHandle}",
+      "inferred": true
+    },
+    "StringWrapper": {
+      "c_type": "StringWrapper",
+      "size": 0,
+      "julia_type": "StringWrapper"
+    },
+    "char*": {
+      "julia_type": "Ptr{UInt8}",
+      "inferred": true
+    },
+    "char": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "UInt8"
+    },
+    "LinkedList": {
+      "c_type": "LinkedList",
+      "size": 0,
+      "julia_type": "LinkedList"
+    },
+    "double": {
+      "c_type": "double",
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "DateInfo": {
+      "c_type": "DateInfo",
+      "size": 0,
+      "julia_type": "DateInfo"
+    }
+  },
+  "function_count": 26,
+  "compiler_info": {
+    "lto_enabled": false,
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "clang_version": "clang version 21.1.6",
+    "optimization_level": "0",
+    "llvm_version": "21.1.6"
+  },
+  "metadata_version": "1.0",
+  "include_dirs": [
+    ".",
+    "include",
+    "src"
+  ],
+  "timestamp": "2026-01-01T16:15:08.677",
+  "struct_definitions": {
+    "timespec": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "long",
+          "name": "tv_sec",
+          "offset": null,
+          "julia_type": "Clong"
+        },
+        {
+          "c_type": "long",
+          "name": "tv_nsec",
+          "offset": null,
+          "julia_type": "Clong"
+        }
+      ]
+    },
+    "ratio<1L, 1L> >": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "long",
+          "name": "__r",
+          "offset": null,
+          "julia_type": "Clong"
+        }
+      ]
+    },
+    "ratio<1L, 1000L> >": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "long",
+          "name": "__r",
+          "offset": null,
+          "julia_type": "Clong"
+        }
+      ]
+    },
+    "ListNode": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "int",
+          "name": "value",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "ListNode*",
+          "name": "next",
+          "offset": null,
+          "julia_type": "Ptr{ListNode}"
+        },
+        {
+          "c_type": "ListNode*",
+          "name": "prev",
+          "offset": null,
+          "julia_type": "Ptr{ListNode}"
+        }
+      ]
+    },
+    "ratio<1L, 1000000000L> > >": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "ratio<1L, 1000000000L> >",
+          "name": "__d",
+          "offset": null,
+          "julia_type": "ratio<1L, 1000000000L> >"
+        }
+      ]
+    },
+    "tm": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "int",
+          "name": "tm_sec",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_min",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_hour",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_mday",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_mon",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_year",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_wday",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_yday",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "tm_isdst",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "long",
+          "name": "tm_gmtoff",
+          "offset": null,
+          "julia_type": "Clong"
+        },
+        {
+          "c_type": "const char*",
+          "name": "tm_zone",
+          "offset": null,
+          "julia_type": "Ptr{UInt8}"
+        }
+      ]
+    },
+    "StringWrapper": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "char*",
+          "name": "data",
+          "offset": null,
+          "julia_type": "Ptr{UInt8}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "length",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "size_t",
+          "name": "capacity",
+          "offset": null,
+          "julia_type": "Csize_t"
+        },
+        {
+          "c_type": "bool",
+          "name": "owns_data",
+          "offset": null,
+          "julia_type": "Bool"
+        }
+      ]
+    },
+    "FileHandle": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "_IO_FILE*",
+          "name": "native_handle",
+          "offset": null,
+          "julia_type": "Ptr{_IO_FILE}"
+        },
+        {
+          "c_type": "char[4]",
+          "name": "mode",
+          "offset": null,
+          "julia_type": "NTuple{4, UInt8}"
+        },
+        {
+          "c_type": "bool",
+          "name": "is_open",
+          "offset": null,
+          "julia_type": "Bool"
+        },
+        {
+          "c_type": "int",
+          "name": "last_error",
+          "offset": null,
+          "julia_type": "Cint"
+        }
+      ]
+    },
+    "LinkedList": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "ListNode*",
+          "name": "head",
+          "offset": null,
+          "julia_type": "Ptr{ListNode}"
+        },
+        {
+          "c_type": "ListNode*",
+          "name": "tail",
+          "offset": null,
+          "julia_type": "Ptr{ListNode}"
+        },
+        {
+          "c_type": "size_t",
+          "name": "size",
+          "offset": null,
+          "julia_type": "Csize_t"
+        }
+      ]
+    },
+    "ratio<1L, 1000000000L> >": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "long",
+          "name": "__r",
+          "offset": null,
+          "julia_type": "Clong"
+        }
+      ]
+    },
+    "DateInfo": {
+      "kind": "struct",
+      "members": [
+        {
+          "c_type": "int",
+          "name": "year",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "month",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "day",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "hour",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "minute",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "second",
+          "offset": null,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "long",
+          "name": "nanoseconds",
+          "offset": null,
+          "julia_type": "Clong"
+        }
+      ]
+    }
+  }
+}

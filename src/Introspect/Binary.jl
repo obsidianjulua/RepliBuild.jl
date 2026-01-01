@@ -25,10 +25,10 @@ Vector{SymbolInfo}
 # Examples
 ```julia
 # Get all function symbols
-syms = symbols("lib.so", filter=:functions)
+syms = symbols("lib", filter=:functions)
 
 # Get all symbols with mangling
-syms = symbols("lib.so", demangled=false)
+syms = symbols("lib", demangled=false)
 
 # Export to CSV
 export_csv(syms, "symbols.csv")
@@ -113,7 +113,7 @@ DWARFInfo
 # Examples
 ```julia
 # Extract DWARF info
-dwarf = dwarf_info("lib.so")
+dwarf = dwarf_info("lib")
 
 # Access structs
 matrix = dwarf.structs["Matrix3x3"]
@@ -221,6 +221,8 @@ function dwarf_info(binary_path::String)
                             else
                                 offset = offset_parsed
                             end
+                        elseif offset === nothing
+                            offset = 0
                         end
 
                         size = get(member_dict, "size", 0)
@@ -231,6 +233,8 @@ function dwarf_info(binary_path::String)
                             else
                                 size = size_parsed
                             end
+                        elseif size === nothing
+                            size = 0
                         end
 
                         push!(members, MemberInfo(
@@ -270,7 +274,7 @@ function dwarf_info(binary_path::String)
 
                 # Determine if polymorphic (has vtable)
                 is_polymorphic = haskey(type_dict, "vtable") ||
-                                any(m -> m.name == "_vptr" || startswith(m.name, "_vptr."), members)
+                                 any(m -> m.name == "_vptr" || startswith(m.name, "_vptr."), members)
 
                 structs_map[type_name] = StructInfo(
                     type_name,
@@ -323,10 +327,10 @@ String - Disassembled code
 # Examples
 ```julia
 # Disassemble entire binary
-asm = disassemble("lib.so")
+asm = disassemble("lib")
 
 # Disassemble specific function
-asm = disassemble("lib.so", "compute_fft", syntax=:intel)
+asm = disassemble("lib", "compute_fft", syntax=:intel)
 
 # Save to file
 open("disasm.s", "w") do io
@@ -410,7 +414,7 @@ HeaderInfo
 # Examples
 ```julia
 # Get header info
-header = headers("lib.so")
+header = headers("lib")
 println("Architecture: \$(header.architecture)")
 println("Sections: \$(length(header.sections))")
 ```
@@ -499,10 +503,10 @@ String - Raw DWARF dump output
 # Examples
 ```julia
 # Dump DWARF info section
-info = dwarf_dump("lib.so", section=:info)
+info = dwarf_dump(lib, section=:info)
 
 # Dump type information
-types = dwarf_dump("lib.so", section=:types)
+types = dwarf_dump(lib, section=:types)
 
 # Save to file
 open("dwarf.txt", "w") do io

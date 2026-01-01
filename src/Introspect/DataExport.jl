@@ -27,7 +27,7 @@ result = benchmark(my_func, args)
 export_json(result, "benchmark.json")
 
 # Export DWARF info
-dwarf = dwarf_info("lib.so")
+dwarf = dwarf_info("lib")
 export_json(dwarf, "dwarf_info.json")
 ```
 """
@@ -262,7 +262,7 @@ Export vector of structs to CSV format.
 # Examples
 ```julia
 # Export symbols to CSV
-syms = symbols("lib.so")
+syms = symbols("lib")
 export_csv(syms, "symbols.csv")
 
 # Export benchmark results
@@ -371,7 +371,7 @@ Organizes data by type and exports to the specified directory.
 # Examples
 ```julia
 # Export DWARF info as dataset
-dwarf = dwarf_info("lib.so")
+dwarf = dwarf_info("lib")
 export_dataset(dwarf, "dataset/")
 # Creates: dataset/functions.json, dataset/structs.json, etc.
 

@@ -63,6 +63,37 @@ function extract_includes_simple(filepath::String)
 end
 
 """
+    is_cpp_header(filepath::String) -> Bool
+
+Detect if .h file is C++ by scanning content.
+"""
+function is_cpp_header(filepath::String)
+    if !isfile(filepath)
+        return false
+    end
+
+    try
+        content = read(filepath, String)
+        # C++ indicators
+        cpp_indicators = [
+            r"\bclass\s+\w+",
+            r"\bnamespace\s+\w+",
+            r"\btemplate\s*<",
+            r"::\w+",
+            r"\bstd::",
+            r"\bvirtual\s+",
+            r"\boverride\b",
+            r"\bconstexpr\b",
+            r"#include\s+<c\w+>"  # Like <cstddef>, <vector>, etc.
+        ]
+
+        return any(pattern -> occursin(pattern, content), cpp_indicators)
+    catch
+        return false
+    end
+end
+
+"""
     extract_includes_clang(filepath::String, clang_path::String, include_dirs::Vector{String}) -> FileDependencies
 
 Use clang -E preprocessor to get detailed include information.
@@ -86,12 +117,18 @@ function extract_includes_clang(filepath::String, clang_path::String, include_di
 
     # Determine language
     ext = lowercase(splitext(filepath)[2])
-    lang_flag = ext in [".cpp", ".cc", ".cxx", ".hpp"] ? "-xc++" : "-xc"
+    
+    is_cpp = ext in [".cpp", ".cc", ".cxx", ".hpp", ".h++", ".hh"]
+    if !is_cpp && ext == ".h"
+        is_cpp = is_cpp_header(filepath)
+    end
+
+    lang_flag = is_cpp ? "-xc++" : "-xc"
 
     try
         # Run clang -E to get preprocessed output with line markers
         cmd = `$clang_path -E $lang_flag $include_flags -H $filepath`
-
+        
         # Capture stderr for -H output (include tree)
         output = IOBuffer()
         err_output = IOBuffer()
@@ -100,7 +137,7 @@ function extract_includes_clang(filepath::String, clang_path::String, include_di
         wait(process)
 
         if process.exitcode == 0
-            # Parse stderr for include hierarchy (-H output)
+            # Parse stderr for -H output (include tree)
             err_str = String(take!(err_output))
 
             for line in split(err_str, '\n')
@@ -112,7 +149,8 @@ function extract_includes_clang(filepath::String, clang_path::String, include_di
                 end
             end
         else
-            push!(deps.parse_errors, "Clang preprocessing failed with exit code $(process.exitcode)")
+            err_str = String(take!(err_output))
+            push!(deps.parse_errors, "Clang preprocessing failed with exit code $(process.exitcode): $err_str")
         end
 
     catch e

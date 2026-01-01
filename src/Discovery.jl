@@ -466,12 +466,14 @@ function walk_dependencies(root_dir::String, scan::ScanResults, include_dirs::Ve
     end
 
     # Build dependency graph
-    dep_graph = ASTWalker.build_dependency_graph(
-        all_sources,
-        include_dirs,
-        use_clang=true,
-        clang_path=clang_path
-    )
+    dep_graph = LLVMEnvironment.with_llvm_env() do
+        ASTWalker.build_dependency_graph(
+            all_sources,
+            include_dirs,
+            use_clang=true,
+            clang_path=clang_path
+        )
+    end
 
     # Print summary
     ASTWalker.print_dependency_summary(dep_graph)

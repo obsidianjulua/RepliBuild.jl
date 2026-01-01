@@ -1,5 +1,5 @@
 [types]
-allow_unknown_enums = false
+allow_unknown_enums = true
 strictness = "warn"
 allow_unknown_structs = true
 allow_function_pointers = true
@@ -7,8 +7,8 @@ allow_function_pointers = true
 [compile]
 parallel = true
 flags = ["-std=c++17", "-fPIC"]
-source_files = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp"]
-include_dirs = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/include", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src"]
+source_files = ["src/std_wrapper.cpp"]
+include_dirs = [".", "include", "src"]
 
 [link]
 enable_lto = false
@@ -34,9 +34,9 @@ enabled = true
 toolchain = "auto"
 
 [project]
-name = "stress_test"
-root = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test"
-uuid = "8c146be1-3b29-4402-b187-9a2c40f2ebc7"
+name = "StdLibTest"
+root = "."
+uuid = "12345678-1234-1234-1234-1234567890ab"
 
 [paths]
 build = "build"

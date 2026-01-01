@@ -15,8 +15,8 @@ println("╚" * "═"^78 * "╝")
 println()
 
 # Paths
-binary_path = joinpath(@__DIR__, "julia", "libproject.so")
-wrapper_path = joinpath(@__DIR__, "julia", "Project.jl")
+binary_path = joinpath(@__DIR__, "julia", "libstress_test.so")
+wrapper_path = joinpath(@__DIR__, "julia", "StressTest.jl")
 
 if !isfile(binary_path)
     println("❌ Binary not found. Run: RepliBuild.build(\"replibuild.toml\")")
@@ -27,7 +27,7 @@ end
 # PART 1: Binary Analysis with LLVM Tools
 # ============================================================================
 println("┏" * "━"^78 * "┓")
-println("┃ PART 1: Binary Introspection - What's in libproject.so?")
+println("┃ PART 1: Binary Introspection - What's in libstress_test.so?")
 println("┗" * "━"^78 * "┛")
 println()
 
@@ -135,9 +135,9 @@ if isfile(wrapper_path)
     include(wrapper_path)
 
     # Find the module
-    if isdefined(Main, :Project)
-        mod = Main.Project
-        println("✓ Module loaded: Project")
+    if isdefined(Main, :StressTest)
+        mod = Main.StressTest
+        println("✓ Module loaded: StressTest")
         println()
 
         # List exported functions
@@ -160,7 +160,7 @@ if isfile(wrapper_path)
 
             func = mod.vector_dot
             println("Function: vector_dot")
-            println("Module: Project")
+            println("Module: StressTest")
 
             # Get method signatures
             methods_list = methods(func)
@@ -178,19 +178,19 @@ end
 # ============================================================================
 # PART 4: Julia Introspection on Wrapper Functions
 # ============================================================================
-if isdefined(Main, :Project) && isdefined(Main.Project, :vector_dot)
+if isdefined(Main, :StressTest) && isdefined(Main.StressTest, :vector_dot)
     println("┏" * "━"^78 * "┓")
     println("┃ PART 4: Julia Introspection on Wrapped C++ Function")
     println("┗" * "━"^78 * "┛")
     println()
 
-    func = Main.Project.vector_dot
+    func = Main.StressTest.vector_dot
 
     # Create test wrapper for introspection
     function test_wrapper()
         a = [1.0, 2.0, 3.0, 4.0, 5.0]
         b = [2.0, 3.0, 4.0, 5.0, 6.0]
-        return Main.Project.vector_dot(pointer(a), pointer(b), 5)
+        return Main.StressTest.vector_dot(pointer(a), pointer(b), UInt64(5))
     end
 
     println("🔬 Analyzing Julia wrapper function")
@@ -245,7 +245,7 @@ end
 # ============================================================================
 # PART 5: Performance Benchmarking
 # ============================================================================
-if isdefined(Main, :Project) && isdefined(Main.Project, :vector_dot)
+if isdefined(Main, :StressTest) && isdefined(Main.StressTest, :vector_dot)
     println("┏" * "━"^78 * "┓")
     println("┃ PART 5: Performance Benchmarking")
     println("┗" * "━"^78 * "┛")
@@ -258,7 +258,7 @@ if isdefined(Main, :Project) && isdefined(Main.Project, :vector_dot)
     function bench_vector_dot()
         a = rand(100)
         b = rand(100)
-        return Main.Project.vector_dot(pointer(a), pointer(b), UInt64(100))
+        return Main.StressTest.vector_dot(pointer(a), pointer(b), UInt64(100))
     end
 
     println("Function: vector_dot (100 elements)")
@@ -274,14 +274,14 @@ if isdefined(Main, :Project) && isdefined(Main.Project, :vector_dot)
     println()
 
     # Benchmark multiple functions if available
-    if isdefined(Main.Project, :vector_norm) && isdefined(Main.Project, :vector_sum)
+    if isdefined(Main.StressTest, :vector_norm) && isdefined(Main.StressTest, :vector_scale)
         println("📊 Benchmark Suite Comparison")
         println("─" * "─"^78)
 
         funcs = Dict(
             "vector_dot" => bench_vector_dot,
-            "vector_norm" => () -> Main.Project.vector_norm(pointer(rand(100)), UInt64(100)),
-            "vector_sum" => () -> Main.Project.vector_sum(pointer(rand(100)), UInt64(100))
+            "vector_norm" => () -> Main.StressTest.vector_norm(pointer(rand(100)), UInt64(100)),
+            "vector_scale" => () -> Main.StressTest.vector_scale(pointer(rand(100)), 2.0, UInt64(100))
         )
 
         results = RepliBuild.Introspect.benchmark_suite(funcs, samples=500, warmup=20)

@@ -1,16 +1,16 @@
-# Auto-generated Julia wrapper for project
-# Generated: 2025-12-06 01:08:14
+# Auto-generated Julia wrapper for stress_test
+# Generated: 2026-01-01 16:42:35
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
-# Library: libproject.so
+# Library: libstress_test.so
 # Metadata: compilation_metadata.json
 #
 # Type Safety: Excellent (~95%) - Types extracted from DWARF debug info
 # Ground truth: Types come from compiled binary, not headers
 # Manual edits: Minimal to none required
 
-module Project
+module StressTest
 
-const LIBRARY_PATH = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libproject.so"
+const LIBRARY_PATH = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libstress_test.so"
 
 # Verify library exists
 if !isfile(LIBRARY_PATH)
@@ -27,7 +27,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2025-12-06T01:08:12.456"
+    "generated_at" => "2026-01-01T16:42:35.634"
 )
 
 # =============================================================================
@@ -229,7 +229,9 @@ function compute_eigen(A::DenseMatrix)::EigenDecomposition
 end
 
 """
-    compute_fft(signal::Ptr{Cdouble}, n::Csize_t)
+    compute_fft(signal::Ptr{Cdouble}, n::Csize_t) -> FFTResult
+
+Wrapper for C++ function: `compute_fft`
 
 # Arguments
 - `signal::Ptr{Cdouble}`
@@ -247,10 +249,10 @@ function compute_fft(signal::Ptr{Cdouble}, n::Csize_t)::FFTResult
     ccall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), signal, n)
 end
 
-
+# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
 function compute_fft(signal::Vector{Float64}, n::Csize_t)::FFTResult
     return GC.@preserve signal begin
-        vcall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), pointer(signal), n)
+        ccall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), pointer(signal), n)
     end
 end
 
@@ -1805,4 +1807,4 @@ function vector_scale(x::Vector{Float64}, alpha::Cdouble, n::Csize_t)::Cvoid
 end
 
 
-end # module Project
+end # module StressTest

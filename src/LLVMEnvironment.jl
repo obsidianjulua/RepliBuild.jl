@@ -374,16 +374,29 @@ function parse_llvm_version(version_str::String)
 end
 
 """
-    build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::String) -> Dict{String,String}
+    build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::String, source::String) -> Dict{String,String}
 
 Build environment variables for isolated LLVM toolchain.
 """
-function build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::String)
+function build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::String, source::String)
     env_vars = Dict{String,String}()
 
     # PATH - prepend LLVM bin directory
     current_path = get(ENV, "PATH", "")
     env_vars["PATH"] = "$bin_dir:$current_path"
+
+    # LLVM-specific variables
+    env_vars["LLVM_ROOT"] = llvm_root
+    env_vars["LLVM_DIR"] = lib_dir  # For CMake find_package
+    env_vars["Clang_DIR"] = lib_dir
+
+    # For system toolchains, DO NOT set library/include paths to avoid breaking default search paths
+    if source == "system"
+        # Force clear LD_LIBRARY_PATH and CPATH to avoid Julia's libs from interfering with system tools
+        env_vars["LD_LIBRARY_PATH"] = ""
+        env_vars["CPATH"] = ""
+        return env_vars
+    end
 
     # LD_LIBRARY_PATH - add LLVM lib directory
     current_ld_path = get(ENV, "LD_LIBRARY_PATH", "")
@@ -397,11 +410,6 @@ function build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::Str
     include_dir = joinpath(llvm_root, "include")
     current_cpath = get(ENV, "CPATH", "")
     env_vars["CPATH"] = isempty(current_cpath) ? include_dir : "$include_dir:$current_cpath"
-
-    # LLVM-specific variables
-    env_vars["LLVM_ROOT"] = llvm_root
-    env_vars["LLVM_DIR"] = lib_dir  # For CMake find_package
-    env_vars["Clang_DIR"] = lib_dir
 
     return env_vars
 end
@@ -491,7 +499,7 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
     (cxxflags, ldflags, libs) = query_llvm_config(llvm_config)
 
     # Build environment variables
-    env_vars = build_environment_vars(llvm_root, bin_dir, lib_dir)
+    env_vars = build_environment_vars(llvm_root, bin_dir, lib_dir, toolchain_source)
 
     toolchain = LLVMToolchain(
         llvm_root,
