@@ -39,7 +39,7 @@ class StoreArrayElementOp;
 } // namespace mlir
 namespace mlir {
 namespace jlcs {
-/// Declares a CStruct type and its C++ base class mapping.
+/// Defines layout info for a C++ class
 class TypeInfoOp;
 } // namespace jlcs
 } // namespace mlir
@@ -966,41 +966,52 @@ namespace detail {
 class TypeInfoOpGenericAdaptorBase {
 public:
   struct Properties {
-    using structTypeTy = ::mlir::TypeAttr;
-    structTypeTy structType;
+    using sizeTy = ::mlir::IntegerAttr;
+    sizeTy size;
 
-    auto getStructType() const {
-      auto &propStorage = this->structType;
-      return ::llvm::cast<::mlir::TypeAttr>(propStorage);
+    auto getSize() const {
+      auto &propStorage = this->size;
+      return ::llvm::cast<::mlir::IntegerAttr>(propStorage);
     }
-    void setStructType(const ::mlir::TypeAttr &propValue) {
-      this->structType = propValue;
+    void setSize(const ::mlir::IntegerAttr &propValue) {
+      this->size = propValue;
     }
-    using superTypeTy = ::mlir::StringAttr;
-    superTypeTy superType;
+    using sym_nameTy = ::mlir::StringAttr;
+    sym_nameTy sym_name;
 
-    auto getSuperType() const {
-      auto &propStorage = this->superType;
-      return ::llvm::dyn_cast_or_null<::mlir::StringAttr>(propStorage);
-    }
-    void setSuperType(const ::mlir::StringAttr &propValue) {
-      this->superType = propValue;
-    }
-    using typeNameTy = ::mlir::StringAttr;
-    typeNameTy typeName;
-
-    auto getTypeName() const {
-      auto &propStorage = this->typeName;
+    auto getSymName() const {
+      auto &propStorage = this->sym_name;
       return ::llvm::cast<::mlir::StringAttr>(propStorage);
     }
-    void setTypeName(const ::mlir::StringAttr &propValue) {
-      this->typeName = propValue;
+    void setSymName(const ::mlir::StringAttr &propValue) {
+      this->sym_name = propValue;
+    }
+    using vtable_addrTy = ::mlir::IntegerAttr;
+    vtable_addrTy vtable_addr;
+
+    auto getVtableAddr() const {
+      auto &propStorage = this->vtable_addr;
+      return ::llvm::cast<::mlir::IntegerAttr>(propStorage);
+    }
+    void setVtableAddr(const ::mlir::IntegerAttr &propValue) {
+      this->vtable_addr = propValue;
+    }
+    using vtable_offsetTy = ::mlir::IntegerAttr;
+    vtable_offsetTy vtable_offset;
+
+    auto getVtableOffset() const {
+      auto &propStorage = this->vtable_offset;
+      return ::llvm::cast<::mlir::IntegerAttr>(propStorage);
+    }
+    void setVtableOffset(const ::mlir::IntegerAttr &propValue) {
+      this->vtable_offset = propValue;
     }
     bool operator==(const Properties &rhs) const {
       return 
-        rhs.structType == this->structType &&
-        rhs.superType == this->superType &&
-        rhs.typeName == this->typeName &&
+        rhs.size == this->size &&
+        rhs.sym_name == this->sym_name &&
+        rhs.vtable_addr == this->vtable_addr &&
+        rhs.vtable_offset == this->vtable_offset &&
         true;
     }
     bool operator!=(const Properties &rhs) const {
@@ -1031,20 +1042,30 @@ public:
     return odsAttrs;
   }
 
-  ::mlir::StringAttr getTypeNameAttr() {
-    auto attr = ::llvm::cast<::mlir::StringAttr>(getProperties().typeName);
+  ::mlir::StringAttr getSymNameAttr() {
+    auto attr = ::llvm::cast<::mlir::StringAttr>(getProperties().sym_name);
     return attr;
   }
 
-  ::llvm::StringRef getTypeName();
-  ::mlir::TypeAttr getStructTypeAttr() {
-    auto attr = ::llvm::cast<::mlir::TypeAttr>(getProperties().structType);
+  ::llvm::StringRef getSymName();
+  ::mlir::IntegerAttr getSizeAttr() {
+    auto attr = ::llvm::cast<::mlir::IntegerAttr>(getProperties().size);
     return attr;
   }
 
-  ::mlir::Type getStructType();
-  ::mlir::StringAttr getSuperTypeAttr();
-  ::llvm::StringRef getSuperType();
+  uint64_t getSize();
+  ::mlir::IntegerAttr getVtableOffsetAttr() {
+    auto attr = ::llvm::cast<::mlir::IntegerAttr>(getProperties().vtable_offset);
+    return attr;
+  }
+
+  uint64_t getVtableOffset();
+  ::mlir::IntegerAttr getVtableAddrAttr() {
+    auto attr = ::llvm::cast<::mlir::IntegerAttr>(getProperties().vtable_addr);
+    return attr;
+  }
+
+  uint64_t getVtableAddr();
 };
 } // namespace detail
 template <typename RangeT>
@@ -1087,7 +1108,7 @@ public:
 
   ::llvm::LogicalResult verify(::mlir::Location loc);
 };
-class TypeInfoOp : public ::mlir::Op<TypeInfoOp, ::mlir::OpTrait::ZeroRegions, ::mlir::OpTrait::ZeroResults, ::mlir::OpTrait::ZeroSuccessors, ::mlir::OpTrait::ZeroOperands, ::mlir::OpTrait::OpInvariants, ::mlir::BytecodeOpInterface::Trait, ::mlir::ConditionallySpeculatable::Trait, ::mlir::OpTrait::AlwaysSpeculatableImplTrait, ::mlir::MemoryEffectOpInterface::Trait, ::mlir::OpTrait::IsIsolatedFromAbove> {
+class TypeInfoOp : public ::mlir::Op<TypeInfoOp, ::mlir::OpTrait::ZeroRegions, ::mlir::OpTrait::ZeroResults, ::mlir::OpTrait::ZeroSuccessors, ::mlir::OpTrait::ZeroOperands, ::mlir::OpTrait::OpInvariants, ::mlir::BytecodeOpInterface::Trait, ::mlir::SymbolOpInterface::Trait> {
 public:
   using Op::Op;
   using Op::print;
@@ -1097,32 +1118,40 @@ public:
   using FoldAdaptor = GenericAdaptor<::llvm::ArrayRef<::mlir::Attribute>>;
   using Properties = FoldAdaptor::Properties;
   static ::llvm::ArrayRef<::llvm::StringRef> getAttributeNames() {
-    static ::llvm::StringRef attrNames[] = {::llvm::StringRef("structType"), ::llvm::StringRef("superType"), ::llvm::StringRef("typeName")};
+    static ::llvm::StringRef attrNames[] = {::llvm::StringRef("size"), ::llvm::StringRef("sym_name"), ::llvm::StringRef("vtable_addr"), ::llvm::StringRef("vtable_offset")};
     return ::llvm::ArrayRef(attrNames);
   }
 
-  ::mlir::StringAttr getStructTypeAttrName() {
+  ::mlir::StringAttr getSizeAttrName() {
     return getAttributeNameForIndex(0);
   }
 
-  static ::mlir::StringAttr getStructTypeAttrName(::mlir::OperationName name) {
+  static ::mlir::StringAttr getSizeAttrName(::mlir::OperationName name) {
     return getAttributeNameForIndex(name, 0);
   }
 
-  ::mlir::StringAttr getSuperTypeAttrName() {
+  ::mlir::StringAttr getSymNameAttrName() {
     return getAttributeNameForIndex(1);
   }
 
-  static ::mlir::StringAttr getSuperTypeAttrName(::mlir::OperationName name) {
+  static ::mlir::StringAttr getSymNameAttrName(::mlir::OperationName name) {
     return getAttributeNameForIndex(name, 1);
   }
 
-  ::mlir::StringAttr getTypeNameAttrName() {
+  ::mlir::StringAttr getVtableAddrAttrName() {
     return getAttributeNameForIndex(2);
   }
 
-  static ::mlir::StringAttr getTypeNameAttrName(::mlir::OperationName name) {
+  static ::mlir::StringAttr getVtableAddrAttrName(::mlir::OperationName name) {
     return getAttributeNameForIndex(name, 2);
+  }
+
+  ::mlir::StringAttr getVtableOffsetAttrName() {
+    return getAttributeNameForIndex(3);
+  }
+
+  static ::mlir::StringAttr getVtableOffsetAttrName(::mlir::OperationName name) {
+    return getAttributeNameForIndex(name, 3);
   }
 
   static constexpr ::llvm::StringLiteral getOperationName() {
@@ -1158,51 +1187,75 @@ public:
   static ::llvm::LogicalResult verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
   static ::llvm::LogicalResult readProperties(::mlir::DialectBytecodeReader &reader, ::mlir::OperationState &state);
   void writeProperties(::mlir::DialectBytecodeWriter &writer);
-  ::mlir::StringAttr getTypeNameAttr() {
-    return ::llvm::cast<::mlir::StringAttr>(getProperties().typeName);
+  ::mlir::StringAttr getSymNameAttr() {
+    return ::llvm::cast<::mlir::StringAttr>(getProperties().sym_name);
   }
 
-  ::llvm::StringRef getTypeName();
-  ::mlir::TypeAttr getStructTypeAttr() {
-    return ::llvm::cast<::mlir::TypeAttr>(getProperties().structType);
+  ::llvm::StringRef getSymName();
+  ::mlir::IntegerAttr getSizeAttr() {
+    return ::llvm::cast<::mlir::IntegerAttr>(getProperties().size);
   }
 
-  ::mlir::Type getStructType();
-  ::mlir::StringAttr getSuperTypeAttr() {
-    return ::llvm::dyn_cast_or_null<::mlir::StringAttr>(getProperties().superType);
+  uint64_t getSize();
+  ::mlir::IntegerAttr getVtableOffsetAttr() {
+    return ::llvm::cast<::mlir::IntegerAttr>(getProperties().vtable_offset);
   }
 
-  ::llvm::StringRef getSuperType();
-  void setTypeNameAttr(::mlir::StringAttr attr) {
-    getProperties().typeName = attr;
+  uint64_t getVtableOffset();
+  ::mlir::IntegerAttr getVtableAddrAttr() {
+    return ::llvm::cast<::mlir::IntegerAttr>(getProperties().vtable_addr);
   }
 
-  void setTypeName(::llvm::StringRef attrValue);
-  void setStructTypeAttr(::mlir::TypeAttr attr) {
-    getProperties().structType = attr;
+  uint64_t getVtableAddr();
+  void setSymNameAttr(::mlir::StringAttr attr) {
+    getProperties().sym_name = attr;
   }
 
-  void setStructType(::mlir::Type attrValue);
-  void setSuperTypeAttr(::mlir::StringAttr attr) {
-    getProperties().superType = attr;
+  void setSymName(::llvm::StringRef attrValue);
+  void setSizeAttr(::mlir::IntegerAttr attr) {
+    getProperties().size = attr;
   }
 
-  void setSuperType(::llvm::StringRef attrValue);
-  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, StringAttr typeName, TypeAttr structType, StringAttr superType);
-  static TypeInfoOp create(::mlir::OpBuilder &builder, ::mlir::Location location, StringAttr typeName, TypeAttr structType, StringAttr superType);
-  static TypeInfoOp create(::mlir::ImplicitLocOpBuilder &builder, StringAttr typeName, TypeAttr structType, StringAttr superType);
-  static void populateDefaultProperties(::mlir::OperationName opName, Properties &properties);
+  void setSize(uint64_t attrValue);
+  void setVtableOffsetAttr(::mlir::IntegerAttr attr) {
+    getProperties().vtable_offset = attr;
+  }
+
+  void setVtableOffset(uint64_t attrValue);
+  void setVtableAddrAttr(::mlir::IntegerAttr attr) {
+    getProperties().vtable_addr = attr;
+  }
+
+  void setVtableAddr(uint64_t attrValue);
+  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr);
+  static TypeInfoOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr);
+  static TypeInfoOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr);
+  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr);
+  static TypeInfoOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr);
+  static TypeInfoOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr);
+  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr);
+  static TypeInfoOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr);
+  static TypeInfoOp create(::mlir::ImplicitLocOpBuilder &builder, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr);
+  static void build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr);
+  static TypeInfoOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr);
+  static TypeInfoOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr);
+  static void build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
+  static TypeInfoOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
+  static TypeInfoOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
+  static void build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
+  static TypeInfoOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
+  static TypeInfoOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
   ::llvm::LogicalResult verifyInvariantsImpl();
   ::llvm::LogicalResult verifyInvariants();
-  static ::llvm::LogicalResult setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
-  void getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>> &effects);
+  static ::mlir::ParseResult parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result);
+  void print(::mlir::OpAsmPrinter &_odsPrinter);
 private:
   ::mlir::StringAttr getAttributeNameForIndex(unsigned index) {
     return getAttributeNameForIndex((*this)->getName(), index);
   }
 
   static ::mlir::StringAttr getAttributeNameForIndex(::mlir::OperationName name, unsigned index) {
-    assert(index < 3 && "invalid attribute index");
+    assert(index < 4 && "invalid attribute index");
     assert(name.getStringRef() == getOperationName() && "invalid operation name");
     assert(name.isRegistered() && "Operation isn't registered, missing a "
           "dependent dialect loading?");

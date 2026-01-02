@@ -13,6 +13,7 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/IR/SymbolTable.h"
 
 #define GET_OP_CLASSES
 #include "JLCSOps.h.inc"

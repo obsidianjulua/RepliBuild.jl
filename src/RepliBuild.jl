@@ -25,6 +25,9 @@ include("Discovery.jl")
 include("ClangJLBridge.jl")
 include("Compiler.jl")
 include("Wrapper.jl")
+include("DWARFParser.jl")
+include("JLCSIRGenerator.jl")
+include("MLIRNative.jl")
 
 # Introspection module
 include("Introspect.jl")
@@ -39,6 +42,9 @@ using .Discovery
 using .ClangJLBridge
 using .Compiler
 using .Wrapper
+using .DWARFParser
+using .JLCSIRGenerator
+using .MLIRNative
 using .Introspect
 
 # ============================================================================
@@ -55,7 +61,7 @@ export discover
 export clean
 
 # Advanced modules (for power users who know what they're doing)
-export Compiler, Wrapper, Discovery, ConfigurationManager
+export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser, JLCSIRGenerator, MLIRNative
 
 # Introspection API
 export Introspect

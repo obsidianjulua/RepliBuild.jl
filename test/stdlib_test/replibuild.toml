@@ -1,5 +1,5 @@
 [types]
-allow_unknown_enums = true
+allow_unknown_enums = false
 strictness = "warn"
 allow_unknown_structs = true
 allow_function_pointers = true
@@ -7,8 +7,8 @@ allow_function_pointers = true
 [compile]
 parallel = true
 flags = ["-std=c++17", "-fPIC"]
-source_files = ["src/std_wrapper.cpp"]
-include_dirs = [".", "include", "src"]
+source_files = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stdlib_test/src/std_wrapper.cpp"]
+include_dirs = ["/home/grim/Desktop/Projects/RepliBuild.jl/test/stdlib_test", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stdlib_test/include", "/home/grim/Desktop/Projects/RepliBuild.jl/test/stdlib_test/src"]
 
 [link]
 enable_lto = false
@@ -34,9 +34,9 @@ enabled = true
 toolchain = "auto"
 
 [project]
-name = "StdLibTest"
-root = "."
-uuid = "12345678-1234-1234-1234-1234567890ab"
+name = "stdlib_test"
+root = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stdlib_test"
+uuid = "cc4f7052-ba83-4811-8bae-07b3cb2b62fb"
 
 [paths]
 build = "build"

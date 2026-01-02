@@ -172,3 +172,6 @@ end
 println("\n" * "="^70)
 println("All RepliBuild tests completed!")
 println("="^70)
+
+include("test_mlir.jl")
+include("test_stdlib_mlir.jl")

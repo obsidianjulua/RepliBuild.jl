@@ -6,7 +6,7 @@
 
 module MLIRNative
 
-export create_context, create_module, destroy_context
+export create_context, create_module, destroy_context, parse_module
 export test_dialect, print_module
 
 # =============================================================================
@@ -103,6 +103,19 @@ function create_module(ctx::MlirContext)
 end
 
 """
+    parse_module(ctx::MlirContext, source::String) -> MlirModule
+
+Parse an MLIR module from a string.
+"""
+function parse_module(ctx::MlirContext, source::String)
+    mod = ccall((:jlcsModuleCreateParse, libJLCS), MlirModule, (MlirContext, Cstring), ctx, source)
+    if mod == C_NULL
+        error("Failed to parse MLIR module")
+    end
+    return mod
+end
+
+"""
     get_module_operation(mlir_module::MlirModule) -> MlirOperation
 
 Get the operation backing a module.
@@ -161,8 +174,20 @@ function test_dialect()
     println("\nEmpty module:")
     print_module(mod)
 
-    # Step 5: TODO - Create jlcs.type_info operation
-    println("\nTODO: Create jlcs.type_info operation")
+    # Step 5: Create jlcs.type_info operation via parsing
+    println("\nTesting parsing of jlcs.type_info...")
+    ir = """
+    module {
+      jlcs.type_info @TestClass {
+        size = 8 : i64,
+        vtable_offset = 0 : i64,
+        vtable_addr = 0x1234 : i64
+      }
+    }"""
+    
+    parsed_mod = parse_module(ctx, ir)
+    print_module(parsed_mod)
+    println("✓ Parsed successfully")
 
     # Step 6: Cleanup
     print("\nCleaning up... ")

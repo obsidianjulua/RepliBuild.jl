@@ -4,6 +4,7 @@ include "mlir/IR/OpBase.td"
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Bytecode/BytecodeOpInterface.td"
+include "mlir/IR/SymbolInterfaces.td"
 
 //===----------------------------------------------------------------------===//
 // Dialect Definition
@@ -74,17 +75,15 @@ def ArrayViewType : JLCS_Type<"ArrayView", "array_view"> {
 // Operation Definitions
 //===----------------------------------------------------------------------===//
 
-def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
-  let summary = "Declares a CStruct type and its C++ base class mapping.";
+def TypeInfoOp : JLCS_Op<"type_info", [Symbol]> {
+  let summary = "Defines layout info for a C++ class";
   let arguments = (ins
-    StrAttr   :$typeName,
-    TypeAttr  :$structType,
-    DefaultValuedStrAttr<StrAttr, "\"\"">:$superType
+    SymbolNameAttr:$sym_name,
+    I64Attr:$size,
+    I64Attr:$vtable_offset,
+    I64Attr:$vtable_addr
   );
-  let skipDefaultBuilders = 1;
-  let builders = [
-    OpBuilder<(ins "StringAttr":$typeName, "TypeAttr":$structType, "StringAttr":$superType)>
-  ];
+  let assemblyFormat = "$sym_name attr-dict";
 }
 
 def GetFieldOp : JLCS_Op<"get_field"> {

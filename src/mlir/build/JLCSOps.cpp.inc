@@ -90,28 +90,14 @@ static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCS2(
 
 static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCS3(
     ::mlir::Attribute attr, ::llvm::StringRef attrName, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
-  if (attr && !(((::llvm::isa<::mlir::TypeAttr>(attr))) && ((::llvm::isa<::mlir::Type>(::llvm::cast<::mlir::TypeAttr>(attr).getValue()))) && ((true))))
-    return emitError() << "attribute '" << attrName
-        << "' failed to satisfy constraint: any type attribute";
-  return ::mlir::success();
-}
-static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCS3(
-    ::mlir::Operation *op, ::mlir::Attribute attr, ::llvm::StringRef attrName) {
-  return __mlir_ods_local_attr_constraint_JLCS3(attr, attrName, [op]() {
-    return op->emitOpError();
-  });
-}
-
-static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCS4(
-    ::mlir::Attribute attr, ::llvm::StringRef attrName, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
   if (attr && !((::llvm::isa<::mlir::SymbolRefAttr>(attr))))
     return emitError() << "attribute '" << attrName
         << "' failed to satisfy constraint: symbol reference attribute";
   return ::mlir::success();
 }
-static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCS4(
+static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCS3(
     ::mlir::Operation *op, ::mlir::Attribute attr, ::llvm::StringRef attrName) {
-  return __mlir_ods_local_attr_constraint_JLCS4(attr, attrName, [op]() {
+  return __mlir_ods_local_attr_constraint_JLCS3(attr, attrName, [op]() {
     return op->emitOpError();
   });
 }
@@ -1098,44 +1084,50 @@ namespace jlcs {
 namespace detail {
 TypeInfoOpGenericAdaptorBase::TypeInfoOpGenericAdaptorBase(TypeInfoOp op) : odsAttrs(op->getRawDictionaryAttrs()), odsOpName(op->getName()), properties(op.getProperties()), odsRegions(op->getRegions()) {}
 
-::llvm::StringRef TypeInfoOpGenericAdaptorBase::getTypeName() {
-  auto attr = getTypeNameAttr();
+::llvm::StringRef TypeInfoOpGenericAdaptorBase::getSymName() {
+  auto attr = getSymNameAttr();
   return attr.getValue();
 }
 
-::mlir::Type TypeInfoOpGenericAdaptorBase::getStructType() {
-  auto attr = getStructTypeAttr();
-  return ::llvm::cast<::mlir::Type>(attr.getValue());
+uint64_t TypeInfoOpGenericAdaptorBase::getSize() {
+  auto attr = getSizeAttr();
+  return attr.getValue().getZExtValue();
 }
 
-::mlir::StringAttr TypeInfoOpGenericAdaptorBase::getSuperTypeAttr() {
-  auto attr = ::llvm::dyn_cast_or_null<::mlir::StringAttr>(getProperties().superType);
-  return attr;
+uint64_t TypeInfoOpGenericAdaptorBase::getVtableOffset() {
+  auto attr = getVtableOffsetAttr();
+  return attr.getValue().getZExtValue();
 }
 
-::llvm::StringRef TypeInfoOpGenericAdaptorBase::getSuperType() {
-  auto attr = getSuperTypeAttr();
-  return attr.getValue();
+uint64_t TypeInfoOpGenericAdaptorBase::getVtableAddr() {
+  auto attr = getVtableAddrAttr();
+  return attr.getValue().getZExtValue();
 }
 
 } // namespace detail
 TypeInfoOpAdaptor::TypeInfoOpAdaptor(TypeInfoOp op) : TypeInfoOpGenericAdaptor(op->getOperands(), op) {}
 
 ::llvm::LogicalResult TypeInfoOpAdaptor::verify(::mlir::Location loc) {
-  auto tblgen_structType = getProperties().structType; (void)tblgen_structType;
-  if (!tblgen_structType) return emitError(loc, "'jlcs.type_info' op ""requires attribute 'structType'");
-  auto tblgen_superType = getProperties().superType; (void)tblgen_superType;
-  auto tblgen_typeName = getProperties().typeName; (void)tblgen_typeName;
-  if (!tblgen_typeName) return emitError(loc, "'jlcs.type_info' op ""requires attribute 'typeName'");
+  auto tblgen_size = getProperties().size; (void)tblgen_size;
+  if (!tblgen_size) return emitError(loc, "'jlcs.type_info' op ""requires attribute 'size'");
+  auto tblgen_sym_name = getProperties().sym_name; (void)tblgen_sym_name;
+  if (!tblgen_sym_name) return emitError(loc, "'jlcs.type_info' op ""requires attribute 'sym_name'");
+  auto tblgen_vtable_addr = getProperties().vtable_addr; (void)tblgen_vtable_addr;
+  if (!tblgen_vtable_addr) return emitError(loc, "'jlcs.type_info' op ""requires attribute 'vtable_addr'");
+  auto tblgen_vtable_offset = getProperties().vtable_offset; (void)tblgen_vtable_offset;
+  if (!tblgen_vtable_offset) return emitError(loc, "'jlcs.type_info' op ""requires attribute 'vtable_offset'");
 
-  if (tblgen_typeName && !((::llvm::isa<::mlir::StringAttr>(tblgen_typeName))))
-    return emitError(loc, "'jlcs.type_info' op ""attribute 'typeName' failed to satisfy constraint: string attribute");
+  if (tblgen_sym_name && !((::llvm::isa<::mlir::StringAttr>(tblgen_sym_name))))
+    return emitError(loc, "'jlcs.type_info' op ""attribute 'sym_name' failed to satisfy constraint: string attribute");
 
-  if (tblgen_structType && !(((::llvm::isa<::mlir::TypeAttr>(tblgen_structType))) && ((::llvm::isa<::mlir::Type>(::llvm::cast<::mlir::TypeAttr>(tblgen_structType).getValue()))) && ((true))))
-    return emitError(loc, "'jlcs.type_info' op ""attribute 'structType' failed to satisfy constraint: any type attribute");
+  if (tblgen_size && !(((::llvm::isa<::mlir::IntegerAttr>(tblgen_size))) && ((::llvm::cast<::mlir::IntegerAttr>(tblgen_size).getType().isSignlessInteger(64)))))
+    return emitError(loc, "'jlcs.type_info' op ""attribute 'size' failed to satisfy constraint: 64-bit signless integer attribute");
 
-  if (tblgen_superType && !((::llvm::isa<::mlir::StringAttr>(tblgen_superType))))
-    return emitError(loc, "'jlcs.type_info' op ""attribute 'superType' failed to satisfy constraint: string attribute");
+  if (tblgen_vtable_offset && !(((::llvm::isa<::mlir::IntegerAttr>(tblgen_vtable_offset))) && ((::llvm::cast<::mlir::IntegerAttr>(tblgen_vtable_offset).getType().isSignlessInteger(64)))))
+    return emitError(loc, "'jlcs.type_info' op ""attribute 'vtable_offset' failed to satisfy constraint: 64-bit signless integer attribute");
+
+  if (tblgen_vtable_addr && !(((::llvm::isa<::mlir::IntegerAttr>(tblgen_vtable_addr))) && ((::llvm::cast<::mlir::IntegerAttr>(tblgen_vtable_addr).getType().isSignlessInteger(64)))))
+    return emitError(loc, "'jlcs.type_info' op ""attribute 'vtable_addr' failed to satisfy constraint: 64-bit signless integer attribute");
   return ::mlir::success();
 }
 
@@ -1147,42 +1139,56 @@ TypeInfoOpAdaptor::TypeInfoOpAdaptor(TypeInfoOp op) : TypeInfoOpGenericAdaptor(o
   }
 
   {
-    auto &propStorage = prop.structType;
-       auto attr = dict.get("structType");
+    auto &propStorage = prop.size;
+       auto attr = dict.get("size");
     if (attr) {
       auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
       if (convertedAttr) {
         propStorage = convertedAttr;
       } else {
-        emitError() << "Invalid attribute `structType` in property conversion: " << attr;
+        emitError() << "Invalid attribute `size` in property conversion: " << attr;
         return ::mlir::failure();
       }
     }
   }
 
   {
-    auto &propStorage = prop.superType;
-       auto attr = dict.get("superType");
+    auto &propStorage = prop.sym_name;
+       auto attr = dict.get("sym_name");
     if (attr) {
       auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
       if (convertedAttr) {
         propStorage = convertedAttr;
       } else {
-        emitError() << "Invalid attribute `superType` in property conversion: " << attr;
+        emitError() << "Invalid attribute `sym_name` in property conversion: " << attr;
         return ::mlir::failure();
       }
     }
   }
 
   {
-    auto &propStorage = prop.typeName;
-       auto attr = dict.get("typeName");
+    auto &propStorage = prop.vtable_addr;
+       auto attr = dict.get("vtable_addr");
     if (attr) {
       auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
       if (convertedAttr) {
         propStorage = convertedAttr;
       } else {
-        emitError() << "Invalid attribute `typeName` in property conversion: " << attr;
+        emitError() << "Invalid attribute `vtable_addr` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+
+  {
+    auto &propStorage = prop.vtable_offset;
+       auto attr = dict.get("vtable_offset");
+    if (attr) {
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `vtable_offset` in property conversion: " << attr;
         return ::mlir::failure();
       }
     }
@@ -1195,23 +1201,30 @@ TypeInfoOpAdaptor::TypeInfoOpAdaptor(TypeInfoOp op) : TypeInfoOpGenericAdaptor(o
     ::mlir::Builder odsBuilder{ctx};
 
     {
-      const auto &propStorage = prop.structType;
+      const auto &propStorage = prop.size;
       if (propStorage)
-        attrs.push_back(odsBuilder.getNamedAttr("structType",
+        attrs.push_back(odsBuilder.getNamedAttr("size",
                                        propStorage));
     }
 
     {
-      const auto &propStorage = prop.superType;
+      const auto &propStorage = prop.sym_name;
       if (propStorage)
-        attrs.push_back(odsBuilder.getNamedAttr("superType",
+        attrs.push_back(odsBuilder.getNamedAttr("sym_name",
                                        propStorage));
     }
 
     {
-      const auto &propStorage = prop.typeName;
+      const auto &propStorage = prop.vtable_addr;
       if (propStorage)
-        attrs.push_back(odsBuilder.getNamedAttr("typeName",
+        attrs.push_back(odsBuilder.getNamedAttr("vtable_addr",
+                                       propStorage));
+    }
+
+    {
+      const auto &propStorage = prop.vtable_offset;
+      if (propStorage)
+        attrs.push_back(odsBuilder.getNamedAttr("vtable_offset",
                                        propStorage));
     }
 
@@ -1223,64 +1236,81 @@ TypeInfoOpAdaptor::TypeInfoOpAdaptor(TypeInfoOp op) : TypeInfoOpGenericAdaptor(o
 llvm::hash_code TypeInfoOp::computePropertiesHash(const Properties &prop) {
   using llvm::hash_value;
   return llvm::hash_combine(
-    llvm::hash_value(prop.structType.getAsOpaquePointer()), 
-    llvm::hash_value(prop.superType.getAsOpaquePointer()), 
-    llvm::hash_value(prop.typeName.getAsOpaquePointer()));
+    llvm::hash_value(prop.size.getAsOpaquePointer()), 
+    llvm::hash_value(prop.sym_name.getAsOpaquePointer()), 
+    llvm::hash_value(prop.vtable_addr.getAsOpaquePointer()), 
+    llvm::hash_value(prop.vtable_offset.getAsOpaquePointer()));
 }
 
 std::optional<mlir::Attribute> TypeInfoOp::getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name) {
-    if (name == "structType")
-      return prop.structType;
+    if (name == "size")
+      return prop.size;
 
-    if (name == "superType")
-      return prop.superType;
+    if (name == "sym_name")
+      return prop.sym_name;
 
-    if (name == "typeName")
-      return prop.typeName;
+    if (name == "vtable_addr")
+      return prop.vtable_addr;
+
+    if (name == "vtable_offset")
+      return prop.vtable_offset;
   return std::nullopt;
 }
 
 void TypeInfoOp::setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value) {
-    if (name == "structType") {
-       prop.structType = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.structType)>>(value);
+    if (name == "size") {
+       prop.size = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.size)>>(value);
        return;
     }
 
-    if (name == "superType") {
-       prop.superType = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.superType)>>(value);
+    if (name == "sym_name") {
+       prop.sym_name = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.sym_name)>>(value);
        return;
     }
 
-    if (name == "typeName") {
-       prop.typeName = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.typeName)>>(value);
+    if (name == "vtable_addr") {
+       prop.vtable_addr = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.vtable_addr)>>(value);
+       return;
+    }
+
+    if (name == "vtable_offset") {
+       prop.vtable_offset = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.vtable_offset)>>(value);
        return;
     }
 }
 
 void TypeInfoOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs) {
-    if (prop.structType) attrs.append("structType", prop.structType);
+    if (prop.size) attrs.append("size", prop.size);
 
-    if (prop.superType) attrs.append("superType", prop.superType);
+    if (prop.sym_name) attrs.append("sym_name", prop.sym_name);
 
-    if (prop.typeName) attrs.append("typeName", prop.typeName);
+    if (prop.vtable_addr) attrs.append("vtable_addr", prop.vtable_addr);
+
+    if (prop.vtable_offset) attrs.append("vtable_offset", prop.vtable_offset);
 }
 
 ::llvm::LogicalResult TypeInfoOp::verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
     {
-      ::mlir::Attribute attr = attrs.get(getStructTypeAttrName(opName));
-      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS3(attr, "structType", emitError)))
+      ::mlir::Attribute attr = attrs.get(getSizeAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(attr, "size", emitError)))
         return ::mlir::failure();
     }
 
     {
-      ::mlir::Attribute attr = attrs.get(getSuperTypeAttrName(opName));
-      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS2(attr, "superType", emitError)))
+      ::mlir::Attribute attr = attrs.get(getSymNameAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS2(attr, "sym_name", emitError)))
         return ::mlir::failure();
     }
 
     {
-      ::mlir::Attribute attr = attrs.get(getTypeNameAttrName(opName));
-      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS2(attr, "typeName", emitError)))
+      ::mlir::Attribute attr = attrs.get(getVtableAddrAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(attr, "vtable_addr", emitError)))
+        return ::mlir::failure();
+    }
+
+    {
+      ::mlir::Attribute attr = attrs.get(getVtableOffsetAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(attr, "vtable_offset", emitError)))
         return ::mlir::failure();
     }
     return ::mlir::success();
@@ -1288,84 +1318,215 @@ void TypeInfoOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Propertie
 
 ::llvm::LogicalResult TypeInfoOp::readProperties(::mlir::DialectBytecodeReader &reader, ::mlir::OperationState &state) {
   auto &prop = state.getOrAddProperties<Properties>(); (void)prop;
-  if (::mlir::failed(reader.readAttribute(prop.structType)))
+  if (::mlir::failed(reader.readAttribute(prop.size)))
     return ::mlir::failure();
 
-  if (::mlir::failed(reader.readOptionalAttribute(prop.superType)))
+  if (::mlir::failed(reader.readAttribute(prop.sym_name)))
     return ::mlir::failure();
 
-  if (::mlir::failed(reader.readAttribute(prop.typeName)))
+  if (::mlir::failed(reader.readAttribute(prop.vtable_addr)))
+    return ::mlir::failure();
+
+  if (::mlir::failed(reader.readAttribute(prop.vtable_offset)))
     return ::mlir::failure();
   return ::mlir::success();
 }
 
 void TypeInfoOp::writeProperties(::mlir::DialectBytecodeWriter &writer) {
   auto &prop = getProperties(); (void)prop;
-  writer.writeAttribute(prop.structType);
-
-  writer.writeOptionalAttribute(prop.superType);
-  writer.writeAttribute(prop.typeName);
+  writer.writeAttribute(prop.size);
+  writer.writeAttribute(prop.sym_name);
+  writer.writeAttribute(prop.vtable_addr);
+  writer.writeAttribute(prop.vtable_offset);
 }
 
-::llvm::StringRef TypeInfoOp::getTypeName() {
-  auto attr = getTypeNameAttr();
+::llvm::StringRef TypeInfoOp::getSymName() {
+  auto attr = getSymNameAttr();
   return attr.getValue();
 }
 
-::mlir::Type TypeInfoOp::getStructType() {
-  auto attr = getStructTypeAttr();
-  return ::llvm::cast<::mlir::Type>(attr.getValue());
+uint64_t TypeInfoOp::getSize() {
+  auto attr = getSizeAttr();
+  return attr.getValue().getZExtValue();
 }
 
-::llvm::StringRef TypeInfoOp::getSuperType() {
-  auto attr = getSuperTypeAttr();
-  return attr.getValue();
+uint64_t TypeInfoOp::getVtableOffset() {
+  auto attr = getVtableOffsetAttr();
+  return attr.getValue().getZExtValue();
 }
 
-void TypeInfoOp::setTypeName(::llvm::StringRef attrValue) {
-  getProperties().typeName = ::mlir::Builder((*this)->getContext()).getStringAttr(attrValue);
+uint64_t TypeInfoOp::getVtableAddr() {
+  auto attr = getVtableAddrAttr();
+  return attr.getValue().getZExtValue();
 }
 
-void TypeInfoOp::setStructType(::mlir::Type attrValue) {
-  getProperties().structType = ::mlir::TypeAttr::get(attrValue);
+void TypeInfoOp::setSymName(::llvm::StringRef attrValue) {
+  getProperties().sym_name = ::mlir::Builder((*this)->getContext()).getStringAttr(attrValue);
 }
 
-void TypeInfoOp::setSuperType(::llvm::StringRef attrValue) {
-  getProperties().superType = ::mlir::Builder((*this)->getContext()).getStringAttr(attrValue);
+void TypeInfoOp::setSize(uint64_t attrValue) {
+  getProperties().size = ::mlir::Builder((*this)->getContext()).getIntegerAttr(::mlir::Builder((*this)->getContext()).getIntegerType(64), attrValue);
 }
 
-TypeInfoOp TypeInfoOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, StringAttr typeName, TypeAttr structType, StringAttr superType) {
+void TypeInfoOp::setVtableOffset(uint64_t attrValue) {
+  getProperties().vtable_offset = ::mlir::Builder((*this)->getContext()).getIntegerAttr(::mlir::Builder((*this)->getContext()).getIntegerType(64), attrValue);
+}
+
+void TypeInfoOp::setVtableAddr(uint64_t attrValue) {
+  getProperties().vtable_addr = ::mlir::Builder((*this)->getContext()).getIntegerAttr(::mlir::Builder((*this)->getContext()).getIntegerType(64), attrValue);
+}
+
+void TypeInfoOp::build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr) {
+  odsState.getOrAddProperties<Properties>().sym_name = sym_name;
+  odsState.getOrAddProperties<Properties>().size = size;
+  odsState.getOrAddProperties<Properties>().vtable_offset = vtable_offset;
+  odsState.getOrAddProperties<Properties>().vtable_addr = vtable_addr;
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr) {
   ::mlir::OperationState __state__(location, getOperationName());
-  build(builder, __state__, typeName, structType, superType);
+  build(builder, __state__, sym_name, size, vtable_offset, vtable_addr);
   auto __res__ = ::llvm::dyn_cast<TypeInfoOp>(builder.create(__state__));
   assert(__res__ && "builder didn't return the right type");
   return __res__;
 }
 
-TypeInfoOp TypeInfoOp::create(::mlir::ImplicitLocOpBuilder &builder, StringAttr typeName, TypeAttr structType, StringAttr superType) {
-  return create(builder, builder.getLoc(), typeName, structType, superType);
+TypeInfoOp TypeInfoOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr) {
+  return create(builder, builder.getLoc(), sym_name, size, vtable_offset, vtable_addr);
 }
 
-void TypeInfoOp::populateDefaultProperties(::mlir::OperationName opName, Properties &properties) {
-  ::mlir::Builder odsBuilder(opName.getContext());
-  if (!properties.superType)
-    properties.superType = odsBuilder.getStringAttr("""");
+void TypeInfoOp::build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr) {
+  odsState.getOrAddProperties<Properties>().sym_name = sym_name;
+  odsState.getOrAddProperties<Properties>().size = size;
+  odsState.getOrAddProperties<Properties>().vtable_offset = vtable_offset;
+  odsState.getOrAddProperties<Properties>().vtable_addr = vtable_addr;
+  assert(resultTypes.size() == 0u && "mismatched number of results");
+  odsState.addTypes(resultTypes);
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, resultTypes, sym_name, size, vtable_offset, vtable_addr);
+  auto __res__ = ::llvm::dyn_cast<TypeInfoOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::StringAttr sym_name, ::mlir::IntegerAttr size, ::mlir::IntegerAttr vtable_offset, ::mlir::IntegerAttr vtable_addr) {
+  return create(builder, builder.getLoc(), resultTypes, sym_name, size, vtable_offset, vtable_addr);
+}
+
+void TypeInfoOp::build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr) {
+  odsState.getOrAddProperties<Properties>().sym_name = odsBuilder.getStringAttr(sym_name);
+  odsState.getOrAddProperties<Properties>().size = odsBuilder.getIntegerAttr(odsBuilder.getIntegerType(64), size);
+  odsState.getOrAddProperties<Properties>().vtable_offset = odsBuilder.getIntegerAttr(odsBuilder.getIntegerType(64), vtable_offset);
+  odsState.getOrAddProperties<Properties>().vtable_addr = odsBuilder.getIntegerAttr(odsBuilder.getIntegerType(64), vtable_addr);
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, sym_name, size, vtable_offset, vtable_addr);
+  auto __res__ = ::llvm::dyn_cast<TypeInfoOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::ImplicitLocOpBuilder &builder, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr) {
+  return create(builder, builder.getLoc(), sym_name, size, vtable_offset, vtable_addr);
+}
+
+void TypeInfoOp::build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr) {
+  odsState.getOrAddProperties<Properties>().sym_name = odsBuilder.getStringAttr(sym_name);
+  odsState.getOrAddProperties<Properties>().size = odsBuilder.getIntegerAttr(odsBuilder.getIntegerType(64), size);
+  odsState.getOrAddProperties<Properties>().vtable_offset = odsBuilder.getIntegerAttr(odsBuilder.getIntegerType(64), vtable_offset);
+  odsState.getOrAddProperties<Properties>().vtable_addr = odsBuilder.getIntegerAttr(odsBuilder.getIntegerType(64), vtable_addr);
+  assert(resultTypes.size() == 0u && "mismatched number of results");
+  odsState.addTypes(resultTypes);
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, resultTypes, sym_name, size, vtable_offset, vtable_addr);
+  auto __res__ = ::llvm::dyn_cast<TypeInfoOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::llvm::StringRef sym_name, uint64_t size, uint64_t vtable_offset, uint64_t vtable_addr) {
+  return create(builder, builder.getLoc(), resultTypes, sym_name, size, vtable_offset, vtable_addr);
+}
+
+void TypeInfoOp::build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes) {
+  assert(operands.size() == 0u && "mismatched number of parameters");
+  odsState.addOperands(operands);
+  odsState.addAttributes(attributes);
+  assert(resultTypes.size() == 0u && "mismatched number of return types");
+  odsState.addTypes(resultTypes);
+
+  if (!attributes.empty()) {
+    ::mlir::OpaqueProperties properties =
+      &odsState.getOrAddProperties<TypeInfoOp::Properties>();
+    std::optional<::mlir::RegisteredOperationName> info =
+      odsState.name.getRegisteredInfo();
+    if (failed(info->setOpPropertiesFromAttribute(odsState.name, properties,
+        odsState.attributes.getDictionary(odsState.getContext()), nullptr)))
+      ::llvm::report_fatal_error("Property conversion failed.");
+  }
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, resultTypes, operands, attributes);
+  auto __res__ = ::llvm::dyn_cast<TypeInfoOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes) {
+  return create(builder, builder.getLoc(), resultTypes, operands, attributes);
+}
+
+void TypeInfoOp::build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes) {
+  assert(operands.size() == 0u && "mismatched number of parameters");
+  odsState.addOperands(operands);
+  odsState.useProperties(const_cast<Properties&>(properties));
+  odsState.addAttributes(discardableAttributes);
+  assert(resultTypes.size() == 0u && "mismatched number of return types");
+  odsState.addTypes(resultTypes);
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, resultTypes, operands, properties, discardableAttributes);
+  auto __res__ = ::llvm::dyn_cast<TypeInfoOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+TypeInfoOp TypeInfoOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes) {
+  return create(builder, builder.getLoc(), resultTypes, operands, properties, discardableAttributes);
 }
 
 ::llvm::LogicalResult TypeInfoOp::verifyInvariantsImpl() {
-  auto tblgen_structType = getProperties().structType; (void)tblgen_structType;
-  if (!tblgen_structType) return emitOpError("requires attribute 'structType'");
-  auto tblgen_superType = getProperties().superType; (void)tblgen_superType;
-  auto tblgen_typeName = getProperties().typeName; (void)tblgen_typeName;
-  if (!tblgen_typeName) return emitOpError("requires attribute 'typeName'");
+  auto tblgen_size = getProperties().size; (void)tblgen_size;
+  if (!tblgen_size) return emitOpError("requires attribute 'size'");
+  auto tblgen_sym_name = getProperties().sym_name; (void)tblgen_sym_name;
+  if (!tblgen_sym_name) return emitOpError("requires attribute 'sym_name'");
+  auto tblgen_vtable_addr = getProperties().vtable_addr; (void)tblgen_vtable_addr;
+  if (!tblgen_vtable_addr) return emitOpError("requires attribute 'vtable_addr'");
+  auto tblgen_vtable_offset = getProperties().vtable_offset; (void)tblgen_vtable_offset;
+  if (!tblgen_vtable_offset) return emitOpError("requires attribute 'vtable_offset'");
 
-  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS2(*this, tblgen_typeName, "typeName")))
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS2(*this, tblgen_sym_name, "sym_name")))
     return ::mlir::failure();
 
-  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS3(*this, tblgen_structType, "structType")))
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(*this, tblgen_size, "size")))
     return ::mlir::failure();
 
-  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS2(*this, tblgen_superType, "superType")))
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(*this, tblgen_vtable_offset, "vtable_offset")))
+    return ::mlir::failure();
+
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(*this, tblgen_vtable_addr, "vtable_addr")))
     return ::mlir::failure();
   return ::mlir::success();
 }
@@ -1374,90 +1535,30 @@ void TypeInfoOp::populateDefaultProperties(::mlir::OperationName opName, Propert
   return verifyInvariantsImpl();
 }
 
-::llvm::LogicalResult TypeInfoOp::setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
-  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
-  if (!dict) {
-    emitError() << "expected DictionaryAttr to set properties";
+::mlir::ParseResult TypeInfoOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
+  ::mlir::StringAttr sym_nameAttr;
+
+  if (parser.parseSymbolName(sym_nameAttr))
     return ::mlir::failure();
-  }
-  // keep track of used keys in the input dictionary to be able to error out
-  // if there are some unknown ones.
-  ::mlir::DenseSet<::mlir::StringAttr> usedKeys;
-  ::mlir::MLIRContext *ctx = dict.getContext();
-  (void)ctx;
+  if (sym_nameAttr) result.getOrAddProperties<TypeInfoOp::Properties>().sym_name = sym_nameAttr;
   {
-
-    auto &propStorage = prop.typeName;
-    auto typeNameAttrName = ::mlir::StringAttr::get(ctx, "typeName");
-    auto attr = dict.get(typeNameAttrName);
-    usedKeys.insert(typeNameAttrName);
-    if (attr || /*isRequired=*/true) {
-      if (!attr) {
-        emitError() << "expected key entry for typeName in DictionaryAttr to set "
-                   "Properties.";
-        return ::mlir::failure();
-      }
-      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
-      if (convertedAttr) {
-        propStorage = convertedAttr;
-      } else {
-        emitError() << "Invalid attribute `typeName` in property conversion: " << attr;
-        return ::mlir::failure();
-      }
-    }
-  }
-  {
-
-    auto &propStorage = prop.structType;
-    auto structTypeAttrName = ::mlir::StringAttr::get(ctx, "structType");
-    auto attr = dict.get(structTypeAttrName);
-    usedKeys.insert(structTypeAttrName);
-    if (attr || /*isRequired=*/true) {
-      if (!attr) {
-        emitError() << "expected key entry for structType in DictionaryAttr to set "
-                   "Properties.";
-        return ::mlir::failure();
-      }
-      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
-      if (convertedAttr) {
-        propStorage = convertedAttr;
-      } else {
-        emitError() << "Invalid attribute `structType` in property conversion: " << attr;
-        return ::mlir::failure();
-      }
-    }
-  }
-  {
-
-    auto &propStorage = prop.superType;
-    auto superTypeAttrName = ::mlir::StringAttr::get(ctx, "superType");
-    auto attr = dict.get(superTypeAttrName);
-    usedKeys.insert(superTypeAttrName);
-    if (attr || /*isRequired=*/false) {
-      if (!attr) {
-        emitError() << "expected key entry for superType in DictionaryAttr to set "
-                   "Properties.";
-        return ::mlir::failure();
-      }
-      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
-      if (convertedAttr) {
-        propStorage = convertedAttr;
-      } else {
-        emitError() << "Invalid attribute `superType` in property conversion: " << attr;
-        return ::mlir::failure();
-      }
-    }
-  }
-
-  for (::mlir::NamedAttribute attr : dict) {
-    if (!usedKeys.contains(attr.getName()))
-      return emitError() << "unknown key '" << attr.getName() <<
-          "' when parsing properties dictionary";
+    auto loc = parser.getCurrentLocation();(void)loc;
+    if (parser.parseOptionalAttrDict(result.attributes))
+      return ::mlir::failure();
+    if (failed(verifyInherentAttrs(result.name, result.attributes, [&]() {
+        return parser.emitError(loc) << "'" << result.name.getStringRef() << "' op ";
+      })))
+      return ::mlir::failure();
   }
   return ::mlir::success();
 }
 
-void TypeInfoOp::getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>> &effects) {
+void TypeInfoOp::print(::mlir::OpAsmPrinter &_odsPrinter) {
+  _odsPrinter << ' ';
+  _odsPrinter.printSymbolName(getSymNameAttr().getValue());
+  ::llvm::SmallVector<::llvm::StringRef, 2> elidedAttrs;
+  elidedAttrs.push_back("sym_name");
+  _odsPrinter.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
 }
 
 } // namespace jlcs
@@ -1700,7 +1801,7 @@ void VirtualCallOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Proper
 ::llvm::LogicalResult VirtualCallOp::verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
     {
       ::mlir::Attribute attr = attrs.get(getClassNameAttrName(opName));
-      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS4(attr, "class_name", emitError)))
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS3(attr, "class_name", emitError)))
         return ::mlir::failure();
     }
 
@@ -1781,7 +1882,7 @@ VirtualCallOp VirtualCallOp::create(::mlir::ImplicitLocOpBuilder &builder, Symbo
   auto tblgen_vtable_offset = getProperties().vtable_offset; (void)tblgen_vtable_offset;
   if (!tblgen_vtable_offset) return emitOpError("requires attribute 'vtable_offset'");
 
-  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS4(*this, tblgen_class_name, "class_name")))
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS3(*this, tblgen_class_name, "class_name")))
     return ::mlir::failure();
 
   if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(*this, tblgen_vtable_offset, "vtable_offset")))
