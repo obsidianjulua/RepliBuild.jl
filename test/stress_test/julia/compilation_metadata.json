@@ -1667,7 +1667,7 @@
           "c_type": "uint64_t",
           "name": "seed",
           "position": 0,
-          "julia_type": "Any"
+          "julia_type": "UInt64"
         }
       ],
       "parameters_source": "dwarf",
@@ -1721,7 +1721,7 @@
           "c_type": "int32_t",
           "name": "max_iterations",
           "position": 5,
-          "julia_type": "Any"
+          "julia_type": "Int32"
         },
         {
           "c_type": "void*",
@@ -2368,7 +2368,7 @@
       "inferred": true
     },
     "uint64_t": {
-      "julia_type": "Any",
+      "julia_type": "UInt64",
       "inferred": true
     },
     "float": {
@@ -2396,7 +2396,7 @@
       "julia_type": "Cint"
     },
     "int32_t": {
-      "julia_type": "Any",
+      "julia_type": "Int32",
       "inferred": true
     },
     "SplineInterpolation*": {
@@ -2494,7 +2494,7 @@
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/include",
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src"
   ],
-  "timestamp": "2026-01-02T17:43:05.380",
+  "timestamp": "2026-01-07T04:19:02.697",
   "struct_definitions": {
     "LUDecomposition": {
       "kind": "struct",
@@ -2515,7 +2515,7 @@
           "c_type": "int32_t*",
           "name": "permutation",
           "offset": null,
-          "julia_type": "Ptr{Cvoid}"
+          "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "size_t",
@@ -2649,13 +2649,13 @@
           "c_type": "int32_t*",
           "name": "row_indices",
           "offset": null,
-          "julia_type": "Ptr{Cvoid}"
+          "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "int32_t*",
           "name": "col_pointers",
           "offset": null,
-          "julia_type": "Ptr{Cvoid}"
+          "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "size_t",
@@ -2822,13 +2822,13 @@
           "c_type": "int32_t",
           "name": "max_iterations",
           "offset": null,
-          "julia_type": "Any"
+          "julia_type": "Int32"
         },
         {
           "c_type": "int32_t",
           "name": "max_function_evals",
           "offset": null,
-          "julia_type": "Any"
+          "julia_type": "Int32"
         },
         {
           "c_type": "OptimizationAlgorithm",
@@ -2857,7 +2857,7 @@
           "c_type": "int32_t*",
           "name": "counts",
           "offset": null,
-          "julia_type": "Ptr{Cvoid}"
+          "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "size_t",
@@ -2926,13 +2926,13 @@
           "c_type": "int32_t",
           "name": "iteration",
           "offset": null,
-          "julia_type": "Any"
+          "julia_type": "Int32"
         },
         {
           "c_type": "int32_t",
           "name": "n_evals",
           "offset": null,
-          "julia_type": "Any"
+          "julia_type": "Int32"
         },
         {
           "c_type": "Status",
@@ -3066,7 +3066,7 @@
         }
       ],
       "underlying_type": "int32_t",
-      "julia_type": "Any"
+      "julia_type": "Int32"
     }
   }
 }

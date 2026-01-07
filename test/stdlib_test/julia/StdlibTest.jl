@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stdlib_test
-# Generated: 2026-01-02 18:01:59
+# Generated: 2026-01-07 04:21:32
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstdlib_test.so
 # Metadata: compilation_metadata.json
@@ -27,8 +27,14 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 26,
-    "generated_at" => "2026-01-02T18:01:56.246"
+    "generated_at" => "2026-01-07T04:19:04.613"
 )
+
+# =============================================================================
+# Opaque Struct Declarations
+# =============================================================================
+
+mutable struct _IO_FILE end
 
 # =============================================================================
 # Struct Definitions (from DWARF debug info)

@@ -1999,7 +1999,21 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         "void" => "Cvoid",
         "char*" => "Cstring",
         "const char*" => "Cstring",
-        "size_t" => "Csize_t" # Added for correct type mapping
+        "size_t" => "Csize_t",
+        "ssize_t" => "Cssize_t",
+        "ptrdiff_t" => "Cptrdiff_t",
+        "intptr_t" => "Cintptr_t",
+        "uintptr_t" => "Cuintptr_t",
+        "int8_t" => "Int8",
+        "uint8_t" => "UInt8",
+        "int16_t" => "Int16",
+        "uint16_t" => "UInt16",
+        "int32_t" => "Int32",
+        "uint32_t" => "UInt32",
+        "int64_t" => "Int64",
+        "uint64_t" => "UInt64",
+        "long long" => "Clonglong",
+        "unsigned long long" => "Culonglong"
     )
 
     # Handle arrays: type[size] or type[size1][size2]

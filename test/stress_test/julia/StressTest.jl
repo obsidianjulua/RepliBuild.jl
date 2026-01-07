@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-01-02 17:43:05
+# Generated: 2026-01-07 04:19:02
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -27,7 +27,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-01-02T17:43:05.380"
+    "generated_at" => "2026-01-07T04:19:02.697"
 )
 
 # =============================================================================
@@ -75,7 +75,7 @@ end
 # C++ struct: Histogram (3 members)
 mutable struct Histogram
     bin_edges::Ptr{Cdouble}
-    counts::Ptr{Cvoid}
+    counts::Ptr{Int32}
     n_bins::Csize_t
 end
 
@@ -93,8 +93,8 @@ end
 mutable struct OptimizationOptions
     tolerance::Cdouble
     step_size::Cdouble
-    max_iterations::Any
-    max_function_evals::Any
+    max_iterations::Int32
+    max_function_evals::Int32
     algorithm::OptimizationAlgorithm
     verbose::Bool
 end
@@ -105,8 +105,8 @@ mutable struct OptimizationState
     gradient::Ptr{Cdouble}
     f_value::Cdouble
     gradient_norm::Cdouble
-    iteration::Any
-    n_evals::Any
+    iteration::Int32
+    n_evals::Int32
     status::Status
     dimension::Csize_t
 end
@@ -120,8 +120,8 @@ end
 # C++ struct: SparseMatrix (6 members)
 mutable struct SparseMatrix
     values::Ptr{Cdouble}
-    row_indices::Ptr{Cvoid}
-    col_pointers::Ptr{Cvoid}
+    row_indices::Ptr{Int32}
+    col_pointers::Ptr{Int32}
     nnz::Csize_t
     rows::Csize_t
     cols::Csize_t
@@ -176,7 +176,7 @@ end
 mutable struct LUDecomposition
     L::DenseMatrix
     U::DenseMatrix
-    permutation::Ptr{Cvoid}
+    permutation::Ptr{Int32}
     size::Csize_t
     status::Status
 end
@@ -1319,12 +1319,12 @@ function print_vector(vec::Vector{Float64}, n::Csize_t)::Cvoid
 end
 
 """
-    set_random_seed(seed::Any) -> Cvoid
+    set_random_seed(seed::UInt64) -> Cvoid
 
 Wrapper for C++ function: `set_random_seed`
 
 # Arguments
-- `seed::Any`
+- `seed::UInt64`
 
 # Returns
 - `Cvoid`
@@ -1334,12 +1334,12 @@ Wrapper for C++ function: `set_random_seed`
 - Type safety:  From compilation
 """
 
-function set_random_seed(seed::Any)::Cvoid
-    ccall((:set_random_seed, LIBRARY_PATH), Cvoid, (Any,), seed)
+function set_random_seed(seed::UInt64)::Cvoid
+    ccall((:set_random_seed, LIBRARY_PATH), Cvoid, (UInt64,), seed)
 end
 
 """
-    solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, max_iterations::Any, user_data::Ptr{Cvoid}) -> Any
+    solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, max_iterations::Int32, user_data::Ptr{Cvoid}) -> Any
 
 Wrapper for C++ function: `solve_conjugate_gradient`
 
@@ -1349,7 +1349,7 @@ Wrapper for C++ function: `solve_conjugate_gradient`
 - `x::Ptr{Cdouble}`
 - `n::Csize_t`
 - `tolerance::Cdouble`
-- `max_iterations::Any`
+- `max_iterations::Int32`
 - `user_data::Ptr{Cvoid}`
 
 # Returns
@@ -1366,14 +1366,14 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 - Type safety:  From compilation
 """
 
-function solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, max_iterations::Any, user_data::Ptr{Cvoid})::Status
-    return ccall((:solve_conjugate_gradient, LIBRARY_PATH), Status, (Ptr{Cvoid}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Cdouble, Any, Ptr{Cvoid},), matvec, b, x, n, tolerance, max_iterations, user_data)
+function solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, max_iterations::Int32, user_data::Ptr{Cvoid})::Status
+    return ccall((:solve_conjugate_gradient, LIBRARY_PATH), Status, (Ptr{Cvoid}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Cdouble, Int32, Ptr{Cvoid},), matvec, b, x, n, tolerance, max_iterations, user_data)
 end
 
 # Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Vector{Float64}, n::Csize_t, tolerance::Cdouble, max_iterations::Any, user_data::Ptr{Cvoid})::Any
+function solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Vector{Float64}, n::Csize_t, tolerance::Cdouble, max_iterations::Int32, user_data::Ptr{Cvoid})::Any
     return GC.@preserve x begin
-        ccall((:solve_conjugate_gradient, LIBRARY_PATH), Any, (Ptr{Cvoid}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Cdouble, Any, Ptr{Cvoid},), matvec, b, pointer(x), n, tolerance, max_iterations, user_data)
+        ccall((:solve_conjugate_gradient, LIBRARY_PATH), Any, (Ptr{Cvoid}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Cdouble, Int32, Ptr{Cvoid},), matvec, b, pointer(x), n, tolerance, max_iterations, user_data)
     end
 end
 

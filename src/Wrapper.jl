@@ -1540,10 +1540,15 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             members = get(info, "members", [])
             for member in members
                 julia_type = get(member, "julia_type", "Any")
-                # Extract inner type from Ptr{T}
-                m = match(r"Ptr\{(.+)\}", julia_type)
-                if !isnothing(m)
-                    inner = m.captures[1]
+                # Extract inner type from Ptr{T} (recursively for Ptr{Ptr{T}})
+                inner = julia_type
+                found_ptr = false
+                while startswith(inner, "Ptr{") && endswith(inner, "}")
+                    inner = inner[5:end-1]
+                    found_ptr = true
+                end
+
+                if found_ptr
                     # If it looks like a struct (not a primitive) and not in defined structs
                     builtin_types = ["Cvoid", "Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort", 
                                      "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8", 
