@@ -1,0 +1,523 @@
+{
+  "symbols": [
+    {
+      "mangled": "create_circle",
+      "demangled": "create_circle",
+      "type": "T",
+      "address": "0000000000001320"
+    },
+    {
+      "mangled": "create_rectangle",
+      "demangled": "create_rectangle",
+      "type": "T",
+      "address": "00000000000012b0"
+    },
+    {
+      "mangled": "delete_shape",
+      "demangled": "delete_shape",
+      "type": "T",
+      "address": "00000000000013c0"
+    },
+    {
+      "mangled": "get_area",
+      "demangled": "get_area",
+      "type": "T",
+      "address": "0000000000001380"
+    },
+    {
+      "mangled": "get_perimeter",
+      "demangled": "get_perimeter",
+      "type": "T",
+      "address": "00000000000013a0"
+    },
+    {
+      "mangled": "_ZN6CircleC2Ed",
+      "demangled": "Circle::Circle(double)",
+      "type": "T",
+      "address": "0000000000001270"
+    },
+    {
+      "mangled": "_ZN6CircleC2Ed",
+      "demangled": "Circle::Circle(double)",
+      "type": "T",
+      "address": "0000000000001270"
+    },
+    {
+      "mangled": "_ZN9RectangleC2Edd",
+      "demangled": "Rectangle::Rectangle(double, double)",
+      "type": "T",
+      "address": "0000000000001220"
+    },
+    {
+      "mangled": "_ZN9RectangleC2Edd",
+      "demangled": "Rectangle::Rectangle(double, double)",
+      "type": "T",
+      "address": "0000000000001220"
+    },
+    {
+      "mangled": "_ZNK6Circle4areaEv",
+      "demangled": "Circle::area() const",
+      "type": "T",
+      "address": "00000000000011e0"
+    },
+    {
+      "mangled": "_ZNK6Circle9perimeterEv",
+      "demangled": "Circle::perimeter() const",
+      "type": "T",
+      "address": "0000000000001200"
+    },
+    {
+      "mangled": "_ZNK9Rectangle4areaEv",
+      "demangled": "Rectangle::area() const",
+      "type": "T",
+      "address": "0000000000001190"
+    },
+    {
+      "mangled": "_ZNK9Rectangle9perimeterEv",
+      "demangled": "Rectangle::perimeter() const",
+      "type": "T",
+      "address": "00000000000011b0"
+    }
+  ],
+  "compile_flags": [
+    "-std=c++17",
+    "-fPIC"
+  ],
+  "binary_path": "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test/julia/libvtable_test.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "name": "create_circle",
+      "parameters": [
+        {
+          "c_type": "double",
+          "name": "r",
+          "position": 0,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "create_circle",
+      "is_method": false,
+      "demangled": "create_circle",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Shape*",
+        "size": 8,
+        "julia_type": "Ptr{Cvoid}"
+      }
+    },
+    {
+      "name": "create_rectangle",
+      "parameters": [
+        {
+          "c_type": "double",
+          "name": "w",
+          "position": 0,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "h",
+          "position": 1,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "create_rectangle",
+      "is_method": false,
+      "demangled": "create_rectangle",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "Shape*",
+        "size": 8,
+        "julia_type": "Ptr{Cvoid}"
+      }
+    },
+    {
+      "name": "delete_shape",
+      "parameters": [
+        {
+          "c_type": "Shape*",
+          "name": "s",
+          "position": 0,
+          "julia_type": "Ptr{Shape}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "delete_shape",
+      "is_method": false,
+      "demangled": "delete_shape",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "get_area",
+      "parameters": [
+        {
+          "c_type": "const Shape*",
+          "name": "s",
+          "position": 0,
+          "julia_type": "Ptr{Shape}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "get_area",
+      "is_method": false,
+      "demangled": "get_area",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "get_perimeter",
+      "parameters": [
+        {
+          "c_type": "const Shape*",
+          "name": "s",
+          "position": 0,
+          "julia_type": "Ptr{Shape}"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "get_perimeter",
+      "is_method": false,
+      "demangled": "get_perimeter",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "Circle",
+      "parameters": [
+        {
+          "c_type": "Circle*",
+          "name": "this",
+          "position": 0,
+          "julia_type": "Ptr{Circle}"
+        },
+        {
+          "c_type": "double",
+          "name": "r",
+          "position": 1,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "Circle",
+      "exported": true,
+      "mangled": "_ZN6CircleC2Ed",
+      "is_method": true,
+      "demangled": "Circle::Circle(double)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "Circle",
+      "parameters": [
+        {
+          "c_type": "Circle*",
+          "name": "this",
+          "position": 0,
+          "julia_type": "Ptr{Circle}"
+        },
+        {
+          "c_type": "double",
+          "name": "r",
+          "position": 1,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "Circle",
+      "exported": true,
+      "mangled": "_ZN6CircleC2Ed",
+      "is_method": true,
+      "demangled": "Circle::Circle(double)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "Rectangle",
+      "parameters": [
+        {
+          "c_type": "Rectangle*",
+          "name": "this",
+          "position": 0,
+          "julia_type": "Ptr{Rectangle}"
+        },
+        {
+          "c_type": "double",
+          "name": "w",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "h",
+          "position": 2,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "Rectangle",
+      "exported": true,
+      "mangled": "_ZN9RectangleC2Edd",
+      "is_method": true,
+      "demangled": "Rectangle::Rectangle(double, double)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "Rectangle",
+      "parameters": [
+        {
+          "c_type": "Rectangle*",
+          "name": "this",
+          "position": 0,
+          "julia_type": "Ptr{Rectangle}"
+        },
+        {
+          "c_type": "double",
+          "name": "w",
+          "position": 1,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "h",
+          "position": 2,
+          "julia_type": "Cdouble"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "Rectangle",
+      "exported": true,
+      "mangled": "_ZN9RectangleC2Edd",
+      "is_method": true,
+      "demangled": "Rectangle::Rectangle(double, double)",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "area",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "Circle",
+      "exported": true,
+      "mangled": "_ZNK6Circle4areaEv",
+      "is_method": true,
+      "demangled": "Circle::area() const",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "perimeter",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "Circle",
+      "exported": true,
+      "mangled": "_ZNK6Circle9perimeterEv",
+      "is_method": true,
+      "demangled": "Circle::perimeter() const",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "area",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "Rectangle",
+      "exported": true,
+      "mangled": "_ZNK9Rectangle4areaEv",
+      "is_method": true,
+      "demangled": "Rectangle::area() const",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    },
+    {
+      "name": "perimeter",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "Rectangle",
+      "exported": true,
+      "mangled": "_ZNK9Rectangle9perimeterEv",
+      "is_method": true,
+      "demangled": "Rectangle::perimeter() const",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "double",
+        "size": 8,
+        "julia_type": "Cdouble"
+      }
+    }
+  ],
+  "project": "vtable_test",
+  "source_files": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test/src/shapes.cpp"
+  ],
+  "type_registry": {
+    "int": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "Shape*": {
+      "julia_type": "Ptr{Shape}",
+      "inferred": true
+    },
+    "Rectangle*": {
+      "julia_type": "Ptr{Rectangle}",
+      "inferred": true
+    },
+    "char": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "UInt8"
+    },
+    "const Shape*": {
+      "julia_type": "Ptr{Shape}",
+      "inferred": true
+    },
+    "double": {
+      "c_type": "double",
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "c_type": "void",
+      "size": 0,
+      "julia_type": "Cvoid"
+    },
+    "Circle*": {
+      "julia_type": "Ptr{Circle}",
+      "inferred": true
+    }
+  },
+  "function_count": 13,
+  "compiler_info": {
+    "lto_enabled": false,
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "clang_version": "clang version 21.1.6",
+    "optimization_level": "0",
+    "llvm_version": "21.1.6"
+  },
+  "metadata_version": "1.0",
+  "include_dirs": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test/include",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test/src"
+  ],
+  "timestamp": "2026-01-07T04:37:54.445",
+  "struct_definitions": {
+    "Circle": {
+      "kind": "class",
+      "base_classes": [
+        {
+          "accessibility": "public",
+          "type": "Shape"
+        }
+      ],
+      "members": [
+        {
+          "c_type": "double",
+          "name": "radius",
+          "offset": null,
+          "julia_type": "Cdouble"
+        }
+      ]
+    },
+    "Shape": {
+      "kind": "class",
+      "members": [
+        {
+          "c_type": "function_ptr(int)**",
+          "name": "_vptr$Shape",
+          "offset": null,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ]
+    },
+    "Rectangle": {
+      "kind": "class",
+      "base_classes": [
+        {
+          "accessibility": "public",
+          "type": "Shape"
+        }
+      ],
+      "members": [
+        {
+          "c_type": "double",
+          "name": "width",
+          "offset": null,
+          "julia_type": "Cdouble"
+        },
+        {
+          "c_type": "double",
+          "name": "height",
+          "offset": null,
+          "julia_type": "Cdouble"
+        }
+      ]
+    }
+  }
+}

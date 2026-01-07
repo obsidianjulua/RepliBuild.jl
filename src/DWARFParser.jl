@@ -54,10 +54,28 @@ function parse_dwarf_output(dwarf_text::String)
     current_size = 0
     base_classes = String[]
     virtual_methods = VirtualMethod[]
+    
+    # Method parsing state
+    current_method_name = ""
+    current_method_mangled = ""
+    current_method_slot = -1
+    is_virtual_method = false
+    in_subprogram = false
 
     for line in split(dwarf_text, '\n')
         # Detect class type
-        if contains(line, "DW_TAG_class_type")
+        if contains(line, "DW_TAG_class_type") || contains(line, "DW_TAG_structure_type")
+            # Save pending method from previous class context if valid
+            if is_virtual_method && !isempty(current_method_name)
+                push!(virtual_methods, VirtualMethod(
+                    current_method_name,
+                    current_method_mangled,
+                    current_method_slot,
+                    "void", 
+                    String[]
+                ))
+            end
+
             # Save previous class if exists
             if !isnothing(current_class_name) && !isempty(current_class_name)
                 classes[current_class_name] = ClassInfo(
@@ -75,14 +93,52 @@ function parse_dwarf_output(dwarf_text::String)
             current_size = 0
             empty!(base_classes)
             empty!(virtual_methods)
+            
+            # Reset method state
+            current_method_name = ""
+            current_method_mangled = ""
+            current_method_slot = -1
+            is_virtual_method = false
+            in_subprogram = false
             continue
+        end
+        
+        # Detect start of a subprogram (method) - reset method state
+        if contains(line, "DW_TAG_subprogram")
+            # If previous method was virtual, save it
+            if is_virtual_method && !isempty(current_method_name)
+                push!(virtual_methods, VirtualMethod(
+                    current_method_name,
+                    current_method_mangled,
+                    current_method_slot,
+                    "void", # TODO: Parse return type
+                    String[] # TODO: Parse parameters
+                ))
+            end
+            
+            current_method_name = ""
+            current_method_mangled = ""
+            current_method_slot = -1
+            is_virtual_method = false
+            in_subprogram = true
+        end
+
+        # If we hit another tag that isn't subprogram or formal parameter, we are likely out of subprogram
+        if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_subprogram") && !contains(line, "DW_TAG_formal_parameter") && !contains(line, "DW_TAG_unspecified_parameters")
+             in_subprogram = false
         end
 
         # Extract class name
-        if contains(line, "DW_AT_name") && isempty(current_class_name)
+        if contains(line, "DW_AT_name") 
             m = match(r"DW_AT_name\s+\(\"([^\"]+)\"\)", line)
             if !isnothing(m)
-                current_class_name = m.captures[1]
+                name = m.captures[1]
+                if isempty(current_class_name)
+                    current_class_name = name
+                elseif in_subprogram
+                    # It's a method name
+                    current_method_name = name
+                end
             end
         end
 
@@ -109,30 +165,39 @@ function parse_dwarf_output(dwarf_text::String)
         end
 
         # Extract virtual method info
-        if contains(line, "DW_AT_virtuality") && contains(line, "DW_VIRTUALITY_virtual")
-            # This is a virtual method - look back for name and slot
+        if in_subprogram && contains(line, "DW_AT_virtuality") && (contains(line, "DW_VIRTUALITY_virtual") || contains(line, "(0x01)"))
+            is_virtual_method = true
         end
 
         # Extract vtable slot
-        if contains(line, "DW_AT_vtable_elem_location")
+        if in_subprogram && contains(line, "DW_AT_vtable_elem_location")
             m = match(r"DW_OP_constu\s+(0x[0-9a-fA-F]+|\d+)", line)
             if !isnothing(m)
                 slot_str = m.captures[1]
-                slot = startswith(slot_str, "0x") ?
+                current_method_slot = startswith(slot_str, "0x") ?
                     parse(Int, slot_str[3:end], base=16) :
                     parse(Int, slot_str)
-                # TODO: Associate with current method being parsed
             end
         end
 
         # Extract mangled name
-        if contains(line, "DW_AT_linkage_name")
-            m = match(r"DW_AT_linkage_name\s+\(\"([^\"]+)\"\)", line)
+        if in_subprogram && (contains(line, "DW_AT_linkage_name") || contains(line, "DW_AT_MIPS_linkage_name"))
+            m = match(r"linkage_name\s+\(\"([^\"]+)\"\)", line)
             if !isnothing(m)
-                mangled = m.captures[1]
-                # TODO: Store with current method
+                current_method_mangled = m.captures[1]
             end
         end
+    end
+
+    # Save last method if virtual
+    if is_virtual_method && !isempty(current_method_name)
+        push!(virtual_methods, VirtualMethod(
+            current_method_name,
+            current_method_mangled,
+            current_method_slot,
+            "void",
+            String[]
+        ))
     end
 
     # Save last class
@@ -231,7 +296,7 @@ function parse_vtables(binary_path::String)
     dwarf_output = read(dwarf_cmd, String)
 
     # Extract symbol table
-    nm_cmd = `nm -C $binary_path`
+    nm_cmd = `nm $binary_path`
     nm_output = read(nm_cmd, String)
 
     # Parse both
