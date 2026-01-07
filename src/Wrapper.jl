@@ -1533,7 +1533,50 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # STRUCT GENERATION (from DWARF)
     # =============================================================================
 
+    # Scan for referenced structs that are missing definitions (opaque types)
+    opaque_structs = Set{String}()
+    for (name, info) in dwarf_structs
+        if !startswith(name, "__enum__") && haskey(info, "members")
+            members = get(info, "members", [])
+            for member in members
+                julia_type = get(member, "julia_type", "Any")
+                # Extract inner type from Ptr{T}
+                m = match(r"Ptr\{(.+)\}", julia_type)
+                if !isnothing(m)
+                    inner = m.captures[1]
+                    # If it looks like a struct (not a primitive) and not in defined structs
+                    builtin_types = ["Cvoid", "Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort", 
+                                     "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8", 
+                                     "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
+                                     "Any", "Nothing"]
+                    
+                    # Also exclude existing structs and NTuple
+                    if !(inner in builtin_types) && !(inner in struct_types) && !startswith(inner, "NTuple")
+                        push!(opaque_structs, inner)
+                    end
+                end
+            end
+        end
+    end
+
     struct_definitions = ""
+
+    if !isempty(opaque_structs)
+        struct_definitions *= """
+        # =============================================================================
+        # Opaque Struct Declarations
+        # =============================================================================
+
+        """
+        for name in sort(collect(opaque_structs))
+            # Sanitize
+            s_name = replace(replace(replace(name, "<" => "_"), ">" => ""), "," => "_")
+            s_name = replace(s_name, " " => "")
+            struct_definitions *= "mutable struct $s_name end\n"
+        end
+        struct_definitions *= "\n"
+    end
+
     if !isempty(struct_types)
         struct_definitions *= """
         # =============================================================================
@@ -1714,7 +1757,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         needs_conversion = Bool[]
 
         for (i, param) in enumerate(params)
-            push!(param_names, param["name"])
+            # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
+            safe_name = make_julia_identifier(param["name"])
+            push!(param_names, safe_name)
             julia_type = param["julia_type"]
             c_type_name = get(param, "c_type", "")
 

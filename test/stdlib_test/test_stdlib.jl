@@ -22,12 +22,12 @@ cd(@__DIR__)
     RepliBuild.wrap()
 
     # 2. Verify output exists
-    @test isfile("julia/StdLibTest.jl")
-    @test isfile("julia/libStdLibTest.so")
+    @test isfile("julia/StdlibTest.jl")
+    @test isfile("julia/libstdlib_test.so")
 
     # 3. Load the generated module
-    include("julia/StdLibTest.jl")
-    using .StdLibTest
+    include("julia/StdlibTest.jl")
+    using .StdlibTest
 
     @testset "String Operations" begin
         # Create string
