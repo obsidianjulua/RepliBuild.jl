@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for vtable_test
-# Generated: 2026-01-07 04:37:57
+# Generated: 2026-01-08 09:32:01
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libvtable_test.so
 # Metadata: compilation_metadata.json
@@ -34,13 +34,15 @@ const METADATA = Dict(
 # Struct Definitions (from DWARF debug info)
 # =============================================================================
 
-# C++ struct: Circle (1 members)
+# C++ struct: Circle (2 members)
 mutable struct Circle
+    _vptr_Shape::Ptr{Cvoid}
     radius::Cdouble
 end
 
-# C++ struct: Rectangle (2 members)
+# C++ struct: Rectangle (3 members)
 mutable struct Rectangle
+    _vptr_Shape::Ptr{Cvoid}
     width::Cdouble
     height::Cdouble
 end
@@ -54,7 +56,7 @@ end
 export create_circle, create_rectangle, delete_shape, get_area, get_perimeter, Circle_area, Circle_perimeter, Rectangle_area, Rectangle_perimeter, Circle, Shape, Rectangle
 
 """
-    create_circle(r::Cdouble) -> Ptr{Cvoid}
+    create_circle(r::Cdouble) -> Ptr{Shape}
 
 Wrapper for C++ function: `create_circle`
 
@@ -62,19 +64,19 @@ Wrapper for C++ function: `create_circle`
 - `r::Cdouble`
 
 # Returns
-- `Ptr{Cvoid}`
+- `Ptr{Shape}`
 
 # Metadata
 - Mangled symbol: `create_circle`
 - Type safety:  From compilation
 """
 
-function create_circle(r::Cdouble)::Ptr{Cvoid}
-    ccall((:create_circle, LIBRARY_PATH), Ptr{Cvoid}, (Cdouble,), r)
+function create_circle(r::Cdouble)::Ptr{Shape}
+    ccall((:create_circle, LIBRARY_PATH), Ptr{Shape}, (Cdouble,), r)
 end
 
 """
-    create_rectangle(w::Cdouble, h::Cdouble) -> Ptr{Cvoid}
+    create_rectangle(w::Cdouble, h::Cdouble) -> Ptr{Shape}
 
 Wrapper for C++ function: `create_rectangle`
 
@@ -83,15 +85,15 @@ Wrapper for C++ function: `create_rectangle`
 - `h::Cdouble`
 
 # Returns
-- `Ptr{Cvoid}`
+- `Ptr{Shape}`
 
 # Metadata
 - Mangled symbol: `create_rectangle`
 - Type safety:  From compilation
 """
 
-function create_rectangle(w::Cdouble, h::Cdouble)::Ptr{Cvoid}
-    ccall((:create_rectangle, LIBRARY_PATH), Ptr{Cvoid}, (Cdouble, Cdouble,), w, h)
+function create_rectangle(w::Cdouble, h::Cdouble)::Ptr{Shape}
+    ccall((:create_rectangle, LIBRARY_PATH), Ptr{Shape}, (Cdouble, Cdouble,), w, h)
 end
 
 """
@@ -155,12 +157,12 @@ function get_perimeter(s::Ptr{Shape})::Cdouble
 end
 
 """
-    Circle_area() -> Cdouble
+    Circle_area(this::Ptr{Circle}) -> Cdouble
 
 Wrapper for C++ function: `Circle::area() const`
 
 # Arguments
-
+- `this::Ptr{Circle}`
 
 # Returns
 - `Cdouble`
@@ -170,17 +172,17 @@ Wrapper for C++ function: `Circle::area() const`
 - Type safety:  From compilation
 """
 
-function Circle_area()::Cdouble
-    ccall((:_ZNK6Circle4areaEv, LIBRARY_PATH), Cdouble, (), )
+function Circle_area(this::Ptr{Circle})::Cdouble
+    ccall((:_ZNK6Circle4areaEv, LIBRARY_PATH), Cdouble, (Ptr{Circle},), this)
 end
 
 """
-    Circle_perimeter() -> Cdouble
+    Circle_perimeter(this::Ptr{Circle}) -> Cdouble
 
 Wrapper for C++ function: `Circle::perimeter() const`
 
 # Arguments
-
+- `this::Ptr{Circle}`
 
 # Returns
 - `Cdouble`
@@ -190,17 +192,17 @@ Wrapper for C++ function: `Circle::perimeter() const`
 - Type safety:  From compilation
 """
 
-function Circle_perimeter()::Cdouble
-    ccall((:_ZNK6Circle9perimeterEv, LIBRARY_PATH), Cdouble, (), )
+function Circle_perimeter(this::Ptr{Circle})::Cdouble
+    ccall((:_ZNK6Circle9perimeterEv, LIBRARY_PATH), Cdouble, (Ptr{Circle},), this)
 end
 
 """
-    Rectangle_area() -> Cdouble
+    Rectangle_area(this::Ptr{Rectangle}) -> Cdouble
 
 Wrapper for C++ function: `Rectangle::area() const`
 
 # Arguments
-
+- `this::Ptr{Rectangle}`
 
 # Returns
 - `Cdouble`
@@ -210,17 +212,17 @@ Wrapper for C++ function: `Rectangle::area() const`
 - Type safety:  From compilation
 """
 
-function Rectangle_area()::Cdouble
-    ccall((:_ZNK9Rectangle4areaEv, LIBRARY_PATH), Cdouble, (), )
+function Rectangle_area(this::Ptr{Rectangle})::Cdouble
+    ccall((:_ZNK9Rectangle4areaEv, LIBRARY_PATH), Cdouble, (Ptr{Rectangle},), this)
 end
 
 """
-    Rectangle_perimeter() -> Cdouble
+    Rectangle_perimeter(this::Ptr{Rectangle}) -> Cdouble
 
 Wrapper for C++ function: `Rectangle::perimeter() const`
 
 # Arguments
-
+- `this::Ptr{Rectangle}`
 
 # Returns
 - `Cdouble`
@@ -230,8 +232,8 @@ Wrapper for C++ function: `Rectangle::perimeter() const`
 - Type safety:  From compilation
 """
 
-function Rectangle_perimeter()::Cdouble
-    ccall((:_ZNK9Rectangle9perimeterEv, LIBRARY_PATH), Cdouble, (), )
+function Rectangle_perimeter(this::Ptr{Rectangle})::Cdouble
+    ccall((:_ZNK9Rectangle9perimeterEv, LIBRARY_PATH), Cdouble, (Ptr{Rectangle},), this)
 end
 
 

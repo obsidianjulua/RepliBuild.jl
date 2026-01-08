@@ -1645,6 +1645,35 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             end
         end
 
+        # Helper to recursively flatten struct members from base classes
+        function flatten_struct_members(s_name, visited=Set{String}())
+            if s_name in visited
+                return []
+            end
+            push!(visited, s_name)
+            
+            all_members = []
+            if haskey(dwarf_structs, s_name)
+                info = dwarf_structs[s_name]
+                
+                # First, add members from base classes
+                bases = get(info, "base_classes", [])
+                for base in bases
+                    base_type = get(base, "type", "")
+                    # Strip "class " or "struct " prefix if present
+                    base_type = replace(base_type, r"^(class|struct)\s+" => "")
+                    if !isempty(base_type)
+                        append!(all_members, flatten_struct_members(base_type, visited))
+                    end
+                end
+                
+                # Then add own members
+                own_members = get(info, "members", [])
+                append!(all_members, own_members)
+            end
+            return all_members
+        end
+
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
@@ -1657,8 +1686,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
             # Check if we have DWARF member information for this struct
             if haskey(dwarf_structs, struct_name)
-                struct_info = dwarf_structs[struct_name]
-                members = get(struct_info, "members", [])
+                # BUG FIX: Recursively get all members including base classes
+                members = flatten_struct_members(struct_name)
 
                 if !isempty(members)
                     # Generate struct with actual member layout from DWARF
@@ -1745,14 +1774,59 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         func_name = func["name"]
         mangled = func["mangled"]
         demangled = func["demangled"]
-        params = func["parameters"]
-        return_type = func["return_type"]
+        
+        # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
+        params = copy(func["parameters"])
+        return_type = copy(func["return_type"])
+        
         is_method = get(func, "is_method", false)
         class_name = get(func, "class", "")
 
-        # Skip constructors and methods for now (need special handling)
+        # Skip constructors for now (need special handling/factory functions)
         if is_method && func_name == class_name
-            continue  # Constructor
+            continue 
+        end
+
+        # BUG FIX: Inject missing 'this' pointer for methods
+        # DWARF metadata sometimes omits the implicit 'this' parameter for methods
+        if is_method && !isempty(class_name)
+            # Check if 'this' is already present (it should be first)
+            has_this = !isempty(params) && (params[1]["name"] == "this")
+            
+            if !has_this
+                # Synthesize 'this' parameter
+                # Sanitize class name for Julia type
+                safe_class = replace(replace(replace(class_name, "<" => "_"), ">" => ""), "," => "_")
+                safe_class = replace(safe_class, " " => "")
+                
+                this_param = Dict{String,Any}(
+                    "name" => "this",
+                    "c_type" => class_name * "*",
+                    "julia_type" => "Ptr{" * safe_class * "}",
+                    "position" => 0,
+                    "is_synthesized" => true
+                )
+                pushfirst!(params, this_param)
+            end
+        end
+
+        # BUG FIX: Refine return types (Ptr{Cvoid} -> Ptr{Struct})
+        # If c_type indicates a pointer to a known struct, but julia_type is generic Ptr{Cvoid}, fix it.
+        c_ret = get(return_type, "c_type", "")
+        j_ret = get(return_type, "julia_type", "")
+        
+        if (j_ret == "Ptr{Cvoid}" || j_ret == "Any") && endswith(c_ret, "*")
+             base_c = strip(c_ret[1:end-1])
+             # Remove const/struct/class prefixes
+             base_c = replace(base_c, r"^(const\s+|struct\s+|class\s+)+" => "")
+             base_c = strip(base_c)
+             
+             if base_c in struct_types
+                 # Sanitize
+                 safe_base = replace(replace(replace(base_c, "<" => "_"), ">" => ""), "," => "_")
+                 safe_base = replace(safe_base, " " => "")
+                 return_type["julia_type"] = "Ptr{$safe_base}"
+             end
         end
 
         # Build parameter list with ergonomic types
