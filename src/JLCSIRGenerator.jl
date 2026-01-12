@@ -88,6 +88,28 @@ function map_cpp_type(type_str::String)
 end
 
 """
+    get_llvm_signature(method::DWARFParser.VirtualMethod) -> (String, String, String)
+
+Get the LLVM signature parts for a method.
+Returns (return_type, argument_types_string, argument_names_string)
+"""
+function get_llvm_signature(method::DWARFParser.VirtualMethod)
+    # Map return type
+    ret_type = map_cpp_type(method.return_type)
+    
+    # Build argument list
+    # Implicit 'this' pointer is always first
+    arg_types = ["!llvm.ptr"]
+    
+    for param in method.parameters
+        type_str = map_cpp_type(param)
+        push!(arg_types, type_str)
+    end
+    
+    return (ret_type, join(arg_types, ", "))
+end
+
+"""
     generate_virtual_method_ir(method::VirtualMethod, addr::UInt64) -> String
 
 Generate IR for a virtual method declaration.
@@ -95,9 +117,7 @@ Generate IR for a virtual method declaration.
 # Example Output
 ```mlir
 func.func @Base_foo(%arg0: !llvm.ptr) -> i32 {
-    %addr = arith.constant 0x12a0 : i64
-    %fptr = llvm.inttoptr %addr : i64 to !llvm.ptr
-    %result = llvm.call %fptr(%arg0) : !llvm.ptr, (i32) -> i32
+    %result = llvm.call @dispatch_Base_foo(%arg0) : (!llvm.ptr) -> i32
     return %result : i32
 }
 ```
@@ -105,41 +125,30 @@ func.func @Base_foo(%arg0: !llvm.ptr) -> i32 {
 function generate_virtual_method_ir(method::DWARFParser.VirtualMethod, addr::UInt64)
     # Sanitize names
     mlir_name = replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_")
+    dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
     
-    # Map types
-    ret_type = map_cpp_type(method.return_type)
+    # Get signature
+    (ret_type, arg_types_str) = get_llvm_signature(method)
     
-    # Build argument list
-    # Implicit 'this' pointer is always first
-    arg_types = ["!llvm.ptr"]
-    arg_names = ["%arg0"]
-    arg_sig_parts = ["%arg0: !llvm.ptr"]
-    
-    for (i, param) in enumerate(method.parameters)
-        type_str = map_cpp_type(param)
-        push!(arg_types, type_str)
-        push!(arg_names, "%arg$i")
-        push!(arg_sig_parts, "%arg$i: $type_str")
-    end
+    # Build argument names for wrapper
+    arg_names = ["%arg$i" for i in 0:length(method.parameters)]
+    arg_sig_parts = ["$(arg_names[i+1]): $(t)" for (i, t) in enumerate(split(arg_types_str, ", "))]
     
     args_sig = "(" * join(arg_sig_parts, ", ") * ")"
     args_vals = "(" * join(arg_names, ", ") * ")"
-    call_sig = "(" * join(arg_types, ", ") * ")" # Signature for call instruction (types only)
+    call_sig = "(" * arg_types_str * ")"
     
     # Function body
-    # We create a wrapper that calls the absolute address
-    # This is a static dispatch wrapper for testing/direct access
+    # Call the external dispatch symbol
     
     call_stmt = ret_type == "" ? 
-        "llvm.call %fptr$(args_vals) : !llvm.ptr, $(call_sig) -> ()" : 
-        "%result = llvm.call %fptr$(args_vals) : !llvm.ptr, $(call_sig) -> $(ret_type)"
+        "llvm.call @$(dispatch_name)$(args_vals) : $(call_sig) -> ()" : 
+        "%result = llvm.call @$(dispatch_name)$(args_vals) : $(call_sig) -> $(ret_type)"
     
     return_stmt = ret_type == "" ? "return" : "return %result : $(ret_type)"
 
     body = """
   func.func @$(mlir_name)$(args_sig) -> $(ret_type == "" ? "()" : ret_type) {
-    %addr = arith.constant $(addr) : i64
-    %fptr = llvm.inttoptr %addr : i64 to !llvm.ptr
     $(call_stmt)
     $(return_stmt)
   }"""
@@ -203,6 +212,22 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo)
     println(io, "// Universal FFI via MLIR Dialects")
     println(io, "")
     println(io, "module {")
+
+    # Generate external declarations for all virtual methods
+    println(io, "  // External Dispatch Declarations")
+    for (class_name, class_info) in vtinfo.classes
+        for method in class_info.virtual_methods
+             method_addr = get(vtinfo.method_addresses, method.mangled_name, UInt64(0))
+             if method_addr != 0
+                 dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
+                 (ret_type, arg_types) = get_llvm_signature(method)
+                 
+                 decl_ret = ret_type == "" ? "void" : ret_type
+                 println(io, "  llvm.func @$(dispatch_name)($(arg_types)) -> $(decl_ret) attributes { sym_visibility = \"private\" }")
+             end
+        end
+    end
+    println(io, "")
 
     # Generate type info for each class
     for (class_name, class_info) in vtinfo.classes

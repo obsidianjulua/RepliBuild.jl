@@ -7,6 +7,7 @@
 module MLIRNative
 
 export create_context, create_module, destroy_context, parse_module
+export create_jit, destroy_jit, register_symbol, lookup, invoke
 export test_dialect, print_module
 
 # =============================================================================
@@ -41,6 +42,7 @@ const MlirModule = Ptr{Cvoid}
 const MlirOperation = Ptr{Cvoid}
 const MlirLocation = Ptr{Cvoid}
 const MlirStringRef = Ptr{Cvoid}
+const MlirExecutionEngine = Ptr{Cvoid}
 
 # =============================================================================
 # Context Management
@@ -132,6 +134,68 @@ Print an MLIR module to stdout.
 function print_module(mlir_module::MlirModule)
     op = get_module_operation(mlir_module)
     ccall((:mlirOperationDump, libJLCS), Cvoid, (MlirOperation,), op)
+end
+
+# =============================================================================
+# JIT Execution Engine
+# =============================================================================
+
+"""
+    create_jit(module::MlirModule; opt_level=2, dump_object=false) -> MlirExecutionEngine
+
+Create a JIT execution engine for the module.
+Automatically attaches host data layout.
+"""
+function create_jit(mod::MlirModule; opt_level::Int=2, dump_object::Bool=false)
+    jit = ccall((:jlcs_create_jit, libJLCS), MlirExecutionEngine, 
+                (MlirModule, Cint, Bool), mod, opt_level, dump_object)
+    if jit == C_NULL
+        error("Failed to create JIT execution engine")
+    end
+    return jit
+end
+
+"""
+    destroy_jit(jit::MlirExecutionEngine)
+
+Destroy the JIT execution engine.
+"""
+function destroy_jit(jit::MlirExecutionEngine)
+    ccall((:jlcs_destroy_jit, libJLCS), Cvoid, (MlirExecutionEngine,), jit)
+end
+
+"""
+    register_symbol(jit::MlirExecutionEngine, name::String, addr::Ptr{Cvoid})
+
+Register a runtime address (symbol) with the JIT.
+Call this BEFORE invoking JIT functions that rely on external symbols.
+"""
+function register_symbol(jit::MlirExecutionEngine, name::String, addr::Ptr{Cvoid})
+    ccall((:jlcs_jit_register_symbol, libJLCS), Cvoid, 
+          (MlirExecutionEngine, Cstring, Ptr{Cvoid}), jit, name, addr)
+end
+
+"""
+    lookup(jit::MlirExecutionEngine, name::String) -> Ptr{Cvoid}
+
+Lookup a function address in the JIT.
+"""
+function lookup(jit::MlirExecutionEngine, name::String)
+    return ccall((:jlcs_jit_lookup, libJLCS), Ptr{Cvoid}, 
+                 (MlirExecutionEngine, Cstring), jit, name)
+end
+
+"""
+    invoke(jit::MlirExecutionEngine, name::String, args::Vector{Any})
+
+Invoke a JIT function with arguments.
+Note: Arguments must be pointers to the actual values (double indirection).
+"""
+function invoke(jit::MlirExecutionEngine, name::String, args::Vector{Ptr{Cvoid}})
+    # Pack arguments into an array of pointers
+    # implementation detail: jlcs_jit_invoke expects void**
+    return ccall((:jlcs_jit_invoke, libJLCS), Bool,
+                 (MlirExecutionEngine, Cstring, Ptr{Ptr{Cvoid}}), jit, name, pointer(args))
 end
 
 # =============================================================================

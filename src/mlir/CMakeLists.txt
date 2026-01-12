@@ -57,7 +57,6 @@ add_llvm_library(JLCS SHARED
   impl/JLCSDialect.cpp
   impl/JLCSOps.cpp
   impl/JLCSTypes.cpp
-  impl/JLCSCHelpers.cpp
   impl/JLCSPasses.cpp
   impl/JLCSCAPIWrappers.cpp
 
@@ -82,6 +81,21 @@ add_llvm_library(JLCS SHARED
   MLIRCAPIExecutionEngine
   MLIRTargetLLVMIRExport
   MLIRToLLVMIRTranslationRegistration
+)
+
+# === JIT & Execution Engine Linking ===
+# We must link these explicitly. -Wl,--whole-archive is strictly required on Linux
+# to force the linker to include the JIT registration symbols (Target/ExecutionEngine).
+target_link_libraries(JLCS PRIVATE
+  -Wl,--whole-archive
+  MLIRExecutionEngine
+  MLIRTargetLLVMIRExport      # Required for converting MLIR -> LLVM IR
+  MLIRLLVMToLLVMIRTranslation # Required for lowering LLVM Dialect -> LLVM IR
+  -Wl,--no-whole-archive
+  
+  # Standard link dependencies
+  MLIRParser
+  MLIROptLib
 )
 
 # Install the library
