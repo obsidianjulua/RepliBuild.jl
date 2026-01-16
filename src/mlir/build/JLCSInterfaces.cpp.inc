@@ -6,3 +6,8 @@
 |*                                                                            *|
 \*===----------------------------------------------------------------------===*/
 
+
+/// Get the supertype name
+StringAttr JuliaSubtype::getSupertypeName(MLIRContext * ctx) const {
+      return getImpl()->getSupertypeName(getImpl(), *this, ctx);
+  }

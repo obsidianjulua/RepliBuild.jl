@@ -168,17 +168,13 @@ def JLCS_FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[]>]> {
 // Interface Definitions
 //===----------------------------------------------------------------------===//
 
-// TODO: Re-enable Julia subtype interface
-// Currently commented out due to TableGen syntax issues
-// Will be added in a future iteration
-
-// def JL_SubtypeInterface : TypeInterface<"JuliaSubtype"> {
-//   let description = "Interface for types that are part of the Julia type hierarchy.";
-//   let methods = [
-//     InterfaceMethod<
-//       "Get the supertype name",
-//       "StringAttr", "getSupertypeName",
-//       (ins "MLIRContext *":$ctx)
-//     >
-//   ];
-// }
+def JL_SubtypeInterface : TypeInterface<"JuliaSubtype"> {
+  let description = "Interface for types that are part of the Julia type hierarchy.";
+  let methods = [
+    InterfaceMethod<
+      "Get the supertype name",
+      "StringAttr", "getSupertypeName",
+      (ins "MLIRContext *":$ctx)
+    >
+  ];
+}

@@ -76,10 +76,7 @@ add_llvm_library(JLCS SHARED
   MLIRLLVMDialect
   MLIRPass
   MLIRTransforms
-  MLIRExecutionEngine
-  MLIRCAPIIR
   MLIRCAPIExecutionEngine
-  MLIRTargetLLVMIRExport
   MLIRToLLVMIRTranslationRegistration
 )
 
@@ -91,6 +88,8 @@ target_link_libraries(JLCS PRIVATE
   MLIRExecutionEngine
   MLIRTargetLLVMIRExport      # Required for converting MLIR -> LLVM IR
   MLIRLLVMToLLVMIRTranslation # Required for lowering LLVM Dialect -> LLVM IR
+  MLIRBuiltinToLLVMIRTranslation
+  MLIRFuncToLLVM
   -Wl,--no-whole-archive
   
   # Standard link dependencies

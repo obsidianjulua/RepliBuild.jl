@@ -7,15 +7,17 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/CAPI/IR.h"
+#include "mlir/CAPI/Support.h"
+#include "mlir/CAPI/ExecutionEngine.h"
 #include "mlir-c/IR.h"
-#include "mlir-c/ExecutionEngine.h" // Added for JIT types
+#include "mlir-c/ExecutionEngine.h"
 
 #include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
-#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVMIR/Export.h"
 
 #include "llvm/Support/raw_ostream.h"
@@ -33,132 +35,129 @@ using namespace mlir;
 
 // --- Helper Functions ---
 
-// helper to attach host data layout (Phase 3 Fix)
-// This ensures the JIT agrees with Julia on struct padding and pointer sizes.
+// helper to attach host data layout
 static void attachHostDataLayout(mlir::ModuleOp module) {
-	auto triple = llvm::sys::getProcessTriple();
-	std::string error;
-	const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, error);
-	if (!target) {
-		llvm::errs() << "Warning: Failed to lookup target for data layout: " << error << "\n";
-		return;
-	}
+    auto triple = llvm::sys::getProcessTriple();
+    std::string error;
+    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, error);
+    if (!target) {
+        llvm::errs() << "Warning: Failed to lookup target for data layout: " << error << "\n";
+        return;
+    }
 
-	auto machine = std::unique_ptr<llvm::TargetMachine>(
-		target->createTargetMachine(triple, "generic", "", {}, std::nullopt));
+    auto machine = std::unique_ptr<llvm::TargetMachine>(
+        target->createTargetMachine(triple, "generic", "", {}, std::nullopt));
 
-	const llvm::DataLayout &dl = machine->createDataLayout();
-	module->setAttr(mlir::LLVM::LLVMDialect::getDataLayoutAttrName(),
-					mlir::StringAttr::get(module.getContext(), dl.getStringRepresentation()));
+    const llvm::DataLayout &dl = machine->createDataLayout();
+    module->setAttr(mlir::LLVM::LLVMDialect::getDataLayoutAttrName(),
+                    mlir::StringAttr::get(module.getContext(), dl.getStringRepresentation()));
 }
 
 extern "C" {
 
-	// --- Dialect & Context Management ---
+    // --- Dialect & Context Management ---
 
-	void registerJLCSDialect(MlirContext context) {
-		MLIRContext *ctx = unwrap(context);
-		ctx->loadDialect<jlcs::JLCSDialect>();
-		ctx->loadDialect<func::FuncDialect>();
-		ctx->loadDialect<arith::ArithDialect>();
-		ctx->loadDialect<LLVM::LLVMDialect>();
-		// Important: Load translation for LLVM IR lowering
-		mlir::registerLLVMDialectTranslation(*ctx);
-	}
+    void registerJLCSDialect(MlirContext context) {
+        MLIRContext *ctx = unwrap(context);
+        ctx->loadDialect<jlcs::JLCSDialect>();
+        ctx->loadDialect<func::FuncDialect>();
+        ctx->loadDialect<arith::ArithDialect>();
+        ctx->loadDialect<LLVM::LLVMDialect>();
+        // Important: Load translation for LLVM IR lowering
+        mlir::DialectRegistry registry;
+        mlir::registerAllToLLVMIRTranslations(registry);
+        ctx->appendDialectRegistry(registry);
+    }
 
-	MlirContext mlirContextCreate() {
-		auto *ctx = new MLIRContext();
-		return wrap(ctx);
-	}
+    MlirContext mlirContextCreate() {
+        auto *ctx = new MLIRContext();
+        return wrap(ctx);
+    }
 
-	void mlirContextDestroy(MlirContext context) {
-		delete unwrap(context);
-	}
+    void mlirContextDestroy(MlirContext context) {
+        delete unwrap(context);
+    }
 
-	// --- Module Management ---
+    // --- Module Management ---
 
-	MlirLocation mlirLocationUnknownGet(MlirContext context) {
-		MLIRContext *ctx = unwrap(context);
-		Location loc = UnknownLoc::get(ctx);
-		return wrap(loc);
-	}
+    MlirLocation mlirLocationUnknownGet(MlirContext context) {
+        MLIRContext *ctx = unwrap(context);
+        Location loc = UnknownLoc::get(ctx);
+        return wrap(loc);
+    }
 
-	MlirModule mlirModuleCreateEmpty(MlirLocation location) {
-		auto mod = ModuleOp::create(unwrap(location));
-		return wrap(mod);
-	}
+    MlirModule mlirModuleCreateEmpty(MlirLocation location) {
+        auto mod = ModuleOp::create(unwrap(location));
+        return wrap(mod);
+    }
 
-	MlirModule jlcsModuleCreateParse(MlirContext context, const char *moduleStr) {
-		MLIRContext *ctx = unwrap(context);
-		llvm::StringRef source(moduleStr);
-		OwningOpRef<ModuleOp> mod = parseSourceString<ModuleOp>(source, ctx);
-		if (!mod) {
-			return {nullptr};
-		}
-		return wrap(mod.release());
-	}
+    MlirModule jlcsModuleCreateParse(MlirContext context, const char *moduleStr) {
+        MLIRContext *ctx = unwrap(context);
+        llvm::StringRef source(moduleStr);
+        OwningOpRef<ModuleOp> mod = parseSourceString<ModuleOp>(source, ctx);
+        if (!mod) {
+            return {nullptr};
+        }
+        return wrap(mod.release());
+    }
 
-	MlirOperation mlirModuleGetOperation(MlirModule module) {
-		return wrap(unwrap(module).getOperation());
-	}
+    MlirOperation mlirModuleGetOperation(MlirModule module) {
+        return wrap(unwrap(module).getOperation());
+    }
 
-	void mlirOperationDump(MlirOperation op) {
-		unwrap(op)->dump();
-	}
+    void mlirOperationDump(MlirOperation op) {
+        unwrap(op)->dump();
+    }
 
-	// --- JIT Execution Engine (New Additions) ---
+    // --- JIT Execution Engine ---
 
-	MlirExecutionEngine jlcs_create_jit(MlirModule module, int optLevel, bool dumpObject) {
-		// 1. Initialize LLVM Native Targets (Mandatory for JIT)
-		llvm::InitializeNativeTarget();
-		llvm::InitializeNativeTargetAsmPrinter(); // Corrected function name
-		llvm::InitializeNativeTargetAsmParser();  // Corrected function name
+    MlirExecutionEngine jlcs_create_jit(MlirModule module, int optLevel, bool dumpObject) {
+        // 1. Initialize LLVM Native Targets (Mandatory for JIT)
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter(); 
+        llvm::InitializeNativeTargetAsmParser();
 
-		// Use mlir::unwrap, not llvm::unwrap for MLIR types
-		auto *op = unwrap(module);
-		auto modOp = llvm::dyn_cast<mlir::ModuleOp>(op);
-		if (!modOp) return {nullptr};
+        // Unwrap directly to ModuleOp
+        mlir::ModuleOp modOp = unwrap(module);
 
-		// 2. Phase 3 Fix: Attach Data Layout
-		attachHostDataLayout(modOp);
+        // 2. Attach Data Layout
+        attachHostDataLayout(modOp);
 
-		// 3. Configure JIT Options
-		mlir::ExecutionEngineOptions options;
-		options.transformer = [optLevel](llvm::Module *m) {
-			return llvm::Error::success(); // Add generic optimizations here if needed
-		};
-		options.jitCodeGenOptLevel = (llvm::CodeGenOptLevel)optLevel;
+        // 3. Configure JIT Options
+        mlir::ExecutionEngineOptions options;
+        options.transformer = [optLevel](llvm::Module *m) {
+            return llvm::Error::success(); 
+        };
+        options.jitCodeGenOptLevel = (llvm::CodeGenOptLevel)optLevel;
 
-		// 4. Create Engine
-		// Note: We depend on symbols being linked via -Wl,--whole-archive in CMake
-		auto engineOrError = mlir::ExecutionEngine::create(modOp, options);
+        // 4. Create Engine
+        auto engineOrError = mlir::ExecutionEngine::create(modOp, options);
 
-		if (!engineOrError) {
-			llvm::errs() << "Failed to create ExecutionEngine: " << engineOrError.takeError() << "\n";
-			return {nullptr};
-		}
+        if (!engineOrError) {
+            llvm::errs() << "Failed to create ExecutionEngine: " << engineOrError.takeError() << "\n";
+            return {nullptr};
+        }
 
-		return wrap(engineOrError->release());
-	}
+        return wrap(engineOrError->release());
+    }
 
-	void jlcs_destroy_jit(MlirExecutionEngine jit) {
-		mlirExecutionEngineDestroy(jit);
-	}
+    void jlcs_destroy_jit(MlirExecutionEngine jit) {
+        mlirExecutionEngineDestroy(jit);
+    }
 
-	void jlcs_jit_register_symbol(MlirExecutionEngine jit, const char *name, void *addr) {
-		// Map the Logical Name (e.g. "dispatch_Base_foo") to the Physical Address
-		llvm::sys::DynamicLibrary::AddSymbol(name, addr);
-	}
+    void jlcs_jit_register_symbol(MlirExecutionEngine jit, const char *name, void *addr) {
+        llvm::sys::DynamicLibrary::AddSymbol(name, addr);
+    }
 
-	void *jlcs_jit_lookup(MlirExecutionEngine jit, const char *name) {
-		MlirStringRef nameRef = mlirStringRefCreateFromCString(name);
-		return mlirExecutionEngineLookup(jit, nameRef);
-	}
+    void *jlcs_jit_lookup(MlirExecutionEngine jit, const char *name) {
+        MlirStringRef nameRef = mlirStringRefCreateFromCString(name);
+        return mlirExecutionEngineLookup(jit, nameRef);
+    }
 
-	bool jlcs_jit_invoke(MlirExecutionEngine jit, const char *name, void **args) {
-		MlirStringRef funcName = mlirStringRefCreateFromCString(name);
-		mlir::ExecutionEngine *engine = unwrap(jit); // Corrected: use mlir::unwrap
+    bool jlcs_jit_invoke(MlirExecutionEngine jit, const char *name, void **args) {
+        MlirStringRef funcName = mlirStringRefCreateFromCString(name);
+        MlirLogicalResult res = mlirExecutionEngineInvokePacked(jit, funcName, args);
+        return mlirLogicalResultIsSuccess(res);
+    }
 
-		// invokePacked expects arguments as a void** list
-		llvm::Error err = engine->invokePacked(unwrap(funcName), // Corrected: use mlir::unwrap
-																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																		\n
+}

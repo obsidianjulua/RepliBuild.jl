@@ -83,7 +83,7 @@ function map_cpp_type(type_str::String)
     end
 
     # Fallback for unknown types (assume pointer or i64 for safety/placeholder)
-    # Ideally we should log a warning
+    @warn "Unknown C++ type encountered: $type_str. Defaulting to !llvm.ptr."
     return "!llvm.ptr" 
 end
 
