@@ -132,7 +132,7 @@ function generate_virtual_method_ir(method::DWARFParser.VirtualMethod, addr::UIn
     
     # Build argument names for wrapper
     arg_names = ["%arg$i" for i in 0:length(method.parameters)]
-    arg_sig_parts = ["$(arg_names[i+1]): $(t)" for (i, t) in enumerate(split(arg_types_str, ", "))]
+    arg_sig_parts = ["$(arg_names[i]): $(t)" for (i, t) in enumerate(split(arg_types_str, ", "))]
     
     args_sig = "(" * join(arg_sig_parts, ", ") * ")"
     args_vals = "(" * join(arg_names, ", ") * ")"
@@ -222,7 +222,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo)
                  dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
                  (ret_type, arg_types) = get_llvm_signature(method)
                  
-                 decl_ret = ret_type == "" ? "void" : ret_type
+                 decl_ret = ret_type == "" ? "!llvm.void" : ret_type
                  println(io, "  llvm.func @$(dispatch_name)($(arg_types)) -> $(decl_ret) attributes { sym_visibility = \"private\" }")
              end
         end

@@ -7,14 +7,13 @@ module RepliBuild
 using TOML
 
 # Version
-const VERSION = v"2.0.1"
+const VERSION = v"2.0.3"
 
 # ============================================================================
 # LOAD CORE MODULES
 # ============================================================================
 
 # Internal utilities (not exported)
-include("RepliBuildPaths.jl")
 include("LLVMEnvironment.jl")
 include("ConfigurationManager.jl")
 include("BuildBridge.jl")
@@ -33,7 +32,6 @@ include("MLIRNative.jl")
 include("Introspect.jl")
 
 # Import submodules for internal use
-using .RepliBuildPaths
 using .LLVMEnvironment
 using .ConfigurationManager
 using .BuildBridge
@@ -417,10 +415,5 @@ end
 # ============================================================================
 # MODULE INITIALIZATION
 # ============================================================================
-
-function __init__()
-    # Initialize RepliBuild paths and directories
-    RepliBuildPaths.ensure_initialized()
-end
 
 end # module RepliBuild

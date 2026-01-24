@@ -18,7 +18,7 @@ using RepliBuild.DWARFParser
         # Test virtual method IR generation
         ir_method = JLCSIRGenerator.generate_virtual_method_ir(vm, UInt64(0x2000))
         @test contains(ir_method, "func.func @_ZN4Base3fooEv(%arg0: !llvm.ptr) -> i32")
-        @test contains(ir_method, "llvm.inttoptr")
+        @test contains(ir_method, "llvm.call")
         
         # Test vcall example
         ir_vcall = generate_vcall_example("Base", "foo", 0, 0, "int")
