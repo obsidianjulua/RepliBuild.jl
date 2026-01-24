@@ -78,6 +78,8 @@ add_llvm_library(JLCS SHARED
   MLIRTransforms
   MLIRCAPIExecutionEngine
   MLIRToLLVMIRTranslationRegistration
+  MLIRArithToLLVM
+  MLIRReconcileUnrealizedCasts
 )
 
 # === JIT & Execution Engine Linking ===

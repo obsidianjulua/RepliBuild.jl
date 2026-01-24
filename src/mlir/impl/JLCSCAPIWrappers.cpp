@@ -10,6 +10,7 @@
 #include "mlir/CAPI/Support.h"
 #include "mlir/CAPI/ExecutionEngine.h"
 #include "mlir-c/IR.h"
+#include "mlir-c/BuiltinTypes.h"
 #include "mlir-c/ExecutionEngine.h"
 
 #include "mlir/Parser/Parser.h"
@@ -19,6 +20,12 @@
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVMIR/Export.h"
+
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/DynamicLibrary.h"
@@ -101,12 +108,74 @@ extern "C" {
         return wrap(mod.release());
     }
 
+    MlirModule jlcs_module_clone(MlirModule module) {
+        mlir::ModuleOp mod = unwrap(module);
+        mlir::ModuleOp cloned = llvm::cast<mlir::ModuleOp>(mod->clone());
+        return wrap(cloned);
+    }
+
     MlirOperation mlirModuleGetOperation(MlirModule module) {
         return wrap(unwrap(module).getOperation());
     }
 
     void mlirOperationDump(MlirOperation op) {
         unwrap(op)->dump();
+    }
+
+    // --- Introspection ---
+
+    MlirOperation jlcs_module_get_function(MlirModule module, const char *name) {
+        mlir::ModuleOp mod = unwrap(module);
+        mlir::func::FuncOp func = mod.lookupSymbol<mlir::func::FuncOp>(name);
+        if (!func) return {nullptr};
+        return wrap(func.getOperation());
+    }
+
+    MlirType jlcs_function_get_type(MlirOperation op) {
+        auto func = llvm::dyn_cast<mlir::func::FuncOp>(unwrap(op));
+        if (!func) return {nullptr};
+        return wrap(func.getFunctionType());
+    }
+
+    intptr_t jlcs_function_type_get_num_inputs(MlirType type) {
+        return mlirFunctionTypeGetNumInputs(type);
+    }
+
+    MlirType jlcs_function_type_get_input(MlirType type, intptr_t pos) {
+        return mlirFunctionTypeGetInput(type, pos);
+    }
+
+    bool jlcs_type_is_integer(MlirType type) {
+        return mlirTypeIsAInteger(type);
+    }
+
+    unsigned jlcs_integer_type_get_width(MlirType type) {
+        return mlirIntegerTypeGetWidth(type);
+    }
+
+    bool jlcs_type_is_f32(MlirType type) {
+        return mlirTypeIsAF32(type);
+    }
+
+    bool jlcs_type_is_f64(MlirType type) {
+        return mlirTypeIsAF64(type);
+    }
+
+    // --- Transformations ---
+
+    bool jlcs_lower_to_llvm(MlirModule module) {
+        mlir::ModuleOp mod = unwrap(module);
+        mlir::PassManager pm(mod.getContext());
+        
+        // Basic lowering pipeline
+        // Convert Func -> LLVM
+        pm.addPass(mlir::createConvertFuncToLLVMPass());
+        // Convert Arith -> LLVM
+        pm.addPass(mlir::createArithToLLVMConversionPass());
+        // Cleanup casts
+        pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+        
+        return mlir::succeeded(pm.run(mod));
     }
 
     // --- JIT Execution Engine ---
