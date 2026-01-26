@@ -294,7 +294,11 @@ function handle_unknown_type(registry::TypeRegistry, cpp_type::String, context::
             end
             # Remove pointer/reference markers for struct name
             base_type = strip(replace(replace(cpp_type, "*" => ""), "&" => ""))
-            return base_type  # Use C++ name directly
+            
+            # Sanitize for Julia (e.g. Box<int> -> Box_int)
+            sanitized = replace(replace(replace(base_type, "<" => "_"), ">" => ""), "," => "_")
+            sanitized = replace(sanitized, " " => "")
+            return sanitized
         end
     end
 
@@ -1381,12 +1385,20 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # Manual edits: Minimal to none required
 
     module $module_name
+    
+    using Libdl
+    import RepliBuild
 
     const LIBRARY_PATH = \"$(abspath(lib_path))\"
 
     # Verify library exists
     if !isfile(LIBRARY_PATH)
         error("Library not found: \$LIBRARY_PATH")
+    end
+
+    function __init__()
+        # Initialize the global JIT context with this library's vtables
+        RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
     end
 
     """
@@ -1686,20 +1698,67 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
             # Check if we have DWARF member information for this struct
             if haskey(dwarf_structs, struct_name)
+                struct_info = dwarf_structs[struct_name]
+                kind = get(struct_info, "kind", "struct")
+                
+                # SPECIAL HANDLING FOR UNIONS
+                if kind == "union"
+                    byte_size_str = get(struct_info, "byte_size", "0x0")
+                    byte_size = parse(Int, byte_size_str)
+                    
+                    if byte_size == 0
+                        # Fallback if size missing
+                        members = get(struct_info, "members", [])
+                        for m in members
+                            m_size = get(m, "size", 0)
+                            byte_size = max(byte_size, m_size)
+                        end
+                        if byte_size == 0; byte_size = 8; end # Panic fallback
+                    end
+
+                    struct_definitions *= """
+                    # C++ union: $struct_name (size $byte_size bytes)
+                    mutable struct $julia_struct_name
+                        data::NTuple{$byte_size, UInt8}
+                    end
+                    
+                    """
+                    continue
+                end
+
                 # BUG FIX: Recursively get all members including base classes
                 members = flatten_struct_members(struct_name)
 
                 if !isempty(members)
-                    # Generate struct with actual member layout from DWARF
+                    # Sort members by offset to ensure correct order
+                    sort!(members, by = m -> begin
+                        off = get(m, "offset", "0x0")
+                        isnothing(off) ? 0 : parse(Int, off)
+                    end)
+                    
                     member_count = length(members)
                     struct_definitions *= """
                     # C++ struct: $struct_name ($member_count members)
                     mutable struct $julia_struct_name
                     """
+                    
+                    current_offset = 0
+                    pad_idx = 0
 
                     for member in members
                         member_name = get(member, "name", "unknown")
                         julia_type = get(member, "julia_type", "Any")
+                        
+                        offset_val = get(member, "offset", "0x0")
+                        offset = isnothing(offset_val) ? 0 : parse(Int, offset_val)
+                        
+                        # Insert padding if needed
+                        if offset > current_offset
+                            pad_size = offset - current_offset
+                            struct_definitions *= "    _pad_$(pad_idx)::NTuple{$(pad_size), UInt8}\n"
+                            pad_idx += 1
+                            current_offset = offset
+                        end
 
                         # Sanitize member name for Julia (replace invalid characters)
                         sanitized_name = replace(member_name, '$' => '_')
@@ -1709,7 +1768,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         sanitized_type = julia_type
 
                         # Don't sanitize built-in Julia types (NTuple, Ptr{Cint}, etc.)
-                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cdouble", "Cfloat", "Clong", "Culonglong", "Cvoid"]
+                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cdouble", "Cfloat", "Clong", "Culonglong", "Cvoid", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64"]
                         is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
 
                         if !is_builtin
@@ -1733,6 +1792,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         end
 
                         struct_definitions *= "    $sanitized_name::$sanitized_type\n"
+                        
+                        # Update current offset
+                        member_size = get(member, "size", 0)
+                        # If size is 0 (e.g. unknown type), we can't reliably track offset
+                        # But typically we rely on the next member's offset to insert padding
+                        current_offset += member_size
                     end
 
                     struct_definitions *= """
@@ -1827,6 +1892,15 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                  safe_base = replace(safe_base, " " => "")
                  return_type["julia_type"] = "Ptr{$safe_base}"
              end
+        end
+
+        # BUG FIX: Sanitize return types that are template instantiations (e.g. Box<double> -> Box_double)
+        # This handles by-value returns of template types
+        ret_type_str = get(return_type, "julia_type", "Cvoid")
+        if occursin(r"[<>]", ret_type_str) && !startswith(ret_type_str, "Ptr{") && !startswith(ret_type_str, "Ref{")
+             safe_ret = replace(replace(replace(ret_type_str, "<" => "_"), ">" => ""), "," => "_")
+             safe_ret = replace(safe_ret, " " => "")
+             return_type["julia_type"] = safe_ret
         end
 
         # Build parameter list with ergonomic types
@@ -2065,14 +2139,54 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         # Check if return type is a struct (not primitive, not pointer)
         is_struct_return = julia_return_type == "Any" && !contains(c_return_type, "*") && !contains(c_return_type, "void") && c_return_type != "unknown"
+        
+        # Check if this is a virtual method that requires dynamic dispatch
+        is_virtual = get(func, "is_virtual", false)
 
-        if is_struct_return
-            # Struct-valued return - Julia uses the struct type directly
-            # ccall will handle struct returns automatically if the Julia type matches
+        if is_virtual
+            # JIT-based virtual dispatch wrapper
+            # 1. Get the class and method name
+            # 2. Call get_jit_thunk(class, method) to get the function pointer
+            # 3. ccall that pointer
+            
+            cls_name = get(func, "class", "")
+            
+            # Sanitize return type if needed
+            safe_c_ret = c_return_type
+            if occursin(r"[<>]", safe_c_ret)
+                 safe_c_ret = replace(replace(replace(safe_c_ret, "<" => "_"), ">" => ""), "," => "_")
+                 safe_c_ret = replace(safe_c_ret, " " => "")
+            end
+            
+            # Use julia_return_type if it's not Any/Cstring, otherwise use sanitized C type
+            ret_type_sig = (julia_return_type == "Any" || julia_return_type == "Cstring") ? safe_c_ret : julia_return_type
+            
             func_def = """
             $doc_comment
-            function $julia_name($param_sig)::$c_return_type
-            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $c_return_type, $ccall_types, $ccall_args)
+            function $julia_name($param_sig)::$ret_type_sig
+                # Get thunk for virtual dispatch (JIT compiled on-demand)
+                thunk_ptr = RepliBuild.JITManager.get_jit_thunk("$cls_name", "$func_name")
+                
+                # Call thunk
+            $conversion_code    return ccall(thunk_ptr, $ret_type_sig, $ccall_types, $ccall_args)
+            end
+
+            """
+        elseif is_struct_return
+            # Struct-valued return - Julia uses the struct type directly
+            # ccall will handle struct returns automatically if the Julia type matches
+            
+            # Sanitize C return type if it contains template chars (Box<int> -> Box_int)
+            safe_c_ret = c_return_type
+            if occursin(r"[<>]", safe_c_ret)
+                 safe_c_ret = replace(replace(replace(safe_c_ret, "<" => "_"), ">" => ""), "," => "_")
+                 safe_c_ret = replace(safe_c_ret, " " => "")
+            end
+
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)::$safe_c_ret
+            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $safe_c_ret, $ccall_types, $ccall_args)
             end
 
             """

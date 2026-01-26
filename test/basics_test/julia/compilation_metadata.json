@@ -1,0 +1,306 @@
+{
+  "symbols": [
+    {
+      "mangled": "make_packed",
+      "demangled": "make_packed",
+      "type": "T",
+      "address": "0000000000001290"
+    },
+    {
+      "mangled": "make_padded",
+      "demangled": "make_padded",
+      "type": "T",
+      "address": "0000000000001270"
+    },
+    {
+      "mangled": "process_packed",
+      "demangled": "process_packed",
+      "type": "T",
+      "address": "00000000000011a0"
+    },
+    {
+      "mangled": "process_padded",
+      "demangled": "process_padded",
+      "type": "T",
+      "address": "0000000000001140"
+    },
+    {
+      "mangled": "process_union",
+      "demangled": "process_union",
+      "type": "T",
+      "address": "0000000000001210"
+    }
+  ],
+  "compile_flags": [
+    "-std=c++17",
+    "-fPIC"
+  ],
+  "binary_path": "/home/grim/Desktop/Projects/RepliBuild.jl/test/basics_test/julia/libbasics_test.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "name": "make_packed",
+      "parameters": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "position": 0,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "make_packed",
+      "is_method": false,
+      "demangled": "make_packed",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "PackedStruct",
+        "size": 0,
+        "julia_type": "PackedStruct"
+      }
+    },
+    {
+      "name": "make_padded",
+      "parameters": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "position": 0,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "make_padded",
+      "is_method": false,
+      "demangled": "make_padded",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "PaddedStruct",
+        "size": 0,
+        "julia_type": "PaddedStruct"
+      }
+    },
+    {
+      "name": "process_packed",
+      "parameters": [
+        {
+          "c_type": "PackedStruct",
+          "name": "s",
+          "position": 0,
+          "julia_type": "PackedStruct"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "process_packed",
+      "is_method": false,
+      "demangled": "process_packed",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "process_padded",
+      "parameters": [
+        {
+          "c_type": "PaddedStruct",
+          "name": "s",
+          "position": 0,
+          "julia_type": "PaddedStruct"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "process_padded",
+      "is_method": false,
+      "demangled": "process_padded",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    },
+    {
+      "name": "process_union",
+      "parameters": [
+        {
+          "c_type": "unknown",
+          "name": "u",
+          "position": 0,
+          "julia_type": "Any"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "process_union",
+      "is_method": false,
+      "demangled": "process_union",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    }
+  ],
+  "project": "basics_test",
+  "source_files": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/basics_test/src/basics.cpp"
+  ],
+  "type_registry": {
+    "int": {
+      "julia_type": "Cint",
+      "inferred": true
+    },
+    "PaddedStruct": {
+      "julia_type": "PaddedStruct",
+      "inferred": true
+    },
+    "char": {
+      "julia_type": "UInt8",
+      "inferred": true
+    },
+    "unknown": {
+      "julia_type": "Any",
+      "inferred": true
+    },
+    "PackedStruct": {
+      "julia_type": "PackedStruct",
+      "inferred": true
+    },
+    "double": {
+      "alignment": 8,
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "c_type": "void",
+      "size": 0,
+      "julia_type": "Cvoid"
+    }
+  },
+  "function_count": 5,
+  "compiler_info": {
+    "lto_enabled": false,
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "clang_version": "clang version 21.1.6",
+    "optimization_level": "0",
+    "llvm_version": "21.1.6"
+  },
+  "metadata_version": "1.0",
+  "include_dirs": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/basics_test",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/basics_test/include",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/basics_test/src"
+  ],
+  "timestamp": "2026-01-26T02:09:15.285",
+  "struct_definitions": {
+    "PaddedStruct": {
+      "kind": "struct",
+      "byte_size": "0x8",
+      "members": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "offset": null,
+          "size": 1,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cint"
+        }
+      ]
+    },
+    "PackedStruct": {
+      "kind": "struct",
+      "byte_size": "0x5",
+      "members": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "offset": null,
+          "size": 1,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cint"
+        }
+      ]
+    },
+    "__va_list_tag": {
+      "kind": "struct",
+      "byte_size": "0x18",
+      "members": [
+        {
+          "c_type": "unsigned int",
+          "name": "gp_offset",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "unsigned int",
+          "name": "fp_offset",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "void*",
+          "name": "overflow_arg_area",
+          "offset": null,
+          "size": 8,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "void*",
+          "name": "reg_save_area",
+          "offset": null,
+          "size": 8,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ]
+    }
+  }
+}

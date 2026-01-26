@@ -744,6 +744,22 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
+        # Extract union type definitions (DW_TAG_union_type)
+        if contains(line, "DW_TAG_union_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                current_struct_context = current_type_offset  # Set context for members
+                # Store union info as a dict with members array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "union",
+                    "name" => "unknown_union",
+                    "members" => []
+                )
+                offset_to_kind[current_type_offset] = :struct  # Treat as struct for generic handling
+            end
+        end
+
         # Extract class type definitions (DW_TAG_class_type)
         # Similar to struct, C++ distinguishes but for our purposes treat the same
         if contains(line, "DW_TAG_class_type")
@@ -1007,14 +1023,21 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
-        # Extract DW_AT_byte_size for enums
+        # Extract DW_AT_byte_size for enums, structs, classes, and unions
         if contains(line, "DW_AT_byte_size") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :enum
-                size_match = match(r"(0x[0-9a-fA-F]+)", line)
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union]
+                # Match value after colon
+                size_match = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
                 if !isnothing(size_match)
+                    val_str = size_match.captures[1]
                     if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
-                        type_refs[tag_offset]["byte_size"] = String(size_match.captures[1])
+                        if !startswith(val_str, "0x")
+                            val = parse(Int, val_str)
+                            type_refs[tag_offset]["byte_size"] = "0x" * string(val, base=16)
+                        else
+                            type_refs[tag_offset]["byte_size"] = val_str
+                        end
                     end
                 end
             end
@@ -1124,9 +1147,17 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
 
                 # Member byte offset within struct
                 if contains(line, "DW_AT_data_member_location")
-                    offset_match = match(r"(0x[0-9a-fA-F]+)", line)
+                    # Match explicit attribute name and value
+                    offset_match = match(r"DW_AT_data_member_location\s*:\s*(0x[0-9a-fA-F]+|\d+)", line)
                     if !isnothing(offset_match)
-                        member_info["offset"] = String(offset_match.captures[1])
+                        val_str = offset_match.captures[1]
+                        # Normalize to hex string if decimal
+                        if !startswith(val_str, "0x")
+                            val = parse(Int, val_str)
+                            member_info["offset"] = "0x" * string(val, base=16)
+                        else
+                            member_info["offset"] = val_str
+                        end
                     end
                 end
 
@@ -1487,6 +1518,26 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
+        # Extract virtuality
+        # Example: <60>   DW_AT_virtuality  : 1 (virtual)
+        if contains(line, "DW_AT_virtuality") && in_function_context
+            # Virtuality is usually 1 (virtual) or 2 (pure virtual)
+            virt_match = match(r":\s*(\d+)", line)
+            if !isnothing(virt_match)
+                is_virtual = parse(Int, virt_match.captures[1]) > 0
+                
+                # Store this temporarily in type_refs for the current function offset
+                if !isnothing(current_function_offset)
+                    if !haskey(type_refs, current_function_offset)
+                        type_refs[current_function_offset] = Dict{String,Any}()
+                    end
+                    if isa(type_refs[current_function_offset], Dict)
+                        type_refs[current_function_offset]["is_virtual"] = is_virtual
+                    end
+                end
+            end
+        end
+
         # Extract function return type reference
         # CRITICAL: Only match DW_AT_type at the function's own level, not from parameters!
         if contains(line, "DW_AT_type") && in_function_context && !function_processed
@@ -1510,12 +1561,20 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 # Use linkage name (C++) or fall back to function name (C)
                 function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
 
+                # Check for virtuality stored earlier
+                is_virtual = false
+                if !isnothing(current_function_offset) && haskey(type_refs, current_function_offset) &&
+                   isa(type_refs[current_function_offset], Dict)
+                    is_virtual = get(type_refs[current_function_offset], "is_virtual", false)
+                end
+
                 # Store if we have a function identifier
                 if !isnothing(function_key)
                     return_types[function_key] = Dict(
                         "c_type" => c_type,
                         "julia_type" => julia_type,
                         "size" => type_size,
+                        "is_virtual" => is_virtual, # NEW: Store virtuality
                         "parameters" => params_for_this_function  # NEW: Use params_for_this_function
                     )
                 end
@@ -1626,6 +1685,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                             "name" => get(member, "name", "unknown"),
                             "c_type" => c_type,
                             "julia_type" => julia_type,
+                            "size" => get_type_size(c_type),
                             "offset" => get(member, "offset", "0x00")
                         ))
                     end
@@ -1634,6 +1694,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 if !isempty(resolved_members)
                     struct_def = Dict{String,Any}(
                         "kind" => get(type_info, "kind", "struct"),
+                        "byte_size" => get(type_info, "byte_size", "0x0"),
                         "members" => resolved_members
                     )
 

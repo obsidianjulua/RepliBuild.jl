@@ -27,6 +27,7 @@ include("Wrapper.jl")
 include("DWARFParser.jl")
 include("JLCSIRGenerator.jl")
 include("MLIRNative.jl")
+include("JITManager.jl")
 
 # Introspection module
 include("Introspect.jl")
@@ -43,6 +44,7 @@ using .Wrapper
 using .DWARFParser
 using .JLCSIRGenerator
 using .MLIRNative
+using .JITManager
 using .Introspect
 
 # ============================================================================
