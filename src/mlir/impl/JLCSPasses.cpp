@@ -294,6 +294,27 @@ struct StoreArrayElementOpLowering : public ConversionPattern {
 };
 
 //===----------------------------------------------------------------------===//
+// TypeInfoOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct TypeInfoOpLowering : public ConversionPattern {
+    TypeInfoOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter, TypeInfoOp::getOperationName(), 1,
+              ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        // TypeInfoOp is metadata, safe to erase during lowering to LLVM
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
 // Lower JLCS to LLVM Pass
 //===----------------------------------------------------------------------===//
 
@@ -314,7 +335,7 @@ struct LowerJLCSToLLVMPass
 
         // Define illegal ops (source dialect)
         target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp,
-            LoadArrayElementOp, StoreArrayElementOp>();
+            LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp>();
 
         // Define legal dialects (target dialects)
         target.addLegalDialect<LLVM::LLVMDialect, arith::ArithDialect>();
@@ -326,6 +347,7 @@ struct LowerJLCSToLLVMPass
         patterns.add<VirtualCallOpLowering>(typeConverter, &getContext());
         patterns.add<LoadArrayElementOpLowering>(typeConverter, &getContext());
         patterns.add<StoreArrayElementOpLowering>(typeConverter, &getContext());
+        patterns.add<TypeInfoOpLowering>(typeConverter, &getContext());
 
         // Execute the conversion
         if (failed(applyPartialConversion(getOperation(), target,

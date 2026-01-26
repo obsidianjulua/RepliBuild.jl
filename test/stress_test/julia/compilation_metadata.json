@@ -2494,527 +2494,616 @@
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/include",
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/src"
   ],
-  "timestamp": "2026-01-07T04:19:02.697",
+  "timestamp": "2026-01-26T14:45:01.680",
   "struct_definitions": {
     "LUDecomposition": {
       "kind": "struct",
+      "byte_size": "0x58",
       "members": [
         {
           "c_type": "DenseMatrix",
           "name": "L",
           "offset": null,
+          "size": 0,
           "julia_type": "DenseMatrix"
         },
         {
           "c_type": "DenseMatrix",
           "name": "U",
           "offset": null,
+          "size": 0,
           "julia_type": "DenseMatrix"
         },
         {
           "c_type": "int32_t*",
           "name": "permutation",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "size_t",
           "name": "size",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "Status",
           "name": "status",
           "offset": null,
+          "size": 0,
           "julia_type": "Status"
         }
       ]
     },
     "ODEResult": {
       "kind": "struct",
+      "byte_size": "0x30",
       "members": [
         {
           "c_type": "double*",
           "name": "y",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double*",
           "name": "t_values",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double**",
           "name": "y_values",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Ptr{Cdouble}}"
         },
         {
           "c_type": "size_t",
           "name": "n_steps",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "size_t",
           "name": "dimension",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "Status",
           "name": "status",
           "offset": null,
+          "size": 0,
           "julia_type": "Status"
         }
       ]
     },
     "EigenDecomposition": {
       "kind": "struct",
+      "byte_size": "0x40",
       "members": [
         {
           "c_type": "double*",
           "name": "eigenvalues",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double*",
           "name": "eigenvalues_imag",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "DenseMatrix",
           "name": "eigenvectors",
           "offset": null,
+          "size": 0,
           "julia_type": "DenseMatrix"
         },
         {
           "c_type": "size_t",
           "name": "n",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "Status",
           "name": "status",
           "offset": null,
+          "size": 0,
           "julia_type": "Status"
         }
       ]
     },
     "DenseMatrix": {
       "kind": "struct",
+      "byte_size": "0x20",
       "members": [
         {
           "c_type": "double*",
           "name": "data",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "size_t",
           "name": "rows",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "size_t",
           "name": "cols",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "bool",
           "name": "owns_data",
           "offset": null,
+          "size": 1,
           "julia_type": "Bool"
         }
       ]
     },
     "SparseMatrix": {
       "kind": "struct",
+      "byte_size": "0x30",
       "members": [
         {
           "c_type": "double*",
           "name": "values",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "int32_t*",
           "name": "row_indices",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "int32_t*",
           "name": "col_pointers",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "size_t",
           "name": "nnz",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "size_t",
           "name": "rows",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "size_t",
           "name": "cols",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         }
       ]
     },
     "mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>": {
       "kind": "class",
+      "byte_size": "0x9c8",
       "members": [
         {
           "c_type": "unsigned long[312]",
           "name": "_M_x",
           "offset": null,
+          "size": 0,
           "julia_type": "NTuple{312, Culong}"
         },
         {
           "c_type": "size_t",
           "name": "_M_p",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         }
       ]
     },
     "QRDecomposition": {
       "kind": "struct",
+      "byte_size": "0x58",
       "members": [
         {
           "c_type": "DenseMatrix",
           "name": "Q",
           "offset": null,
+          "size": 0,
           "julia_type": "DenseMatrix"
         },
         {
           "c_type": "DenseMatrix",
           "name": "R",
           "offset": null,
+          "size": 0,
           "julia_type": "DenseMatrix"
         },
         {
           "c_type": "size_t",
           "name": "m",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "size_t",
           "name": "n",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "Status",
           "name": "status",
           "offset": null,
+          "size": 0,
           "julia_type": "Status"
         }
       ]
     },
     "uniform_real_distribution<double>": {
       "kind": "class",
+      "byte_size": "0x10",
       "members": [
         {
           "c_type": "param_type",
           "name": "_M_param",
           "offset": null,
+          "size": 0,
           "julia_type": "param_type"
         }
       ]
     },
     "FFTResult": {
       "kind": "struct",
+      "byte_size": "0x18",
       "members": [
         {
           "c_type": "double*",
           "name": "real",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double*",
           "name": "imag",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "size_t",
           "name": "n",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         }
       ]
     },
     "mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>, double>": {
       "kind": "struct",
+      "byte_size": "0x8",
       "members": [
         {
           "c_type": "mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>&",
           "name": "_M_g",
           "offset": null,
+          "size": 8,
           "julia_type": "Ref{mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>}"
         }
       ]
     },
     "__va_list_tag": {
       "kind": "struct",
+      "byte_size": "0x18",
       "members": [
         {
           "c_type": "unsigned int",
           "name": "gp_offset",
           "offset": null,
+          "size": 4,
           "julia_type": "Cuint"
         },
         {
           "c_type": "unsigned int",
           "name": "fp_offset",
           "offset": null,
+          "size": 4,
           "julia_type": "Cuint"
         },
         {
           "c_type": "void*",
           "name": "overflow_arg_area",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cvoid}"
         },
         {
           "c_type": "void*",
           "name": "reg_save_area",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cvoid}"
         }
       ]
     },
     "OptimizationOptions": {
       "kind": "struct",
+      "byte_size": "0x20",
       "members": [
         {
           "c_type": "double",
           "name": "tolerance",
           "offset": null,
+          "size": 8,
           "julia_type": "Cdouble"
         },
         {
           "c_type": "double",
           "name": "step_size",
           "offset": null,
+          "size": 8,
           "julia_type": "Cdouble"
         },
         {
           "c_type": "int32_t",
           "name": "max_iterations",
           "offset": null,
+          "size": 4,
           "julia_type": "Int32"
         },
         {
           "c_type": "int32_t",
           "name": "max_function_evals",
           "offset": null,
+          "size": 4,
           "julia_type": "Int32"
         },
         {
           "c_type": "OptimizationAlgorithm",
           "name": "algorithm",
           "offset": null,
+          "size": 0,
           "julia_type": "OptimizationAlgorithm"
         },
         {
           "c_type": "bool",
           "name": "verbose",
           "offset": null,
+          "size": 1,
           "julia_type": "Bool"
         }
       ]
     },
     "Histogram": {
       "kind": "struct",
+      "byte_size": "0x18",
       "members": [
         {
           "c_type": "double*",
           "name": "bin_edges",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "int32_t*",
           "name": "counts",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Int32}"
         },
         {
           "c_type": "size_t",
           "name": "n_bins",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         }
       ]
     },
     "normal_distribution<double>": {
       "kind": "class",
+      "byte_size": "0x20",
       "members": [
         {
           "c_type": "param_type",
           "name": "_M_param",
           "offset": null,
+          "size": 0,
           "julia_type": "param_type"
         }
       ]
     },
     "Polynomial": {
       "kind": "struct",
+      "byte_size": "0x10",
       "members": [
         {
           "c_type": "double*",
           "name": "coefficients",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "size_t",
           "name": "degree",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         }
       ]
     },
     "OptimizationState": {
       "kind": "struct",
+      "byte_size": "0x38",
       "members": [
         {
           "c_type": "double*",
           "name": "x",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double*",
           "name": "gradient",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double",
           "name": "f_value",
           "offset": null,
+          "size": 8,
           "julia_type": "Cdouble"
         },
         {
           "c_type": "double",
           "name": "gradient_norm",
           "offset": null,
+          "size": 8,
           "julia_type": "Cdouble"
         },
         {
           "c_type": "int32_t",
           "name": "iteration",
           "offset": null,
+          "size": 4,
           "julia_type": "Int32"
         },
         {
           "c_type": "int32_t",
           "name": "n_evals",
           "offset": null,
+          "size": 4,
           "julia_type": "Int32"
         },
         {
           "c_type": "Status",
           "name": "status",
           "offset": null,
+          "size": 0,
           "julia_type": "Status"
         },
         {
           "c_type": "size_t",
           "name": "dimension",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         }
       ]
     },
     "param_type": {
       "kind": "struct",
+      "byte_size": "0x10",
       "members": [
         {
           "c_type": "double",
           "name": "_M_mean",
           "offset": null,
+          "size": 8,
           "julia_type": "Cdouble"
         },
         {
           "c_type": "double",
           "name": "_M_stddev",
           "offset": null,
+          "size": 8,
           "julia_type": "Cdouble"
         },
         {
           "c_type": "double",
           "name": "_M_saved",
           "offset": null,
+          "size": 8,
           "julia_type": "Cdouble"
         },
         {
           "c_type": "bool",
           "name": "_M_saved_available",
           "offset": null,
+          "size": 1,
           "julia_type": "Bool"
         }
       ]
     },
     "SplineInterpolation": {
       "kind": "struct",
+      "byte_size": "0x28",
       "members": [
         {
           "c_type": "double*",
           "name": "x_points",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double*",
           "name": "y_points",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "double*",
           "name": "coefficients",
           "offset": null,
+          "size": 8,
           "julia_type": "Ptr{Cdouble}"
         },
         {
           "c_type": "size_t",
           "name": "n_points",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         },
         {
           "c_type": "size_t",
           "name": "n_coeffs",
           "offset": null,
+          "size": 8,
           "julia_type": "Csize_t"
         }
       ]
     },
     "__enum__OptimizationAlgorithm": {
       "kind": "enum",
-      "byte_size": null,
+      "byte_size": "0x4",
       "enumerators": [
         {
           "name": "GRADIENT_DESCENT",
@@ -3038,7 +3127,7 @@
     },
     "__enum__Status": {
       "kind": "enum",
-      "byte_size": null,
+      "byte_size": "0x4",
       "enumerators": [
         {
           "name": "SUCCESS",

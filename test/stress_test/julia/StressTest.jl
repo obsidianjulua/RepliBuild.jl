@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-01-07 04:19:02
+# Generated: 2026-01-26 14:45:01
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -10,11 +10,19 @@
 
 module StressTest
 
+using Libdl
+import RepliBuild
+
 const LIBRARY_PATH = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libstress_test.so"
 
 # Verify library exists
 if !isfile(LIBRARY_PATH)
     error("Library not found: $LIBRARY_PATH")
+end
+
+function __init__()
+    # Initialize the global JIT context with this library's vtables
+    RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
 end
 
 # =============================================================================
@@ -27,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-01-07T04:19:02.697"
+    "generated_at" => "2026-01-26T14:45:01.680"
 )
 
 # =============================================================================
@@ -58,7 +66,7 @@ end
 # =============================================================================
 
 # C++ struct: DenseMatrix (4 members)
-mutable struct DenseMatrix
+struct DenseMatrix
     data::Ptr{Cdouble}
     rows::Csize_t
     cols::Csize_t
@@ -66,21 +74,21 @@ mutable struct DenseMatrix
 end
 
 # C++ struct: FFTResult (3 members)
-mutable struct FFTResult
+struct FFTResult
     real::Ptr{Cdouble}
     imag::Ptr{Cdouble}
     n::Csize_t
 end
 
 # C++ struct: Histogram (3 members)
-mutable struct Histogram
+struct Histogram
     bin_edges::Ptr{Cdouble}
     counts::Ptr{Int32}
     n_bins::Csize_t
 end
 
 # C++ struct: ODEResult (6 members)
-mutable struct ODEResult
+struct ODEResult
     y::Ptr{Cdouble}
     t_values::Ptr{Cdouble}
     y_values::Ptr{Ptr{Cdouble}}
@@ -90,7 +98,7 @@ mutable struct ODEResult
 end
 
 # C++ struct: OptimizationOptions (6 members)
-mutable struct OptimizationOptions
+struct OptimizationOptions
     tolerance::Cdouble
     step_size::Cdouble
     max_iterations::Int32
@@ -100,7 +108,7 @@ mutable struct OptimizationOptions
 end
 
 # C++ struct: OptimizationState (8 members)
-mutable struct OptimizationState
+struct OptimizationState
     x::Ptr{Cdouble}
     gradient::Ptr{Cdouble}
     f_value::Cdouble
@@ -112,13 +120,13 @@ mutable struct OptimizationState
 end
 
 # C++ struct: Polynomial (2 members)
-mutable struct Polynomial
+struct Polynomial
     coefficients::Ptr{Cdouble}
     degree::Csize_t
 end
 
 # C++ struct: SparseMatrix (6 members)
-mutable struct SparseMatrix
+struct SparseMatrix
     values::Ptr{Cdouble}
     row_indices::Ptr{Int32}
     col_pointers::Ptr{Int32}
@@ -128,7 +136,7 @@ mutable struct SparseMatrix
 end
 
 # C++ struct: SplineInterpolation (5 members)
-mutable struct SplineInterpolation
+struct SplineInterpolation
     x_points::Ptr{Cdouble}
     y_points::Ptr{Cdouble}
     coefficients::Ptr{Cdouble}
@@ -137,7 +145,7 @@ mutable struct SplineInterpolation
 end
 
 # C++ struct: __va_list_tag (4 members)
-mutable struct __va_list_tag
+struct __va_list_tag
     gp_offset::Cuint
     fp_offset::Cuint
     overflow_arg_area::Ptr{Cvoid}
@@ -145,18 +153,18 @@ mutable struct __va_list_tag
 end
 
 # C++ struct: mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL> (2 members)
-mutable struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL
+struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL
     _M_x::NTuple{312, Culong}
     _M_p::Csize_t
 end
 
 # C++ struct: mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>, double> (1 members)
-mutable struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double
+struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double
     _M_g::Ref{mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL}
 end
 
 # C++ struct: param_type (4 members)
-mutable struct param_type
+struct param_type
     _M_mean::Cdouble
     _M_stddev::Cdouble
     _M_saved::Cdouble
@@ -164,7 +172,7 @@ mutable struct param_type
 end
 
 # C++ struct: EigenDecomposition (5 members)
-mutable struct EigenDecomposition
+struct EigenDecomposition
     eigenvalues::Ptr{Cdouble}
     eigenvalues_imag::Ptr{Cdouble}
     eigenvectors::DenseMatrix
@@ -173,7 +181,7 @@ mutable struct EigenDecomposition
 end
 
 # C++ struct: LUDecomposition (5 members)
-mutable struct LUDecomposition
+struct LUDecomposition
     L::DenseMatrix
     U::DenseMatrix
     permutation::Ptr{Int32}
@@ -182,7 +190,7 @@ mutable struct LUDecomposition
 end
 
 # C++ struct: QRDecomposition (5 members)
-mutable struct QRDecomposition
+struct QRDecomposition
     Q::DenseMatrix
     R::DenseMatrix
     m::Csize_t
@@ -191,12 +199,12 @@ mutable struct QRDecomposition
 end
 
 # C++ struct: normal_distribution<double> (1 members)
-mutable struct normal_distribution_double
+struct normal_distribution_double
     _M_param::param_type
 end
 
 # C++ struct: uniform_real_distribution<double> (1 members)
-mutable struct uniform_real_distribution_double
+struct uniform_real_distribution_double
     _M_param::param_type
 end
 
@@ -219,15 +227,10 @@ Wrapper for C++ function: `compute_eigen`
 - Type safety:  From compilation
 """
 
-function compute_eigen(A::Ptr{DenseMatrix})::EigenDecomposition
-    ccall((:compute_eigen, LIBRARY_PATH), EigenDecomposition, (Ptr{DenseMatrix},), A)
+function compute_eigen(A::Ptr{DenseMatrix})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("compute_eigen", A)
 end
-
-# Convenience wrapper - accepts structs directly instead of pointers
-function compute_eigen(A::DenseMatrix)::EigenDecomposition
-    return ccall((:compute_eigen, LIBRARY_PATH), EigenDecomposition, (Ptr{DenseMatrix},), Ref(A))
-end
-
 """
     compute_fft(signal::Ptr{Cdouble}, n::Csize_t) -> FFTResult
 
@@ -245,17 +248,10 @@ Wrapper for C++ function: `compute_fft`
 - Type safety:  From compilation
 """
 
-function compute_fft(signal::Ptr{Cdouble}, n::Csize_t)::FFTResult
-    ccall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), signal, n)
+function compute_fft(signal::Ptr{Cdouble}, n::Csize_t)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("compute_fft", signal, n)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function compute_fft(signal::Vector{Float64}, n::Csize_t)::FFTResult
-    return GC.@preserve signal begin
-        ccall((:compute_fft, LIBRARY_PATH), FFTResult, (Ptr{Cdouble}, Csize_t,), pointer(signal), n)
-    end
-end
-
 """
     compute_histogram(data::Ptr{Cdouble}, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble) -> Histogram
 
@@ -276,17 +272,10 @@ Wrapper for C++ function: `compute_histogram`
 - Type safety:  From compilation
 """
 
-function compute_histogram(data::Ptr{Cdouble}, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble)::Histogram
-    ccall((:compute_histogram, LIBRARY_PATH), Histogram, (Ptr{Cdouble}, Csize_t, Csize_t, Cdouble, Cdouble,), data, n, n_bins, min_val, max_val)
+function compute_histogram(data::Ptr{Cdouble}, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("compute_histogram", data, n, n_bins, min_val, max_val)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function compute_histogram(data::Vector{Float64}, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble)::Histogram
-    return GC.@preserve data begin
-        ccall((:compute_histogram, LIBRARY_PATH), Histogram, (Ptr{Cdouble}, Csize_t, Csize_t, Cdouble, Cdouble,), pointer(data), n, n_bins, min_val, max_val)
-    end
-end
-
 """
     compute_ifft(fft_data::Ptr{FFTResult}, signal_out::Ptr{Cdouble}) -> Cvoid
 
@@ -329,15 +318,10 @@ Wrapper for C++ function: `compute_lu`
 - Type safety:  From compilation
 """
 
-function compute_lu(A::Ptr{DenseMatrix})::LUDecomposition
-    ccall((:compute_lu, LIBRARY_PATH), LUDecomposition, (Ptr{DenseMatrix},), A)
+function compute_lu(A::Ptr{DenseMatrix})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("compute_lu", A)
 end
-
-# Convenience wrapper - accepts structs directly instead of pointers
-function compute_lu(A::DenseMatrix)::LUDecomposition
-    return ccall((:compute_lu, LIBRARY_PATH), LUDecomposition, (Ptr{DenseMatrix},), Ref(A))
-end
-
 """
     compute_mean(data::Ptr{Cdouble}, n::Csize_t) -> Cdouble
 
@@ -410,15 +394,10 @@ Wrapper for C++ function: `compute_qr`
 - Type safety:  From compilation
 """
 
-function compute_qr(A::Ptr{DenseMatrix})::QRDecomposition
-    ccall((:compute_qr, LIBRARY_PATH), QRDecomposition, (Ptr{DenseMatrix},), A)
+function compute_qr(A::Ptr{DenseMatrix})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("compute_qr", A)
 end
-
-# Convenience wrapper - accepts structs directly instead of pointers
-function compute_qr(A::DenseMatrix)::QRDecomposition
-    return ccall((:compute_qr, LIBRARY_PATH), QRDecomposition, (Ptr{DenseMatrix},), Ref(A))
-end
-
 """
     compute_quantiles(data::Ptr{Cdouble}, n::Csize_t, probabilities::Ptr{Cdouble}, quantiles::Ptr{Cdouble}, n_quantiles::Csize_t) -> Cvoid
 
@@ -585,17 +564,10 @@ Wrapper for C++ function: `create_cubic_spline`
 - Type safety:  From compilation
 """
 
-function create_cubic_spline(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t)::SplineInterpolation
-    ccall((:create_cubic_spline, LIBRARY_PATH), SplineInterpolation, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t,), x, y, n)
+function create_cubic_spline(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("create_cubic_spline", x, y, n)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function create_cubic_spline(x::Vector{Float64}, y::Vector{Float64}, n::Csize_t)::SplineInterpolation
-    return GC.@preserve x y begin
-        ccall((:create_cubic_spline, LIBRARY_PATH), SplineInterpolation, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t,), pointer(x), pointer(y), n)
-    end
-end
-
 """
     dense_matrix_copy(src::Ptr{DenseMatrix}) -> DenseMatrix
 
@@ -612,15 +584,10 @@ Wrapper for C++ function: `dense_matrix_copy`
 - Type safety:  From compilation
 """
 
-function dense_matrix_copy(src::Ptr{DenseMatrix})::DenseMatrix
-    ccall((:dense_matrix_copy, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix},), src)
+function dense_matrix_copy(src::Ptr{DenseMatrix})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("dense_matrix_copy", src)
 end
-
-# Convenience wrapper - accepts structs directly instead of pointers
-function dense_matrix_copy(src::DenseMatrix)::DenseMatrix
-    return ccall((:dense_matrix_copy, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix},), Ref(src))
-end
-
 """
     dense_matrix_create(rows::Csize_t, cols::Csize_t) -> DenseMatrix
 
@@ -638,10 +605,10 @@ Wrapper for C++ function: `dense_matrix_create`
 - Type safety:  From compilation
 """
 
-function dense_matrix_create(rows::Csize_t, cols::Csize_t)::DenseMatrix
-    ccall((:dense_matrix_create, LIBRARY_PATH), DenseMatrix, (Csize_t, Csize_t,), rows, cols)
+function dense_matrix_create(rows::Csize_t, cols::Csize_t)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("dense_matrix_create", rows, cols)
 end
-
 """
     dense_matrix_destroy(mat::Ptr{DenseMatrix}) -> Cvoid
 
@@ -910,15 +877,10 @@ Wrapper for C++ function: `matrix_add`
 - Type safety:  From compilation
 """
 
-function matrix_add(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix})::DenseMatrix
-    ccall((:matrix_add, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix}, Ptr{DenseMatrix},), A, B)
+function matrix_add(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("matrix_add", A, B)
 end
-
-# Convenience wrapper - accepts structs directly instead of pointers
-function matrix_add(A::DenseMatrix, B::DenseMatrix)::DenseMatrix
-    return ccall((:matrix_add, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix}, Ptr{DenseMatrix},), Ref(A), Ref(B))
-end
-
 """
     matrix_determinant(A::Ptr{DenseMatrix}) -> Cdouble
 
@@ -961,15 +923,10 @@ Wrapper for C++ function: `matrix_multiply`
 - Type safety:  From compilation
 """
 
-function matrix_multiply(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix})::DenseMatrix
-    ccall((:matrix_multiply, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix}, Ptr{DenseMatrix},), A, B)
+function matrix_multiply(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("matrix_multiply", A, B)
 end
-
-# Convenience wrapper - accepts structs directly instead of pointers
-function matrix_multiply(A::DenseMatrix, B::DenseMatrix)::DenseMatrix
-    return ccall((:matrix_multiply, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix}, Ptr{DenseMatrix},), Ref(A), Ref(B))
-end
-
 """
     matrix_trace(A::Ptr{DenseMatrix}) -> Cdouble
 
@@ -1011,15 +968,10 @@ Wrapper for C++ function: `matrix_transpose`
 - Type safety:  From compilation
 """
 
-function matrix_transpose(A::Ptr{DenseMatrix})::DenseMatrix
-    ccall((:matrix_transpose, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix},), A)
+function matrix_transpose(A::Ptr{DenseMatrix})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("matrix_transpose", A)
 end
-
-# Convenience wrapper - accepts structs directly instead of pointers
-function matrix_transpose(A::DenseMatrix)::DenseMatrix
-    return ccall((:matrix_transpose, LIBRARY_PATH), DenseMatrix, (Ptr{DenseMatrix},), Ref(A))
-end
-
 """
     matrix_vector_mult(A::Ptr{DenseMatrix}, x::Ptr{Cdouble}, y::Ptr{Cdouble}) -> Cvoid
 
@@ -1096,10 +1048,10 @@ Wrapper for C++ function: `ode_result_destroy`
 - Type safety:  From compilation
 """
 
-function ode_result_destroy(result::Ptr{ODEResult})::Cvoid
-    ccall((:ode_result_destroy, LIBRARY_PATH), Cvoid, (Ptr{ODEResult},), result)
+function ode_result_destroy(result::Ptr{ODEResult})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("ode_result_destroy", result)
 end
-
 """
     optimize_minimize(objective::Ptr{Cvoid}, gradient::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid}) -> Any
 
@@ -1139,17 +1091,10 @@ callback = @cfunction(my_callback, Bool, (Ptr{OptimizationState}, Ptr{Cvoid},)) 
 - Type safety:  From compilation
 """
 
-function optimize_minimize(objective::Ptr{Cvoid}, gradient::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})::Status
-    return ccall((:optimize_minimize, LIBRARY_PATH), Status, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cdouble}, Csize_t, Ptr{OptimizationOptions}, Ptr{OptimizationState}, Ptr{Cvoid}, Ptr{Cvoid},), objective, gradient, x, n, options, final_state, callback, user_data)
+function optimize_minimize(objective::Ptr{Cvoid}, gradient::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("optimize_minimize", objective, gradient, x, n, options, final_state, callback, user_data)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function optimize_minimize(objective::Ptr{Cvoid}, gradient::Ptr{Cvoid}, x::Vector{Float64}, n::Csize_t, options::OptimizationOptions, final_state::OptimizationState, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})::Any
-    return GC.@preserve x begin
-        ccall((:optimize_minimize, LIBRARY_PATH), Any, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cdouble}, Csize_t, Ptr{OptimizationOptions}, Ptr{OptimizationState}, Ptr{Cvoid}, Ptr{Cvoid},), objective, gradient, pointer(x), n, Ref(options), Ref(final_state), callback, user_data)
-    end
-end
-
 """
     optimize_minimize_numerical_gradient(objective::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid}) -> Any
 
@@ -1183,17 +1128,10 @@ callback = @cfunction(my_callback, Bool, (Ptr{OptimizationState}, Ptr{Cvoid},)) 
 - Type safety:  From compilation
 """
 
-function optimize_minimize_numerical_gradient(objective::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})::Status
-    return ccall((:optimize_minimize_numerical_gradient, LIBRARY_PATH), Status, (Ptr{Cvoid}, Ptr{Cdouble}, Csize_t, Ptr{OptimizationOptions}, Ptr{OptimizationState}, Ptr{Cvoid}, Ptr{Cvoid},), objective, x, n, options, final_state, callback, user_data)
+function optimize_minimize_numerical_gradient(objective::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("optimize_minimize_numerical_gradient", objective, x, n, options, final_state, callback, user_data)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function optimize_minimize_numerical_gradient(objective::Ptr{Cvoid}, x::Vector{Float64}, n::Csize_t, options::OptimizationOptions, final_state::OptimizationState, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})::Any
-    return GC.@preserve x begin
-        ccall((:optimize_minimize_numerical_gradient, LIBRARY_PATH), Any, (Ptr{Cvoid}, Ptr{Cdouble}, Csize_t, Ptr{OptimizationOptions}, Ptr{OptimizationState}, Ptr{Cvoid}, Ptr{Cvoid},), objective, pointer(x), n, Ref(options), Ref(final_state), callback, user_data)
-    end
-end
-
 """
     polynomial_destroy(poly::Ptr{Polynomial}) -> Cvoid
 
@@ -1425,17 +1363,10 @@ Wrapper for C++ function: `solve_linear_system_lu`
 - Type safety:  From compilation
 """
 
-function solve_linear_system_lu(lu::Ptr{LUDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t)::Status
-    return ccall((:solve_linear_system_lu, LIBRARY_PATH), Status, (Ptr{LUDecomposition}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t,), lu, b, x, n)
+function solve_linear_system_lu(lu::Ptr{LUDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("solve_linear_system_lu", lu, b, x, n)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function solve_linear_system_lu(lu::LUDecomposition, b::Ptr{Cdouble}, x::Vector{Float64}, n::Csize_t)::Any
-    return GC.@preserve x begin
-        ccall((:solve_linear_system_lu, LIBRARY_PATH), Any, (Ptr{LUDecomposition}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t,), Ref(lu), b, pointer(x), n)
-    end
-end
-
 """
     solve_linear_system_qr(qr::Ptr{QRDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble}) -> Any
 
@@ -1454,17 +1385,10 @@ Wrapper for C++ function: `solve_linear_system_qr`
 - Type safety:  From compilation
 """
 
-function solve_linear_system_qr(qr::Ptr{QRDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble})::Status
-    return ccall((:solve_linear_system_qr, LIBRARY_PATH), Status, (Ptr{QRDecomposition}, Ptr{Cdouble}, Ptr{Cdouble},), qr, b, x)
+function solve_linear_system_qr(qr::Ptr{QRDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("solve_linear_system_qr", qr, b, x)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function solve_linear_system_qr(qr::QRDecomposition, b::Ptr{Cdouble}, x::Vector{Float64})::Any
-    return GC.@preserve x begin
-        ccall((:solve_linear_system_qr, LIBRARY_PATH), Any, (Ptr{QRDecomposition}, Ptr{Cdouble}, Ptr{Cdouble},), Ref(qr), b, pointer(x))
-    end
-end
-
 """
     solve_ode_adaptive(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, event_func::Ptr{Cvoid}, user_data::Ptr{Cvoid}) -> ODEResult
 
@@ -1499,17 +1423,10 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 - Type safety:  From compilation
 """
 
-function solve_ode_adaptive(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, event_func::Ptr{Cvoid}, user_data::Ptr{Cvoid})::ODEResult
-    ccall((:solve_ode_adaptive, LIBRARY_PATH), ODEResult, (Ptr{Cvoid}, Cdouble, Cdouble, Ptr{Cdouble}, Csize_t, Cdouble, Ptr{Cvoid}, Ptr{Cvoid},), ode_func, t0, t_final, y0, n, tolerance, event_func, user_data)
+function solve_ode_adaptive(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, event_func::Ptr{Cvoid}, user_data::Ptr{Cvoid})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("solve_ode_adaptive", ode_func, t0, t_final, y0, n, tolerance, event_func, user_data)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function solve_ode_adaptive(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Vector{Float64}, n::Csize_t, tolerance::Cdouble, event_func::Ptr{Cvoid}, user_data::Ptr{Cvoid})::ODEResult
-    return GC.@preserve y0 begin
-        ccall((:solve_ode_adaptive, LIBRARY_PATH), ODEResult, (Ptr{Cvoid}, Cdouble, Cdouble, Ptr{Cdouble}, Csize_t, Cdouble, Ptr{Cvoid}, Ptr{Cvoid},), ode_func, t0, t_final, pointer(y0), n, tolerance, event_func, user_data)
-    end
-end
-
 """
     solve_ode_rk4(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, dt::Cdouble, user_data::Ptr{Cvoid}) -> ODEResult
 
@@ -1538,17 +1455,10 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 - Type safety:  From compilation
 """
 
-function solve_ode_rk4(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, dt::Cdouble, user_data::Ptr{Cvoid})::ODEResult
-    ccall((:solve_ode_rk4, LIBRARY_PATH), ODEResult, (Ptr{Cvoid}, Cdouble, Cdouble, Ptr{Cdouble}, Csize_t, Cdouble, Ptr{Cvoid},), ode_func, t0, t_final, y0, n, dt, user_data)
+function solve_ode_rk4(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, dt::Cdouble, user_data::Ptr{Cvoid})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("solve_ode_rk4", ode_func, t0, t_final, y0, n, dt, user_data)
 end
-
-# Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-function solve_ode_rk4(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Vector{Float64}, n::Csize_t, dt::Cdouble, user_data::Ptr{Cvoid})::ODEResult
-    return GC.@preserve y0 begin
-        ccall((:solve_ode_rk4, LIBRARY_PATH), ODEResult, (Ptr{Cvoid}, Cdouble, Cdouble, Ptr{Cdouble}, Csize_t, Cdouble, Ptr{Cvoid},), ode_func, t0, t_final, pointer(y0), n, dt, user_data)
-    end
-end
-
 """
     sparse_matrix_create(rows::Csize_t, cols::Csize_t, nnz::Csize_t) -> SparseMatrix
 
@@ -1567,10 +1477,10 @@ Wrapper for C++ function: `sparse_matrix_create`
 - Type safety:  From compilation
 """
 
-function sparse_matrix_create(rows::Csize_t, cols::Csize_t, nnz::Csize_t)::SparseMatrix
-    ccall((:sparse_matrix_create, LIBRARY_PATH), SparseMatrix, (Csize_t, Csize_t, Csize_t,), rows, cols, nnz)
+function sparse_matrix_create(rows::Csize_t, cols::Csize_t, nnz::Csize_t)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("sparse_matrix_create", rows, cols, nnz)
 end
-
 """
     sparse_matrix_destroy(mat::Ptr{SparseMatrix}) -> Cvoid
 

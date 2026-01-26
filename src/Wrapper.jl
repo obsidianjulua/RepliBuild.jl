@@ -1365,6 +1365,103 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     return output_file
 end
 
+# =============================================================================
+# DISPATCH LOGIC HELPERS
+# =============================================================================
+
+"""
+    get_julia_aligned_size(members::Vector)
+
+Calculate the size of a struct in Julia including standard padding alignment.
+Used to detect if a C++ struct is 'packed' (Julia size > DWARF size).
+"""
+function get_julia_aligned_size(members::Vector)
+    current_offset = 0
+    max_align = 1
+
+    for m in members
+        # specific size of this member
+        m_size = get(m, "size", 0)
+
+        # simple alignment heuristic (size usually equals alignment for primitives)
+        # generic pointer/int alignment cap at 8 bytes on 64-bit
+        align = m_size > 8 ? 8 : m_size
+        align = align == 0 ? 1 : align # handle empty/void
+
+        # update generic alignment requirement
+        max_align = max(max_align, align)
+
+        # Add padding to current offset
+        padding = (align - (current_offset % align)) % align
+        current_offset += padding + m_size
+    end
+
+    # Final structure alignment padding
+    padding = (max_align - (current_offset % max_align)) % max_align
+    return current_offset + padding
+end
+
+"""
+    is_ccall_safe(func_info, dwarf_structs)::Bool
+
+Determine if a function is safe for standard `ccall`.
+Returns false if:
+1. Arguments are Packed Structs (alignment mismatch)
+2. Arguments are Unions
+3. Return type is a complex struct by value
+"""
+function is_ccall_safe(func_info, dwarf_structs)
+    # 1. Check Return Type
+    ret_type = String(get(func_info["return_type"], "c_type", ""))
+
+    # If returning a struct by value (not pointer/void/primitive)
+    if !contains(ret_type, "*") && !contains(ret_type, "void") &&
+       !contains(ret_type, "int") && !contains(ret_type, "float") &&
+       !contains(ret_type, "double") && !contains(ret_type, "bool")
+
+        # Check if it's a known struct
+        if haskey(dwarf_structs, ret_type)
+            # Struct return by value is notoriously fragile in ABIs (large structs split registers)
+            # Conservative: Send to MLIR if > 16 bytes
+            s_info = dwarf_structs[ret_type]
+            if parse(Int, get(s_info, "byte_size", "0")) > 16
+                return false
+            end
+        end
+    end
+
+    # 2. Check Arguments
+    for param in func_info["parameters"]
+        c_type = get(param, "c_type", "")
+
+        # Clean pointer syntax to check base type
+        # Ensure we allocate a new String to satisfy strict JSON.Object requirements
+        base_type = replace(c_type, "*" => "")
+        base_type = String(strip(replace(base_type, "const" => "")))
+
+        if haskey(dwarf_structs, base_type)
+            s_info = dwarf_structs[base_type]
+
+            # CHECK A: Is it a Union?
+            if get(s_info, "kind", "struct") == "union"
+                return false
+            end
+
+            # CHECK B: Is it Packed?
+            dwarf_size = parse(Int, get(s_info, "byte_size", "0"))
+            members = get(s_info, "members", [])
+            julia_size = get_julia_aligned_size(members)
+
+            # If DWARF says 5 bytes but Julia calculates 8, it's packed!
+            if dwarf_size > 0 && dwarf_size != julia_size
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
 """
 Generate introspective wrapper module content using compilation metadata.
 """
@@ -1739,7 +1836,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     member_count = length(members)
                     struct_definitions *= """
                     # C++ struct: $struct_name ($member_count members)
-                    mutable struct $julia_struct_name
+                    struct $julia_struct_name
                     """
                     
                     current_offset = 0
@@ -1839,6 +1936,13 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         func_name = func["name"]
         mangled = func["mangled"]
         demangled = func["demangled"]
+
+        # =========================================================
+        # TIERED DISPATCH DECISION
+        # =========================================================
+
+        # Determine if we should use MLIR or ccall
+        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs)
         
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
@@ -2101,6 +2205,31 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
             doc_comment = doc_parts
         end
+
+        # =========================================================
+        # BRANCH 1: MLIR DISPATCH (Robust Path)
+        # =========================================================
+        if use_mlir_dispatch
+
+            # Build argument list for invoke
+            invoke_args = join(param_names, ", ")
+
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+                # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+                return RepliBuild.JITManager.invoke("$mangled", $invoke_args)
+            end
+            """
+
+            function_wrappers *= func_def
+            push!(exports, julia_name)
+            continue # Skip the rest of the loop (ccall generation)
+        end
+
+        # =========================================================
+        # BRANCH 2: CCALL (Fast Path) - Existing Logic
+        # =========================================================
 
         # Build conversion logic for parameters
         conversion_code = ""

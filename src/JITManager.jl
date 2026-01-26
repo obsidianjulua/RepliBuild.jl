@@ -8,8 +8,9 @@ using ..MLIRNative
 using ..JLCSIRGenerator
 using ..DWARFParser
 using Libdl
+import JSON
 
-export get_jit_thunk, ensure_jit_initialized, JITContext
+export get_jit_thunk, ensure_jit_initialized, JITContext, invoke
 
 # Global singleton to manage JIT state
 mutable struct JITContext
@@ -26,6 +27,45 @@ mutable struct JITContext
 end
 
 const GLOBAL_JIT = JITContext()
+
+"""
+    invoke(func_name::String, args...)
+
+Invoke a JIT-compiled function managed by the global JIT context.
+Arguments are passed by reference (pointers to values) to the JIT.
+"""
+function invoke(func_name::String, args...)
+    if !GLOBAL_JIT.initialized
+        error("JIT not initialized. Call initialize_global_jit() first.")
+    end
+
+    # Prepare arguments for mlirExecutionEngineInvokePacked
+    # We need a vector of pointers to the arguments
+    ptr_args = Vector{Ptr{Cvoid}}()
+    ref_args = Any[] # Keep references alive
+    
+    for arg in args
+        # Create a reference to the argument
+        r = Ref(arg)
+        push!(ref_args, r)
+        # Get the pointer to the data
+        push!(ptr_args, Base.unsafe_convert(Ptr{Cvoid}, r))
+    end
+    
+    # Invoke via MLIRNative
+    success = MLIRNative.jit_invoke(GLOBAL_JIT.jit_engine, func_name, ptr_args)
+    
+    if !success
+        # Try with underscore prefix
+        success = MLIRNative.jit_invoke(GLOBAL_JIT.jit_engine, "_" * func_name, ptr_args)
+    end
+    
+    if !success
+        error("Failed to invoke JIT function: $func_name")
+    end
+    
+    return nothing
+end
 
 """
     initialize_global_jit(binary_path::String)
@@ -46,9 +86,17 @@ function initialize_global_jit(binary_path::String)
             # 2. Parse VTable Info
             # This is fast enough to do at runtime, or we could serialize it
             GLOBAL_JIT.vtable_info = DWARFParser.parse_vtables(binary_path)
+            
+            # Load metadata
+            metadata_path = joinpath(dirname(binary_path), "compilation_metadata.json")
+            metadata = if isfile(metadata_path)
+                JSON.parsefile(metadata_path)
+            else
+                Dict()
+            end
 
             # 3. Generate MLIR Module for all vtables
-            ir_source = JLCSIRGenerator.generate_jlcs_ir(GLOBAL_JIT.vtable_info)
+            ir_source = JLCSIRGenerator.generate_jlcs_ir(GLOBAL_JIT.vtable_info, metadata)
             
             # 4. Parse and Lower Module
             mod = parse_module(GLOBAL_JIT.mlir_ctx, ir_source)

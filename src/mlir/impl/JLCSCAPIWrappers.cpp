@@ -167,6 +167,9 @@ extern "C" {
         mlir::ModuleOp mod = unwrap(module);
         mlir::PassManager pm(mod.getContext());
         
+        // Add JLCS custom lowering pass FIRST
+        pm.addPass(mlir::jlcs::createLowerJLCSToLLVMPass());
+
         // Basic lowering pipeline
         // Convert Func -> LLVM
         pm.addPass(mlir::createConvertFuncToLLVMPass());

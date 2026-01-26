@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for basics_test
-# Generated: 2026-01-26 02:09:21
+# Generated: 2026-01-26 14:38:49
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libbasics_test.so
 # Metadata: compilation_metadata.json
@@ -35,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 5,
-    "generated_at" => "2026-01-26T02:09:15.285"
+    "generated_at" => "2026-01-26T14:38:46.650"
 )
 
 # =============================================================================
@@ -43,19 +43,19 @@ const METADATA = Dict(
 # =============================================================================
 
 # C++ struct: PackedStruct (2 members)
-mutable struct PackedStruct
+struct PackedStruct
     a::UInt8
     b::Cint
 end
 
 # C++ struct: PaddedStruct (2 members)
-mutable struct PaddedStruct
+struct PaddedStruct
     a::UInt8
     b::Cint
 end
 
 # C++ struct: __va_list_tag (4 members)
-mutable struct __va_list_tag
+struct __va_list_tag
     gp_offset::Cuint
     fp_offset::Cuint
     overflow_arg_area::Ptr{Cvoid}
@@ -125,10 +125,10 @@ Wrapper for C++ function: `process_packed`
 - Type safety:  From compilation
 """
 
-function process_packed(s::PackedStruct)::Cvoid
-    ccall((:process_packed, LIBRARY_PATH), Cvoid, (PackedStruct,), s)
+function process_packed(s::PackedStruct)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("process_packed", s)
 end
-
 """
     process_padded(s::PaddedStruct) -> Cvoid
 

@@ -36,7 +36,7 @@ toolchain = "auto"
 [project]
 name = "stress_test"
 root = "/home/grim/Desktop/Projects/RepliBuild.jl/test/stress_test"
-uuid = "6d6d65ad-a244-4cbd-bf12-6b03b1b78820"
+uuid = "adcfdba6-1bd2-4618-97f1-8339c93358ad"
 
 [paths]
 build = "build"
