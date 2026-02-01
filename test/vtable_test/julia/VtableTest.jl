@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for vtable_test
-# Generated: 2026-02-01 17:00:23
+# Generated: 2026-02-01 17:20:03
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libvtable_test.so
 # Metadata: compilation_metadata.json
@@ -120,10 +120,10 @@ Wrapper for C++ function: `delete_shape`
 - Type safety:  From compilation
 """
 
-function delete_shape(s::Ptr{Shape})
-    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("delete_shape", s)
+function delete_shape(s::Ptr{Shape})::Cvoid
+    ccall((:delete_shape, LIBRARY_PATH), Cvoid, (Ptr{Shape},), s)
 end
+
 """
     get_area(s::Ptr{Shape}) -> Cdouble
 
@@ -140,10 +140,10 @@ Wrapper for C++ function: `get_area`
 - Type safety:  From compilation
 """
 
-function get_area(s::Ptr{Shape})
-    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("get_area", s)
+function get_area(s::Ptr{Shape})::Cdouble
+    ccall((:get_area, LIBRARY_PATH), Cdouble, (Ptr{Shape},), s)
 end
+
 """
     get_perimeter(s::Ptr{Shape}) -> Cdouble
 
@@ -160,10 +160,10 @@ Wrapper for C++ function: `get_perimeter`
 - Type safety:  From compilation
 """
 
-function get_perimeter(s::Ptr{Shape})
-    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("get_perimeter", s)
+function get_perimeter(s::Ptr{Shape})::Cdouble
+    ccall((:get_perimeter, LIBRARY_PATH), Cdouble, (Ptr{Shape},), s)
 end
+
 """
     Circle_area(this::Ptr{Circle}) -> Cdouble
 
