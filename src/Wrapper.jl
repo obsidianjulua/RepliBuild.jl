@@ -1427,6 +1427,11 @@ function is_ccall_safe(func_info, dwarf_structs)
             if parse(Int, get(s_info, "byte_size", "0")) > 16
                 return false
             end
+            
+            # Check if it is a class (likely non-POD)
+            if get(s_info, "kind", "struct") == "class"
+                return false
+            end
         end
     end
 
@@ -1446,8 +1451,13 @@ function is_ccall_safe(func_info, dwarf_structs)
             if get(s_info, "kind", "struct") == "union"
                 return false
             end
+            
+            # CHECK B: Is it a Class? (likely non-POD)
+            if get(s_info, "kind", "struct") == "class"
+                return false
+            end
 
-            # CHECK B: Is it Packed?
+            # CHECK C: Is it Packed?
             dwarf_size = parse(Int, get(s_info, "byte_size", "0"))
             members = get(s_info, "members", [])
             julia_size = get_julia_aligned_size(members)

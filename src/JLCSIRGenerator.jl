@@ -109,7 +109,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict())
                  (ret_type, arg_types) = get_llvm_signature(method)
                  
                  decl_ret = ret_type == "" ? "!llvm.void" : ret_type
-                 println(io, "  llvm.func @$(dispatch_name)($(arg_types)) -> $(decl_ret) attributes { sym_visibility = \"private\" }")
+                 println(io, "  llvm.func @$(dispatch_name)($(arg_types)) -> $(decl_ret)")
              end
         end
     end

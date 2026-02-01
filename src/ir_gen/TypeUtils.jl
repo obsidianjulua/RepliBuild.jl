@@ -41,4 +41,25 @@ function map_cpp_type(type_str::String)
     return "!llvm.ptr" 
 end
 
+"""
+    get_llvm_signature(method) -> (String, String)
+
+Get LLVM return type and argument types string from a method object.
+Expects object to have `return_type` and `parameters` fields.
+"""
+function get_llvm_signature(method)
+    # Map return type
+    ret_type = map_cpp_type(getfield(method, :return_type))
+    
+    # Map parameters
+    # Implicit 'this' pointer is always first arg for virtual methods
+    arg_types = ["!llvm.ptr"]
+    
+    for param_type in getfield(method, :parameters)
+        push!(arg_types, map_cpp_type(param_type))
+    end
+    
+    return (ret_type, join(arg_types, ", "))
+end
+
 end

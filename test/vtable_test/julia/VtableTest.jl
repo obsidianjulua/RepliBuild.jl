@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for vtable_test
-# Generated: 2026-01-08 09:32:01
+# Generated: 2026-02-01 17:00:23
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libvtable_test.so
 # Metadata: compilation_metadata.json
@@ -10,11 +10,19 @@
 
 module VtableTest
 
+using Libdl
+import RepliBuild
+
 const LIBRARY_PATH = "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test/julia/libvtable_test.so"
 
 # Verify library exists
 if !isfile(LIBRARY_PATH)
     error("Library not found: $LIBRARY_PATH")
+end
+
+function __init__()
+    # Initialize the global JIT context with this library's vtables
+    RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
 end
 
 # =============================================================================
@@ -27,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 13,
-    "generated_at" => "2026-01-07T04:37:54.445"
+    "generated_at" => "2026-02-01T17:00:17.265"
 )
 
 # =============================================================================
@@ -35,20 +43,20 @@ const METADATA = Dict(
 # =============================================================================
 
 # C++ struct: Circle (2 members)
-mutable struct Circle
+struct Circle
     _vptr_Shape::Ptr{Cvoid}
     radius::Cdouble
 end
 
 # C++ struct: Rectangle (3 members)
-mutable struct Rectangle
+struct Rectangle
     _vptr_Shape::Ptr{Cvoid}
     width::Cdouble
     height::Cdouble
 end
 
 # C++ struct: Shape (1 members)
-mutable struct Shape
+struct Shape
     _vptr_Shape::Ptr{Cvoid}
 end
 
@@ -112,10 +120,10 @@ Wrapper for C++ function: `delete_shape`
 - Type safety:  From compilation
 """
 
-function delete_shape(s::Ptr{Shape})::Cvoid
-    ccall((:delete_shape, LIBRARY_PATH), Cvoid, (Ptr{Shape},), s)
+function delete_shape(s::Ptr{Shape})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("delete_shape", s)
 end
-
 """
     get_area(s::Ptr{Shape}) -> Cdouble
 
@@ -132,10 +140,10 @@ Wrapper for C++ function: `get_area`
 - Type safety:  From compilation
 """
 
-function get_area(s::Ptr{Shape})::Cdouble
-    ccall((:get_area, LIBRARY_PATH), Cdouble, (Ptr{Shape},), s)
+function get_area(s::Ptr{Shape})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("get_area", s)
 end
-
 """
     get_perimeter(s::Ptr{Shape}) -> Cdouble
 
@@ -152,10 +160,10 @@ Wrapper for C++ function: `get_perimeter`
 - Type safety:  From compilation
 """
 
-function get_perimeter(s::Ptr{Shape})::Cdouble
-    ccall((:get_perimeter, LIBRARY_PATH), Cdouble, (Ptr{Shape},), s)
+function get_perimeter(s::Ptr{Shape})
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("get_perimeter", s)
 end
-
 """
     Circle_area(this::Ptr{Circle}) -> Cdouble
 

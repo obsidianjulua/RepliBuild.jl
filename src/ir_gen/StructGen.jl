@@ -164,14 +164,15 @@ function generate_struct_definitions(structs::Any)
     # 4. Emit
     for name in sorted_nodes
         info = node_map[name]
-        type_str = get_struct_type_string(name, info, node_map=node_map)
+        type_str = get_struct_type_string(name, info)
         
         # Opaque types cannot be instantiated as globals with body
         if endswith(type_str, "opaque>")
             continue
         end
         
-        println(io, "llvm.mlir.global private @__def_$(name)() : $(type_str)")
+        # Use a dummy function declaration to register the struct type definition
+        println(io, "llvm.func @__def_$(name)($(type_str)) -> !llvm.void")
     end
     
     println(io, "")
