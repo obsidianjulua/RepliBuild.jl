@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-01-26 14:45:01
+# Generated: 2026-01-26 16:54:33
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -35,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-01-26T14:45:01.680"
+    "generated_at" => "2026-01-26T16:54:33.715"
 )
 
 # =============================================================================

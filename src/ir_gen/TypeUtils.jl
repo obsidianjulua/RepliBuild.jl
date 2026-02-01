@@ -11,9 +11,9 @@ function map_cpp_type(type_str::String)
     # Basic types
     if type_str == "void"
         return "" # Void return usually means no value
-    elseif type_str == "int" || type_str == "int32_t" || type_str == "Cint"
+    elseif type_str == "int" || type_str == "int32_t" || type_str == "Cint" || type_str == "unsigned int" || type_str == "uint32_t" || type_str == "Cuint"
         return "i32"
-    elseif type_str == "long" || type_str == "long long" || type_str == "int64_t" || type_str == "size_t" || type_str == "Csize_t" || type_str == "Clong"
+    elseif type_str == "long" || type_str == "long long" || type_str == "int64_t" || type_str == "size_t" || type_str == "Csize_t" || type_str == "Clong" || type_str == "unsigned long" || type_str == "uint64_t" || type_str == "Culong" || type_str == "unsigned long long"
         return "i64"
     elseif type_str == "float" || type_str == "Cfloat"
         return "f32"

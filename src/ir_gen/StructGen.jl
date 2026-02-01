@@ -17,8 +17,17 @@ function get_struct_type_string(name::String, info::Any)
         0
     end
 
-    if get(info, "kind", "") == "union"
+    kind = get(info, "kind", "")
+    if kind == "union"
         return "!llvm.array<$(dwarf_size) x i8>"
+    elseif kind == "enum"
+        underlying = get(info, "underlying_type", "i32")
+        mlir_t = map_cpp_type(underlying)
+        # Fallback to i32 if mapping fails or returns struct alias
+        if isempty(mlir_t) || startswith(mlir_t, "!llvm.struct")
+            mlir_t = "i32"
+        end
+        return "!llvm.struct<\"$(name)\", ($(mlir_t))>"
     end
     
     members = get(info, "members", [])
@@ -65,20 +74,107 @@ function generate_struct_definitions(structs::Any)
     
     println(io, "// Struct Definitions")
     
+    # 1. Prepare nodes and strip __enum__
+    nodes = String[]
+    node_map = Dict{String, Any}() # Name -> Info
+    
     for (name, info) in structs
         # Skip standard types
         if name in ["int", "float", "double", "bool", "char", "void"]
             continue
         end
 
-        type_str = get_struct_type_string(name, info)
+        effective_name = name
+        if startswith(name, "__enum__")
+            effective_name = replace(name, "__enum__" => "")
+        end
         
-        # Use llvm.mlir.global to define the type body in the context
+        push!(nodes, effective_name)
+        node_map[effective_name] = info
+    end
+    
+    # 2. Build dependency graph
+    # Adjacency: A -> B means A depends on B (A uses B by value)
+    deps = Dict{String, Set{String}}()
+    
+    for name in nodes
+        info = node_map[name]
+        d = Set{String}()
+        deps[name] = d
+        
+        # If enum/union, no deps usually (underlying type is primitive)
+        kind = get(info, "kind", "")
+        if kind == "enum" || kind == "union"
+            continue
+        end
+        
+        members = get(info, "members", [])
+        for m in members
+            t = get(m, "c_type", "void*")
+            # If pointer, skip
+            if endswith(t, "*") || contains(t, "*")
+                continue
+            end
+            
+            # Map type to check if it's a struct
+            mlir_t = map_cpp_type(t)
+            
+            # Check if it is !llvm.struct<"Name">
+            m_match = match(r"!llvm.struct<\"([^\"]+)\">", mlir_t)
+            if m_match !== nothing
+                dep_name = m_match.captures[1]
+                # If dep_name is in our nodes, add dependency
+                if haskey(node_map, dep_name) && dep_name != name
+                    push!(d, dep_name)
+                end
+            end
+        end
+    end
+    
+    # 3. Topological Sort
+    sorted_nodes = String[]
+    visited = Set{String}()
+    stack = Set{String}()
+    
+    function visit(n)
+        if n in visited
+            return
+        end
+        if n in stack
+            # Cycle detected, break it
+            return
+        end
+        
+        push!(stack, n)
+        if haskey(deps, n)
+            for d in deps[n]
+                visit(d)
+            end
+        end
+        delete!(stack, n)
+        
+        push!(visited, n)
+        push!(sorted_nodes, n)
+    end
+
+    for n in nodes
+        visit(n)
+    end
+    
+    # 4. Emit
+    for name in sorted_nodes
+        info = node_map[name]
+        type_str = get_struct_type_string(name, info, node_map=node_map)
+        
+        # Opaque types cannot be instantiated as globals with body
+        if endswith(type_str, "opaque>")
+            continue
+        end
+        
         println(io, "llvm.mlir.global private @__def_$(name)() : $(type_str)")
     end
     
     println(io, "")
     return String(take!(io))
 end
-
 end
