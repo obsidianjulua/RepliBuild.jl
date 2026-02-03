@@ -47,8 +47,8 @@ using .BasicsTest
     # This verifies if Julia struct definition matches packed layout
     @test sizeof(PackedStruct) == 5
 
-    # process_packed(packed)
-    println("  Skipping process_packed (known issue with packed layout mismatch in JIT)")
+    process_packed(packed)
+    # println("  Skipping process_packed (known issue with packed layout mismatch in JIT)")
 
     # 4. Unions
     println("  Testing Unions...")

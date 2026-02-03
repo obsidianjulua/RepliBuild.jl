@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for basics_test
-# Generated: 2026-02-02 22:01:52
+# Generated: 2026-02-03 00:47:07
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libbasics_test.so
 # Metadata: compilation_metadata.json
@@ -30,7 +30,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 5,
-    "generated_at" => "2026-02-02T22:01:49.594"
+    "generated_at" => "2026-02-03T00:47:04.575"
 )
 
 # =============================================================================

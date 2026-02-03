@@ -2,7 +2,81 @@ module StructGen
 
 using ..TypeUtils
 
-export generate_struct_definitions, get_struct_type_string
+export generate_struct_definitions, get_struct_type_string, is_struct_packed, get_julia_offsets
+
+"""
+    is_struct_packed(info::Any) -> Bool
+
+Determine if a struct is packed (dwarf_size == sum(member_sizes)).
+"""
+function is_struct_packed(info::Any)
+    dwarf_size_str = get(info, "byte_size", "0")
+    dwarf_size = try
+        startswith(dwarf_size_str, "0x") ? parse(Int, dwarf_size_str) : parse(Int, dwarf_size_str)
+    catch
+        0
+    end
+    
+    if dwarf_size == 0
+        return false
+    end
+
+    kind = get(info, "kind", "")
+    if kind == "union" || kind == "enum"
+        return false
+    end
+    
+    members = get(info, "members", [])
+    sum_size = 0
+    
+    for m in members
+        m_size = try
+            s = get(m, "size", 0)
+            s isa String ? parse(Int, s) : s
+        catch
+            0
+        end
+        sum_size += m_size
+    end
+    
+    return sum_size == dwarf_size
+end
+
+"""
+    get_julia_offsets(info::Any) -> Vector{Int}
+
+Calculate the byte offsets of struct members according to Julia/C alignment rules.
+Returns a vector of start offsets for each member.
+"""
+function get_julia_offsets(info::Any)
+    members = get(info, "members", [])
+    offsets = Int[]
+    current_offset = 0
+    
+    for m in members
+        m_size = try
+            s = get(m, "size", 0)
+            s isa String ? parse(Int, s) : s
+        catch
+            0
+        end
+        
+        # Alignment heuristic: alignment = min(size, 8)
+        # Cap at 8 bytes (64-bit) usually
+        align = m_size > 8 ? 8 : m_size
+        align = align == 0 ? 1 : align
+        
+        # Add padding
+        padding = (align - (current_offset % align)) % align
+        current_offset += padding
+        
+        push!(offsets, current_offset)
+        
+        current_offset += m_size
+    end
+    
+    return offsets
+end
 
 """
     get_struct_type_string(name::String, info::Any) -> String

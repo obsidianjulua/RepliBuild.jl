@@ -36,7 +36,7 @@ toolchain = "auto"
 [project]
 name = "basics_test"
 root = "/home/grim/Desktop/Projects/RepliBuild.jl/test/basics_test"
-uuid = "563251d8-c9e0-4dfd-ba57-4e12ccdc56c4"
+uuid = "e8dee32d-a006-41f8-b62b-ecb346da0753"
 
 [paths]
 build = "build"
