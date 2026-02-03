@@ -466,7 +466,7 @@
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test/include",
     "/home/grim/Desktop/Projects/RepliBuild.jl/test/vtable_test/src"
   ],
-  "timestamp": "2026-02-01T17:00:17.265",
+  "timestamp": "2026-02-02T22:02:03.672",
   "struct_definitions": {
     "Circle": {
       "kind": "class",

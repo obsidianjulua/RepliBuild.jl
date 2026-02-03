@@ -867,7 +867,6 @@ Use when: Headers not available, quick prototyping, binary-only distribution.
 function wrap_basic(config::RepliBuildConfig, library_path::String; generate_docs::Bool=true)
     println("Generating basic wrapper (symbol-only extraction)...")
     println("Method: Symbol extraction (nm)")
-    println("Type safety:   Conservative placeholders")
     println()
 
     if !isfile(library_path)
@@ -878,7 +877,6 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
     registry = create_type_registry(config)
 
     # Extract symbols
-    println("   Extracting symbols...")
     symbols = extract_symbols(library_path, registry, demangle=true, method=:nm)
 
     if isempty(symbols)
@@ -889,9 +887,6 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
     # Filter functions and data
     functions = filter(s -> s.symbol_type == :function, symbols)
     data_symbols = filter(s -> s.symbol_type == :data, symbols)
-
-    println("  ✓ Found $(length(functions)) functions, $(length(data_symbols)) data symbols")
-    println()
 
     # Generate wrapper module
     module_name = get_module_name(config)
@@ -906,13 +901,6 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
     write(output_file, wrapper_content)
 
     println("   Generated: $output_file")
-    println("   Functions wrapped: $(min(length(functions), 50))")
-
-    if length(functions) > 50
-        println("    Limited to first 50 functions ($(length(functions) - 50) omitted)")
-        println("     Consider using --tier=advanced with headers for complete wrapping")
-    end
-
     println()
     return output_file
 end
@@ -930,10 +918,6 @@ function generate_basic_module(config::RepliBuildConfig, lib_path::String,
     # Generated: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))
     # Generator: RepliBuild Wrapper (Basic: Symbol extraction)
     # Library: $(basename(lib_path))
-    #
-    #   TYPE SAFETY: BASIC (~40%)
-    # This wrapper uses conservative type placeholders extracted from binary symbols.
-    # For better type safety, recompile with -g flag to enable DWARF metadata extraction.
 
     """
 
@@ -1082,7 +1066,6 @@ function generate_basic_function_wrapper(func::SymbolInfo, registry::TypeRegistr
 
         Wrapper for C/C++ function `$(func.demangled_name)`.
 
-        # Type Safety:   BASIC
         Signature uses placeholder types. Actual types unknown without headers.
         Return type and parameters may need manual adjustment.
 
@@ -1119,7 +1102,6 @@ function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers
                         generate_docs::Bool=true)
     println("  Generating header-aware wrapper (Clang.jl)...")
     println("   Method: Clang.jl header parsing")
-    println("   Type safety:  Full (from headers)")
     println()
 
     if !isfile(library_path)
@@ -1280,7 +1262,6 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
                            generate_docs::Bool=true)
     println("  Generating introspective wrapper (DWARF metadata)...")
     println("   Method: DWARF debug info + symbol metadata")
-    println("   Type safety:  Excellent (~95% - ground truth from compilation)")
     println()
 
     if !isfile(library_path)
@@ -1293,7 +1274,6 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         error("Compilation metadata not found: $metadata_file\nRun RepliBuild.build() first to generate metadata")
     end
 
-    println("   Loading compilation metadata...")
     metadata = JSON.parsefile(metadata_file)
 
     if !haskey(metadata, "functions")
@@ -1301,11 +1281,9 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     end
 
     functions = metadata["functions"]
-    println("  ✓ Found $(length(functions)) functions with type information")
 
     # Extract supplementary types from headers (enums, unused types, etc.)
     header_types = if !isempty(headers)
-        println("   Parsing headers for supplementary types...")
         ClangJLBridge.extract_header_types(headers)
     else
         # Auto-discover headers from include directories
@@ -1317,7 +1295,6 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
             end
         end
         if !isempty(discovered_headers)
-            println("   Parsing $(length(discovered_headers)) discovered headers...")
             ClangJLBridge.extract_header_types(discovered_headers)
         else
             Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
@@ -1331,16 +1308,12 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         else
             merge!(metadata["header_enums"], header_types["enums"])
         end
-        println("  ✓ Merged $(length(header_types["enums"])) enums from headers")
     end
 
     # Store function pointer typedefs for callback documentation
     if haskey(header_types, "function_pointers") && !isempty(header_types["function_pointers"])
         metadata["function_pointer_typedefs"] = header_types["function_pointers"]
-        println("  ✓ Merged $(length(header_types["function_pointers"])) function pointer typedefs from headers")
     end
-
-    println()
 
     # Create type registry with metadata
     registry = create_type_registry(config)
@@ -1358,8 +1331,6 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     write(output_file, wrapper_content)
 
     println("   Generated: $output_file")
-    println("   Functions wrapped: $(length(functions))")
-    println("   Type accuracy: ~95% (from compilation metadata)")
     println()
 
     return output_file
@@ -1481,10 +1452,6 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
     # Library: $(basename(lib_path))
     # Metadata: compilation_metadata.json
-    #
-    # Type Safety: Excellent (~95%) - Types extracted from DWARF debug info
-    # Ground truth: Types come from compiled binary, not headers
-    # Manual edits: Minimal to none required
 
     module $module_name
     
@@ -1498,12 +1465,10 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         error("Library not found: \$LIBRARY_PATH")
     end
 
-    function __init__()
-        # Initialize the global JIT context with this library's vtables
-        RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
-    end
-
     """
+
+    # Track if JIT is required (for virtual methods or complex ABI)
+    requires_jit = false
 
     # Metadata section
     compiler_info = get(metadata, "compiler_info", Dict())
@@ -1934,6 +1899,92 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # Function wrappers
     function_wrappers = ""
 
+    # =============================================================================
+    # AUTOMATIC FINALIZER GENERATION (Memory Safety)
+    # =============================================================================
+
+    # 1. Scan for Deleters
+    # Map: StructName -> DeleterFunctionName
+    deleters = Dict{String, String}()
+
+    for func in functions
+        f_name = func["name"]
+        demangled = func["demangled"]
+        params = func["parameters"]
+        
+        # Criteria: 1 arg, arg is Ptr{Struct}, name implies deletion
+        if length(params) == 1
+            arg_type = params[1]["julia_type"]
+            if startswith(arg_type, "Ptr{") && endswith(arg_type, "}")
+                struct_name = arg_type[5:end-1]
+                # Check if it's a known struct
+                if struct_name in struct_types
+                    # Check name patterns
+                    lower_name = lowercase(f_name)
+                    lower_demangled = lowercase(demangled)
+                    
+                    is_destructor = contains(demangled, "~")
+                    is_deleter = contains(lower_name, "delete") || contains(lower_name, "destroy") || contains(lower_name, "free")
+                    
+                    if is_destructor || is_deleter
+                        # Found a deleter for struct_name
+                        # Prefer destructors over generic deleters if duplicates?
+                        # For now, just take the first one
+                        if !haskey(deleters, struct_name)
+                            deleters[struct_name] = f_name
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    # 2. Generate Managed Types
+    managed_types_def = ""
+    if !isempty(deleters)
+        managed_types_def *= """
+        # =============================================================================
+        # Managed Types (Auto-Finalizers)
+        # =============================================================================
+
+        """
+        
+        for (s_name, deleter) in deleters
+            # Sanitize names
+            safe_s_name = replace(replace(replace(s_name, "<" => "_"), ">" => ""), "," => "_")
+            safe_s_name = replace(safe_s_name, " " => "")
+            
+            managed_name = "Managed$safe_s_name"
+            
+            # Generate mutable struct with finalizer
+            managed_types_def *= """
+            mutable struct $managed_name
+                handle::Ptr{$safe_s_name}
+                
+                function $managed_name(ptr::Ptr{$safe_s_name})
+                    if ptr == C_NULL
+                        error("Cannot wrap NULL pointer in $managed_name")
+                    end
+                    obj = new(ptr)
+                    finalizer(obj) do x
+                        # Call deleter: $deleter(x.handle)
+                        ccall((:$deleter, LIBRARY_PATH), Cvoid, (Ptr{$safe_s_name},), x.handle)
+                    end
+                    return obj
+                end
+            end
+
+            # Allow passing Managed object to ccall expecting Ptr
+            Base.unsafe_convert(::Type{Ptr{$safe_s_name}}, obj::$managed_name) = obj.handle
+            
+            export $managed_name
+
+            """
+        end
+        
+        struct_definitions *= managed_types_def
+    end
+
     # Track exported function names
     exports = String[]
 
@@ -2045,6 +2096,10 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             elseif actual_c_type == "Cshort"  # Int16
                 push!(julia_param_types, "Integer")
                 push!(needs_conversion, true)
+            elseif startswith(actual_c_type, "Ptr{")
+                # Relax pointer types to Any to allow Managed wrappers via Base.unsafe_convert
+                push!(julia_param_types, "Any")
+                push!(needs_conversion, false)
             else
                 push!(julia_param_types, actual_c_type)
                 push!(needs_conversion, false)
@@ -2204,7 +2259,6 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
             # Metadata
             - Mangled symbol: `$mangled`
-            - Type safety:  From compilation
             \"\"\"
             """
 
@@ -2215,6 +2269,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         # BRANCH 1: MLIR DISPATCH (Robust Path)
         # =========================================================
         if use_mlir_dispatch
+            requires_jit = true
 
             # Build argument list for invoke
             invoke_args = join(param_names, ", ")
@@ -2279,6 +2334,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         is_virtual = get(func, "is_virtual", false)
 
         if is_virtual
+            requires_jit = true
             # JIT-based virtual dispatch wrapper
             # 1. Get the class and method name
             # 2. Call get_jit_thunk(class, method) to get the function pointer
@@ -2360,6 +2416,34 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         function_wrappers *= func_def
         push!(exports, julia_name)
+
+        # Generate safe wrapper if return type is a managed struct
+        if startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")
+            target_struct = julia_return_type[5:end-1]
+            # Sanitize target struct name to match ManagedX keys
+            safe_target = replace(replace(replace(target_struct, "<" => "_"), ">" => ""), "," => "_")
+            safe_target = replace(safe_target, " " => "")
+            
+            if haskey(deleters, safe_target) || haskey(deleters, target_struct)
+                managed_name = "Managed$safe_target"
+                safe_func_name = "$(julia_name)_safe"
+                
+                safe_wrapper = """
+                \"""
+                    $safe_func_name($param_sig) -> $managed_name
+
+                Safe wrapper for `$julia_name` that returns a managed object with automatic finalization.
+                \"""
+                function $safe_func_name($param_sig)::$managed_name
+                    ptr = $julia_name($ccall_args)
+                    return $managed_name(ptr)
+                end
+                """
+                
+                function_wrappers *= safe_wrapper
+                push!(exports, safe_func_name)
+            end
+        end
 
         # Generate convenience wrappers for ergonomic APIs
         # Two types:
@@ -2535,7 +2619,27 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     end # module $module_name
     """
 
-    return header * metadata_section * enum_definitions * struct_definitions * export_statement * function_wrappers * footer
+    # Generate initialization block
+    init_block = if requires_jit
+        """
+        function __init__()
+            # Initialize the global JIT context with this library's vtables
+            RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
+        end
+        """
+    else
+        """
+        # Library handle for manual management if needed
+        const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
+
+        function __init__()
+            # Load library explicitly to ensure symbols are available
+            LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH)
+        end
+        """
+    end
+
+    return header * init_block * metadata_section * enum_definitions * struct_definitions * export_statement * function_wrappers * footer
 end
 
 end # module Wrapper

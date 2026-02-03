@@ -33,10 +33,30 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict())
         arg_types = String[]
         for p in params
             t = get(p, "c_type", "void*")
-            push!(arg_types, map_cpp_type(t))
+            mlir_t = map_cpp_type(t)
+            
+            # Resolve full struct type if available
+            if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
+                s_name = mlir_t[15:end-2]
+                if haskey(structs, s_name)
+                    mlir_t = StructGen.get_struct_type_string(s_name, structs[s_name])
+                end
+            end
+            
+            push!(arg_types, mlir_t)
         end
         
-        ret_type = map_cpp_type(get(ret_info, "c_type", "void"))
+        ret_c_type = get(ret_info, "c_type", "void")
+        ret_type = map_cpp_type(ret_c_type)
+        
+        # Resolve full struct type for return
+        if startswith(ret_type, "!llvm.struct<\"") && endswith(ret_type, "\">")
+            s_name = ret_type[15:end-2]
+            if haskey(structs, s_name)
+                ret_type = StructGen.get_struct_type_string(s_name, structs[s_name])
+            end
+        end
+
         # func.func uses () for void, not !llvm.void
         mlir_ret = ret_type == "" || ret_type == "!llvm.void" ? "" : "-> $ret_type"
         func_ret = ret_type == "" || ret_type == "!llvm.void" ? "" : ret_type
@@ -55,6 +75,15 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict())
         for (i, p) in enumerate(params)
             t = get(p, "c_type", "void*")
             mlir_t = map_cpp_type(t)
+            
+            # Resolve full struct type if available (must match arg_types)
+            if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
+                s_name = mlir_t[15:end-2]
+                if haskey(structs, s_name)
+                    mlir_t = StructGen.get_struct_type_string(s_name, structs[s_name])
+                end
+            end
+
             idx = i - 1
             
             println(io, "  %idx_$(i) = arith.constant $(idx) : i64")

@@ -1,12 +1,8 @@
 # Auto-generated Julia wrapper for vtable_test
-# Generated: 2026-02-01 17:20:03
+# Generated: 2026-02-02 22:02:03
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libvtable_test.so
 # Metadata: compilation_metadata.json
-#
-# Type Safety: Excellent (~95%) - Types extracted from DWARF debug info
-# Ground truth: Types come from compiled binary, not headers
-# Manual edits: Minimal to none required
 
 module VtableTest
 
@@ -20,11 +16,13 @@ if !isfile(LIBRARY_PATH)
     error("Library not found: $LIBRARY_PATH")
 end
 
-function __init__()
-    # Initialize the global JIT context with this library's vtables
-    RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
-end
+# Library handle for manual management if needed
+const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
+function __init__()
+    # Load library explicitly to ensure symbols are available
+    LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH)
+end
 # =============================================================================
 # Compilation Metadata
 # =============================================================================
@@ -35,7 +33,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 13,
-    "generated_at" => "2026-02-01T17:00:17.265"
+    "generated_at" => "2026-02-02T22:02:03.672"
 )
 
 # =============================================================================
@@ -61,7 +59,32 @@ struct Shape
 end
 
 
-export create_circle, create_rectangle, delete_shape, get_area, get_perimeter, Circle_area, Circle_perimeter, Rectangle_area, Rectangle_perimeter, Circle, Shape, Rectangle
+# =============================================================================
+# Managed Types (Auto-Finalizers)
+# =============================================================================
+
+mutable struct ManagedShape
+    handle::Ptr{Shape}
+    
+    function ManagedShape(ptr::Ptr{Shape})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedShape")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: delete_shape(x.handle)
+            ccall((:delete_shape, LIBRARY_PATH), Cvoid, (Ptr{Shape},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{Shape}}, obj::ManagedShape) = obj.handle
+
+export ManagedShape
+
+export create_circle, create_circle_safe, create_rectangle, create_rectangle_safe, delete_shape, get_area, get_perimeter, Circle_area, Circle_perimeter, Rectangle_area, Rectangle_perimeter, Circle, Shape, Rectangle
 
 """
     create_circle(r::Cdouble) -> Ptr{Shape}
@@ -76,13 +99,21 @@ Wrapper for C++ function: `create_circle`
 
 # Metadata
 - Mangled symbol: `create_circle`
-- Type safety:  From compilation
 """
 
 function create_circle(r::Cdouble)::Ptr{Shape}
     ccall((:create_circle, LIBRARY_PATH), Ptr{Shape}, (Cdouble,), r)
 end
 
+"""
+    create_circle_safe(r::Cdouble) -> ManagedShape
+
+Safe wrapper for `create_circle` that returns a managed object with automatic finalization.
+"""
+function create_circle_safe(r::Cdouble)::ManagedShape
+    ptr = create_circle(r)
+    return ManagedShape(ptr)
+end
 """
     create_rectangle(w::Cdouble, h::Cdouble) -> Ptr{Shape}
 
@@ -97,7 +128,6 @@ Wrapper for C++ function: `create_rectangle`
 
 # Metadata
 - Mangled symbol: `create_rectangle`
-- Type safety:  From compilation
 """
 
 function create_rectangle(w::Cdouble, h::Cdouble)::Ptr{Shape}
@@ -105,7 +135,16 @@ function create_rectangle(w::Cdouble, h::Cdouble)::Ptr{Shape}
 end
 
 """
-    delete_shape(s::Ptr{Shape}) -> Cvoid
+    create_rectangle_safe(w::Cdouble, h::Cdouble) -> ManagedShape
+
+Safe wrapper for `create_rectangle` that returns a managed object with automatic finalization.
+"""
+function create_rectangle_safe(w::Cdouble, h::Cdouble)::ManagedShape
+    ptr = create_rectangle(w, h)
+    return ManagedShape(ptr)
+end
+"""
+    delete_shape(s::Any) -> Cvoid
 
 Wrapper for C++ function: `delete_shape`
 
@@ -117,15 +156,14 @@ Wrapper for C++ function: `delete_shape`
 
 # Metadata
 - Mangled symbol: `delete_shape`
-- Type safety:  From compilation
 """
 
-function delete_shape(s::Ptr{Shape})::Cvoid
+function delete_shape(s::Any)::Cvoid
     ccall((:delete_shape, LIBRARY_PATH), Cvoid, (Ptr{Shape},), s)
 end
 
 """
-    get_area(s::Ptr{Shape}) -> Cdouble
+    get_area(s::Any) -> Cdouble
 
 Wrapper for C++ function: `get_area`
 
@@ -137,15 +175,14 @@ Wrapper for C++ function: `get_area`
 
 # Metadata
 - Mangled symbol: `get_area`
-- Type safety:  From compilation
 """
 
-function get_area(s::Ptr{Shape})::Cdouble
+function get_area(s::Any)::Cdouble
     ccall((:get_area, LIBRARY_PATH), Cdouble, (Ptr{Shape},), s)
 end
 
 """
-    get_perimeter(s::Ptr{Shape}) -> Cdouble
+    get_perimeter(s::Any) -> Cdouble
 
 Wrapper for C++ function: `get_perimeter`
 
@@ -157,15 +194,14 @@ Wrapper for C++ function: `get_perimeter`
 
 # Metadata
 - Mangled symbol: `get_perimeter`
-- Type safety:  From compilation
 """
 
-function get_perimeter(s::Ptr{Shape})::Cdouble
+function get_perimeter(s::Any)::Cdouble
     ccall((:get_perimeter, LIBRARY_PATH), Cdouble, (Ptr{Shape},), s)
 end
 
 """
-    Circle_area(this::Ptr{Circle}) -> Cdouble
+    Circle_area(this::Any) -> Cdouble
 
 Wrapper for C++ function: `Circle::area() const`
 
@@ -177,15 +213,14 @@ Wrapper for C++ function: `Circle::area() const`
 
 # Metadata
 - Mangled symbol: `_ZNK6Circle4areaEv`
-- Type safety:  From compilation
 """
 
-function Circle_area(this::Ptr{Circle})::Cdouble
+function Circle_area(this::Any)::Cdouble
     ccall((:_ZNK6Circle4areaEv, LIBRARY_PATH), Cdouble, (Ptr{Circle},), this)
 end
 
 """
-    Circle_perimeter(this::Ptr{Circle}) -> Cdouble
+    Circle_perimeter(this::Any) -> Cdouble
 
 Wrapper for C++ function: `Circle::perimeter() const`
 
@@ -197,15 +232,14 @@ Wrapper for C++ function: `Circle::perimeter() const`
 
 # Metadata
 - Mangled symbol: `_ZNK6Circle9perimeterEv`
-- Type safety:  From compilation
 """
 
-function Circle_perimeter(this::Ptr{Circle})::Cdouble
+function Circle_perimeter(this::Any)::Cdouble
     ccall((:_ZNK6Circle9perimeterEv, LIBRARY_PATH), Cdouble, (Ptr{Circle},), this)
 end
 
 """
-    Rectangle_area(this::Ptr{Rectangle}) -> Cdouble
+    Rectangle_area(this::Any) -> Cdouble
 
 Wrapper for C++ function: `Rectangle::area() const`
 
@@ -217,15 +251,14 @@ Wrapper for C++ function: `Rectangle::area() const`
 
 # Metadata
 - Mangled symbol: `_ZNK9Rectangle4areaEv`
-- Type safety:  From compilation
 """
 
-function Rectangle_area(this::Ptr{Rectangle})::Cdouble
+function Rectangle_area(this::Any)::Cdouble
     ccall((:_ZNK9Rectangle4areaEv, LIBRARY_PATH), Cdouble, (Ptr{Rectangle},), this)
 end
 
 """
-    Rectangle_perimeter(this::Ptr{Rectangle}) -> Cdouble
+    Rectangle_perimeter(this::Any) -> Cdouble
 
 Wrapper for C++ function: `Rectangle::perimeter() const`
 
@@ -237,10 +270,9 @@ Wrapper for C++ function: `Rectangle::perimeter() const`
 
 # Metadata
 - Mangled symbol: `_ZNK9Rectangle9perimeterEv`
-- Type safety:  From compilation
 """
 
-function Rectangle_perimeter(this::Ptr{Rectangle})::Cdouble
+function Rectangle_perimeter(this::Any)::Cdouble
     ccall((:_ZNK9Rectangle9perimeterEv, LIBRARY_PATH), Cdouble, (Ptr{Rectangle},), this)
 end
 

@@ -1447,12 +1447,25 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         if contains(line, "DW_TAG_subprogram")
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
-                # Before resetting for new function, if a function was just parsed, ensure its parameters are stored
-                # This handles cases where a function might not have DW_AT_type (void return)
+                # Before resetting for new function, check if the previous function was processed
+                # This handles void functions (no DW_AT_type) and ensures parameters are attached
                 if !isnothing(current_function_offset)
                     function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
-                    if !isnothing(function_key_prev) && haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
-                        return_types[function_key_prev]["parameters"] = params_for_this_function
+                    
+                    if !isnothing(function_key_prev)
+                        # Case 1: Function exists but missing parameters (already had return type)
+                        if haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
+                            return_types[function_key_prev]["parameters"] = params_for_this_function
+                        
+                        # Case 2: Function not registered yet (void return type implied by missing DW_AT_type)
+                        elseif !haskey(return_types, function_key_prev)
+                            return_types[function_key_prev] = Dict(
+                                "c_type" => "void",
+                                "julia_type" => "Cvoid",
+                                "size" => 0,
+                                "parameters" => params_for_this_function
+                            )
+                        end
                     end
                 end
 
@@ -1658,6 +1671,24 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             elseif !haskey(return_types[function_key], "parameters")
                 # Function already has return type, but may need parameters added
                 return_types[function_key]["parameters"] = params_for_this_function # NEW: Use params_for_this_function
+            end
+        end
+    end
+
+    # Handle the very last function (if it was void and loop finished)
+    if !isnothing(current_function_offset)
+        function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+        
+        if !isnothing(function_key_prev)
+            if haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
+                return_types[function_key_prev]["parameters"] = params_for_this_function
+            elseif !haskey(return_types, function_key_prev)
+                return_types[function_key_prev] = Dict(
+                    "c_type" => "void",
+                    "julia_type" => "Cvoid",
+                    "size" => 0,
+                    "parameters" => params_for_this_function
+                )
             end
         end
     end

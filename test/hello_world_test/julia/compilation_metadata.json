@@ -1,0 +1,154 @@
+{
+  "symbols": [
+    {
+      "mangled": "add",
+      "demangled": "add",
+      "type": "T",
+      "address": "0000000000001150"
+    },
+    {
+      "mangled": "hello_world",
+      "demangled": "hello_world",
+      "type": "T",
+      "address": "0000000000001120"
+    }
+  ],
+  "compile_flags": [
+    "-std=c++17",
+    "-fPIC"
+  ],
+  "binary_path": "/home/grim/Desktop/Projects/RepliBuild.jl/test/hello_world_test/julia/libhello_world_test.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "name": "add",
+      "parameters": [
+        {
+          "c_type": "int",
+          "name": "a",
+          "position": 0,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "exported": true,
+      "mangled": "add",
+      "is_method": false,
+      "demangled": "add",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      }
+    },
+    {
+      "name": "hello_world",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "exported": true,
+      "mangled": "hello_world",
+      "is_method": false,
+      "demangled": "hello_world",
+      "return_type_source": "dwarf",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      }
+    }
+  ],
+  "project": "hello_world_test",
+  "source_files": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/hello_world_test/src/hello.cpp"
+  ],
+  "type_registry": {
+    "int": {
+      "julia_type": "Cint",
+      "inferred": true
+    },
+    "char": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "UInt8"
+    },
+    "double": {
+      "alignment": 8,
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "c_type": "void",
+      "size": 0,
+      "julia_type": "Cvoid"
+    }
+  },
+  "function_count": 2,
+  "compiler_info": {
+    "lto_enabled": false,
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "clang_version": "clang version 21.1.6",
+    "optimization_level": "0",
+    "llvm_version": "21.1.6"
+  },
+  "metadata_version": "1.0",
+  "include_dirs": [
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/hello_world_test",
+    "/home/grim/Desktop/Projects/RepliBuild.jl/test/hello_world_test/src"
+  ],
+  "timestamp": "2026-02-02T21:08:29.163",
+  "struct_definitions": {
+    "__va_list_tag": {
+      "kind": "struct",
+      "byte_size": "0x18",
+      "members": [
+        {
+          "c_type": "unsigned int",
+          "name": "gp_offset",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "unsigned int",
+          "name": "fp_offset",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "void*",
+          "name": "overflow_arg_area",
+          "offset": null,
+          "size": 8,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "void*",
+          "name": "reg_save_area",
+          "offset": null,
+          "size": 8,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ]
+    }
+  }
+}
