@@ -9,14 +9,14 @@
 
 namespace mlir {
 namespace jlcs {
-/// Generic operation to read a field from a C-compatible struct.
-class GetFieldOp;
+/// Call an external C function using FFE metadata
+class FFECallOp;
 } // namespace jlcs
 } // namespace mlir
 namespace mlir {
 namespace jlcs {
-/// Call an external C function using FFE metadata
-class FFECallOp;
+/// Generic operation to read a field from a C-compatible struct.
+class GetFieldOp;
 } // namespace jlcs
 } // namespace mlir
 namespace mlir {
@@ -51,6 +51,150 @@ class VirtualCallOp;
 } // namespace mlir
 #ifdef GET_OP_CLASSES
 #undef GET_OP_CLASSES
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
+// ::mlir::jlcs::FFECallOp declarations
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+class FFECallOpGenericAdaptorBase {
+public:
+  using Properties = ::mlir::EmptyProperties;
+protected:
+  ::mlir::DictionaryAttr odsAttrs;
+  ::std::optional<::mlir::OperationName> odsOpName;
+  Properties properties;
+  ::mlir::RegionRange odsRegions;
+public:
+  FFECallOpGenericAdaptorBase(::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : odsAttrs(attrs), properties(properties), odsRegions(regions) {  if (odsAttrs)
+      odsOpName.emplace("jlcs.ffe_call", odsAttrs.getContext());
+  }
+
+  FFECallOpGenericAdaptorBase(FFECallOp op);
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize);
+  const Properties &getProperties() {
+    return properties;
+  }
+
+  ::mlir::DictionaryAttr getAttributes() {
+    return odsAttrs;
+  }
+
+};
+} // namespace detail
+template <typename RangeT>
+class FFECallOpGenericAdaptor : public detail::FFECallOpGenericAdaptorBase {
+  using ValueT = ::llvm::detail::ValueOfRange<RangeT>;
+  using Base = detail::FFECallOpGenericAdaptorBase;
+  static constexpr int odsIndex_args = 0;
+public:
+  FFECallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : Base(attrs, properties, regions), odsOperands(values) {}
+
+  FFECallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions = {}) : FFECallOpGenericAdaptor(values, attrs, (properties ? *properties.as<Properties *>() : Properties{}), regions) {}
+
+  FFECallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs = nullptr) : FFECallOpGenericAdaptor(values, attrs, Properties{}, {}) {}
+
+  FFECallOpGenericAdaptor(RangeT values, const FFECallOpGenericAdaptorBase &base) : Base(base), odsOperands(values) {}
+
+  template <typename LateInst = FFECallOp, typename = std::enable_if_t<std::is_same_v<LateInst, FFECallOp>>>
+  FFECallOpGenericAdaptor(RangeT values, LateInst op) : Base(op), odsOperands(values) {}
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index) {
+    return Base::getODSOperandIndexAndLength(index, odsOperands.size());
+  }
+
+  RangeT getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(odsOperands.begin(), valueRange.first),
+             std::next(odsOperands.begin(), valueRange.first + valueRange.second)};
+  }
+
+  RangeT getArgs() {
+    return getODSOperands(0);
+  }
+
+  RangeT getOperands() {
+    return odsOperands;
+  }
+
+private:
+  RangeT odsOperands;
+};
+class FFECallOpAdaptor : public FFECallOpGenericAdaptor<::mlir::ValueRange> {
+public:
+  using FFECallOpGenericAdaptor::FFECallOpGenericAdaptor;
+  FFECallOpAdaptor(FFECallOp op);
+
+  ::llvm::LogicalResult verify(::mlir::Location loc);
+};
+class FFECallOp : public ::mlir::Op<FFECallOp, ::mlir::OpTrait::ZeroRegions, ::mlir::OpTrait::VariadicResults, ::mlir::OpTrait::ZeroSuccessors, ::mlir::OpTrait::VariadicOperands, ::mlir::OpTrait::OpInvariants, ::mlir::MemoryEffectOpInterface::Trait> {
+public:
+  using Op::Op;
+  using Op::print;
+  using Adaptor = FFECallOpAdaptor;
+  template <typename RangeT>
+  using GenericAdaptor = FFECallOpGenericAdaptor<RangeT>;
+  using FoldAdaptor = GenericAdaptor<::llvm::ArrayRef<::mlir::Attribute>>;
+  static constexpr int odsIndex_args = 0;
+  using Properties = FoldAdaptor::Properties;
+  static ::llvm::ArrayRef<::llvm::StringRef> getAttributeNames() {
+    return {};
+  }
+
+  static constexpr ::llvm::StringLiteral getOperationName() {
+    return ::llvm::StringLiteral("jlcs.ffe_call");
+  }
+
+  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index);
+  ::mlir::Operation::operand_range getODSOperands(unsigned index) {
+    auto valueRange = getODSOperandIndexAndLength(index);
+    return {std::next(getOperation()->operand_begin(), valueRange.first),
+             std::next(getOperation()->operand_begin(), valueRange.first + valueRange.second)};
+  }
+
+  ::mlir::Operation::operand_range getArgs() {
+    return getODSOperands(0);
+  }
+
+  ::mlir::MutableOperandRange getArgsMutable();
+  std::pair<unsigned, unsigned> getODSResultIndexAndLength(unsigned index);
+  ::mlir::Operation::result_range getODSResults(unsigned index) {
+    auto valueRange = getODSResultIndexAndLength(index);
+    return {std::next(getOperation()->result_begin(), valueRange.first),
+             std::next(getOperation()->result_begin(), valueRange.first + valueRange.second)};
+  }
+
+  ::mlir::Operation::result_range getResults() {
+    return getODSResults(0);
+  }
+
+  static ::llvm::LogicalResult setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static ::mlir::Attribute getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop);
+  static llvm::hash_code computePropertiesHash(const Properties &prop);
+  static std::optional<mlir::Attribute> getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name);
+  static void setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value);
+  static void populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs);
+  static ::llvm::LogicalResult verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
+  static void build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
+  static FFECallOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
+  static FFECallOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
+  static void build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
+  static FFECallOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
+  static FFECallOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
+  ::llvm::LogicalResult verifyInvariantsImpl();
+  ::llvm::LogicalResult verifyInvariants();
+  static ::mlir::ParseResult parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result);
+  void print(::mlir::OpAsmPrinter &_odsPrinter);
+  void getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>> &effects);
+public:
+};
+} // namespace jlcs
+} // namespace mlir
+MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::FFECallOp)
 
 namespace mlir {
 namespace jlcs {
@@ -262,150 +406,6 @@ public:
 } // namespace jlcs
 } // namespace mlir
 MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::GetFieldOp)
-
-namespace mlir {
-namespace jlcs {
-
-//===----------------------------------------------------------------------===//
-// ::mlir::jlcs::FFECallOp declarations
-//===----------------------------------------------------------------------===//
-
-namespace detail {
-class FFECallOpGenericAdaptorBase {
-public:
-  using Properties = ::mlir::EmptyProperties;
-protected:
-  ::mlir::DictionaryAttr odsAttrs;
-  ::std::optional<::mlir::OperationName> odsOpName;
-  Properties properties;
-  ::mlir::RegionRange odsRegions;
-public:
-  FFECallOpGenericAdaptorBase(::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : odsAttrs(attrs), properties(properties), odsRegions(regions) {  if (odsAttrs)
-      odsOpName.emplace("jlcs.ffe_call", odsAttrs.getContext());
-  }
-
-  FFECallOpGenericAdaptorBase(FFECallOp op);
-
-  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index, unsigned odsOperandsSize);
-  const Properties &getProperties() {
-    return properties;
-  }
-
-  ::mlir::DictionaryAttr getAttributes() {
-    return odsAttrs;
-  }
-
-};
-} // namespace detail
-template <typename RangeT>
-class FFECallOpGenericAdaptor : public detail::FFECallOpGenericAdaptorBase {
-  using ValueT = ::llvm::detail::ValueOfRange<RangeT>;
-  using Base = detail::FFECallOpGenericAdaptorBase;
-  static constexpr int odsIndex_args = 0;
-public:
-  FFECallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, const Properties &properties, ::mlir::RegionRange regions = {}) : Base(attrs, properties, regions), odsOperands(values) {}
-
-  FFECallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs, ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions = {}) : FFECallOpGenericAdaptor(values, attrs, (properties ? *properties.as<Properties *>() : Properties{}), regions) {}
-
-  FFECallOpGenericAdaptor(RangeT values, ::mlir::DictionaryAttr attrs = nullptr) : FFECallOpGenericAdaptor(values, attrs, Properties{}, {}) {}
-
-  FFECallOpGenericAdaptor(RangeT values, const FFECallOpGenericAdaptorBase &base) : Base(base), odsOperands(values) {}
-
-  template <typename LateInst = FFECallOp, typename = std::enable_if_t<std::is_same_v<LateInst, FFECallOp>>>
-  FFECallOpGenericAdaptor(RangeT values, LateInst op) : Base(op), odsOperands(values) {}
-
-  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index) {
-    return Base::getODSOperandIndexAndLength(index, odsOperands.size());
-  }
-
-  RangeT getODSOperands(unsigned index) {
-    auto valueRange = getODSOperandIndexAndLength(index);
-    return {std::next(odsOperands.begin(), valueRange.first),
-             std::next(odsOperands.begin(), valueRange.first + valueRange.second)};
-  }
-
-  RangeT getArgs() {
-    return getODSOperands(0);
-  }
-
-  RangeT getOperands() {
-    return odsOperands;
-  }
-
-private:
-  RangeT odsOperands;
-};
-class FFECallOpAdaptor : public FFECallOpGenericAdaptor<::mlir::ValueRange> {
-public:
-  using FFECallOpGenericAdaptor::FFECallOpGenericAdaptor;
-  FFECallOpAdaptor(FFECallOp op);
-
-  ::llvm::LogicalResult verify(::mlir::Location loc);
-};
-class FFECallOp : public ::mlir::Op<FFECallOp, ::mlir::OpTrait::ZeroRegions, ::mlir::OpTrait::VariadicResults, ::mlir::OpTrait::ZeroSuccessors, ::mlir::OpTrait::VariadicOperands, ::mlir::OpTrait::OpInvariants, ::mlir::MemoryEffectOpInterface::Trait> {
-public:
-  using Op::Op;
-  using Op::print;
-  using Adaptor = FFECallOpAdaptor;
-  template <typename RangeT>
-  using GenericAdaptor = FFECallOpGenericAdaptor<RangeT>;
-  using FoldAdaptor = GenericAdaptor<::llvm::ArrayRef<::mlir::Attribute>>;
-  static constexpr int odsIndex_args = 0;
-  using Properties = FoldAdaptor::Properties;
-  static ::llvm::ArrayRef<::llvm::StringRef> getAttributeNames() {
-    return {};
-  }
-
-  static constexpr ::llvm::StringLiteral getOperationName() {
-    return ::llvm::StringLiteral("jlcs.ffe_call");
-  }
-
-  std::pair<unsigned, unsigned> getODSOperandIndexAndLength(unsigned index);
-  ::mlir::Operation::operand_range getODSOperands(unsigned index) {
-    auto valueRange = getODSOperandIndexAndLength(index);
-    return {std::next(getOperation()->operand_begin(), valueRange.first),
-             std::next(getOperation()->operand_begin(), valueRange.first + valueRange.second)};
-  }
-
-  ::mlir::Operation::operand_range getArgs() {
-    return getODSOperands(0);
-  }
-
-  ::mlir::MutableOperandRange getArgsMutable();
-  std::pair<unsigned, unsigned> getODSResultIndexAndLength(unsigned index);
-  ::mlir::Operation::result_range getODSResults(unsigned index) {
-    auto valueRange = getODSResultIndexAndLength(index);
-    return {std::next(getOperation()->result_begin(), valueRange.first),
-             std::next(getOperation()->result_begin(), valueRange.first + valueRange.second)};
-  }
-
-  ::mlir::Operation::result_range getResults() {
-    return getODSResults(0);
-  }
-
-  static ::llvm::LogicalResult setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
-  static ::mlir::Attribute getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop);
-  static llvm::hash_code computePropertiesHash(const Properties &prop);
-  static std::optional<mlir::Attribute> getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name);
-  static void setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value);
-  static void populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs);
-  static ::llvm::LogicalResult verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError);
-  static void build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
-  static FFECallOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
-  static FFECallOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, ::llvm::ArrayRef<::mlir::NamedAttribute> attributes = {});
-  static void build(::mlir::OpBuilder &, ::mlir::OperationState &odsState, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
-  static FFECallOp create(::mlir::OpBuilder &builder, ::mlir::Location location, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
-  static FFECallOp create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeRange resultTypes, ::mlir::ValueRange operands, const Properties &properties, ::llvm::ArrayRef<::mlir::NamedAttribute> discardableAttributes = {});
-  ::llvm::LogicalResult verifyInvariantsImpl();
-  ::llvm::LogicalResult verifyInvariants();
-  static ::mlir::ParseResult parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result);
-  void print(::mlir::OpAsmPrinter &_odsPrinter);
-  void getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>> &effects);
-public:
-};
-} // namespace jlcs
-} // namespace mlir
-MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::jlcs::FFECallOp)
 
 namespace mlir {
 namespace jlcs {

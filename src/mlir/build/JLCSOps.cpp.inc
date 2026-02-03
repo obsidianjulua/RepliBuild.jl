@@ -10,8 +10,8 @@
 #ifdef GET_OP_LIST
 #undef GET_OP_LIST
 
-::mlir::jlcs::GetFieldOp,
 ::mlir::jlcs::FFECallOp,
+::mlir::jlcs::GetFieldOp,
 ::mlir::jlcs::LoadArrayElementOp,
 ::mlir::jlcs::SetFieldOp,
 ::mlir::jlcs::StoreArrayElementOp,
@@ -35,7 +35,7 @@ static ::llvm::LogicalResult __mlir_ods_local_type_constraint_JLCS1(
     unsigned valueIndex) {
   if (!((true))) {
     return op->emitOpError(valueKind) << " #" << valueIndex
-        << " must be any type, but got " << type;
+        << " must be variadic of any type, but got " << type;
   }
   return ::mlir::success();
 }
@@ -45,7 +45,7 @@ static ::llvm::LogicalResult __mlir_ods_local_type_constraint_JLCS2(
     unsigned valueIndex) {
   if (!((true))) {
     return op->emitOpError(valueKind) << " #" << valueIndex
-        << " must be variadic of any type, but got " << type;
+        << " must be any type, but got " << type;
   }
   return ::mlir::success();
 }
@@ -103,213 +103,6 @@ static ::llvm::LogicalResult __mlir_ods_local_attr_constraint_JLCS3(
 }
 } // namespace jlcs
 } // namespace mlir
-namespace mlir {
-namespace jlcs {
-
-//===----------------------------------------------------------------------===//
-// ::mlir::jlcs::GetFieldOp definitions
-//===----------------------------------------------------------------------===//
-
-namespace detail {
-GetFieldOpGenericAdaptorBase::GetFieldOpGenericAdaptorBase(GetFieldOp op) : odsAttrs(op->getRawDictionaryAttrs()), odsOpName(op->getName()), properties(op.getProperties()), odsRegions(op->getRegions()) {}
-
-uint64_t GetFieldOpGenericAdaptorBase::getFieldOffset() {
-  auto attr = getFieldOffsetAttr();
-  return attr.getValue().getZExtValue();
-}
-
-} // namespace detail
-GetFieldOpAdaptor::GetFieldOpAdaptor(GetFieldOp op) : GetFieldOpGenericAdaptor(op->getOperands(), op) {}
-
-::llvm::LogicalResult GetFieldOpAdaptor::verify(::mlir::Location loc) {
-  auto tblgen_fieldOffset = getProperties().fieldOffset; (void)tblgen_fieldOffset;
-  if (!tblgen_fieldOffset) return emitError(loc, "'jlcs.get_field' op ""requires attribute 'fieldOffset'");
-
-  if (tblgen_fieldOffset && !(((::llvm::isa<::mlir::IntegerAttr>(tblgen_fieldOffset))) && ((::llvm::cast<::mlir::IntegerAttr>(tblgen_fieldOffset).getType().isSignlessInteger(64)))))
-    return emitError(loc, "'jlcs.get_field' op ""attribute 'fieldOffset' failed to satisfy constraint: 64-bit signless integer attribute");
-  return ::mlir::success();
-}
-
-::llvm::LogicalResult GetFieldOp::setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
-  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
-  if (!dict) {
-    emitError() << "expected DictionaryAttr to set properties";
-    return ::mlir::failure();
-  }
-
-  {
-    auto &propStorage = prop.fieldOffset;
-       auto attr = dict.get("fieldOffset");
-    if (attr) {
-      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
-      if (convertedAttr) {
-        propStorage = convertedAttr;
-      } else {
-        emitError() << "Invalid attribute `fieldOffset` in property conversion: " << attr;
-        return ::mlir::failure();
-      }
-    }
-  }
-  return ::mlir::success();
-}
-
-::mlir::Attribute GetFieldOp::getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop) {
-    ::mlir::SmallVector<::mlir::NamedAttribute> attrs;
-    ::mlir::Builder odsBuilder{ctx};
-
-    {
-      const auto &propStorage = prop.fieldOffset;
-      if (propStorage)
-        attrs.push_back(odsBuilder.getNamedAttr("fieldOffset",
-                                       propStorage));
-    }
-
-  if (!attrs.empty())
-    return odsBuilder.getDictionaryAttr(attrs);
-  return {};
-}
-
-llvm::hash_code GetFieldOp::computePropertiesHash(const Properties &prop) {
-  using llvm::hash_value;
-  return llvm::hash_combine(
-    llvm::hash_value(prop.fieldOffset.getAsOpaquePointer()));
-}
-
-std::optional<mlir::Attribute> GetFieldOp::getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name) {
-    if (name == "fieldOffset")
-      return prop.fieldOffset;
-  return std::nullopt;
-}
-
-void GetFieldOp::setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value) {
-    if (name == "fieldOffset") {
-       prop.fieldOffset = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.fieldOffset)>>(value);
-       return;
-    }
-}
-
-void GetFieldOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs) {
-    if (prop.fieldOffset) attrs.append("fieldOffset", prop.fieldOffset);
-}
-
-::llvm::LogicalResult GetFieldOp::verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
-    {
-      ::mlir::Attribute attr = attrs.get(getFieldOffsetAttrName(opName));
-      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(attr, "fieldOffset", emitError)))
-        return ::mlir::failure();
-    }
-    return ::mlir::success();
-}
-
-::llvm::LogicalResult GetFieldOp::readProperties(::mlir::DialectBytecodeReader &reader, ::mlir::OperationState &state) {
-  auto &prop = state.getOrAddProperties<Properties>(); (void)prop;
-  if (::mlir::failed(reader.readAttribute(prop.fieldOffset)))
-    return ::mlir::failure();
-  return ::mlir::success();
-}
-
-void GetFieldOp::writeProperties(::mlir::DialectBytecodeWriter &writer) {
-  auto &prop = getProperties(); (void)prop;
-  writer.writeAttribute(prop.fieldOffset);
-}
-
-uint64_t GetFieldOp::getFieldOffset() {
-  auto attr = getFieldOffsetAttr();
-  return attr.getValue().getZExtValue();
-}
-
-void GetFieldOp::setFieldOffset(uint64_t attrValue) {
-  getProperties().fieldOffset = ::mlir::Builder((*this)->getContext()).getIntegerAttr(::mlir::Builder((*this)->getContext()).getIntegerType(64), attrValue);
-}
-
-GetFieldOp GetFieldOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, Value structValue, IntegerAttr fieldOffset, Type resultType) {
-  ::mlir::OperationState __state__(location, getOperationName());
-  build(builder, __state__, structValue, fieldOffset, resultType);
-  auto __res__ = ::llvm::dyn_cast<GetFieldOp>(builder.create(__state__));
-  assert(__res__ && "builder didn't return the right type");
-  return __res__;
-}
-
-GetFieldOp GetFieldOp::create(::mlir::ImplicitLocOpBuilder &builder, Value structValue, IntegerAttr fieldOffset, Type resultType) {
-  return create(builder, builder.getLoc(), structValue, fieldOffset, resultType);
-}
-
-::llvm::LogicalResult GetFieldOp::verifyInvariantsImpl() {
-  auto tblgen_fieldOffset = getProperties().fieldOffset; (void)tblgen_fieldOffset;
-  if (!tblgen_fieldOffset) return emitOpError("requires attribute 'fieldOffset'");
-
-  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(*this, tblgen_fieldOffset, "fieldOffset")))
-    return ::mlir::failure();
-  {
-    unsigned index = 0; (void)index;
-    auto valueGroup0 = getODSOperands(0);
-
-    for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
-        return ::mlir::failure();
-    }
-  }
-  {
-    unsigned index = 0; (void)index;
-    auto valueGroup0 = getODSResults(0);
-
-    for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "result", index++)))
-        return ::mlir::failure();
-    }
-  }
-  return ::mlir::success();
-}
-
-::llvm::LogicalResult GetFieldOp::verifyInvariants() {
-  return verifyInvariantsImpl();
-}
-
-::llvm::LogicalResult GetFieldOp::setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
-  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
-  if (!dict) {
-    emitError() << "expected DictionaryAttr to set properties";
-    return ::mlir::failure();
-  }
-  // keep track of used keys in the input dictionary to be able to error out
-  // if there are some unknown ones.
-  ::mlir::DenseSet<::mlir::StringAttr> usedKeys;
-  ::mlir::MLIRContext *ctx = dict.getContext();
-  (void)ctx;
-  {
-
-    auto &propStorage = prop.fieldOffset;
-    auto fieldOffsetAttrName = ::mlir::StringAttr::get(ctx, "fieldOffset");
-    auto attr = dict.get(fieldOffsetAttrName);
-    usedKeys.insert(fieldOffsetAttrName);
-    if (attr || /*isRequired=*/true) {
-      if (!attr) {
-        emitError() << "expected key entry for fieldOffset in DictionaryAttr to set "
-                   "Properties.";
-        return ::mlir::failure();
-      }
-      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
-      if (convertedAttr) {
-        propStorage = convertedAttr;
-      } else {
-        emitError() << "Invalid attribute `fieldOffset` in property conversion: " << attr;
-        return ::mlir::failure();
-      }
-    }
-  }
-
-  for (::mlir::NamedAttribute attr : dict) {
-    if (!usedKeys.contains(attr.getName()))
-      return emitError() << "unknown key '" << attr.getName() <<
-          "' when parsing properties dictionary";
-  }
-  return ::mlir::success();
-}
-
-} // namespace jlcs
-} // namespace mlir
-MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::GetFieldOp)
-
 namespace mlir {
 namespace jlcs {
 
@@ -467,7 +260,7 @@ FFECallOp FFECallOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeR
     auto valueGroup0 = getODSOperands(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
   }
@@ -476,7 +269,7 @@ FFECallOp FFECallOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeR
     auto valueGroup0 = getODSResults(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "result", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "result", index++)))
         return ::mlir::failure();
     }
   }
@@ -541,6 +334,213 @@ void FFECallOp::getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectIn
 } // namespace jlcs
 } // namespace mlir
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::FFECallOp)
+
+namespace mlir {
+namespace jlcs {
+
+//===----------------------------------------------------------------------===//
+// ::mlir::jlcs::GetFieldOp definitions
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+GetFieldOpGenericAdaptorBase::GetFieldOpGenericAdaptorBase(GetFieldOp op) : odsAttrs(op->getRawDictionaryAttrs()), odsOpName(op->getName()), properties(op.getProperties()), odsRegions(op->getRegions()) {}
+
+uint64_t GetFieldOpGenericAdaptorBase::getFieldOffset() {
+  auto attr = getFieldOffsetAttr();
+  return attr.getValue().getZExtValue();
+}
+
+} // namespace detail
+GetFieldOpAdaptor::GetFieldOpAdaptor(GetFieldOp op) : GetFieldOpGenericAdaptor(op->getOperands(), op) {}
+
+::llvm::LogicalResult GetFieldOpAdaptor::verify(::mlir::Location loc) {
+  auto tblgen_fieldOffset = getProperties().fieldOffset; (void)tblgen_fieldOffset;
+  if (!tblgen_fieldOffset) return emitError(loc, "'jlcs.get_field' op ""requires attribute 'fieldOffset'");
+
+  if (tblgen_fieldOffset && !(((::llvm::isa<::mlir::IntegerAttr>(tblgen_fieldOffset))) && ((::llvm::cast<::mlir::IntegerAttr>(tblgen_fieldOffset).getType().isSignlessInteger(64)))))
+    return emitError(loc, "'jlcs.get_field' op ""attribute 'fieldOffset' failed to satisfy constraint: 64-bit signless integer attribute");
+  return ::mlir::success();
+}
+
+::llvm::LogicalResult GetFieldOp::setPropertiesFromAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+
+  {
+    auto &propStorage = prop.fieldOffset;
+       auto attr = dict.get("fieldOffset");
+    if (attr) {
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `fieldOffset` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+  return ::mlir::success();
+}
+
+::mlir::Attribute GetFieldOp::getPropertiesAsAttr(::mlir::MLIRContext *ctx, const Properties &prop) {
+    ::mlir::SmallVector<::mlir::NamedAttribute> attrs;
+    ::mlir::Builder odsBuilder{ctx};
+
+    {
+      const auto &propStorage = prop.fieldOffset;
+      if (propStorage)
+        attrs.push_back(odsBuilder.getNamedAttr("fieldOffset",
+                                       propStorage));
+    }
+
+  if (!attrs.empty())
+    return odsBuilder.getDictionaryAttr(attrs);
+  return {};
+}
+
+llvm::hash_code GetFieldOp::computePropertiesHash(const Properties &prop) {
+  using llvm::hash_value;
+  return llvm::hash_combine(
+    llvm::hash_value(prop.fieldOffset.getAsOpaquePointer()));
+}
+
+std::optional<mlir::Attribute> GetFieldOp::getInherentAttr(::mlir::MLIRContext *ctx, const Properties &prop, llvm::StringRef name) {
+    if (name == "fieldOffset")
+      return prop.fieldOffset;
+  return std::nullopt;
+}
+
+void GetFieldOp::setInherentAttr(Properties &prop, llvm::StringRef name, mlir::Attribute value) {
+    if (name == "fieldOffset") {
+       prop.fieldOffset = ::llvm::dyn_cast_or_null<std::remove_reference_t<decltype(prop.fieldOffset)>>(value);
+       return;
+    }
+}
+
+void GetFieldOp::populateInherentAttrs(::mlir::MLIRContext *ctx, const Properties &prop, ::mlir::NamedAttrList &attrs) {
+    if (prop.fieldOffset) attrs.append("fieldOffset", prop.fieldOffset);
+}
+
+::llvm::LogicalResult GetFieldOp::verifyInherentAttrs(::mlir::OperationName opName, ::mlir::NamedAttrList &attrs, llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+    {
+      ::mlir::Attribute attr = attrs.get(getFieldOffsetAttrName(opName));
+      if (attr && ::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(attr, "fieldOffset", emitError)))
+        return ::mlir::failure();
+    }
+    return ::mlir::success();
+}
+
+::llvm::LogicalResult GetFieldOp::readProperties(::mlir::DialectBytecodeReader &reader, ::mlir::OperationState &state) {
+  auto &prop = state.getOrAddProperties<Properties>(); (void)prop;
+  if (::mlir::failed(reader.readAttribute(prop.fieldOffset)))
+    return ::mlir::failure();
+  return ::mlir::success();
+}
+
+void GetFieldOp::writeProperties(::mlir::DialectBytecodeWriter &writer) {
+  auto &prop = getProperties(); (void)prop;
+  writer.writeAttribute(prop.fieldOffset);
+}
+
+uint64_t GetFieldOp::getFieldOffset() {
+  auto attr = getFieldOffsetAttr();
+  return attr.getValue().getZExtValue();
+}
+
+void GetFieldOp::setFieldOffset(uint64_t attrValue) {
+  getProperties().fieldOffset = ::mlir::Builder((*this)->getContext()).getIntegerAttr(::mlir::Builder((*this)->getContext()).getIntegerType(64), attrValue);
+}
+
+GetFieldOp GetFieldOp::create(::mlir::OpBuilder &builder, ::mlir::Location location, Value structValue, IntegerAttr fieldOffset, Type resultType) {
+  ::mlir::OperationState __state__(location, getOperationName());
+  build(builder, __state__, structValue, fieldOffset, resultType);
+  auto __res__ = ::llvm::dyn_cast<GetFieldOp>(builder.create(__state__));
+  assert(__res__ && "builder didn't return the right type");
+  return __res__;
+}
+
+GetFieldOp GetFieldOp::create(::mlir::ImplicitLocOpBuilder &builder, Value structValue, IntegerAttr fieldOffset, Type resultType) {
+  return create(builder, builder.getLoc(), structValue, fieldOffset, resultType);
+}
+
+::llvm::LogicalResult GetFieldOp::verifyInvariantsImpl() {
+  auto tblgen_fieldOffset = getProperties().fieldOffset; (void)tblgen_fieldOffset;
+  if (!tblgen_fieldOffset) return emitOpError("requires attribute 'fieldOffset'");
+
+  if (::mlir::failed(__mlir_ods_local_attr_constraint_JLCS1(*this, tblgen_fieldOffset, "fieldOffset")))
+    return ::mlir::failure();
+  {
+    unsigned index = 0; (void)index;
+    auto valueGroup0 = getODSOperands(0);
+
+    for (auto v : valueGroup0) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
+        return ::mlir::failure();
+    }
+  }
+  {
+    unsigned index = 0; (void)index;
+    auto valueGroup0 = getODSResults(0);
+
+    for (auto v : valueGroup0) {
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "result", index++)))
+        return ::mlir::failure();
+    }
+  }
+  return ::mlir::success();
+}
+
+::llvm::LogicalResult GetFieldOp::verifyInvariants() {
+  return verifyInvariantsImpl();
+}
+
+::llvm::LogicalResult GetFieldOp::setPropertiesFromParsedAttr(Properties &prop, ::mlir::Attribute attr, ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) {
+  ::mlir::DictionaryAttr dict = ::llvm::dyn_cast<::mlir::DictionaryAttr>(attr);
+  if (!dict) {
+    emitError() << "expected DictionaryAttr to set properties";
+    return ::mlir::failure();
+  }
+  // keep track of used keys in the input dictionary to be able to error out
+  // if there are some unknown ones.
+  ::mlir::DenseSet<::mlir::StringAttr> usedKeys;
+  ::mlir::MLIRContext *ctx = dict.getContext();
+  (void)ctx;
+  {
+
+    auto &propStorage = prop.fieldOffset;
+    auto fieldOffsetAttrName = ::mlir::StringAttr::get(ctx, "fieldOffset");
+    auto attr = dict.get(fieldOffsetAttrName);
+    usedKeys.insert(fieldOffsetAttrName);
+    if (attr || /*isRequired=*/true) {
+      if (!attr) {
+        emitError() << "expected key entry for fieldOffset in DictionaryAttr to set "
+                   "Properties.";
+        return ::mlir::failure();
+      }
+      auto convertedAttr = ::llvm::dyn_cast<std::remove_reference_t<decltype(propStorage)>>(attr);
+      if (convertedAttr) {
+        propStorage = convertedAttr;
+      } else {
+        emitError() << "Invalid attribute `fieldOffset` in property conversion: " << attr;
+        return ::mlir::failure();
+      }
+    }
+  }
+
+  for (::mlir::NamedAttribute attr : dict) {
+    if (!usedKeys.contains(attr.getName()))
+      return emitError() << "unknown key '" << attr.getName() <<
+          "' when parsing properties dictionary";
+  }
+  return ::mlir::success();
+}
+
+} // namespace jlcs
+} // namespace mlir
+MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::jlcs::GetFieldOp)
 
 namespace mlir {
 namespace jlcs {
@@ -656,7 +656,7 @@ LoadArrayElementOp LoadArrayElementOp::create(::mlir::ImplicitLocOpBuilder &buil
     auto valueGroup0 = getODSOperands(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
     auto valueGroup1 = getODSOperands(1);
@@ -671,7 +671,7 @@ LoadArrayElementOp LoadArrayElementOp::create(::mlir::ImplicitLocOpBuilder &buil
     auto valueGroup0 = getODSResults(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "result", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "result", index++)))
         return ::mlir::failure();
     }
   }
@@ -848,13 +848,13 @@ SetFieldOp SetFieldOp::create(::mlir::ImplicitLocOpBuilder &builder, Value struc
     auto valueGroup0 = getODSOperands(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
     auto valueGroup1 = getODSOperands(1);
 
     for (auto v : valueGroup1) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
   }
@@ -1027,13 +1027,13 @@ StoreArrayElementOp StoreArrayElementOp::create(::mlir::ImplicitLocOpBuilder &bu
     auto valueGroup0 = getODSOperands(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
     auto valueGroup1 = getODSOperands(1);
 
     for (auto v : valueGroup1) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
     auto valueGroup2 = getODSOperands(2);
@@ -1895,7 +1895,7 @@ VirtualCallOp VirtualCallOp::create(::mlir::ImplicitLocOpBuilder &builder, Symbo
     auto valueGroup0 = getODSOperands(0);
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "operand", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "operand", index++)))
         return ::mlir::failure();
     }
   }
@@ -1909,7 +1909,7 @@ VirtualCallOp VirtualCallOp::create(::mlir::ImplicitLocOpBuilder &builder, Symbo
     }
 
     for (auto v : valueGroup0) {
-      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS1(*this, v.getType(), "result", index++)))
+      if (::mlir::failed(__mlir_ods_local_type_constraint_JLCS2(*this, v.getType(), "result", index++)))
         return ::mlir::failure();
     }
   }

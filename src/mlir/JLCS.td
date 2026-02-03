@@ -157,7 +157,7 @@ def StoreArrayElementOp : JLCS_Op<"store_array_element"> {
   ];
 }
 
-def JLCS_FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[]>]> {
+def FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[]>]> {
   let summary = "Call an external C function using FFE metadata";
   let arguments = (ins Variadic<AnyType>:$args);
   let results = (outs Variadic<AnyType>:$results);

@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for vtable_test
-# Generated: 2026-02-03 00:47:18
+# Generated: 2026-02-03 01:51:31
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libvtable_test.so
 # Metadata: compilation_metadata.json
@@ -33,7 +33,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 13,
-    "generated_at" => "2026-02-03T00:47:18.659"
+    "generated_at" => "2026-02-03T01:51:30.953"
 )
 
 # =============================================================================

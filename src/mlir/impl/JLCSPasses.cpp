@@ -315,6 +315,123 @@ struct TypeInfoOpLowering : public ConversionPattern {
 };
 
 //===----------------------------------------------------------------------===//
+// FFECallOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct FFECallOpLowering : public ConversionPattern {
+    FFECallOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter, FFECallOp::getOperationName(), 1,
+              ctx)
+    {
+    }
+
+    // Helper to calculate size of a struct type (simple sum for packed)
+    uint64_t getPackedSizeInBits(Type type) const {
+        if (auto structType = dyn_cast<LLVM::LLVMStructType>(type)) {
+            uint64_t sum = 0;
+            for (Type elem : structType.getBody()) {
+                sum += getPackedSizeInBits(elem);
+            }
+            return sum;
+        }
+        if (type.isInteger(1) || type.isInteger(8) || type.isInteger(16) || type.isInteger(32) || type.isInteger(64)) {
+            return type.getIntOrFloatBitWidth();
+        }
+        if (isa<LLVM::LLVMPointerType>(type)) {
+            return 64; // Assume 64-bit pointers
+        }
+        return 0; // Unknown
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto ffeCallOp = cast<FFECallOp>(op);
+        Location loc = ffeCallOp.getLoc();
+        FFECallOp::Adaptor adaptor(operands);
+        ValueRange args = adaptor.getArgs();
+
+        // Get the callee attribute
+        auto calleeAttr = op->getAttrOfType<FlatSymbolRefAttr>("callee");
+        if (!calleeAttr) {
+            return op->emitError("ffe_call requires a 'callee' symbol reference attribute");
+        }
+
+        // Determine result types
+        SmallVector<Type, 1> resultTypeVec;
+        for (Type t : ffeCallOp.getResults().getTypes()) {
+            resultTypeVec.push_back(typeConverter->convertType(t));
+        }
+
+        // ABI Coercion: Convert small packed structs to integers
+        SmallVector<Value, 4> coercedArgs;
+        
+        for (Value arg : args) {
+            Type argType = arg.getType();
+            bool coerced = false;
+            
+            // Check if it's a packed struct that is small enough to be coerced (<= 64 bits)
+            // This mimics x86_64 SysV ABI for small structs passed in registers
+            if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
+                if (structType.isPacked()) {
+                    uint64_t bits = getPackedSizeInBits(structType);
+                    if (bits > 0 && bits <= 64) {
+                        // Coerce to integer!
+                        // 1. Alloca stack slot
+                        Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
+                        Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+                        Value stackSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, argType, one);
+                        
+                        // 2. Store struct to stack
+                        rewriter.create<LLVM::StoreOp>(loc, arg, stackSlot);
+                        
+                        // 3. Load as integer
+                        // We use the same pointer (opaque), but load with integer type
+                        Type intType = rewriter.getIntegerType(bits);
+                        Value intVal = rewriter.create<LLVM::LoadOp>(loc, intType, stackSlot);
+                        
+                        coercedArgs.push_back(intVal);
+                        coerced = true;
+                    }
+                }
+            }
+            
+            if (!coerced) {
+                coercedArgs.push_back(arg);
+            }
+        }
+
+        // Create LLVM::CallOp with coerced arguments
+        // We use an indirect call strategy to avoid signature mismatch with the module symbol
+        // 1. Get pointer to function
+        Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+        Value funcPtr = rewriter.create<LLVM::AddressOfOp>(loc, ptrType, calleeAttr.getValue());
+        
+        // 2. Create CallOp (indirect)
+        SmallVector<Value> callOperands;
+        callOperands.push_back(funcPtr); // Callee
+        callOperands.append(coercedArgs.begin(), coercedArgs.end());
+        
+        OperationState state(loc, LLVM::CallOp::getOperationName());
+        state.addOperands(callOperands);
+        state.addTypes(resultTypeVec);
+        // No "callee" attribute for indirect call
+        
+        Operation *callOp = rewriter.create(state);
+
+        // Replace the op
+        if (!resultTypeVec.empty()) {
+            rewriter.replaceOp(op, callOp->getResults());
+        } else {
+            rewriter.eraseOp(op);
+        }
+
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
 // Lower JLCS to LLVM Pass
 //===----------------------------------------------------------------------===//
 
@@ -335,7 +452,7 @@ struct LowerJLCSToLLVMPass
 
         // Define illegal ops (source dialect)
         target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp,
-            LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp>();
+            LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp, FFECallOp>();
 
         // Define legal dialects (target dialects)
         target.addLegalDialect<LLVM::LLVMDialect, arith::ArithDialect>();
@@ -348,6 +465,7 @@ struct LowerJLCSToLLVMPass
         patterns.add<LoadArrayElementOpLowering>(typeConverter, &getContext());
         patterns.add<StoreArrayElementOpLowering>(typeConverter, &getContext());
         patterns.add<TypeInfoOpLowering>(typeConverter, &getContext());
+        patterns.add<FFECallOpLowering>(typeConverter, &getContext());
 
         // Execute the conversion
         if (failed(applyPartialConversion(getOperation(), target,
