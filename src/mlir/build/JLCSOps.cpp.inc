@@ -284,8 +284,8 @@ FFECallOp FFECallOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeR
   ::llvm::SmallVector<::mlir::OpAsmParser::UnresolvedOperand, 4> argsOperands;
   ::llvm::SMLoc argsOperandsLoc;
   (void)argsOperandsLoc;
-  ::llvm::SmallVector<::mlir::Type, 1> argsTypes;
-  ::llvm::SmallVector<::mlir::Type, 1> resultsTypes;
+  ::llvm::ArrayRef<::mlir::Type> argsTypes;
+  ::llvm::ArrayRef<::mlir::Type> resultsTypes;
 
   argsOperandsLoc = parser.getCurrentLocation();
   if (parser.parseOperandList(argsOperands))
@@ -302,13 +302,11 @@ FFECallOp FFECallOp::create(::mlir::ImplicitLocOpBuilder &builder, ::mlir::TypeR
   if (parser.parseColon())
     return ::mlir::failure();
 
-  if (parser.parseTypeList(argsTypes))
+  ::mlir::FunctionType args__results_functionType;
+  if (parser.parseType(args__results_functionType))
     return ::mlir::failure();
-  if (parser.parseArrow())
-    return ::mlir::failure();
-
-  if (parser.parseTypeList(resultsTypes))
-    return ::mlir::failure();
+  argsTypes = args__results_functionType.getInputs();
+  resultsTypes = args__results_functionType.getResults();
   result.addTypes(resultsTypes);
   if (parser.resolveOperands(argsOperands, argsTypes, argsOperandsLoc, result.operands))
     return ::mlir::failure();
@@ -322,10 +320,7 @@ void FFECallOp::print(::mlir::OpAsmPrinter &_odsPrinter) {
   _odsPrinter.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
   _odsPrinter << ' ' << ":";
   _odsPrinter << ' ';
-  _odsPrinter << getArgs().getTypes();
-  _odsPrinter << ' ' << "->";
-  _odsPrinter << ' ';
-  _odsPrinter << getResults().getTypes();
+  _odsPrinter.printFunctionalType(getArgs().getTypes(), getResults().getTypes());
 }
 
 void FFECallOp::getEffects(::llvm::SmallVectorImpl<::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>> &effects) {

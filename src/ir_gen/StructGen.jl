@@ -2,7 +2,7 @@ module StructGen
 
 using ..TypeUtils
 
-export generate_struct_definitions, get_struct_type_string, is_struct_packed, get_julia_offsets
+export generate_struct_definitions, get_struct_type_string, get_struct_definition_string, is_struct_packed, get_julia_offsets, get_llvm_equivalent_type_string
 
 """
     is_struct_packed(info::Any) -> Bool
@@ -43,12 +43,12 @@ function is_struct_packed(info::Any)
 end
 
 """
-    get_julia_offsets(info::Any) -> Vector{Int}
+    get_julia_offsets(info::Any, is_packed::Bool=false) -> Vector{Int}
 
 Calculate the byte offsets of struct members according to Julia/C alignment rules.
 Returns a vector of start offsets for each member.
 """
-function get_julia_offsets(info::Any)
+function get_julia_offsets(info::Any, is_packed::Bool=false)
     members = get(info, "members", [])
     offsets = Int[]
     current_offset = 0
@@ -61,14 +61,16 @@ function get_julia_offsets(info::Any)
             0
         end
         
-        # Alignment heuristic: alignment = min(size, 8)
-        # Cap at 8 bytes (64-bit) usually
-        align = m_size > 8 ? 8 : m_size
-        align = align == 0 ? 1 : align
-        
-        # Add padding
-        padding = (align - (current_offset % align)) % align
-        current_offset += padding
+        if !is_packed
+            # Alignment heuristic: alignment = min(size, 8)
+            # Cap at 8 bytes (64-bit) usually
+            align = m_size > 8 ? 8 : m_size
+            align = align == 0 ? 1 : align
+            
+            # Add padding
+            padding = (align - (current_offset % align)) % align
+            current_offset += padding
+        end
         
         push!(offsets, current_offset)
         
@@ -79,11 +81,11 @@ function get_julia_offsets(info::Any)
 end
 
 """
-    get_struct_type_string(name::String, info::Any) -> String
+    get_struct_definition_string(name::String, info::Any) -> String
 
-Get the LLVM IR type string for a struct (e.g. `!llvm.struct<"Name", ...>`).
+Get the MLIR type definition string for a struct.
 """
-function get_struct_type_string(name::String, info::Any)
+function get_struct_definition_string(name::String, info::Any)
     dwarf_size_str = get(info, "byte_size", "0")
     dwarf_size = try
         startswith(dwarf_size_str, "0x") ? parse(Int, dwarf_size_str) : parse(Int, dwarf_size_str)
@@ -97,63 +99,103 @@ function get_struct_type_string(name::String, info::Any)
     elseif kind == "enum"
         underlying = get(info, "underlying_type", "i32")
         mlir_t = map_cpp_type(underlying)
-        # Fallback to i32 if mapping fails or returns struct alias
         if isempty(mlir_t) || startswith(mlir_t, "!llvm.struct")
             mlir_t = "i32"
         end
-        return "!llvm.struct<\"$(name)\", ($(mlir_t))>"
+        return "!llvm.struct<\"$(name)\", ($(mlir_t)))"
     end
+    
+    is_packed = is_struct_packed(info)
     
     members = get(info, "members", [])
     member_types = String[]
-    sum_size = 0
     
     for m in members
         t = get(m, "c_type", "void*")
-        # Recursion risk? If nested structs, we rely on map_cpp_type returning !llvm.struct<"Name"> (opaque)
-        # But we want definition.
-        # If we use full string recursively, we might loop.
-        # So nested structs should be opaque alias, but top level usage should be full?
-        # No, LLVM struct definition is flat.
-        
         mlir_t = map_cpp_type(t)
         push!(member_types, mlir_t)
-        
-        m_size = try
-            s = get(m, "size", 0)
-            s isa String ? parse(Int, s) : s
-        catch
-            0
-        end
-        sum_size += m_size
     end
     
-    is_packed = (sum_size == dwarf_size) && (dwarf_size > 0)
-    packed_attr = is_packed ? "packed " : ""
-    
-    if isempty(member_types)
-         return "!llvm.struct<\"$(name)\", opaque>"
+    if is_packed
+        # Emit !jlcs.c_struct for packed structs
+        offsets = get_julia_offsets(info, true) # packed offsets
+        
+        # Format: !jlcs.c_struct<"Name", [types], [[offsets]], packed=true>
+        types_str = join(member_types, ", ")
+        
+        offsets_typed = ["$(o) : i64" for o in offsets]
+        offsets_str = "[$(join(offsets_typed, ", "))]"
+        
+        return "!jlcs.c_struct<\"$(name)\", [$(types_str)], [$(offsets_str)], packed = true>"
     else
-         return "!llvm.struct<\"$(name)\", $(packed_attr)($(join(member_types, ", ")))>"
+        # Standard LLVM struct
+        if isempty(member_types)
+             return "!llvm.struct<\"$(name)\", opaque>"
+        else
+             return "!llvm.struct<\"$(name)\", ($(join(member_types, ", ")))>"
+        end
     end
 end
 
 """
-    generate_struct_definitions(structs::Any) -> String
+    get_struct_type_string(name::String, info::Any) -> String
 
-Generate LLVM struct type definitions via a registration function.
+Get the MLIR type reference string (alias).
+"""
+function get_struct_type_string(name::String, info::Any)
+    def_str = get_struct_definition_string(name, info)
+    if endswith(def_str, "opaque>")
+        return def_str
+    end
+    # Sanitize name for alias
+    safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
+    return "!Struct_$(safe_name)"
+end
+
+"""
+    get_llvm_equivalent_type_string(name::String, info::Any) -> String
+
+Get the LLVM literal struct type string corresponding to the struct.
+Used for constructing values of packed structs.
+"""
+function get_llvm_equivalent_type_string(name::String, info::Any)
+    members = get(info, "members", [])
+    member_types = String[]
+    
+    for m in members
+        t = get(m, "c_type", "void*")
+        mlir_t = map_cpp_type(t)
+        push!(member_types, mlir_t)
+    end
+    
+    is_packed = is_struct_packed(info)
+    packed_attr = is_packed ? "packed " : ""
+    
+    if isempty(member_types)
+         return "!llvm.struct<\"$(name)\", opaque>" # Fallback
+    else
+         # Return a literal struct (no name)
+         return "!llvm.struct<$(packed_attr)($(join(member_types, ", "))) >"
+    end
+end
+
+"""
+    generate_struct_definitions(structs::Any) -> (String, String)
+
+Generate LLVM/JLCS struct type aliases and registration functions.
+Returns (aliases_ir, registrations_ir).
 """
 function generate_struct_definitions(structs::Any)
-    io = IOBuffer()
+    io_aliases = IOBuffer()
+    io_regs = IOBuffer()
     
-    println(io, "// Struct Definitions")
+    println(io_aliases, "// Struct Aliases")
+    println(io_regs, "// Struct Definitions (Registration)")
     
-    # 1. Prepare nodes and strip __enum__
     nodes = String[]
     node_map = Dict{String, Any}() # Name -> Info
     
     for (name, info) in structs
-        # Skip standard types
         if name in ["int", "float", "double", "bool", "char", "void"]
             continue
         end
@@ -167,8 +209,6 @@ function generate_struct_definitions(structs::Any)
         node_map[effective_name] = info
     end
     
-    # 2. Build dependency graph
-    # Adjacency: A -> B means A depends on B (A uses B by value)
     deps = Dict{String, Set{String}}()
     
     for name in nodes
@@ -176,7 +216,6 @@ function generate_struct_definitions(structs::Any)
         d = Set{String}()
         deps[name] = d
         
-        # If enum/union, no deps usually (underlying type is primitive)
         kind = get(info, "kind", "")
         if kind == "enum" || kind == "union"
             continue
@@ -185,19 +224,15 @@ function generate_struct_definitions(structs::Any)
         members = get(info, "members", [])
         for m in members
             t = get(m, "c_type", "void*")
-            # If pointer, skip
             if endswith(t, "*") || contains(t, "*")
                 continue
             end
             
-            # Map type to check if it's a struct
             mlir_t = map_cpp_type(t)
-            
-            # Check if it is !llvm.struct<"Name">
-            m_match = match(r"!llvm.struct<\"([^\"]+)\">", mlir_t)
+            # Use triple-quoted regex to avoid escape issues
+            m_match = match(r"""!llvm.struct<\"([^\"]+)\">""", mlir_t)
             if m_match !== nothing
                 dep_name = m_match.captures[1]
-                # If dep_name is in our nodes, add dependency
                 if haskey(node_map, dep_name) && dep_name != name
                     push!(d, dep_name)
                 end
@@ -205,7 +240,6 @@ function generate_struct_definitions(structs::Any)
         end
     end
     
-    # 3. Topological Sort
     sorted_nodes = String[]
     visited = Set{String}()
     stack = Set{String}()
@@ -215,7 +249,6 @@ function generate_struct_definitions(structs::Any)
             return
         end
         if n in stack
-            # Cycle detected, break it
             return
         end
         
@@ -235,21 +268,23 @@ function generate_struct_definitions(structs::Any)
         visit(n)
     end
     
-    # 4. Emit
     for name in sorted_nodes
         info = node_map[name]
-        type_str = get_struct_type_string(name, info)
+        def_str = get_struct_definition_string(name, info)
         
-        # Opaque types cannot be instantiated as globals with body
-        if endswith(type_str, "opaque>")
+        if endswith(def_str, "opaque>")
             continue
         end
         
-        # Use a dummy function declaration to register the struct type definition
-        println(io, "llvm.func @__def_$(name)($(type_str)) -> !llvm.void")
+        # Emit alias
+        safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
+        alias_name = "!Struct_$(safe_name)"
+        println(io_aliases, "$(alias_name) = $(def_str)")
+        
+        # Use a dummy function to register usage
+        println(io_regs, "func.func private @__def_$(name)($(alias_name)) -> ()")
     end
     
-    println(io, "")
-    return String(take!(io))
+    return (String(take!(io_aliases)), String(take!(io_regs)))
 end
 end

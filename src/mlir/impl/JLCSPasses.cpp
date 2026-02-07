@@ -5,6 +5,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "JLCSDialect.h"
+#include "JLCSTypes.h"
 #include "JLCSLoweringUtils.h"
 #include "JLCSOps.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
@@ -137,7 +138,11 @@ struct VirtualCallOpLowering : public ConversionPattern {
         // Determine result types
         SmallVector<Type, 1> resultTypeVec;
         if (vcallOp.getResult()) {
-            resultTypeVec.push_back(vcallOp.getResult().getType());
+            Type converted = typeConverter->convertType(vcallOp.getResult().getType());
+            if (!converted) {
+                return op->emitError("VirtualCallOp: Could not convert result type");
+            }
+            resultTypeVec.push_back(converted);
         }
 
         // LLVM 21 API: Build CallOp manually with OperationState for indirect calls
@@ -149,9 +154,11 @@ struct VirtualCallOpLowering : public ConversionPattern {
         OperationState state(loc, LLVM::CallOp::getOperationName());
         state.addOperands(allOperands);
         state.addTypes(resultTypeVec);
-
-        // Add required attributes for indirect call
-        state.addAttribute("callee", FlatSymbolRefAttr());  // empty for indirect
+        
+        // Add attributes for segment sizes (indirect call: callee_operands=1, args=N, op_bundle=0)
+        int32_t nArgs = (int32_t)callArgs.size();
+        state.addAttribute("operandSegmentSizes", 
+            rewriter.getDenseI32ArrayAttr({1, nArgs, 0}));
 
         Operation *callOp = rewriter.create(state);
 
@@ -361,7 +368,11 @@ struct FFECallOpLowering : public ConversionPattern {
         // Determine result types
         SmallVector<Type, 1> resultTypeVec;
         for (Type t : ffeCallOp.getResults().getTypes()) {
-            resultTypeVec.push_back(typeConverter->convertType(t));
+            Type converted = typeConverter->convertType(t);
+            if (!converted) {
+                return op->emitError("FFECallOp: Could not convert result type");
+            }
+            resultTypeVec.push_back(converted);
         }
 
         // ABI Coercion: Convert small packed structs to integers
@@ -416,9 +427,21 @@ struct FFECallOpLowering : public ConversionPattern {
         OperationState state(loc, LLVM::CallOp::getOperationName());
         state.addOperands(callOperands);
         state.addTypes(resultTypeVec);
-        // No "callee" attribute for indirect call
         
-        Operation *callOp = rewriter.create(state);
+        // Add attributes for segment sizes
+        int32_t nArgs = (int32_t)coercedArgs.size();
+        NamedAttribute opSeg = rewriter.getNamedAttr("operandSegmentSizes", 
+            rewriter.getDenseI32ArrayAttr({1, nArgs, 0}));
+        NamedAttribute opBundle = rewriter.getNamedAttr("op_bundle_sizes", 
+            rewriter.getDenseI32ArrayAttr({}));
+        
+        SmallVector<NamedAttribute, 2> attrs;
+        attrs.push_back(opSeg);
+        attrs.push_back(opBundle);
+
+        // Create CallOp using generic builder
+        Operation *callOp = rewriter.create<LLVM::CallOp>(
+            loc, resultTypeVec, ValueRange(callOperands), attrs);
 
         // Replace the op
         if (!resultTypeVec.empty()) {
@@ -448,6 +471,16 @@ struct LowerJLCSToLLVMPass
     void runOnOperation() override
     {
         LLVMTypeConverter typeConverter(&getContext());
+
+        // Register CStructType conversion for packed struct support
+        typeConverter.addConversion([&](CStructType type) -> Type {
+            SmallVector<Type> llvmFields;
+            for (Type fieldType : type.getFieldTypes()) {
+                llvmFields.push_back(typeConverter.convertType(fieldType));
+            }
+            return LLVM::LLVMStructType::getLiteral(&getContext(), llvmFields, type.getIsPacked());
+        });
+
         ConversionTarget target(getContext());
 
         // Define illegal ops (source dialect)

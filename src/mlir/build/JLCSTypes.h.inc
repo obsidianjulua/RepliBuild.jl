@@ -25,7 +25,7 @@ public:
   using Base::Base;
   static constexpr ::llvm::StringLiteral name = "jlcs.c_struct";
   static constexpr ::llvm::StringLiteral dialectName = "jlcs";
-  static CStructType get(::mlir::MLIRContext *context, StringAttr juliaTypeName, ::llvm::ArrayRef<Type> fieldTypes, ArrayAttr fieldOffsets);
+  static CStructType get(::mlir::MLIRContext *context, StringAttr juliaTypeName, ::llvm::ArrayRef<Type> fieldTypes, ArrayAttr fieldOffsets, bool isPacked);
   static constexpr ::llvm::StringLiteral getMnemonic() {
     return {"c_struct"};
   }
@@ -35,6 +35,7 @@ public:
   StringAttr getJuliaTypeName() const;
   ::llvm::ArrayRef<Type> getFieldTypes() const;
   ArrayAttr getFieldOffsets() const;
+  bool getIsPacked() const;
 };
 class ArrayViewType : public ::mlir::Type::TypeBase<ArrayViewType, ::mlir::Type, detail::ArrayViewTypeStorage> {
 public:

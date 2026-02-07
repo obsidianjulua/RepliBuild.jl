@@ -1,12 +1,8 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-01-26 16:54:33
+# Generated: 2026-02-04 03:03:43
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
-#
-# Type Safety: Excellent (~95%) - Types extracted from DWARF debug info
-# Ground truth: Types come from compiled binary, not headers
-# Manual edits: Minimal to none required
 
 module StressTest
 
@@ -24,7 +20,6 @@ function __init__()
     # Initialize the global JIT context with this library's vtables
     RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
 end
-
 # =============================================================================
 # Compilation Metadata
 # =============================================================================
@@ -35,7 +30,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-01-26T16:54:33.715"
+    "generated_at" => "2026-02-04T03:03:43.762"
 )
 
 # =============================================================================
@@ -209,10 +204,161 @@ struct uniform_real_distribution_double
 end
 
 
+# =============================================================================
+# Managed Types (Auto-Finalizers)
+# =============================================================================
+
+mutable struct ManagedFFTResult
+    handle::Ptr{FFTResult}
+    
+    function ManagedFFTResult(ptr::Ptr{FFTResult})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedFFTResult")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: fft_result_destroy(x.handle)
+            ccall((:fft_result_destroy, LIBRARY_PATH), Cvoid, (Ptr{FFTResult},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{FFTResult}}, obj::ManagedFFTResult) = obj.handle
+
+export ManagedFFTResult
+
+mutable struct ManagedODEResult
+    handle::Ptr{ODEResult}
+    
+    function ManagedODEResult(ptr::Ptr{ODEResult})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedODEResult")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: ode_result_destroy(x.handle)
+            ccall((:ode_result_destroy, LIBRARY_PATH), Cvoid, (Ptr{ODEResult},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{ODEResult}}, obj::ManagedODEResult) = obj.handle
+
+export ManagedODEResult
+
+mutable struct ManagedSplineInterpolation
+    handle::Ptr{SplineInterpolation}
+    
+    function ManagedSplineInterpolation(ptr::Ptr{SplineInterpolation})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedSplineInterpolation")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: spline_destroy(x.handle)
+            ccall((:spline_destroy, LIBRARY_PATH), Cvoid, (Ptr{SplineInterpolation},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{SplineInterpolation}}, obj::ManagedSplineInterpolation) = obj.handle
+
+export ManagedSplineInterpolation
+
+mutable struct ManagedDenseMatrix
+    handle::Ptr{DenseMatrix}
+    
+    function ManagedDenseMatrix(ptr::Ptr{DenseMatrix})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedDenseMatrix")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: dense_matrix_destroy(x.handle)
+            ccall((:dense_matrix_destroy, LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{DenseMatrix}}, obj::ManagedDenseMatrix) = obj.handle
+
+export ManagedDenseMatrix
+
+mutable struct ManagedHistogram
+    handle::Ptr{Histogram}
+    
+    function ManagedHistogram(ptr::Ptr{Histogram})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedHistogram")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: histogram_destroy(x.handle)
+            ccall((:histogram_destroy, LIBRARY_PATH), Cvoid, (Ptr{Histogram},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{Histogram}}, obj::ManagedHistogram) = obj.handle
+
+export ManagedHistogram
+
+mutable struct ManagedPolynomial
+    handle::Ptr{Polynomial}
+    
+    function ManagedPolynomial(ptr::Ptr{Polynomial})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedPolynomial")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: polynomial_destroy(x.handle)
+            ccall((:polynomial_destroy, LIBRARY_PATH), Cvoid, (Ptr{Polynomial},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{Polynomial}}, obj::ManagedPolynomial) = obj.handle
+
+export ManagedPolynomial
+
+mutable struct ManagedSparseMatrix
+    handle::Ptr{SparseMatrix}
+    
+    function ManagedSparseMatrix(ptr::Ptr{SparseMatrix})
+        if ptr == C_NULL
+            error("Cannot wrap NULL pointer in ManagedSparseMatrix")
+        end
+        obj = new(ptr)
+        finalizer(obj) do x
+            # Call deleter: sparse_matrix_destroy(x.handle)
+            ccall((:sparse_matrix_destroy, LIBRARY_PATH), Cvoid, (Ptr{SparseMatrix},), x.handle)
+        end
+        return obj
+    end
+end
+
+# Allow passing Managed object to ccall expecting Ptr
+Base.unsafe_convert(::Type{Ptr{SparseMatrix}}, obj::ManagedSparseMatrix) = obj.handle
+
+export ManagedSparseMatrix
+
 export compute_eigen, compute_fft, compute_histogram, compute_ifft, compute_lu, compute_mean, compute_median, compute_qr, compute_quantiles, compute_stddev, compute_variance, convolve, correlate, create_cubic_spline, dense_matrix_copy, dense_matrix_create, dense_matrix_destroy, dense_matrix_resize, dense_matrix_set_identity, dense_matrix_set_zero, fft_result_destroy, fill_random_normal, fill_random_uniform, histogram_destroy, line_search_backtracking, matrix_add, matrix_determinant, matrix_multiply, matrix_trace, matrix_transpose, matrix_vector_mult, matrix_vector_mult_add, ode_result_destroy, optimize_minimize, optimize_minimize_numerical_gradient, polynomial_destroy, polynomial_eval, polynomial_fit, print_matrix, print_vector, set_random_seed, solve_conjugate_gradient, solve_least_squares, solve_linear_system_lu, solve_linear_system_qr, solve_ode_adaptive, solve_ode_rk4, sparse_matrix_create, sparse_matrix_destroy, spline_destroy, spline_eval, status_to_string, vector_axpy, vector_copy, vector_dot, vector_norm, vector_scale, OptimizationAlgorithm, GRADIENT_DESCENT, CONJUGATE_GRADIENT, LBFGS, NEWTON, Status, SUCCESS, ERROR_INVALID_INPUT, ERROR_SINGULAR_MATRIX, ERROR_NOT_CONVERGED, ERROR_OUT_OF_MEMORY, ERROR_DIMENSION_MISMATCH, LUDecomposition, ODEResult, EigenDecomposition, DenseMatrix, SparseMatrix, mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL, QRDecomposition, uniform_real_distribution_double, FFTResult, mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double, __va_list_tag, OptimizationOptions, Histogram, normal_distribution_double, Polynomial, OptimizationState, param_type, SplineInterpolation
 
 """
-    compute_eigen(A::Ptr{DenseMatrix}) -> EigenDecomposition
+    compute_eigen(A::Any) -> EigenDecomposition
 
 Wrapper for C++ function: `compute_eigen`
 
@@ -224,15 +370,15 @@ Wrapper for C++ function: `compute_eigen`
 
 # Metadata
 - Mangled symbol: `compute_eigen`
-- Type safety:  From compilation
 """
 
-function compute_eigen(A::Ptr{DenseMatrix})
+function compute_eigen(A::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("compute_eigen", A)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_eigen_thunk", A)
 end
 """
-    compute_fft(signal::Ptr{Cdouble}, n::Csize_t) -> FFTResult
+    compute_fft(signal::Any, n::Csize_t) -> FFTResult
 
 Wrapper for C++ function: `compute_fft`
 
@@ -245,15 +391,15 @@ Wrapper for C++ function: `compute_fft`
 
 # Metadata
 - Mangled symbol: `compute_fft`
-- Type safety:  From compilation
 """
 
-function compute_fft(signal::Ptr{Cdouble}, n::Csize_t)
+function compute_fft(signal::Any, n::Csize_t)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("compute_fft", signal, n)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_fft_thunk", signal, n)
 end
 """
-    compute_histogram(data::Ptr{Cdouble}, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble) -> Histogram
+    compute_histogram(data::Any, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble) -> Histogram
 
 Wrapper for C++ function: `compute_histogram`
 
@@ -269,15 +415,15 @@ Wrapper for C++ function: `compute_histogram`
 
 # Metadata
 - Mangled symbol: `compute_histogram`
-- Type safety:  From compilation
 """
 
-function compute_histogram(data::Ptr{Cdouble}, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble)
+function compute_histogram(data::Any, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("compute_histogram", data, n, n_bins, min_val, max_val)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_histogram_thunk", data, n, n_bins, min_val, max_val)
 end
 """
-    compute_ifft(fft_data::Ptr{FFTResult}, signal_out::Ptr{Cdouble}) -> Cvoid
+    compute_ifft(fft_data::Any, signal_out::Any) -> Cvoid
 
 Wrapper for C++ function: `compute_ifft`
 
@@ -290,10 +436,9 @@ Wrapper for C++ function: `compute_ifft`
 
 # Metadata
 - Mangled symbol: `compute_ifft`
-- Type safety:  From compilation
 """
 
-function compute_ifft(fft_data::Ptr{FFTResult}, signal_out::Ptr{Cdouble})::Cvoid
+function compute_ifft(fft_data::Any, signal_out::Any)::Cvoid
     ccall((:compute_ifft, LIBRARY_PATH), Cvoid, (Ptr{FFTResult}, Ptr{Cdouble},), fft_data, signal_out)
 end
 
@@ -303,7 +448,7 @@ function compute_ifft(fft_data::FFTResult, signal_out::Ptr{Cdouble})::Cvoid
 end
 
 """
-    compute_lu(A::Ptr{DenseMatrix}) -> LUDecomposition
+    compute_lu(A::Any) -> LUDecomposition
 
 Wrapper for C++ function: `compute_lu`
 
@@ -315,15 +460,15 @@ Wrapper for C++ function: `compute_lu`
 
 # Metadata
 - Mangled symbol: `compute_lu`
-- Type safety:  From compilation
 """
 
-function compute_lu(A::Ptr{DenseMatrix})
+function compute_lu(A::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("compute_lu", A)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_lu_thunk", A)
 end
 """
-    compute_mean(data::Ptr{Cdouble}, n::Csize_t) -> Cdouble
+    compute_mean(data::Any, n::Csize_t) -> Cdouble
 
 Wrapper for C++ function: `compute_mean`
 
@@ -336,10 +481,9 @@ Wrapper for C++ function: `compute_mean`
 
 # Metadata
 - Mangled symbol: `compute_mean`
-- Type safety:  From compilation
 """
 
-function compute_mean(data::Ptr{Cdouble}, n::Csize_t)::Cdouble
+function compute_mean(data::Any, n::Csize_t)::Cdouble
     ccall((:compute_mean, LIBRARY_PATH), Cdouble, (Ptr{Cdouble}, Csize_t,), data, n)
 end
 
@@ -351,7 +495,7 @@ function compute_mean(data::Vector{Float64}, n::Csize_t)::Cdouble
 end
 
 """
-    compute_median(data::Ptr{Cdouble}, n::Csize_t) -> Cdouble
+    compute_median(data::Any, n::Csize_t) -> Cdouble
 
 Wrapper for C++ function: `compute_median`
 
@@ -364,10 +508,9 @@ Wrapper for C++ function: `compute_median`
 
 # Metadata
 - Mangled symbol: `compute_median`
-- Type safety:  From compilation
 """
 
-function compute_median(data::Ptr{Cdouble}, n::Csize_t)::Cdouble
+function compute_median(data::Any, n::Csize_t)::Cdouble
     ccall((:compute_median, LIBRARY_PATH), Cdouble, (Ptr{Cdouble}, Csize_t,), data, n)
 end
 
@@ -379,7 +522,7 @@ function compute_median(data::Vector{Float64}, n::Csize_t)::Cdouble
 end
 
 """
-    compute_qr(A::Ptr{DenseMatrix}) -> QRDecomposition
+    compute_qr(A::Any) -> QRDecomposition
 
 Wrapper for C++ function: `compute_qr`
 
@@ -391,15 +534,15 @@ Wrapper for C++ function: `compute_qr`
 
 # Metadata
 - Mangled symbol: `compute_qr`
-- Type safety:  From compilation
 """
 
-function compute_qr(A::Ptr{DenseMatrix})
+function compute_qr(A::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("compute_qr", A)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_qr_thunk", A)
 end
 """
-    compute_quantiles(data::Ptr{Cdouble}, n::Csize_t, probabilities::Ptr{Cdouble}, quantiles::Ptr{Cdouble}, n_quantiles::Csize_t) -> Cvoid
+    compute_quantiles(data::Any, n::Csize_t, probabilities::Any, quantiles::Any, n_quantiles::Csize_t) -> Cvoid
 
 Wrapper for C++ function: `compute_quantiles`
 
@@ -415,10 +558,9 @@ Wrapper for C++ function: `compute_quantiles`
 
 # Metadata
 - Mangled symbol: `compute_quantiles`
-- Type safety:  From compilation
 """
 
-function compute_quantiles(data::Ptr{Cdouble}, n::Csize_t, probabilities::Ptr{Cdouble}, quantiles::Ptr{Cdouble}, n_quantiles::Csize_t)::Cvoid
+function compute_quantiles(data::Any, n::Csize_t, probabilities::Any, quantiles::Any, n_quantiles::Csize_t)::Cvoid
     ccall((:compute_quantiles, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Csize_t, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t,), data, n, probabilities, quantiles, n_quantiles)
 end
 
@@ -430,7 +572,7 @@ function compute_quantiles(data::Vector{Float64}, n::Csize_t, probabilities::Ptr
 end
 
 """
-    compute_stddev(data::Ptr{Cdouble}, n::Csize_t) -> Cdouble
+    compute_stddev(data::Any, n::Csize_t) -> Cdouble
 
 Wrapper for C++ function: `compute_stddev`
 
@@ -443,10 +585,9 @@ Wrapper for C++ function: `compute_stddev`
 
 # Metadata
 - Mangled symbol: `compute_stddev`
-- Type safety:  From compilation
 """
 
-function compute_stddev(data::Ptr{Cdouble}, n::Csize_t)::Cdouble
+function compute_stddev(data::Any, n::Csize_t)::Cdouble
     ccall((:compute_stddev, LIBRARY_PATH), Cdouble, (Ptr{Cdouble}, Csize_t,), data, n)
 end
 
@@ -458,7 +599,7 @@ function compute_stddev(data::Vector{Float64}, n::Csize_t)::Cdouble
 end
 
 """
-    compute_variance(data::Ptr{Cdouble}, n::Csize_t) -> Cdouble
+    compute_variance(data::Any, n::Csize_t) -> Cdouble
 
 Wrapper for C++ function: `compute_variance`
 
@@ -471,10 +612,9 @@ Wrapper for C++ function: `compute_variance`
 
 # Metadata
 - Mangled symbol: `compute_variance`
-- Type safety:  From compilation
 """
 
-function compute_variance(data::Ptr{Cdouble}, n::Csize_t)::Cdouble
+function compute_variance(data::Any, n::Csize_t)::Cdouble
     ccall((:compute_variance, LIBRARY_PATH), Cdouble, (Ptr{Cdouble}, Csize_t,), data, n)
 end
 
@@ -486,7 +626,7 @@ function compute_variance(data::Vector{Float64}, n::Csize_t)::Cdouble
 end
 
 """
-    convolve(signal1::Ptr{Cdouble}, n1::Csize_t, signal2::Ptr{Cdouble}, n2::Csize_t, result::Ptr{Cdouble}) -> Cvoid
+    convolve(signal1::Any, n1::Csize_t, signal2::Any, n2::Csize_t, result::Any) -> Cvoid
 
 Wrapper for C++ function: `convolve`
 
@@ -502,10 +642,9 @@ Wrapper for C++ function: `convolve`
 
 # Metadata
 - Mangled symbol: `convolve`
-- Type safety:  From compilation
 """
 
-function convolve(signal1::Ptr{Cdouble}, n1::Csize_t, signal2::Ptr{Cdouble}, n2::Csize_t, result::Ptr{Cdouble})::Cvoid
+function convolve(signal1::Any, n1::Csize_t, signal2::Any, n2::Csize_t, result::Any)::Cvoid
     ccall((:convolve, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Csize_t, Ptr{Cdouble}, Csize_t, Ptr{Cdouble},), signal1, n1, signal2, n2, result)
 end
 
@@ -517,7 +656,7 @@ function convolve(signal1::Vector{Float64}, n1::Csize_t, signal2::Vector{Float64
 end
 
 """
-    correlate(signal1::Ptr{Cdouble}, signal2::Ptr{Cdouble}, n::Csize_t, result::Ptr{Cdouble}) -> Cvoid
+    correlate(signal1::Any, signal2::Any, n::Csize_t, result::Any) -> Cvoid
 
 Wrapper for C++ function: `correlate`
 
@@ -532,10 +671,9 @@ Wrapper for C++ function: `correlate`
 
 # Metadata
 - Mangled symbol: `correlate`
-- Type safety:  From compilation
 """
 
-function correlate(signal1::Ptr{Cdouble}, signal2::Ptr{Cdouble}, n::Csize_t, result::Ptr{Cdouble})::Cvoid
+function correlate(signal1::Any, signal2::Any, n::Csize_t, result::Any)::Cvoid
     ccall((:correlate, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Ptr{Cdouble},), signal1, signal2, n, result)
 end
 
@@ -547,7 +685,7 @@ function correlate(signal1::Vector{Float64}, signal2::Vector{Float64}, n::Csize_
 end
 
 """
-    create_cubic_spline(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t) -> SplineInterpolation
+    create_cubic_spline(x::Any, y::Any, n::Csize_t) -> SplineInterpolation
 
 Wrapper for C++ function: `create_cubic_spline`
 
@@ -561,15 +699,15 @@ Wrapper for C++ function: `create_cubic_spline`
 
 # Metadata
 - Mangled symbol: `create_cubic_spline`
-- Type safety:  From compilation
 """
 
-function create_cubic_spline(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t)
+function create_cubic_spline(x::Any, y::Any, n::Csize_t)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("create_cubic_spline", x, y, n)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_create_cubic_spline_thunk", x, y, n)
 end
 """
-    dense_matrix_copy(src::Ptr{DenseMatrix}) -> DenseMatrix
+    dense_matrix_copy(src::Any) -> DenseMatrix
 
 Wrapper for C++ function: `dense_matrix_copy`
 
@@ -581,12 +719,12 @@ Wrapper for C++ function: `dense_matrix_copy`
 
 # Metadata
 - Mangled symbol: `dense_matrix_copy`
-- Type safety:  From compilation
 """
 
-function dense_matrix_copy(src::Ptr{DenseMatrix})
+function dense_matrix_copy(src::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("dense_matrix_copy", src)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_dense_matrix_copy_thunk", src)
 end
 """
     dense_matrix_create(rows::Csize_t, cols::Csize_t) -> DenseMatrix
@@ -602,15 +740,15 @@ Wrapper for C++ function: `dense_matrix_create`
 
 # Metadata
 - Mangled symbol: `dense_matrix_create`
-- Type safety:  From compilation
 """
 
 function dense_matrix_create(rows::Csize_t, cols::Csize_t)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("dense_matrix_create", rows, cols)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_dense_matrix_create_thunk", rows, cols)
 end
 """
-    dense_matrix_destroy(mat::Ptr{DenseMatrix}) -> Cvoid
+    dense_matrix_destroy(mat::Any) -> Cvoid
 
 Wrapper for C++ function: `dense_matrix_destroy`
 
@@ -622,10 +760,9 @@ Wrapper for C++ function: `dense_matrix_destroy`
 
 # Metadata
 - Mangled symbol: `dense_matrix_destroy`
-- Type safety:  From compilation
 """
 
-function dense_matrix_destroy(mat::Ptr{DenseMatrix})::Cvoid
+function dense_matrix_destroy(mat::Any)::Cvoid
     ccall((:dense_matrix_destroy, LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix},), mat)
 end
 
@@ -635,7 +772,7 @@ function dense_matrix_destroy(mat::DenseMatrix)::Cvoid
 end
 
 """
-    dense_matrix_resize(mat::Ptr{DenseMatrix}, new_rows::Csize_t, new_cols::Csize_t) -> Any
+    dense_matrix_resize(mat::Any, new_rows::Csize_t, new_cols::Csize_t) -> Any
 
 Wrapper for C++ function: `dense_matrix_resize`
 
@@ -649,10 +786,9 @@ Wrapper for C++ function: `dense_matrix_resize`
 
 # Metadata
 - Mangled symbol: `dense_matrix_resize`
-- Type safety:  From compilation
 """
 
-function dense_matrix_resize(mat::Ptr{DenseMatrix}, new_rows::Csize_t, new_cols::Csize_t)::Status
+function dense_matrix_resize(mat::Any, new_rows::Csize_t, new_cols::Csize_t)::Status
     return ccall((:dense_matrix_resize, LIBRARY_PATH), Status, (Ptr{DenseMatrix}, Csize_t, Csize_t,), mat, new_rows, new_cols)
 end
 
@@ -662,7 +798,7 @@ function dense_matrix_resize(mat::DenseMatrix, new_rows::Csize_t, new_cols::Csiz
 end
 
 """
-    dense_matrix_set_identity(mat::Ptr{DenseMatrix}) -> Cvoid
+    dense_matrix_set_identity(mat::Any) -> Cvoid
 
 Wrapper for C++ function: `dense_matrix_set_identity`
 
@@ -674,10 +810,9 @@ Wrapper for C++ function: `dense_matrix_set_identity`
 
 # Metadata
 - Mangled symbol: `dense_matrix_set_identity`
-- Type safety:  From compilation
 """
 
-function dense_matrix_set_identity(mat::Ptr{DenseMatrix})::Cvoid
+function dense_matrix_set_identity(mat::Any)::Cvoid
     ccall((:dense_matrix_set_identity, LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix},), mat)
 end
 
@@ -687,7 +822,7 @@ function dense_matrix_set_identity(mat::DenseMatrix)::Cvoid
 end
 
 """
-    dense_matrix_set_zero(mat::Ptr{DenseMatrix}) -> Cvoid
+    dense_matrix_set_zero(mat::Any) -> Cvoid
 
 Wrapper for C++ function: `dense_matrix_set_zero`
 
@@ -699,10 +834,9 @@ Wrapper for C++ function: `dense_matrix_set_zero`
 
 # Metadata
 - Mangled symbol: `dense_matrix_set_zero`
-- Type safety:  From compilation
 """
 
-function dense_matrix_set_zero(mat::Ptr{DenseMatrix})::Cvoid
+function dense_matrix_set_zero(mat::Any)::Cvoid
     ccall((:dense_matrix_set_zero, LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix},), mat)
 end
 
@@ -712,7 +846,7 @@ function dense_matrix_set_zero(mat::DenseMatrix)::Cvoid
 end
 
 """
-    fft_result_destroy(result::Ptr{FFTResult}) -> Cvoid
+    fft_result_destroy(result::Any) -> Cvoid
 
 Wrapper for C++ function: `fft_result_destroy`
 
@@ -724,10 +858,9 @@ Wrapper for C++ function: `fft_result_destroy`
 
 # Metadata
 - Mangled symbol: `fft_result_destroy`
-- Type safety:  From compilation
 """
 
-function fft_result_destroy(result::Ptr{FFTResult})::Cvoid
+function fft_result_destroy(result::Any)::Cvoid
     ccall((:fft_result_destroy, LIBRARY_PATH), Cvoid, (Ptr{FFTResult},), result)
 end
 
@@ -737,7 +870,7 @@ function fft_result_destroy(result::FFTResult)::Cvoid
 end
 
 """
-    fill_random_normal(data::Ptr{Cdouble}, n::Csize_t, mean::Cdouble, stddev::Cdouble) -> Cvoid
+    fill_random_normal(data::Any, n::Csize_t, mean::Cdouble, stddev::Cdouble) -> Cvoid
 
 Wrapper for C++ function: `fill_random_normal`
 
@@ -752,10 +885,9 @@ Wrapper for C++ function: `fill_random_normal`
 
 # Metadata
 - Mangled symbol: `fill_random_normal`
-- Type safety:  From compilation
 """
 
-function fill_random_normal(data::Ptr{Cdouble}, n::Csize_t, mean::Cdouble, stddev::Cdouble)::Cvoid
+function fill_random_normal(data::Any, n::Csize_t, mean::Cdouble, stddev::Cdouble)::Cvoid
     ccall((:fill_random_normal, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Csize_t, Cdouble, Cdouble,), data, n, mean, stddev)
 end
 
@@ -767,7 +899,7 @@ function fill_random_normal(data::Vector{Float64}, n::Csize_t, mean::Cdouble, st
 end
 
 """
-    fill_random_uniform(data::Ptr{Cdouble}, n::Csize_t, min_val::Cdouble, max_val::Cdouble) -> Cvoid
+    fill_random_uniform(data::Any, n::Csize_t, min_val::Cdouble, max_val::Cdouble) -> Cvoid
 
 Wrapper for C++ function: `fill_random_uniform`
 
@@ -782,10 +914,9 @@ Wrapper for C++ function: `fill_random_uniform`
 
 # Metadata
 - Mangled symbol: `fill_random_uniform`
-- Type safety:  From compilation
 """
 
-function fill_random_uniform(data::Ptr{Cdouble}, n::Csize_t, min_val::Cdouble, max_val::Cdouble)::Cvoid
+function fill_random_uniform(data::Any, n::Csize_t, min_val::Cdouble, max_val::Cdouble)::Cvoid
     ccall((:fill_random_uniform, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Csize_t, Cdouble, Cdouble,), data, n, min_val, max_val)
 end
 
@@ -797,7 +928,7 @@ function fill_random_uniform(data::Vector{Float64}, n::Csize_t, min_val::Cdouble
 end
 
 """
-    histogram_destroy(hist::Ptr{Histogram}) -> Cvoid
+    histogram_destroy(hist::Any) -> Cvoid
 
 Wrapper for C++ function: `histogram_destroy`
 
@@ -809,10 +940,9 @@ Wrapper for C++ function: `histogram_destroy`
 
 # Metadata
 - Mangled symbol: `histogram_destroy`
-- Type safety:  From compilation
 """
 
-function histogram_destroy(hist::Ptr{Histogram})::Cvoid
+function histogram_destroy(hist::Any)::Cvoid
     ccall((:histogram_destroy, LIBRARY_PATH), Cvoid, (Ptr{Histogram},), hist)
 end
 
@@ -822,7 +952,7 @@ function histogram_destroy(hist::Histogram)::Cvoid
 end
 
 """
-    line_search_backtracking(objective::Ptr{Cvoid}, x::Ptr{Cdouble}, direction::Ptr{Cdouble}, x_new::Ptr{Cdouble}, n::Csize_t, initial_step::Cdouble, user_data::Ptr{Cvoid}) -> Cdouble
+    line_search_backtracking(objective::Any, x::Any, direction::Any, x_new::Any, n::Csize_t, initial_step::Cdouble, user_data::Any) -> Cdouble
 
 Wrapper for C++ function: `line_search_backtracking`
 
@@ -846,10 +976,9 @@ callback = @cfunction(my_callback, Cdouble, (Ptr{Cdouble}, Csize_t, Ptr{Cvoid},)
 
 # Metadata
 - Mangled symbol: `line_search_backtracking`
-- Type safety:  From compilation
 """
 
-function line_search_backtracking(objective::Ptr{Cvoid}, x::Ptr{Cdouble}, direction::Ptr{Cdouble}, x_new::Ptr{Cdouble}, n::Csize_t, initial_step::Cdouble, user_data::Ptr{Cvoid})::Cdouble
+function line_search_backtracking(objective::Any, x::Any, direction::Any, x_new::Any, n::Csize_t, initial_step::Cdouble, user_data::Any)::Cdouble
     ccall((:line_search_backtracking, LIBRARY_PATH), Cdouble, (Ptr{Cvoid}, Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Cdouble, Ptr{Cvoid},), objective, x, direction, x_new, n, initial_step, user_data)
 end
 
@@ -861,7 +990,7 @@ function line_search_backtracking(objective::Ptr{Cvoid}, x::Vector{Float64}, dir
 end
 
 """
-    matrix_add(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix}) -> DenseMatrix
+    matrix_add(A::Any, B::Any) -> DenseMatrix
 
 Wrapper for C++ function: `matrix_add`
 
@@ -874,15 +1003,15 @@ Wrapper for C++ function: `matrix_add`
 
 # Metadata
 - Mangled symbol: `matrix_add`
-- Type safety:  From compilation
 """
 
-function matrix_add(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix})
+function matrix_add(A::Any, B::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("matrix_add", A, B)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_matrix_add_thunk", A, B)
 end
 """
-    matrix_determinant(A::Ptr{DenseMatrix}) -> Cdouble
+    matrix_determinant(A::Any) -> Cdouble
 
 Wrapper for C++ function: `matrix_determinant`
 
@@ -894,10 +1023,9 @@ Wrapper for C++ function: `matrix_determinant`
 
 # Metadata
 - Mangled symbol: `matrix_determinant`
-- Type safety:  From compilation
 """
 
-function matrix_determinant(A::Ptr{DenseMatrix})::Cdouble
+function matrix_determinant(A::Any)::Cdouble
     ccall((:matrix_determinant, LIBRARY_PATH), Cdouble, (Ptr{DenseMatrix},), A)
 end
 
@@ -907,7 +1035,7 @@ function matrix_determinant(A::DenseMatrix)::Cdouble
 end
 
 """
-    matrix_multiply(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix}) -> DenseMatrix
+    matrix_multiply(A::Any, B::Any) -> DenseMatrix
 
 Wrapper for C++ function: `matrix_multiply`
 
@@ -920,15 +1048,15 @@ Wrapper for C++ function: `matrix_multiply`
 
 # Metadata
 - Mangled symbol: `matrix_multiply`
-- Type safety:  From compilation
 """
 
-function matrix_multiply(A::Ptr{DenseMatrix}, B::Ptr{DenseMatrix})
+function matrix_multiply(A::Any, B::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("matrix_multiply", A, B)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_matrix_multiply_thunk", A, B)
 end
 """
-    matrix_trace(A::Ptr{DenseMatrix}) -> Cdouble
+    matrix_trace(A::Any) -> Cdouble
 
 Wrapper for C++ function: `matrix_trace`
 
@@ -940,10 +1068,9 @@ Wrapper for C++ function: `matrix_trace`
 
 # Metadata
 - Mangled symbol: `matrix_trace`
-- Type safety:  From compilation
 """
 
-function matrix_trace(A::Ptr{DenseMatrix})::Cdouble
+function matrix_trace(A::Any)::Cdouble
     ccall((:matrix_trace, LIBRARY_PATH), Cdouble, (Ptr{DenseMatrix},), A)
 end
 
@@ -953,7 +1080,7 @@ function matrix_trace(A::DenseMatrix)::Cdouble
 end
 
 """
-    matrix_transpose(A::Ptr{DenseMatrix}) -> DenseMatrix
+    matrix_transpose(A::Any) -> DenseMatrix
 
 Wrapper for C++ function: `matrix_transpose`
 
@@ -965,15 +1092,15 @@ Wrapper for C++ function: `matrix_transpose`
 
 # Metadata
 - Mangled symbol: `matrix_transpose`
-- Type safety:  From compilation
 """
 
-function matrix_transpose(A::Ptr{DenseMatrix})
+function matrix_transpose(A::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("matrix_transpose", A)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_matrix_transpose_thunk", A)
 end
 """
-    matrix_vector_mult(A::Ptr{DenseMatrix}, x::Ptr{Cdouble}, y::Ptr{Cdouble}) -> Cvoid
+    matrix_vector_mult(A::Any, x::Any, y::Any) -> Cvoid
 
 Wrapper for C++ function: `matrix_vector_mult`
 
@@ -987,10 +1114,9 @@ Wrapper for C++ function: `matrix_vector_mult`
 
 # Metadata
 - Mangled symbol: `matrix_vector_mult`
-- Type safety:  From compilation
 """
 
-function matrix_vector_mult(A::Ptr{DenseMatrix}, x::Ptr{Cdouble}, y::Ptr{Cdouble})::Cvoid
+function matrix_vector_mult(A::Any, x::Any, y::Any)::Cvoid
     ccall((:matrix_vector_mult, LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix}, Ptr{Cdouble}, Ptr{Cdouble},), A, x, y)
 end
 
@@ -1002,7 +1128,7 @@ function matrix_vector_mult(A::DenseMatrix, x::Vector{Float64}, y::Vector{Float6
 end
 
 """
-    matrix_vector_mult_add(A::Ptr{DenseMatrix}, x::Ptr{Cdouble}, y::Ptr{Cdouble}, alpha::Cdouble, beta::Cdouble) -> Cvoid
+    matrix_vector_mult_add(A::Any, x::Any, y::Any, alpha::Cdouble, beta::Cdouble) -> Cvoid
 
 Wrapper for C++ function: `matrix_vector_mult_add`
 
@@ -1018,10 +1144,9 @@ Wrapper for C++ function: `matrix_vector_mult_add`
 
 # Metadata
 - Mangled symbol: `matrix_vector_mult_add`
-- Type safety:  From compilation
 """
 
-function matrix_vector_mult_add(A::Ptr{DenseMatrix}, x::Ptr{Cdouble}, y::Ptr{Cdouble}, alpha::Cdouble, beta::Cdouble)::Cvoid
+function matrix_vector_mult_add(A::Any, x::Any, y::Any, alpha::Cdouble, beta::Cdouble)::Cvoid
     ccall((:matrix_vector_mult_add, LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix}, Ptr{Cdouble}, Ptr{Cdouble}, Cdouble, Cdouble,), A, x, y, alpha, beta)
 end
 
@@ -1033,7 +1158,7 @@ function matrix_vector_mult_add(A::DenseMatrix, x::Vector{Float64}, y::Vector{Fl
 end
 
 """
-    ode_result_destroy(result::Ptr{ODEResult}) -> Cvoid
+    ode_result_destroy(result::Any) -> Cvoid
 
 Wrapper for C++ function: `ode_result_destroy`
 
@@ -1045,15 +1170,15 @@ Wrapper for C++ function: `ode_result_destroy`
 
 # Metadata
 - Mangled symbol: `ode_result_destroy`
-- Type safety:  From compilation
 """
 
-function ode_result_destroy(result::Ptr{ODEResult})
+function ode_result_destroy(result::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("ode_result_destroy", result)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_ode_result_destroy_thunk", result)
 end
 """
-    optimize_minimize(objective::Ptr{Cvoid}, gradient::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid}) -> Any
+    optimize_minimize(objective::Any, gradient::Any, x::Any, n::Csize_t, options::Any, final_state::Any, callback::Any, user_data::Any) -> Any
 
 Wrapper for C++ function: `optimize_minimize`
 
@@ -1088,15 +1213,15 @@ callback = @cfunction(my_callback, Bool, (Ptr{OptimizationState}, Ptr{Cvoid},)) 
 
 # Metadata
 - Mangled symbol: `optimize_minimize`
-- Type safety:  From compilation
 """
 
-function optimize_minimize(objective::Ptr{Cvoid}, gradient::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})
+function optimize_minimize(objective::Any, gradient::Any, x::Any, n::Csize_t, options::Any, final_state::Any, callback::Any, user_data::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("optimize_minimize", objective, gradient, x, n, options, final_state, callback, user_data)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_optimize_minimize_thunk", objective, gradient, x, n, options, final_state, callback, user_data)
 end
 """
-    optimize_minimize_numerical_gradient(objective::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid}) -> Any
+    optimize_minimize_numerical_gradient(objective::Any, x::Any, n::Csize_t, options::Any, final_state::Any, callback::Any, user_data::Any) -> Any
 
 Wrapper for C++ function: `optimize_minimize_numerical_gradient`
 
@@ -1125,15 +1250,15 @@ callback = @cfunction(my_callback, Bool, (Ptr{OptimizationState}, Ptr{Cvoid},)) 
 
 # Metadata
 - Mangled symbol: `optimize_minimize_numerical_gradient`
-- Type safety:  From compilation
 """
 
-function optimize_minimize_numerical_gradient(objective::Ptr{Cvoid}, x::Ptr{Cdouble}, n::Csize_t, options::Ptr{OptimizationOptions}, final_state::Ptr{OptimizationState}, callback::Ptr{Cvoid}, user_data::Ptr{Cvoid})
+function optimize_minimize_numerical_gradient(objective::Any, x::Any, n::Csize_t, options::Any, final_state::Any, callback::Any, user_data::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("optimize_minimize_numerical_gradient", objective, x, n, options, final_state, callback, user_data)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_optimize_minimize_numerical_gradient_thunk", objective, x, n, options, final_state, callback, user_data)
 end
 """
-    polynomial_destroy(poly::Ptr{Polynomial}) -> Cvoid
+    polynomial_destroy(poly::Any) -> Cvoid
 
 Wrapper for C++ function: `polynomial_destroy`
 
@@ -1145,15 +1270,14 @@ Wrapper for C++ function: `polynomial_destroy`
 
 # Metadata
 - Mangled symbol: `polynomial_destroy`
-- Type safety:  From compilation
 """
 
-function polynomial_destroy(poly::Ptr{Polynomial})::Cvoid
+function polynomial_destroy(poly::Any)::Cvoid
     ccall((:polynomial_destroy, LIBRARY_PATH), Cvoid, (Ptr{Polynomial},), poly)
 end
 
 """
-    polynomial_eval(poly::Ptr{Polynomial}, x::Cdouble) -> Cdouble
+    polynomial_eval(poly::Any, x::Cdouble) -> Cdouble
 
 Wrapper for C++ function: `polynomial_eval`
 
@@ -1166,15 +1290,14 @@ Wrapper for C++ function: `polynomial_eval`
 
 # Metadata
 - Mangled symbol: `polynomial_eval`
-- Type safety:  From compilation
 """
 
-function polynomial_eval(poly::Ptr{Polynomial}, x::Cdouble)::Cdouble
+function polynomial_eval(poly::Any, x::Cdouble)::Cdouble
     ccall((:polynomial_eval, LIBRARY_PATH), Cdouble, (Ptr{Polynomial}, Cdouble,), poly, x)
 end
 
 """
-    polynomial_fit(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t, degree::Csize_t) -> Polynomial
+    polynomial_fit(x::Any, y::Any, n::Csize_t, degree::Csize_t) -> Polynomial
 
 Wrapper for C++ function: `polynomial_fit`
 
@@ -1189,10 +1312,9 @@ Wrapper for C++ function: `polynomial_fit`
 
 # Metadata
 - Mangled symbol: `polynomial_fit`
-- Type safety:  From compilation
 """
 
-function polynomial_fit(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t, degree::Csize_t)::Polynomial
+function polynomial_fit(x::Any, y::Any, n::Csize_t, degree::Csize_t)::Polynomial
     ccall((:polynomial_fit, LIBRARY_PATH), Polynomial, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Csize_t,), x, y, n, degree)
 end
 
@@ -1204,7 +1326,7 @@ function polynomial_fit(x::Vector{Float64}, y::Vector{Float64}, n::Csize_t, degr
 end
 
 """
-    print_matrix(mat::Ptr{DenseMatrix}) -> Cvoid
+    print_matrix(mat::Any) -> Cvoid
 
 Wrapper for C++ function: `print_matrix`
 
@@ -1216,10 +1338,9 @@ Wrapper for C++ function: `print_matrix`
 
 # Metadata
 - Mangled symbol: `print_matrix`
-- Type safety:  From compilation
 """
 
-function print_matrix(mat::Ptr{DenseMatrix})::Cvoid
+function print_matrix(mat::Any)::Cvoid
     ccall((:print_matrix, LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix},), mat)
 end
 
@@ -1229,7 +1350,7 @@ function print_matrix(mat::DenseMatrix)::Cvoid
 end
 
 """
-    print_vector(vec::Ptr{Cdouble}, n::Csize_t) -> Cvoid
+    print_vector(vec::Any, n::Csize_t) -> Cvoid
 
 Wrapper for C++ function: `print_vector`
 
@@ -1242,10 +1363,9 @@ Wrapper for C++ function: `print_vector`
 
 # Metadata
 - Mangled symbol: `print_vector`
-- Type safety:  From compilation
 """
 
-function print_vector(vec::Ptr{Cdouble}, n::Csize_t)::Cvoid
+function print_vector(vec::Any, n::Csize_t)::Cvoid
     ccall((:print_vector, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Csize_t,), vec, n)
 end
 
@@ -1269,7 +1389,6 @@ Wrapper for C++ function: `set_random_seed`
 
 # Metadata
 - Mangled symbol: `set_random_seed`
-- Type safety:  From compilation
 """
 
 function set_random_seed(seed::UInt64)::Cvoid
@@ -1277,7 +1396,7 @@ function set_random_seed(seed::UInt64)::Cvoid
 end
 
 """
-    solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, max_iterations::Int32, user_data::Ptr{Cvoid}) -> Any
+    solve_conjugate_gradient(matvec::Any, b::Any, x::Any, n::Csize_t, tolerance::Cdouble, max_iterations::Int32, user_data::Any) -> Any
 
 Wrapper for C++ function: `solve_conjugate_gradient`
 
@@ -1301,10 +1420,9 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 
 # Metadata
 - Mangled symbol: `solve_conjugate_gradient`
-- Type safety:  From compilation
 """
 
-function solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, max_iterations::Int32, user_data::Ptr{Cvoid})::Status
+function solve_conjugate_gradient(matvec::Any, b::Any, x::Any, n::Csize_t, tolerance::Cdouble, max_iterations::Int32, user_data::Any)::Status
     return ccall((:solve_conjugate_gradient, LIBRARY_PATH), Status, (Ptr{Cvoid}, Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, Cdouble, Int32, Ptr{Cvoid},), matvec, b, x, n, tolerance, max_iterations, user_data)
 end
 
@@ -1316,7 +1434,7 @@ function solve_conjugate_gradient(matvec::Ptr{Cvoid}, b::Ptr{Cdouble}, x::Vector
 end
 
 """
-    solve_least_squares(A::Ptr{DenseMatrix}, b::Ptr{Cdouble}, x::Ptr{Cdouble}) -> Any
+    solve_least_squares(A::Any, b::Any, x::Any) -> Any
 
 Wrapper for C++ function: `solve_least_squares`
 
@@ -1330,10 +1448,9 @@ Wrapper for C++ function: `solve_least_squares`
 
 # Metadata
 - Mangled symbol: `solve_least_squares`
-- Type safety:  From compilation
 """
 
-function solve_least_squares(A::Ptr{DenseMatrix}, b::Ptr{Cdouble}, x::Ptr{Cdouble})::Status
+function solve_least_squares(A::Any, b::Any, x::Any)::Status
     return ccall((:solve_least_squares, LIBRARY_PATH), Status, (Ptr{DenseMatrix}, Ptr{Cdouble}, Ptr{Cdouble},), A, b, x)
 end
 
@@ -1345,7 +1462,7 @@ function solve_least_squares(A::DenseMatrix, b::Ptr{Cdouble}, x::Vector{Float64}
 end
 
 """
-    solve_linear_system_lu(lu::Ptr{LUDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t) -> Any
+    solve_linear_system_lu(lu::Any, b::Any, x::Any, n::Csize_t) -> Any
 
 Wrapper for C++ function: `solve_linear_system_lu`
 
@@ -1360,15 +1477,15 @@ Wrapper for C++ function: `solve_linear_system_lu`
 
 # Metadata
 - Mangled symbol: `solve_linear_system_lu`
-- Type safety:  From compilation
 """
 
-function solve_linear_system_lu(lu::Ptr{LUDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble}, n::Csize_t)
+function solve_linear_system_lu(lu::Any, b::Any, x::Any, n::Csize_t)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("solve_linear_system_lu", lu, b, x, n)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_solve_linear_system_lu_thunk", lu, b, x, n)
 end
 """
-    solve_linear_system_qr(qr::Ptr{QRDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble}) -> Any
+    solve_linear_system_qr(qr::Any, b::Any, x::Any) -> Any
 
 Wrapper for C++ function: `solve_linear_system_qr`
 
@@ -1382,15 +1499,15 @@ Wrapper for C++ function: `solve_linear_system_qr`
 
 # Metadata
 - Mangled symbol: `solve_linear_system_qr`
-- Type safety:  From compilation
 """
 
-function solve_linear_system_qr(qr::Ptr{QRDecomposition}, b::Ptr{Cdouble}, x::Ptr{Cdouble})
+function solve_linear_system_qr(qr::Any, b::Any, x::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("solve_linear_system_qr", qr, b, x)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_solve_linear_system_qr_thunk", qr, b, x)
 end
 """
-    solve_ode_adaptive(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, event_func::Ptr{Cvoid}, user_data::Ptr{Cvoid}) -> ODEResult
+    solve_ode_adaptive(ode_func::Any, t0::Cdouble, t_final::Cdouble, y0::Any, n::Csize_t, tolerance::Cdouble, event_func::Any, user_data::Any) -> ODEResult
 
 Wrapper for C++ function: `solve_ode_adaptive`
 
@@ -1420,15 +1537,15 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 
 # Metadata
 - Mangled symbol: `solve_ode_adaptive`
-- Type safety:  From compilation
 """
 
-function solve_ode_adaptive(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, tolerance::Cdouble, event_func::Ptr{Cvoid}, user_data::Ptr{Cvoid})
+function solve_ode_adaptive(ode_func::Any, t0::Cdouble, t_final::Cdouble, y0::Any, n::Csize_t, tolerance::Cdouble, event_func::Any, user_data::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("solve_ode_adaptive", ode_func, t0, t_final, y0, n, tolerance, event_func, user_data)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_solve_ode_adaptive_thunk", ode_func, t0, t_final, y0, n, tolerance, event_func, user_data)
 end
 """
-    solve_ode_rk4(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, dt::Cdouble, user_data::Ptr{Cvoid}) -> ODEResult
+    solve_ode_rk4(ode_func::Any, t0::Cdouble, t_final::Cdouble, y0::Any, n::Csize_t, dt::Cdouble, user_data::Any) -> ODEResult
 
 Wrapper for C++ function: `solve_ode_rk4`
 
@@ -1452,12 +1569,12 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 
 # Metadata
 - Mangled symbol: `solve_ode_rk4`
-- Type safety:  From compilation
 """
 
-function solve_ode_rk4(ode_func::Ptr{Cvoid}, t0::Cdouble, t_final::Cdouble, y0::Ptr{Cdouble}, n::Csize_t, dt::Cdouble, user_data::Ptr{Cvoid})
+function solve_ode_rk4(ode_func::Any, t0::Cdouble, t_final::Cdouble, y0::Any, n::Csize_t, dt::Cdouble, user_data::Any)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("solve_ode_rk4", ode_func, t0, t_final, y0, n, dt, user_data)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_solve_ode_rk4_thunk", ode_func, t0, t_final, y0, n, dt, user_data)
 end
 """
     sparse_matrix_create(rows::Csize_t, cols::Csize_t, nnz::Csize_t) -> SparseMatrix
@@ -1474,15 +1591,15 @@ Wrapper for C++ function: `sparse_matrix_create`
 
 # Metadata
 - Mangled symbol: `sparse_matrix_create`
-- Type safety:  From compilation
 """
 
 function sparse_matrix_create(rows::Csize_t, cols::Csize_t, nnz::Csize_t)
     # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-    return RepliBuild.JITManager.invoke("sparse_matrix_create", rows, cols, nnz)
+    # Call the C-interface wrapper generated by llvm.emit_c_interface
+    return RepliBuild.JITManager.invoke("_mlir_ciface_sparse_matrix_create_thunk", rows, cols, nnz)
 end
 """
-    sparse_matrix_destroy(mat::Ptr{SparseMatrix}) -> Cvoid
+    sparse_matrix_destroy(mat::Any) -> Cvoid
 
 Wrapper for C++ function: `sparse_matrix_destroy`
 
@@ -1494,10 +1611,9 @@ Wrapper for C++ function: `sparse_matrix_destroy`
 
 # Metadata
 - Mangled symbol: `sparse_matrix_destroy`
-- Type safety:  From compilation
 """
 
-function sparse_matrix_destroy(mat::Ptr{SparseMatrix})::Cvoid
+function sparse_matrix_destroy(mat::Any)::Cvoid
     ccall((:sparse_matrix_destroy, LIBRARY_PATH), Cvoid, (Ptr{SparseMatrix},), mat)
 end
 
@@ -1507,7 +1623,7 @@ function sparse_matrix_destroy(mat::SparseMatrix)::Cvoid
 end
 
 """
-    spline_destroy(spline::Ptr{SplineInterpolation}) -> Cvoid
+    spline_destroy(spline::Any) -> Cvoid
 
 Wrapper for C++ function: `spline_destroy`
 
@@ -1519,15 +1635,14 @@ Wrapper for C++ function: `spline_destroy`
 
 # Metadata
 - Mangled symbol: `spline_destroy`
-- Type safety:  From compilation
 """
 
-function spline_destroy(spline::Ptr{SplineInterpolation})::Cvoid
+function spline_destroy(spline::Any)::Cvoid
     ccall((:spline_destroy, LIBRARY_PATH), Cvoid, (Ptr{SplineInterpolation},), spline)
 end
 
 """
-    spline_eval(spline::Ptr{SplineInterpolation}, x::Cdouble) -> Cdouble
+    spline_eval(spline::Any, x::Cdouble) -> Cdouble
 
 Wrapper for C++ function: `spline_eval`
 
@@ -1540,10 +1655,9 @@ Wrapper for C++ function: `spline_eval`
 
 # Metadata
 - Mangled symbol: `spline_eval`
-- Type safety:  From compilation
 """
 
-function spline_eval(spline::Ptr{SplineInterpolation}, x::Cdouble)::Cdouble
+function spline_eval(spline::Any, x::Cdouble)::Cdouble
     ccall((:spline_eval, LIBRARY_PATH), Cdouble, (Ptr{SplineInterpolation}, Cdouble,), spline, x)
 end
 
@@ -1560,7 +1674,6 @@ Wrapper for C++ function: `status_to_string`
 
 # Metadata
 - Mangled symbol: `status_to_string`
-- Type safety:  From compilation
 """
 
 function status_to_string(status::Status)::String
@@ -1572,7 +1685,7 @@ function status_to_string(status::Status)::String
 end
 
 """
-    vector_axpy(y::Ptr{Cdouble}, alpha::Cdouble, x::Ptr{Cdouble}, n::Csize_t) -> Cvoid
+    vector_axpy(y::Any, alpha::Cdouble, x::Any, n::Csize_t) -> Cvoid
 
 Wrapper for C++ function: `vector_axpy`
 
@@ -1587,10 +1700,9 @@ Wrapper for C++ function: `vector_axpy`
 
 # Metadata
 - Mangled symbol: `vector_axpy`
-- Type safety:  From compilation
 """
 
-function vector_axpy(y::Ptr{Cdouble}, alpha::Cdouble, x::Ptr{Cdouble}, n::Csize_t)::Cvoid
+function vector_axpy(y::Any, alpha::Cdouble, x::Any, n::Csize_t)::Cvoid
     ccall((:vector_axpy, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Cdouble, Ptr{Cdouble}, Csize_t,), y, alpha, x, n)
 end
 
@@ -1602,7 +1714,7 @@ function vector_axpy(y::Vector{Float64}, alpha::Cdouble, x::Vector{Float64}, n::
 end
 
 """
-    vector_copy(dest::Ptr{Cdouble}, src::Ptr{Cdouble}, n::Csize_t) -> Cvoid
+    vector_copy(dest::Any, src::Any, n::Csize_t) -> Cvoid
 
 Wrapper for C++ function: `vector_copy`
 
@@ -1616,10 +1728,9 @@ Wrapper for C++ function: `vector_copy`
 
 # Metadata
 - Mangled symbol: `vector_copy`
-- Type safety:  From compilation
 """
 
-function vector_copy(dest::Ptr{Cdouble}, src::Ptr{Cdouble}, n::Csize_t)::Cvoid
+function vector_copy(dest::Any, src::Any, n::Csize_t)::Cvoid
     ccall((:vector_copy, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t,), dest, src, n)
 end
 
@@ -1631,7 +1742,7 @@ function vector_copy(dest::Ptr{Cdouble}, src::Vector{Float64}, n::Csize_t)::Cvoi
 end
 
 """
-    vector_dot(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t) -> Cdouble
+    vector_dot(x::Any, y::Any, n::Csize_t) -> Cdouble
 
 Wrapper for C++ function: `vector_dot`
 
@@ -1645,10 +1756,9 @@ Wrapper for C++ function: `vector_dot`
 
 # Metadata
 - Mangled symbol: `vector_dot`
-- Type safety:  From compilation
 """
 
-function vector_dot(x::Ptr{Cdouble}, y::Ptr{Cdouble}, n::Csize_t)::Cdouble
+function vector_dot(x::Any, y::Any, n::Csize_t)::Cdouble
     ccall((:vector_dot, LIBRARY_PATH), Cdouble, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t,), x, y, n)
 end
 
@@ -1660,7 +1770,7 @@ function vector_dot(x::Vector{Float64}, y::Vector{Float64}, n::Csize_t)::Cdouble
 end
 
 """
-    vector_norm(x::Ptr{Cdouble}, n::Csize_t) -> Cdouble
+    vector_norm(x::Any, n::Csize_t) -> Cdouble
 
 Wrapper for C++ function: `vector_norm`
 
@@ -1673,10 +1783,9 @@ Wrapper for C++ function: `vector_norm`
 
 # Metadata
 - Mangled symbol: `vector_norm`
-- Type safety:  From compilation
 """
 
-function vector_norm(x::Ptr{Cdouble}, n::Csize_t)::Cdouble
+function vector_norm(x::Any, n::Csize_t)::Cdouble
     ccall((:vector_norm, LIBRARY_PATH), Cdouble, (Ptr{Cdouble}, Csize_t,), x, n)
 end
 
@@ -1688,7 +1797,7 @@ function vector_norm(x::Vector{Float64}, n::Csize_t)::Cdouble
 end
 
 """
-    vector_scale(x::Ptr{Cdouble}, alpha::Cdouble, n::Csize_t) -> Cvoid
+    vector_scale(x::Any, alpha::Cdouble, n::Csize_t) -> Cvoid
 
 Wrapper for C++ function: `vector_scale`
 
@@ -1702,10 +1811,9 @@ Wrapper for C++ function: `vector_scale`
 
 # Metadata
 - Mangled symbol: `vector_scale`
-- Type safety:  From compilation
 """
 
-function vector_scale(x::Ptr{Cdouble}, alpha::Cdouble, n::Csize_t)::Cvoid
+function vector_scale(x::Any, alpha::Cdouble, n::Csize_t)::Cvoid
     ccall((:vector_scale, LIBRARY_PATH), Cvoid, (Ptr{Cdouble}, Cdouble, Csize_t,), x, alpha, n)
 end
 

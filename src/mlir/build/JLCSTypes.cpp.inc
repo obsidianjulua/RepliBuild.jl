@@ -49,8 +49,8 @@ t.print(printer);
 
 namespace mlir {
 namespace jlcs {
-CStructType CStructType::get(::mlir::MLIRContext *context, StringAttr juliaTypeName, ::llvm::ArrayRef<Type> fieldTypes, ArrayAttr fieldOffsets) {
-  return Base::get(context, std::move(juliaTypeName), std::move(fieldTypes), std::move(fieldOffsets));
+CStructType CStructType::get(::mlir::MLIRContext *context, StringAttr juliaTypeName, ::llvm::ArrayRef<Type> fieldTypes, ArrayAttr fieldOffsets, bool isPacked) {
+  return Base::get(context, std::move(juliaTypeName), std::move(fieldTypes), std::move(fieldOffsets), std::move(isPacked));
 }
 
 ::mlir::Type CStructType::parse(::mlir::AsmParser &odsParser) {
@@ -60,6 +60,7 @@ CStructType CStructType::get(::mlir::MLIRContext *context, StringAttr juliaTypeN
   ::mlir::FailureOr<StringAttr> _result_juliaTypeName;
   ::mlir::FailureOr<::llvm::SmallVector<Type>> _result_fieldTypes;
   ::mlir::FailureOr<ArrayAttr> _result_fieldOffsets;
+  ::mlir::FailureOr<bool> _result_isPacked;
   // Parse literal '<'
   if (odsParser.parseLess()) return {};
 
@@ -95,15 +96,30 @@ CStructType CStructType::get(::mlir::MLIRContext *context, StringAttr juliaTypeN
   }
   // Parse literal ']'
   if (odsParser.parseRSquare()) return {};
+  // Parse literal ','
+  if (odsParser.parseComma()) return {};
+  // Parse literal 'packed'
+  if (odsParser.parseKeyword("packed")) return {};
+  // Parse literal '='
+  if (odsParser.parseEqual()) return {};
+
+  // Parse variable 'isPacked'
+  _result_isPacked = ::mlir::FieldParser<bool>::parse(odsParser);
+  if (::mlir::failed(_result_isPacked)) {
+    odsParser.emitError(odsParser.getCurrentLocation(), "failed to parse CStructType parameter 'isPacked' which is to be a `bool`");
+    return {};
+  }
   // Parse literal '>'
   if (odsParser.parseGreater()) return {};
   assert(::mlir::succeeded(_result_juliaTypeName));
   assert(::mlir::succeeded(_result_fieldTypes));
   assert(::mlir::succeeded(_result_fieldOffsets));
+  assert(::mlir::succeeded(_result_isPacked));
   return CStructType::get(odsParser.getContext(),
       StringAttr((*_result_juliaTypeName)),
       ::llvm::ArrayRef<Type>((*_result_fieldTypes)),
-      ArrayAttr((*_result_fieldOffsets)));
+      ArrayAttr((*_result_fieldOffsets)),
+      bool((*_result_isPacked)));
 }
 
 void CStructType::print(::mlir::AsmPrinter &odsPrinter) const {
@@ -118,6 +134,11 @@ void CStructType::print(::mlir::AsmPrinter &odsPrinter) const {
   odsPrinter << ' ' << "[";
   odsPrinter.printStrippedAttrOrType(getFieldOffsets());
   odsPrinter << "]";
+  odsPrinter << ",";
+  odsPrinter << ' ' << "packed";
+  odsPrinter << ' ' << "=";
+  odsPrinter << ' ';
+  odsPrinter.printStrippedAttrOrType(getIsPacked());
   odsPrinter << ">";
 }
 

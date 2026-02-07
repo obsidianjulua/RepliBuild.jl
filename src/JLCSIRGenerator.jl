@@ -19,6 +19,45 @@ using .FunctionGen
 export generate_jlcs_ir, generate_mlir_module
 
 """
+    map_cpp_type_to_mlir(cpp_type::String) -> String
+
+Map C++ DWARF type names to MLIR types.
+"""
+function map_cpp_type_to_mlir(cpp_type::String)
+    t = strip(cpp_type)
+    
+    if endswith(t, "*") || endswith(t, "&") || contains(t, "(*)")
+        return "!llvm.ptr"
+    end
+    
+    if t == "double"
+        return "f64"
+    elseif t == "float"
+        return "f32"
+    elseif t == "int" || t == "unsigned int" || t == "int32_t" || t == "uint32_t"
+        return "i32"
+    elseif t == "short" || t == "unsigned short" || t == "int16_t" || t == "uint16_t"
+        return "i16"
+    elseif t == "char" || t == "unsigned char" || t == "int8_t" || t == "uint8_t" || t == "bool"
+        return "i8"
+    elseif t == "long" || t == "unsigned long" || t == "long long" || t == "unsigned long long" || t == "int64_t" || t == "uint64_t" || t == "size_t"
+        return "i64"
+    elseif t == "void"
+        return "none" # Should handle carefully
+    end
+    
+    # Fallback for unknown structs/classes
+    # Ideally we would map them to their own named type, but for now pointer or opaque.
+    # If it's a value type member, we might want to assume it's a struct and handle it.
+    # But DWARF parser might not give us full nested info easily yet.
+    # Let's fallback to i8 array of correct size? No, that's hard.
+    # Let's fallback to !llvm.ptr if we can't determine.
+    # Actually, for members, if it is a struct by value, we need to know.
+    # For now, let's assume primitives or pointers.
+    return "!llvm.ptr" 
+end
+
+"""
     generate_type_info_ir(class_name::String, info::ClassInfo, vtable_addr::UInt64) -> String
 
 Generate JLCS type_info operation for a class.
@@ -37,12 +76,44 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
         mlir_name = "anonymous_type_$(hash(class_name))"
     end
 
+    # Build field types and offsets lists
+    field_types = String[]
+    field_offsets = Int[]
+    
+    # 1. Add vtable pointer if present (usually at offset 0)
+    # We check if info.vtable_ptr_offset is valid (e.g. 0).
+    # Some classes might not have vtable.
+    has_vptr = !isempty(info.virtual_methods)
+    
+    # We need to sort members by offset to ensure correct order?
+    # !jlcs.c_struct takes lists, so order matters for the list, but offsets are explicit.
+    # However, for readability, sorting is good.
+    sorted_members = sort(info.members, by = m -> m.offset)
+    
+    # Explicitly add members
+    for m in sorted_members
+        push!(field_types, map_cpp_type_to_mlir(m.type_name))
+        push!(field_offsets, m.offset)
+    end
+    
+    # If we have a vptr but no member covering it (usually implicit), we should probably add it?
+    # DWARF usually exposes vptr as a member like "_vptr$Shape" or similar.
+    # Our DWARFParser handles it.
+    # If not found in members, and we expect one...
+    # Let's rely on what DWARFParser gives us.
+
+    field_types_str = join(field_types, ", ")
+    field_offsets_str = join(field_offsets, ", ")
+    
+    # Supertype
+    super_type = isempty(info.base_classes) ? "" : info.base_classes[1]
+    
+    # Construct the CStruct type string
+    # !jlcs.c_struct<"Name", [T1, T2], [O1, O2], packed=false>
+    struct_type_str = "!jlcs.c_struct<\"$(class_name)\", [$(field_types_str)], [$(field_offsets_str)], packed=false>"
+
     ir = """
-  jlcs.type_info @"$(mlir_name)" {
-    size = $(info.size) : i64,
-    vtable_offset = $(info.vtable_ptr_offset) : i64,
-    vtable_addr = $(vtable_addr) : i64
-  }"""
+  jlcs.type_info "$(mlir_name)", $(struct_type_str), "$(super_type)" """
 
     return ir
 end
@@ -92,11 +163,19 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict())
     println(io, "// Universal FFI via MLIR Dialects")
     println(io, "")
 
-    println(io, "module {")
-
-    # 1. Generate Struct Definitions (Registration)
+    # 1. Generate Struct Definitions (Aliases & Registration)
     if haskey(metadata, "struct_definitions")
-        println(io, generate_struct_definitions(metadata["struct_definitions"]))
+        (aliases_ir, regs_ir) = generate_struct_definitions(metadata["struct_definitions"])
+        println(io, aliases_ir)
+        println(io, "")
+    else
+        regs_ir = ""
+    end
+
+    println(io, "module {")
+    
+    if !isempty(regs_ir)
+        println(io, regs_ir)
     end
 
     # 2. External Dispatch Declarations (Virtual Methods)
@@ -121,7 +200,10 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict())
     for (class_name, class_info) in vtinfo.classes
         if class_info.size == 0; continue; end
 
+        # vtable_addr might be useful metadata, but TypeInfoOp doesn't store it in the new format.
+        # We could add it as an attribute if needed.
         vtable_addr = get(vtinfo.vtable_addresses, class_name, UInt64(0))
+        
         println(io, generate_type_info_ir(class_name, class_info, vtable_addr))
         println(io, "")
 

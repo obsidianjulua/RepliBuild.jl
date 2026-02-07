@@ -1445,6 +1445,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool)
 
+    # Track exported symbols
+    exports = String[]
+
     # Header with metadata
     header = """
     # Auto-generated Julia wrapper for $(config.project.name)
@@ -1457,6 +1460,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     
     using Libdl
     import RepliBuild
+    import Base: unsafe_convert
 
     const LIBRARY_PATH = \"$(abspath(lib_path))\"
 
@@ -1896,8 +1900,61 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         struct_definitions *= "\n"
     end
 
+    # =============================================================================
+    # GLOBAL VARIABLES GENERATION
+    # =============================================================================
+    
+    global_vars = get(metadata, "globals", Dict())
+    global_var_defs = ""
+    
+    if !isempty(global_vars)
+        global_var_defs *= """
+        # =============================================================================
+        # Global Variables
+        # =============================================================================
+
+        """
+        
+        for (var_name, var_info) in global_vars
+            julia_type = get(var_info, "julia_type", "Any")
+            # Sanitize name
+            safe_name = make_julia_identifier(var_name)
+            
+            # 1. Accessor for the value (read-only)
+            # Only for simple types or pointers, struct values might be tricky
+            # We use unsafe_load on the pointer
+            
+            global_var_defs *= """
+            \"""
+                $safe_name()
+
+            Get value of global variable `$var_name`.
+            \"""
+            function $safe_name()::$julia_type
+                ptr = cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+                return unsafe_load(ptr)
+            end
+
+            \"""
+                $(safe_name)_ptr()
+
+            Get pointer to global variable `$var_name`.
+            \"""
+            function $(safe_name)_ptr()::Ptr{$julia_type}
+                return cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+            end
+
+            """
+            
+            push!(exports, safe_name)
+            push!(exports, "$(safe_name)_ptr")
+        end
+        
+        global_var_defs *= "\n"
+    end
+
     # Function wrappers
-    function_wrappers = ""
+    function_wrappers = global_var_defs
 
     # =============================================================================
     # AUTOMATIC FINALIZER GENERATION (Memory Safety)
@@ -1975,7 +2032,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             end
 
             # Allow passing Managed object to ccall expecting Ptr
-            Base.unsafe_convert(::Type{Ptr{$safe_s_name}}, obj::$managed_name) = obj.handle
+            unsafe_convert(::Type{Ptr{$safe_s_name}}, obj::$managed_name) = obj.handle
             
             export $managed_name
 
@@ -1986,7 +2043,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     end
 
     # Track exported function names
-    exports = String[]
+    # exports already initialized at top
+
 
     for func in functions
         func_name = func["name"]
@@ -2005,6 +2063,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         return_type = copy(func["return_type"])
         
         is_method = get(func, "is_method", false)
+        is_vararg = get(func, "is_vararg", false)
         class_name = get(func, "class", "")
 
         # Skip constructors for now (need special handling/factory functions)
@@ -2126,7 +2185,15 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         julia_name = replace(julia_name, "/" => "div")
 
         # Build function signature using ergonomic Julia types
-        param_sig = join(["$(name)::$(typ)" for (name, typ) in zip(param_names, julia_param_types)], ", ")
+        param_sig_parts = String[]
+        for (name, typ) in zip(param_names, julia_param_types)
+            if name == "varargs..."
+                push!(param_sig_parts, name)
+            else
+                push!(param_sig_parts, "$name::$typ")
+            end
+        end
+        param_sig = join(param_sig_parts, ", ")
 
         # Documentation
         doc_comment = ""

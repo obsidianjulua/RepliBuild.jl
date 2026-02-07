@@ -6,7 +6,7 @@ module DWARFParser
 
 using JSON
 
-export parse_vtables, VirtualMethod, ClassInfo, VtableInfo
+export parse_vtables, VirtualMethod, MemberInfo, ClassInfo, VtableInfo
 
 """
 Information about a virtual method
@@ -20,6 +20,15 @@ struct VirtualMethod
 end
 
 """
+Information about a data member (field)
+"""
+struct MemberInfo
+    name::String
+    type_name::String
+    offset::Int
+end
+
+"""
 Information about a C++ class with virtual methods
 """
 struct ClassInfo
@@ -27,6 +36,7 @@ struct ClassInfo
     vtable_ptr_offset::Int           # Offset of vptr in object (usually 0)
     base_classes::Vector{String}     # Immediate base classes
     virtual_methods::Vector{VirtualMethod}
+    members::Vector{MemberInfo}      # Data members
     size::Int                        # Class size in bytes
 end
 
@@ -54,6 +64,7 @@ function parse_dwarf_output(dwarf_text::String)
     current_size = 0
     base_classes = String[]
     virtual_methods = VirtualMethod[]
+    members = MemberInfo[]
     
     # Method parsing state
     current_method_name = ""
@@ -83,6 +94,7 @@ function parse_dwarf_output(dwarf_text::String)
                     current_vptr_offset,
                     copy(base_classes),
                     copy(virtual_methods),
+                    copy(members),
                     current_size
                 )
             end
@@ -93,6 +105,7 @@ function parse_dwarf_output(dwarf_text::String)
             current_size = 0
             empty!(base_classes)
             empty!(virtual_methods)
+            empty!(members)
             
             # Reset method state
             current_method_name = ""
@@ -122,13 +135,23 @@ function parse_dwarf_output(dwarf_text::String)
             is_virtual_method = false
             in_subprogram = true
         end
+        
+        # Parse Members
+        # DW_TAG_member
+        if contains(line, "DW_TAG_member")
+             # We just hit a member tag. We'll extract its info in subsequent lines or if they are on the same line (rare).
+             # Simple state tracking for member is needed? 
+             # Actually, dwarfdump output is nested. We can parse lines that follow until next TAG.
+             # But our loop is line-by-line. 
+             # Let's assume we can capture "DW_AT_name" etc. while "in_class" context.
+        end
 
         # If we hit another tag that isn't subprogram or formal parameter, we are likely out of subprogram
         if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_subprogram") && !contains(line, "DW_TAG_formal_parameter") && !contains(line, "DW_TAG_unspecified_parameters")
              in_subprogram = false
         end
 
-        # Extract class name
+        # Extract class/member/method name
         if contains(line, "DW_AT_name") 
             m = match(r"DW_AT_name\s+\(\"([^\"]+)\"\)", line)
             if !isnothing(m)
@@ -138,78 +161,225 @@ function parse_dwarf_output(dwarf_text::String)
                 elseif in_subprogram
                     # It's a method name
                     current_method_name = name
+                elseif !in_subprogram && !isempty(current_class_name)
+                    # Likely a member name, but we need to match it with DW_TAG_member context.
+                    # Limitations of this simple parser: it assumes state based on recent TAG.
+                    # We need a robust way to know we are in a member.
+                    # IMPROVEMENT: Use the indentation level or look at the preceding TAG line.
                 end
             end
         end
+        
+        # IMPROVED MEMBER PARSING:
+        # We need to capture member details when we see DW_TAG_member.
+        # But we are streaming lines.
+        # Let's use a "last_tag" variable.
+    end
+    
+    # Re-implementing the loop with better state tracking
+    return parse_dwarf_output_robust(dwarf_text)
+end
 
-        # Extract class size
-        if contains(line, "DW_AT_byte_size")
+function parse_dwarf_output_robust(dwarf_text::String)
+    classes = Dict{String, ClassInfo}()
+
+    current_class_name = ""
+    current_vptr_offset = 0
+    current_size = 0
+    base_classes = String[]
+    virtual_methods = VirtualMethod[]
+    members = MemberInfo[]
+    
+    # Member parsing
+    pending_member_name = ""
+    pending_member_type = ""
+    pending_member_offset = -1
+    
+    # Method parsing
+    pending_method_name = ""
+    pending_method_mangled = ""
+    pending_method_slot = -1
+    is_virtual_method = false
+    
+    # Context
+    in_class = false
+    context = :none # :class, :method, :member
+    
+    lines = split(dwarf_text, '\n')
+    
+    function commit_class()
+        if !isempty(current_class_name)
+            classes[current_class_name] = ClassInfo(
+                current_class_name,
+                current_vptr_offset,
+                copy(base_classes),
+                copy(virtual_methods),
+                copy(members),
+                current_size
+            )
+        end
+        current_class_name = ""
+        current_vptr_offset = 0
+        current_size = 0
+        empty!(base_classes)
+        empty!(virtual_methods)
+        empty!(members)
+        in_class = false
+    end
+    
+    function commit_method()
+        if is_virtual_method && !isempty(pending_method_name)
+            push!(virtual_methods, VirtualMethod(
+                pending_method_name,
+                pending_method_mangled,
+                pending_method_slot,
+                "void", 
+                String[]
+            ))
+        end
+        pending_method_name = ""
+        pending_method_mangled = ""
+        pending_method_slot = -1
+        is_virtual_method = false
+    end
+
+    function commit_member()
+        if !isempty(pending_member_name) && !isempty(pending_member_type) && pending_member_offset != -1
+            push!(members, MemberInfo(
+                pending_member_name,
+                pending_member_type,
+                pending_member_offset
+            ))
+        end
+        pending_member_name = ""
+        pending_member_type = ""
+        pending_member_offset = -1
+    end
+
+    for line in lines
+        # Determine Tag
+        if contains(line, "DW_TAG_class_type") || contains(line, "DW_TAG_structure_type")
+            commit_method()
+            commit_member()
+            commit_class() # Close previous class
+            context = :class
+            in_class = true
+            continue
+        end
+        
+        if contains(line, "DW_TAG_subprogram")
+            commit_method()
+            commit_member()
+            context = :method
+            continue
+        end
+        
+        if contains(line, "DW_TAG_member")
+            commit_method()
+            commit_member()
+            context = :member
+            continue
+        end
+        
+        if contains(line, "DW_TAG_inheritance")
+            commit_method()
+            commit_member()
+            context = :inheritance
+            continue
+        end
+        
+        if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_formal_parameter")
+             # Some other tag, reset context if specific
+             # But keep class context
+        end
+        
+        # Parse Attributes based on context
+        
+        # 1. Name
+        if contains(line, "DW_AT_name")
+            m = match(r"DW_AT_name\s+\(\"([^\"]+)\"\)", line)
+            if !isnothing(m)
+                name = m.captures[1]
+                if context == :class
+                    current_class_name = name
+                elseif context == :method
+                    pending_method_name = name
+                elseif context == :member
+                    pending_member_name = name
+                end
+            end
+        end
+        
+        # 2. Type (for members and inheritance)
+        if (context == :member || context == :inheritance) && contains(line, "DW_AT_type")
+             # Try to capture type name from comment: DW_AT_type (0x123 "double")
+             m = match(r"DW_AT_type\s+\(0x[0-9a-fA-F]+\s+\"([^\"]+)\"\)", line)
+             if !isnothing(m)
+                 type_name = m.captures[1]
+                 if context == :member
+                     pending_member_type = type_name
+                 elseif context == :inheritance
+                     push!(base_classes, type_name)
+                 end
+             else
+                 if context == :member
+                    pending_member_type = "void*" 
+                 end
+             end
+        end
+
+        # 3. Data Member Location (offset)
+        if context == :member && contains(line, "DW_AT_data_member_location")
+            # Can be constant (0x08) or loclist. We handle simple constant.
+            m = match(r"DW_AT_data_member_location\s+\((0x[0-9a-fA-F]+|\d+)\)", line)
+            if !isnothing(m)
+                val_str = m.captures[1]
+                pending_member_offset = startswith(val_str, "0x") ?
+                    parse(Int, val_str[3:end], base=16) :
+                    parse(Int, val_str)
+            end
+        end
+        
+        # 4. Class Size
+        if context == :class && contains(line, "DW_AT_byte_size")
             m = match(r"DW_AT_byte_size\s+\((0x[0-9a-fA-F]+|\d+)\)", line)
             if !isnothing(m)
-                size_str = m.captures[1]
-                current_size = startswith(size_str, "0x") ?
-                    parse(Int, size_str[3:end], base=16) :
-                    parse(Int, size_str)
+                val_str = m.captures[1]
+                current_size = startswith(val_str, "0x") ?
+                    parse(Int, val_str[3:end], base=16) :
+                    parse(Int, val_str)
             end
         end
-
-        # Detect vtable pointer member
-        if contains(line, "_vptr\$")
-            current_vptr_offset = 0  # Usually at offset 0
-        end
-
-        # Detect inheritance
-        if contains(line, "DW_TAG_inheritance")
-            # Next DW_AT_type will tell us the base class
-            # For now, mark that we're in inheritance context
-        end
-
-        # Extract virtual method info
-        if in_subprogram && contains(line, "DW_AT_virtuality") && (contains(line, "DW_VIRTUALITY_virtual") || contains(line, "(0x01)"))
-            is_virtual_method = true
-        end
-
-        # Extract vtable slot
-        if in_subprogram && contains(line, "DW_AT_vtable_elem_location")
-            m = match(r"DW_OP_constu\s+(0x[0-9a-fA-F]+|\d+)", line)
-            if !isnothing(m)
-                slot_str = m.captures[1]
-                current_method_slot = startswith(slot_str, "0x") ?
-                    parse(Int, slot_str[3:end], base=16) :
-                    parse(Int, slot_str)
+        
+        # 5. Method Info
+        if context == :method
+            if contains(line, "DW_AT_virtuality") && (contains(line, "virtual") || contains(line, "(0x01)"))
+                is_virtual_method = true
             end
-        end
-
-        # Extract mangled name
-        if in_subprogram && (contains(line, "DW_AT_linkage_name") || contains(line, "DW_AT_MIPS_linkage_name"))
-            m = match(r"linkage_name\s+\(\"([^\"]+)\"\)", line)
-            if !isnothing(m)
-                current_method_mangled = m.captures[1]
+            
+            if contains(line, "DW_AT_vtable_elem_location")
+                m = match(r"DW_OP_constu\s+(0x[0-9a-fA-F]+|\d+)", line)
+                if !isnothing(m)
+                     val_str = m.captures[1]
+                     pending_method_slot = startswith(val_str, "0x") ?
+                        parse(Int, val_str[3:end], base=16) :
+                        parse(Int, val_str)
+                end
+            end
+            
+            if contains(line, "linkage_name")
+                m = match(r"linkage_name\s+\(\"([^\"]+)\"\)", line)
+                if !isnothing(m)
+                    pending_method_mangled = m.captures[1]
+                end
             end
         end
     end
 
-    # Save last method if virtual
-    if is_virtual_method && !isempty(current_method_name)
-        push!(virtual_methods, VirtualMethod(
-            current_method_name,
-            current_method_mangled,
-            current_method_slot,
-            "void",
-            String[]
-        ))
-    end
-
-    # Save last class
-    if !isempty(current_class_name)
-        classes[current_class_name] = ClassInfo(
-            current_class_name,
-            current_vptr_offset,
-            base_classes,
-            virtual_methods,
-            current_size
-        )
-    end
+    # Final commits
+    commit_member()
+    commit_method()
+    commit_class()
 
     return classes
 end
@@ -322,6 +492,13 @@ function export_vtable_json(vtinfo::VtableInfo, output_path::String)
                 "size" => info.size,
                 "vtable_ptr_offset" => info.vtable_ptr_offset,
                 "base_classes" => info.base_classes,
+                "members" => [
+                    Dict(
+                        "name" => m.name,
+                        "type" => m.type_name,
+                        "offset" => m.offset
+                    ) for m in info.members
+                ],
                 "virtual_methods" => [
                     Dict(
                         "name" => m.name,

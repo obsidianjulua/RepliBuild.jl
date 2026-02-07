@@ -67,6 +67,7 @@ struct WrapConfig
     style::Symbol  # :clang, :basic, :none
     module_name::String  # Empty = auto from project.name
     use_clang_jl::Bool
+    varargs_overloads::Dict{String,Vector{Vector{String}}}
 end
 
 """Nested struct for [llvm] section"""
@@ -274,11 +275,28 @@ function parse_wrap_config(data::Dict)::WrapConfig
         wrap_style = :clang
     end
 
+    # Parse varargs overloads
+    varargs = get(wrap, "varargs", Dict())
+    varargs_overloads = Dict{String,Vector{Vector{String}}}()
+    
+    for (func, sigs) in varargs
+        sig_list = Vector{Vector{String}}()
+        if isa(sigs, Vector)
+            for s in sigs
+                if isa(s, Vector)
+                    push!(sig_list, String[string(x) for x in s])
+                end
+            end
+        end
+        varargs_overloads[String(func)] = sig_list
+    end
+
     return WrapConfig(
         get(wrap, "enabled", true),
         wrap_style,
         get(wrap, "module_name", ""),  # Empty = auto-generate
-        get(wrap, "use_clang_jl", true)
+        get(wrap, "use_clang_jl", true),
+        varargs_overloads
     )
 end
 
@@ -381,7 +399,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true),
         LinkConfig("2", false, String[]),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, "", true),
+        WrapConfig(true, :clang, "", true, Dict{String,Vector{Vector{String}}}()),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -473,6 +491,9 @@ function save_config(config::RepliBuildConfig)
     )
     if !isempty(config.wrap.module_name)
         wrap_dict["module_name"] = config.wrap.module_name
+    end
+    if !isempty(config.wrap.varargs_overloads)
+        wrap_dict["varargs"] = config.wrap.varargs_overloads
     end
     data["wrap"] = wrap_dict
 

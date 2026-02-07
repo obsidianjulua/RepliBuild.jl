@@ -640,7 +640,7 @@ Returns: (return_types_dict, struct_defs_dict)
   - return_types: Dict{mangled_name => {c_type, julia_type, size}}
   - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
 """
-function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}}
+function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}}
     println("Parsing DWARF debug info...")
 
     # Run readelf to get DWARF debug info
@@ -1401,6 +1401,12 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
 
     # Track formal parameters (similar to struct members)
     current_param_offset = nothing
+    
+    # NEW: Track global variables
+    current_variable_offset = nothing
+    
+    # NEW: Track unspecified parameters (varargs)
+    current_unspecified_offset = nothing
 
     last_seen_level = nothing  # Track last level for attribute lines
 
@@ -1416,6 +1422,16 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
         # Use last seen level for attributes (which don't have level prefix)
         current_level = last_seen_level
+        
+        # Generic context reset for major tags to prevent leakage
+        if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_variable") && 
+           !contains(line, "DW_TAG_subprogram") && !contains(line, "DW_TAG_formal_parameter") &&
+           !contains(line, "DW_TAG_unspecified_parameters")
+            # If we hit a tag we don't explicitly handle as a "child" container in this pass
+            # we should reset the variable context.
+            # Base types, const types, etc. are handled in Pass 1, but we see them here too.
+            current_variable_offset = nothing
+        end
 
         # Detect when we've left the function's own level (entered child tags)
         if !isnothing(current_function_offset) && !isnothing(current_level) && !isnothing(current_function_level)
@@ -1476,6 +1492,54 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 function_processed = false  # Reset flag for new function
                 params_for_this_function = []  # NEW: Reset for the new function
                 current_subroutine_offset = nothing  # Reset subroutine context when entering function
+                
+                # RESET VARIABLE CONTEXT to prevent leakage
+                current_variable_offset = nothing
+            end
+        end
+        
+        # NEW: Detect global variable (DW_TAG_variable)
+        if contains(line, "DW_TAG_variable")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_variable_offset = "0x" * offset_match.captures[1]
+                
+                type_refs[current_variable_offset] = Dict{String,Any}(
+                    "kind" => "variable",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "external" => false,
+                    "declaration" => false
+                )
+                offset_to_kind[current_variable_offset] = :variable
+                
+                # Ensure we don't leak param context
+                current_param_offset = nothing
+            end
+        end
+        
+        # NEW: Detect varargs (DW_TAG_unspecified_parameters)
+        if contains(line, "DW_TAG_unspecified_parameters")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                # If we are inside a function context, mark it as varargs
+                if !isnothing(current_function_offset) && !isnothing(current_level) &&
+                   !isnothing(current_function_level) && current_level > current_function_level
+                   
+                   # Update type_refs
+                   if !haskey(type_refs, current_function_offset)
+                       type_refs[current_function_offset] = Dict{String,Any}()
+                   end
+                   if isa(type_refs[current_function_offset], Dict)
+                       type_refs[current_function_offset]["is_vararg"] = true
+                   end
+                   
+                   # Update return_types if function is already registered
+                   function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                   if !isnothing(function_key) && haskey(return_types, function_key)
+                       return_types[function_key]["is_vararg"] = true
+                   end
+                end
             end
         end
 
@@ -1485,6 +1549,9 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_param_offset = "0x" * offset_match.captures[1]
+                
+                # RESET VARIABLE CONTEXT
+                current_variable_offset = nothing
 
                 # Determine position based on context (function or subroutine type)
                 position = if !isnothing(current_subroutine_offset) && haskey(type_refs, current_subroutine_offset)
@@ -1504,6 +1571,36 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 )
                 offset_to_kind[current_param_offset] = :parameter
             end
+        end
+        
+        # Process Global Variable Attributes
+        if !isnothing(current_variable_offset) && haskey(type_refs, current_variable_offset) &&
+           haskey(offset_to_kind, current_variable_offset) && offset_to_kind[current_variable_offset] == :variable
+           
+           var_info = type_refs[current_variable_offset]
+           
+           if contains(line, "DW_AT_name")
+               name_match = match(r":\s*([^:]+)\s*$", line)
+               if !isnothing(name_match)
+                   var_info["name"] = String(strip(name_match.captures[1]))
+               end
+           end
+           
+           if contains(line, "DW_AT_type")
+               type_match = match(r"<(0x[^>]+)>", line)
+               if !isnothing(type_match)
+                   var_info["type"] = String(type_match.captures[1])
+               end
+           end
+           
+           if contains(line, "DW_AT_external")
+               # Usually DW_AT_external : 1
+               var_info["external"] = true
+           end
+           
+           if contains(line, "DW_AT_declaration")
+               var_info["declaration"] = true
+           end
         end
 
         # Only process attributes at the function level (not in child tags like parameters)
@@ -1574,11 +1671,13 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 # Use linkage name (C++) or fall back to function name (C)
                 function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
 
-                # Check for virtuality stored earlier
+                # Check for virtuality and varargs stored earlier
                 is_virtual = false
+                is_vararg = false
                 if !isnothing(current_function_offset) && haskey(type_refs, current_function_offset) &&
                    isa(type_refs[current_function_offset], Dict)
                     is_virtual = get(type_refs[current_function_offset], "is_virtual", false)
+                    is_vararg = get(type_refs[current_function_offset], "is_vararg", false)
                 end
 
                 # Store if we have a function identifier
@@ -1588,6 +1687,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         "julia_type" => julia_type,
                         "size" => type_size,
                         "is_virtual" => is_virtual, # NEW: Store virtuality
+                        "is_vararg" => is_vararg,   # NEW: Store varargs status
                         "parameters" => params_for_this_function  # NEW: Use params_for_this_function
                     )
                 end
@@ -1825,8 +1925,34 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     for (enum_name, enum_info) in enum_defs
         struct_defs["__enum__" * enum_name] = enum_info
     end
+    
+    # Process extracted variables into a clean dictionary
+    global_vars = Dict{String,Any}()
+    for (offset, info) in type_refs
+        if isa(info, Dict) && get(info, "kind", nothing) == "variable" && 
+           get(info, "external", false) == true && !get(info, "declaration", false)
+           
+           name = get(info, "name", "unknown")
+           type_ref = get(info, "type", nothing)
+           
+           if name != "unknown" && !isnothing(type_ref)
+               c_type = resolve_type(type_ref, type_refs)
+               julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+               
+               global_vars[name] = Dict(
+                   "name" => name,
+                   "c_type" => c_type,
+                   "julia_type" => julia_type
+               )
+           end
+        end
+    end
+    
+    if !isempty(global_vars)
+        println("    Extracted $(length(global_vars)) global variables")
+    end
 
-    return (return_types, struct_defs)
+    return (return_types, struct_defs, global_vars)
 end
 
 """
@@ -1842,7 +1968,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     println("   Found $(length(symbols)) exported symbols")
 
     # Extract return types and struct definitions from DWARF debug info (if available)
-    (dwarf_return_types, struct_defs) = extract_dwarf_return_types(binary_path)
+    (dwarf_return_types, struct_defs, global_vars) = extract_dwarf_return_types(binary_path)
 
     # Collect struct/enum names for type resolution in function signatures
     sig_struct_names = Set{String}()
@@ -1872,6 +1998,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                 "size" => get(dwarf_info, "size", 0)
             )
             func["return_type_source"] = "dwarf"
+            
+            # Merge is_vararg
+            func["is_vararg"] = get(dwarf_info, "is_vararg", false)
 
             # Merge parameters if available from DWARF (at function level, not in return_type)
             if haskey(dwarf_info, "parameters") && !isempty(dwarf_info["parameters"])
@@ -1883,6 +2012,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         else
             func["return_type_source"] = "inferred"
             func["parameters_source"] = "inferred"
+            func["is_vararg"] = false
         end
     end
 
@@ -1918,6 +2048,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # Symbols and functions
         "symbols" => symbols,
         "functions" => functions,
+        "globals" => global_vars,  # NEW: Global variables
         "function_count" => length(functions),
 
         # Type mappings

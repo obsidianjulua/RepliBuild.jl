@@ -23,8 +23,9 @@ def JL_SubtypeInterface : TypeInterface
 }
     >
   ];
-    }
+}
 
+/*
     // Pseudocode C++ Binding Generator Pass
 
 for (auto typeInfoOp : module.getOps<jl::TypeInfoOp>())
@@ -41,3 +42,4 @@ for (auto typeInfoOp : module.getOps<jl::TypeInfoOp>())
         class MyPoint : public baseClassName.getValue() { ... };
     }
 }
+*/

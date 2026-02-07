@@ -18,3 +18,20 @@ using namespace mlir::jlcs;
 // so redefinitions in .cpp.inc will be ignored by the linker
 #define GET_TYPEDEF_CLASSES
 #include "JLCSTypes.cpp.inc"
+
+// Manual accessor implementations for CStructType (required due to manual storage)
+StringAttr CStructType::getJuliaTypeName() const {
+  return getImpl()->juliaTypeName;
+}
+
+::llvm::ArrayRef<Type> CStructType::getFieldTypes() const {
+  return getImpl()->fieldTypes;
+}
+
+ArrayAttr CStructType::getFieldOffsets() const {
+  return getImpl()->fieldOffsets;
+}
+
+bool CStructType::getIsPacked() const {
+  return getImpl()->isPacked;
+}
