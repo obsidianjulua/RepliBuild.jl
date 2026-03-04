@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for hello_world_test
-# Generated: 2026-03-03 22:49:08
+# Generated: 2026-03-04 09:58:33
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libhello_world_test.so
 # Metadata: compilation_metadata.json
@@ -33,8 +33,8 @@ const METADATA = Dict(
     "clang_version" => "clang version 21.1.8",
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
-    "function_count" => 2,
-    "generated_at" => "2026-03-03T22:48:53.626"
+    "function_count" => 1,
+    "generated_at" => "2026-03-04T09:58:33.177"
 )
 
 # =============================================================================
@@ -50,29 +50,7 @@ struct __va_list_tag
 end
 
 
-export add, hello_world, __va_list_tag
-
-"""
-    add(a::Integer, b::Integer) -> Cint
-
-Wrapper for C++ function: `add`
-
-# Arguments
-- `a::Cint`
-- `b::Cint`
-
-# Returns
-- `Cint`
-
-# Metadata
-- Mangled symbol: `add`
-"""
-
-function add(a::Integer, b::Integer)::Cint
-    a_c = Cint(a)  # Auto-converts with overflow check
-    b_c = Cint(b)  # Auto-converts with overflow check
-    return ccall((:add, LIBRARY_PATH), Cint, (Cint, Cint,), a_c, b_c)
-end
+export hello_world, __va_list_tag
 
 """
     hello_world() -> Cvoid
