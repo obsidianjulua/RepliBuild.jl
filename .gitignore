@@ -1,0 +1,27 @@
+# Julia package - do not track Manifest
+Manifest.toml
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.o
+*.a
+*.ll
+
+# Test build outputs
+test/*/build/
+test/*/julia/
+test/*/.replibuild_cache/
+
+# RepliBuild cache
+.replibuild_cache/
+
+# MLIR build output
+src/mlir/build/
+
+# Documentation build
+docs/build/
+
+# Claude Code
+.claude/

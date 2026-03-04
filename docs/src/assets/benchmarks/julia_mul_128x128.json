@@ -1,0 +1,13 @@
+{
+  "median_time": 111012.0,
+  "memory": 655800000,
+  "function_name": "pure_julia_multiply",
+  "max_time": 733152.0,
+  "allocations": 5000,
+  "gc_time": 0.0,
+  "samples": 5000,
+  "std_time": 23669.690447634566,
+  "mean_time": 109421.9132,
+  "min_time": 79392.0,
+  "timestamp": "2026-03-03 21:18:58"
+}
