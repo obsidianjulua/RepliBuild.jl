@@ -1,0 +1,2 @@
+# Prevent MLIR TableGen files from skewing language stats
+*.td linguist-vendored
