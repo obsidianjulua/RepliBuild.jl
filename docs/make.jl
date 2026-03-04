@@ -4,12 +4,12 @@ using RepliBuild
 
 makedocs(;
     modules=[RepliBuild],
-    authors="grim <archjulialua@gmail.com>",
-    repo="https://github.com/grim/RepliBuild.jl/blob/{commit}{path}#{line}",
+    authors="John <archjulialua@gmail.com>",
+    repo="https://github.com/obsidianjulua/RepliBuild.jl/blob/{commit}{path}#{line}",
     sitename="RepliBuild.jl",
     format=Documenter.HTML(;
         prettyurls=get(ENV, "CI", "false") == "true",
-        canonical="https://grim.github.io/RepliBuild.jl",
+        canonical="https://obsidianjulua.github.io/RepliBuild.jl",
         edit_link="main",
         assets=String[],
     ),
@@ -30,6 +30,6 @@ makedocs(;
 )
 
 deploydocs(;
-    repo="github.com/grim/RepliBuild.jl",
+    repo="github.com/obsidianjulua/RepliBuild.jl",
     devbranch="main",
 )
