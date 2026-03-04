@@ -1,2 +1,4 @@
-# Prevent MLIR TableGen files from skewing language stats
+# Prevent MLIR/C++ infrastructure from skewing language stats
 *.td linguist-vendored
+src/mlir/impl/* linguist-vendored
+src/mlir/IR/* linguist-vendored
