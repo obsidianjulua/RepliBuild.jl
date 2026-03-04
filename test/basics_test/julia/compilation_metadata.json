@@ -1,0 +1,388 @@
+{
+  "symbols": [
+    {
+      "mangled": "make_packed",
+      "demangled": "make_packed",
+      "type": "T",
+      "address": "00000000000012a0"
+    },
+    {
+      "mangled": "make_padded",
+      "demangled": "make_padded",
+      "type": "T",
+      "address": "0000000000001280"
+    },
+    {
+      "mangled": "process_packed",
+      "demangled": "process_packed",
+      "type": "T",
+      "address": "00000000000011b0"
+    },
+    {
+      "mangled": "process_padded",
+      "demangled": "process_padded",
+      "type": "T",
+      "address": "0000000000001150"
+    },
+    {
+      "mangled": "process_union",
+      "demangled": "process_union",
+      "type": "T",
+      "address": "0000000000001220"
+    },
+    {
+      "mangled": "sum_ints",
+      "demangled": "sum_ints",
+      "type": "T",
+      "address": "00000000000012c0"
+    }
+  ],
+  "compile_flags": [
+    "-std=c++17",
+    "-fPIC"
+  ],
+  "binary_path": "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/julia/libbasics_test.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "exported": true,
+      "mangled": "make_packed",
+      "demangled": "make_packed",
+      "return_type": {
+        "c_type": "PackedStruct",
+        "size": 0,
+        "julia_type": "PackedStruct"
+      },
+      "name": "make_packed",
+      "parameters": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "position": 0,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "dwarf"
+    },
+    {
+      "exported": true,
+      "mangled": "make_padded",
+      "demangled": "make_padded",
+      "return_type": {
+        "c_type": "PaddedStruct",
+        "size": 0,
+        "julia_type": "PaddedStruct"
+      },
+      "name": "make_padded",
+      "parameters": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "position": 0,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "position": 1,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "dwarf"
+    },
+    {
+      "exported": true,
+      "mangled": "process_packed",
+      "demangled": "process_packed",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      },
+      "name": "process_packed",
+      "parameters": [
+        {
+          "c_type": "PackedStruct",
+          "name": "s",
+          "position": 0,
+          "julia_type": "PackedStruct"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "dwarf"
+    },
+    {
+      "exported": true,
+      "mangled": "process_padded",
+      "demangled": "process_padded",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      },
+      "name": "process_padded",
+      "parameters": [
+        {
+          "c_type": "PaddedStruct",
+          "name": "s",
+          "position": 0,
+          "julia_type": "PaddedStruct"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "dwarf"
+    },
+    {
+      "exported": true,
+      "mangled": "process_union",
+      "demangled": "process_union",
+      "return_type": {
+        "c_type": "void",
+        "size": 0,
+        "julia_type": "Cvoid"
+      },
+      "name": "process_union",
+      "parameters": [
+        {
+          "c_type": "unknown",
+          "name": "u",
+          "position": 0,
+          "julia_type": "Any"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "dwarf"
+    },
+    {
+      "exported": true,
+      "mangled": "sum_ints",
+      "demangled": "sum_ints",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "sum_ints",
+      "parameters": [
+        {
+          "c_type": "int",
+          "name": "count",
+          "position": 0,
+          "julia_type": "Cint"
+        }
+      ],
+      "parameters_source": "dwarf",
+      "class": "",
+      "is_method": false,
+      "is_vararg": true,
+      "return_type_source": "dwarf"
+    }
+  ],
+  "project": "basics_test",
+  "source_files": [
+    "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src/basics.cpp"
+  ],
+  "type_registry": {
+    "int": {
+      "julia_type": "Cint",
+      "inferred": true
+    },
+    "PaddedStruct": {
+      "julia_type": "PaddedStruct",
+      "inferred": true
+    },
+    "char": {
+      "julia_type": "UInt8",
+      "inferred": true
+    },
+    "unknown": {
+      "julia_type": "Any",
+      "inferred": true
+    },
+    "PackedStruct": {
+      "julia_type": "PackedStruct",
+      "inferred": true
+    },
+    "double": {
+      "alignment": 8,
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "c_type": "void",
+      "size": 0,
+      "julia_type": "Cvoid"
+    }
+  },
+  "function_count": 6,
+  "compiler_info": {
+    "lto_enabled": false,
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "clang_version": "clang version 21.1.8",
+    "optimization_level": "0",
+    "llvm_version": "21.1.8"
+  },
+  "metadata_version": "1.0",
+  "globals": {
+    "global_string": {
+      "c_type": "const char*",
+      "name": "global_string",
+      "julia_type": "Ptr{UInt8}"
+    },
+    "global_int": {
+      "c_type": "int",
+      "name": "global_int",
+      "julia_type": "Cint"
+    }
+  },
+  "include_dirs": [
+    "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test",
+    "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/include",
+    "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src"
+  ],
+  "typedef_table": {
+    "wctype_t": "Culong",
+    "wctrans_t": "Ptr{Cint}",
+    "va_list": "NTuple{1, __va_list_tag}",
+    "__gnuc_va_list": "NTuple{1, __va_list_tag}",
+    "fpos_t": "_G_fpos_t",
+    "__int32_t": "Cint",
+    "wint_t": "Cuint",
+    "size_t": "Culong",
+    "__fpos_t": "_G_fpos_t",
+    "__compar_fn_t": "Ptr{Cvoid}",
+    "FILE": "_IO_FILE",
+    "__FILE": "_IO_FILE",
+    "__builtin_va_list": "NTuple{1, __va_list_tag}"
+  },
+  "timestamp": "2026-03-03T19:36:24.879",
+  "struct_definitions": {
+    "PaddedStruct": {
+      "kind": "struct",
+      "byte_size": "0x8",
+      "members": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "offset": null,
+          "size": 1,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cint"
+        }
+      ]
+    },
+    "PackedStruct": {
+      "kind": "struct",
+      "byte_size": "0x5",
+      "members": [
+        {
+          "c_type": "char",
+          "name": "a",
+          "offset": null,
+          "size": 1,
+          "julia_type": "UInt8"
+        },
+        {
+          "c_type": "int",
+          "name": "b",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cint"
+        }
+      ]
+    },
+    "__va_list_tag": {
+      "kind": "struct",
+      "byte_size": "0x18",
+      "members": [
+        {
+          "c_type": "unsigned int",
+          "name": "gp_offset",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "unsigned int",
+          "name": "fp_offset",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cuint"
+        },
+        {
+          "c_type": "void*",
+          "name": "overflow_arg_area",
+          "offset": null,
+          "size": 8,
+          "julia_type": "Ptr{Cvoid}"
+        },
+        {
+          "c_type": "void*",
+          "name": "reg_save_area",
+          "offset": null,
+          "size": 8,
+          "julia_type": "Ptr{Cvoid}"
+        }
+      ]
+    },
+    "NumberUnion": {
+      "kind": "union",
+      "byte_size": "0x4",
+      "members": [
+        {
+          "c_type": "int",
+          "name": "i",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cint"
+        },
+        {
+          "c_type": "float",
+          "name": "f",
+          "offset": null,
+          "size": 4,
+          "julia_type": "Cfloat"
+        }
+      ]
+    }
+  }
+}

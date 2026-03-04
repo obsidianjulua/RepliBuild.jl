@@ -1,0 +1,55 @@
+[project]
+name = "callback_test"
+root = "/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test"
+
+[compile]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test/src/callbacks.cpp"]
+include_dirs = [
+    "/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test",
+    "/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test/include",
+    "/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test/src"
+]
+flags = ["-xc++", "-std=c++17", "-fPIC"]
+parallel = true
+
+[link]
+enable_lto = false
+optimization_level = "0"
+
+[binary]
+type = "shared"
+strip_symbols = false
+
+[wrap]
+enabled = true
+style = "clang"
+use_clang_jl = true
+
+[workflow]
+stages = ["discover", "compile", "link", "binary", "wrap"]
+
+[paths]
+build = "build"
+source = "src"
+output = "julia"
+include = "include"
+cache = ".replibuild_cache"
+
+[cache]
+enabled = true
+directory = ".replibuild_cache"
+
+[discovery]
+enabled = true
+max_depth = 10
+parse_ast = true
+ignore_patterns = ["build", ".git", ".cache"]
+
+[types]
+allow_unknown_structs = true
+allow_unknown_enums = false
+allow_function_pointers = true
+strictness = "warn"
+
+[llvm]
+toolchain = "auto"
