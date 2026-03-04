@@ -59,7 +59,7 @@ Slow path: JIT engine lookup + cache with lock.
             ptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, "_" * func_name)
         end
         if ptr == C_NULL
-            error("JIT symbol not found: $func_name")
+            throw(ErrorException("JIT Error: Symbol not found: $func_name. This may indicate a missing library or complex C++ type that failed to compile through the MLIR backend."))
         end
 
         GLOBAL_JIT.compiled_symbols[func_name] = ptr
@@ -220,6 +220,18 @@ function initialize_global_jit(binary_path::String)
                 JSON.parsefile(metadata_path)
             else
                 Dict()
+            end
+
+            # Register dispatch_ symbols for virtual methods
+            lib_handle = Libdl.dlopen(binary_path)
+            for (class_name, class_info) in GLOBAL_JIT.vtable_info.classes
+                for method in class_info.virtual_methods
+                    dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
+                    ptr = Libdl.dlsym(lib_handle, method.mangled_name, throw_error=false)
+                    if ptr != C_NULL
+                        MLIRNative.register_symbol_global(dispatch_name, ptr)
+                    end
+                end
             end
 
             # 3. Generate MLIR Module for all vtables

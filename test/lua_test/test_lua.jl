@@ -22,12 +22,6 @@ using Test
     @test isfile(wrapper_path)
     println("Wrapper generated: $wrapper_path")
 
-    # Patch wrapper to define missing Cintptr_t type
-    # This is a workaround for a bug in RepliBuild v2.1.0 where intptr_t is mapped to Cintptr_t
-    # but Cintptr_t is not defined in the generated wrapper.
-    wrapper_content = read(wrapper_path, String)
-    wrapper_content = replace(wrapper_content, "module LuaTest" => "module LuaTest\n\nconst Cintptr_t = Int\nconst Cuintptr_t = UInt")
-    write(wrapper_path, wrapper_content)
 
     # Load wrapper
     include(wrapper_path)

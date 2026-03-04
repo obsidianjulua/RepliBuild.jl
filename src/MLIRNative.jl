@@ -242,9 +242,13 @@ Register a runtime address (symbol) with the JIT.
 Call this BEFORE invoking JIT functions that rely on external symbols.
 """
 function register_symbol(jit::MlirExecutionEngine, name::String, addr::Ptr{Cvoid})
-    ccall((:jlcs_jit_register_symbol, libJLCS), Cvoid, 
-          (MlirExecutionEngine, Cstring, Ptr{Cvoid}), jit, name, addr
-    )
+    ccall((:jlcs_jit_register_symbol, libJLCS), Cvoid,
+          (MlirExecutionEngine, Cstring, Ptr{Cvoid}), jit, name, addr)
+end
+
+function register_symbol_global(name::String, addr::Ptr{Cvoid})
+    ccall((:jlcs_jit_register_symbol, libJLCS), Cvoid,
+          (MlirExecutionEngine, Cstring, Ptr{Cvoid}), C_NULL, name, addr)
 end
 
 """

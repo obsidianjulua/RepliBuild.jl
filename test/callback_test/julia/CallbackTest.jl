@@ -1,10 +1,13 @@
 # Auto-generated Julia wrapper for callback_test
-# Generated: 2026-03-04 09:01:18
+# Generated: 2026-03-04 13:27:39
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libcallback_test.so
 # Metadata: compilation_metadata.json
 
 module CallbackTest
+
+const Cintptr_t = Int
+const Cuintptr_t = UInt
 
 using Libdl
 import RepliBuild
@@ -34,7 +37,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 2,
-    "generated_at" => "2026-03-04T09:01:18.092"
+    "generated_at" => "2026-03-04T13:27:39.335"
 )
 
 export execute_binary_op, simulate_work

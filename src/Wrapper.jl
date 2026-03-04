@@ -374,9 +374,10 @@ function handle_unknown_type(registry::TypeRegistry, cpp_type::String, context::
         ═══════════════════════════════════════════════════════════════
         """)
     elseif registry.strictness == WARN
-        @warn """Unknown C/C++ type '$cpp_type' in $context, falling back to Any.
-        This may cause runtime type errors. Consider adding a custom type mapping."""
-        return "Any"
+        @warn """Unknown C/C++ type '$cpp_type' in $context, falling back to safe placeholder.
+        This function will throw an error if called to prevent GC memory corruption.
+        Consider adding a custom type mapping."""
+        return "_UnsafeUnknown"
     else  # PERMISSIVE
         return "Any"
     end
@@ -425,6 +426,12 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String; context::Str
     is_const = contains(clean_type, "const")
     clean_type = replace(clean_type, r"\bconst\b" => "")
     clean_type = replace(clean_type, r"\bvolatile\b" => "")
+    
+    # Strip C/C++ keywords that might come from DWARF
+    clean_type = replace(clean_type, r"\bstruct\b" => "")
+    clean_type = replace(clean_type, r"\bunion\b" => "")
+    clean_type = replace(clean_type, r"\bclass\b" => "")
+    
     clean_type = strip(clean_type)
 
     # Handle special case: const char* and char* are Cstring
@@ -912,6 +919,8 @@ function generate_basic_module(config::RepliBuildConfig, lib_path::String,
 
     # Module declaration
     content *= "module $module_name\n\n"
+    content *= "const Cintptr_t = Int\n"
+    content *= "const Cuintptr_t = UInt\n\n"
     content *= "using Libdl\n\n"
 
     # Library management
@@ -1589,6 +1598,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
     module $module_name
     
+    const Cintptr_t = Int
+    const Cuintptr_t = UInt
+
     using Libdl
     import RepliBuild
     import Base: unsafe_convert
@@ -1972,6 +1984,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     mutable struct $julia_struct_name
                         data::NTuple{$byte_size, UInt8}
                     end
+                    $julia_struct_name() = $julia_struct_name(ntuple(i -> 0x00, $byte_size))
 
                     """
 
@@ -2033,6 +2046,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         mutable struct $julia_struct_name
                             _data::NTuple{$byte_size, UInt8}
                         end
+                        $julia_struct_name() = $julia_struct_name(ntuple(i -> 0x00, $byte_size))
 
                         """
 
@@ -2177,6 +2191,15 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     end
 
                     struct_definitions *= """
+                    end
+
+                    # Zero-initializer for $julia_struct_name
+                    function $julia_struct_name()
+                        ref = Ref{$julia_struct_name}()
+                        GC.@preserve ref begin
+                            ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof($julia_struct_name))
+                        end
+                        return ref[]
                     end
 
                     """
@@ -2769,7 +2792,27 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         # Check if this is a virtual method that requires dynamic dispatch
         is_virtual = get(func, "is_virtual", false)
 
-        if is_virtual
+        # Check for _UnsafeUnknown trap to prevent segfaults
+        has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
+        is_unknown_return = julia_return_type == "_UnsafeUnknown"
+
+        if has_unknown_param || is_unknown_return
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+                error(\"\"\"
+                FFI Safety Trap: Cannot call function '$julia_name'.
+                One or more types could not be mapped to Julia safely:
+                Return type: $julia_return_type (C++: $c_return_type)
+                Parameter types: $(join(param_types, ", "))
+                
+                To fix this, add the missing type mapping to your replibuild.toml.
+                Calling this function would have caused a segmentation fault.
+                \"\"\")
+            end
+
+            """
+        elseif is_virtual
             requires_jit = true
             # JIT-based virtual dispatch wrapper
             # 1. Get the class and method name

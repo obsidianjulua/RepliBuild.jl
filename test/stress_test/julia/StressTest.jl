@@ -1,10 +1,13 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-03-04 09:01:06
+# Generated: 2026-03-04 13:27:28
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
 
 module StressTest
+
+const Cintptr_t = Int
+const Cuintptr_t = UInt
 
 using Libdl
 import RepliBuild
@@ -31,7 +34,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-03-04T09:01:06.691"
+    "generated_at" => "2026-03-04T13:27:28.168"
 )
 
 # =============================================================================
@@ -76,6 +79,15 @@ struct DenseMatrix
     owns_data::Bool
 end
 
+# Zero-initializer for DenseMatrix
+function DenseMatrix()
+    ref = Ref{DenseMatrix}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(DenseMatrix))
+    end
+    return ref[]
+end
+
 # C++ struct: FFTResult (3 members)
 struct FFTResult
     real::Ptr{Cdouble}
@@ -83,11 +95,29 @@ struct FFTResult
     n::Csize_t
 end
 
+# Zero-initializer for FFTResult
+function FFTResult()
+    ref = Ref{FFTResult}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(FFTResult))
+    end
+    return ref[]
+end
+
 # C++ struct: Histogram (3 members)
 struct Histogram
     bin_edges::Ptr{Cdouble}
     counts::Ptr{Int32}
     n_bins::Csize_t
+end
+
+# Zero-initializer for Histogram
+function Histogram()
+    ref = Ref{Histogram}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(Histogram))
+    end
+    return ref[]
 end
 
 # C++ struct: ODEResult (6 members)
@@ -100,6 +130,15 @@ struct ODEResult
     status::Status
 end
 
+# Zero-initializer for ODEResult
+function ODEResult()
+    ref = Ref{ODEResult}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(ODEResult))
+    end
+    return ref[]
+end
+
 # C++ struct: OptimizationOptions (6 members)
 struct OptimizationOptions
     tolerance::Cdouble
@@ -108,6 +147,15 @@ struct OptimizationOptions
     max_function_evals::Int32
     algorithm::OptimizationAlgorithm
     verbose::Bool
+end
+
+# Zero-initializer for OptimizationOptions
+function OptimizationOptions()
+    ref = Ref{OptimizationOptions}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(OptimizationOptions))
+    end
+    return ref[]
 end
 
 # C++ struct: OptimizationState (8 members)
@@ -122,10 +170,28 @@ struct OptimizationState
     dimension::Csize_t
 end
 
+# Zero-initializer for OptimizationState
+function OptimizationState()
+    ref = Ref{OptimizationState}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(OptimizationState))
+    end
+    return ref[]
+end
+
 # C++ struct: Polynomial (2 members)
 struct Polynomial
     coefficients::Ptr{Cdouble}
     degree::Csize_t
+end
+
+# Zero-initializer for Polynomial
+function Polynomial()
+    ref = Ref{Polynomial}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(Polynomial))
+    end
+    return ref[]
 end
 
 # C++ struct: SparseMatrix (6 members)
@@ -138,6 +204,15 @@ struct SparseMatrix
     cols::Csize_t
 end
 
+# Zero-initializer for SparseMatrix
+function SparseMatrix()
+    ref = Ref{SparseMatrix}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(SparseMatrix))
+    end
+    return ref[]
+end
+
 # C++ struct: SplineInterpolation (5 members)
 struct SplineInterpolation
     x_points::Ptr{Cdouble}
@@ -145,6 +220,15 @@ struct SplineInterpolation
     coefficients::Ptr{Cdouble}
     n_points::Csize_t
     n_coeffs::Csize_t
+end
+
+# Zero-initializer for SplineInterpolation
+function SplineInterpolation()
+    ref = Ref{SplineInterpolation}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(SplineInterpolation))
+    end
+    return ref[]
 end
 
 # C++ struct: __va_list_tag (4 members)
@@ -155,15 +239,42 @@ struct __va_list_tag
     reg_save_area::Ptr{Cvoid}
 end
 
+# Zero-initializer for __va_list_tag
+function __va_list_tag()
+    ref = Ref{__va_list_tag}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(__va_list_tag))
+    end
+    return ref[]
+end
+
 # C++ struct: mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL> (2 members)
 struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL
     _M_x::NTuple{312, Culong}
     _M_p::Csize_t
 end
 
+# Zero-initializer for mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL
+function mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL()
+    ref = Ref{mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL))
+    end
+    return ref[]
+end
+
 # C++ struct: mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>, double> (1 members)
 struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double
     _M_g::Ref{mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL}
+end
+
+# Zero-initializer for mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double
+function mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double()
+    ref = Ref{mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double))
+    end
+    return ref[]
 end
 
 # C++ struct: param_type (4 members)
@@ -172,6 +283,15 @@ struct param_type
     _M_stddev::Cdouble
     _M_saved::Cdouble
     _M_saved_available::Bool
+end
+
+# Zero-initializer for param_type
+function param_type()
+    ref = Ref{param_type}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(param_type))
+    end
+    return ref[]
 end
 
 # C++ struct: EigenDecomposition (5 members)
@@ -183,6 +303,15 @@ struct EigenDecomposition
     status::Status
 end
 
+# Zero-initializer for EigenDecomposition
+function EigenDecomposition()
+    ref = Ref{EigenDecomposition}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(EigenDecomposition))
+    end
+    return ref[]
+end
+
 # C++ struct: LUDecomposition (5 members)
 struct LUDecomposition
     L::DenseMatrix
@@ -190,6 +319,15 @@ struct LUDecomposition
     permutation::Ptr{Int32}
     size::Csize_t
     status::Status
+end
+
+# Zero-initializer for LUDecomposition
+function LUDecomposition()
+    ref = Ref{LUDecomposition}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(LUDecomposition))
+    end
+    return ref[]
 end
 
 # C++ struct: QRDecomposition (5 members)
@@ -201,14 +339,41 @@ struct QRDecomposition
     status::Status
 end
 
+# Zero-initializer for QRDecomposition
+function QRDecomposition()
+    ref = Ref{QRDecomposition}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(QRDecomposition))
+    end
+    return ref[]
+end
+
 # C++ struct: normal_distribution<double> (1 members)
 struct normal_distribution_double
     _M_param::param_type
 end
 
+# Zero-initializer for normal_distribution_double
+function normal_distribution_double()
+    ref = Ref{normal_distribution_double}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(normal_distribution_double))
+    end
+    return ref[]
+end
+
 # C++ struct: uniform_real_distribution<double> (1 members)
 struct uniform_real_distribution_double
     _M_param::param_type
+end
+
+# Zero-initializer for uniform_real_distribution_double
+function uniform_real_distribution_double()
+    ref = Ref{uniform_real_distribution_double}()
+    GC.@preserve ref begin
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(uniform_real_distribution_double))
+    end
+    return ref[]
 end
 
 
