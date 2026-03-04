@@ -14,6 +14,17 @@ test/*/build/
 test/*/julia/
 test/*/.replibuild_cache/
 
+# Vendored C/C++ sources (downloaded by setup.jl scripts)
+test/lua_test/src/
+test/lua_test/include/
+test/duktape_test/src/
+test/duktape_test/include/
+test/sqlite_test/src/
+test/sqlite_test/include/
+
+# Generated TOML configs (contain machine-specific absolute paths)
+test/*/replibuild.toml
+
 # RepliBuild cache
 .replibuild_cache/
 

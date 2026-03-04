@@ -66,9 +66,6 @@ function benchmark(func, args...; samples::Int=1000, warmup::Int=10)
     gc_times = Vector{Float64}(undef, samples)
 
     for i in 1:samples
-        # Clear compilation effects
-        GC.gc(false)
-
         # Measure
         stats = @timed func(args...)
 

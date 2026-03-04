@@ -2708,6 +2708,14 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             jit_ret_type = return_type["julia_type"]
             jit_c_ret = get(return_type, "c_type", "void")
 
+            # Resolve "Any" return type to the Julia struct if we have a DWARF definition
+            # This is critical: invoke(name, Any, ...) creates Ref{Any}() which corrupts
+            # memory when the JIT writes raw struct bytes into it.
+            if jit_ret_type == "Any" && jit_c_ret != "void" && haskey(dwarf_structs, jit_c_ret)
+                jit_ret_type = replace(replace(replace(jit_c_ret, "<" => "_"), ">" => ""), "," => "_")
+                jit_ret_type = replace(jit_ret_type, " " => "")
+            end
+
             # Determine if we need the return type overload of invoke
             # Void returns: invoke(name, args...)
             # Struct returns: invoke(name, RetType, args...)

@@ -38,7 +38,7 @@ end
     for N in SIZES
         println("
 Benchmarking Matrix Size: $(N)x$(N)")
-        
+
         A = rand(Float64, N, N)
         B = rand(Float64, N, N)
         C_cpp = zeros(Float64, N, N)
@@ -47,14 +47,17 @@ Benchmarking Matrix Size: $(N)x$(N)")
         viewB = BenchmarkTest.StridedMatrixView(pointer(B), UInt64(N), UInt64(N), UInt64(1), UInt64(N))
         viewC = BenchmarkTest.StridedMatrixView(pointer(C_cpp), UInt64(N), UInt64(N), UInt64(1), UInt64(N))
 
-        # Introspect Benchmarks (Single Call Overhead tracking)
-        res_jl = benchmark(pure_julia_multiply, A, B; samples=5000, warmup=10)
-        res_cpp = benchmark(cpp_wrapper_multiply, viewA, viewB, viewC; samples=5000, warmup=10)
+        # GC.@preserve keeps backing arrays alive while raw pointers are in use
+        GC.@preserve A B C_cpp begin
+            # Introspect Benchmarks (Single Call Overhead tracking)
+            res_jl = benchmark(pure_julia_multiply, A, B; samples=5000, warmup=10)
+            res_cpp = benchmark(cpp_wrapper_multiply, viewA, viewB, viewC; samples=5000, warmup=10)
+        end
 
         # Export JSONs specifically tagged with their size
         export_json(res_jl, joinpath(export_dir, "julia_mul_$(N)x$(N).json"))
         export_json(res_cpp, joinpath(export_dir, "cpp_mul_$(N)x$(N).json"))
-        
+
         println("  Julia Median: $(res_jl.median_time) ns")
         println("  C++ Median:   $(res_cpp.median_time) ns")
     end

@@ -28,72 +28,161 @@ end
 
 const GLOBAL_JIT = JITContext()
 
+# =============================================================================
+# Fast function pointer lookup with lock-free read path
+# =============================================================================
+
 """
-    invoke(func_name::String, ::Type{T}, args...) where T
-    invoke(func_name::String, args...)
+    _lookup_cached(func_name::String) -> Ptr{Cvoid}
 
-Invoke a JIT-compiled function managed by the global JIT context.
-
-The thunk functions take a single `!llvm.ptr` argument (a void** array of pointers
-to argument values) and optionally return a value. With `llvm.emit_c_interface`,
-MLIR generates a `_mlir_ciface_*` wrapper:
-  - Void return:   `ciface(void** args_ptr)`
-  - Struct return:  `ciface(struct* sret_result, void** args_ptr)`
-
-We use `lookup` + `ccall` to call the ciface wrapper directly, avoiding the
-pitfalls of `mlirExecutionEngineInvokePacked`.
+Look up a JIT function pointer with caching.
+Fast path: lock-free Dict read for already-cached symbols.
+Slow path: JIT engine lookup + cache with lock.
 """
-function invoke(func_name::String, ::Type{T}, args...) where T
-    if !GLOBAL_JIT.initialized
-        error("JIT not initialized. Call initialize_global_jit() first.")
+@inline function _lookup_cached(func_name::String)::Ptr{Cvoid}
+    # Fast path: Dict reads are safe without lock (single-writer pattern)
+    ptr = get(GLOBAL_JIT.compiled_symbols, func_name, C_NULL)
+    if ptr != C_NULL
+        return ptr
     end
 
-    # Look up the ciface function pointer
-    fptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, func_name)
-    if fptr == C_NULL
-        fptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, "_" * func_name)
-    end
-    if fptr == C_NULL
-        error("JIT symbol not found: $func_name")
-    end
+    # Slow path: look up in JIT engine and cache
+    lock(GLOBAL_JIT.lock) do
+        # Double-check after acquiring lock
+        ptr = get(GLOBAL_JIT.compiled_symbols, func_name, C_NULL)
+        if ptr != C_NULL
+            return ptr
+        end
 
-    # Build the inner args array: void*[] where each entry points to an argument value
-    ref_args = Any[]
-    inner_ptrs = Ptr{Cvoid}[]
-    for arg in args
-        r = Ref(arg)
-        push!(ref_args, r)
-        push!(inner_ptrs, Base.unsafe_convert(Ptr{Cvoid}, r))
-    end
+        ptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, func_name)
+        if ptr == C_NULL
+            ptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, "_" * func_name)
+        end
+        if ptr == C_NULL
+            error("JIT symbol not found: $func_name")
+        end
 
-    # Call ciface with sret convention: ciface(T* result, void** args_ptr) -> void
-    ret_buf = Ref{T}()
-    GC.@preserve ref_args inner_ptrs ret_buf begin
-        ccall(fptr, Cvoid, (Ptr{T}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
+        GLOBAL_JIT.compiled_symbols[func_name] = ptr
+        return ptr
     end
-    return ret_buf[]
 end
 
-# Void-return overload
-function invoke(func_name::String, args...)
-    if !GLOBAL_JIT.initialized
-        error("JIT not initialized. Call initialize_global_jit() first.")
-    end
+# =============================================================================
+# Arity-specialized invoke methods (zero heap allocation)
+# =============================================================================
 
-    fptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, func_name)
-    if fptr == C_NULL
-        fptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, "_" * func_name)
-    end
-    if fptr == C_NULL
-        error("JIT symbol not found: $func_name")
-    end
+# MLIR ciface calling convention:
+#   Scalar return (i32, f64, etc.):  T    ciface(args_ptr)     — direct return
+#   Struct return:                   void ciface(T* sret, args_ptr) — sret convention
+#   Void return:                     void ciface(args_ptr)
 
-    ref_args = Any[]
-    inner_ptrs = Ptr{Cvoid}[]
-    for arg in args
+"""
+    _invoke_call(fptr, ::Type{T}, inner_ptrs)
+
+Call JIT function with correct ABI. Uses @generated to resolve ccall return type
+at compile time (ccall requires a concrete type, not a TypeVar).
+"""
+@generated function _invoke_call(fptr::Ptr{Cvoid}, ::Type{T}, inner_ptrs::Vector{Ptr{Cvoid}}) where T
+    if isprimitivetype(T)
+        # Scalar return: T ciface(void** args_ptr) — direct return
+        return :(ccall(fptr, $T, (Ptr{Ptr{Cvoid}},), inner_ptrs))
+    else
+        # Struct return: void ciface(T* sret, void** args_ptr) — sret convention
+        return quote
+            ret_buf = Ref{$T}()
+            GC.@preserve ret_buf begin
+                ccall(fptr, Cvoid, (Ptr{$T}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
+            end
+            ret_buf[]
+        end
+    end
+end
+
+"""
+    invoke(func_name::String, ::Type{T}, args...) where T
+
+Invoke a JIT-compiled function with return type T.
+Arity-specialized methods for 1-4 args eliminate the Any[] boxing overhead.
+Uses _lookup_cached for lock-free symbol resolution on hot paths.
+Handles both scalar returns (direct) and struct returns (sret) correctly.
+"""
+
+# 1-arg specialization
+function invoke(func_name::String, ::Type{T}, a1) where T
+    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    fptr = _lookup_cached(func_name)
+    r1 = Ref(a1)
+    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1)]
+    GC.@preserve r1 begin
+        return _invoke_call(fptr, T, inner_ptrs)
+    end
+end
+
+# 2-arg specialization
+function invoke(func_name::String, ::Type{T}, a1, a2) where T
+    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    fptr = _lookup_cached(func_name)
+    r1 = Ref(a1); r2 = Ref(a2)
+    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2)]
+    GC.@preserve r1 r2 begin
+        return _invoke_call(fptr, T, inner_ptrs)
+    end
+end
+
+# 3-arg specialization
+function invoke(func_name::String, ::Type{T}, a1, a2, a3) where T
+    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    fptr = _lookup_cached(func_name)
+    r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3)
+    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3)]
+    GC.@preserve r1 r2 r3 begin
+        return _invoke_call(fptr, T, inner_ptrs)
+    end
+end
+
+# 4-arg specialization
+function invoke(func_name::String, ::Type{T}, a1, a2, a3, a4) where T
+    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    fptr = _lookup_cached(func_name)
+    r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3); r4 = Ref(a4)
+    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3), Base.unsafe_convert(Ptr{Cvoid}, r4)]
+    GC.@preserve r1 r2 r3 r4 begin
+        return _invoke_call(fptr, T, inner_ptrs)
+    end
+end
+
+# Generic fallback for 5+ args
+function invoke(func_name::String, ::Type{T}, args::Vararg{Any, N}) where {T, N}
+    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    fptr = _lookup_cached(func_name)
+
+    ref_args = Vector{Any}(undef, N)
+    inner_ptrs = Vector{Ptr{Cvoid}}(undef, N)
+    for (i, arg) in enumerate(args)
         r = Ref(arg)
-        push!(ref_args, r)
-        push!(inner_ptrs, Base.unsafe_convert(Ptr{Cvoid}, r))
+        ref_args[i] = r
+        inner_ptrs[i] = Base.unsafe_convert(Ptr{Cvoid}, r)
+    end
+
+    GC.@preserve ref_args begin
+        return _invoke_call(fptr, T, inner_ptrs)
+    end
+end
+
+# =============================================================================
+# Void-return invoke (no Type parameter = void return)
+# =============================================================================
+
+function invoke(func_name::String, args::Vararg{Any, N}) where N
+    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    fptr = _lookup_cached(func_name)
+
+    ref_args = Vector{Any}(undef, N)
+    inner_ptrs = Vector{Ptr{Cvoid}}(undef, N)
+    for (i, arg) in enumerate(args)
+        r = Ref(arg)
+        ref_args[i] = r
+        inner_ptrs[i] = Base.unsafe_convert(Ptr{Cvoid}, r)
     end
 
     GC.@preserve ref_args inner_ptrs begin
@@ -101,6 +190,10 @@ function invoke(func_name::String, args...)
     end
     return nothing
 end
+
+# =============================================================================
+# JIT Initialization
+# =============================================================================
 
 """
     initialize_global_jit(binary_path::String)
@@ -119,9 +212,8 @@ function initialize_global_jit(binary_path::String)
             GLOBAL_JIT.mlir_ctx = create_context()
 
             # 2. Parse VTable Info
-            # This is fast enough to do at runtime, or we could serialize it
             GLOBAL_JIT.vtable_info = DWARFParser.parse_vtables(binary_path)
-            
+
             # Load metadata
             metadata_path = joinpath(dirname(binary_path), "compilation_metadata.json")
             metadata = if isfile(metadata_path)
@@ -132,10 +224,10 @@ function initialize_global_jit(binary_path::String)
 
             # 3. Generate MLIR Module for all vtables
             ir_source = JLCSIRGenerator.generate_jlcs_ir(GLOBAL_JIT.vtable_info, metadata)
-            
+
             # 4. Parse and Lower Module
             mod = parse_module(GLOBAL_JIT.mlir_ctx, ir_source)
-            
+
             # Lower JLCS -> LLVM
             if !lower_to_llvm(mod)
                 error("Failed to lower JLCS dialect to LLVM")
@@ -143,13 +235,12 @@ function initialize_global_jit(binary_path::String)
 
             # 5. Create JIT Engine with the C++ library registered for symbol resolution
             GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=3, shared_libs=[binary_path])
-            
+
             GLOBAL_JIT.initialized = true
             println("JIT Initialized for $binary_path")
         catch e
             @error "Failed to initialize JIT" exception=e
             @warn "JIT initialization failed. Functions using JIT dispatch (Tier 2) will not work, but ccall-based wrappers (Tier 1) will still function."
-            # Don't rethrow — allow the module to load so ccall-based functions work
         end
     end
 end
@@ -165,34 +256,11 @@ function get_jit_thunk(class_name::String, method_name::String)
         error("JIT not initialized. Call initialize_global_jit() first.")
     end
 
-    # Construct the unique name used in the MLIR generator
-    # Corresponds to: func.func @Base_foo(...)
-    # We need to match the sanitization logic in JLCSIRGenerator.jl
     safe_class = replace(class_name, "::" => "_")
     safe_method = replace(method_name, "::" => "_", "(" => "_", ")" => "_")
     thunk_name = "$(safe_class)_$(safe_method)"
 
-    # Check cache
-    lock(GLOBAL_JIT.lock) do
-        if haskey(GLOBAL_JIT.compiled_symbols, thunk_name)
-            return GLOBAL_JIT.compiled_symbols[thunk_name]
-        end
-
-        # Lookup in JIT
-        ptr = lookup(GLOBAL_JIT.jit_engine, thunk_name)
-        
-        if ptr == C_NULL
-            # Try with leading underscore (common platform variation)
-            ptr = lookup(GLOBAL_JIT.jit_engine, "_" * thunk_name)
-        end
-
-        if ptr == C_NULL
-            error("JIT symbol not found: $thunk_name")
-        end
-
-        GLOBAL_JIT.compiled_symbols[thunk_name] = ptr
-        return ptr
-    end
+    return _lookup_cached(thunk_name)
 end
 
 """
@@ -206,12 +274,12 @@ function cleanup()
             destroy_jit(GLOBAL_JIT.jit_engine)
             GLOBAL_JIT.jit_engine = nothing
         end
-        
+
         if GLOBAL_JIT.mlir_ctx != C_NULL
             destroy_context(GLOBAL_JIT.mlir_ctx)
             GLOBAL_JIT.mlir_ctx = C_NULL
         end
-        
+
         GLOBAL_JIT.initialized = false
         empty!(GLOBAL_JIT.compiled_symbols)
     end

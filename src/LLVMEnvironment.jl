@@ -139,7 +139,15 @@ function get_llvm_root(source::Symbol=:auto; config=nothing)
         end
     end
 
-    # 2. Force or prefer JLL
+    # 2. System LLVM (preferred — use what's installed on the system)
+    if source == :auto || source == :system
+        system_root = find_system_llvm()
+        if system_root !== nothing
+            return (system_root, "system")
+        end
+    end
+
+    # 3. JLL fallback
     if source == :jll || source == :auto
         jll_root = get_jll_llvm_root()
         if jll_root !== nothing && isdir(jll_root)
@@ -149,24 +157,13 @@ function get_llvm_root(source::Symbol=:auto; config=nothing)
         end
     end
 
-    # 3. In-tree fallback
-    try
+    # 4. In-tree fallback (only if explicitly requested)
+    if source == :intree
         intree_root = get_replibuild_llvm_root()
-        @info "Using in-tree LLVM toolchain"
         return (intree_root, "intree")
-    catch e
-        @warn "In-tree LLVM not found: $e"
     end
 
-    # 4. System LLVM as last resort
-    @info "Searching for system LLVM installation..."
-    system_root = find_system_llvm()
-    if system_root !== nothing
-        @info "Using system LLVM toolchain at: $system_root"
-        return (system_root, "system")
-    end
-
-    # No LLVM found - throw error
+    # No LLVM found
     error("LLVM Toolchain not found. RepliBuild requires an LLVM installation with clang++. Please install LLVM or set LLVM_CONFIG environment variable.")
 end
 
