@@ -94,7 +94,7 @@ Compile multiple C++ files to LLVM IR (with parallel support).
 Returns vector of IR file paths.
 """
 function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
-    println("Compiling to LLVM IR...")
+    # Compile to LLVM IR
 
     if isempty(cpp_files)
         @warn "No source files to compile"
@@ -121,33 +121,31 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
         push!(ir_files, ir_file)
     end
 
-    if is_cache_enabled(config) && cached_files > 0
-        cache_pct = round(100 * cached_files / length(cpp_files), digits=1)
-        println("  ⚡ $cache_pct% cache hit ($cached_files/$(length(cpp_files)) files)")
-    end
-
     if isempty(files_to_compile)
-        println("All files cached, nothing to compile")
+        println("  compile: $(length(cpp_files)) cached")
         return ir_files
     end
 
-    println("Compiling $(length(files_to_compile)) files...")
+    if cached_files > 0
+        print("  compile: $(length(files_to_compile))/$(length(cpp_files)) files ($(cached_files) cached)")
+    else
+        print("  compile: $(length(files_to_compile)) files")
+    end
 
     # Compile in parallel if enabled
     if is_parallel_enabled(config) && length(files_to_compile) > 1
-        println("Using $(Threads.nthreads()) threads")
 
         results = Vector{Tuple{String,Bool,Int}}(undef, length(files_to_compile))
         Threads.@threads for i in 1:length(files_to_compile)
             results[i] = compile_single_to_ir(config, files_to_compile[i])
         end
 
+        println()
         # Check for failures
         failures = [(file, res) for (file, res) in zip(files_to_compile, results) if !res[2]]
         if !isempty(failures)
-            println("  $(length(failures)) compilation failures")
             for (file, (_, _, exitcode)) in failures
-                println("     $(basename(file)) (exit: $exitcode)")
+                println("    FAIL: $(basename(file)) (exit $exitcode)")
             end
             error("Compilation failed for $(length(failures)) files")
         end
@@ -156,10 +154,12 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
         for cpp_file in files_to_compile
             (ir_file, success, exitcode) = compile_single_to_ir(config, cpp_file)
             if !success
+                println()
                 error("Compilation failed for $cpp_file (exit: $exitcode)")
             end
         end
-    end 
+        println()
+    end
     return ir_files
 end
 
@@ -172,7 +172,7 @@ Link multiple LLVM IR files and optimize.
 Returns path to linked IR file.
 """
 function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, output_name::String)
-    println("Linking and optimizing IR...")
+    # Link and optimize IR
 
     if isempty(ir_files)
         error("No IR files to link")
@@ -193,12 +193,9 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         error("Linked IR file not created: $linked_ir")
     end
 
-    println("Linked $(length(ir_files)) IR files → $(basename(linked_ir))")
-
     # Optimize if requested
     opt_level = config.link.optimization_level
     if opt_level != "0"
-        println("Optimizing (O$opt_level)...")
 
         optimized_ir = joinpath(build_dir, output_name * "_opt.ll")
         opt_args = ["-S", "-O$opt_level"]
@@ -213,10 +210,9 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         (output, exitcode) = BuildBridge.execute("opt", opt_args)
 
         if exitcode != 0
-            @warn "Optimization failed, using unoptimized IR: $output"
+            @warn "Optimization failed, using unoptimized IR"
         elseif isfile(optimized_ir)
             linked_ir = optimized_ir
-            println("Optimized")
         end
     end
 
@@ -232,7 +228,7 @@ Create shared library from LLVM IR.
 Returns path to library file.
 """
 function create_library(config::RepliBuildConfig, ir_file::String, lib_name::String="")
-    println("Creating shared library...")
+    # Create shared library
 
     if !isfile(ir_file)
         error("IR file not found: $ir_file")
@@ -276,9 +272,8 @@ function create_library(config::RepliBuildConfig, ir_file::String, lib_name::Str
         error("Library file not created: $lib_path")
     end
 
-    # Get file size
     size_mb = round(filesize(lib_path) / 1024 / 1024, digits=2)
-    println("Created: $lib_name ($size_mb MB)")
+    println("  link: $lib_name ($size_mb MB)")
 
     return lib_path
 end
@@ -290,7 +285,7 @@ Returns path to executable file.
 function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::String,
                           link_libraries::Vector{String}=String[],
                           lib_dirs::Vector{String}=String[])
-    println("Creating executable...")
+    # Create executable
 
     if !isfile(ir_file)
         error("IR file not found: $ir_file")
@@ -329,7 +324,7 @@ function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::
     chmod(exe_path, 0o755)
 
     size_kb = round(filesize(exe_path) / 1024, digits=1)
-    println("Created: $exe_name ($size_kb KB)")
+    println("  link: $exe_name ($size_kb KB)")
 
     return exe_path
 end
@@ -343,13 +338,7 @@ Complete compilation workflow: discover sources, compile, link, create binary.
 This is the main entry point for building a project.
 """
 function compile_project(config::RepliBuildConfig)
-    println("="^70)
-    println("RepliBuild Compiler")
-    println("="^70)
-    println("Project: $(config.project.name)")
-    println("Root:    $(config.project.root)")
-    println("="^70)
-    println()
+    println("RepliBuild | $(config.project.name)")
 
     start_time = time()
 
@@ -362,10 +351,7 @@ function compile_project(config::RepliBuildConfig)
         return nothing
     end
 
-    println("Source files: $(length(cpp_files))")
-    println("Compiler flags: $(join(get_compile_flags(config), " "))")
-    println("Include dirs: $(length(get_include_dirs(config)))")
-    println()
+    println("  sources: $(length(cpp_files))  includes: $(length(get_include_dirs(config)))")
 
     # Step 1: Compile C++ → IR
     ir_files = compile_to_ir(config, cpp_files)
@@ -386,12 +372,7 @@ function compile_project(config::RepliBuildConfig)
     # Step 4: Extract and save compilation metadata
     metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
 
-    println()
-    println("="^70)
-    println("Build successful ($elapsed seconds)")
-    println("Binary: $binary_path")
-    println("Metadata: $metadata_path")
-    println("="^70)
+    println("  done: $(elapsed)s")
 
     return binary_path
 end
@@ -672,7 +653,7 @@ Returns: (return_types_dict, struct_defs_dict)
   - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
 """
 function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
-    println("Parsing DWARF debug info...")
+    # Parse DWARF debug info
 
     # Run readelf to get DWARF debug info
     (output, exitcode) = BuildBridge.execute("readelf", ["--debug-dump=info", binary_path])
@@ -1295,9 +1276,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
-    println("Types collected: $base_count base, $pointer_count pointer, $struct_count struct, $class_count class")
-    println("   Advanced types: $enum_count enum, $array_count array, $subroutine_count function_pointer")
-    println("   Struct/class members: $total_members, Enum enumerators: $total_enumerators")
+    # Types collected from DWARF
 
     # Collect all struct/class/enum names for type resolution
     struct_names = Set{String}()
@@ -1863,10 +1842,8 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
-    if !isempty(return_types)
-        println("    Extracted $(length(return_types)) return types from DWARF")
-    else
-        println("     No DWARF return type info found (compile with -g flag)")
+    if isempty(return_types)
+        @warn "No DWARF return type info found (compile with -g flag)"
     end
 
     # Extract struct definitions with member information
@@ -1959,9 +1936,6 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
-    if !isempty(struct_defs)
-        println("    Extracted $(length(struct_defs)) struct/class definitions with members")
-    end
 
     # Extract enum definitions with enumerator information
     enum_defs = Dict{String,Dict{String,Any}}()
@@ -1993,9 +1967,6 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
-    if !isempty(enum_defs)
-        println("    Extracted $(length(enum_defs)) enum definitions with enumerators")
-    end
 
     # Store enum_defs in struct_defs with special marker (for now, to maintain API compatibility)
     # Later we can extend the return type
@@ -2025,9 +1996,6 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
     
-    if !isempty(global_vars)
-        println("    Extracted $(length(global_vars)) global variables")
-    end
 
     # Build typedef resolution table: typedef name -> resolved Julia type
     typedef_table = Dict{String,String}()
@@ -2047,9 +2015,6 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
-    if !isempty(typedef_table)
-        println("    Built typedef table: $(length(typedef_table)) entries")
-    end
 
     return (return_types, struct_defs, global_vars, typedef_table)
 end
@@ -2060,11 +2025,8 @@ This is the core of automatic wrapper generation!
 """
 function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
                                       binary_path::String)::Dict{String,Any}
-    println(" Extracting compilation metadata...")
-
-    # Extract symbols from compiled binary
+    # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
-    println("   Found $(length(symbols)) exported symbols")
 
     # Extract return types and struct definitions from DWARF debug info (if available)
     (dwarf_return_types, struct_defs, global_vars, typedef_table) = extract_dwarf_return_types(binary_path)
@@ -2487,7 +2449,9 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
         JSON.print(io, metadata, 2)  # Pretty print with indent=2
     end
 
-    println("    Saved metadata: $metadata_path")
+    nfuncs = length(get(metadata, "functions", []))
+    nstructs = length(get(metadata, "structs", Dict()))
+    println("  dwarf: $(nfuncs) functions, $(nstructs) types")
     return metadata_path
 end
 

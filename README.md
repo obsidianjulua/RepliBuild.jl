@@ -1,56 +1,107 @@
 # RepliBuild.jl
 
-**A No-BS, Zero-Overhead C++ ↔ Julia JIT Bridge.**
+[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/stable/)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/dev/)
 
-RepliBuild.jl isn't just another `ccall` wrapper generator. It is a full ABI-aware compiler bridge powered by a custom MLIR dialect (`jlcs`). It ingests raw C++ source code, parses the DWARF debug info, maps out deep C++ inheritance and vtables, and JIT-compiles it directly into type-safe, native Julia bindings.
+**ABI-aware C/C++ compiler bridge for Julia, powered by MLIR.**
 
-If you have a massive C/C++ project (like Duktape or SQLite) and you want it in Julia right now without writing manual bindings, or you need to pass strided matrices back and forth with *literally zero* wrapper overhead (matching bare-metal `ccall` speeds to the nanosecond), RepliBuild is what you use.
+RepliBuild ingests C/C++ source code, compiles it through an LLVM/MLIR pipeline, introspects DWARF debug metadata, and emits type-safe Julia bindings with correct struct layout, enum definitions, and calling conventions. Functions that require non-trivial ABI handling (packed structs, unions, virtual dispatch) are automatically routed through a JIT tier built on a custom MLIR dialect.
 
-## What it actually does
-
-1. **JIT-to-JIT Execution**: Passes Julia closures into C++ event loops and executes C++ virtual methods from Julia. It crosses the boundary seamlessly.
-2. **Native VTable Dispatch**: Automatically resolves and calls C++ virtual methods directly in IR (`jlcs.vcall`). No "fragile base class" hacks. 
-3. **Zero-Copy Arrays**: Implements N-dimensional strided array views natively in MLIR (`jlcs.load_array_element`). Your `Vector{Float64}` maps exactly to C++ multi-dimensional memory layouts without copies.
-4. **Dependency-Aware Builds**: Discovers your C++ files, parses `#include` trees, caches aggressively, and builds parallelized shared libraries via an embedded LLVM/MLIR toolchain.
-5. **No Boilerplate**: You don't write bindings. It extracts `struct` layouts, enums, function pointers, and methods straight from the compiled DWARF metadata.
-
-## Quickstart (The No-BS Workflow)
-
-Drop this in the root of your C++ project:
+## Install
 
 ```julia
-using Pkg; Pkg.add("RepliBuild")
+using Pkg
+Pkg.add("RepliBuild")
+```
+
+Requires Julia 1.10+ and a system LLVM/Clang toolchain (auto-detected, falls back to JLL).
+
+## Usage
+
+```julia
 using RepliBuild
 
-# 1. Scans your C++ files, builds the `#include` graph, and generates `replibuild.toml`
-RepliBuild.discover()
-
-# 2. Compiles your C++ code to LLVM IR, optimizes it, and emits a shared library
-RepliBuild.build()
-
-# 3. Parses the DWARF data and generates the native Julia wrapper module
-RepliBuild.wrap()
+# Point at a directory containing C/C++ source files
+RepliBuild.discover("path/to/project", build=true, wrap=true)
 ```
 
-Or just do it all at once:
+Or step by step:
+
 ```julia
-RepliBuild.discover(build=true, wrap=true)
+# 1. Scan source files, resolve #include dependencies, generate replibuild.toml
+RepliBuild.discover("path/to/project")
+
+# 2. Compile to LLVM IR, optimize, link, emit shared library
+RepliBuild.build("path/to/project/replibuild.toml")
+
+# 3. Parse DWARF metadata, generate Julia module with ccall wrappers
+RepliBuild.wrap("path/to/project/replibuild.toml")
 ```
 
-## Realistic Configuration
+The generated module lives in `julia/ProjectName.jl` and can be loaded directly:
 
-The `replibuild.toml` controls everything. Here is a real-world setup for a high-performance C++ engine:
+```julia
+include("path/to/project/julia/ProjectName.jl")
+using .ProjectName
+```
+
+## What it handles
+
+- **Structs** with correct field order, alignment padding, and forward declarations for circular references
+- **Enums** mapped to Julia `@enum` with correct underlying types
+- **Unions** as `NTuple{N,UInt8}` with typed getter/setter accessors
+- **Bitfields** with bit-level extraction
+- **Function pointers** and variadic functions (typed overloads via config)
+- **Multi-level pointers** (`T**` -> `Ptr{Ptr{T}}`) and reference types (`T&` -> `Ref{T}`)
+- **C++ virtual methods** via MLIR JIT thunks
+- **Automatic finalizers** for types with destructors (generates `ManagedX` wrappers with GC integration)
+- **Global variables** via `cglobal` accessors
+
+## Architecture
+
+RepliBuild operates as a two-tier dispatch system:
+
+**Tier 1 (ccall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself.
+
+**Tier 2 (MLIR JIT)** — Functions involving packed structs, unions, large struct returns, or virtual dispatch are compiled through a custom MLIR dialect (`jlcs`) that handles ABI marshalling correctly. The JIT engine caches compiled symbols with a lock-free read path for hot calls.
+
+The tier selection is automatic. The wrapper generator analyzes each function's signature against DWARF metadata and routes accordingly.
+
+### Pipeline
+
+```
+C/C++ Source
+    |
+    v
+Discovery (scan files, parse #include graph)
+    |
+    v
+Compilation (Clang -> LLVM IR, per-file caching, parallel)
+    |
+    v
+Linking (IR merge, LTO, optimization)
+    |
+    v
+Binary (shared library + DWARF metadata extraction)
+    |
+    v
+Wrapping (DWARF introspection -> Julia module generation)
+    |
+    v
+JIT Init (MLIR IR generation -> execution engine, on demand)
+```
+
+## Configuration
+
+`replibuild.toml` is generated by `discover()` and can be customized:
 
 ```toml
 [project]
-name = "MyEngine"
-root = "."
+name = "MyProject"
 
 [compile]
 flags = ["-std=c++17", "-fPIC", "-O3"]
 parallel = true
-source_files = ["src/engine.cpp", "src/math.cpp"]
-include_dirs = ["include", "src"]
 
 [link]
 optimization_level = "3"
@@ -59,22 +110,60 @@ optimization_level = "3"
 style = "clang"
 use_clang_jl = true
 
+[wrap.varargs]
+# Typed overloads for variadic functions
+printf = [["Cstring", "Cint"], ["Cstring", "Cdouble"]]
+
 [types]
+strictness = "warn"           # "strict", "warn", or "permissive"
 allow_unknown_structs = true
 allow_function_pointers = true
-strictness = "warn"
 ```
 
-## Proof it works
+See [docs/src/config.md](docs/src/config.md) for the full reference.
 
-Check out the `test/` directory. We battle-test this engine against:
-- **Duktape (`duktape_test`)**: Compiles the entire 3.25 MB `duktape.c` monolithic Javascript engine and evaluates JS natively from Julia.
-- **SQLite (`sqlite_test`)**: Wraps the full SQLite3 C API automatically.
-- **Virtual Dispatch (`vtable_test`)**: Instantiates derived C++ classes (like `Circle` and `Rectangle`) and natively dispatches virtual methods (`get_area`) correctly from Julia.
-- **Bi-directional Callbacks (`callback_test`)**: Passes native Julia JIT closures (`@cfunction`) down to C++ which calls them back in a loop without losing stack context.
-- **Zero-Copy Benchmarks (`benchmark_test`)**: Passes zero-allocation strided struct views for multi-dimensional memory without copying. For small matrices (e.g. 4x4), the MLIR thunk completely strips generic dispatch overhead, executing natively in ~94ns, perfectly mirroring bare-metal `ccall` performance with zero wrapper penalty.
+## Tested against
+
+The test suite compiles and wraps real-world C/C++ projects end-to-end:
+
+| Project | Source | What it validates |
+|---------|--------|-------------------|
+| **Lua 5.4.7** | 30 files, full VM + stdlib | State management, stack ops, code eval, Julia<->Lua callbacks, coroutines |
+| **Duktape 2.7.0** | 101K-line JS engine amalgamation | Compiles monolithic C, evaluates JavaScript from Julia |
+| **SQLite 3.49.1** | 261K-line database engine | Full C API wrap with varargs support |
+| **Stress test** | Vectors, matrices, complex numerics | DWARF extraction, struct layout, introspection toolkit |
+| **VTable test** | C++ inheritance hierarchy | Virtual dispatch via MLIR JIT (Circle/Rectangle polymorphism) |
+| **Callback test** | Bidirectional FFI | Julia `@cfunction` passed to C++ event loops |
+| **Benchmark test** | Strided matrix views | Zero-copy struct pointer passing, matches bare `ccall` at ~94ns for 4x4 matmul |
+| **JIT edge cases** | Scalars, structs, packed structs | 3-tier benchmark: bare ccall vs wrapper vs MLIR JIT |
+
+Test sources for Lua, Duktape, and SQLite are downloaded on demand via `setup.jl` scripts (not vendored).
+
+## Introspection
+
+RepliBuild includes a built-in analysis toolkit:
+
+```julia
+using RepliBuild.Introspect
+
+# Binary analysis
+Introspect.symbols("lib.so", filter=:functions)
+Introspect.dwarf_info("lib.so")
+Introspect.disassemble("lib.so", "my_function")
+
+# Benchmarking
+result = Introspect.benchmark(f, args...; samples=1000)
+Introspect.export_json(result, "bench.json")
+```
 
 ## Documentation
 
-- **[docs/src/guide.md](docs/src/guide.md)**: The user guide on workflows and configuration.
-- **[docs/src/mlir.md](docs/src/mlir.md)**: Deep dive into the MLIR / JLCS Dialect Internals.
+- [User Guide](docs/src/guide.md) — Workflow and configuration
+- [Configuration Reference](docs/src/config.md) — All `replibuild.toml` options
+- [Introspection Tools](docs/src/introspect.md) — Binary analysis, benchmarking, data export
+- [MLIR / JLCS Dialect](docs/src/mlir.md) — JIT internals and the custom dialect
+- [Changelog](CHANGELOG.md)
+
+## License
+
+MIT

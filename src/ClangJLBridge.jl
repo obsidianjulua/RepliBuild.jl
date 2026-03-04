@@ -320,7 +320,6 @@ function extract_header_types(headers::Vector{String}, include_dirs::Vector{Stri
         )
     end
 
-    println("  Extracting supplementary types from headers...")
 
     result = Dict(
         "enums" => Dict{String,Vector{Tuple{String,Int}}}(),
@@ -409,16 +408,6 @@ function extract_header_types(headers::Vector{String}, include_dirs::Vector{Stri
         catch e
             @warn "Failed to parse header: $header" exception=e
         end
-    end
-
-    enum_count = length(result["enums"])
-    fp_count = length(result["function_pointers"])
-
-    if enum_count > 0
-        println("  ✓ Extracted $enum_count enums from headers")
-    end
-    if fp_count > 0
-        println("  ✓ Extracted $fp_count function pointer typedefs from headers")
     end
 
     return result

@@ -36,7 +36,7 @@ toolchain = "auto"
 [project]
 name = "stdlib_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/stdlib_test"
-uuid = "2b1d6e9f-7d99-4eb1-a7b9-d5367a192960"
+uuid = "3da0a7a8-50cd-4b01-85cc-94dc8fe7ddee"
 
 [paths]
 build = "build"

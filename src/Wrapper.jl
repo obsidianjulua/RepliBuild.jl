@@ -826,9 +826,6 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
                      generate_tests::Bool=false,
                      generate_docs::Bool=true)
 
-    println(" RepliBuild Wrapper Generator")
-    println("="^70)
-    println("   Library: $(basename(library_path))")
 
     if !isfile(library_path)
         error("Library not found: $library_path")
@@ -841,14 +838,9 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
     if !has_metadata
         @warn "No compilation metadata found. Did you compile with -g flag?"
         @warn "Falling back to basic symbol-only wrapper (conservative types, limited safety)"
-        println("   Method: Basic symbol extraction")
-        println()
         return wrap_basic(config, library_path, generate_docs=generate_docs)
     end
 
-    # Use introspective wrapper (DWARF metadata - ground truth from compilation)
-    println("   Method: Introspective (DWARF metadata)")
-    println()
     return wrap_introspective(config, library_path, headers, generate_docs=generate_docs)
 end
 
@@ -865,9 +857,6 @@ Quality: ~40% - Conservative types, placeholder signatures, requires manual refi
 Use when: Headers not available, quick prototyping, binary-only distribution.
 """
 function wrap_basic(config::RepliBuildConfig, library_path::String; generate_docs::Bool=true)
-    println("Generating basic wrapper (symbol-only extraction)...")
-    println("Method: Symbol extraction (nm)")
-    println()
 
     if !isfile(library_path)
         error("Library not found: $library_path")
@@ -900,8 +889,6 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
 
     write(output_file, wrapper_content)
 
-    println("   Generated: $output_file")
-    println()
     return output_file
 end
 
@@ -1100,9 +1087,6 @@ Use when: Headers available, need type safety, production deployment.
 """
 function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers::Vector{String};
                         generate_docs::Bool=true)
-    println("  Generating header-aware wrapper (Clang.jl)...")
-    println("   Method: Clang.jl header parsing")
-    println()
 
     if !isfile(library_path)
         error("Library not found: $library_path")
@@ -1130,8 +1114,6 @@ function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers
         )
     )
 
-    # Generate bindings via ClangJLBridge
-    println("  Parsing headers with Clang.jl...")
     output_file = ClangJLBridge.generate_bindings_clangjl(clang_config, library_path, headers)
 
     if isnothing(output_file)
@@ -1140,9 +1122,6 @@ function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers
 
     # TODO: Enhance generated file with our safety checks and metadata
     # For now, ClangJLBridge handles the generation
-
-    println("   Generated: $output_file")
-    println()
 
     return output_file
 end
@@ -1260,9 +1239,6 @@ This is the culmination of RepliBuild's vision: automatic, accurate, language-ag
 """
 function wrap_introspective(config::RepliBuildConfig, library_path::String, headers::Vector{String};
                            generate_docs::Bool=true)
-    println("  Generating introspective wrapper (DWARF metadata)...")
-    println("   Method: DWARF debug info + symbol metadata")
-    println()
 
     if !isfile(library_path)
         error("Library not found: $library_path")
@@ -1333,8 +1309,7 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
 
     write(output_file, wrapper_content)
 
-    println("   Generated: $output_file")
-    println()
+    println("  wrap: $(basename(output_file))")
 
     return output_file
 end

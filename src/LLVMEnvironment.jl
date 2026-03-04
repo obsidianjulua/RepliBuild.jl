@@ -432,19 +432,12 @@ Initialize the LLVM toolchain.
 function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:auto)
     # Read from config struct first (source of truth), or auto-discover
     (llvm_root, toolchain_source) = if config !== nothing && !isempty(config.llvm.version)
-        println("Initializing LLVM Toolchain from Config")
-        # Config has LLVM info - check if we can get root from somewhere
-        # For now, just auto-discover since config.llvm doesn't store full root path
         (root, src) = get_llvm_root(config.llvm.toolchain)
         (root, String(config.llvm.toolchain))
     else
-        println("Initializing LLVM Toolchain (auto-discover)")
         (root, src) = get_llvm_root(source)
         (root, src)
     end
-
-    println("   Root: $llvm_root")
-    println("   Source: $toolchain_source")
 
     # Setup paths (JLL and system use bin/, in-tree uses tools/)
     bin_dir = (toolchain_source == "jll" || toolchain_source == "system") ? joinpath(llvm_root, "bin") : joinpath(llvm_root, "tools")
@@ -474,12 +467,7 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
 
     (major, minor, patch) = parse_llvm_version(String(version_str))
 
-    println("   Version: $version_str (LLVM $major.$minor.$patch)")
-
-    # Auto-discover tools (config doesn't cache tools in new immutable struct)
-    println("   Tools: Auto-discovering...")
     tools = discover_llvm_tools(llvm_root, toolchain_source)
-    println("   Tools: Discovered $(length(tools)) tools (cached for next run)")
 
     # Validate tools exist, warn if missing
     for (name, path) in tools
@@ -488,9 +476,7 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
         end
     end
 
-    # Discover libraries
     libraries = discover_llvm_libraries(llvm_root)
-    println("   Libraries: $(length(libraries)) discovered")
 
     # Query llvm-config
     (cxxflags, ldflags, libs) = query_llvm_config(llvm_config)
@@ -518,8 +504,6 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
         isolated,
         toolchain_source
     )
-
-    println(" LLVM Toolchain initialized")
 
     return toolchain
 end

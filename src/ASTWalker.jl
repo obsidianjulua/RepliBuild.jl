@@ -318,7 +318,7 @@ function build_dependency_graph(files::Vector{String}, include_dirs::Vector{Stri
     file_deps = Dict{String,FileDependencies}()
 
     # Analyze each file with progress bar
-    p = Progress(length(files), desc="   Analyzing dependencies: ")
+    p = Progress(length(files), desc="   Analyzing dependencies: ", enabled=false)
     for (i, filepath) in enumerate(files)
         abs_path = abspath(filepath)
 
@@ -365,9 +365,6 @@ function build_dependency_graph(files::Vector{String}, include_dirs::Vector{Stri
     # Topological sort for compilation order
     compilation_order = topological_sort(include_graph)
 
-    println("      Dependency graph built:")
-    println("      Files analyzed: $(length(file_deps))")
-    println("      Include relationships: $(sum(length(v) for v in values(include_graph)))")
 
     return DependencyGraph(
         file_deps,
@@ -456,7 +453,6 @@ function export_dependency_graph_json(graph::DependencyGraph, output_path::Strin
         JSON.print(f, data, 2)
     end
 
-    println("Exported dependency graph: $output_path")
 end
 
 """
@@ -534,52 +530,6 @@ end
 Print summary statistics of the dependency graph.
 """
 function print_dependency_summary(graph::DependencyGraph)
-    println("="^70)
-    println("Dependency Graph Summary")
-    println("="^70)
-
-    total_files = length(graph.files)
-    header_count = count(d -> d.is_header, values(graph.files))
-    source_count = total_files - header_count
-
-    total_includes = sum(length(d.includes) for d in values(graph.files))
-    total_namespaces = length(unique(vcat([d.namespaces for d in values(graph.files)]...)))
-    total_classes = length(unique(vcat([d.classes for d in values(graph.files)]...)))
-    total_functions = length(unique(vcat([d.functions for d in values(graph.files)]...)))
-
-    files_with_errors = count(d -> !isempty(d.parse_errors), values(graph.files))
-
-    println("\n File Statistics:")
-    println("   Total files:     $total_files")
-    println("   Headers:         $header_count")
-    println("   Sources:         $source_count")
-    println("   With errors:     $files_with_errors")
-
-    println("\n Dependency Statistics:")
-    println("   Total includes:  $total_includes")
-    println("   Avg per file:    $(round(total_includes / max(total_files, 1), digits=1))")
-
-    println("\n Structure Statistics:")
-    println("   Namespaces:      $total_namespaces")
-    println("   Classes:         $total_classes")
-    println("   Functions:       $total_functions")
-
-    println("\n Compilation Order:")
-    println("   $(length(graph.compilation_order)) files in dependency order")
-
-    if files_with_errors > 0
-        println("\n  Errors:")
-        for (file, deps) in graph.files
-            if !isempty(deps.parse_errors)
-                println("   ❌ $(basename(file)):")
-                for err in deps.parse_errors
-                    println("      • $err")
-                end
-            end
-        end
-    end
-
-    println("="^70)
 end
 
 # Exports

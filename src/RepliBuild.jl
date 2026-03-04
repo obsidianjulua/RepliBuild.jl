@@ -7,7 +7,7 @@ module RepliBuild
 using TOML
 
 # Version
-const VERSION = v"2.0.3"
+const VERSION = v"2.1.0"
 
 # ============================================================================
 # LOAD CORE MODULES
@@ -166,9 +166,6 @@ RepliBuild.wrap("replibuild.toml")
 ```
 """
 function build(toml_path::String="replibuild.toml"; clean::Bool=false)
-    println("═"^70)
-    println(" RepliBuild - Compile C++")
-    println("═"^70)
 
     # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)
@@ -193,12 +190,6 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
         # Compile the project (C++ → IR → library + metadata)
         library_path = Compiler.compile_project(config)
 
-        println()
-        println("✓ Library: $library_path")
-        println("✓ Metadata saved")
-        println()
-        println("Next: RepliBuild.wrap(\"$toml_path\") to generate Julia bindings")
-        println("═"^70)
 
         return library_path
 
@@ -242,9 +233,6 @@ RepliBuild.wrap("replibuild.toml", headers=["mylib.h"])
 ```
 """
 function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=String[])
-    println("═"^70)
-    println(" RepliBuild - Generate Julia Wrappers")
-    println("═"^70)
 
     # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)
@@ -277,8 +265,6 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
             @warn "No metadata found. Wrapper quality may be limited."
         end
 
-        println(" Library: $(basename(library_path))")
-        println()
 
         # Generate wrapper
         wrapper_path = Wrapper.wrap_library(
@@ -289,14 +275,6 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
             generate_docs=true
         )
 
-        println()
-        println("✓ Wrapper: $wrapper_path")
-        println()
-        println("Usage:")
-        module_name = ConfigurationManager.get_module_name(config)
-        println("  include(\"$wrapper_path\")")
-        println("  using .$module_name")
-        println("═"^70)
 
         return wrapper_path
 
@@ -338,13 +316,16 @@ end
 function clean_internal(path::String)
     dirs_to_remove = ["build", "julia", ".replibuild_cache"]
 
-    println("Cleaning build artifacts...")
+    removed = String[]
     for dir in dirs_to_remove
         dir_path = joinpath(path, dir)
         if isdir(dir_path)
             rm(dir_path, recursive=true, force=true)
-            println("   ✓ Removed $dir/")
+            push!(removed, dir)
         end
+    end
+    if !isempty(removed)
+        println("  clean: $(join(removed, ", "))")
     end
 end
 
@@ -366,52 +347,39 @@ RepliBuild.info("path/to/replibuild.toml")
 ```
 """
 function info(toml_path::String="replibuild.toml")
-    println("═"^70)
-    println(" RepliBuild - Project Info")
-    println("═"^70)
-
-    # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)
 
     if !isfile(toml_path)
-        println("❌ No replibuild.toml found at: $toml_path")
-        println("   Create one with RepliBuild.Discovery.discover()")
-        println("═"^70)
+        println("No replibuild.toml at: $toml_path")
         return
     end
 
     project_dir = dirname(toml_path)
-
     data = TOML.parsefile(toml_path)
     project = get(data, "project", Dict())
 
-    println("Config: $toml_path")
-    println("Project: $(get(project, "name", "unnamed"))")
-    println()
+    println("RepliBuild | $(get(project, "name", "unnamed"))")
 
-    # Check library
     julia_dir = joinpath(project_dir, "julia")
     if isdir(julia_dir)
         lib_files = filter(f -> endswith(f, ".so") || endswith(f, ".dylib") || endswith(f, ".dll"),
                           readdir(julia_dir))
         if !isempty(lib_files)
-            println("✓ Library: $(lib_files[1])")
+            println("  library: $(lib_files[1])")
         else
-            println("❌ No library built yet - run RepliBuild.build(\"$toml_path\")")
+            println("  library: not built")
         end
 
-        # Check wrapper
         jl_files = filter(f -> endswith(f, ".jl"), readdir(julia_dir))
         if !isempty(jl_files)
-            println("✓ Wrapper: $(jl_files[1])")
+            println("  wrapper: $(jl_files[1])")
         else
-            println("❌ No wrapper yet - run RepliBuild.wrap(\"$toml_path\")")
+            println("  wrapper: not generated")
         end
     else
-        println("❌ No build output - run RepliBuild.build(\"$toml_path\")")
+        println("  not built yet")
     end
 
-    println("═"^70)
 end
 
 # ============================================================================
