@@ -126,8 +126,11 @@ end
 Generate IR for a virtual method declaration.
 """
 function generate_virtual_method_ir(method::DWARFParser.VirtualMethod, addr::UInt64)
-    mlir_name = replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_")
-    dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
+    # The actual C++ function we want to call
+    call_target = method.mangled_name
+    
+    # The MLIR wrapper function name (must not conflict with the call target)
+    mlir_name = "thunk_$(call_target)"
     
     (ret_type, arg_types_str) = get_llvm_signature(method)
     
@@ -139,8 +142,8 @@ function generate_virtual_method_ir(method::DWARFParser.VirtualMethod, addr::UIn
     call_sig = "(" * arg_types_str * ")"
     
     call_stmt = ret_type == "" ? 
-        "llvm.call @$(dispatch_name)$(args_vals) : $(call_sig) -> ()" : 
-        "%result = llvm.call @$(dispatch_name)$(args_vals) : $(call_sig) -> $(ret_type)"
+        "llvm.call @$(call_target)$(args_vals) : $(call_sig) -> ()" : 
+        "%result = llvm.call @$(call_target)$(args_vals) : $(call_sig) -> $(ret_type)"
     
     return_stmt = ret_type == "" ? "return" : "return %result : $(ret_type)"
 
@@ -186,7 +189,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict())
         for method in class_info.virtual_methods
              method_addr = get(vtinfo.method_addresses, method.mangled_name, UInt64(0))
              if method_addr != 0
-                 dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
+                 dispatch_name = "$(method.mangled_name)"
                  (ret_type, arg_types) = get_llvm_signature(method)
                  
                  decl_ret = ret_type == "" ? "!llvm.void" : ret_type

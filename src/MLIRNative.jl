@@ -407,11 +407,7 @@ function test_dialect()
     println("\nTesting parsing of jlcs.type_info...")
     ir = """
     module {
-      jlcs.type_info @TestClass {
-        size = 8 : i64,
-        vtable_offset = 0 : i64,
-        vtable_addr = 0x1234 : i64
-      }
+      jlcs.type_info "TestClass", !jlcs.c_struct<"TestClass", [i64], [[0 : i64]], packed = false>, ""
     }"""
     
     parsed_mod = parse_module(ctx, ir)
@@ -455,6 +451,40 @@ macro with_context(body)
         finally
             destroy_context(ctx)
         end
+    end
+end
+
+"""
+    emit_llvmir(mod::MlirModule, output_path::String) -> Bool
+
+Translate an MLIR module (already lowered to LLVM dialect) to LLVM IR text.
+This is the in-process half of AOT compilation; use `emit_object` for the
+full .ll → .o pipeline.
+"""
+function emit_llvmir(mod::MlirModule, output_path::String)
+    ccall((:jlcs_emit_llvmir, libJLCS), Bool,
+          (MlirModule, Cstring), mod, output_path)
+end
+
+"""
+    emit_object(mod::MlirModule, output_path::String; opt_level::Int=2) -> Bool
+
+AOT compile an MLIR module to a native object file (`.o`).
+
+Two-step process to avoid Julia/system LLVM version conflicts:
+  1. Translate MLIR → LLVM IR text in-process (`jlcs_emit_llvmir`)
+  2. Compile .ll → .o out-of-process via `llc`
+"""
+function emit_object(mod::MlirModule, output_path::String; opt_level::Int=2)
+    ll_path = output_path * ".ll"
+    try
+        if !emit_llvmir(mod, ll_path)
+            error("Failed to translate MLIR module to LLVM IR")
+        end
+        run(`llc -filetype=obj -relocation-model=pic -O$opt_level -o $output_path $ll_path`)
+        return true
+    finally
+        rm(ll_path, force=true)
     end
 end
 

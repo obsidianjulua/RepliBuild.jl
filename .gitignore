@@ -23,7 +23,7 @@ test/sqlite_test/src/
 test/sqlite_test/include/
 
 # Generated TOML configs (contain machine-specific absolute paths)
-test/*/replibuild.toml
+test/*/*.toml
 
 # RepliBuild cache
 .replibuild_cache/
@@ -36,3 +36,5 @@ docs/build/
 
 # Claude Code
 .claude/
+CLAUDE.md
+CLAUDE

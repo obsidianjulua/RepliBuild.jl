@@ -59,6 +59,7 @@ add_llvm_library(JLCS SHARED
   impl/JLCSTypes.cpp
   impl/JLCSPasses.cpp
   impl/JLCSCAPIWrappers.cpp
+  impl/AOTCompiler.cpp
 
   DEPENDS
   JLCSIncGen
