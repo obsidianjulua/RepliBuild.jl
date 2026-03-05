@@ -11,6 +11,11 @@ RepliBuild.jl isn't just another `ccall` wrapper generator. It is a full ABI-awa
 3. **Zero-Copy Arrays**: Implements N-dimensional strided array views natively in MLIR (`jlcs.load_array_element`). Your `Vector{Float64}` maps exactly to C++ multi-dimensional memory layouts without copies.
 4. **Dependency-Aware Builds**: Discovers your C++ files, parses `#include` trees, caches aggressively, and builds parallelized shared libraries via an embedded LLVM/MLIR toolchain.
 5. **No Boilerplate**: You don't write bindings. It extracts `struct` layouts, enums, function pointers, and methods straight from the compiled DWARF metadata.
+6. **Git Dependencies**: Declare `[dependencies.mylib]` with a git URL and tag — RepliBuild clones, filters, and compiles the external library automatically alongside your own sources.
+7. **Idiomatic Julia Wrappers**: Factory/destructor pairs are automatically detected and wrapped into `mutable struct` types with GC finalizers and multiple-dispatch method proxies.
+8. **Zero-Cost LTO**: With `enable_lto = true`, hot C++ functions are emitted as `Base.llvmcall` paths so Julia's LLVM JIT can inline them directly into your Julia hot loops.
+9. **AOT Thunks**: Pre-compile all virtual dispatch thunks at build time (`aot_thunks = true`) for zero-latency polymorphic calls in production.
+10. **Template Instantiation**: Declare `templates = ["std::vector<int>"]` and RepliBuild forces Clang to emit the DWARF for those types automatically.
 
 ## Quickstart (The No-BS Workflow)
 
@@ -35,9 +40,32 @@ Or just do it all at once:
 RepliBuild.discover(build=true, wrap=true)
 ```
 
+## Example: wrapping an external git library
+
+```toml
+# replibuild.toml
+[dependencies.cjson]
+type    = "git"
+url     = "https://github.com/DaveGamble/cJSON"
+tag     = "v1.7.18"
+exclude = ["test", "fuzzing"]
+```
+
+```julia
+RepliBuild.build("replibuild.toml")
+RepliBuild.wrap("replibuild.toml")
+
+include("julia/CjsonTest.jl")
+using .CjsonTest
+
+obj = cJSON_CreateObject()
+cJSON_AddStringToObject(obj, "key", "value")
+```
+
 ## Documentation
 
-- **[No-BS User Guide](guide.md)**: Detailed instructions on workflows and configuration.
+- **[No-BS User Guide](guide.md)**: Detailed instructions on workflows, git dependencies, idiomatic wrappers, LTO, AOT thunks, and template instantiation.
+- **[Configuration Reference](config.md)**: Complete `replibuild.toml` option reference including the new `[dependencies]` section.
 - **[API Reference](api.md)**: Documentation for the public API.
 - **[Introspection](introspect.md)**: Deep dive into binary analysis and performance tools.
 - **[MLIR / JLCS Dialect Internals](mlir.md)**: Advanced guide for MLIR integration.
@@ -52,15 +80,27 @@ name = "MyEngine"
 root = "."
 
 [compile]
-flags = ["-O3", "-std=c++17", "-fPIC"]
-parallel = true
+flags        = ["-O3", "-std=c++17", "-fPIC"]
+parallel     = true
+aot_thunks   = false   # set true to pre-compile vtable thunks
+
+[link]
+enable_lto         = false   # set true for Base.llvmcall zero-cost dispatch
+optimization_level = "3"
 
 [wrap]
-style = "clang"
+style        = "clang"
 use_clang_jl = true
 
 [types]
-allow_unknown_structs = true
+allow_unknown_structs   = true
 allow_function_pointers = true
-strictness = "warn"
+strictness              = "warn"
+templates               = ["std::vector<int>"]
+template_headers        = ["<vector>"]
+
+[dependencies.mylib]
+type = "git"
+url  = "https://github.com/example/mylib"
+tag  = "v1.0.0"
 ```

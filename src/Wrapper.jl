@@ -1638,6 +1638,16 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
     # Metadata section
     compiler_info = get(metadata, "compiler_info", Dict())
+    lto_name = config.project.name
+    lto_ir_block = config.link.enable_lto ? """
+    # LTO: load LLVM IR text at module parse time for Base.llvmcall zero-cost dispatch
+    const LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_lto.ll")
+    const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH, String) : ""
+
+    """ : """
+    const LTO_IR = ""  # LTO disabled for this build
+
+    """
     metadata_section = """
     # =============================================================================
     # Compilation Metadata
@@ -1652,7 +1662,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         "generated_at" => "$(get(metadata, "timestamp", "unknown"))"
     )
 
-    """
+    """ * lto_ir_block
 
     # Extract metadata
     functions = metadata["functions"]
@@ -2647,7 +2657,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
             # Allow passing a $cls_nm directly to raw FFI functions expecting a pointer.
             Base.unsafe_convert(::Type{Ptr{Cvoid}}, obj::$cls_nm) = obj.handle
-            Base.unsafe_convert(::Type{Ptr{$cls_nm}}, obj::$cls_nm) = Base.unsafe_convert(Ptr{$cls_nm}, obj.handle)
+            Base.unsafe_convert(::Type{Ptr{$cls_nm}}, obj::$cls_nm) = Ptr{$cls_nm}(obj.handle)
 
             """
 
@@ -2685,7 +2695,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 # Build parameter list, skipping the implicit 'this' pointer
                 meth_params = get(meth, "parameters", Any[])
                 sig_parts   = String[]
-                call_args   = String["obj"]
+                call_args   = String["obj.handle"]  # pass the raw C pointer, not the Julia wrapper
                 used_names  = Set{String}()
 
                 for (i, p) in enumerate(meth_params)
@@ -3180,6 +3190,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             "($(join(param_types, ", ")),)"  # Note: trailing comma for single-element tuples
         end
 
+        # llvmcall needs Tuple{Type1, Type2} — built from raw param_types (no trailing comma)
+        llvmcall_types = isempty(param_types) ? "" : join(param_types, ", ")
+
         # Generate function body based on return type and conversions
         julia_return_type = return_type["julia_type"]
         c_return_type = return_type["c_type"]
@@ -3189,6 +3202,14 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         
         # Check if this is a virtual method that requires dynamic dispatch
         is_virtual = get(func, "is_virtual", false)
+
+        # LTO eligibility: only safe for primitive/pointer, non-virtual, non-struct-return,
+        # no Cstring anywhere (llvmcall won't auto-convert String→Cstring like ccall does)
+        lto_eligible = config.link.enable_lto &&
+            !is_virtual &&
+            !is_struct_return &&
+            julia_return_type != "Cstring" &&
+            !any(t -> t == "Cstring", param_types)
 
         # Check for _UnsafeUnknown trap to prevent segfaults
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
@@ -3282,22 +3303,50 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             """
         elseif !isempty(conversion_code)
             # Has parameter conversions
-            func_def = """
-            $doc_comment
-            function $julia_name($param_sig)::$julia_return_type
-            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
-            end
+            if lto_eligible
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$julia_return_type
+                $conversion_code    if !isempty(LTO_IR)
+                        return Base.llvmcall(("$mangled", LTO_IR), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
+                    else
+                        return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
+                    end
+                end
 
-            """
+                """
+            else
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$julia_return_type
+                $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
+                end
+
+                """
+            end
         else
             # Standard wrapper - no conversions needed
-            func_def = """
-            $doc_comment
-            function $julia_name($param_sig)::$julia_return_type
-                ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
-            end
+            if lto_eligible
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$julia_return_type
+                    if !isempty(LTO_IR)
+                        return Base.llvmcall(("$mangled", LTO_IR), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
+                    else
+                        return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
+                    end
+                end
 
-            """
+                """
+            else
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$julia_return_type
+                    ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
+                end
+
+                """
+            end
         end
 
         function_wrappers *= func_def

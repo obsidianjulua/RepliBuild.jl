@@ -8,6 +8,7 @@ Manifest.toml
 *.o
 *.a
 *.ll
+*.py
 
 # Test build outputs
 test/*/build/

@@ -226,6 +226,8 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
             output_dir = get_output_path(config)
             mkpath(output_dir)
             cp(bitcode_file, joinpath(output_dir, "$(output_name)_lto.bc"), force=true)
+            # Also copy the text IR (.ll) — Base.llvmcall with string arg needs LLVM assembly text
+            cp(linked_ir, joinpath(output_dir, "$(output_name)_lto.ll"), force=true)
         else
             @warn "Failed to assemble bitcode for LTO: $bc_out"
         end

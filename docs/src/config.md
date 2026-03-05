@@ -49,6 +49,7 @@ Compiler settings for turning C++ into LLVM IR.
 | `parallel` | Bool | Enable multi-threaded compilation. | `true` |
 | `source_files` | Vector{String} | Explicit list of source files (overrides discovery). | `[]` |
 | `include_dirs` | Vector{String} | Explicit list of include directories. | `[]` |
+| `aot_thunks` | Bool | Pre-compile MLIR virtual-dispatch thunks into a static `_thunks.so` at build time. Eliminates JIT startup cost for virtual methods; requires the JLCS dialect to be built. | `false` |
 
 ## `[link]`
 
@@ -57,7 +58,7 @@ Settings for linking and optimizing the LLVM IR.
 | Key | Type | Description | Default |
 |:--- |:---- |:----------- |:------- |
 | `optimization_level` | String | Optimization level (`"0"`, `"1"`, `"2"`, `"3"`, `"s"`, `"z"`). | `"2"` |
-| `enable_lto` | Bool | Enable Link Time Optimization (LTO). | `false` |
+| `enable_lto` | Bool | Enable Link-Time Optimization. When `true`, also emits `<name>_lto.ll` (LLVM text IR) alongside the shared library. The generated Julia wrapper loads this file at parse time and routes eligible functions through `Base.llvmcall` so Julia's JIT can inline C++ code directly into hot loops. Falls back to `ccall` automatically if the file is absent. | `false` |
 | `link_libraries` | Vector{String} | External libraries to link against (e.g., `["stdc++fs"]`). | `[]` |
 
 ## `[binary]`
@@ -92,6 +93,8 @@ Control how C++ types map to Julia types. This is critical for FFI safety.
 | `allow_unknown_enums` | Bool | Map unknown enums to `Int32`. | `false` |
 | `allow_function_pointers` | Bool | Generate `Ptr{Cvoid}` for function pointers. | `true` |
 | `custom` | Dict | Custom type mappings (e.g., `{"MyType" = "Int32"}`). | `{}` |
+| `templates` | Vector{String} | C++ template instantiations to force-emit into DWARF (e.g., `["std::vector<int>"]`). RepliBuild auto-generates a stub `.cpp` that instantiates these types so they appear in metadata. | `[]` |
+| `template_headers` | Vector{String} | Headers `#include`d in the auto-generated template stub (e.g., `["<vector>", "\"mylib.h\""]`). | `[]` |
 
 ### Strictness Modes
 
@@ -124,3 +127,63 @@ Build caching settings.
 |:--- |:---- |:----------- |:------- |
 | `enabled` | Bool | Enable build caching to skip unchanged files. | `true` |
 | `directory` | String | Directory for cache files. | `".replibuild_cache"` |
+
+## `[dependencies]`
+
+RepliBuild can automatically fetch, filter, and compile external C/C++ libraries from git repositories, local paths, or system packages — no BinaryBuilder or JLL packages required.
+
+Each dependency is declared as a named sub-table:
+
+```toml
+[dependencies.cjson]
+type    = "git"
+url     = "https://github.com/DaveGamble/cJSON"
+tag     = "v1.7.18"
+exclude = ["test", "fuzzing", "CMakeLists.txt"]
+
+[dependencies.mylocal]
+type = "local"
+path = "../vendor/mylib"
+exclude = ["docs"]
+
+[dependencies.zlib]
+type = "system"
+pkg_config = "zlib"
+```
+
+### Dependency item fields
+
+| Key | Type | Description | Default |
+|:--- |:---- |:----------- |:------- |
+| `type` | String | Source kind: `"git"`, `"local"`, or `"system"`. | — (required) |
+| `url` | String | Git clone URL. Required when `type = "git"`. | `""` |
+| `tag` | String | Git tag or branch to check out. | `""` (uses default branch) |
+| `path` | String | Filesystem path. Required when `type = "local"`. | `""` |
+| `pkg_config` | String | `pkg-config` package name. Used when `type = "system"` to resolve include/link flags. | `""` |
+| `exclude` | Vector{String} | Files or subdirectories to skip during source injection (glob-matched against relative paths). Useful for silencing test files, build scripts, and unrelated C files in single-directory amalgamations. | `[]` |
+
+### How it works
+
+1. **`git` dependencies** are cloned into `.replibuild_cache/deps/<name>/` on first use and updated to the requested `tag` on subsequent builds. The clone is shallow (`--depth 1`) when a tag is specified.
+2. **`local` dependencies** are scanned in-place. No copying is performed.
+3. **`system` dependencies** run `pkg-config --cflags` to inject include paths into the compile flags.
+
+In all cases, resolved source files are merged into the compilation graph before the `[compile]` step runs. The `exclude` list is applied after scanning, so you can trim large repos down to just the files you need.
+
+### Example: wrapping cJSON from git
+
+```toml
+[project]
+name = "cjson_test"
+
+[dependencies.cjson]
+type    = "git"
+url     = "https://github.com/DaveGamble/cJSON"
+tag     = "v1.7.18"
+exclude = ["test", "fuzzing"]
+
+[types]
+allow_unknown_structs = true
+```
+
+After `RepliBuild.build()` and `RepliBuild.wrap()`, the generated module exposes the full cJSON C API as type-safe Julia functions without any manual binding work.

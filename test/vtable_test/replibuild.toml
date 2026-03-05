@@ -12,7 +12,7 @@ include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test", "/
 aot_thunks = true
 
 [link]
-enable_lto = false
+enable_lto = true
 optimization_level = "0"
 
 [binary]

@@ -53,24 +53,33 @@ using .ProjectName
 - **Bitfields** with bit-level extraction
 - **Function pointers** and variadic functions (typed overloads via config)
 - **Multi-level pointers** (`T**` -> `Ptr{Ptr{T}}`) and reference types (`T&` -> `Ref{T}`)
-- **C++ virtual methods** via MLIR JIT thunks
+- **C++ virtual methods** via MLIR JIT thunks (or statically via AOT thunks)
+- **Idiomatic Julia structs** — factory/destructor pairs are detected and wrapped into `mutable struct` types with GC-managed finalizers and multiple-dispatch method proxies
 - **Automatic finalizers** for types with destructors (generates `ManagedX` wrappers with GC integration)
 - **Global variables** via `cglobal` accessors
+- **Git/local/system dependencies** — external C/C++ libraries fetched, filtered, and compiled automatically via `[dependencies]` in `replibuild.toml`
+- **Template instantiation** — declare `templates = ["std::vector<int>"]` and RepliBuild forces Clang to emit the DWARF for those types
+- **Zero-cost LTO dispatch** — when `enable_lto = true`, eligible functions are emitted as `Base.llvmcall` paths that let Julia's JIT inline C++ code directly into hot loops
 
 ## Architecture
 
 RepliBuild operates as a two-tier dispatch system:
 
-**Tier 1 (ccall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself.
+**Tier 1 (ccall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself. When `enable_lto = true`, eligible functions are further upgraded to `Base.llvmcall`, embedding the C++ LLVM IR directly into Julia's JIT pipeline so the compiler can inline across the boundary.
 
-**Tier 2 (MLIR JIT)** — Functions involving packed structs, unions, large struct returns, or virtual dispatch are compiled through a custom MLIR dialect (`jlcs`) that handles ABI marshalling correctly. The JIT engine caches compiled symbols with a lock-free read path for hot calls.
+**Tier 2 (MLIR JIT / AOT)** — Functions involving packed structs, unions, large struct returns, or virtual dispatch are compiled through a custom MLIR dialect (`jlcs`) that handles ABI marshalling correctly. The JIT engine caches compiled symbols with a lock-free read path for hot calls. When `aot_thunks = true`, these thunks are pre-compiled to a static `.so` at build time, eliminating JIT startup cost entirely.
 
 The tier selection is automatic. The wrapper generator analyzes each function's signature against DWARF metadata and routes accordingly.
+
+**Idiomatic wrappers** — On top of the raw bindings, `Wrapper.jl` clusters factory functions, destructors, and methods by C++ class name and emits `mutable struct` types with GC-managed finalizers and multiple-dispatch method proxies, so user code reads like natural Julia rather than raw FFI.
 
 ### Pipeline
 
 ```
-C/C++ Source
+C/C++ Source + [dependencies] (git/local/system)
+    |
+    v
+Dependency Resolver (clone/update, filter excludes, inject into compile graph)
     |
     v
 Discovery (scan files, parse #include graph)
@@ -79,16 +88,16 @@ Discovery (scan files, parse #include graph)
 Compilation (Clang -> LLVM IR, per-file caching, parallel)
     |
     v
-Linking (IR merge, LTO, optimization)
+Linking (IR merge, LTO, optimization → .so + optional _lto.ll + optional _thunks.so)
     |
     v
 Binary (shared library + DWARF metadata extraction)
     |
     v
-Wrapping (DWARF introspection -> Julia module generation)
+Wrapping (DWARF introspection -> raw ccall/llvmcall wrappers + idiomatic mutable structs)
     |
     v
-JIT Init (MLIR IR generation -> execution engine, on demand)
+JIT Init (MLIR IR generation -> execution engine, on demand — or AOT .so, if pre-compiled)
 ```
 
 ## Configuration
@@ -102,9 +111,11 @@ name = "MyProject"
 [compile]
 flags = ["-std=c++17", "-fPIC", "-O3"]
 parallel = true
+aot_thunks = false        # Pre-compile MLIR C++ vtable thunks into a static .so
 
 [link]
 optimization_level = "3"
+enable_lto = false        # Emit LLVM IR for Base.llvmcall zero-cost dispatch
 
 [wrap]
 style = "clang"
@@ -118,6 +129,15 @@ printf = [["Cstring", "Cint"], ["Cstring", "Cdouble"]]
 strictness = "warn"           # "strict", "warn", or "permissive"
 allow_unknown_structs = true
 allow_function_pointers = true
+templates = ["std::vector<int>", "std::vector<double>"]
+template_headers = ["<vector>"]
+
+# External git dependency: fetched, filtered, and compiled automatically
+[dependencies.cjson]
+type = "git"
+url = "https://github.com/DaveGamble/cJSON"
+tag = "v1.7.18"
+exclude = ["test", "fuzzing", "CMakeLists.txt"]
 ```
 
 See [docs/src/config.md](docs/src/config.md) for the full reference.
@@ -137,7 +157,7 @@ The test suite compiles and wraps real-world C/C++ projects end-to-end:
 | **Benchmark test** | Strided matrix views | Zero-copy struct pointer passing, matches bare `ccall` at ~94ns for 4x4 matmul |
 | **JIT edge cases** | Scalars, structs, packed structs | 3-tier benchmark: bare ccall vs wrapper vs MLIR JIT |
 
-Test sources for Lua, Duktape, and SQLite are downloaded on demand via `setup.jl` scripts (not vendored).
+Test sources for Lua, Duktape, and SQLite are downloaded on demand via `setup.jl` scripts or git config's in replibuild.toml (not vendored).
 
 ## Introspection
 

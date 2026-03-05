@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-03-04 19:27:00
+# Generated: 2026-03-04 21:16:34
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -35,8 +35,10 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-03-04T19:27:00.905"
+    "generated_at" => "2026-03-04T21:16:34.482"
 )
+
+const LTO_IR = ""  # LTO disabled for this build
 
 # =============================================================================
 # Enum Definitions (from DWARF debug info)
