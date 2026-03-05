@@ -9,6 +9,7 @@ parallel = true
 flags = ["-std=c++17", "-fPIC"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test/src/shapes.cpp"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test/src"]
+aot_thunks = true
 
 [link]
 enable_lto = false
@@ -36,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "vtable_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test"
-uuid = "699e112c-2c8f-44a0-b46d-13ac38511886"
+uuid = "cade556e-8a59-4043-b42f-95ef4c1c91cb"
 
 [paths]
 build = "build"

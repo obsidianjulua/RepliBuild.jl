@@ -9,6 +9,7 @@ parallel = true
 flags = ["-std=c++17", "-fPIC"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src"]
+aot_thunks = false
 
 [link]
 enable_lto = false
@@ -36,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "stress_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test"
-uuid = "121df749-23c5-47a0-acf5-875ca8eca53b"
+uuid = "2cba4a9e-8216-47cc-abcd-753e86570917"
 
 [paths]
 build = "build"

@@ -45,6 +45,7 @@ struct CompileConfig
     flags::Vector{String}
     defines::Dict{String,String}
     parallel::Bool
+    aot_thunks::Bool
 end
 
 """Nested struct for [link] section"""
@@ -220,7 +221,8 @@ function parse_compile_config(data::Dict)::CompileConfig
         get(compile, "include_dirs", String[]),
         get(compile, "flags", ["-std=c++17", "-fPIC"]),
         get(compile, "defines", Dict{String,String}()),
-        get(compile, "parallel", true)
+        get(compile, "parallel", true),
+        get(compile, "aot_thunks", false)
     )
 end
 
@@ -398,7 +400,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         ProjectConfig(project_name, project_root, uuid4()),
         PathsConfig("src", "include", "julia", "build", ".replibuild_cache"),
         DiscoveryConfig(true, true, 10, ["build", ".git", ".cache"], true),
-        CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true),
+        CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
         LinkConfig("2", false, String[], String[]),
         BinaryConfig(:shared, "", false),
         WrapConfig(true, :clang, "", true, Dict{String,Vector{Vector{String}}}()),
@@ -451,7 +453,8 @@ function save_config(config::RepliBuildConfig)
     # [compile]
     compile_dict = Dict(
         "flags" => config.compile.flags,
-        "parallel" => config.compile.parallel
+        "parallel" => config.compile.parallel,
+        "aot_thunks" => config.compile.aot_thunks
     )
     # Only save if non-empty
     if !isempty(config.compile.source_files)
@@ -556,7 +559,8 @@ function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{
         config.compile.include_dirs,
         new_flags,  # Updated
         config.compile.defines,
-        config.compile.parallel
+        config.compile.parallel,
+        config.compile.aot_thunks
     )
 
     return RepliBuildConfig(
@@ -578,7 +582,8 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
         config.compile.include_dirs,
         config.compile.flags,
         config.compile.defines,
-        config.compile.parallel
+        config.compile.parallel,
+        config.compile.aot_thunks
     )
 
     return RepliBuildConfig(
@@ -600,7 +605,8 @@ function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String
         include_dirs,  # Updated
         config.compile.flags,
         config.compile.defines,
-        config.compile.parallel
+        config.compile.parallel,
+        config.compile.aot_thunks
     )
 
     return RepliBuildConfig(
@@ -624,7 +630,8 @@ function with_discovery_results(config::RepliBuildConfig;
         isempty(include_dirs) ? config.compile.include_dirs : include_dirs,
         config.compile.flags,
         config.compile.defines,
-        config.compile.parallel
+        config.compile.parallel,
+        config.compile.aot_thunks
     )
 
     return RepliBuildConfig(

@@ -9,6 +9,7 @@ parallel = true
 flags = ["-std=c++17", "-fPIC"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stdlib_test/src/std_wrapper.cpp"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stdlib_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/stdlib_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/stdlib_test/src"]
+aot_thunks = false
 
 [link]
 enable_lto = false
@@ -36,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "stdlib_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/stdlib_test"
-uuid = "758b0ef0-550f-4cce-8500-14e02c941687"
+uuid = "3599cfac-1472-4201-91ea-09185651c9cb"
 
 [paths]
 build = "build"

@@ -465,7 +465,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         include_dirs,                            # include_dirs
         ["-std=c++17", "-fPIC"],         # flags
         Dict{String,String}(),                   # defines
-        true                                     # parallel
+        true,                                    # parallel
+        false                                    # aot_thunks
     )
 
     link_config = ConfigurationManager.LinkConfig(

@@ -249,7 +249,7 @@ function initialize_global_jit(binary_path::String)
             GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=3, shared_libs=[binary_path])
 
             GLOBAL_JIT.initialized = true
-            println("JIT Initialized for $binary_path")
+            # println("JIT Initialized for $binary_path")
         catch e
             @error "Failed to initialize JIT" exception=e
             @warn "JIT initialization failed. Functions using JIT dispatch (Tier 2) will not work, but ccall-based wrappers (Tier 1) will still function."

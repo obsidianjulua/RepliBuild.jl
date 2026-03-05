@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for callback_test
-# Generated: 2026-03-04 19:05:00
+# Generated: 2026-03-04 19:27:12
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libcallback_test.so
 # Metadata: compilation_metadata.json
@@ -14,27 +14,19 @@ import RepliBuild
 import Base: unsafe_convert
 
 const LIBRARY_PATH = "/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test/julia/libcallback_test.so"
-const THUNKS_LIBRARY_PATH = "/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test/julia/libcallback_test_thunks.so"
+const THUNKS_LIBRARY_PATH = ""
 
 # Verify library exists
 if !isfile(LIBRARY_PATH)
     error("Library not found: $LIBRARY_PATH")
 end
 
-# Library handles for manual management if needed
+# Library handle for manual management if needed
 const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
-const THUNKS_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
 function __init__()
-    # Load main library explicitly to ensure symbols are available
+    # Load library explicitly to ensure symbols are available
     LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-    
-    # Load AOT thunks library if it was successfully generated
-    if !isempty(THUNKS_LIBRARY_PATH) && isfile(THUNKS_LIBRARY_PATH)
-        THUNKS_HANDLE[] = Libdl.dlopen(THUNKS_LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-    elseif false
-        @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
-    end
 end
 # =============================================================================
 # Compilation Metadata
@@ -46,7 +38,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 2,
-    "generated_at" => "2026-03-04T19:05:00.368"
+    "generated_at" => "2026-03-04T19:27:12.009"
 )
 
 export execute_binary_op, simulate_work

@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-03-04 19:04:49
+# Generated: 2026-03-04 19:27:00
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -14,27 +14,16 @@ import RepliBuild
 import Base: unsafe_convert
 
 const LIBRARY_PATH = "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libstress_test.so"
-const THUNKS_LIBRARY_PATH = "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libstress_test_thunks.so"
+const THUNKS_LIBRARY_PATH = ""
 
 # Verify library exists
 if !isfile(LIBRARY_PATH)
     error("Library not found: $LIBRARY_PATH")
 end
 
-# Library handles for manual management if needed
-const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
-const THUNKS_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
-
 function __init__()
-    # Load main library explicitly to ensure symbols are available
-    LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-    
-    # Load AOT thunks library if it was successfully generated
-    if !isempty(THUNKS_LIBRARY_PATH) && isfile(THUNKS_LIBRARY_PATH)
-        THUNKS_HANDLE[] = Libdl.dlopen(THUNKS_LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-    elseif true
-        @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
-    end
+    # Initialize the global JIT context with this library's vtables
+    RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
 end
 # =============================================================================
 # Compilation Metadata
@@ -46,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-03-04T19:04:49.165"
+    "generated_at" => "2026-03-04T19:27:00.905"
 )
 
 # =============================================================================
@@ -558,17 +547,8 @@ Wrapper for C++ function: `compute_eigen`
 """
 
 function compute_eigen(A::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(A),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{EigenDecomposition}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_compute_eigen_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{EigenDecomposition}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_eigen_thunk", EigenDecomposition, A)
 end
 """
     compute_fft(signal::Any, n::Csize_t) -> FFTResult
@@ -587,17 +567,8 @@ Wrapper for C++ function: `compute_fft`
 """
 
 function compute_fft(signal::Any, n::Csize_t)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(signal), Ref(n),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{FFTResult}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_compute_fft_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{FFTResult}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_fft_thunk", FFTResult, signal, n)
 end
 """
     compute_histogram(data::Any, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble) -> Histogram
@@ -619,17 +590,8 @@ Wrapper for C++ function: `compute_histogram`
 """
 
 function compute_histogram(data::Any, n::Csize_t, n_bins::Csize_t, min_val::Cdouble, max_val::Cdouble)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(data), Ref(n), Ref(n_bins), Ref(min_val), Ref(max_val),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{Histogram}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_compute_histogram_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{Histogram}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_histogram_thunk", Histogram, data, n, n_bins, min_val, max_val)
 end
 """
     compute_ifft(fft_data::Any, signal_out::Any) -> Cvoid
@@ -672,17 +634,8 @@ Wrapper for C++ function: `compute_lu`
 """
 
 function compute_lu(A::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(A),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{LUDecomposition}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_compute_lu_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{LUDecomposition}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_lu_thunk", LUDecomposition, A)
 end
 """
     compute_mean(data::Any, n::Csize_t) -> Cdouble
@@ -754,17 +707,8 @@ Wrapper for C++ function: `compute_qr`
 """
 
 function compute_qr(A::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(A),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{QRDecomposition}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_compute_qr_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{QRDecomposition}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_compute_qr_thunk", QRDecomposition, A)
 end
 """
     compute_quantiles(data::Any, n::Csize_t, probabilities::Any, quantiles::Any, n_quantiles::Csize_t) -> Cvoid
@@ -927,17 +871,8 @@ Wrapper for C++ function: `create_cubic_spline`
 """
 
 function create_cubic_spline(x::Any, y::Any, n::Csize_t)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(x), Ref(y), Ref(n),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{SplineInterpolation}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_create_cubic_spline_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{SplineInterpolation}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_create_cubic_spline_thunk", SplineInterpolation, x, y, n)
 end
 """
     dense_matrix_copy(src::Any) -> DenseMatrix
@@ -955,17 +890,8 @@ Wrapper for C++ function: `dense_matrix_copy`
 """
 
 function dense_matrix_copy(src::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(src),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{DenseMatrix}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_dense_matrix_copy_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_dense_matrix_copy_thunk", DenseMatrix, src)
 end
 """
     dense_matrix_create(rows::Csize_t, cols::Csize_t) -> DenseMatrix
@@ -984,17 +910,8 @@ Wrapper for C++ function: `dense_matrix_create`
 """
 
 function dense_matrix_create(rows::Csize_t, cols::Csize_t)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(rows), Ref(cols),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{DenseMatrix}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_dense_matrix_create_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_dense_matrix_create_thunk", DenseMatrix, rows, cols)
 end
 """
     dense_matrix_destroy(mat::Any) -> Cvoid
@@ -1255,17 +1172,8 @@ Wrapper for C++ function: `matrix_add`
 """
 
 function matrix_add(A::Any, B::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(A), Ref(B),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{DenseMatrix}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_matrix_add_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_matrix_add_thunk", DenseMatrix, A, B)
 end
 """
     matrix_determinant(A::Any) -> Cdouble
@@ -1308,17 +1216,8 @@ Wrapper for C++ function: `matrix_multiply`
 """
 
 function matrix_multiply(A::Any, B::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(A), Ref(B),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{DenseMatrix}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_matrix_multiply_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_matrix_multiply_thunk", DenseMatrix, A, B)
 end
 """
     matrix_trace(A::Any) -> Cdouble
@@ -1360,17 +1259,8 @@ Wrapper for C++ function: `matrix_transpose`
 """
 
 function matrix_transpose(A::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(A),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{DenseMatrix}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_matrix_transpose_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{DenseMatrix}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_matrix_transpose_thunk", DenseMatrix, A)
 end
 """
     matrix_vector_mult(A::Any, x::Any, y::Any) -> Cvoid
@@ -1836,17 +1726,8 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 """
 
 function solve_ode_adaptive(ode_func::Any, t0::Cdouble, t_final::Cdouble, y0::Any, n::Csize_t, tolerance::Cdouble, event_func::Any, user_data::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(ode_func), Ref(t0), Ref(t_final), Ref(y0), Ref(n), Ref(tolerance), Ref(event_func), Ref(user_data),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{ODEResult}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_solve_ode_adaptive_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{ODEResult}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_solve_ode_adaptive_thunk", ODEResult, ode_func, t0, t_final, y0, n, tolerance, event_func, user_data)
 end
 """
     solve_ode_rk4(ode_func::Any, t0::Cdouble, t_final::Cdouble, y0::Any, n::Csize_t, dt::Cdouble, user_data::Any) -> ODEResult
@@ -1876,17 +1757,8 @@ callback = @cfunction(my_callback, Cvoid, (Ptr{Cdouble}, Ptr{Cdouble}, Csize_t, 
 """
 
 function solve_ode_rk4(ode_func::Any, t0::Cdouble, t_final::Cdouble, y0::Any, n::Csize_t, dt::Cdouble, user_data::Any)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(ode_func), Ref(t0), Ref(t_final), Ref(y0), Ref(n), Ref(dt), Ref(user_data),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{ODEResult}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_solve_ode_rk4_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{ODEResult}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_solve_ode_rk4_thunk", ODEResult, ode_func, t0, t_final, y0, n, dt, user_data)
 end
 """
     sparse_matrix_create(rows::Csize_t, cols::Csize_t, nnz::Csize_t) -> SparseMatrix
@@ -1906,17 +1778,8 @@ Wrapper for C++ function: `sparse_matrix_create`
 """
 
 function sparse_matrix_create(rows::Csize_t, cols::Csize_t, nnz::Csize_t)
-    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-    refs = (Ref(rows), Ref(cols), Ref(nnz),)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r), Base.unsafe_convert(Ptr{Cvoid}, r)]
-    GC.@preserve refs inner_ptrs begin
-
-        ret_buf = Ref{SparseMatrix}()
-        GC.@preserve ret_buf begin
-            ccall((:_mlir_ciface_sparse_matrix_create_thunk, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{SparseMatrix}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)
-        end
-    end
-    return ret_buf[]
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke("_mlir_ciface_sparse_matrix_create_thunk", SparseMatrix, rows, cols, nnz)
 end
 """
     sparse_matrix_destroy(mat::Any) -> Cvoid

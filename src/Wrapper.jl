@@ -1311,34 +1311,16 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
 
     # AOT Compilation Pass
     thunks_lib_path = ""
-    try
-        vtable_info = DWARFParser.parse_vtables(library_path)
-        ir_source = JLCSIRGenerator.generate_jlcs_ir(vtable_info, metadata)
-        
-        if contains(ir_source, "llvm.func") || contains(ir_source, "jlcs.ffe_call")
-            ctx = MLIRNative.create_context()
-            mod = MLIRNative.parse_module(ctx, ir_source)
-            if MLIRNative.lower_to_llvm(mod)
-                output_dir = get_output_path(config)
-                obj_file = joinpath(output_dir, "$(config.project.name)_thunks.o")
-                thunks_so = joinpath(output_dir, "lib$(config.project.name)_thunks.so")
-                
-                if MLIRNative.emit_object(mod, obj_file)
-                    # Link object file against main library
-                    lib_dir = dirname(library_path)
-                    lib_name = replace(basename(library_path), r"^lib|\.so$" => "")
-                    cmd = `gcc -shared -o $thunks_so $obj_file -L$lib_dir -l$lib_name -Wl,-rpath,$lib_dir`
-                    run(cmd)
-                    
-                    if isfile(thunks_so)
-                        thunks_lib_path = abspath(thunks_so)
-                    end
-                end
-            end
-            MLIRNative.destroy_context(ctx)
+    if config.compile.aot_thunks
+        output_dir = get_output_path(config)
+        lib_name = basename(library_path)
+        thunks_name = replace(lib_name, ".so" => "_thunks.so", ".dylib" => "_thunks.dylib", ".dll" => "_thunks.dll")
+        thunks_so = joinpath(output_dir, thunks_name)
+        if isfile(thunks_so)
+            thunks_lib_path = abspath(thunks_so)
+        else
+            @warn "AOT thunks enabled but companion library not found at $thunks_so"
         end
-    catch e
-        @warn "AOT MLIR compilation failed. Advanced FFI features may be disabled." exception=e
     end
 
     # Generate wrapper module
@@ -2756,49 +2738,72 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Struct returns: invoke(name, RetType, args...)
             is_void_ret = jit_ret_type == "Cvoid" || jit_c_ret == "void"
 
-            # The AOT compiled thunks expect a single argument: void** args
-            # We pack references into an array of pointers just like JITManager did.
-            thunk_sym = ":_mlir_ciface_$(mangled)_thunk"
-            
-            ptr_setup = ""
-            if !isempty(invoke_args)
-                ptr_setup *= "    refs = ($(join(["Ref($a)" for a in param_names], ", ")),)\n"
-                ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[$(join(["Base.unsafe_convert(Ptr{Cvoid}, r)" for r in ["refs[$i]" for i in 1:length(param_names)]], ", "))]\n"
-                ptr_setup *= "    GC.@preserve refs inner_ptrs begin\n"
-            else
-                ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[]\n"
-                ptr_setup *= "    GC.@preserve inner_ptrs begin\n"
-            end
-            
-            if is_void_ret
-                invoke_call = "        ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
-                invoke_call *= "        return nothing\n"
-                invoke_call *= "    end"
-            elseif jit_ret_type in ("Int8","UInt8","Int16","UInt16","Int32","UInt32","Int64","UInt64",
-                                    "Float32","Float64","Cint","Clong","Culong","Csize_t","Cchar",
-                                    "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring")
-                # Scalar return directly
-                invoke_call = "        ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
-                invoke_call *= "    end\n"
-                invoke_call *= "    return ret"
-            else
-                # Struct return via sret pointer
-                invoke_call = "        ret_buf = Ref{$jit_ret_type}()\n"
-                invoke_call *= "        GC.@preserve ret_buf begin\n"
-                invoke_call *= "            ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)\n"
-                invoke_call *= "        end\n"
-                invoke_call *= "    end\n"
-                invoke_call *= "    return ret_buf[]"
-            end
+            if config.compile.aot_thunks
+                # The AOT compiled thunks expect a single argument: void** args
+                thunk_sym = ":_mlir_ciface_$(mangled)_thunk"
+                
+                ptr_setup = ""
+                if !isempty(invoke_args)
+                    ptr_setup *= "    refs = ($(join(["Ref($a)" for a in param_names], ", ")),)\n"
+                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[$(join(["Base.unsafe_convert(Ptr{Cvoid}, r)" for r in ["refs[$i]" for i in 1:length(param_names)]], ", "))]\n"
+                    ptr_setup *= "    GC.@preserve refs inner_ptrs begin\n"
+                else
+                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[]\n"
+                    ptr_setup *= "    GC.@preserve inner_ptrs begin\n"
+                end
+                
+                if is_void_ret
+                    invoke_call = "        ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
+                    invoke_call *= "        return nothing\n"
+                    invoke_call *= "    end"
+                elseif jit_ret_type in ("Int8","UInt8","Int16","UInt16","Int32","UInt32","Int64","UInt64",
+                                        "Float32","Float64","Cint","Clong","Culong","Csize_t","Cchar",
+                                        "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring")
+                    # Scalar return directly
+                    invoke_call = "        ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
+                    invoke_call *= "    end\n"
+                    invoke_call *= "    return ret"
+                else
+                    # Struct return via sret pointer
+                    invoke_call = "        ret_buf = Ref{$jit_ret_type}()\n"
+                    invoke_call *= "        GC.@preserve ret_buf begin\n"
+                    invoke_call *= "            ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)\n"
+                    invoke_call *= "        end\n"
+                    invoke_call *= "    end\n"
+                    invoke_call *= "    return ret_buf[]"
+                end
 
-            func_def = """
-            $doc_comment
-            function $julia_name($param_sig)
-                # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-            $ptr_setup
-            $invoke_call
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)
+                    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
+                $ptr_setup
+                $invoke_call
+                end
+                """
+            else
+                if is_void_ret
+                    invoke_call = if isempty(invoke_args)
+                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\")"
+                    else
+                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\", $invoke_args)"
+                    end
+                else
+                    invoke_call = if isempty(invoke_args)
+                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type)"
+                    else
+                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type, $invoke_args)"
+                    end
+                end
+
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)
+                    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+                    return $invoke_call
+                end
+                """
             end
-            """
 
             function_wrappers *= func_def
             push!(exports, julia_name)
@@ -2872,10 +2877,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             """
         elseif is_virtual
             requires_jit = true
-            # AOT-based virtual dispatch wrapper
-            # We call the statically generated MLIR thunk which natively handles the vtable math
             
-            # Use julia_return_type if it's not Any/Cstring, otherwise use sanitized C type
+            # Sanitize return type if needed
             safe_c_ret = c_return_type
             if occursin(r"[<>]", safe_c_ret)
                  safe_c_ret = replace(replace(replace(safe_c_ret, "<" => "_"), ">" => ""), "," => "_")
@@ -2883,15 +2886,34 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             end
             ret_type_sig = (julia_return_type == "Any" || julia_return_type == "Cstring") ? safe_c_ret : julia_return_type
             
-            thunk_sym = ":thunk_$(mangled)"
-            
-            func_def = """
-            $doc_comment
-            function $julia_name($param_sig)::$ret_type_sig
-            $conversion_code    return ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $ret_type_sig, $ccall_types, $ccall_args)
-            end
+            if config.compile.aot_thunks
+                # AOT-based virtual dispatch wrapper
+                # We call the statically generated MLIR thunk which natively handles the vtable math
+                thunk_sym = ":thunk_$(mangled)"
+                
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$ret_type_sig
+                $conversion_code    return ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $ret_type_sig, $ccall_types, $ccall_args)
+                end
 
-            """
+                """
+            else
+                # JIT-based virtual dispatch wrapper
+                cls_name = get(func, "class", "")
+                
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$ret_type_sig
+                    # Get thunk for virtual dispatch (JIT compiled on-demand)
+                    thunk_ptr = RepliBuild.JITManager.get_jit_thunk("$cls_name", "$func_name")
+                    
+                    # Call thunk
+                $conversion_code    return ccall(thunk_ptr, $ret_type_sig, $ccall_types, $ccall_args)
+                end
+
+                """
+            end
         elseif is_struct_return
             # Struct-valued return - Julia uses the struct type directly
             # ccall will handle struct returns automatically if the Julia type matches
@@ -3149,23 +3171,44 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     """
 
     # Generate initialization block
-    init_block = """
-    # Library handles for manual management if needed
-    const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
-    const THUNKS_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
+    init_block = if config.compile.aot_thunks
+        """
+        # Library handles for manual management if needed
+        const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
+        const THUNKS_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
-    function __init__()
-        # Load main library explicitly to ensure symbols are available
-        LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-        
-        # Load AOT thunks library if it was successfully generated
-        if !isempty(THUNKS_LIBRARY_PATH) && isfile(THUNKS_LIBRARY_PATH)
-            THUNKS_HANDLE[] = Libdl.dlopen(THUNKS_LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-        elseif $requires_jit
-            @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
+        function __init__()
+            # Load main library explicitly to ensure symbols are available
+            LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+            
+            # Load AOT thunks library if it was successfully generated
+            if !isempty(THUNKS_LIBRARY_PATH) && isfile(THUNKS_LIBRARY_PATH)
+                THUNKS_HANDLE[] = Libdl.dlopen(THUNKS_LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+            elseif $requires_jit
+                @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
+            end
+        end
+        """
+    else
+        if requires_jit
+            """
+            function __init__()
+                # Initialize the global JIT context with this library's vtables
+                RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
+            end
+            """
+        else
+            """
+            # Library handle for manual management if needed
+            const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
+
+            function __init__()
+                # Load library explicitly to ensure symbols are available
+                LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+            end
+            """
         end
     end
-    """
 
     return header * init_block * metadata_section * enum_definitions * struct_definitions * export_statement * function_wrappers * footer
 end

@@ -5,6 +5,7 @@
 module RepliBuild
 
 using TOML
+using JSON
 
 # Version
 const VERSION = v"2.1.0"
@@ -129,6 +130,61 @@ function discover(path::String="."; force::Bool=false, build::Bool=false, wrap::
     return result
 end
 
+function _build_aot_thunks(config, library_path)
+    output_dir = ConfigurationManager.get_output_path(config)
+    metadata_path = joinpath(output_dir, "compilation_metadata.json")
+    
+    if !isfile(metadata_path)
+        @warn "Cannot AOT compile thunks: metadata not found."
+        return
+    end
+    
+    println("  aot: Generating MLIR thunks...")
+    start_time = time()
+    
+    vtable_info = DWARFParser.parse_vtables(library_path)
+    metadata = JSON.parsefile(metadata_path)
+    ir_source = JLCSIRGenerator.generate_jlcs_ir(vtable_info, metadata)
+    
+    ctx = MLIRNative.create_context()
+    try
+        mod = MLIRNative.parse_module(ctx, ir_source)
+        if mod == C_NULL
+            error("Failed to parse generated MLIR for AOT.")
+        end
+        
+        if !MLIRNative.lower_to_llvm(mod)
+            error("Failed to lower MLIR to LLVM for AOT.")
+        end
+        
+        thunks_obj = joinpath(output_dir, "thunks.o")
+        if !MLIRNative.emit_object(mod, thunks_obj)
+            error("Failed to emit object file for AOT thunks.")
+        end
+        
+        # Link into a companion shared library
+        lib_name = basename(library_path)
+        thunks_name = replace(lib_name, ".so" => "_thunks.so", ".dylib" => "_thunks.dylib", ".dll" => "_thunks.dll")
+        thunks_so = joinpath(output_dir, thunks_name)
+        
+        (output, exitcode) = BuildBridge.execute("clang++", ["-shared", "-fPIC", "-o", thunks_so, thunks_obj])
+        if exitcode != 0
+            error("Failed to link thunks.o: $output")
+        end
+        
+        elapsed = round(time() - start_time, digits=2)
+        size_kb = round(filesize(thunks_so) / 1024, digits=1)
+        println("  aot: $thunks_name ($size_kb KB) in $(elapsed)s")
+        
+        # Cleanup
+        rm(thunks_obj, force=true)
+    catch e
+        @warn "AOT MLIR compilation failed." exception=e
+    finally
+        MLIRNative.destroy_context(ctx)
+    end
+end
+
 """
     build(toml_path="replibuild.toml"; clean=false)
 
@@ -190,6 +246,10 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
         # Compile the project (C++ → IR → library + metadata)
         library_path = Compiler.compile_project(config)
 
+        # Build AOT thunks if enabled
+        if config.compile.aot_thunks && config.binary.type != :executable
+            _build_aot_thunks(config, library_path)
+        end
 
         return library_path
 

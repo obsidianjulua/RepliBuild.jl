@@ -235,7 +235,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict())
     println(io, "}")
 
     ir = String(take!(io))
-    println("DEBUG: Generated IR:\n$ir")
+    # println("DEBUG: Generated IR:\n$ir")
     return ir
 end
 
