@@ -509,7 +509,13 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         true,                                    # allow_unknown_structs
         false,                                   # allow_unknown_enums
         true,                                    # allow_function_pointers
-        Dict{String,String}()                    # custom_mappings
+        Dict{String,String}(),                   # custom_mappings
+        String[],                                # templates
+        String[]                                 # template_headers
+    )
+
+    dependencies_config = ConfigurationManager.DependenciesConfig(
+        Dict{String, ConfigurationManager.DependencyItem}()
     )
 
     # Construct RepliBuildConfig from nested structs
@@ -524,6 +530,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         llvm_config,
         workflow_config,
         cache_config,
+        dependencies_config,
         types_config,
         joinpath(root_dir, "replibuild.toml"),  # config_file
         now()                                    # loaded_at

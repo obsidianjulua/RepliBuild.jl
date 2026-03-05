@@ -111,6 +111,8 @@ struct TypesConfig
     allow_unknown_enums::Bool
     allow_function_pointers::Bool
     custom_mappings::Dict{String,String}  # User-defined type mappings
+    templates::Vector{String}             # C++ templates to explicitly instantiate
+    template_headers::Vector{String}      # Headers required to instantiate the templates
 end
 
 """
@@ -404,12 +406,17 @@ function parse_types_config(data::Dict)::TypesConfig
         custom_mappings[String(k)] = String(v)
     end
 
+    templates = get(types, "templates", String[])
+    template_headers = get(types, "template_headers", String[])
+
     return TypesConfig(
         strictness,
         get(types, "allow_unknown_structs", true),
         get(types, "allow_unknown_enums", false),
         get(types, "allow_function_pointers", true),
-        custom_mappings
+        custom_mappings,
+        templates,
+        template_headers
     )
 end
 
@@ -446,7 +453,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
         DependenciesConfig(Dict{String, DependencyItem}()),
-        TypesConfig(:warn, true, false, true, Dict{String,String}()),
+        TypesConfig(:warn, true, false, true, Dict{String,String}(), String[], String[]),
         toml_path,
         now()
     )
@@ -588,6 +595,12 @@ function save_config(config::RepliBuildConfig)
     )
     if !isempty(config.types.custom_mappings)
         types_dict["custom"] = config.types.custom_mappings
+    end
+    if !isempty(config.types.templates)
+        types_dict["templates"] = config.types.templates
+    end
+    if !isempty(config.types.template_headers)
+        types_dict["template_headers"] = config.types.template_headers
     end
     data["types"] = types_dict
 
