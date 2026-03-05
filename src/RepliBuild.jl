@@ -18,6 +18,7 @@ const VERSION = v"2.1.0"
 include("LLVMEnvironment.jl")
 include("ConfigurationManager.jl")
 include("BuildBridge.jl")
+include("DependencyResolver.jl")
 
 # Core build system modules
 include("ASTWalker.jl")
@@ -37,6 +38,7 @@ include("Introspect.jl")
 using .LLVMEnvironment
 using .ConfigurationManager
 using .BuildBridge
+using .DependencyResolver
 using .ASTWalker
 using .Discovery
 using .ClangJLBridge
@@ -242,6 +244,7 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
 
         # Load config
         config = ConfigurationManager.load_config(toml_path)
+        config = DependencyResolver.resolve_dependencies(config)
 
         # Compile the project (C++ → IR → library + metadata)
         library_path = Compiler.compile_project(config)
@@ -309,6 +312,7 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
 
         # Load config
         config = ConfigurationManager.load_config(toml_path)
+        config = DependencyResolver.resolve_dependencies(config)
 
         # Find library
         output_dir = ConfigurationManager.get_output_path(config)

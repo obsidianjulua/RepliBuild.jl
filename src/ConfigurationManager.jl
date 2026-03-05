@@ -89,6 +89,21 @@ struct CacheConfig
     directory::String
 end
 
+"""Nested struct for a single dependency"""
+struct DependencyItem
+    type::String # "git", "system", "local"
+    url::String
+    tag::String
+    path::String
+    pkg_config::String
+    exclude::Vector{String}
+end
+
+"""Nested struct for [dependencies] section"""
+struct DependenciesConfig
+    items::Dict{String, DependencyItem}
+end
+
 """Nested struct for [types] section - Type validation settings"""
 struct TypesConfig
     strictness::Symbol              # :strict, :warn, :permissive
@@ -114,6 +129,7 @@ struct RepliBuildConfig
     llvm::LLVMConfig
     workflow::WorkflowConfig
     cache::CacheConfig
+    dependencies::DependenciesConfig
     types::TypesConfig
 
     # Metadata
@@ -152,6 +168,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
         parse_llvm_config(data),
         parse_workflow_config(data),
         parse_cache_config(data),
+        parse_dependencies_config(data),
         parse_types_config(data),
         toml_path,
         now()
@@ -345,6 +362,27 @@ function parse_cache_config(data::Dict)::CacheConfig
     )
 end
 
+"""Parse [dependencies] section"""
+function parse_dependencies_config(data::Dict)::DependenciesConfig
+    deps = get(data, "dependencies", Dict())
+    items = Dict{String, DependencyItem}()
+    
+    for (name, conf) in deps
+        if isa(conf, Dict)
+            items[String(name)] = DependencyItem(
+                get(conf, "type", "local"),
+                get(conf, "url", ""),
+                get(conf, "tag", ""),
+                get(conf, "path", ""),
+                get(conf, "pkg_config", ""),
+                get(conf, "exclude", String[])
+            )
+        end
+    end
+    
+    return DependenciesConfig(items)
+end
+
 """Parse [types] section - Type validation settings for FFI generation"""
 function parse_types_config(data::Dict)::TypesConfig
     types = get(data, "types", Dict())
@@ -407,6 +445,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
+        DependenciesConfig(Dict{String, DependencyItem}()),
         TypesConfig(:warn, true, false, true, Dict{String,String}()),
         toml_path,
         now()
@@ -525,6 +564,21 @@ function save_config(config::RepliBuildConfig)
         "directory" => config.cache.directory
     )
 
+    # [dependencies]
+    if !isempty(config.dependencies.items)
+        deps_dict = Dict{String,Any}()
+        for (name, item) in config.dependencies.items
+            item_dict = Dict{String,Any}("type" => item.type)
+            if !isempty(item.url) item_dict["url"] = item.url end
+            if !isempty(item.tag) item_dict["tag"] = item.tag end
+            if !isempty(item.path) item_dict["path"] = item.path end
+            if !isempty(item.pkg_config) item_dict["pkg_config"] = item.pkg_config end
+            if !isempty(item.exclude) item_dict["exclude"] = item.exclude end
+            deps_dict[name] = item_dict
+        end
+        data["dependencies"] = deps_dict
+    end
+
     # [types]
     types_dict = Dict(
         "strictness" => string(config.types.strictness),
@@ -567,7 +621,7 @@ function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache, config.types,
+        config.llvm, config.workflow, config.cache, config.dependencies, config.types,
         config.config_file, config.loaded_at
     )
 end
@@ -590,7 +644,7 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache, config.types,
+        config.llvm, config.workflow, config.cache, config.dependencies, config.types,
         config.config_file, config.loaded_at
     )
 end
@@ -613,7 +667,7 @@ function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache, config.types,
+        config.llvm, config.workflow, config.cache, config.dependencies, config.types,
         config.config_file, config.loaded_at
     )
 end
@@ -638,7 +692,7 @@ function with_discovery_results(config::RepliBuildConfig;
         config.project, config.paths, config.discovery,
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
-        config.llvm, config.workflow, config.cache, config.types,
+        config.llvm, config.workflow, config.cache, config.dependencies, config.types,
         config.config_file, config.loaded_at
     )
 end
@@ -801,7 +855,7 @@ end
 export RepliBuildConfig,
        ProjectConfig, PathsConfig, DiscoveryConfig, CompileConfig,
        LinkConfig, BinaryConfig, WrapConfig, LLVMConfig,
-       WorkflowConfig, CacheConfig, TypesConfig,
+       WorkflowConfig, CacheConfig, DependenciesConfig, DependencyItem, TypesConfig,
        load_config, save_config, create_default_config,
        merge_compile_flags, with_source_files, with_include_dirs, with_discovery_results,
        get_output_path, get_build_path, get_cache_path,
