@@ -3805,7 +3805,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             byte_size = 24  # default for vector on 64-bit
             for (sname, sinfo) in dwarf_structs
                 if contains(sname, container_type) || _normalize_stl_for_dwarf(sname) == container_type
-                    byte_size = parse(Int, get(sinfo, "byte_size", "24"), base=16)
+                    bs_str = get(sinfo, "byte_size", "24")
+                    byte_size = bs_str isa Integer ? bs_str : (startswith(bs_str, "0x") ? parse(Int, bs_str[3:end], base=16) : parse(Int, bs_str))
                     break
                 end
             end

@@ -55,128 +55,6 @@ end
 Parse llvm-dwarfdump output to extract class and vtable information.
 """
 function parse_dwarf_output(dwarf_text::String)
-    classes = Dict{String, ClassInfo}()
-
-    # State machine for parsing
-    current_class = nothing
-    current_class_name = ""
-    current_vptr_offset = 0
-    current_size = 0
-    base_classes = String[]
-    virtual_methods = VirtualMethod[]
-    members = MemberInfo[]
-    
-    # Method parsing state
-    current_method_name = ""
-    current_method_mangled = ""
-    current_method_slot = -1
-    is_virtual_method = false
-    in_subprogram = false
-
-    for line in split(dwarf_text, '\n')
-        # Detect class type
-        if contains(line, "DW_TAG_class_type") || contains(line, "DW_TAG_structure_type")
-            # Save pending method from previous class context if valid
-            if is_virtual_method && !isempty(current_method_name)
-                push!(virtual_methods, VirtualMethod(
-                    current_method_name,
-                    current_method_mangled,
-                    current_method_slot,
-                    "void", 
-                    String[]
-                ))
-            end
-
-            # Save previous class if exists
-            if !isnothing(current_class_name) && !isempty(current_class_name)
-                classes[current_class_name] = ClassInfo(
-                    current_class_name,
-                    current_vptr_offset,
-                    copy(base_classes),
-                    copy(virtual_methods),
-                    copy(members),
-                    current_size
-                )
-            end
-
-            # Reset state
-            current_class_name = ""
-            current_vptr_offset = 0
-            current_size = 0
-            empty!(base_classes)
-            empty!(virtual_methods)
-            empty!(members)
-            
-            # Reset method state
-            current_method_name = ""
-            current_method_mangled = ""
-            current_method_slot = -1
-            is_virtual_method = false
-            in_subprogram = false
-            continue
-        end
-        
-        # Detect start of a subprogram (method) - reset method state
-        if contains(line, "DW_TAG_subprogram")
-            # If previous method was virtual, save it
-            if is_virtual_method && !isempty(current_method_name)
-                push!(virtual_methods, VirtualMethod(
-                    current_method_name,
-                    current_method_mangled,
-                    current_method_slot,
-                    "void", # TODO: Parse return type
-                    String[] # TODO: Parse parameters
-                ))
-            end
-            
-            current_method_name = ""
-            current_method_mangled = ""
-            current_method_slot = -1
-            is_virtual_method = false
-            in_subprogram = true
-        end
-        
-        # Parse Members
-        # DW_TAG_member
-        if contains(line, "DW_TAG_member")
-             # We just hit a member tag. We'll extract its info in subsequent lines or if they are on the same line (rare).
-             # Simple state tracking for member is needed? 
-             # Actually, dwarfdump output is nested. We can parse lines that follow until next TAG.
-             # But our loop is line-by-line. 
-             # Let's assume we can capture "DW_AT_name" etc. while "in_class" context.
-        end
-
-        # If we hit another tag that isn't subprogram or formal parameter, we are likely out of subprogram
-        if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_subprogram") && !contains(line, "DW_TAG_formal_parameter") && !contains(line, "DW_TAG_unspecified_parameters")
-             in_subprogram = false
-        end
-
-        # Extract class/member/method name
-        if contains(line, "DW_AT_name") 
-            m = match(r"DW_AT_name\s+\(\"([^\"]+)\"\)", line)
-            if !isnothing(m)
-                name = m.captures[1]
-                if isempty(current_class_name)
-                    current_class_name = name
-                elseif in_subprogram
-                    # It's a method name
-                    current_method_name = name
-                elseif !in_subprogram && !isempty(current_class_name)
-                    # Likely a member name, but we need to match it with DW_TAG_member context.
-                    # Limitations of this simple parser: it assumes state based on recent TAG.
-                    # We need a robust way to know we are in a member.
-                    # IMPROVEMENT: Use the indentation level or look at the preceding TAG line.
-                end
-            end
-        end
-        
-        # IMPROVED MEMBER PARSING:
-        # We need to capture member details when we see DW_TAG_member.
-        # But we are streaming lines.
-        # Let's use a "last_tag" variable.
-    end
-    
-    # Re-implementing the loop with better state tracking
     return parse_dwarf_output_robust(dwarf_text)
 end
 
@@ -200,10 +78,12 @@ function parse_dwarf_output_robust(dwarf_text::String)
     pending_method_mangled = ""
     pending_method_slot = -1
     is_virtual_method = false
+    pending_method_return_type = "void"
+    pending_method_params = String[]
     
     # Context
     in_class = false
-    context = :none # :class, :method, :member
+    context = :none # :class, :method, :member, :parameter
     
     lines = split(dwarf_text, '\n')
     
@@ -233,14 +113,16 @@ function parse_dwarf_output_robust(dwarf_text::String)
                 pending_method_name,
                 pending_method_mangled,
                 pending_method_slot,
-                "void", 
-                String[]
+                pending_method_return_type, 
+                copy(pending_method_params)
             ))
         end
         pending_method_name = ""
         pending_method_mangled = ""
         pending_method_slot = -1
         is_virtual_method = false
+        pending_method_return_type = "void"
+        empty!(pending_method_params)
     end
 
     function commit_member()
@@ -288,6 +170,13 @@ function parse_dwarf_output_robust(dwarf_text::String)
             continue
         end
         
+        if contains(line, "DW_TAG_formal_parameter")
+            # Don't commit_method() here because parameter belongs to method
+            commit_member()
+            context = :parameter
+            continue
+        end
+        
         if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_formal_parameter")
              # Some other tag, reset context if specific
              # But keep class context
@@ -310,8 +199,8 @@ function parse_dwarf_output_robust(dwarf_text::String)
             end
         end
         
-        # 2. Type (for members and inheritance)
-        if (context == :member || context == :inheritance) && contains(line, "DW_AT_type")
+        # 2. Type (for members, inheritance, method returns, and parameters)
+        if (context == :member || context == :inheritance || context == :method || context == :parameter) && contains(line, "DW_AT_type")
              # Try to capture type name from comment: DW_AT_type (0x123 "double")
              m = match(r"DW_AT_type\s+\(0x[0-9a-fA-F]+\s+\"([^\"]+)\"\)", line)
              if !isnothing(m)
@@ -320,10 +209,18 @@ function parse_dwarf_output_robust(dwarf_text::String)
                      pending_member_type = type_name
                  elseif context == :inheritance
                      push!(base_classes, type_name)
+                 elseif context == :method
+                     pending_method_return_type = type_name
+                 elseif context == :parameter
+                     push!(pending_method_params, type_name)
                  end
              else
                  if context == :member
                     pending_member_type = "void*" 
+                 elseif context == :method
+                    pending_method_return_type = "void*"
+                 elseif context == :parameter
+                    push!(pending_method_params, "void*")
                  end
              end
         end
