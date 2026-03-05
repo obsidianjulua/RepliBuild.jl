@@ -9,6 +9,7 @@ Manifest.toml
 *.a
 *.ll
 *.py
+*.idx
 
 # Test build outputs
 test/*/build/
