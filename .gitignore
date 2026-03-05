@@ -26,6 +26,7 @@ test/sqlite_test/include/
 
 # Generated TOML configs (contain machine-specific absolute paths)
 test/*/*.toml
+!test/*/replibuild.toml
 
 # RepliBuild cache
 .replibuild_cache/

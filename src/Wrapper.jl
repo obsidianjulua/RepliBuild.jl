@@ -173,29 +173,31 @@ function create_type_registry(config::RepliBuildConfig;
     )
 
     # C++ STL types
+    # Containers are mapped to Ptr{Cvoid} (opaque handles) since their ABI
+    # is incompatible with Julia types. Use CppVector{T}/CppString for access.
     stl_types = Dict{String,String}(
-        # String types
-        "std::string" => "String",
-        "std::basic_string<char>" => "String",
-        "std::string_view" => "String",
-        "std::basic_string_view<char>" => "String",
+        # String types - opaque handles (use CppString for access)
+        "std::string" => "Ptr{Cvoid}",
+        "std::basic_string<char>" => "Ptr{Cvoid}",
+        "std::string_view" => "Ptr{Cvoid}",
+        "std::basic_string_view<char>" => "Ptr{Cvoid}",
 
-        # Containers (conservative mappings - actual element types need parsing)
-        "std::vector" => "Vector",
-        "std::array" => "Vector",
-        "std::deque" => "Vector",
-        "std::list" => "Vector",
-        "std::forward_list" => "Vector",
+        # Containers - opaque handles (use CppVector{T} etc. for access)
+        "std::vector" => "Ptr{Cvoid}",
+        "std::array" => "Ptr{Cvoid}",
+        "std::deque" => "Ptr{Cvoid}",
+        "std::list" => "Ptr{Cvoid}",
+        "std::forward_list" => "Ptr{Cvoid}",
 
-        # Associative containers
-        "std::map" => "Dict",
-        "std::unordered_map" => "Dict",
-        "std::multimap" => "Dict",
-        "std::set" => "Set",
-        "std::unordered_set" => "Set",
-        "std::multiset" => "Set",
+        # Associative containers - opaque handles
+        "std::map" => "Ptr{Cvoid}",
+        "std::unordered_map" => "Ptr{Cvoid}",
+        "std::multimap" => "Ptr{Cvoid}",
+        "std::set" => "Ptr{Cvoid}",
+        "std::unordered_set" => "Ptr{Cvoid}",
+        "std::multiset" => "Ptr{Cvoid}",
 
-        # Utility types
+        # Utility types (these can be POD-like)
         "std::pair" => "Tuple",
         "std::tuple" => "Tuple",
         "std::optional" => "Union{Nothing,T} where T",
@@ -267,6 +269,108 @@ function is_function_pointer_like(cpp_type::String)::Bool
     # - void (*cleanup)()
     # - typedef int (*IntCallback)(double, double)
     return occursin(r"\(\s*\*", cpp_type) || occursin(r"\(\s*\^", cpp_type)
+end
+
+"""
+    is_stl_container_type(c_type::String)::Bool
+
+Check if a C++ type is an STL container (non-POD, requires opaque handle).
+"""
+function is_stl_container_type(c_type::String)::Bool
+    clean = strip(replace(c_type, r"\bconst\b" => ""))
+    clean = strip(replace(clean, r"[*&]+$" => ""))
+    clean = strip(clean)
+    return any(p -> startswith(clean, p),
+        ("std::vector", "std::basic_string", "std::string",
+         "std::map", "std::unordered_map", "std::set", "std::unordered_set",
+         "std::deque", "std::list", "std::forward_list",
+         "std::multimap", "std::multiset"))
+end
+
+"""
+    _split_template_args(args_str::String) -> Vector{String}
+
+Split template arguments with bracket-aware parsing.
+Handles nested templates like "std::map<std::string, std::vector<int>>".
+"""
+function _split_template_args(args_str::String)::Vector{String}
+    result = String[]
+    depth = 0
+    current = IOBuffer()
+
+    for c in args_str
+        if c == '<'
+            depth += 1
+            write(current, c)
+        elseif c == '>'
+            depth -= 1
+            write(current, c)
+        elseif c == ',' && depth == 0
+            push!(result, strip(String(take!(current))))
+        else
+            write(current, c)
+        end
+    end
+
+    remaining = strip(String(take!(current)))
+    if !isempty(remaining)
+        push!(result, remaining)
+    end
+
+    return result
+end
+
+"""
+    _is_stl_internal_type(name::String) -> Bool
+
+Check if a DWARF struct name is an STL implementation-internal type that
+should not be exposed to Julia users.
+"""
+function _is_stl_internal_type(name::String)::Bool
+    # STL internal types from libstdc++ / libc++
+    stl_internal_prefixes = (
+        "_Alloc_hider", "_Guard", "_Guard_alloc", "_Storage",
+        "_Temporary_value", "_UninitDestroyGuard", "_Vector_impl",
+        "_Vector_base", "_Bvector", "_Deque_impl", "_List_impl",
+        "_Rb_tree", "_Hashtable", "_Node_base", "_Node_alloc",
+        "__gnu_cxx::", "std::_", "std::__", "__cxx",
+        "allocator<", "char_traits<", "less<", "hash<", "equal_to<",
+        "iterator<", "reverse_iterator<", "__normal_iterator<",
+        "__wrap_iter<", "initializer_list<",
+    )
+    for prefix in stl_internal_prefixes
+        if startswith(name, prefix)
+            return true
+        end
+    end
+
+    # Also filter types that are clearly STL containers themselves
+    # (we handle them as opaque handles, not as Julia structs)
+    if is_stl_container_type(name)
+        return true
+    end
+
+    return false
+end
+
+"""
+    _normalize_stl_for_dwarf(dwarf_name::String) -> String
+
+Normalize a DWARF struct name for STL container matching.
+DWARF names include allocator args: "std::vector<int, std::allocator<int>>"
+We strip those to match the user-facing name: "std::vector<int>"
+"""
+function _normalize_stl_for_dwarf(dwarf_name::String)::String
+    # std::vector<T, std::allocator<T>>
+    m = match(r"^std::vector<(.+),\s*std::allocator<.+>>$", dwarf_name)
+    if !isnothing(m)
+        return "std::vector<$(strip(m.captures[1]))>"
+    end
+    # std::basic_string<char, ...>
+    if startswith(dwarf_name, "std::basic_string<char")
+        return "std::basic_string<char>"
+    end
+    return dwarf_name
 end
 
 # =============================================================================
@@ -498,45 +602,33 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String; context::Str
         template_name = strip(template_match.captures[1])
         template_args = strip(template_match.captures[2])
 
-        # Handle std::vector<T> → Vector{T}
-        if template_name == "std::vector"
-            vec_context = context == "" ? "std::vector element type" : "$context (std::vector element)"
-            elem_type = infer_julia_type(registry, String(template_args); context=vec_context)
-            return "Vector{$elem_type}"
+        # Handle STL containers → Ptr{Cvoid} (opaque handles for JIT dispatch)
+        if template_name in ("std::vector", "std::deque", "std::list", "std::forward_list",
+                             "std::set", "std::unordered_set", "std::multiset",
+                             "std::map", "std::unordered_map", "std::multimap",
+                             "std::basic_string", "std::string")
+            return "Ptr{Cvoid}"
         end
 
-        # Handle std::array<T, N> → Vector{T} (size lost in translation)
+        # Handle std::array<T, N> → NTuple{N,T} or Ptr{Cvoid}
         if template_name == "std::array"
-            # Parse "T, N"
-            parts = split(template_args, ",")
-            if !isempty(parts)
+            parts = _split_template_args(template_args)
+            if length(parts) >= 2
                 arr_context = context == "" ? "std::array element type" : "$context (std::array element)"
                 elem_type = infer_julia_type(registry, String(strip(parts[1])); context=arr_context)
-                return "Vector{$elem_type}"
+                return "Ptr{Cvoid}"  # std::array has non-trivial ABI too
             end
         end
 
-        # Handle std::pair<T1, T2> → Tuple{T1, T2}
+        # Handle std::pair<T1, T2> → Tuple{T1, T2} (POD-like, can be ccall'd)
         if template_name == "std::pair"
-            parts = split(template_args, ",", limit=2)
+            parts = _split_template_args(template_args)
             if length(parts) == 2
                 pair_ctx1 = context == "" ? "std::pair first type" : "$context (std::pair first)"
                 pair_ctx2 = context == "" ? "std::pair second type" : "$context (std::pair second)"
                 t1 = infer_julia_type(registry, String(strip(parts[1])); context=pair_ctx1)
                 t2 = infer_julia_type(registry, String(strip(parts[2])); context=pair_ctx2)
                 return "Tuple{$t1,$t2}"
-            end
-        end
-
-        # Handle std::map<K,V> → Dict{K,V}
-        if template_name == "std::map" || template_name == "std::unordered_map"
-            parts = split(template_args, ",", limit=2)
-            if length(parts) == 2
-                map_ctx_k = context == "" ? "std::map key type" : "$context (std::map key)"
-                map_ctx_v = context == "" ? "std::map value type" : "$context (std::map value)"
-                k = infer_julia_type(registry, String(strip(parts[1])); context=map_ctx_k)
-                v = infer_julia_type(registry, String(strip(parts[2])); context=map_ctx_v)
-                return "Dict{$k,$v}"
             end
         end
 
@@ -764,8 +856,29 @@ function make_julia_identifier(name::String)::String
         return ""
     end
 
+    # Strip parameter list from demangled C++ names
+    # e.g., "sum_vector(std::vector<int, ...> const&)" → "sum_vector"
+    # Use bracket-aware parsing to find the first '(' at depth 0
+    depth = 0
+    paren_pos = 0
+    for i in eachindex(name)
+        c = name[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth -= 1
+        elseif c == '(' && depth == 0
+            paren_pos = i
+            break
+        end
+    end
+    clean = paren_pos > 0 ? name[1:prevind(name, paren_pos)] : name
+
+    # Remove [abi:cxx11] tags
+    clean = replace(clean, r"\[abi:[^\]]*\]" => "")
+
     # Remove C++ namespace
-    clean = replace(name, r"^.*::" => "")
+    clean = replace(clean, r"^.*::" => "")
 
     # Handle C++ operators
     clean = replace(clean, "operator+" => "op_add")
@@ -1386,8 +1499,19 @@ Returns false if:
 3. Return type is a complex struct by value
 """
 function is_ccall_safe(func_info, dwarf_structs)
+    # 0. Check for STL container types (never ccall-safe)
+    ret_type_str = String(get(func_info["return_type"], "c_type", ""))
+    if is_stl_container_type(ret_type_str)
+        return false
+    end
+    for param in func_info["parameters"]
+        if is_stl_container_type(get(param, "c_type", ""))
+            return false
+        end
+    end
+
     # 1. Check Return Type
-    ret_type = String(get(func_info["return_type"], "c_type", ""))
+    ret_type = ret_type_str
 
     # If returning a struct by value (not pointer/void/primitive)
     if !contains(ret_type, "*") && !contains(ret_type, "void") &&
@@ -2062,14 +2186,24 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         """
         for name in sort(collect(all_forward_decls))
+            # Skip STL internal types
+            _is_stl_internal_type(name) && continue
+
             # Sanitize
             s_name = replace(replace(replace(name, "<" => "_"), ">" => ""), "," => "_")
             s_name = replace(s_name, " " => "")
+            s_name = replace(s_name, "*" => "Ptr")
+            s_name = replace(s_name, "&" => "Ref")
+            s_name = replace(s_name, r"[^a-zA-Z0-9_]" => "_")
+
+            # Skip names that are Julia keywords or builtins
+            if s_name in ("char", "int", "void", "bool", "float", "double", "long", "short")
+                continue
+            end
+
             if name in opaque_structs
-                # Truly opaque — mutable struct (no full definition coming)
                 struct_definitions *= "mutable struct $s_name end\n"
             else
-                # Forward declaration — will be redefined with fields later
                 struct_definitions *= "struct $s_name end\n"
             end
         end
@@ -2189,10 +2323,19 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 continue
             end
 
+            # Skip STL internal implementation types (they leak from DWARF when
+            # template instantiation is forced, but are not useful to Julia users)
+            if _is_stl_internal_type(struct_name)
+                continue
+            end
+
             # Sanitize struct name for Julia (replace < > , with _)
             julia_struct_name = replace(replace(replace(struct_name, "<" => "_"), ">" => ""), "," => "_")
-            julia_struct_name = replace(julia_struct_name, " " => "")  # Remove spaces
-            
+            julia_struct_name = replace(julia_struct_name, " " => "")
+            julia_struct_name = replace(julia_struct_name, "*" => "Ptr")
+            julia_struct_name = replace(julia_struct_name, "&" => "Ref")
+            julia_struct_name = replace(julia_struct_name, r"[^a-zA-Z0-9_]" => "_")
+
             # Skip DWARF struct generation if we are generating a high-level idiomatic wrapper
             if haskey(idiomatic_classes, julia_struct_name)
                 continue
@@ -2400,23 +2543,46 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cdouble", "Cfloat", "Clong", "Culonglong", "Cvoid", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64"]
                         is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
 
-                        if !is_builtin
+                        if !is_builtin || occursin(r"[<>]", julia_type)
                             if occursin(r"Ptr\{[^}]+\}", julia_type)
                                 # Extract type from Ptr{Type} for custom struct references
                                 type_match = match(r"Ptr\{([^}]+)\}", julia_type)
                                 if !isnothing(type_match)
-                                    inner_type = type_match.captures[1]
+                                    inner_type = String(type_match.captures[1])
                                     # Only sanitize if inner type is a custom struct (contains template chars)
                                     if occursin(r"[<>]", inner_type)
-                                        sanitized_inner = replace(replace(replace(inner_type, "<" => "_"), ">" => ""), "," => "_")
-                                        sanitized_inner = replace(sanitized_inner, " " => "")
-                                        sanitized_type = "Ptr{$sanitized_inner}"
+                                        if _is_stl_internal_type(inner_type)
+                                            # STL-internal inner type: use Ptr{Cvoid} — never defined
+                                            sanitized_type = "Ptr{Cvoid}"
+                                        else
+                                            sanitized_inner = replace(replace(replace(inner_type, "<" => "_"), ">" => ""), "," => "_")
+                                            sanitized_inner = replace(sanitized_inner, " " => "")
+                                            sanitized_type = "Ptr{$sanitized_inner}"
+                                        end
                                     end
                                 end
                             elseif occursin(r"[<>]", julia_type)
                                 # Direct custom struct reference with template syntax
-                                sanitized_type = replace(replace(replace(julia_type, "<" => "_"), ">" => ""), "," => "_")
-                                sanitized_type = replace(sanitized_type, " " => "")
+                                if _is_stl_internal_type(julia_type)
+                                    m_size = get(member, "size", 0)
+                                    sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
+                                else
+                                    sanitized_type = replace(replace(replace(julia_type, "<" => "_"), ">" => ""), "," => "_")
+                                    sanitized_type = replace(sanitized_type, " " => "")
+                                end
+                            end
+
+                            # If the (now-sanitized) type refers to an STL-internal type that
+                            # will be filtered out during struct generation, fall back to a byte
+                            # buffer so the embedding struct remains valid Julia syntax.
+                            if sanitized_type == julia_type && _is_stl_internal_type(julia_type)
+                                m_size = get(member, "size", 0)
+                                if m_size > 0
+                                    sanitized_type = "NTuple{$m_size, UInt8}"
+                                else
+                                    # Size unknown; use Ptr{Cvoid} as a same-width placeholder
+                                    sanitized_type = "Ptr{Cvoid}"
+                                end
                             end
                         end
 
@@ -2542,6 +2708,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             
             managed_name = "Managed$safe_s_name"
             
+            # Use the mangled symbol for ccall (demangled names like ~Foo are invalid Julia symbols)
+            deleter_sym = get(deleters_mangled, s_name, deleter)
+            
             # Generate mutable struct with finalizer
             managed_types_def *= """
             mutable struct $managed_name
@@ -2553,8 +2722,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     end
                     obj = new(ptr)
                     finalizer(obj) do x
-                        # Call deleter: $deleter(x.handle)
-                        ccall((:$deleter, LIBRARY_PATH), Cvoid, (Ptr{$safe_s_name},), x.handle)
+                        # Call deleter: $deleter_sym(x.handle)
+                        ccall((:$deleter_sym, LIBRARY_PATH), Cvoid, (Ptr{$safe_s_name},), x.handle)
                     end
                     return obj
                 end
@@ -2770,19 +2939,59 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             has_this = !isempty(params) && (params[1]["name"] == "this")
             
             if !has_this
-                # Synthesize 'this' parameter
-                # Sanitize class name for Julia type
-                safe_class = replace(replace(replace(class_name, "<" => "_"), ">" => ""), "," => "_")
-                safe_class = replace(safe_class, " " => "")
+                # Synthesize 'this' parameter.
+                # The class_name may be namespace-qualified (e.g. "pugi::xml_document").
+                # The Julia struct uses only the bare class name without namespace prefix,
+                # so strip everything up to and including the last "::".
+                # Also sanitize template brackets and other non-identifier characters.
+                raw_class = class_name
+                # Remove template parameters before splitting on ::
+                # (so "std::vector<int>" → bare name is "vector" not "vector<int>")
+                bare_class = let
+                    angle_depth = 0
+                    prefix_end = length(raw_class)
+                    for (i, c) in enumerate(raw_class)
+                        if c == '<'; angle_depth += 1
+                        elseif c == '>'; angle_depth = max(0, angle_depth - 1)
+                        end
+                    end
+                    # Find last "::" at angle-bracket depth 0
+                    last_sep = 0
+                    d = 0
+                    i = 1
+                    while i <= length(raw_class) - 1
+                        c = raw_class[i]
+                        if c == '<'; d += 1
+                        elseif c == '>'; d = max(0, d - 1)
+                        elseif c == ':' && raw_class[i+1] == ':' && d == 0
+                            last_sep = i + 1
+                            i += 1
+                        end
+                        i += 1
+                    end
+                    last_sep > 0 ? raw_class[last_sep+1:end] : raw_class
+                end
+                safe_class = replace(replace(replace(bare_class, "<" => "_"), ">" => ""), "," => "_")
+                safe_class = replace(safe_class, r"[^A-Za-z0-9_]" => "")
+                safe_class = replace(safe_class, r"_+"            => "_")
+                safe_class = String(strip(safe_class, '_'))
+                # If garbled (empty or looks like an operator), fall back to Cvoid
+                if isempty(safe_class) || startswith(safe_class, "operator")
+                    safe_class = "Cvoid"
+                end
                 
-                this_param = Dict{String,Any}(
-                    "name" => "this",
-                    "c_type" => class_name * "*",
-                    "julia_type" => "Ptr{" * safe_class * "}",
-                    "position" => 0,
-                    "is_synthesized" => true
-                )
-                pushfirst!(params, this_param)
+                # Only synthesize 'this' when bare_class is a known struct type.
+                # If it's a namespace name (e.g. "pugi") rather than a class, skip.
+                if !isempty(safe_class) && safe_class != "Cvoid" && safe_class in struct_types
+                    this_param = Dict{String,Any}(
+                        "name" => "this",
+                        "c_type" => class_name * "*",
+                        "julia_type" => "Ptr{" * safe_class * "}",
+                        "position" => 0,
+                        "is_synthesized" => true
+                    )
+                    pushfirst!(params, this_param)
+                end
             end
         end
 
@@ -2809,9 +3018,14 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         # This handles by-value returns of template types
         ret_type_str = get(return_type, "julia_type", "Cvoid")
         if occursin(r"[<>]", ret_type_str) && !startswith(ret_type_str, "Ptr{") && !startswith(ret_type_str, "Ref{")
-             safe_ret = replace(replace(replace(ret_type_str, "<" => "_"), ">" => ""), "," => "_")
-             safe_ret = replace(safe_ret, " " => "")
-             return_type["julia_type"] = safe_ret
+            # If the raw return type is an STL-internal opaque type, use Ptr{Cvoid}
+            if _is_stl_internal_type(ret_type_str)
+                return_type["julia_type"] = "Ptr{Cvoid}"
+            else
+                safe_ret = replace(replace(replace(ret_type_str, "<" => "_"), ">" => ""), "," => "_")
+                safe_ret = replace(safe_ret, " " => "")
+                return_type["julia_type"] = safe_ret
+            end
         end
 
         # =========================================================
@@ -2829,6 +3043,14 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             va_julia_name = replace(va_julia_name, ">" => "_")
             va_julia_name = replace(va_julia_name, "," => "_")
             va_julia_name = replace(va_julia_name, " " => "_")
+            va_julia_name = replace(va_julia_name, "(" => "_")
+            va_julia_name = replace(va_julia_name, ")" => "")
+            va_julia_name = replace(va_julia_name, "&" => "ref")
+            va_julia_name = replace(va_julia_name, "[" => "_")
+            va_julia_name = replace(va_julia_name, "]" => "")
+            va_julia_name = replace(va_julia_name, ":" => "_")
+            va_julia_name = replace(va_julia_name, r"_+" => "_")
+            va_julia_name = String(rstrip(va_julia_name, '_'))
 
             overloads = get(config.wrap.varargs_overloads, func_name, Vector{Vector{String}}())
             if isempty(overloads)
@@ -2860,6 +3082,41 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             end
             push!(param_names, safe_name)
             julia_type = param["julia_type"]
+
+            # Sanitize C++ template types in parameter julia_type (e.g. "Ref{allocator<int> >}")
+            if occursin(r"[<>]", julia_type)
+                m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+                if m !== nothing
+                    wrapper_kw, inner = m.captures
+                    # If inner type is an STL-internal (allocator<>, char_traits<>, etc.),
+                    # fall back to Ptr{Cvoid} — the type is opaque and not user-accessible.
+                    if _is_stl_internal_type(String(inner))
+                        julia_type = "Ptr{Cvoid}"
+                    else
+                        inner_safe = replace(replace(replace(inner, "<" => "_"), ">" => ""), "," => "_")
+                        inner_safe = String(rstrip(replace(replace(inner_safe, " " => ""), r"_+" => "_"), '_'))
+                        julia_type = "$wrapper_kw{$inner_safe}"
+                    end
+                else
+                    julia_type = replace(replace(replace(julia_type, "<" => "_"), ">" => ""), "," => "_")
+                    julia_type = String(rstrip(replace(julia_type, " " => ""), '_'))
+                end
+            end
+            # Also sanitize namespace separators (::) and other non-identifier chars
+            # that can appear in Ptr{namespace::type} style references from DWARF
+            if occursin(r"::|[^A-Za-z0-9_{},\[\]]", julia_type) && julia_type != "Any"
+                m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+                if m !== nothing
+                    wrapper_kw, inner = m.captures
+                    inner_safe = replace(inner, "::" => "_")
+                    inner_safe = replace(inner_safe, r"[^A-Za-z0-9_]" => "")
+                    inner_safe = replace(inner_safe, r"_+" => "_")
+                    inner_safe = strip(inner_safe, '_')
+                    julia_type = isempty(inner_safe) ? "Ptr{Cvoid}" : "$wrapper_kw{$inner_safe}"
+                else
+                    julia_type = "Any"
+                end
+            end
             c_type_name = get(param, "c_type", "")
 
             # Determine the actual C type for ccall
@@ -2910,6 +3167,14 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         julia_name = replace(julia_name, "-" => "minus")
         julia_name = replace(julia_name, "*" => "mul")
         julia_name = replace(julia_name, "/" => "div")
+        julia_name = replace(julia_name, "(" => "_")
+        julia_name = replace(julia_name, ")" => "")
+        julia_name = replace(julia_name, "&" => "ref")
+        julia_name = replace(julia_name, "[" => "_")
+        julia_name = replace(julia_name, "]" => "")
+        julia_name = replace(julia_name, ":" => "_")
+        julia_name = replace(julia_name, r"_+" => "_")  # collapse consecutive underscores
+        julia_name = String(rstrip(julia_name, '_'))
 
         # Build function signature using ergonomic Julia types
         param_sig_parts = String[]
@@ -3510,6 +3775,116 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
     end
 
+    # =================================================================
+    # STL CONTAINER FACTORY FUNCTIONS
+    # =================================================================
+    stl_methods = get(metadata, "stl_methods", Dict())
+    if !isempty(stl_methods)
+        requires_jit = true
+        function_wrappers *= """
+
+        # =============================================================================
+        # STL Container Factories
+        # =============================================================================
+
+        """
+
+        for (container_type, methods) in stl_methods
+            # Build thunks dict for this container
+            thunks_entries = String[]
+            for m in methods
+                method_name = get(m, "method", "")
+                mangled_name = get(m, "mangled", "")
+                if !isempty(method_name) && !isempty(mangled_name)
+                    push!(thunks_entries, "\"$method_name\" => \"$mangled_name\"")
+                end
+            end
+            thunks_dict_str = "Dict{String,String}(" * join(thunks_entries, ", ") * ")"
+
+            # Get container byte_size from DWARF struct_definitions
+            byte_size = 24  # default for vector on 64-bit
+            for (sname, sinfo) in dwarf_structs
+                if contains(sname, container_type) || _normalize_stl_for_dwarf(sname) == container_type
+                    byte_size = parse(Int, get(sinfo, "byte_size", "24"), base=16)
+                    break
+                end
+            end
+
+            # Generate sanitized factory name
+            safe_name = replace(replace(replace(container_type, "::" => "_"), "<" => "_"), ">" => "")
+            safe_name = replace(replace(safe_name, " " => ""), "," => "_")
+
+            # Determine element type for CppVector
+            if startswith(container_type, "std::vector<")
+                elem_match = match(r"std::vector<(.+)>$", container_type)
+                if !isnothing(elem_match)
+                    elem_cpp = String(strip(elem_match.captures[1]))
+                    elem_julia = infer_julia_type(registry, elem_cpp; context="STL factory element type")
+                    # Map to ccall-compatible type
+                    if elem_julia in ("Cint", "Int32")
+                        elem_julia = "Cint"
+                    elseif elem_julia in ("Cdouble", "Float64")
+                        elem_julia = "Cdouble"
+                    elseif elem_julia in ("Cfloat", "Float32")
+                        elem_julia = "Cfloat"
+                    elseif elem_julia in ("Int64",)
+                        elem_julia = "Int64"
+                    elseif elem_julia in ("UInt64",)
+                        elem_julia = "UInt64"
+                    end
+
+                    factory_name = "create_$(safe_name)"
+                    push!(exports, factory_name)
+
+                    function_wrappers *= """
+                    const _THUNKS_$(uppercase(safe_name)) = $thunks_dict_str
+
+                    \"\"\"
+                        $factory_name() -> CppVector{$elem_julia}
+
+                    Create a new `$container_type` and return a Julia `CppVector{$elem_julia}` wrapper.
+                    \"\"\"
+                    function $factory_name()
+                        buf = Libc.malloc($byte_size)
+                        # Zero-initialize
+                        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), buf, 0, $byte_size)
+                        # Call C++ constructor
+                        ctor = get(_THUNKS_$(uppercase(safe_name)), "constructor", "")
+                        if !isempty(ctor)
+                            RepliBuild.JITManager.invoke("_mlir_ciface_\$(ctor)_thunk", buf)
+                        end
+                        return RepliBuild.STLWrappers.CppVector{$elem_julia}(buf, true, _THUNKS_$(uppercase(safe_name)); byte_size=$byte_size)
+                    end
+
+                    """
+                end
+            elseif startswith(container_type, "std::basic_string") || container_type == "std::string"
+                factory_name = "create_$(safe_name)"
+                push!(exports, factory_name)
+
+                function_wrappers *= """
+                    const _THUNKS_$(uppercase(safe_name)) = $thunks_dict_str
+
+                    \"\"\"
+                        $factory_name() -> CppString
+
+                    Create a new `$container_type` and return a Julia `CppString` wrapper.
+                    \"\"\"
+                    function $factory_name()
+                        buf = Libc.malloc($byte_size)
+                        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), buf, 0, $byte_size)
+                        ctor = get(_THUNKS_$(uppercase(safe_name)), "constructor", "")
+                        if !isempty(ctor)
+                            RepliBuild.JITManager.invoke("_mlir_ciface_\$(ctor)_thunk", buf)
+                        end
+                        return RepliBuild.STLWrappers.CppString(buf, true, _THUNKS_$(uppercase(safe_name)); byte_size=$byte_size)
+                    end
+
+                """
+            end
+        end
+    end
+
     # Export statement (unique to handle overloaded functions)
     # Include enum types, enum values, struct types, and functions
     all_exports = copy(exports)
@@ -3538,6 +3913,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Sanitize struct name for export
             julia_struct_name = replace(replace(replace(struct_name, "<" => "_"), ">" => ""), "," => "_")
             julia_struct_name = replace(julia_struct_name, " " => "")
+            julia_struct_name = replace(julia_struct_name, "*" => "Ptr")
+            julia_struct_name = replace(julia_struct_name, "&" => "Ref")
+            julia_struct_name = replace(julia_struct_name, r"[^a-zA-Z0-9_]" => "_")
             push!(all_exports, julia_struct_name)
         end
     end

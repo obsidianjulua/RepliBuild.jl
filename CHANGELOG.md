@@ -1,6 +1,31 @@
 # Changelog
 
-## v2.2.0
+## v2.2.1
+
+### Fix: Wrapper Generator — C++ Namespace & Operator Correctness
+
+Seven bugs fixed in `Wrapper.jl` that caused the generated wrapper to fail parsing or crash at runtime when wrapping real-world C++ libraries (validated against pugixml 1.15):
+
+- **Template type sanitization on `Ptr{}`-wrapped builtins** — `Ptr{xml_stream_chunk<char>}` was skipping angle-bracket sanitization because the outer `Ptr` triggered `is_builtin`. Now also sanitizes when `<>` are present, regardless of `is_builtin`.
+- **STL-internal type check on wrapped inner types** — `_is_stl_internal_type` was called on `Ptr{char_traits<char>}` (starts with `Ptr{`), always returning false. Now extracts the inner type before checking.
+- **Destructor finalizers use mangled symbol** — Finalizers generated `ccall((:~ClassName, lib), ...)` which is a syntax error at Julia parse time. Now uses the mangled C++ symbol (`_ZN...D2Ev`) from `deleters_mangled`.
+- **`this` parameter namespace prefix stripping** — When a class is `pugi::xpath_query`, the Julia struct is `xpath_query` (no namespace). Now correctly strips the namespace prefix by scanning for the last `::` at angle-bracket depth 0.
+- **Namespace-only "class" guard for free functions** — Free functions in a C++ namespace (e.g. `pugi::get_memory_allocation_function`) were parsed with `class="pugi"` and received a spurious synthesized `this` parameter. Now only synthesizes `this` if the bare class name is a known struct type.
+- **Operator function name `>` depth confusion** — `operator>=` / `operator>` contain `>` which corrupted angle-bracket depth tracking, producing garbled type names. Now heavily sanitizes `safe_class` and falls back to `Cvoid` for any `operator…` class.
+- **Parameter `::` sanitization** — Namespace-qualified types in DWARF parameter lists (e.g. `pugi::xml_attribute`) were emitted verbatim. Added a second sanitization pass to convert `::` and remaining non-identifier characters.
+
+### New: SQLite Integration Test (84/84 passing)
+
+- `test/sqlite_test/test_sqlite.jl` — wraps SQLite 3.49.1 from source via RepliBuild and exercises open/prepare/bind/step/finalize/close through the generated ccall wrappers.
+- Fixed `Ref{Ptr{Cvoid}}` → `Ref{Ptr{S.sqlite3}}` / `Ref{Ptr{S.sqlite3_stmt}}` throughout for correct `unsafe_convert` in ccall.
+
+### New: pugixml Integration Test (36/36 passing)
+
+- `test/pugixml_test/` — downloads pugixml 1.15 on demand and wraps it **directly** via DWARF introspection (no `extern "C"` shim). 401 C++ functions, 484 exported names.
+- `test/pugixml_test/test_pugixml.jl` — exercises document load, attribute access, child/sibling navigation, nested traversal, error handling, empty-sentinel semantics, and multi-document isolation through the RepliBuild-generated Julia wrapper.
+- Establishes the pattern for wrapping struct-returning C++ methods (8-byte `xml_node` / `xml_attribute` value types) via direct `ccall` with mangled symbols as a Tier 1 bypass when libJLCS.so is unavailable.
+
+
 
 ### New: Build Orchestration & Dependency Resolution
 - **Zero-Boilerplate Git Dependencies** — `DependencyResolver.jl` introduces native `[dependencies]` blocks in `replibuild.toml` to automatically fetch, filter (via `exclude`), and inject raw external C/C++ git repositories into the Clang compilation pipeline.

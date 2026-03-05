@@ -30,6 +30,7 @@ include("DWARFParser.jl")
 include("JLCSIRGenerator.jl")
 include("MLIRNative.jl")
 include("JITManager.jl")
+include("STLWrappers.jl")
 
 # Introspection module
 include("Introspect.jl")
@@ -48,6 +49,7 @@ using .DWARFParser
 using .JLCSIRGenerator
 using .MLIRNative
 using .JITManager
+using .STLWrappers
 using .Introspect
 
 # ============================================================================
@@ -64,7 +66,7 @@ export discover
 export clean
 
 # Advanced modules (for power users who know what they're doing)
-export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser, JLCSIRGenerator, MLIRNative
+export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser, JLCSIRGenerator, MLIRNative, STLWrappers
 
 # Introspection API
 export Introspect
