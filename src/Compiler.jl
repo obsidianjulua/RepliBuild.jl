@@ -216,6 +216,21 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         end
     end
 
+    # If LTO is enabled, also emit a binary bitcode file (.bc) 
+    # for Julia's LLVM compiler to consume via llvmcall
+    if config.link.enable_lto
+        bitcode_file = joinpath(build_dir, output_name * "_lto.bc")
+        (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [linked_ir, "-o", bitcode_file])
+        if bc_exit == 0
+            # Copy the bitcode to the julia/ output directory so the wrapper can find it
+            output_dir = get_output_path(config)
+            mkpath(output_dir)
+            cp(bitcode_file, joinpath(output_dir, "$(output_name)_lto.bc"), force=true)
+        else
+            @warn "Failed to assemble bitcode for LTO: $bc_out"
+        end
+    end
+
     return linked_ir
 end
 
