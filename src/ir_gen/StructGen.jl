@@ -298,6 +298,17 @@ function generate_struct_definitions(structs::Any)
         visit(n)
     end
     
+    # Collect all alias names that will be defined so we can validate references
+    defined_aliases = Set{String}()
+    for name in sorted_nodes
+        info = node_map[name]
+        def_str = get_struct_definition_string(name, info)
+        if !endswith(def_str, "opaque>")
+            safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
+            push!(defined_aliases, "!Struct_$(safe_name)")
+        end
+    end
+
     for name in sorted_nodes
         info = node_map[name]
         def_str = get_struct_definition_string(name, info)
@@ -306,6 +317,9 @@ function generate_struct_definitions(structs::Any)
             continue
         end
         
+        # Replace any undefined alias references with !llvm.ptr
+        def_str = replace(def_str, r"!Struct_[A-Za-z0-9_]+" => m -> m in defined_aliases ? m : "!llvm.ptr")
+
         # Emit alias
         safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
         alias_name = "!Struct_$(safe_name)"

@@ -23,6 +23,14 @@ function map_cpp_type(type_str::String)
         return "i1"
     elseif type_str == "char" || type_str == "int8_t" || type_str == "UInt8" || type_str == "Cchar"
         return "i8"
+    elseif type_str == "short" || type_str == "int16_t" || type_str == "unsigned short" || type_str == "uint16_t"
+        return "i16"
+    # C built-in types that DWARF may strip qualifiers from
+    elseif type_str == "ptrdiff_t" || type_str == "ssize_t" || type_str == "intptr_t" || type_str == "uintptr_t"
+        return "i64"
+    elseif type_str == "complex"
+        # _Complex T — DWARF strips the element type; use opaque pointer since size is unknown
+        return "!llvm.ptr"
     elseif endswith(type_str, "*") || contains(type_str, "*") || type_str == "unknown" # simplified pointer check
         return "!llvm.ptr"
     # Struct types?

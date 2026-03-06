@@ -48,6 +48,23 @@ function _sanitize_julia_type_name(name::AbstractString)::String
     return s
 end
 
+"""
+    _fuzzy_dwarf_lookup(c_type, dwarf_structs) -> Union{String, Nothing}
+
+Fuzzy-match a C type name against DWARF struct definition keys.
+DWARF keys for template types often have trailing " >" nesting artifacts.
+"""
+function _fuzzy_dwarf_lookup(c_type::AbstractString, dwarf_structs)
+    haskey(dwarf_structs, c_type) && return String(c_type)
+    key = c_type * " >"
+    haskey(dwarf_structs, key) && return key
+    c_norm = rstrip(c_type, [' ', '>'])
+    for k in keys(dwarf_structs)
+        rstrip(String(k), [' ', '>']) == c_norm && return String(k)
+    end
+    return nothing
+end
+
 # =============================================================================
 # TYPE SYSTEM - Comprehensive C/C++ to Julia Type Mapping
 # =============================================================================
@@ -193,8 +210,8 @@ function create_type_registry(config::RepliBuildConfig;
         "size_t" => "Csize_t",
         "ssize_t" => "Cssize_t",
         "ptrdiff_t" => "Cptrdiff_t",
-        "intptr_t" => "Cintptr_t",
-        "uintptr_t" => "Cuintptr_t",
+        "intptr_t" => "Int64",
+        "uintptr_t" => "UInt64",
         "off_t" => "Int64",
         "time_t" => "Int64",
         "clock_t" => "Int64",
@@ -2230,7 +2247,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 builtin_types = Set(["Cvoid", "Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
                                      "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                                      "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
-                                     "Clonglong", "Culonglong", "Any", "Nothing"])
+                                     "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
+                                     "Cstring", "Float32", "Float64", "Any", "Nothing"])
 
                 # Extract the base type by stripping known container prefixes
                 base_ref = julia_type
@@ -2616,6 +2634,57 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         continue
                     end
 
+                    # Check if any member has unresolvable size (template types with no DWARF size info).
+                    # When DWARF byte_size is known but member sizes aren't, use a byte blob to ensure
+                    # the Julia struct has the correct total size for ABI safety.
+                    _known_c_primitives = Set([
+                        "int", "unsigned int", "int32_t", "uint32_t",
+                        "long", "unsigned long", "long long", "unsigned long long", "int64_t", "uint64_t",
+                        "short", "unsigned short", "int16_t", "uint16_t",
+                        "char", "unsigned char", "signed char", "int8_t", "uint8_t",
+                        "float", "double", "long double", "bool", "_Bool",
+                        "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+                        "wchar_t",
+                    ])
+                    has_unresolvable = false
+                    for m in members
+                        if get(m, "size", 0) == 0
+                            c_type_raw = strip(replace(get(m, "c_type", ""), r"\bconst\b" => ""))
+                            c_type_raw = strip(c_type_raw)
+                            if endswith(c_type_raw, "*") || endswith(c_type_raw, "&")
+                                continue
+                            end
+                            if c_type_raw in _known_c_primitives
+                                continue
+                            end
+                            has_unresolvable = true
+                            break
+                        end
+                    end
+
+                    byte_size_str = get(struct_info, "byte_size", "0x0")
+                    byte_size = isnothing(byte_size_str) ? 0 :
+                        (startswith(string(byte_size_str), "0x") ?
+                         parse(Int, string(byte_size_str)[3:end], base=16) :
+                         parse(Int, string(byte_size_str)))
+
+                    if has_unresolvable && byte_size > 0
+                        member_count = length(members)
+                        struct_definitions *= """
+                        # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
+                        struct $julia_struct_name
+                            _data::NTuple{$(byte_size), UInt8}
+                        end
+
+                        # Zero-initializer for $julia_struct_name
+                        function $julia_struct_name()
+                            return $julia_struct_name(ntuple(i -> 0x00, $byte_size))
+                        end
+
+                        """
+                        continue
+                    end
+
                     member_count = length(members)
                     struct_definitions *= """
                     # C++ struct: $struct_name ($member_count members)
@@ -2649,7 +2718,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         sanitized_type = julia_type
 
                         # Don't sanitize built-in Julia types (NTuple, Ptr{Cint}, etc.)
-                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cdouble", "Cfloat", "Clong", "Culonglong", "Cvoid", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64"]
+                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cdouble", "Cfloat", "Clong", "Culong", "Cshort", "Cushort", "Cchar", "Cuchar", "Culonglong", "Clonglong", "Cvoid", "Csize_t", "Cptrdiff_t", "Cssize_t", "Cwchar_t", "Cstring", "Bool", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Float32", "Float64"]
                         is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
 
                         if !is_builtin || occursin(r"[<>]", julia_type)
@@ -3442,8 +3511,16 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Resolve "Any" return type to the Julia struct if we have a DWARF definition
             # This is critical: invoke(name, Any, ...) creates Ref{Any}() which corrupts
             # memory when the JIT writes raw struct bytes into it.
-            if jit_ret_type == "Any" && jit_c_ret != "void" && haskey(dwarf_structs, jit_c_ret)
-                jit_ret_type = _sanitize_julia_type_name(jit_c_ret)
+            if jit_ret_type == "Any" && jit_c_ret != "void"
+                if haskey(dwarf_structs, jit_c_ret)
+                    jit_ret_type = _sanitize_julia_type_name(jit_c_ret)
+                else
+                    # Fuzzy match: DWARF keys may have trailing " >" nesting artifacts
+                    matched_key = _fuzzy_dwarf_lookup(jit_c_ret, dwarf_structs)
+                    if matched_key !== nothing
+                        jit_ret_type = _sanitize_julia_type_name(matched_key)
+                    end
+                end
             end
 
             # Determine if we need the return type overload of invoke

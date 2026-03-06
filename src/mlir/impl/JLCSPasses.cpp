@@ -343,7 +343,10 @@ struct FFECallOpLowering : public ConversionPattern {
             }
             return sum;
         }
-        if (type.isInteger(1) || type.isInteger(8) || type.isInteger(16) || type.isInteger(32) || type.isInteger(64)) {
+        if (auto arrType = dyn_cast<LLVM::LLVMArrayType>(type)) {
+            return arrType.getNumElements() * getPackedSizeInBits(arrType.getElementType());
+        }
+        if (type.isIntOrFloat()) {
             return type.getIntOrFloatBitWidth();
         }
         if (isa<LLVM::LLVMPointerType>(type)) {
@@ -385,7 +388,7 @@ struct FFECallOpLowering : public ConversionPattern {
         Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
         Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
 
-        // Check if return type is a packed struct (needs sret)
+        // Check if return type needs sret (packed struct, or large struct > 16 bytes)
         bool needsSret = false;
         Type sretStructType;
         Value sretSlot;
@@ -394,8 +397,15 @@ struct FFECallOpLowering : public ConversionPattern {
                 if (retStructType.isPacked()) {
                     needsSret = true;
                     sretStructType = retStructType;
-                    // Allocate stack space for sret return
                     sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                } else {
+                    // x86_64 SysV ABI: non-packed structs > 16 bytes use sret
+                    uint64_t sizeBits = getPackedSizeInBits(retStructType);
+                    if (sizeBits > 128) {
+                        needsSret = true;
+                        sretStructType = retStructType;
+                        sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                    }
                 }
             }
         }
