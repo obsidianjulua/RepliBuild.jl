@@ -174,7 +174,7 @@ In all cases, resolved source files are merged into the compilation graph before
 
 ```toml
 [project]
-name = "cjson_test"
+name = "my_cjson_wrapper"
 
 [dependencies.cjson]
 type    = "git"

@@ -9,6 +9,7 @@ parallel = true
 flags = ["-std=c++17", "-fPIC"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src/basics.cpp"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src"]
+aot_thunks = false
 
 [link]
 enable_lto = false
@@ -30,16 +31,13 @@ use_clang_jl = true
 style = "clang"
 enabled = true
 
-[wrap.varargs]
-sum_ints = [["Cint"], ["Cint", "Cint"], ["Cint", "Cint", "Cint"]]
-
 [llvm]
 toolchain = "auto"
 
 [project]
 name = "basics_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test"
-uuid = "b704db05-e457-4a5a-96a8-cc03ec7d7556"
+uuid = "e27fd61d-0bdf-45b7-929a-9a7a249dd2a1"
 
 [paths]
 build = "build"

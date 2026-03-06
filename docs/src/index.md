@@ -55,8 +55,8 @@ exclude = ["test", "fuzzing"]
 RepliBuild.build("replibuild.toml")
 RepliBuild.wrap("replibuild.toml")
 
-include("julia/CjsonTest.jl")
-using .CjsonTest
+include("julia/MyCjsonWrapper.jl")
+using .MyCjsonWrapper
 
 obj = cJSON_CreateObject()
 cJSON_AddStringToObject(obj, "key", "value")

@@ -35,7 +35,7 @@ enabled = true
 toolchain = "auto"
 
 [project]
-name = "DiscBench"
+name = "LtoBench"
 root = "."
 uuid = "b3a1c2d4-dead-beef-cafe-123456789abc"
 

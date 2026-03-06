@@ -1,12 +1,12 @@
 scenario,tier,median_ns,vs_bare_ccall,note
 scalar_add,pure_julia,30.0,1.0x,Julia native a+b
 scalar_add,bare_ccall,30.0,1.0x,Hand-written ccall (community baseline)
-scalar_add,wrapper_ccall,40.0,1.33x,RepliBuild generated ccall wrapper (LTO disabled fallback)
+scalar_add,wrapper_ccall,30.0,1.0x,RepliBuild generated ccall wrapper (LTO disabled fallback)
 scalar_add,lto_llvmcall,30.0,1.0x,RepliBuild LTO: Base.llvmcall (Julia JIT inlines C++ IR)
 scalar_mul,pure_julia,40.0,1.0x,Julia native a*b
 scalar_mul,bare_ccall,40.0,1.0x,Hand-written ccall
-scalar_mul,wrapper_ccall,40.0,1.0x,RepliBuild generated ccall wrapper (LTO disabled fallback)
-scalar_mul,lto_llvmcall,40.0,1.0x,RepliBuild LTO: Base.llvmcall
+scalar_mul,wrapper_ccall,30.0,0.75x,RepliBuild generated ccall wrapper (LTO disabled fallback)
+scalar_mul,lto_llvmcall,30.0,0.75x,RepliBuild LTO: Base.llvmcall
 make_point,pure_julia,40.0,1.0x,Julia native struct construction
 make_point,bare_ccall,40.0,1.0x,"Hand-written ccall (struct return, manual layout)"
 make_point,wrapper_ccall,40.0,1.0x,RepliBuild generated wrapper (LTO disabled fallback)

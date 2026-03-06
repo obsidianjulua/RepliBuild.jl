@@ -1,6 +1,0 @@
-scenario,tier,note,iters,median_ns,mean_ns,std_ns,min_ns,max_ns,ns_per_iter
-hot_loop_add_to,pure_julia,Julia @inbounds loop with native add,1000000,676738.0,676206.0,3484.0,673348.0,717059.0,0.677
-hot_loop_add_to,bare_ccall_loop,"Julia loop — bare ccall(:add_to, lib) in a typed function (true apples-to-apples baseline)",1000000,1.800312e6,1.750638e6,176229.0,1.128383e6,1.883793e6,1.8
-hot_loop_add_to,wrapper_ccall_loop,Julia loop calling RepliBuild ccall wrapper (LTO disabled fallback),1000000,2.02593e6,2.023252e6,44324.0,1.400357e6,2.046655e6,2.026
-hot_loop_add_to,lto_llvmcall_loop,Julia loop with LTO: Julia JIT inlines C++ add_to across FFI boundary,1000000,677078.0,676501.0,3307.0,673418.0,714228.0,0.677
-hot_loop_add_to,whole_loop_in_cpp,Single ccall to C++ accumulate_array (entire loop in C++),1000000,997147.0,997633.0,3829.0,996462.0,1.048583e6,0.997

@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# discourse_benchmark/run_benchmark.jl
+# lto_benchmark_test/run_benchmark.jl
 #
 # Brutally honest benchmark comparing every dispatch path RepliBuild offers
 # against raw hand-written ccall — the current Julia ecosystem baseline.
@@ -54,7 +54,7 @@ println("\nBuilding with LTO enabled (enable_lto = true) ...")
 RepliBuild.build(TOML)
 RepliBuild.wrap(TOML)
 
-wrapper_path = joinpath(BENCH_DIR, "julia", "DiscBench.jl")
+wrapper_path = joinpath(BENCH_DIR, "julia", "LtoBench.jl")
 @assert isfile(wrapper_path) "Wrapper not generated: $wrapper_path"
 
 # Inject struct definitions that DWARF name-resolution found but body-emission
@@ -75,18 +75,18 @@ struct PackedRecord
 end
 # --- end stubs ---
 """
-    # Insert after the `module DiscBench` line
-    patched = replace(src, r"(^module DiscBench\s*$)"m => SubstitutionString("\\1\n" * structs_stub); count=1)
+    # Insert after the `module LtoBench` line
+    patched = replace(src, r"(^module LtoBench\s*$)"m => SubstitutionString("\\1\n" * structs_stub); count=1)
     write(wrapper_path, patched)
 end
 
 include(wrapper_path)
-using .DiscBench
+using .LtoBench
 
-lib_path = joinpath(BENCH_DIR, "julia", "libDiscBench.so")
+lib_path = joinpath(BENCH_DIR, "julia", "libLtoBench.so")
 @assert isfile(lib_path) "Shared library not found: $lib_path"
 
-lto_ir_path = joinpath(BENCH_DIR, "julia", "DiscBench_lto.ll")
+lto_ir_path = joinpath(BENCH_DIR, "julia", "LtoBench_lto.ll")
 lto_available = isfile(lto_ir_path)
 lto_available || @warn "LTO IR not found — llvmcall tier will be skipped"
 
@@ -102,7 +102,7 @@ sym_make_point       = Libdl.dlsym(lib, :make_point)
 # iteration (~150ns overhead unrelated to FFI). Capturing in a const-local closure
 # forces the JIT to treat the pointer as a compile-time constant, matching what
 # the generated wrapper does with its static ccall((:fn, LIB), ...) form.
-const _BENCH_LIB_PATH = joinpath(BENCH_DIR, "julia", "libDiscBench.so")
+const _BENCH_LIB_PATH = joinpath(BENCH_DIR, "julia", "libLtoBench.so")
 
 # ============================================================================
 # 2. Pure Julia references
@@ -143,10 +143,10 @@ end
 #    The generated wrapper already emits these; we re-expose them here
 #    explicitly for comparison clarity.
 # ============================================================================
-# The generated DiscBench module contains lto_scalar_add etc. if LTO is on.
+# The generated LtoBench module contains lto_scalar_add etc. if LTO is on.
 # We access them via the module directly.
-has_lto_scalar_add  = lto_available && isdefined(DiscBench, :scalar_add)  # wrapper routes via llvmcall
-has_lto_add_to      = lto_available && isdefined(DiscBench, :add_to)
+has_lto_scalar_add  = lto_available && isdefined(LtoBench, :scalar_add)  # wrapper routes via llvmcall
+has_lto_add_to      = lto_available && isdefined(LtoBench, :add_to)
 
 # ============================================================================
 # 4. Benchmark helpers
@@ -212,10 +212,10 @@ record(per_call_rows, "scalar_add", "wrapper_ccall",
 if lto_available
     # The wrapper emits Base.llvmcall for LTO-eligible functions.
     # scalar_add is LTO-eligible (primitive args/return, no Cstring).
-    # We time the same DiscBench.scalar_add — it IS the llvmcall path when LTO is on.
+    # We time the same LtoBench.scalar_add — it IS the llvmcall path when LTO is on.
     record(per_call_rows, "scalar_add", "lto_llvmcall",
         "RepliBuild LTO: Base.llvmcall (Julia JIT inlines C++ IR)",
-        timed_median(DiscBench.scalar_add, Cint(3), Cint(7)))
+        timed_median(LtoBench.scalar_add, Cint(3), Cint(7)))
 end
 
 # --- scalar_mul ---
@@ -235,7 +235,7 @@ record(per_call_rows, "scalar_mul", "wrapper_ccall",
 if lto_available
     record(per_call_rows, "scalar_mul", "lto_llvmcall",
         "RepliBuild LTO: Base.llvmcall",
-        timed_median(DiscBench.scalar_mul, 2.5, 4.0))
+        timed_median(LtoBench.scalar_mul, 2.5, 4.0))
 end
 
 # --- make_point (struct return) ---
@@ -245,17 +245,17 @@ record(per_call_rows, "make_point", "pure_julia",
 
 record(per_call_rows, "make_point", "bare_ccall",
     "Hand-written ccall (struct return, manual layout)",
-    timed_median((s,x,y) -> ccall(s, DiscBench.Point2D, (Cdouble, Cdouble), x, y),
+    timed_median((s,x,y) -> ccall(s, LtoBench.Point2D, (Cdouble, Cdouble), x, y),
                  sym_make_point, 1.0, 2.0))
 
 record(per_call_rows, "make_point", "wrapper_ccall",
     "RepliBuild generated wrapper (LTO disabled fallback)",
-    timed_median((x,y) -> ccall((:make_point, _BENCH_LIB_PATH), DiscBench.Point2D, (Cdouble, Cdouble,), x, y), 1.0, 2.0))
+    timed_median((x,y) -> ccall((:make_point, _BENCH_LIB_PATH), LtoBench.Point2D, (Cdouble, Cdouble,), x, y), 1.0, 2.0))
 
 if lto_available
     record(per_call_rows, "make_point", "lto_llvmcall",
         "RepliBuild LTO: Base.llvmcall",
-        timed_median(DiscBench.make_point, 1.0, 2.0))
+        timed_median(LtoBench.make_point, 1.0, 2.0))
 end
 
 # --- pack_record (packed struct — ABI trap for naive ccall) ---
@@ -272,7 +272,7 @@ println("  $(rpad("bare_ccall_UNSAFE", 20)) pack_record               ⚠ skippe
 
 record(per_call_rows, "pack_record", "wrapper_ccall",
     "RepliBuild generated wrapper (DWARF-verified packed layout)",
-    timed_median(DiscBench.pack_record, UInt8('A'), Cint(42), UInt8('Z')))
+    timed_median(LtoBench.pack_record, UInt8('A'), Cint(42), UInt8('Z')))
 
 # ============================================================================
 # 6. Hot loop benchmarks (1M iterations of add_to)
@@ -322,7 +322,7 @@ end
 function lto_llvmcall_add_to_loop(data, n)
     acc = 0.0
     @inbounds for i in 1:n
-        acc = DiscBench.add_to(acc, data[i])
+        acc = LtoBench.add_to(acc, data[i])
     end
     acc
 end
