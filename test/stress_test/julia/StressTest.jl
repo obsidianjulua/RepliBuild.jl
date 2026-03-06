@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-03-06 16:34:43
+# Generated: 2026-03-06 17:52:09
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -35,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-03-06T16:34:43.540"
+    "generated_at" => "2026-03-06T17:52:09.085"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
@@ -127,63 +127,34 @@ function Histogram()
     return ref[]
 end
 
-# C++ struct: ODEResult (6 members)
+# C++ struct: ODEResult (6 members, byte blob for ABI safety)
 struct ODEResult
-    y::Ptr{Cdouble}
-    t_values::Ptr{Cdouble}
-    y_values::Ptr{Ptr{Cdouble}}
-    n_steps::Csize_t
-    dimension::Csize_t
-    status::Status
+    _data::NTuple{48, UInt8}
 end
 
 # Zero-initializer for ODEResult
 function ODEResult()
-    ref = Ref{ODEResult}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(ODEResult))
-    end
-    return ref[]
+    return ODEResult(ntuple(i -> 0x00, 48))
 end
 
-# C++ struct: OptimizationOptions (6 members)
+# C++ struct: OptimizationOptions (6 members, byte blob for ABI safety)
 struct OptimizationOptions
-    tolerance::Cdouble
-    step_size::Cdouble
-    max_iterations::Int32
-    max_function_evals::Int32
-    algorithm::OptimizationAlgorithm
-    verbose::Bool
+    _data::NTuple{32, UInt8}
 end
 
 # Zero-initializer for OptimizationOptions
 function OptimizationOptions()
-    ref = Ref{OptimizationOptions}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(OptimizationOptions))
-    end
-    return ref[]
+    return OptimizationOptions(ntuple(i -> 0x00, 32))
 end
 
-# C++ struct: OptimizationState (8 members)
+# C++ struct: OptimizationState (8 members, byte blob for ABI safety)
 struct OptimizationState
-    x::Ptr{Cdouble}
-    gradient::Ptr{Cdouble}
-    f_value::Cdouble
-    gradient_norm::Cdouble
-    iteration::Int32
-    n_evals::Int32
-    status::Status
-    dimension::Csize_t
+    _data::NTuple{56, UInt8}
 end
 
 # Zero-initializer for OptimizationState
 function OptimizationState()
-    ref = Ref{OptimizationState}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(OptimizationState))
-    end
-    return ref[]
+    return OptimizationState(ntuple(i -> 0x00, 56))
 end
 
 # C++ struct: Polynomial (2 members)
@@ -238,19 +209,14 @@ function SplineInterpolation()
     return ref[]
 end
 
-# C++ struct: __mbstate_t (2 members)
+# C++ struct: __mbstate_t (2 members, byte blob for ABI safety)
 struct _mbstate_t
-    _count::Cint
-    _value::Any
+    _data::NTuple{8, UInt8}
 end
 
 # Zero-initializer for _mbstate_t
 function _mbstate_t()
-    ref = Ref{_mbstate_t}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(_mbstate_t))
-    end
-    return ref[]
+    return _mbstate_t(ntuple(i -> 0x00, 8))
 end
 
 # C++ struct: __va_list_tag (4 members)
@@ -315,19 +281,14 @@ function max_align_t()
     return ref[]
 end
 
-# C++ struct: mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL> (2 members)
+# C++ struct: mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL> (2 members, byte blob for ABI safety)
 struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL
-    _M_x::NTuple{312, Culong}
-    _M_p::Csize_t
+    _data::NTuple{2504, UInt8}
 end
 
 # Zero-initializer for mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL
 function mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL()
-    ref = Ref{mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL))
-    end
-    return ref[]
+    return mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL(ntuple(i -> 0x00, 2504))
 end
 
 # C++ struct: mersenne_twister_engine<unsigned long, 64UL, 312UL, 156UL, 31UL, 13043109905998158313UL, 29UL, 6148914691236517205UL, 17UL, 8202884508482404352UL, 37UL, 18444473444759240704UL, 43UL, 6364136223846793005UL>, double> (1 members)
@@ -361,86 +322,54 @@ function param_type()
     return ref[]
 end
 
-# C++ struct: EigenDecomposition (5 members)
+# C++ struct: EigenDecomposition (5 members, byte blob for ABI safety)
 struct EigenDecomposition
-    eigenvalues::Ptr{Cdouble}
-    eigenvalues_imag::Ptr{Cdouble}
-    eigenvectors::DenseMatrix
-    n::Csize_t
-    status::Status
+    _data::NTuple{64, UInt8}
 end
 
 # Zero-initializer for EigenDecomposition
 function EigenDecomposition()
-    ref = Ref{EigenDecomposition}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(EigenDecomposition))
-    end
-    return ref[]
+    return EigenDecomposition(ntuple(i -> 0x00, 64))
 end
 
-# C++ struct: LUDecomposition (5 members)
+# C++ struct: LUDecomposition (5 members, byte blob for ABI safety)
 struct LUDecomposition
-    L::DenseMatrix
-    U::DenseMatrix
-    permutation::Ptr{Int32}
-    size::Csize_t
-    status::Status
+    _data::NTuple{88, UInt8}
 end
 
 # Zero-initializer for LUDecomposition
 function LUDecomposition()
-    ref = Ref{LUDecomposition}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(LUDecomposition))
-    end
-    return ref[]
+    return LUDecomposition(ntuple(i -> 0x00, 88))
 end
 
-# C++ struct: QRDecomposition (5 members)
+# C++ struct: QRDecomposition (5 members, byte blob for ABI safety)
 struct QRDecomposition
-    Q::DenseMatrix
-    R::DenseMatrix
-    m::Csize_t
-    n::Csize_t
-    status::Status
+    _data::NTuple{88, UInt8}
 end
 
 # Zero-initializer for QRDecomposition
 function QRDecomposition()
-    ref = Ref{QRDecomposition}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(QRDecomposition))
-    end
-    return ref[]
+    return QRDecomposition(ntuple(i -> 0x00, 88))
 end
 
-# C++ struct: normal_distribution<double> (1 members)
+# C++ struct: normal_distribution<double> (1 members, byte blob for ABI safety)
 struct normal_distribution_double
-    _M_param::param_type
+    _data::NTuple{32, UInt8}
 end
 
 # Zero-initializer for normal_distribution_double
 function normal_distribution_double()
-    ref = Ref{normal_distribution_double}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(normal_distribution_double))
-    end
-    return ref[]
+    return normal_distribution_double(ntuple(i -> 0x00, 32))
 end
 
-# C++ struct: uniform_real_distribution<double> (1 members)
+# C++ struct: uniform_real_distribution<double> (1 members, byte blob for ABI safety)
 struct uniform_real_distribution_double
-    _M_param::param_type
+    _data::NTuple{16, UInt8}
 end
 
 # Zero-initializer for uniform_real_distribution_double
 function uniform_real_distribution_double()
-    ref = Ref{uniform_real_distribution_double}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(uniform_real_distribution_double))
-    end
-    return ref[]
+    return uniform_real_distribution_double(ntuple(i -> 0x00, 16))
 end
 
 
