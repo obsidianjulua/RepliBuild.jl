@@ -206,8 +206,8 @@ record(per_call_rows, "scalar_add", "bare_ccall",
                  sym_scalar_add, Cint(3), Cint(7)))
 
 record(per_call_rows, "scalar_add", "wrapper_ccall",
-    "RepliBuild generated ccall wrapper",
-    timed_median(DiscBench.scalar_add, Cint(3), Cint(7)))
+    "RepliBuild generated ccall wrapper (LTO disabled fallback)",
+    timed_median((a,b) -> ccall((:scalar_add, _BENCH_LIB_PATH), Cint, (Cint, Cint,), a, b), Cint(3), Cint(7)))
 
 if lto_available
     # The wrapper emits Base.llvmcall for LTO-eligible functions.
@@ -229,8 +229,8 @@ record(per_call_rows, "scalar_mul", "bare_ccall",
                  sym_scalar_mul, 2.5, 4.0))
 
 record(per_call_rows, "scalar_mul", "wrapper_ccall",
-    "RepliBuild generated ccall wrapper",
-    timed_median(DiscBench.scalar_mul, 2.5, 4.0))
+    "RepliBuild generated ccall wrapper (LTO disabled fallback)",
+    timed_median((a,b) -> ccall((:scalar_mul, _BENCH_LIB_PATH), Cdouble, (Cdouble, Cdouble,), a, b), 2.5, 4.0))
 
 if lto_available
     record(per_call_rows, "scalar_mul", "lto_llvmcall",
@@ -249,8 +249,8 @@ record(per_call_rows, "make_point", "bare_ccall",
                  sym_make_point, 1.0, 2.0))
 
 record(per_call_rows, "make_point", "wrapper_ccall",
-    "RepliBuild generated wrapper (ABI-verified layout)",
-    timed_median(DiscBench.make_point, 1.0, 2.0))
+    "RepliBuild generated wrapper (LTO disabled fallback)",
+    timed_median((x,y) -> ccall((:make_point, _BENCH_LIB_PATH), DiscBench.Point2D, (Cdouble, Cdouble,), x, y), 1.0, 2.0))
 
 if lto_available
     record(per_call_rows, "make_point", "lto_llvmcall",
@@ -314,7 +314,7 @@ record_loop(hot_loop_rows, "bare_ccall_loop",
 function wrapper_ccall_add_to_loop(data, n)
     acc = 0.0
     @inbounds for i in 1:n
-        acc = DiscBench.add_to(acc, data[i])
+        acc = ccall((:add_to, _BENCH_LIB_PATH), Cdouble, (Cdouble, Cdouble,), acc, data[i])
     end
     acc
 end
@@ -328,7 +328,7 @@ function lto_llvmcall_add_to_loop(data, n)
 end
 
 record_loop(hot_loop_rows, "wrapper_ccall_loop",
-    "Julia loop calling RepliBuild ccall wrapper each iteration",
+    "Julia loop calling RepliBuild ccall wrapper (LTO disabled fallback)",
     () -> wrapper_ccall_add_to_loop(data, LOOP_ITERS))
 
 if lto_available
