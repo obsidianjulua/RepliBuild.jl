@@ -7,8 +7,8 @@ allow_function_pointers = true
 [compile]
 parallel = true
 flags = ["-std=c++17", "-fPIC"]
-source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp"]
-include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/src/jit_edges.cpp"]
+include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/src"]
 aot_thunks = false
 
 [link]
@@ -35,9 +35,9 @@ enabled = true
 toolchain = "auto"
 
 [project]
-name = "stress_test"
-root = "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test"
-uuid = "249a89b1-c37e-4779-a470-483bbf5b41bb"
+name = "jit_edge_test"
+root = "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test"
+uuid = "9f062fd1-72cf-45f3-af54-423f9dac1ade"
 
 [paths]
 build = "build"

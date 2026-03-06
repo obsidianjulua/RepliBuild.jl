@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-03-05 00:13:20
+# Generated: 2026-03-05 20:10:00
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -35,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-03-05T00:13:20.888"
+    "generated_at" => "2026-03-05T20:10:00.699"
 )
 
 const LTO_IR = ""  # LTO disabled for this build

@@ -2918,6 +2918,11 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         # Determine if we should use MLIR or ccall
         use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs)
+        if func_name == "pack_record"
+            println("DEBUG: pack_record use_mlir_dispatch = $use_mlir_dispatch")
+            println("DEBUG: is_ccall_safe returned ", is_ccall_safe(func, dwarf_structs))
+            println("DEBUG: dwarf_structs keys = ", collect(keys(dwarf_structs)))
+        end
         
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
@@ -3468,11 +3473,10 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         # Check if this is a virtual method that requires dynamic dispatch
         is_virtual = get(func, "is_virtual", false)
 
-        # LTO eligibility: only safe for primitive/pointer, non-virtual, non-struct-return,
-        # no Cstring anywhere (llvmcall won't auto-convert String→Cstring like ccall does)
+        # LTO eligibility: safe for primitive/pointer/small-POD structs (filtered earlier by is_ccall_safe),
+        # non-virtual, no Cstring anywhere (llvmcall won't auto-convert String→Cstring like ccall does)
         lto_eligible = config.link.enable_lto &&
             !is_virtual &&
-            !is_struct_return &&
             julia_return_type != "Cstring" &&
             !any(t -> t == "Cstring", param_types)
 
@@ -3546,13 +3550,27 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                  safe_c_ret = replace(safe_c_ret, " " => "")
             end
 
-            func_def = """
-            $doc_comment
-            function $julia_name($param_sig)::$safe_c_ret
-            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $safe_c_ret, $ccall_types, $ccall_args)
-            end
+            if lto_eligible
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$safe_c_ret
+                $conversion_code    if !isempty(LTO_IR)
+                        return Base.llvmcall((LTO_IR, "$mangled"), $safe_c_ret, Tuple{$llvmcall_types}, $ccall_args)
+                    else
+                        return ccall((:$mangled, LIBRARY_PATH), $safe_c_ret, $ccall_types, $ccall_args)
+                    end
+                end
 
-            """
+                """
+            else
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)::$safe_c_ret
+                $conversion_code    return ccall((:$mangled, LIBRARY_PATH), $safe_c_ret, $ccall_types, $ccall_args)
+                end
+
+                """
+            end
         elseif julia_return_type == "Cstring"
             # Cstring with NULL check and conversion to String
             func_def = """
@@ -3573,7 +3591,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
                 $conversion_code    if !isempty(LTO_IR)
-                        return Base.llvmcall(("$mangled", LTO_IR), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
+                        return Base.llvmcall((LTO_IR, "$mangled"), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
                     else
                         return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
                     end
@@ -3596,7 +3614,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
                     if !isempty(LTO_IR)
-                        return Base.llvmcall(("$mangled", LTO_IR), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
+                        return Base.llvmcall((LTO_IR, "$mangled"), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
                     else
                         return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
                     end

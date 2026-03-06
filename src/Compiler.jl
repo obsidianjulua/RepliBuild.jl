@@ -227,7 +227,37 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
             mkpath(output_dir)
             cp(bitcode_file, joinpath(output_dir, "$(output_name)_lto.bc"), force=true)
             # Also copy the text IR (.ll) — Base.llvmcall with string arg needs LLVM assembly text
-            cp(linked_ir, joinpath(output_dir, "$(output_name)_lto.ll"), force=true)
+            # Inject alwaysinline, strip debug info and LLVM 19+ attributes that Julia's internal
+            # LLVM (which may be older) cannot parse.
+            lto_ir_text = read(linked_ir, String)
+            lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
+            lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
+            lto_ir_text = replace(lto_ir_text, r"(attributes\s+#[0-9]+\s*=\s*\{[^}]*)\}" => s"\1 alwaysinline }")
+            # LLVM 19+: nuw/nsw on getelementptr (only nuw is new, nsw existed but combined form differs)
+            lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
+            lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
+            # LLVM 19+: new-style debug intrinsics — strip entirely
+            lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
+            # LLVM 19+: captures(...) attribute on pointer params — strip
+            lto_ir_text = replace(lto_ir_text, r"\bcaptures\([^)]*\)\s*" => "")
+            # LLVM 19+: dead_on_unwind attribute
+            lto_ir_text = replace(lto_ir_text, r"\bdead_on_unwind\b\s*" => "")
+            # LLVM 19+: initializes attribute
+            lto_ir_text = replace(lto_ir_text, r"\binitializes\(\([^)]*\)\)\s*" => "")
+            # Strip all metadata references from anywhere (instructions, function definitions)
+            # This catches !dbg, !tbaa, !llvm.loop, etc.
+            lto_ir_text = replace(lto_ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
+            # Strip all numbered debug metadata entries (!NNN = !DIxxx / distinct !DIxxx)
+            lines = split(lto_ir_text, '\n')
+            filtered = filter(lines) do l
+                !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
+            end
+            # Remove all named debug metadata references entirely to avoid referencing undefined nodes
+            filtered2 = filter(filtered) do l
+                !occursin(r"^![a-zA-Z].*=\s*!\{", l)
+            end
+            lto_ir_text = join(filtered2, '\n')
+            write(joinpath(output_dir, "$(output_name)_lto.ll"), lto_ir_text)
         else
             @warn "Failed to assemble bitcode for LTO: $bc_out"
         end
@@ -1621,6 +1651,26 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
+    # Propagate typedef names to anonymous structs, unions, and enums
+    # C-style code often defines structs as: typedef struct { ... } Name;
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict) && get(type_info, "kind", "") == "typedef"
+            typedef_name = get(type_info, "name", "")
+            target_ref = get(type_info, "target", nothing)
+            if !isempty(typedef_name) && !isnothing(target_ref) && haskey(type_refs, target_ref)
+                target_info = type_refs[target_ref]
+                if isa(target_info, Dict)
+                    target_kind = get(target_info, "kind", "")
+                    target_name = get(target_info, "name", "")
+                    if target_kind in ["struct", "class", "union", "enum"] && 
+                       (isempty(target_name) || startswith(target_name, "unknown_"))
+                        target_info["name"] = typedef_name
+                    end
+                end
+            end
+        end
+    end
+
     # Types collected from DWARF
 
     # Collect all struct/class/enum names for type resolution
@@ -1753,7 +1803,12 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 # For other typedefs, resolve to underlying type
                 target_ref = get(type_info, "target", nothing)
                 if !isnothing(target_ref)
-                    return resolve_type(target_ref, type_refs, visited)
+                    resolved_target = resolve_type(target_ref, type_refs, visited)
+                    if resolved_target == "unknown_struct" && !isempty(typedef_name)
+                        # If the target is an anonymous struct, use the typedef name instead
+                        return typedef_name
+                    end
+                    return resolved_target
                 else
                     # If no target, return the typedef name itself
                     return typedef_name == "" ? "unknown" : typedef_name
