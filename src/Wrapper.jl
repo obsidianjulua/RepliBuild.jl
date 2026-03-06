@@ -21,6 +21,34 @@ export TypeStrictness, STRICT, WARN, PERMISSIVE
 export is_struct_like, is_enum_like, is_function_pointer_like
 
 # =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+# Helper: sanitize a C++ type name to a valid Julia struct/type identifier
+function _sanitize_julia_type_name(name::AbstractString)::String
+    s = replace(string(name), "::" => "_")
+    s = replace(s, "<"  => "_")
+    s = replace(s, ">"  => "")
+    s = replace(s, ","  => "_")
+    s = replace(s, " "  => "")
+    s = replace(s, "-"  => "minus_")
+    s = replace(s, "+"  => "plus_")
+    s = replace(s, "*"  => "star_")
+    # Collapse consecutive underscores and trim trailing ones so that every
+    # call-site (struct definitions, field types, function parameters, …)
+    # produces identical identifiers for the same C++ type.
+    s = replace(s, r"_+" => "_")
+    s = String(rstrip(s, '_'))
+    if !isempty(s) && isdigit(s[1])
+        s = "_" * s
+    end
+    if s in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "true", "false", "abstract", "type", "mutable", "primitive")
+        s = "c_" * s
+    end
+    return s
+end
+
+# =============================================================================
 # TYPE SYSTEM - Comprehensive C/C++ to Julia Type Mapping
 # =============================================================================
 
@@ -403,8 +431,7 @@ function handle_unknown_type(registry::TypeRegistry, cpp_type::String, context::
             base_type = strip(replace(replace(cpp_type, "*" => ""), "&" => ""))
             
             # Sanitize for Julia (e.g. Box<int> -> Box_int)
-            sanitized = replace(replace(replace(base_type, "<" => "_"), ">" => ""), "," => "_")
-            sanitized = replace(sanitized, " " => "")
+            sanitized = _sanitize_julia_type_name(base_type)
             return sanitized
         end
     end
@@ -1514,9 +1541,20 @@ function is_ccall_safe(func_info, dwarf_structs)
     ret_type = ret_type_str
 
     # If returning a struct by value (not pointer/void/primitive)
-    if !contains(ret_type, "*") && !contains(ret_type, "void") &&
-       !contains(ret_type, "int") && !contains(ret_type, "float") &&
-       !contains(ret_type, "double") && !contains(ret_type, "bool")
+    # For template types (containing '<'), skip primitive substring matching —
+    # "Matrix<double, -1, -1>" contains "double" but is NOT a double return.
+    is_template_ret = occursin('<', ret_type)
+    is_primitive_ret = !is_template_ret &&
+        (contains(ret_type, "int") || contains(ret_type, "float") ||
+         contains(ret_type, "double") || contains(ret_type, "bool"))
+    if !contains(ret_type, "*") && !contains(ret_type, "void") && !is_primitive_ret
+
+        # Template return types (e.g. Matrix<double,-1,-1>) are always complex
+        # struct returns — route to MLIR unconditionally.  DWARF may not have
+        # an entry for the exact template instantiation.
+        if is_template_ret
+            return false
+        end
 
         # Check if it's a known struct
         if haskey(dwarf_structs, ret_type)
@@ -1767,9 +1805,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # LTO: load LLVM IR text at module parse time for Base.llvmcall zero-cost dispatch
     const LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_lto.ll")
     const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH, String) : ""
+    const THUNKS_LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_thunks_lto.ll")
+    const THUNKS_LTO_IR = isfile(THUNKS_LTO_IR_PATH) ? read(THUNKS_LTO_IR_PATH, String) : ""
 
     """ : """
     const LTO_IR = ""  # LTO disabled for this build
+    const THUNKS_LTO_IR = ""
 
     """
     metadata_section = """
@@ -1898,8 +1939,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
 
         if !isnothing(class_nm) && !isempty(string(class_nm))
-            safe_nm = replace(replace(replace(string(class_nm), "<" => "_"), ">" => ""), "," => "_")
-            safe_nm = replace(safe_nm, " " => "")
+            safe_nm = _sanitize_julia_type_name(string(class_nm))
             push!(get!(factory_funcs, safe_nm, Any[]), func)
         end
     end
@@ -1910,8 +1950,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         is_m   = get(func, "is_method", false)
         cls_nm = get(func, "class", "")
         is_m && !isempty(cls_nm) && func["name"] == cls_nm || continue
-        safe_cls = replace(replace(replace(cls_nm, "<" => "_"), ">" => ""), "," => "_")
-        safe_cls = replace(safe_cls, " " => "")
+        safe_cls = _sanitize_julia_type_name(cls_nm)
         push!(get!(class_constructors, safe_cls, Any[]), func)
     end
 
@@ -1921,8 +1960,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         is_m   = get(func, "is_method", false)
         cls_nm = get(func, "class", "")
         is_m && !isempty(cls_nm) && contains(func["demangled"], "~") || continue
-        safe_cls = replace(replace(replace(cls_nm, "<" => "_"), ">" => ""), "," => "_")
-        safe_cls = replace(safe_cls, " " => "")
+        safe_cls = _sanitize_julia_type_name(cls_nm)
         haskey(class_destructors, safe_cls) || (class_destructors[safe_cls] = func)
     end
 
@@ -1934,8 +1972,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         is_m && !isempty(cls_nm) || continue
         func["name"] == cls_nm   && continue  # skip constructors
         contains(func["demangled"], "~") && continue  # skip destructors
-        safe_cls = replace(replace(replace(cls_nm, "<" => "_"), ">" => ""), "," => "_")
-        safe_cls = replace(safe_cls, " " => "")
+        safe_cls = _sanitize_julia_type_name(cls_nm)
         push!(get!(class_methods, safe_cls, Any[]), func)
     end
 
@@ -2051,16 +2088,37 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 @enum $enum_name::$julia_underlying begin
                 """
 
+                seen_values = Set{Any}()
+                seen_names = Set{String}()
+                duplicate_defs = String[]
                 for (i, enumerator) in enumerate(enumerators)
                     name = get(enumerator, "name", "Unknown")
+                    name = _sanitize_julia_type_name(name)
                     value = get(enumerator, "value", 0)
-                    enum_definitions *= "    $name = $value\n"
+                    if name in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "true", "false", "abstract", "type", "mutable", "primitive")
+                        name = "var\"$name\""
+                    end
+                    
+                    if name in seen_names
+                        continue
+                    end
+                    push!(seen_names, name)
+
+                    if value in seen_values
+                        push!(duplicate_defs, "const $name = $enum_name($value)")
+                    else
+                        push!(seen_values, value)
+                        enum_definitions *= "    $name = $value\n"
+                    end
                 end
 
                 enum_definitions *= """
                 end
 
                 """
+                if !isempty(duplicate_defs)
+                    enum_definitions *= join(duplicate_defs, "\n") * "\n\n"
+                end
             end
         end
 
@@ -2096,14 +2154,35 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 @enum $enum_name::Cint begin
                 """
 
+                seen_values = Set{Any}()
+                seen_names = Set{String}()
+                duplicate_defs = String[]
                 for (member_name, value) in members
-                    enum_definitions *= "    $member_name = $value\n"
+                    member_name = _sanitize_julia_type_name(string(member_name))
+                    if member_name in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "true", "false", "abstract", "type", "mutable", "primitive")
+                        member_name = "var\"$member_name\""
+                    end
+                    
+                    if member_name in seen_names
+                        continue
+                    end
+                    push!(seen_names, member_name)
+
+                    if value in seen_values
+                        push!(duplicate_defs, "const $member_name = $enum_name($value)")
+                    else
+                        push!(seen_values, value)
+                        enum_definitions *= "    $member_name = $value\n"
+                    end
                 end
 
                 enum_definitions *= """
                 end
 
                 """
+                if !isempty(duplicate_defs)
+                    enum_definitions *= join(duplicate_defs, "\n") * "\n\n"
+                end
                 added_header_enums += 1
             end
         end
@@ -2116,6 +2195,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # =============================================================================
     # STRUCT GENERATION (from DWARF)
     # =============================================================================
+
+    # Create a mapping from sanitized Julia name back to raw C++ name for resolving dependencies
+    julia_to_cpp_struct = Dict{String, String}()
+    for struct_name in struct_types
+        julia_to_cpp_struct[_sanitize_julia_type_name(struct_name)] = struct_name
+    end
 
     # Scan for ALL referenced struct types that need forward declarations.
     # This includes:
@@ -2141,29 +2226,40 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 end
 
                 # Scan for ALL struct type references in this julia_type
-                # Handles: Ptr{Foo}, NTuple{N, Ptr{Foo}}, Ptr{Ptr{Foo}}, etc.
+                # Handles: Ptr{Foo}, NTuple{N, Ptr{Foo}}, Ptr{Ptr{Foo}}, Ref{Foo}, etc.
                 builtin_types = Set(["Cvoid", "Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
                                      "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                                      "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
                                      "Clonglong", "Culonglong", "Any", "Nothing"])
 
-                # Find all identifiers that could be struct type references
-                for ref_match in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", julia_type)
-                    ref_name = ref_match.match
-                    if ref_name in builtin_types || ref_name in ["Ptr", "NTuple", "Ref"]
-                        continue
-                    end
-                    # Skip numeric-looking tokens (from NTuple{N,...})
-                    if all(isdigit, ref_name)
-                        continue
-                    end
-                    if ref_name in struct_types
-                        push!(ptr_referenced_structs, ref_name)
-                    elseif !(ref_name in builtin_types)
-                        # Could be an opaque struct referenced via Ptr
-                        if found_ptr
-                            push!(opaque_structs, ref_name)
+                # Extract the base type by stripping known container prefixes
+                base_ref = julia_type
+                while true
+                    if startswith(base_ref, "Ptr{") && endswith(base_ref, "}")
+                        base_ref = base_ref[5:end-1]
+                    elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
+                        base_ref = base_ref[5:end-1]
+                    elseif startswith(base_ref, "NTuple{")
+                        ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
+                        if !isnothing(ntuple_match)
+                            base_ref = strip(ntuple_match.captures[1])
+                        else
+                            break
                         end
+                    else
+                        break
+                    end
+                end
+                
+                base_ref = strip(base_ref)
+                
+                # If the inner type is not a builtin, register it
+                if !(base_ref in builtin_types) && !isempty(base_ref)
+                    # We compare the raw string with struct_types
+                    if base_ref in struct_types
+                        push!(ptr_referenced_structs, base_ref)
+                    else
+                        push!(opaque_structs, base_ref)
                     end
                 end
             end
@@ -2185,13 +2281,13 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         # =============================================================================
 
         """
+        seen_forward_decls = Set{String}()
         for name in sort(collect(all_forward_decls))
             # Skip STL internal types
             _is_stl_internal_type(name) && continue
 
             # Sanitize
-            s_name = replace(replace(replace(name, "<" => "_"), ">" => ""), "," => "_")
-            s_name = replace(s_name, " " => "")
+            s_name = _sanitize_julia_type_name(name)
             s_name = replace(s_name, "*" => "Ptr")
             s_name = replace(s_name, "&" => "Ref")
             s_name = replace(s_name, r"[^a-zA-Z0-9_]" => "_")
@@ -2201,11 +2297,13 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 continue
             end
 
-            if name in opaque_structs
-                struct_definitions *= "mutable struct $s_name end\n"
-            else
-                struct_definitions *= "struct $s_name end\n"
-            end
+            # Skip duplicates (different C++ names can sanitize to the same Julia identifier)
+            s_name in seen_forward_decls && continue
+            push!(seen_forward_decls, s_name)
+
+            # Both opaque types and pointer-referenced types should be immutable structs
+            # to preserve inline C++ ABI layout (0-byte empty structs) if they are used by value.
+            struct_definitions *= "struct $s_name end\n"
         end
         struct_definitions *= "\n"
     end
@@ -2235,11 +2333,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     # Extract type name from various wrapper types:
                     #   Ptr{Foo} -> Foo (NOT a hard dep — resolved via opaque forward decl)
                     #   NTuple{N, Foo} -> Foo (hard dep, needs full definition first)
+                    #   Ref{Foo} -> Foo (hard dep)
                     #   Foo -> Foo (hard dep, direct by-value embedding)
-                    #
-                    # Ptr{X} is NOT a hard dependency because we emit opaque forward
-                    # declarations for all struct types before full definitions.
-                    # This avoids circular dependency deadlocks from mutual pointer refs.
                     dep_type = nothing
 
                     if startswith(julia_type, "Ptr{")
@@ -2249,13 +2344,19 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         if !isnothing(ntuple_match)
                             dep_type = strip(ntuple_match.captures[1])
                         end
-                    elseif julia_type in struct_types && julia_type != struct_name
+                    elseif startswith(julia_type, "Ref{")
+                        ref_match = match(r"Ref\{([^}]+)\}", julia_type)
+                        if !isnothing(ref_match)
+                            dep_type = strip(ref_match.captures[1])
+                        end
+                    else
                         dep_type = julia_type
                     end
 
-                    if !isnothing(dep_type)
-                        if dep_type in struct_types && dep_type != struct_name
-                            push!(deps, dep_type)
+                    if !isnothing(dep_type) && haskey(julia_to_cpp_struct, dep_type)
+                        cpp_dep = julia_to_cpp_struct[dep_type]
+                        if cpp_dep != struct_name
+                            push!(deps, cpp_dep)
                         end
                     end
                 end
@@ -2317,6 +2418,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             return all_members
         end
 
+        seen_struct_defs = Set{String}()
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
@@ -2330,11 +2432,18 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             end
 
             # Sanitize struct name for Julia (replace < > , with _)
-            julia_struct_name = replace(replace(replace(struct_name, "<" => "_"), ">" => ""), "," => "_")
-            julia_struct_name = replace(julia_struct_name, " " => "")
+            julia_struct_name = _sanitize_julia_type_name(struct_name)
             julia_struct_name = replace(julia_struct_name, "*" => "Ptr")
             julia_struct_name = replace(julia_struct_name, "&" => "Ref")
             julia_struct_name = replace(julia_struct_name, r"[^a-zA-Z0-9_]" => "_")
+
+            # Skip duplicate sanitized names (different C++ template nesting depths
+            # like "Matrix<double,-1,-1> >" vs "Matrix<double,-1,-1> > >" can
+            # sanitize to the same Julia identifier)
+            if julia_struct_name in seen_struct_defs
+                continue
+            end
+            push!(seen_struct_defs, julia_struct_name)
 
             # Skip DWARF struct generation if we are generating a high-level idiomatic wrapper
             if haskey(idiomatic_classes, julia_struct_name)
@@ -2555,8 +2664,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                                             # STL-internal inner type: use Ptr{Cvoid} — never defined
                                             sanitized_type = "Ptr{Cvoid}"
                                         else
-                                            sanitized_inner = replace(replace(replace(inner_type, "<" => "_"), ">" => ""), "," => "_")
-                                            sanitized_inner = replace(sanitized_inner, " " => "")
+                                            sanitized_inner = _sanitize_julia_type_name(inner_type)
                                             sanitized_type = "Ptr{$sanitized_inner}"
                                         end
                                     end
@@ -2567,8 +2675,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                                     m_size = get(member, "size", 0)
                                     sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
                                 else
-                                    sanitized_type = replace(replace(replace(julia_type, "<" => "_"), ">" => ""), "," => "_")
-                                    sanitized_type = replace(sanitized_type, " " => "")
+                                    sanitized_type = _sanitize_julia_type_name(julia_type)
                                 end
                             end
 
@@ -2703,8 +2810,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Skip: a full idiomatic wrapper will be generated for this class
             haskey(idiomatic_classes, s_name) && continue
             # Sanitize names
-            safe_s_name = replace(replace(replace(s_name, "<" => "_"), ">" => ""), "," => "_")
-            safe_s_name = replace(safe_s_name, " " => "")
+            safe_s_name = _sanitize_julia_type_name(s_name)
             
             managed_name = "Managed$safe_s_name"
             
@@ -2976,7 +3082,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     end
                     last_sep > 0 ? raw_class[last_sep+1:end] : raw_class
                 end
-                safe_class = replace(replace(replace(bare_class, "<" => "_"), ">" => ""), "," => "_")
+                safe_class = _sanitize_julia_type_name(bare_class)
                 safe_class = replace(safe_class, r"[^A-Za-z0-9_]" => "")
                 safe_class = replace(safe_class, r"_+"            => "_")
                 safe_class = String(strip(safe_class, '_'))
@@ -3013,8 +3119,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
              
              if base_c in struct_types
                  # Sanitize
-                 safe_base = replace(replace(replace(base_c, "<" => "_"), ">" => ""), "," => "_")
-                 safe_base = replace(safe_base, " " => "")
+                 safe_base = _sanitize_julia_type_name(base_c)
                  return_type["julia_type"] = "Ptr{$safe_base}"
              end
         end
@@ -3027,8 +3132,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             if _is_stl_internal_type(ret_type_str)
                 return_type["julia_type"] = "Ptr{Cvoid}"
             else
-                safe_ret = replace(replace(replace(ret_type_str, "<" => "_"), ">" => ""), "," => "_")
-                safe_ret = replace(safe_ret, " " => "")
+                safe_ret = _sanitize_julia_type_name(ret_type_str)
                 return_type["julia_type"] = safe_ret
             end
         end
@@ -3098,13 +3202,11 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     if _is_stl_internal_type(String(inner))
                         julia_type = "Ptr{Cvoid}"
                     else
-                        inner_safe = replace(replace(replace(inner, "<" => "_"), ">" => ""), "," => "_")
-                        inner_safe = String(rstrip(replace(replace(inner_safe, " " => ""), r"_+" => "_"), '_'))
+                        inner_safe = _sanitize_julia_type_name(inner)
                         julia_type = "$wrapper_kw{$inner_safe}"
                     end
                 else
-                    julia_type = replace(replace(replace(julia_type, "<" => "_"), ">" => ""), "," => "_")
-                    julia_type = String(rstrip(replace(julia_type, " " => ""), '_'))
+                    julia_type = _sanitize_julia_type_name(julia_type)
                 end
             end
             # Also sanitize namespace separators (::) and other non-identifier chars
@@ -3113,13 +3215,10 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
                 if m !== nothing
                     wrapper_kw, inner = m.captures
-                    inner_safe = replace(inner, "::" => "_")
-                    inner_safe = replace(inner_safe, r"[^A-Za-z0-9_]" => "")
-                    inner_safe = replace(inner_safe, r"_+" => "_")
-                    inner_safe = strip(inner_safe, '_')
+                    inner_safe = _sanitize_julia_type_name(inner)
                     julia_type = isempty(inner_safe) ? "Ptr{Cvoid}" : "$wrapper_kw{$inner_safe}"
                 else
-                    julia_type = "Any"
+                    julia_type = _sanitize_julia_type_name(julia_type)
                 end
             end
             c_type_name = get(param, "c_type", "")
@@ -3344,8 +3443,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # This is critical: invoke(name, Any, ...) creates Ref{Any}() which corrupts
             # memory when the JIT writes raw struct bytes into it.
             if jit_ret_type == "Any" && jit_c_ret != "void" && haskey(dwarf_structs, jit_c_ret)
-                jit_ret_type = replace(replace(replace(jit_c_ret, "<" => "_"), ">" => ""), "," => "_")
-                jit_ret_type = replace(jit_ret_type, " " => "")
+                jit_ret_type = _sanitize_julia_type_name(jit_c_ret)
             end
 
             # Determine if we need the return type overload of invoke
@@ -3368,21 +3466,33 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 end
                 
                 if is_void_ret
-                    invoke_call = "        ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
+                    invoke_call = "        if !isempty(THUNKS_LTO_IR)\n"
+                    invoke_call *= "            Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
+                    invoke_call *= "        else\n"
+                    invoke_call *= "            ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
+                    invoke_call *= "        end\n"
                     invoke_call *= "        return nothing\n"
                     invoke_call *= "    end"
                 elseif jit_ret_type in ("Int8","UInt8","Int16","UInt16","Int32","UInt32","Int64","UInt64",
                                         "Float32","Float64","Cint","Clong","Culong","Csize_t","Cchar",
                                         "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring")
                     # Scalar return directly
-                    invoke_call = "        ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
+                    invoke_call = "        if !isempty(THUNKS_LTO_IR)\n"
+                    invoke_call *= "            ret = Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), $jit_ret_type, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
+                    invoke_call *= "        else\n"
+                    invoke_call *= "            ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
+                    invoke_call *= "        end\n"
                     invoke_call *= "    end\n"
                     invoke_call *= "    return ret"
                 else
                     # Struct return via sret pointer
                     invoke_call = "        ret_buf = Ref{$jit_ret_type}()\n"
                     invoke_call *= "        GC.@preserve ret_buf begin\n"
-                    invoke_call *= "            ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)\n"
+                    invoke_call *= "            if !isempty(THUNKS_LTO_IR)\n"
+                    invoke_call *= "                Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}}, ret_buf, inner_ptrs)\n"
+                    invoke_call *= "            else\n"
+                    invoke_call *= "                ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)\n"
+                    invoke_call *= "            end\n"
                     invoke_call *= "        end\n"
                     invoke_call *= "    end\n"
                     invoke_call *= "    return ret_buf[]"
@@ -3470,13 +3580,22 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         # Check if return type is a struct (not primitive, not pointer)
         is_struct_return = julia_return_type == "Any" && !contains(c_return_type, "*") && !contains(c_return_type, "void") && c_return_type != "unknown"
         
+        # Also detect resolved struct returns: julia_return_type was mapped to a
+        # known struct name (e.g. Matrix_double_minus_1...) but is_struct_return
+        # missed it because julia_return_type != "Any".
+        returns_known_struct = is_struct_return ||
+            haskey(julia_to_cpp_struct, julia_return_type) ||
+            c_return_type in struct_types
+
         # Check if this is a virtual method that requires dynamic dispatch
         is_virtual = get(func, "is_virtual", false)
 
         # LTO eligibility: safe for primitive/pointer/small-POD structs (filtered earlier by is_ccall_safe),
-        # non-virtual, no Cstring anywhere (llvmcall won't auto-convert String→Cstring like ccall does)
+        # non-virtual, no Cstring anywhere (llvmcall won't auto-convert String→Cstring like ccall does),
+        # and NOT returning a struct by value (Base.llvmcall doesn't handle the sret ABI).
         lto_eligible = config.link.enable_lto &&
             !is_virtual &&
+            !returns_known_struct &&
             julia_return_type != "Cstring" &&
             !any(t -> t == "Cstring", param_types)
 
@@ -3506,8 +3625,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Sanitize return type if needed
             safe_c_ret = c_return_type
             if occursin(r"[<>]", safe_c_ret)
-                 safe_c_ret = replace(replace(replace(safe_c_ret, "<" => "_"), ">" => ""), "," => "_")
-                 safe_c_ret = replace(safe_c_ret, " " => "")
+                 safe_c_ret = _sanitize_julia_type_name(safe_c_ret)
             end
             ret_type_sig = (julia_return_type == "Any" || julia_return_type == "Cstring") ? safe_c_ret : julia_return_type
             
@@ -3546,8 +3664,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Sanitize C return type if it contains template chars (Box<int> -> Box_int)
             safe_c_ret = c_return_type
             if occursin(r"[<>]", safe_c_ret)
-                 safe_c_ret = replace(replace(replace(safe_c_ret, "<" => "_"), ">" => ""), "," => "_")
-                 safe_c_ret = replace(safe_c_ret, " " => "")
+                 safe_c_ret = _sanitize_julia_type_name(safe_c_ret)
             end
 
             if lto_eligible
@@ -3639,8 +3756,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         if startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")
             target_struct = julia_return_type[5:end-1]
             # Sanitize target struct name to match ManagedX keys
-            safe_target = replace(replace(replace(target_struct, "<" => "_"), ">" => ""), "," => "_")
-            safe_target = replace(safe_target, " " => "")
+            safe_target = _sanitize_julia_type_name(target_struct)
             
             if (haskey(deleters, safe_target) || haskey(deleters, target_struct)) && !haskey(idiomatic_classes, safe_target) && !haskey(idiomatic_classes, target_struct)
                 managed_name = "Managed$safe_target"
@@ -3930,8 +4046,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     for struct_name in struct_types
         if !(struct_name in enum_names)
             # Sanitize struct name for export
-            julia_struct_name = replace(replace(replace(struct_name, "<" => "_"), ">" => ""), "," => "_")
-            julia_struct_name = replace(julia_struct_name, " " => "")
+            julia_struct_name = _sanitize_julia_type_name(struct_name)
             julia_struct_name = replace(julia_struct_name, "*" => "Ptr")
             julia_struct_name = replace(julia_struct_name, "&" => "Ref")
             julia_struct_name = replace(julia_struct_name, r"[^a-zA-Z0-9_]" => "_")

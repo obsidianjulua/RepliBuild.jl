@@ -24,6 +24,13 @@ test/duktape_test/include/
 test/sqlite_test/src/
 test/sqlite_test/include/
 
+# Massive real-world test libraries
+test/realworld_*/
+
+# Temporary root test scripts
+test_*.jl
+test_*_wrapper*.jl
+
 # Generated TOML configs (contain machine-specific absolute paths)
 test/*/*.toml
 !test/*/replibuild.toml

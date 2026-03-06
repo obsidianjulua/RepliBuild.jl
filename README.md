@@ -65,7 +65,7 @@ using .ProjectName
 
 RepliBuild operates as a two-tier dispatch system:
 
-**Tier 1 (ccall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself. When `enable_lto = true`, eligible functions are further upgraded to `Base.llvmcall`, embedding the C++ LLVM IR directly into Julia's JIT pipeline so the compiler can inline across the boundary.
+**Tier 1 (ccall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself. When `enable_lto = true`, eligible functions are further upgraded to `Base.llvmcall`, embedding the C++ LLVM IR directly into Julia's JIT pipeline so the compiler can inline across the boundary. (Enzyme.jl)... I have intel gpu or I would test if it can AD across the ffi boundry now that the ir is exposed.
 
 **Tier 2 (MLIR JIT / AOT)** — Functions involving packed structs, unions, large struct returns, or virtual dispatch are compiled through a custom MLIR dialect (`jlcs`) that handles ABI marshalling correctly. The JIT engine caches compiled symbols with a lock-free read path for hot calls. When `aot_thunks = true`, these thunks are pre-compiled to a static `.so` at build time, eliminating JIT startup cost entirely.
 

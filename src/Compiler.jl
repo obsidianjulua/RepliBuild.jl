@@ -236,6 +236,8 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
             # LLVM 19+: nuw/nsw on getelementptr (only nuw is new, nsw existed but combined form differs)
             lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
             lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
+            # LLVM 19+: inrange(-16, 24) on getelementptr
+            lto_ir_text = replace(lto_ir_text, r"\binrange\([^)]*\)\s*" => "")
             # LLVM 19+: new-style debug intrinsics — strip entirely
             lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
             # LLVM 19+: captures(...) attribute on pointer params — strip

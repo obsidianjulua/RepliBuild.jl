@@ -81,14 +81,6 @@ Seven bugs fixed in `Wrapper.jl` that caused the generated wrapper to fail parsi
 - **Julia minimum**: 1.9 -> 1.10
 - **Clang compat**: now accepts 0.18 + 0.19
 
-### Tests
-
-- **Lua 5.4** — Full VM wrap, 10 tests including Julia<->Lua callbacks and coroutines
-- **Duktape** — 101K-line JS engine, eval from Julia
-- **SQLite 3.49.1** — Full database engine wrap
-- **JIT edge cases** — Scalar, struct return, packed struct, 3-tier benchmarks
-- **Download-from-source** — `setup.jl` scripts replace vendored C sources (-275K lines)
-
 ## v2.0.3
 
 - Initial public release with DWARF-based wrapper generation

@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-03-05 23:16:33
+# Generated: 2026-03-06 16:34:43
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -35,10 +35,11 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-03-05T23:16:33.098"
+    "generated_at" => "2026-03-06T16:34:43.540"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
+const THUNKS_LTO_IR = ""
 
 # =============================================================================
 # Enum Definitions (from DWARF debug info)
@@ -68,6 +69,9 @@ end
 # =============================================================================
 
 struct DenseMatrix end
+struct OptimizationAlgorithm end
+struct Status end
+struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL end
 struct param_type end
 
 # =============================================================================
@@ -235,33 +239,33 @@ function SplineInterpolation()
 end
 
 # C++ struct: __mbstate_t (2 members)
-struct __mbstate_t
+struct _mbstate_t
     _count::Cint
     _value::Any
 end
 
-# Zero-initializer for __mbstate_t
-function __mbstate_t()
-    ref = Ref{__mbstate_t}()
+# Zero-initializer for _mbstate_t
+function _mbstate_t()
+    ref = Ref{_mbstate_t}()
     GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(__mbstate_t))
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(_mbstate_t))
     end
     return ref[]
 end
 
 # C++ struct: __va_list_tag (4 members)
-struct __va_list_tag
+struct _va_list_tag
     gp_offset::Cuint
     fp_offset::Cuint
     overflow_arg_area::Ptr{Cvoid}
     reg_save_area::Ptr{Cvoid}
 end
 
-# Zero-initializer for __va_list_tag
-function __va_list_tag()
-    ref = Ref{__va_list_tag}()
+# Zero-initializer for _va_list_tag
+function _va_list_tag()
+    ref = Ref{_va_list_tag}()
     GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(__va_list_tag))
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(_va_list_tag))
     end
     return ref[]
 end
@@ -591,7 +595,7 @@ unsafe_convert(::Type{Ptr{SparseMatrix}}, obj::ManagedSparseMatrix) = obj.handle
 
 export ManagedSparseMatrix
 
-export compute_eigen, compute_fft, compute_histogram, compute_ifft, compute_lu, compute_mean, compute_median, compute_qr, compute_quantiles, compute_stddev, compute_variance, convolve, correlate, create_cubic_spline, dense_matrix_copy, dense_matrix_create, dense_matrix_destroy, dense_matrix_resize, dense_matrix_set_identity, dense_matrix_set_zero, fft_result_destroy, fill_random_normal, fill_random_uniform, histogram_destroy, line_search_backtracking, matrix_add, matrix_determinant, matrix_multiply, matrix_trace, matrix_transpose, matrix_vector_mult, matrix_vector_mult_add, ode_result_destroy, optimize_minimize, optimize_minimize_numerical_gradient, polynomial_destroy, polynomial_eval, polynomial_fit, print_matrix, print_vector, set_random_seed, solve_conjugate_gradient, solve_least_squares, solve_linear_system_lu, solve_linear_system_qr, solve_ode_adaptive, solve_ode_rk4, sparse_matrix_create, sparse_matrix_destroy, spline_destroy, spline_eval, status_to_string, vector_axpy, vector_copy, vector_dot, vector_norm, vector_scale, OptimizationAlgorithm, GRADIENT_DESCENT, CONJUGATE_GRADIENT, LBFGS, NEWTON, Status, SUCCESS, ERROR_INVALID_INPUT, ERROR_SINGULAR_MATRIX, ERROR_NOT_CONVERGED, ERROR_OUT_OF_MEMORY, ERROR_DIMENSION_MISMATCH, LUDecomposition, __mbstate_t, ODEResult, ldiv_t, EigenDecomposition, DenseMatrix, SparseMatrix, mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL, FFTResult, uniform_real_distribution_double, QRDecomposition, mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double, lldiv_t, __va_list_tag, OptimizationOptions, Histogram, normal_distribution_double, Polynomial, max_align_t, OptimizationState, param_type, SplineInterpolation
+export compute_eigen, compute_fft, compute_histogram, compute_ifft, compute_lu, compute_mean, compute_median, compute_qr, compute_quantiles, compute_stddev, compute_variance, convolve, correlate, create_cubic_spline, dense_matrix_copy, dense_matrix_create, dense_matrix_destroy, dense_matrix_resize, dense_matrix_set_identity, dense_matrix_set_zero, fft_result_destroy, fill_random_normal, fill_random_uniform, histogram_destroy, line_search_backtracking, matrix_add, matrix_determinant, matrix_multiply, matrix_trace, matrix_transpose, matrix_vector_mult, matrix_vector_mult_add, ode_result_destroy, optimize_minimize, optimize_minimize_numerical_gradient, polynomial_destroy, polynomial_eval, polynomial_fit, print_matrix, print_vector, set_random_seed, solve_conjugate_gradient, solve_least_squares, solve_linear_system_lu, solve_linear_system_qr, solve_ode_adaptive, solve_ode_rk4, sparse_matrix_create, sparse_matrix_destroy, spline_destroy, spline_eval, status_to_string, vector_axpy, vector_copy, vector_dot, vector_norm, vector_scale, OptimizationAlgorithm, GRADIENT_DESCENT, CONJUGATE_GRADIENT, LBFGS, NEWTON, Status, SUCCESS, ERROR_INVALID_INPUT, ERROR_SINGULAR_MATRIX, ERROR_NOT_CONVERGED, ERROR_OUT_OF_MEMORY, ERROR_DIMENSION_MISMATCH, LUDecomposition, _mbstate_t, ODEResult, ldiv_t, EigenDecomposition, DenseMatrix, SparseMatrix, mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL, FFTResult, uniform_real_distribution_double, QRDecomposition, mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL_double, lldiv_t, _va_list_tag, OptimizationOptions, Histogram, normal_distribution_double, Polynomial, max_align_t, OptimizationState, param_type, SplineInterpolation
 
 """
     compute_eigen(A::Any) -> EigenDecomposition

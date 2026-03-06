@@ -176,6 +176,37 @@ function _build_aot_thunks(config, library_path)
             error("Failed to link thunks.o: $output")
         end
         
+        # Emit LTO text IR for AOT thunks if LTO is enabled
+        if config.link.enable_lto
+            thunks_lto_name = replace(lib_name, ".so" => "_thunks_lto.ll", ".dylib" => "_thunks_lto.ll", ".dll" => "_thunks_lto.ll")
+            thunks_lto_path = joinpath(output_dir, thunks_lto_name)
+            if MLIRNative.emit_llvmir(mod, thunks_lto_path)
+                lto_ir_text = read(thunks_lto_path, String)
+                lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
+                lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
+                lto_ir_text = replace(lto_ir_text, r"(attributes\s+#[0-9]+\s*=\s*\{[^}]*)\}" => s"\1 alwaysinline }")
+                lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
+                lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
+                lto_ir_text = replace(lto_ir_text, r"\binrange\([^)]*\)\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
+                lto_ir_text = replace(lto_ir_text, r"\bcaptures\([^)]*\)\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r"\bdead_on_unwind\b\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r"\binitializes\(\([^)]*\)\)\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
+                lines = split(lto_ir_text, '\n')
+                filtered = filter(lines) do l
+                    !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
+                end
+                filtered2 = filter(filtered) do l
+                    !occursin(r"^![a-zA-Z].*=\s*!\{", l)
+                end
+                lto_ir_text = join(filtered2, '\n')
+                write(thunks_lto_path, lto_ir_text)
+            else
+                @warn "Failed to emit LLVM IR for AOT thunks LTO."
+            end
+        end
+        
         elapsed = round(time() - start_time, digits=2)
         size_kb = round(filesize(thunks_so) / 1024, digits=1)
         println("  aot: $thunks_name ($size_kb KB) in $(elapsed)s")
