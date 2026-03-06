@@ -5,6 +5,44 @@ using ..StructGen # for get_struct_type_string
 
 export generate_function_thunks
 
+"""
+    _fuzzy_struct_lookup(c_type, structs) -> Union{String, Nothing}
+
+Fuzzy-match a C type name against struct definition keys.
+DWARF keys often have trailing " >" nesting artifacts from template types.
+"""
+function _fuzzy_struct_lookup(c_type::String, structs::Any)
+    haskey(structs, c_type) && return c_type
+    key = c_type * " >"
+    haskey(structs, key) && return key
+    c_norm = rstrip(c_type, [' ', '>'])
+    for k in keys(structs)
+        rstrip(String(k), [' ', '>']) == c_norm && return String(k)
+    end
+    return nothing
+end
+
+"""
+    _byte_blob_type(byte_size) -> String
+
+Generate a packed MLIR struct type of exactly `byte_size` bytes.
+Uses i64 chunks with i8 remainder for compactness.
+"""
+function _byte_blob_type(byte_size::Int)
+    byte_size <= 0 && return "!llvm.ptr"
+    n_i64 = div(byte_size, 8)
+    n_rem = byte_size % 8
+    parts = fill("i64", n_i64)
+    for _ in 1:n_rem
+        push!(parts, "i8")
+    end
+    return "!llvm.struct<packed ($(join(parts, ", ")))>"
+end
+
+function _parse_byte_size(s::AbstractString)
+    startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
+end
+
 function generate_function_thunks(functions::Vector, structs::Any=Dict())
     io = IOBuffer()
     println(io, "// Function Thunks")
@@ -77,8 +115,34 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict())
                     ret_struct_info = structs[lookup_key]
                     ret_num_members = length(get(ret_struct_info, "members", []))
                 else
-                    # Use FULL definition string
-                    ret_type = StructGen.get_struct_definition_string(s_name, structs[lookup_key])
+                    # Check if the struct has members that can't be sized correctly in MLIR.
+                    # When members are template types with size=0, get_struct_definition_string
+                    # would produce a struct with wrong total size. Use a byte blob instead.
+                    info = structs[lookup_key]
+                    byte_size = try _parse_byte_size(get(info, "byte_size", "0")) catch; 0 end
+                    members = get(info, "members", [])
+                    has_unsizable = any(m -> begin
+                        ms = try; s = get(m, "size", 0); s isa String ? parse(Int, s) : s; catch; 0; end
+                        ct = strip(replace(get(m, "c_type", ""), r"\bconst\b" => ""))
+                        ms == 0 && !endswith(ct, "*") && !endswith(ct, "&") && !occursin(r"^[A-Za-z0-9_]+$", ct)
+                    end, members)
+                    if has_unsizable && byte_size > 0
+                        ret_type = _byte_blob_type(byte_size)
+                    else
+                        ret_type = StructGen.get_struct_definition_string(s_name, structs[lookup_key])
+                    end
+                end
+            end
+        elseif ret_type == "!llvm.ptr" && !contains(ret_c_type, "*") && ret_c_type != "void" && ret_c_type != "unknown"
+            # Template types (e.g. "Matrix<double, -1, -1>") fall through map_cpp_type
+            # to !llvm.ptr because they contain non-alphanumeric chars.
+            # Fuzzy-match against DWARF struct definitions to recover the correct size.
+            matched_key = _fuzzy_struct_lookup(ret_c_type, structs)
+            if matched_key !== nothing
+                info = structs[matched_key]
+                byte_size = try _parse_byte_size(get(info, "byte_size", "0")) catch; 0 end
+                if byte_size > 0
+                    ret_type = _byte_blob_type(byte_size)
                 end
             end
         end
