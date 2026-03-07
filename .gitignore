@@ -46,6 +46,11 @@ src/mlir/build/
 # Documentation build
 docs/build/
 
+# Editor/IDE
+*.code-workspace
+.vscode/
+.idea/
+
 # Claude Code
 .claude/
 CLAUDE.md
