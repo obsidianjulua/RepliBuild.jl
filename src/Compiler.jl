@@ -995,6 +995,9 @@ end
 Get type size in bytes from C/C++ type name.
 """
 function get_type_size(c_type::AbstractString)::Int
+    # Strip cv-qualifiers for lookup
+    stripped = replace(strip(c_type), r"\b(const|volatile|mutable)\b\s*" => "")
+    stripped = strip(stripped)
     size_map = Dict(
         "void" => 0,
         "bool" => 1, "_Bool" => 1,
@@ -1011,16 +1014,18 @@ function get_type_size(c_type::AbstractString)::Int
         "double" => 8,
         "long double" => 16,  # x86_64 extended precision
         "size_t" => 8, "ssize_t" => 8,  # x86_64
+        "ptrdiff_t" => 8,
         "intptr_t" => 8, "uintptr_t" => 8,
+        "wchar_t" => 4,
         "__int128" => 16, "__uint128_t" => 16,
     )
 
     # Check for pointers/references (always 8 bytes on x86_64)
-    if endswith(c_type, "*") || endswith(c_type, "&")
+    if endswith(stripped, "*") || endswith(stripped, "&")
         return 8
     end
 
-    return get(size_map, strip(c_type), 0)
+    return get(size_map, stripped, 0)
 end
 
 """
@@ -1056,12 +1061,48 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     current_struct_context = nothing  # Track parent struct for members
     current_subroutine_offset = nothing  # Track current subroutine type for parameters
 
+    # Flush a completed member into its parent struct's members array.
+    # Called on each new DW_TAG_* to ensure all attributes (name, type, offset)
+    # are collected before the member dict is copied to the parent.
+    function flush_pending_member()
+        if !haskey(type_refs, "_pending_member_offset")
+            return
+        end
+        mo = type_refs["_pending_member_offset"]
+        if haskey(type_refs, mo) && isa(type_refs[mo], Dict) && get(type_refs[mo], "kind", "") == "member"
+            mi = type_refs[mo]
+            parent_off = get(mi, "parent", nothing)
+            if !isnothing(parent_off) && haskey(type_refs, parent_off) &&
+               isa(type_refs[parent_off], Dict) && haskey(type_refs[parent_off], "members")
+                if !isnothing(mi["name"]) && !isnothing(mi["type"])
+                    existing_names = [m["name"] for m in type_refs[parent_off]["members"]]
+                    if !(mi["name"] in existing_names)
+                        member_dict = Dict(
+                            "name" => mi["name"],
+                            "type" => mi["type"],
+                            "offset" => mi["offset"]
+                        )
+                        for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy"]
+                            if haskey(mi, bf_key)
+                                member_dict[bf_key] = mi[bf_key]
+                            end
+                        end
+                        push!(type_refs[parent_off]["members"], member_dict)
+                    end
+                end
+            end
+        end
+        delete!(type_refs, "_pending_member_offset")
+    end
+
     for line in split(output, '\n')
         line = strip(line)
 
         # Track ANY tag to avoid attribute pollution
         # Tags have format: <level><offset>: Abbrev Number: N (DW_TAG_*)
         if contains(line, "DW_TAG_")
+            # Flush any pending member before starting a new tag
+            flush_pending_member()
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 tag_offset = "0x" * offset_match.captures[1]
@@ -1517,6 +1558,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     "parent" => current_struct_context  # Track which struct/class this belongs to
                 )
                 offset_to_kind[member_offset] = :member
+                type_refs["_pending_member_offset"] = member_offset
             end
         end
 
@@ -1582,29 +1624,8 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     end
                 end
 
-                # When we have all info, add to parent struct/class
-                parent_offset = get(member_info, "parent", nothing)
-                if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
-                   isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "members")
-                    if !isnothing(member_info["name"]) && !isnothing(member_info["type"])
-                        # Only add if we haven't already added this member
-                        existing_names = [m["name"] for m in type_refs[parent_offset]["members"]]
-                        if !(member_info["name"] in existing_names)
-                            member_dict = Dict(
-                                "name" => member_info["name"],
-                                "type" => member_info["type"],
-                                "offset" => get(member_info, "offset", "0x00")
-                            )
-                            # Propagate bitfield attributes
-                            for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy"]
-                                if haskey(member_info, bf_key)
-                                    member_dict[bf_key] = member_info[bf_key]
-                                end
-                            end
-                            push!(type_refs[parent_offset]["members"], member_dict)
-                        end
-                    end
-                end
+                # Member addition to parent is deferred to flush_pending_member()
+                # which runs at the next DW_TAG_* boundary to ensure all attributes are collected.
             end
 
             # Extract enumerator attributes and add to parent enum
@@ -1629,6 +1650,9 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
     end
+
+    # Flush any remaining pending member after the last line
+    flush_pending_member()
 
     # Debug: Show type refs collected
     base_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :base && isa(type_refs[k], String), keys(type_refs))
@@ -2266,7 +2290,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                             "c_type" => c_type,
                             "julia_type" => julia_type,
                             "size" => get_type_size(c_type),
-                            "offset" => get(member, "offset", "0x00")
+                            "offset" => let v = get(member, "offset", nothing); isnothing(v) ? nothing : v end
                         )
                         # Propagate bitfield attributes if present
                         for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy"]

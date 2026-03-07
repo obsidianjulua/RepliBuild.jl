@@ -2290,7 +2290,20 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     # 1. Truly opaque types (no DWARF definition) — as mutable struct
     # 2. Struct types referenced via Ptr{X} — as empty struct (will be redefined with fields later)
     # This ensures Ptr{X} fields can reference types defined later in the file.
+    # BUT: skip forward declarations for types that will get a real DWARF definition,
+    # since Julia doesn't allow redefining a struct with the same name.
     all_forward_decls = union(opaque_structs, ptr_referenced_structs)
+
+    # Build set of sanitized names that will get real DWARF definitions
+    dwarf_defined_names = Set{String}()
+    for (name, info) in dwarf_structs
+        _is_stl_internal_type(name) && continue
+        s = _sanitize_julia_type_name(name)
+        s = replace(s, "*" => "Ptr")
+        s = replace(s, "&" => "Ref")
+        s = replace(s, r"[^a-zA-Z0-9_]" => "_")
+        push!(dwarf_defined_names, s)
+    end
 
     if !isempty(all_forward_decls)
         struct_definitions *= """
@@ -2318,6 +2331,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Skip duplicates (different C++ names can sanitize to the same Julia identifier)
             s_name in seen_forward_decls && continue
             push!(seen_forward_decls, s_name)
+
+            # Skip forward declaration if this type will get a real DWARF definition later
+            s_name in dwarf_defined_names && continue
 
             # Both opaque types and pointer-referenced types should be immutable structs
             # to preserve inline C++ ABI layout (0-byte empty structs) if they are used by value.
@@ -2436,6 +2452,40 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             return all_members
         end
 
+        # Pre-merge DWARF keys that sanitize to the same Julia name.
+        # Multiple C++ template nesting depths (e.g., "Matrix<double,-1,-1> >" vs
+        # "Matrix<double,-1,-1> > >") sanitize to the same identifier.
+        # Keep the one with the largest byte_size and most members.
+        best_dwarf_key = Dict{String, String}()  # sanitized_name -> best struct_name
+        for struct_name in sorted_structs
+            struct_name in enum_names && continue
+            _is_stl_internal_type(struct_name) && continue
+            
+            jname = _sanitize_julia_type_name(struct_name)
+            jname = replace(jname, "*" => "Ptr")
+            jname = replace(jname, "&" => "Ref")
+            jname = replace(jname, r"[^a-zA-Z0-9_]" => "_")
+            
+            if !haskey(best_dwarf_key, jname)
+                best_dwarf_key[jname] = struct_name
+            else
+                old_key = best_dwarf_key[jname]
+                if haskey(dwarf_structs, struct_name) && haskey(dwarf_structs, old_key)
+                    old_info = dwarf_structs[old_key]
+                    new_info = dwarf_structs[struct_name]
+                    old_bs = try; s = get(old_info, "byte_size", "0"); startswith(string(s), "0x") ? parse(Int, string(s)[3:end], base=16) : parse(Int, string(s)); catch; 0; end
+                    new_bs = try; s = get(new_info, "byte_size", "0"); startswith(string(s), "0x") ? parse(Int, string(s)[3:end], base=16) : parse(Int, string(s)); catch; 0; end
+                    old_mc = length(get(old_info, "members", []))
+                    new_mc = length(get(new_info, "members", []))
+                    if new_bs > old_bs || (new_bs == old_bs && new_mc > old_mc)
+                        best_dwarf_key[jname] = struct_name
+                    end
+                elseif haskey(dwarf_structs, struct_name) && !haskey(dwarf_structs, old_key)
+                    best_dwarf_key[jname] = struct_name
+                end
+            end
+        end
+
         seen_struct_defs = Set{String}()
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
@@ -2455,10 +2505,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             julia_struct_name = replace(julia_struct_name, "&" => "Ref")
             julia_struct_name = replace(julia_struct_name, r"[^a-zA-Z0-9_]" => "_")
 
-            # Skip duplicate sanitized names (different C++ template nesting depths
-            # like "Matrix<double,-1,-1> >" vs "Matrix<double,-1,-1> > >" can
-            # sanitize to the same Julia identifier)
+            # Skip duplicate sanitized names — only process the "best" DWARF key
+            # (the one with largest byte_size / most members)
             if julia_struct_name in seen_struct_defs
+                continue
+            end
+            if haskey(best_dwarf_key, julia_struct_name) && best_dwarf_key[julia_struct_name] != struct_name
                 continue
             end
             push!(seen_struct_defs, julia_struct_name)

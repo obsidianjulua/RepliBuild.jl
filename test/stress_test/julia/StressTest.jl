@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for stress_test
-# Generated: 2026-03-06 17:52:09
+# Generated: 2026-03-06 18:24:02
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libstress_test.so
 # Metadata: compilation_metadata.json
@@ -35,7 +35,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 57,
-    "generated_at" => "2026-03-06T17:52:09.085"
+    "generated_at" => "2026-03-06T18:24:02.898"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
@@ -68,11 +68,8 @@ end
 # Forward Declarations (Opaque + Ptr-referenced types)
 # =============================================================================
 
-struct DenseMatrix end
 struct OptimizationAlgorithm end
 struct Status end
-struct mersenne_twister_engine_unsignedlong_64UL_312UL_156UL_31UL_13043109905998158313UL_29UL_6148914691236517205UL_17UL_8202884508482404352UL_37UL_18444473444759240704UL_43UL_6364136223846793005UL end
-struct param_type end
 
 # =============================================================================
 # Struct Definitions (from DWARF debug info)
@@ -269,6 +266,7 @@ end
 # C++ struct: max_align_t (2 members)
 struct max_align_t
     _clang_max_align_nonce1::Clonglong
+    _pad_0::NTuple{8, UInt8}
     _clang_max_align_nonce2::Any
 end
 
