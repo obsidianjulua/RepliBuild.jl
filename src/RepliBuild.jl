@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.1.0"
+const VERSION = v"2.3.0"
 
 # ============================================================================
 # LOAD CORE MODULES
@@ -35,6 +35,10 @@ include("STLWrappers.jl")
 # Introspection module
 include("Introspect.jl")
 
+# Polish modules
+include("EnvironmentDoctor.jl")
+include("Scaffold.jl")
+
 # Import submodules for internal use
 using .LLVMEnvironment
 using .ConfigurationManager
@@ -51,6 +55,8 @@ using .MLIRNative
 using .JITManager
 using .STLWrappers
 using .Introspect
+using .EnvironmentDoctor
+using .Scaffold
 
 # ============================================================================
 # EXPORTS - Clean Build Orchestration API
@@ -65,11 +71,54 @@ export discover
 # Utility functions
 export clean
 
+# Environment diagnostics
+export check_environment
+
+# Package scaffolding
+export scaffold_package
+
 # Advanced modules (for power users who know what they're doing)
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser, JLCSIRGenerator, MLIRNative, STLWrappers
 
 # Introspection API
 export Introspect
+
+"""
+    check_environment(; verbose=true, throw_on_error=false) -> ToolchainStatus
+
+Run environment diagnostics to verify LLVM 21+, MLIR, CMake, and other toolchain requirements.
+
+Prints a colorful report showing which tools are found, their versions, and installation
+instructions for anything missing. Use `throw_on_error=true` to abort on missing requirements.
+
+# Example
+```julia
+status = RepliBuild.check_environment()
+status.ready          # true if Tier 1 (ccall) builds will work
+status.tier2_ready    # true if MLIR JIT tier is also available
+```
+"""
+function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)
+    return EnvironmentDoctor.check_environment(verbose=verbose, throw_on_error=throw_on_error)
+end
+
+"""
+    scaffold_package(name::String; path::String=".") -> String
+
+Generate a standardized Julia package for distributing RepliBuild wrappers.
+
+Creates a complete package with Project.toml, replibuild.toml, source stub,
+deps/build.jl hook, and test skeleton. Edit the replibuild.toml to point at
+your C/C++ source, then `Pkg.build()` compiles and wraps automatically.
+
+# Example
+```julia
+RepliBuild.scaffold_package("MyEigenWrapper")
+```
+"""
+function scaffold_package(name::String; path::String=".")
+    return Scaffold.scaffold_package(name; path=path)
+end
 
 # ============================================================================
 # PUBLIC API - Build Orchestration
@@ -257,6 +306,12 @@ RepliBuild.wrap("replibuild.toml")
 ```
 """
 function build(toml_path::String="replibuild.toml"; clean::Bool=false)
+
+    # Validate environment before attempting build
+    env_status = EnvironmentDoctor.check_environment(verbose=false)
+    if !env_status.ready
+        EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
+    end
 
     # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)

@@ -7,6 +7,18 @@
 
 RepliBuild ingests C/C++ source code, compiles it through an LLVM/MLIR pipeline, introspects DWARF debug metadata, and emits type-safe Julia bindings with correct struct layout, enum definitions, and calling conventions. Functions that require non-trivial ABI handling (packed structs, unions, virtual dispatch) are automatically routed through a JIT tier built on a custom MLIR dialect.
 
+## Philosophy
+
+RepliBuild is a **source-based wrapper generator**. It intentionally bypasses JLLs and BinaryBuilder to utilize modern LLVM 21 and MLIR for perfect, zero-edit C++ bindings. This requires the user to have a local toolchain installed, but in exchange provides:
+
+- **Perfectly optimized binaries** tailored to the host machine (native `-march`, LTO across the FFI boundary)
+- **Automatic DWARF-based wrappers** that standard tools cannot generate — struct layout, enum mappings, virtual dispatch, and idiomatic Julia types are all derived from debug metadata, not manual annotations
+- **Zero-cost abstractions** — eligible functions are inlined across the C++/Julia boundary via `Base.llvmcall`
+
+By owning the heavy toolchain requirement, RepliBuild occupies a different point in the design space than BinaryBuilder: instead of distributing pre-compiled binaries that work everywhere, it generates *exact* bindings on your machine with *zero* manual FFI boilerplate. If you are wrapping a C++ library with templates, virtual methods, or complex ABI, this is the tool for it.
+
+Run `RepliBuild.check_environment()` to verify your toolchain is ready.
+
 ## Install
 
 ```julia

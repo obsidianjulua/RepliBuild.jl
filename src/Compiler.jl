@@ -17,7 +17,8 @@ import ..BuildBridge
 import ..LLVMEnvironment
 
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
-       extract_compilation_metadata, save_compilation_metadata
+       extract_compilation_metadata, save_compilation_metadata,
+       compute_project_hash, is_project_cache_valid, save_project_hash
 
 # =============================================================================
 # INCREMENTAL BUILD SUPPORT
@@ -40,6 +41,113 @@ function needs_recompile(source_file::String, ir_file::String, cache_enabled::Bo
     ir_mtime = mtime(ir_file)
 
     return source_mtime > ir_mtime
+end
+
+# =============================================================================
+# AGGRESSIVE PROJECT-LEVEL CACHE (hash-based)
+# =============================================================================
+
+"""
+Compute a content hash for the entire project: replibuild.toml + source files + git HEAD.
+Returns a hex string that changes when anything relevant changes.
+"""
+function compute_project_hash(config::RepliBuildConfig)::String
+    h = UInt64(0)
+
+    # Hash the replibuild.toml content
+    toml_path = config.config_file
+    if isfile(toml_path)
+        h = hash(read(toml_path), h)
+    end
+
+    # Hash all source files by content
+    for src in get_source_files(config)
+        if isfile(src)
+            h = hash(read(src), h)
+        end
+    end
+
+    # Hash include directory contents (header files)
+    for inc_dir in get_include_dirs(config)
+        if isdir(inc_dir)
+            for f in readdir(inc_dir; join=true)
+                if isfile(f) && any(endswith(f, ext) for ext in [".h", ".hpp", ".hxx", ".hh"])
+                    h = hash(read(f), h)
+                end
+            end
+        end
+    end
+
+    # Hash git HEAD of the project root (captures upstream repo state)
+    project_root = config.project.root
+    git_head = _get_git_head(project_root)
+    if !isempty(git_head)
+        h = hash(git_head, h)
+    end
+
+    return string(h, base=16)
+end
+
+function _get_git_head(dir::String)::String
+    try
+        head_file = joinpath(dir, ".git", "HEAD")
+        if isfile(head_file)
+            head_content = strip(read(head_file, String))
+            if startswith(head_content, "ref: ")
+                ref_path = joinpath(dir, ".git", head_content[6:end])
+                if isfile(ref_path)
+                    return strip(read(ref_path, String))
+                end
+            end
+            return head_content
+        end
+    catch
+    end
+    return ""
+end
+
+"""
+Check if the project-level cache is valid. Returns `true` if all artifacts exist
+and the content hash matches, meaning the build can be skipped entirely.
+"""
+function is_project_cache_valid(config::RepliBuildConfig)::Bool
+    if !is_cache_enabled(config)
+        return false
+    end
+
+    cache_dir = get_cache_path(config)
+    hash_file = joinpath(cache_dir, "project_hash")
+
+    # Check hash file exists
+    if !isfile(hash_file)
+        return false
+    end
+
+    # Check all required artifacts exist
+    output_dir = get_output_path(config)
+    lib_name = get_library_name(config)
+    library_path = joinpath(output_dir, lib_name)
+    metadata_path = joinpath(output_dir, "compilation_metadata.json")
+
+    if !isfile(library_path) || !isfile(metadata_path)
+        return false
+    end
+
+    # Compare stored hash with current
+    stored_hash = strip(read(hash_file, String))
+    current_hash = compute_project_hash(config)
+
+    return stored_hash == current_hash
+end
+
+"""
+Save the project hash after a successful build.
+"""
+function save_project_hash(config::RepliBuildConfig)
+    cache_dir = get_cache_path(config)
+    mkpath(cache_dir)
+    hash_file = joinpath(cache_dir, "project_hash")
+    write(hash_file, compute_project_hash(config))
 end
 
 # =============================================================================
@@ -716,6 +824,16 @@ function compile_project(config::RepliBuildConfig)
 
     start_time = time()
 
+    # Fast path: check project-level content hash cache
+    if is_project_cache_valid(config)
+        output_dir = get_output_path(config)
+        lib_name = get_library_name(config)
+        library_path = joinpath(output_dir, lib_name)
+        elapsed = round(time() - start_time, digits=4)
+        println("  cache: project unchanged ($(elapsed)s)")
+        return library_path
+    end
+
     # Get source files (from config or discovery)
     cpp_files = get_source_files(config)
 
@@ -748,6 +866,9 @@ function compile_project(config::RepliBuildConfig)
 
     # Step 4: Extract and save compilation metadata
     metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
+
+    # Step 5: Save project hash for future cache hits
+    save_project_hash(config)
 
     println("  done: $(elapsed)s")
 
