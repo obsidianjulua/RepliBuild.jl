@@ -1878,6 +1878,14 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         error("Library not found: \$LIBRARY_PATH")
     end
 
+    # Flush C stdout so printf output appears immediately in the Julia REPL
+    @inline _flush_cstdout() = ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
+
+    # Unbuffer C stdout on module load so printf output is visible in the REPL
+    let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
+        ccall(:setvbuf, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Csize_t), c_stdout, C_NULL, 2, 0)
+    end
+
     """
 
     # Track if JIT is required (for virtual methods or complex ABI)

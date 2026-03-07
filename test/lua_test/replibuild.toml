@@ -1,0 +1,20 @@
+[project]
+name = "lua_wrapper"
+version = "0.1.0"
+root = "."
+
+[dependencies]
+# Using a specific commit for stability
+[dependencies.lua]
+type = "git"
+url = "https://github.com/lua/lua.git"
+tag = "v5.4.6"
+# Build the library normally by excluding the amalgamator and the standalone executables
+exclude = ["onelua.c", "lua.c", "luac.c", "ltests.c"]
+
+[compile]
+flags = ["-O2", "-fPIC"]
+
+[link]
+enable_lto = false
+optimization_level = "2"

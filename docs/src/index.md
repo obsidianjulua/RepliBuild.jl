@@ -16,6 +16,7 @@ RepliBuild.jl isn't just another `ccall` wrapper generator. It is a full ABI-awa
 8. **Zero-Cost LTO**: With `enable_lto = true`, hot C++ functions are emitted as `Base.llvmcall` paths so Julia's LLVM JIT can inline them directly into your Julia hot loops.
 9. **AOT Thunks**: Pre-compile all virtual dispatch thunks at build time (`aot_thunks = true`) for zero-latency polymorphic calls in production.
 10. **Template Instantiation**: Declare `templates = ["std::vector<int>"]` and RepliBuild forces Clang to emit the DWARF for those types automatically.
+11. **Package Registry**: `use("pkg")` builds on first call, caches globally, loads instantly on subsequent calls. `register`, `list_registry`, `unregister`, `scaffold_package` for full lifecycle management.
 
 ## Quickstart (The No-BS Workflow)
 
@@ -38,6 +39,19 @@ RepliBuild.wrap()
 Or just do it all at once:
 ```julia
 RepliBuild.discover(build=true, wrap=true)
+```
+
+### Use the package registry for instant loads
+
+```julia
+# First time: builds and caches the project
+Lua = RepliBuild.use("lua_wrapper")
+
+# Second time onward: loads from cache in milliseconds
+Lua = RepliBuild.use("lua_wrapper")
+
+# List registered packages
+RepliBuild.list_registry()
 ```
 
 ## Example: wrapping an external git library
@@ -64,7 +78,7 @@ cJSON_AddStringToObject(obj, "key", "value")
 
 ## Documentation
 
-- **[No-BS User Guide](guide.md)**: Detailed instructions on workflows, git dependencies, idiomatic wrappers, LTO, AOT thunks, and template instantiation.
+- **[No-BS User Guide](guide.md)**: Detailed instructions on workflows, git dependencies, idiomatic wrappers, LTO, AOT thunks, template instantiation, and the package registry.
 - **[Configuration Reference](config.md)**: Complete `replibuild.toml` option reference including the new `[dependencies]` section.
 - **[API Reference](api.md)**: Documentation for the public API.
 - **[Introspection](introspect.md)**: Deep dive into binary analysis and performance tools.

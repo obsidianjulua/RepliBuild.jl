@@ -30,16 +30,11 @@ Requires Julia 1.10+ and a system LLVM/Clang toolchain (auto-detected, falls bac
 
 ## Usage
 
+### Step by step
+
 ```julia
 using RepliBuild
 
-# Point at a directory containing C/C++ source files
-RepliBuild.discover("path/to/project", build=true, wrap=true)
-```
-
-Or step by step:
-
-```julia
 # 1. Scan source files, resolve #include dependencies, generate replibuild.toml
 RepliBuild.discover("path/to/project")
 
@@ -50,11 +45,64 @@ RepliBuild.build("path/to/project/replibuild.toml")
 RepliBuild.wrap("path/to/project/replibuild.toml")
 ```
 
+Or chain everything in one call:
+
+```julia
+RepliBuild.discover("path/to/project", build=true, wrap=true)
+```
+
+### One-liner with the package registry
+
+```julia
+using RepliBuild
+
+# Verify your toolchain is ready.
+RepliBuild.check_environment()
+
+# Register a project once
+RepliBuild.register("path/to/project/replibuild.toml")
+
+# Then load it anywhere — builds on first call, cached thereafter
+Lua = RepliBuild.use("lua_wrapper")
+```
+
 The generated module lives in `julia/ProjectName.jl` and can be loaded directly:
 
 ```julia
 include("path/to/project/julia/ProjectName.jl")
 using .ProjectName
+```
+
+### Utilities
+
+```julia
+# Show project info (source files, config, build status)
+RepliBuild.info("path/to/project/replibuild.toml")
+
+# Clean build artifacts
+RepliBuild.clean("path/to/project/replibuild.toml")
+
+# Check LLVM/Clang/MLIR toolchain status
+RepliBuild.check_environment()
+```
+
+### Package registry
+
+```julia
+# Register a project in the global registry (~/.replibuild/registry/)
+RepliBuild.register("replibuild.toml")
+
+# List all registered packages
+RepliBuild.list_registry()
+
+# Load a registered package (builds + wraps + caches automatically)
+MyLib = RepliBuild.use("my_lib")
+
+# Remove a package from the registry
+RepliBuild.unregister("my_lib")
+
+# Scaffold a distributable Julia package from a registered project
+RepliBuild.scaffold_package("MyLibWrapper")
 ```
 
 ## What it handles
@@ -77,7 +125,7 @@ using .ProjectName
 
 RepliBuild operates as a two-tier dispatch system:
 
-**Tier 1 (ccall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself. When `enable_lto = true`, eligible functions are further upgraded to `Base.llvmcall`, embedding the C++ LLVM IR directly into Julia's JIT pipeline so the compiler can inline across the boundary. (Enzyme.jl)... I have intel gpu or I would test if it can AD across the ffi boundry now that the ir is exposed.
+**Tier 1 (ccall / llvmcall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself. When `enable_lto = true`, eligible functions are upgraded to `Base.llvmcall`, embedding the C++ LLVM bitcode directly into Julia's JIT pipeline so the compiler can inline across the language boundary. This makes the C++ IR visible to Julia's optimizer, enabling cross-language AD with tools like Enzyme.jl.
 
 **Tier 2 (MLIR JIT / AOT)** — Functions involving packed structs, unions, large struct returns, or virtual dispatch are compiled through a custom MLIR dialect (`jlcs`) that handles ABI marshalling correctly. The JIT engine caches compiled symbols with a lock-free read path for hot calls. When `aot_thunks = true`, these thunks are pre-compiled to a static `.so` at build time, eliminating JIT startup cost entirely.
 
@@ -160,7 +208,7 @@ The test suite compiles and wraps real-world C/C++ projects end-to-end:
 
 | Project | Source | What it validates |
 |---------|--------|-------------------|
-| **Lua 5.4.7** | 30 files, full VM + stdlib | State management, stack ops, code eval, Julia<->Lua callbacks, coroutines |
+| **Lua 5.4.6** | 30 files, full VM + stdlib | State management, stack ops, code eval, Julia<->Lua callbacks, coroutines |
 | **Duktape 2.7.0** | 101K-line JS engine amalgamation | Compiles monolithic C, evaluates JavaScript from Julia |
 | **SQLite 3.49.1** | 261K-line database engine | Full C API wrap with varargs support |
 | **Stress test** | Vectors, matrices, complex numerics | DWARF extraction, struct layout, introspection toolkit |
@@ -173,7 +221,7 @@ Test sources for Lua, Duktape, and SQLite are downloaded on demand via `setup.jl
 
 ## Introspection
 
-RepliBuild includes a built-in analysis toolkit:
+RepliBuild includes a built-in analysis toolkit covering binary analysis, Julia IR inspection, LLVM tooling, benchmarking, and data export:
 
 ```julia
 using RepliBuild.Introspect
@@ -183,10 +231,21 @@ Introspect.symbols("lib.so", filter=:functions)
 Introspect.dwarf_info("lib.so")
 Introspect.disassemble("lib.so", "my_function")
 
+# Julia IR inspection
+Introspect.code_llvm(my_func, (Cint, Cint))
+Introspect.analyze_type_stability(my_func, (Cint, Cint))
+Introspect.analyze_simd(my_func, (Cint, Cint))
+
+# LLVM tooling
+Introspect.optimize_ir("build/module.ll", "3")
+Introspect.compare_optimization("build/module.ll", ["0", "2", "3"])
+
 # Benchmarking
 result = Introspect.benchmark(f, args...; samples=1000)
 Introspect.export_json(result, "bench.json")
 ```
+
+See [docs/src/introspect.md](docs/src/introspect.md) for the full 25+ function reference.
 
 ## Documentation
 

@@ -53,6 +53,29 @@ You can chain these steps together using the flags in `discover`:
 RepliBuild.discover(build=true, wrap=true)
 ```
 
+## Package Registry
+
+RepliBuild includes a global package registry (`~/.replibuild/registry/`) that caches build artifacts so repeated loads are instant.
+
+```julia
+# Register a project (discover() does this automatically)
+RepliBuild.register("replibuild.toml")
+
+# Load a registered package — builds on first call, cached thereafter
+Lua = RepliBuild.use("lua_wrapper")
+
+# List all registered packages with hash, source, and build status
+RepliBuild.list_registry()
+
+# Remove a package from the registry and clean cached builds
+RepliBuild.unregister("lua_wrapper")
+
+# Scaffold a distributable Julia package from a registered project
+RepliBuild.scaffold_package("LuaWrapper")
+```
+
+The `use()` function handles the full lifecycle: resolve dependencies, build (or load from cache), wrap, and return a loaded Julia module. The `REPLIBUILD_HOME` environment variable can override the default registry location.
+
 ## Configuration
 
 The `replibuild.toml` file controls the build process. You can edit this file to customize:
@@ -160,7 +183,7 @@ RepliBuild auto-generates a stub `.cpp` file that explicitly instantiates each r
 
 ## Zero-Cost LTO Dispatch
 
-When `enable_lto = true`, the linker emits both the shared library **and** an LLVM text IR file (`<name>_lto.ll`) in the `julia/` output directory.
+When `enable_lto = true`, the linker emits both the shared library **and** LLVM bitcode (`<name>_lto.bc`) in the `julia/` output directory.
 
 ```toml
 [link]
@@ -168,10 +191,11 @@ enable_lto = true
 optimization_level = "3"
 ```
 
-The generated Julia wrapper loads this IR at module parse time:
+The generated Julia wrapper loads the bitcode at module parse time:
 
 ```julia
-const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH, String) : ""
+const LTO_IR_PATH = joinpath(@__DIR__, "mylib_lto.bc")
+const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH) : UInt8[]
 ```
 
 For every eligible function (primitive/pointer types, no `Cstring`, no virtual dispatch, no struct-by-value return), the wrapper emits a dual-dispatch body:
@@ -179,7 +203,7 @@ For every eligible function (primitive/pointer types, no `Cstring`, no virtual d
 ```julia
 function vector_dot(a::Ptr{Cvoid}, b::Ptr{Cvoid}, n::Cint)::Cdouble
     if !isempty(LTO_IR)
-        return Base.llvmcall(("_Z10vector_dotPdPdi", LTO_IR),
+        return Base.llvmcall((LTO_IR, "_Z10vector_dotPdPdi"),
                              Cdouble, Tuple{Ptr{Cvoid}, Ptr{Cvoid}, Cint},
                              a, b, n)
     else
@@ -190,7 +214,7 @@ function vector_dot(a::Ptr{Cvoid}, b::Ptr{Cvoid}, n::Cint)::Cdouble
 end
 ```
 
-When the IR is present, Julia's LLVM JIT merges the C++ IR directly into the calling Julia function's IR, enabling full cross-language inlining and vectorization. The `ccall` fallback fires automatically if the `.ll` file is missing (e.g., an LTO-disabled build was deployed).
+When the bitcode is present, Julia's LLVM JIT merges the C++ IR directly into the calling Julia function's IR, enabling full cross-language inlining and vectorization. The `ccall` fallback fires automatically if the `.bc` file is missing (e.g., an LTO-disabled build was deployed).
 
 ## AOT Thunks for Virtual Dispatch
 

@@ -18,7 +18,8 @@ import ..LLVMEnvironment
 
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
        extract_compilation_metadata, save_compilation_metadata,
-       compute_project_hash, is_project_cache_valid, save_project_hash
+       compute_project_hash, is_project_cache_valid, save_project_hash,
+       assemble_bitcode
 
 # =============================================================================
 # INCREMENTAL BUILD SUPPORT
@@ -187,7 +188,8 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
     )
 
     # Compile using BuildBridge
-    (output, exitcode) = BuildBridge.execute("clang++", cmd_args)
+    compiler = endswith(cpp_file, ".c") ? "clang" : "clang++"
+    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
 
     if !isempty(output) && exitcode != 0
         println("  $(basename(cpp_file)): $output")
@@ -386,13 +388,38 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
 
         # Now compile the filtered IR to bitcode
         bitcode_file = joinpath(output_dir, "$(output_name)_lto.bc")
-        (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [filtered_ll_path, "-o", bitcode_file])
+        assemble_bitcode(filtered_ll_path, bitcode_file)
+    end
+
+    return linked_ir
+end
+
+"""
+Assemble LLVM IR text (.ll) to bitcode (.bc).
+Prioritizes pure Julia internal Clang_unified_jll (to ensure perfect llvmcall compatibility)
+before falling back to the system LLVM toolchain.
+"""
+function assemble_bitcode(ll_path::String, bc_path::String)
+    pure_julia_success = false
+    try
+        # Attempt to use Julia's internal Clang to emit a .bc file that perfectly matches the Julia LLVM version
+        Clang_mod = Base.require(Base.PkgId(Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
+        if isdefined(Clang_mod, :Clang_unified_jll)
+            clang_cmd = Clang_mod.Clang_unified_jll.clang()
+            cmd = `$(clang_cmd) -Wno-override-module -x ir -emit-llvm -c $ll_path -o $bc_path`
+            run(cmd)
+            pure_julia_success = isfile(bc_path)
+        end
+    catch e
+        # Silently fallback
+    end
+    
+    if !pure_julia_success
+        (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [ll_path, "-o", bc_path])
         if bc_exit != 0
             @warn "Failed to assemble bitcode for LTO: $bc_out"
         end
     end
-
-    return linked_ir
 end
 
 # =============================================================================
@@ -2679,7 +2706,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
 
         # Source information
         "source_files" => source_files,
-        "include_dirs" => get_include_dirs(config),
+        "include_dirs" => [abspath(d) for d in get_include_dirs(config)],
         "compile_flags" => get_compile_flags(config),
 
         # Symbols and functions

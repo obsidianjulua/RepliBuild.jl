@@ -438,11 +438,10 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
 
     # Get source files from dependency graph if available
     source_files = if !isnothing(dep_graph)
-        # Filter to .cpp files in compilation order
-        filter(f -> endswith(f, ".cpp") || endswith(f, ".cc") || endswith(f, ".cxx"),
+        filter(f -> endswith(f, ".cpp") || endswith(f, ".cc") || endswith(f, ".cxx") || endswith(f, ".c"),
                dep_graph.compilation_order)
     else
-        scan.cpp_sources
+        vcat(scan.cpp_sources, scan.c_sources)
     end
 
     # Create nested config structs following ConfigurationManager structure
@@ -468,10 +467,13 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         true                                     # parse_ast
     )
 
+    has_cpp = !isempty(scan.cpp_sources)
+    default_flags = has_cpp ? ["-std=c++17", "-fPIC"] : ["-fPIC"]
+
     compile_config = ConfigurationManager.CompileConfig(
         source_files,                            # source_files
         include_dirs,                            # include_dirs
-        ["-std=c++17", "-fPIC"],         # flags
+        default_flags,                           # flags
         Dict{String,String}(),                   # defines
         true,                                    # parallel
         false                                    # aot_thunks

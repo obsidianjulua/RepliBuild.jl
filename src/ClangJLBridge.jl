@@ -399,7 +399,7 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
     # Build compiler flags
     flags = String["-xc++", "-std=c++17"]
     for dir in include_dirs
-        push!(flags, "-I$dir")
+        push!(flags, "-I$(abspath(dir))")
     end
 
     idx = Clang.Index()
@@ -411,6 +411,22 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
 
         try
             tu = Clang.parse_header(idx, header, flags)
+            # Check for fatal diagnostics before walking — a corrupted TU will segfault
+            n_diags = Clang.LibClang.clang_getNumDiagnostics(tu.ptr)
+            has_fatal = false
+            for i in 0:(n_diags - 1)
+                diag = Clang.LibClang.clang_getDiagnostic(tu.ptr, i)
+                severity = Clang.LibClang.clang_getDiagnosticSeverity(diag)
+                Clang.LibClang.clang_disposeDiagnostic(diag)
+                if severity == Clang.LibClang.CXDiagnostic_Fatal
+                    has_fatal = true
+                    break
+                end
+            end
+            if has_fatal
+                @debug "Clang reported fatal errors for $header, skipping enum extraction"
+                continue
+            end
             root = Clang.getTranslationUnitCursor(tu)
             _walk_enums!(result["enums"], root)
         catch e

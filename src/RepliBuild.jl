@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.3.0"
+const VERSION = v"2.4.0"
 
 # ============================================================================
 # LOAD CORE MODULES
@@ -305,7 +305,7 @@ function _build_aot_thunks(config, library_path)
                 
                 # Assemble to bitcode for much faster llvmcall loading
                 thunks_bc_path = replace(thunks_lto_path, ".ll" => ".bc")
-                BuildBridge.execute("llvm-as", [thunks_lto_path, "-o", thunks_bc_path])
+                Compiler.assemble_bitcode(thunks_lto_path, thunks_bc_path)
             else
                 @warn "Failed to emit LLVM IR for AOT thunks LTO."
             end

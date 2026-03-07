@@ -513,7 +513,7 @@ function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)::Modul
     wrapper_path = parent_mod.wrap(entry.toml_path)
 
     # 9. Cache the build artifacts
-    output_dir = ConfigurationManager.get_output_path(config)
+    output_dir = abspath(joinpath(dirname(entry.toml_path), ConfigurationManager.get_output_path(config)))
     _store_build(config_hash, output_dir)
 
     # 10. Mark as verified in registry
@@ -566,10 +566,14 @@ function _load_wrapper(name::String, config_hash::String, config::RepliBuildConf
     mod_name = Symbol(replace(titlecase(replace(name, "_" => " ")), " " => ""))
     verbose && println("  loading: $wrapper_path")
 
-    # Include into a fresh module
-    m = Module(mod_name)
-    Base.include(m, wrapper_path)
-    return m
+    # Include the wrapper into an anonymous parent module to avoid name collisions.
+    # The wrapper file defines `module X ... end` — Base.include returns the module.
+    parent = Module()
+    result = Base.include(parent, wrapper_path)
+    if result isa Module
+        return result
+    end
+    return parent
 end
 
 # =============================================================================
