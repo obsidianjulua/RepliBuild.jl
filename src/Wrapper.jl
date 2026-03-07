@@ -2368,7 +2368,53 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
     end
 
+    # Also scan function parameter and return types for struct references.
+    # Types like sqlite3_blob only appear in function signatures, not struct members.
+    _builtin_types = Set(["Cvoid", "Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
+                          "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
+                          "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
+                          "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
+                          "Cstring", "Float32", "Float64", "Any", "Nothing"])
+    for func in functions
+        all_types = String[]
+        for param in get(func, "parameters", [])
+            push!(all_types, get(param, "julia_type", "Any"))
+        end
+        ret = get(func, "return_type", nothing)
+        if !isnothing(ret)
+            push!(all_types, get(ret, "julia_type", "Cvoid"))
+        end
+        for julia_type in all_types
+            base_ref = julia_type
+            while true
+                if startswith(base_ref, "Ptr{") && endswith(base_ref, "}")
+                    base_ref = base_ref[5:end-1]
+                elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
+                    base_ref = base_ref[5:end-1]
+                elseif startswith(base_ref, "NTuple{")
+                    ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
+                    if !isnothing(ntuple_match)
+                        base_ref = strip(ntuple_match.captures[1])
+                    else
+                        break
+                    end
+                else
+                    break
+                end
+            end
+            base_ref = strip(base_ref)
+            if !(base_ref in _builtin_types) && !isempty(base_ref)
+                if base_ref in struct_types
+                    push!(ptr_referenced_structs, base_ref)
+                else
+                    push!(opaque_structs, base_ref)
+                end
+            end
+        end
+    end
+
     struct_definitions = ""
+    union_accessor_defs = ""  # Deferred union accessors (emitted after all struct defs)
 
     # Emit forward declarations for:
     # 1. Truly opaque types (no DWARF definition) — as mutable struct
@@ -2388,6 +2434,8 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         s = replace(s, r"[^a-zA-Z0-9_]" => "_")
         push!(dwarf_defined_names, s)
     end
+    # Also exclude enum names — they're already defined via @enum
+    union!(dwarf_defined_names, enum_names)
 
     if !isempty(all_forward_decls)
         struct_definitions *= """
@@ -2671,6 +2719,19 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
                     """
 
+                    # Collect all struct names being generated for reference
+                    known_struct_names = Set{String}()
+                    for sn in keys(dwarf_structs)
+                        push!(known_struct_names, _sanitize_julia_type_name(sn))
+                    end
+
+                    # Julia primitive types that are always available
+                    julia_builtins = Set(["Cvoid", "Cint", "Cuint", "Cchar", "Cuchar",
+                        "Cshort", "Cushort", "Clong", "Culong", "Clonglong", "Culonglong",
+                        "Cfloat", "Cdouble", "Cstring", "Csize_t", "Cssize_t", "Cptrdiff_t",
+                        "Bool", "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32",
+                        "Int64", "UInt64", "Float32", "Float64", "Nothing"])
+
                     # Generate typed accessor functions for each union member
                     for m in members
                         m_name = get(m, "name", "")
@@ -2678,6 +2739,9 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         if isempty(m_name) || m_julia_type == "Any"
                             continue
                         end
+
+                        # Sanitize member type name to match struct definitions
+                        m_julia_type = _sanitize_julia_type_name(m_julia_type)
 
                         # Sanitize member name for Julia identifier
                         safe_m_name = replace(m_name, r"[^A-Za-z0-9_]" => "_")
@@ -2687,7 +2751,23 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                             continue
                         end
 
-                        struct_definitions *= """
+                        # Check that Ptr{X} inner types are defined; fall back to Ptr{Cvoid} if not
+                        ptr_match = match(r"^Ptr\{(.+)\}$", m_julia_type)
+                        if !isnothing(ptr_match)
+                            inner = ptr_match.captures[1]
+                            # Recursively unwrap nested Ptr{}
+                            while (pm = match(r"^Ptr\{(.+)\}$", inner)) !== nothing
+                                inner = pm.captures[1]
+                            end
+                            if inner ∉ julia_builtins && inner ∉ known_struct_names
+                                m_julia_type = "Ptr{Cvoid}"
+                            end
+                        elseif m_julia_type ∉ julia_builtins && m_julia_type ∉ known_struct_names
+                            # Non-pointer, non-primitive, non-generated struct — skip
+                            continue
+                        end
+
+                        union_accessor_defs *= """
                         \"\"\"Get union member `$m_name` as `$m_julia_type` from `$julia_struct_name`.\"\"\"
                         function get_$(safe_m_name)(u::$julia_struct_name)::$m_julia_type
                             return unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(u)))
@@ -4562,7 +4642,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
     end
 
-    return header * init_block * metadata_section * enum_definitions * struct_definitions * export_statement * function_wrappers * footer
+    return header * init_block * metadata_section * enum_definitions * struct_definitions * union_accessor_defs * export_statement * function_wrappers * footer
 end
 
 end # module Wrapper
