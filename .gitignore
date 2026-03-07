@@ -35,6 +35,9 @@ test_*_wrapper*.jl
 test/*/*.toml
 !test/*/replibuild.toml
 
+# IDE 
+*.code-workspace
+
 # RepliBuild cache
 .replibuild_cache/
 
