@@ -327,48 +327,67 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
     # If LTO is enabled, also emit a binary bitcode file (.bc) 
     # for Julia's LLVM compiler to consume via llvmcall
     if config.link.enable_lto
-        bitcode_file = joinpath(build_dir, output_name * "_lto.bc")
-        (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [linked_ir, "-o", bitcode_file])
-        if bc_exit == 0
-            # Copy the bitcode to the julia/ output directory so the wrapper can find it
-            output_dir = get_output_path(config)
-            mkpath(output_dir)
-            cp(bitcode_file, joinpath(output_dir, "$(output_name)_lto.bc"), force=true)
-            # Also copy the text IR (.ll) — Base.llvmcall with string arg needs LLVM assembly text
-            # Inject alwaysinline, strip debug info and LLVM 19+ attributes that Julia's internal
-            # LLVM (which may be older) cannot parse.
-            lto_ir_text = read(linked_ir, String)
-            lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
-            lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
-            lto_ir_text = replace(lto_ir_text, r"(attributes\s+#[0-9]+\s*=\s*\{[^}]*)\}" => s"\1 alwaysinline }")
-            # LLVM 19+: nuw/nsw on getelementptr (only nuw is new, nsw existed but combined form differs)
-            lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
-            lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
-            # LLVM 19+: inrange(-16, 24) on getelementptr
-            lto_ir_text = replace(lto_ir_text, r"\binrange\([^)]*\)\s*" => "")
-            # LLVM 19+: new-style debug intrinsics — strip entirely
-            lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
-            # LLVM 19+: captures(...) attribute on pointer params — strip
-            lto_ir_text = replace(lto_ir_text, r"\bcaptures\([^)]*\)\s*" => "")
-            # LLVM 19+: dead_on_unwind attribute
-            lto_ir_text = replace(lto_ir_text, r"\bdead_on_unwind\b\s*" => "")
-            # LLVM 19+: initializes attribute
-            lto_ir_text = replace(lto_ir_text, r"\binitializes\(\([^)]*\)\)\s*" => "")
-            # Strip all metadata references from anywhere (instructions, function definitions)
-            # This catches !dbg, !tbaa, !llvm.loop, etc.
-            lto_ir_text = replace(lto_ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
-            # Strip all numbered debug metadata entries (!NNN = !DIxxx / distinct !DIxxx)
-            lines = split(lto_ir_text, '\n')
-            filtered = filter(lines) do l
-                !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
-            end
-            # Remove all named debug metadata references entirely to avoid referencing undefined nodes
-            filtered2 = filter(filtered) do l
-                !occursin(r"^![a-zA-Z].*=\s*!\{", l)
-            end
-            lto_ir_text = join(filtered2, '\n')
-            write(joinpath(output_dir, "$(output_name)_lto.ll"), lto_ir_text)
-        else
+        output_dir = get_output_path(config)
+        mkpath(output_dir)
+        
+        # Also copy the text IR (.ll) — Base.llvmcall with string arg needs LLVM assembly text
+        # Inject alwaysinline, strip debug info and LLVM 19+ attributes that Julia's internal
+        # LLVM (which may be older) cannot parse.
+        lto_ir_text = read(linked_ir, String)
+        lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
+        lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
+        # Replace all attribute blocks with minimal alwaysinline.
+        # Julia's internal LLVM may be older than the system clang that produced
+        # this IR, so attributes like allockind, allocsize, memory(errnomem:...),
+        # etc. can cause parse failures.  Stripping to just alwaysinline is safe
+        # because the IR has already been optimised by the system LLVM opt pass.
+        lto_ir_text = replace(lto_ir_text,
+            r"^attributes\s+#(\d+)\s*=\s*\{[^}]*\}"m =>
+            s"attributes #\1 = { alwaysinline }")
+        # --- LLVM 19+ instruction-level compatibility ---
+        # nuw on getelementptr
+        lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
+        lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
+        # inrange(-16, 24) on getelementptr
+        lto_ir_text = replace(lto_ir_text, r"\binrange\([^)]*\)\s*" => "")
+        # new-style debug intrinsics
+        lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
+        # captures(...) attribute on pointer params
+        lto_ir_text = replace(lto_ir_text, r"\bcaptures\([^)]*\)\s*" => "")
+        # dead_on_unwind attribute
+        lto_ir_text = replace(lto_ir_text, r"\bdead_on_unwind\b\s*" => "")
+        # initializes attribute (handles multiple ranges)
+        lto_ir_text = replace(lto_ir_text, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
+        # allocptr attribute
+        lto_ir_text = replace(lto_ir_text, r"\ballocptr\b\s*" => "")
+        # samesign flag on icmp
+        lto_ir_text = replace(lto_ir_text, r"\bicmp samesign\b" => "icmp")
+        # range() attribute on return types / call results
+        lto_ir_text = replace(lto_ir_text, r"\brange\([^)]*\)\s*" => "")
+        # nuw/nsw on trunc, nneg on zext/uitofp
+        lto_ir_text = replace(lto_ir_text, r"\btrunc (nuw |nsw )+" => "trunc ")
+        lto_ir_text = replace(lto_ir_text, r"\b(uitofp|zext) nneg " => s"\1 ")
+        # Strip all metadata references from anywhere (instructions, function definitions)
+        # This catches !dbg, !tbaa, !llvm.loop, etc.
+        lto_ir_text = replace(lto_ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
+        # Strip all numbered debug metadata entries (!NNN = !DIxxx / distinct !DIxxx)
+        lines = split(lto_ir_text, '\n')
+        filtered = filter(lines) do l
+            !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
+        end
+        # Remove all named debug metadata references entirely to avoid referencing undefined nodes
+        filtered2 = filter(filtered) do l
+            !occursin(r"^![a-zA-Z].*=\s*!\{", l)
+        end
+        lto_ir_text = join(filtered2, '\n')
+        
+        filtered_ll_path = joinpath(output_dir, "$(output_name)_lto.ll")
+        write(filtered_ll_path, lto_ir_text)
+
+        # Now compile the filtered IR to bitcode
+        bitcode_file = joinpath(output_dir, "$(output_name)_lto.bc")
+        (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [filtered_ll_path, "-o", bitcode_file])
+        if bc_exit != 0
             @warn "Failed to assemble bitcode for LTO: $bc_out"
         end
     end
@@ -1198,7 +1217,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 if !isnothing(mi["name"]) && !isnothing(mi["type"])
                     existing_names = [m["name"] for m in type_refs[parent_off]["members"]]
                     if !(mi["name"] in existing_names)
-                        member_dict = Dict(
+                        member_dict = Dict{String, Any}(
                             "name" => mi["name"],
                             "type" => mi["type"],
                             "offset" => mi["offset"]
@@ -2849,6 +2868,12 @@ function cpp_to_julia_type(cpp_type::AbstractString,
     cpp_type = strip(cpp_type)
     cpp_type = replace(cpp_type, r"^const\s+" => "")
     cpp_type = replace(cpp_type, r"^volatile\s+" => "")
+
+    # Clean up internal compiler types to avoid leaking them
+    base_type_for_check = strip(replace(cpp_type, r"[*&\[\]\s\d]+$" => ""))
+    if base_type_for_check in ["__va_list_tag", "__mbstate_t", "_va_list_tag", "_mbstate_t", "max_align_t"]
+        cpp_type = replace(cpp_type, base_type_for_check => "void")
+    end
 
     type_map = Dict(
         "int" => "Cint",

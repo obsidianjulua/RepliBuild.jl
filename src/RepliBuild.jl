@@ -277,14 +277,21 @@ function _build_aot_thunks(config, library_path)
                 lto_ir_text = read(thunks_lto_path, String)
                 lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
                 lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
-                lto_ir_text = replace(lto_ir_text, r"(attributes\s+#[0-9]+\s*=\s*\{[^}]*)\}" => s"\1 alwaysinline }")
+                lto_ir_text = replace(lto_ir_text,
+                    r"^attributes\s+#(\d+)\s*=\s*\{[^}]*\}"m =>
+                    s"attributes #\1 = { alwaysinline }")
                 lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
                 lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
                 lto_ir_text = replace(lto_ir_text, r"\binrange\([^)]*\)\s*" => "")
                 lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
                 lto_ir_text = replace(lto_ir_text, r"\bcaptures\([^)]*\)\s*" => "")
                 lto_ir_text = replace(lto_ir_text, r"\bdead_on_unwind\b\s*" => "")
-                lto_ir_text = replace(lto_ir_text, r"\binitializes\(\([^)]*\)\)\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r"\ballocptr\b\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r"\bicmp samesign\b" => "icmp")
+                lto_ir_text = replace(lto_ir_text, r"\brange\([^)]*\)\s*" => "")
+                lto_ir_text = replace(lto_ir_text, r"\btrunc (nuw |nsw )+" => "trunc ")
+                lto_ir_text = replace(lto_ir_text, r"\b(uitofp|zext) nneg " => s"\1 ")
                 lto_ir_text = replace(lto_ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
                 lines = split(lto_ir_text, '\n')
                 filtered = filter(lines) do l
@@ -295,6 +302,10 @@ function _build_aot_thunks(config, library_path)
                 end
                 lto_ir_text = join(filtered2, '\n')
                 write(thunks_lto_path, lto_ir_text)
+                
+                # Assemble to bitcode for much faster llvmcall loading
+                thunks_bc_path = replace(thunks_lto_path, ".ll" => ".bc")
+                BuildBridge.execute("llvm-as", [thunks_lto_path, "-o", thunks_bc_path])
             else
                 @warn "Failed to emit LLVM IR for AOT thunks LTO."
             end

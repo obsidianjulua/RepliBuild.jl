@@ -53,6 +53,40 @@ function _escape_keyword(name::String)::String
     return name
 end
 
+# Built-in Julia types that never need forward declaration
+const _JULIA_BUILTIN_TYPES = Set([
+    "Cvoid", "Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
+    "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
+    "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
+    "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
+    "Cstring", "Float32", "Float64", "Any", "Nothing", "Cintptr_t", "Cuintptr_t",
+])
+
+"""
+    _resolve_forward_ptr(julia_type, defined_names) -> String
+
+Replace `Ptr{X}` (including nested `Ptr{Ptr{X}}`) with `Ptr{Cvoid}` when `X`
+is a custom struct type that has not been defined yet. This avoids
+`UndefVarError` from forward references while preserving ABI layout
+(all pointers are the same size).
+"""
+function _resolve_forward_ptr(julia_type::AbstractString, defined_names::Set{String})::String
+    m = match(r"^Ptr\{(.+)\}$", julia_type)
+    isnothing(m) && return julia_type
+    inner = m.captures[1]
+    # Recurse for nested Ptr
+    resolved_inner = _resolve_forward_ptr(inner, defined_names)
+    # Check if the innermost type is defined or builtin
+    base = inner
+    while (bm = match(r"^Ptr\{(.+)\}$", base)) !== nothing
+        base = bm.captures[1]
+    end
+    if base in _JULIA_BUILTIN_TYPES || base in defined_names
+        return "Ptr{$resolved_inner}"
+    end
+    return "Ptr{Cvoid}"
+end
+
 # Helper: sanitize a C++ type name to a valid Julia struct/type identifier
 function _sanitize_julia_type_name(name::AbstractString)::String
     s = replace(string(name), "::" => "_")
@@ -613,6 +647,10 @@ function infer_julia_type(registry::TypeRegistry, cpp_type::String; context::Str
     clean_type = replace(clean_type, r"\bclass\b" => "")
     
     clean_type = strip(clean_type)
+
+    if clean_type in _INTERNAL_TYPE_BLOCKLIST
+        return "Cvoid"
+    end
 
     # Handle special case: const char* and char* are Cstring
     if clean_type == "char*" || clean_type == "char *"
@@ -1848,11 +1886,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
     compiler_info = get(metadata, "compiler_info", Dict())
     lto_name = config.project.name
     lto_ir_block = config.link.enable_lto ? """
-    # LTO: load LLVM IR text at module parse time for Base.llvmcall zero-cost dispatch
-    const LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_lto.ll")
-    const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH, String) : ""
-    const THUNKS_LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_thunks_lto.ll")
-    const THUNKS_LTO_IR = isfile(THUNKS_LTO_IR_PATH) ? read(THUNKS_LTO_IR_PATH, String) : ""
+    # LTO: load LLVM bitcode at module parse time for Base.llvmcall zero-cost dispatch
+    # Using bitcode (.bc) is significantly faster for Julia to parse than text IR (.ll)
+    const LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_lto.bc")
+    const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH) : UInt8[]
+    const THUNKS_LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_thunks_lto.bc")
+    const THUNKS_LTO_IR = isfile(THUNKS_LTO_IR_PATH) ? read(THUNKS_LTO_IR_PATH) : UInt8[]
 
     """ : """
     const LTO_IR = ""  # LTO disabled for this build
@@ -2389,9 +2428,11 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         # Topologically sort structs by dependencies
         # Build dependency graph: struct_name => [dependencies]
         struct_deps = Dict{String, Set{String}}()
+        struct_soft_deps = Dict{String, Set{String}}()
 
         for struct_name in struct_types
             deps = Set{String}()
+            soft_deps = Set{String}()
 
             if haskey(dwarf_structs, struct_name)
                 struct_info = dwarf_structs[struct_name]
@@ -2401,14 +2442,19 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     julia_type = get(member, "julia_type", "Any")
 
                     # Extract type name from various wrapper types:
-                    #   Ptr{Foo} -> Foo (NOT a hard dep — resolved via opaque forward decl)
+                    #   Ptr{Foo} -> Foo (soft dep)
                     #   NTuple{N, Foo} -> Foo (hard dep, needs full definition first)
                     #   Ref{Foo} -> Foo (hard dep)
                     #   Foo -> Foo (hard dep, direct by-value embedding)
                     dep_type = nothing
+                    is_soft = false
 
                     if startswith(julia_type, "Ptr{")
-                        # Not a hard dep — opaque forward decl will satisfy this
+                        ptr_match = match(r"Ptr\{([^}]+)\}", julia_type)
+                        if !isnothing(ptr_match)
+                            dep_type = strip(ptr_match.captures[1])
+                            is_soft = true
+                        end
                     elseif startswith(julia_type, "NTuple{")
                         ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", julia_type)
                         if !isnothing(ntuple_match)
@@ -2426,34 +2472,49 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     if !isnothing(dep_type) && haskey(julia_to_cpp_struct, dep_type)
                         cpp_dep = julia_to_cpp_struct[dep_type]
                         if cpp_dep != struct_name
-                            push!(deps, cpp_dep)
+                            if is_soft
+                                push!(soft_deps, cpp_dep)
+                            else
+                                push!(deps, cpp_dep)
+                            end
                         end
                     end
                 end
             end
 
             struct_deps[struct_name] = deps
+            struct_soft_deps[struct_name] = soft_deps
         end
 
         # Topological sort using Kahn's algorithm
         sorted_structs = String[]
-        remaining = Dict(k => copy(v) for (k, v) in struct_deps)
+        remaining_hard = Dict(k => copy(v) for (k, v) in struct_deps)
+        remaining_soft = Dict(k => copy(v) for (k, v) in struct_soft_deps)
 
-        while !isempty(remaining)
-            # Find structs with no dependencies
-            ready = [name for (name, deps) in remaining if isempty(deps)]
+        while !isempty(remaining_hard)
+            # Find structs with no hard AND no soft dependencies
+            ready = [name for (name, deps) in remaining_hard if isempty(deps) && isempty(remaining_soft[name])]
 
             if isempty(ready)
-                # Circular dependency - just take alphabetically first
-                ready = [sort(collect(keys(remaining)))[1]]
+                # Break soft dependency cycle: find structs with no hard dependencies
+                ready = [name for (name, deps) in remaining_hard if isempty(deps)]
+            end
+
+            if isempty(ready)
+                # Circular hard dependency - just take alphabetically first
+                ready = [sort(collect(keys(remaining_hard)))[1]]
             end
 
             for name in sort(ready)
                 push!(sorted_structs, name)
-                delete!(remaining, name)
+                delete!(remaining_hard, name)
+                delete!(remaining_soft, name)
 
                 # Remove this struct from all dependency lists
-                for deps in values(remaining)
+                for deps in values(remaining_hard)
+                    delete!(deps, name)
+                end
+                for deps in values(remaining_soft)
                     delete!(deps, name)
                 end
             end
@@ -2523,6 +2584,15 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
 
         seen_struct_defs = Set{String}()
+        defined_struct_names = Set{String}()
+        if @isdefined(seen_forward_decls)
+            # Only seed with forward decls that were actually emitted (not DWARF-defined skips)
+            for s in seen_forward_decls
+                if !(s in dwarf_defined_names)
+                    push!(defined_struct_names, s)
+                end
+            end
+        end
         blob_struct_names = Set{String}()  # Track which structs became byte-blobs
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
@@ -2556,6 +2626,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 continue
             end
             push!(seen_struct_defs, julia_struct_name)
+            push!(defined_struct_names, julia_struct_name)
 
             # Skip DWARF struct generation if we are generating a high-level idiomatic wrapper
             if haskey(idiomatic_classes, julia_struct_name)
@@ -2983,6 +3054,10 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                                 end
                             end
                         end
+
+                        # If the field is Ptr{X} and X hasn't been defined yet,
+                        # substitute Ptr{Cvoid} to avoid UndefVarError (same ABI size).
+                        sanitized_type = _resolve_forward_ptr(sanitized_type, defined_struct_names)
 
                         struct_definitions *= "    $sanitized_name::$sanitized_type\n"
                         

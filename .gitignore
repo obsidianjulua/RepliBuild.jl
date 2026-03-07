@@ -10,6 +10,7 @@ Manifest.toml
 *.ll
 *.py
 *.idx
+*.bc
 
 # Test build outputs
 test/*/build/
@@ -34,9 +35,6 @@ test_*_wrapper*.jl
 # Generated TOML configs (contain machine-specific absolute paths)
 test/*/*.toml
 !test/*/replibuild.toml
-
-# IDE 
-*.code-workspace
 
 # RepliBuild cache
 .replibuild_cache/
