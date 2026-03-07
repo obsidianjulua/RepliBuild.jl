@@ -2487,6 +2487,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
 
         seen_struct_defs = Set{String}()
+        blob_struct_names = Set{String}()  # Track which structs became byte-blobs
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
@@ -2722,6 +2723,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
                     if has_unresolvable && byte_size > 0
                         member_count = length(members)
+                        push!(blob_struct_names, julia_struct_name)
                         struct_definitions *= """
                         # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
                         struct $julia_struct_name
@@ -2734,6 +2736,133 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                         end
 
                         """
+
+                        # Generate Base.getproperty accessor for named member access on byte-blob structs
+                        _accessor_branches = String[]
+                        _loadable_primitives = Dict(
+                            "Cdouble" => ("Cdouble", 8), "Cfloat" => ("Cfloat", 4),
+                            "Cint" => ("Cint", 4), "Cuint" => ("Cuint", 4),
+                            "Clong" => ("Clong", 8), "Culong" => ("Culong", 8),
+                            "Clonglong" => ("Clonglong", 8), "Culonglong" => ("Culonglong", 8),
+                            "Cshort" => ("Cshort", 2), "Cushort" => ("Cushort", 2),
+                            "Cchar" => ("Cchar", 1), "Cuchar" => ("Cuchar", 1),
+                            "Csize_t" => ("Csize_t", 8), "Cptrdiff_t" => ("Cptrdiff_t", 8),
+                            "Cssize_t" => ("Cssize_t", 8), "Bool" => ("Bool", 1),
+                            "UInt8" => ("UInt8", 1), "Int8" => ("Int8", 1),
+                            "UInt16" => ("UInt16", 2), "Int16" => ("Int16", 2),
+                            "UInt32" => ("UInt32", 4), "Int32" => ("Int32", 4),
+                            "UInt64" => ("UInt64", 8), "Int64" => ("Int64", 8),
+                            "Float32" => ("Float32", 4), "Float64" => ("Float64", 8),
+                        )
+                        # Pre-compute in-context sizes for each member from offset gaps
+                        _member_offsets = Int[]
+                        for m in members
+                            m_offset_str = get(m, "offset", nothing)
+                            if isnothing(m_offset_str)
+                                push!(_member_offsets, -1)
+                            else
+                                push!(_member_offsets, startswith(string(m_offset_str), "0x") ?
+                                    parse(Int, string(m_offset_str)[3:end], base=16) :
+                                    parse(Int, string(m_offset_str)))
+                            end
+                        end
+                        for (mi, m) in enumerate(members)
+                            m_name = get(m, "name", nothing)
+                            isnothing(m_name) && continue
+                            m_offset = _member_offsets[mi]
+                            m_offset < 0 && continue
+                            m_julia_type = get(m, "julia_type", "")
+                            m_c_type = strip(get(m, "c_type", ""))
+
+                            # Compute available space for this member from offset gaps
+                            next_offset = byte_size
+                            for j in (mi+1):length(_member_offsets)
+                                if _member_offsets[j] >= 0
+                                    next_offset = _member_offsets[j]
+                                    break
+                                end
+                            end
+                            available_size = next_offset - m_offset
+
+                            # Pointer types
+                            if endswith(m_c_type, "*")
+                                push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        return GC.@preserve x unsafe_load(Ptr{Ptr{Cvoid}}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                    end""")
+                            # Primitive types we can unsafe_load directly
+                            elseif haskey(_loadable_primitives, m_julia_type)
+                                jt, _ = _loadable_primitives[m_julia_type]
+                                push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        return GC.@preserve x unsafe_load(Ptr{$jt}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                    end""")
+                            # Nested struct types — extract sub-blob
+                            else
+                                m_sanitized = _sanitize_julia_type_name(m_c_type)
+                                if !isempty(m_sanitized) && m_sanitized != m_c_type
+                                    # Find the nested struct's byte_size using best_dwarf_key map
+                                    nested_info = nothing
+                                    best_key = get(best_dwarf_key, m_sanitized, nothing)
+                                    if !isnothing(best_key) && haskey(dwarf_structs, best_key)
+                                        nested_info = dwarf_structs[best_key]
+                                    else
+                                        # Fallback: search all structs for sanitized name match
+                                        for (sk, sv) in dwarf_structs
+                                            if _sanitize_julia_type_name(sk) == m_sanitized
+                                                nested_info = sv
+                                                break
+                                            end
+                                        end
+                                    end
+                                    if !isnothing(nested_info)
+                                        nested_bs_str = get(nested_info, "byte_size", "0x0")
+                                        nested_bs = isnothing(nested_bs_str) ? 0 :
+                                            (startswith(string(nested_bs_str), "0x") ?
+                                             parse(Int, string(nested_bs_str)[3:end], base=16) :
+                                             parse(Int, string(nested_bs_str)))
+                                        if nested_bs > 0
+                                            if m_sanitized in blob_struct_names
+                                                # Target is a byte-blob struct — extract bytes
+                                                actual_size = min(nested_bs, available_size)
+                                                if actual_size == nested_bs
+                                                    push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        bytes = GC.@preserve x ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(Ref(x._data)) + $m_offset + i - 1)), $nested_bs)
+                                        return $(m_sanitized)(bytes)
+                                    end""")
+                                                else
+                                                    push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        raw = GC.@preserve x ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(Ref(x._data)) + $m_offset + i - 1)), $actual_size)
+                                        padded = ntuple(i -> i <= $actual_size ? raw[i] : 0x00, $nested_bs)
+                                        return $(m_sanitized)(padded)
+                                    end""")
+                                                end
+                                            else
+                                                # Target is a normal typed struct — unsafe_load directly
+                                                push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        return GC.@preserve x unsafe_load(Ptr{$m_sanitized}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                    end""")
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if !isempty(_accessor_branches)
+                            accessor_code = join(_accessor_branches, "\n")
+                            struct_definitions *= """
+                            function Base.getproperty(x::$julia_struct_name, s::Symbol)
+                                s === :_data && return getfield(x, :_data)
+                            $accessor_code
+                                error("type $julia_struct_name has no field \$s")
+                            end
+
+                            """
+                        end
+
                         continue
                     end
 
