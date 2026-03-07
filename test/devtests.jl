@@ -64,13 +64,24 @@ end
     @test any(endswith(f, ".jl") for f in readdir(julia_dir))
 end
 
-# ── 2. Integration tests (each in subprocess) ───────────────────────────────
+# ── 2. Setup: download external sources if needed ────────────────────────────
+
+# Duktape uses a setup script to download the amalgamation
+let setup = joinpath(TEST_DIR, "duktape_test", "setup.jl")
+    if isfile(setup)
+        include(setup)
+        setup_duktape() || @warn "Duktape setup failed — duktape_test will be skipped"
+    end
+end
+
+# ── 3. Integration tests (each in subprocess) ───────────────────────────────
 
 INTEGRATION_TESTS = [
     ("basics_test",    "Type Handling (structs, packed, unions)"),
     ("vtable_test",    "Virtual Dispatch (vtables)"),
     ("callback_test",  "Callbacks (Julia ↔ C++)"),
     ("jit_edge_test",  "JIT Edge Cases (Tier 1 ccall)"),
+    ("duktape_test",   "Duktape (C library, ccall, no LTO)"),
 ]
 
 for (name, label) in INTEGRATION_TESTS
@@ -87,7 +98,7 @@ for (name, label) in INTEGRATION_TESTS
     end
 end
 
-# ── 3. MLIR & AOT ───────────────────────────────────────────────────────────
+# ── 4. MLIR & AOT ───────────────────────────────────────────────────────────
 
 const MLIR_AVAILABLE = isfile(joinpath(dirname(TEST_DIR), "src", "mlir", "build",
     Sys.isapple() ? "libJLCS.dylib" : "libJLCS.so"))
@@ -99,3 +110,7 @@ if MLIR_AVAILABLE
 else
     @warn "Skipping MLIR/AOT tests — libJLCS not found"
 end
+
+# ── 5. Registry tests ───────────────────────────────────────────────────────
+
+include(joinpath(TEST_DIR, "test_registry.jl"))

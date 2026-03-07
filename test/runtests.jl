@@ -11,7 +11,7 @@ using RepliBuild
 @testset "RepliBuild.jl" begin
 
     @testset "Package loads" begin
-        @test RepliBuild.VERSION == v"2.3.0"
+        @test RepliBuild.VERSION == v"2.4.0"
         @test isdefined(RepliBuild, :discover)
         @test isdefined(RepliBuild, :build)
         @test isdefined(RepliBuild, :wrap)
@@ -104,3 +104,7 @@ using RepliBuild
         @test hasproperty(status, :ready) || hasfield(typeof(status), :ready)
     end
 end
+
+# ── Registry unit tests (no C++ toolchain required) ──────────────────────────
+
+include(joinpath(@__DIR__, "test_registry.jl"))
