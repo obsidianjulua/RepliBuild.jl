@@ -25,11 +25,11 @@ include("ASTWalker.jl")
 include("Discovery.jl")
 include("ClangJLBridge.jl")
 include("Compiler.jl")
-include("Wrapper.jl")
 include("DWARFParser.jl")
-include("JLCSIRGenerator.jl")
 include("MLIRNative.jl")
+include("JLCSIRGenerator.jl")
 include("JITManager.jl")
+include("Wrapper.jl")
 include("STLWrappers.jl")
 
 # Introspection module

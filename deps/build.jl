@@ -128,9 +128,17 @@ function main()
     println("[RepliBuild] Found LLVM $llvm_version at $llvm_config")
     println("[RepliBuild] Found mlir-tblgen at $mlir_tblgen")
 
-    # Get LLVM/MLIR CMake paths
-    llvm_cmake_dir = strip(read(`$llvm_config --cmakedir`, String))
-    llvm_prefix = strip(read(`$llvm_config --prefix`, String))
+    # Get LLVM/MLIR CMake paths safely
+    llvm_cmake_dir = ""
+    llvm_prefix = ""
+    try
+        llvm_cmake_dir = strip(read(`$llvm_config --cmakedir`, String))
+        llvm_prefix = strip(read(`$llvm_config --prefix`, String))
+    catch e
+        @warn "[RepliBuild] Failed to query llvm-config. Skipping MLIR dialect compilation."
+        return
+    end
+
     mlir_cmake_dir = joinpath(llvm_prefix, "lib", "cmake", "mlir")
 
     if !isdir(mlir_cmake_dir)

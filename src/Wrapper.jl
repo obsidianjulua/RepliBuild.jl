@@ -2730,6 +2730,30 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                             julia_type = get(member, "julia_type", "Any")
                             safe_member = replace(member_name, r"[^A-Za-z0-9_]" => "_")
 
+                            # Sanitize julia_type to avoid < > in function signatures
+                            sanitized_type = julia_type
+                            if occursin(r"[<>]", julia_type)
+                                if occursin(r"Ptr\{[^}]+\}", julia_type)
+                                    type_match = match(r"Ptr\{([^}]+)\}", julia_type)
+                                    if !isnothing(type_match)
+                                        inner_type = String(type_match.captures[1])
+                                        if _is_stl_internal_type(inner_type)
+                                            sanitized_type = "Ptr{Cvoid}"
+                                        else
+                                            sanitized_type = "Ptr{$(_sanitize_julia_type_name(inner_type))}"
+                                        end
+                                    end
+                                else
+                                    if _is_stl_internal_type(julia_type)
+                                        m_size = get(member, "size", 0)
+                                        sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
+                                    else
+                                        sanitized_type = _sanitize_julia_type_name(julia_type)
+                                    end
+                                end
+                            end
+                            julia_type = sanitized_type
+
                             if haskey(member, "bit_size")
                                 bit_size = member["bit_size"]
 

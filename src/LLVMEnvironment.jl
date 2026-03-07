@@ -8,16 +8,7 @@ module LLVMEnvironment
 using Pkg
 
 # Conditional import - will try to use LLVM_full_assert_jll if available
-const LLVM_JLL_AVAILABLE = Ref{Bool}(false)
-
-function __init__()
-    try
-        @eval using LLVM_full_assert_jll
-        LLVM_JLL_AVAILABLE[] = true
-    catch
-        LLVM_JLL_AVAILABLE[] = false
-    end
-end
+# We avoid __init__ evaluation to ensure safe loading in clean environments.
 
 """
 LLVM toolchain configuration and paths
@@ -92,12 +83,13 @@ Get the absolute path to LLVM_full_assert_jll installation if available.
 Returns nothing if LLVM_full_assert_jll is not installed.
 """
 function get_jll_llvm_root()
-    if !LLVM_JLL_AVAILABLE[]
+    pkg_id = Base.identify_package("LLVM_full_assert_jll")
+    if pkg_id === nothing
         return nothing
     end
 
     try
-        jll = @eval LLVM_full_assert_jll
+        jll = Base.require(pkg_id)
 
         # Prefer artifact system over older fields
         if hasproperty(jll, :artifacts)

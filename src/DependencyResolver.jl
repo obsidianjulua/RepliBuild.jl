@@ -56,7 +56,15 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
             for (root, dirs, files) in walkdir(dep_path)
                 filter!(d -> !in(d, ["test", "tests", "testes", "example", "examples", "fuzzing", "build", ".git", "doc", "docs"]), dirs)
                 for file in files
-                    if file in dep.exclude
+                    rel_path = replace(relpath(joinpath(root, file), dep_path), "\\" => "/")
+                    should_exclude = false
+                    for ex in dep.exclude
+                        if file == ex || startswith(rel_path, ex) || endswith(rel_path, ex) || occursin(ex, rel_path)
+                            should_exclude = true
+                            break
+                        end
+                    end
+                    if should_exclude
                         continue
                     end
                     if endswith(file, ".cpp") || endswith(file, ".cc") || endswith(file, ".cxx") || endswith(file, ".c")

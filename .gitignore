@@ -11,6 +11,7 @@ Manifest.toml
 *.py
 *.idx
 *.bc
+*.log
 
 # Test build outputs
 test/*/build/
