@@ -1,0 +1,310 @@
+================================================================================
+RepliBuild.jl - DEEP TECHNICAL ANALYSIS SUMMARY
+================================================================================
+
+COMPLETE TECHNICAL DOCUMENT: See DEEP_TECHNICAL_ANALYSIS.md (1028 lines)
+
+================================================================================
+1. MLIR JLCS DIALECT OPERATIONS (Real Definitions)
+================================================================================
+
+TYPE SYSTEM:
+  !jlcs.c_struct<"Name", [field_types...], [byte_offsets...], packed=bool>
+  !jlcs.array_view<ElementType, Rank>
+
+OPERATIONS:
+  jlcs.type_info     - Declare struct & C++ inheritance mapping
+  jlcs.get_field     - Read field at byte offset: %v = jlcs.get_field %struct { fieldOffset = 4 : i64 }
+  jlcs.set_field     - Write field: jlcs.set_field %struct, %value { fieldOffset = 4 : i64 }
+  jlcs.vcall         - Virtual method: %r = jlcs.vcall @Base::foo(%obj) { vtable_offset=0, slot=0 }
+  jlcs.load_array_element  - Read from strided array: %e = jlcs.load_array_element %view[%i, %j]
+  jlcs.store_array_element - Write to strided array: jlcs.store_array_element %val, %view[%i, %j]
+  jlcs.ffe_call      - Call external C function
+
+FILES: src/mlir/JLCSDialect.td, JLCSOps.td, Types.td, CMakeLists.txt
+
+================================================================================
+2. DWARF PARSING & STRUCT EXTRACTION
+================================================================================
+
+DATA STRUCTURES (src/DWARFParser.jl):
+
+  struct ClassInfo
+    name::String                      # Full class name
+    vtable_ptr_offset::Int           # Usually 0
+    base_classes::Vector{String}     # Base class names
+    virtual_methods::Vector{VirtualMethod}  # Vtable slots
+    members::Vector{MemberInfo}      # Data members with byte offsets
+    size::Int                        # Total struct size in bytes
+  end
+
+  struct VirtualMethod
+    name::String              # foo
+    mangled_name::String      # _ZN4Base3fooEv
+    slot::Int                 # Vtable slot index
+    return_type::String       # int, void, etc.
+    parameters::Vector{String} # Parameter types
+  end
+
+  struct MemberInfo
+    name::String              # Member variable name
+    type_name::String         # C++ type (int, double*, std::vector<>, etc.)
+    offset::Int               # Byte offset in struct
+  end
+
+Extraction flow: llvm-dwarfdump output → DW_TAG_class_type → members, virtuals, bases
+
+================================================================================
+3. IR GENERATION FROM DWARF (JLCSIRGenerator.jl)
+================================================================================
+
+TYPE MAPPING:
+  double → f64
+  int → i32
+  void → none
+  T* or T& → !llvm.ptr
+  std::vector<T> → !llvm.ptr (opaque)
+
+GENERATED IR STRUCTURE:
+
+  module {
+    // 1. External dispatch declarations
+    llvm.func @_ZN4Base3fooEv(!llvm.ptr) -> i32
+    
+    // 2. Type info (one per class)
+    jlcs.type_info "Base", !jlcs.c_struct<"Base", [i32, i32], [0:i64, 4:i64], packed=false>, ""
+    
+    // 3. Virtual method wrappers (one per vmethod)
+    func.func @thunk__ZN4Base3fooEv(%arg0: !llvm.ptr) -> i32 {
+      %result = llvm.call @_ZN4Base3fooEv(%arg0) : (!llvm.ptr) -> i32
+      return %result : i32
+    }
+    
+    // 4. Function thunks
+    // 5. STL container accessors
+  }
+
+EXAMPLE OUTPUT:
+  See DEEP_TECHNICAL_ANALYSIS.md section 6
+
+================================================================================
+4. TIER SELECTION LOGIC - 3-TIER DISPATCH (Wrapper.jl)
+================================================================================
+
+DECISION: is_ccall_safe(func_info, dwarf_structs) → Bool
+
+TIER 1 (ccall): Returns true if ALL conditions met:
+  ✓ No STL container types
+  ✓ Return type: primitive | pointer | void | small struct (<16 bytes, aligned)
+  ✓ Parameters: all primitive | pointer | small struct | NOT union | NOT packed
+  ✓ No class types (non-POD)
+
+TIER 2A (Base.llvmcall with LTO):
+  - Used if is_ccall_safe = false AND config.link.enable_lto = true
+  - LLVM IR embedded as module constant
+  - Conditions:
+    ✓ NOT virtual method
+    ✓ No Cstring types
+    ✓ Does NOT return struct by value
+  
+  Example: Base.llvmcall((LTO_IR, "symbol"), RetType, Tuple{ArgTypes}, args...)
+
+TIER 2B (JITManager.invoke):
+  - Used if is_ccall_safe = false AND config.compile.aot_thunks = false
+  - Runtime JIT compilation of MLIR IR
+  - Example: RepliBuild.JITManager.invoke("symbol", RetType, args...)
+
+ACTUAL CONDITIONS CHECKED (lines 1574-1665):
+  1. STL Container Check
+  2. Return Type:
+     - Template types (containing '<') → MLIR
+     - Struct by value > 16 bytes → MLIR
+     - Non-POD class → MLIR
+     - Packed struct (DWARF_size ≠ Julia_aligned_size) → MLIR
+  3. Parameters:
+     - By-pointer → OK
+     - Union types → MLIR
+     - Packed structs → MLIR
+
+================================================================================
+5. LLVMCALL WRAPPER GENERATION (Wrapper.jl)
+================================================================================
+
+LLVMCALL FORMAT:
+  Base.llvmcall((LTO_IR, "mangled_symbol"), ReturnType, Tuple{ArgTypes}, args...)
+
+LTO IR LOADING (lines 1850-1861):
+  const LTO_IR_PATH = joinpath(@__DIR__, "$(project_name)_lto.ll")
+  const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH, String) : ""
+  const THUNKS_LTO_IR = isfile(THUNKS_LTO_IR_PATH) ? read(...) : ""
+
+ELIGIBILITY (lines 3937-3941):
+  lto_eligible = config.link.enable_lto &&
+    !is_virtual &&
+    !returns_known_struct &&
+    julia_return_type ≠ "Cstring" &&
+    !any(t → t == "Cstring", param_types)
+
+REF{T} CONVERSION (lines 3888):
+  __ptr_m = Base.unsafe_convert(Ptr{Matrix_double}, m)
+  GC.@preserve m begin
+    Base.llvmcall((LTO_IR, "_Z4fillRM"), Cvoid, Tuple{Ptr{Matrix_double}}, __ptr_m)
+  end
+
+EXAMPLE WRAPPER:
+  function add(a::Cint, b::Cint)::Cint
+    if !isempty(LTO_IR)
+      return Base.llvmcall((LTO_IR, "_Z3addii"), Cint, Tuple{Cint, Cint}, a, b)
+    else
+      return ccall((:_Z3addii, LIBRARY_PATH), Cint, (Cint, Cint), a, b)
+    end
+  end
+
+EXAMPLE LLVM IR (jit_edges.ll):
+  define i32 @scalar_add(i32 noundef %0, i32 noundef %1) #0 {
+    %3 = alloca i32, align 4
+    store i32 %0, ptr %3, align 4
+    %4 = load i32, ptr %3, align 4
+    %5 = load i32, ptr %4, align 4
+    %6 = add nsw i32 %4, %5
+    ret i32 %6
+  }
+
+================================================================================
+6. JIT MANAGER - LOCK-FREE INVOCATION (JITManager.jl)
+================================================================================
+
+CONTEXT:
+  struct JITContext
+    mlir_ctx::Ptr{Cvoid}
+    jit_engine::Union{Ptr{Cvoid}, Nothing}
+    compiled_symbols::Dict{String, Ptr{Cvoid}}      # Function pointer cache
+    vtable_info::Union{VtableInfo, Nothing}
+    initialized::Bool
+    lock::ReentrantLock
+  end
+
+LOCK-FREE CACHED LOOKUP (lines 42-68):
+  @inline function _lookup_cached(func_name::String)::Ptr{Cvoid}
+    # FAST PATH: O(1) Dict read, no lock
+    ptr = get(GLOBAL_JIT.compiled_symbols, func_name, C_NULL)
+    if ptr ≠ C_NULL; return ptr; end
+    
+    # SLOW PATH: Acquire lock, double-check, JIT lookup, cache
+    lock(GLOBAL_JIT.lock) do
+      ptr = get(GLOBAL_JIT.compiled_symbols, func_name, C_NULL)
+      if ptr ≠ C_NULL; return ptr; end
+      
+      ptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, func_name)
+      GLOBAL_JIT.compiled_symbols[func_name] = ptr
+      return ptr
+    end
+  end
+
+ARITY-SPECIALIZED INVOKE (lines 111-152):
+  4 optimized overloads (1-4 args) eliminate Any[] boxing
+  Generic fallback for 5+ args
+  @generated _invoke_call handles scalar vs struct returns
+
+  function invoke(func_name::String, ::Type{T}, a1) where T
+    fptr = _lookup_cached(func_name)
+    r1 = Ref(a1)
+    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1)]
+    GC.@preserve r1 begin
+      return _invoke_call(fptr, T, inner_ptrs)
+    end
+  end
+
+CALLING CONVENTION:
+  All args passed as: inner_ptrs = [ptr_to_arg1, ptr_to_arg2, ...]
+  Scalar return:  T ciface(void** args_ptr)
+  Struct return:  void ciface(T* sret_buf, void** args_ptr)
+  Void return:    void ciface(void** args_ptr)
+
+RETURN HANDLING (@generated):
+  isprimitivetype(T) → direct return: ccall(fptr, T, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+  else → sret: ccall(fptr, Cvoid, (Ptr{T}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs); ret_buf[]
+
+================================================================================
+7. EXAMPLE GENERATED MLIR MODULE
+================================================================================
+
+module {
+  // External Dispatch Declarations
+  llvm.func @_ZN4Base3fooEv(!llvm.ptr) -> i32
+  llvm.func @_ZN4Base3barEv(!llvm.ptr, i32) -> i32
+
+  // Type Info - Base class
+  jlcs.type_info "Base", !jlcs.c_struct<"Base", [!llvm.ptr, i32, i32], 
+                                        [0:i64, 8:i64, 12:i64], packed=false>, ""
+
+  // Virtual Method Wrapper
+  func.func @thunk__ZN4Base3fooEv(%arg0: !llvm.ptr) -> i32 {
+    %result = llvm.call @_ZN4Base3fooEv(%arg0) : (!llvm.ptr) -> i32
+    return %result : i32
+  }
+
+  // Method with parameter
+  func.func @thunk__ZN4Base3barEv(%arg0: !llvm.ptr, %arg1: i32) -> i32 {
+    %result = llvm.call @_ZN4Base3barEv(%arg0, %arg1) : (!llvm.ptr, i32) -> i32
+    return %result : i32
+  }
+}
+
+================================================================================
+8. KEY FILE LOCATIONS
+================================================================================
+
+Core MLIR:
+  src/mlir/JLCSDialect.td    - Dialect definition
+  src/mlir/JLCSOps.td        - Operation definitions (type_info, vcall, etc.)
+  src/mlir/Types.td          - Type system (c_struct, array_view)
+  src/mlir/CMakeLists.txt    - Build configuration, TableGen, JIT linking
+
+Parsing & Generation:
+  src/DWARFParser.jl         - ClassInfo, VtableInfo from DWARF
+  src/JLCSIRGenerator.jl     - Generate MLIR module from DWARF
+    → src/ir_gen/TypeUtils.jl        - C++ → MLIR type mapping
+    → src/ir_gen/StructGen.jl        - Struct definition generation
+    → src/ir_gen/FunctionGen.jl      - Function thunk generation
+    → src/ir_gen/STLContainerGen.jl  - STL accessor thunks
+
+Dispatch & Wrapping:
+  src/Wrapper.jl             - Tier selection, ccall vs JIT/LTO decision
+    Lines 1566-1665: is_ccall_safe() - Dispatch decision logic
+    Lines 1850-1861: LTO IR loading
+    Lines 3316-3835: Tier routing (ccall vs JIT vs LTO)
+    Lines 3918-3932: llvmcall generation
+
+Execution:
+  src/JITManager.jl          - Lock-free JIT dispatch, invoke() methods
+    Lines 42-68:   _lookup_cached() - Fast path symbol resolution
+    Lines 85-99:   @generated _invoke_call() - ABI handling
+    Lines 111-152: Arity-specialized invoke(1-4 args)
+    Lines 176-192: Void-return invoke()
+
+Tests:
+  test/test_mlir.jl          - MLIR IR generation tests
+  test/test_mlir_safety.jl   - Type safety validation
+  test/jit_edge_test/        - Example LLVM IR generation
+
+================================================================================
+9. QUICK REFERENCE - WHAT GETS GENERATED
+================================================================================
+
+Input:   Binary with DWARF debug info
+         ↓
+DWARFParser: Extract ClassInfo, VirtualMethod, MemberInfo
+         ↓
+JLCSIRGenerator: Generate MLIR module (jlcs.type_info, jlcs.vcall, func.func)
+         ↓
+Wrapper.jl: For each function:
+  - Decide: is_ccall_safe?
+    ✓ → Generate ccall wrapper (Tier 1, fastest)
+    ✗ → Generate JIT/LTO wrapper (Tier 2, high-fidelity ABI)
+  - If LTO eligible: Embed LLVM IR, use Base.llvmcall
+  - If JIT only: Use JITManager.invoke (runtime MLIR→LLVM)
+         ↓
+Output:  Julia module with type-safe wrappers for all C++ functions
+
+================================================================================

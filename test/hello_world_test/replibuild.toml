@@ -9,6 +9,7 @@ parallel = true
 flags = ["-std=c++17", "-fPIC"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/hello_world_test/src/hello.cpp"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/hello_world_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/hello_world_test/src"]
+aot_thunks = false
 
 [link]
 enable_lto = false
@@ -36,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "hello_world_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/hello_world_test"
-uuid = "05b56bbb-b9da-4409-aec3-3912e499496c"
+uuid = "062fb30f-cc3f-4355-b9bd-841accd36887"
 
 [paths]
 build = "build"
