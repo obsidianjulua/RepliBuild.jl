@@ -1,36 +1,17 @@
 # JIT Edge Case Verification
-# Tests small functions through Tier 1 (ccall) wrappers for correctness
+# Expects: wrapper already generated at julia/JitEdgeTest.jl
 
 using Test
-using Pkg
 
-Pkg.activate(joinpath(@__DIR__, "..", ".."))
-using RepliBuild
+wrapper_path = joinpath(@__DIR__, "julia", "JitEdgeTest.jl")
+if !isfile(wrapper_path)
+    error("Wrapper not found at $wrapper_path. Did you run discover + build + wrap?")
+end
 
-@testset "JIT Edge Cases" begin
-    println("\n" * "="^70)
-    println("Building JIT Edge Test...")
-    println("="^70)
+include(wrapper_path)
+using .JitEdgeTest
 
-    test_dir = @__DIR__
-    toml_path = joinpath(test_dir, "replibuild.toml")
-
-    # Clean previous artifacts
-    for d in ["build", "julia", ".replibuild_cache", "replibuild.toml"]
-        p = joinpath(test_dir, d)
-        ispath(p) && rm(p, recursive=true, force=true)
-    end
-
-    # Discover → Build → Wrap
-    toml_path = RepliBuild.discover(test_dir, force=true, build=true, wrap=true)
-    @test isfile(toml_path)
-
-    wrapper_path = joinpath(test_dir, "julia", "JitEdgeTest.jl")
-    @test isfile(wrapper_path)
-
-    include(wrapper_path)
-    using .JitEdgeTest
-
+@testset "JIT Edge Case Verification" begin
     @testset "scalar_add" begin
         result = JitEdgeTest.scalar_add(Cint(3), Cint(7))
         @test result == 10
@@ -68,6 +49,4 @@ using RepliBuild
         @test triplet.value == 999
         @test triplet.flag == UInt8('Z')
     end
-
-    println("\n All JIT edge case tests passed.")
 end

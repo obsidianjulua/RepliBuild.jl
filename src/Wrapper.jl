@@ -43,6 +43,7 @@ const _INTERNAL_TYPE_BLOCKLIST = Set([
     "_va_list_tag", "_mbstate_t", "_loadu_pd", "_storeu_pd",
     "_loadu_ps", "_storeu_ps",
     "ldiv_t", "lldiv_t", "div_t", "max_align_t", "imaxdiv_t",
+    "_IO_FILE", "_IO_marker", "_IO_codecvt", "_IO_wide_data",
 ])
 
 """Escape a name if it's a Julia keyword, using var\"...\" syntax."""

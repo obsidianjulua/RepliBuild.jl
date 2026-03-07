@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for basics_test
-# Generated: 2026-03-05 23:18:36
+# Generated: 2026-03-07 00:22:54
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libbasics_test.so
 # Metadata: compilation_metadata.json
@@ -35,10 +35,11 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 6,
-    "generated_at" => "2026-03-05T23:18:33.104"
+    "generated_at" => "2026-03-07T00:22:54.192"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
+const THUNKS_LTO_IR = ""
 
 # =============================================================================
 # Struct Definitions (from DWARF debug info)
@@ -88,6 +89,7 @@ end
 # C++ struct: PaddedStruct (2 members)
 struct PaddedStruct
     a::UInt8
+    _pad_0::NTuple{3, UInt8}
     b::Cint
 end
 
@@ -100,85 +102,8 @@ function PaddedStruct()
     return ref[]
 end
 
-# C++ struct: __mbstate_t (2 members)
-struct __mbstate_t
-    _count::Cint
-    _value::Any
-end
 
-# Zero-initializer for __mbstate_t
-function __mbstate_t()
-    ref = Ref{__mbstate_t}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(__mbstate_t))
-    end
-    return ref[]
-end
-
-# C++ struct: __va_list_tag (4 members)
-struct __va_list_tag
-    gp_offset::Cuint
-    fp_offset::Cuint
-    overflow_arg_area::Ptr{Cvoid}
-    reg_save_area::Ptr{Cvoid}
-end
-
-# Zero-initializer for __va_list_tag
-function __va_list_tag()
-    ref = Ref{__va_list_tag}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(__va_list_tag))
-    end
-    return ref[]
-end
-
-# C++ struct: ldiv_t (2 members)
-struct ldiv_t
-    quot::Clong
-    rem::Clong
-end
-
-# Zero-initializer for ldiv_t
-function ldiv_t()
-    ref = Ref{ldiv_t}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(ldiv_t))
-    end
-    return ref[]
-end
-
-# C++ struct: lldiv_t (2 members)
-struct lldiv_t
-    quot::Clonglong
-    rem::Clonglong
-end
-
-# Zero-initializer for lldiv_t
-function lldiv_t()
-    ref = Ref{lldiv_t}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(lldiv_t))
-    end
-    return ref[]
-end
-
-# C++ struct: max_align_t (2 members)
-struct max_align_t
-    _clang_max_align_nonce1::Clonglong
-    _clang_max_align_nonce2::Any
-end
-
-# Zero-initializer for max_align_t
-function max_align_t()
-    ref = Ref{max_align_t}()
-    GC.@preserve ref begin
-        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), Base.unsafe_convert(Ptr{Cvoid}, ref), 0, sizeof(max_align_t))
-    end
-    return ref[]
-end
-
-
-export get_i, set_i!, get_f, set_f!, global_string, global_string_ptr, global_int, global_int_ptr, make_packed, make_padded, process_packed, process_padded, process_union, sum_ints, PaddedStruct, __mbstate_t, ldiv_t, PackedStruct, lldiv_t, __va_list_tag, max_align_t, NumberUnion
+export get_i, set_i!, get_f, set_f!, global_string, global_string_ptr, global_int, global_int_ptr, make_packed, make_padded, process_packed, process_padded, process_union, sum_ints, PaddedStruct, PackedStruct, NumberUnion
 
 # =============================================================================
 # Global Variables

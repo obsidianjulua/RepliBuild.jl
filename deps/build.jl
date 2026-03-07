@@ -98,7 +98,7 @@ function main()
     end
 
     # Check for LLVM
-    llvm_config = something(_find("llvm-config-21"), _find("llvm-config"), nothing)
+    llvm_config = let a = _find("llvm-config-21"); a !== nothing ? a : _find("llvm-config") end
     if llvm_config === nothing
         @warn """
         [RepliBuild] llvm-config not found. Cannot compile JLCS MLIR dialect.
@@ -112,7 +112,7 @@ function main()
     end
 
     # Check for mlir-tblgen
-    mlir_tblgen = something(_find("mlir-tblgen-21"), _find("mlir-tblgen"), nothing)
+    mlir_tblgen = let a = _find("mlir-tblgen-21"); a !== nothing ? a : _find("mlir-tblgen") end
     if mlir_tblgen === nothing
         @warn """
         [RepliBuild] mlir-tblgen not found. Cannot compile JLCS MLIR dialect.

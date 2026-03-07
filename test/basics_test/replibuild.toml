@@ -37,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "basics_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test"
-uuid = "e27fd61d-0bdf-45b7-929a-9a7a249dd2a1"
+uuid = "d02581a2-fa09-48f6-abf5-f92039414cb6"
 
 [paths]
 build = "build"

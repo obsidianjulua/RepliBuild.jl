@@ -347,7 +347,7 @@ function invoke_safe(jit::MlirExecutionEngine, mod::MlirModule, name::String, ar
     for i in 1:num_inputs
         r = Ref(args[i])
         push!(ref_args, r)
-        push!(ptr_args, unsafe_convert(Ptr{Cvoid}, r))
+        push!(ptr_args, Base.unsafe_convert(Ptr{Cvoid}, r))
     end
     
     # Handle Return Buffer (Last argument)
@@ -357,7 +357,7 @@ function invoke_safe(jit::MlirExecutionEngine, mod::MlirModule, name::String, ar
          error("Last argument must be a Ref for the return value")
     end
     
-    push!(ptr_args, unsafe_convert(Ptr{Cvoid}, ret_buffer))
+    push!(ptr_args, Base.unsafe_convert(Ptr{Cvoid}, ret_buffer))
     
     # Invoke
     return jit_invoke(jit, name, ptr_args)
