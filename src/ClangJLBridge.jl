@@ -5,6 +5,7 @@
 module ClangJLBridge
 
 using Clang.Generators
+using Clang
 using TOML
 using Dates
 
@@ -309,7 +310,7 @@ Dictionary with:
 - `structs`: Vector{String} - struct names found in headers
 - `function_pointers`: Dict{String, Dict} - function pointer typedef signatures
 """
-function extract_header_types(headers::Vector{String}, include_dirs::Vector{String}=String[])
+function extract_header_types(headers::Vector{String}, include_dirs::Vector=String[])
     if isempty(headers)
         return Dict(
             "enums" => Dict{String,Vector{Tuple{String,Int}}}(),
@@ -329,8 +330,10 @@ function extract_header_types(headers::Vector{String}, include_dirs::Vector{Stri
         "function_pointers" => Dict{String,Dict}()
     )
 
-    # Simple regex-based extraction as fallback
-    # TODO: Use Clang.jl AST for more accurate parsing
+    # ── Enum extraction via Clang.jl AST (accurate, ignores comments) ──
+    _extract_enums_via_ast!(result, headers, include_dirs)
+
+    # ── Struct / function-pointer / typedef extraction (regex, works fine) ──
     for header in headers
         if !isfile(header)
             continue
@@ -338,31 +341,6 @@ function extract_header_types(headers::Vector{String}, include_dirs::Vector{Stri
 
         try
             content = read(header, String)
-
-            # Extract enum definitions
-            enum_pattern = r"enum\s+(?:class\s+)?(\w+)\s*\{([^}]+)\}"s
-            for m in eachmatch(enum_pattern, content)
-                enum_name = m.captures[1]
-                enum_body = m.captures[2]
-
-                members = Tuple{String,Int}[]
-                current_value = 0
-
-                # Parse enum members
-                member_pattern = r"(\w+)\s*(?:=\s*(\d+))?"
-                for mem in eachmatch(member_pattern, enum_body)
-                    member_name = mem.captures[1]
-                    if !isnothing(mem.captures[2])
-                        current_value = parse(Int, mem.captures[2])
-                    end
-                    push!(members, (member_name, current_value))
-                    current_value += 1
-                end
-
-                if !isempty(members)
-                    result["enums"][enum_name] = members
-                end
-            end
 
             # Extract struct names (for completeness)
             struct_pattern = r"struct\s+(\w+)\s*\{"
@@ -411,6 +389,72 @@ function extract_header_types(headers::Vector{String}, include_dirs::Vector{Stri
     end
 
     return result
+end
+
+"""
+Extract enum definitions from C++ headers using Clang.jl's AST parser.
+Correctly ignores comments, handles enum class, hex/octal/binary values, and namespaces.
+"""
+function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_dirs::Vector)
+    # Build compiler flags
+    flags = String["-xc++", "-std=c++17"]
+    for dir in include_dirs
+        push!(flags, "-I$dir")
+    end
+
+    idx = Clang.Index()
+
+    for header in headers
+        if !isfile(header)
+            continue
+        end
+
+        try
+            tu = Clang.parse_header(idx, header, flags)
+            root = Clang.getTranslationUnitCursor(tu)
+            _walk_enums!(result["enums"], root)
+        catch e
+            @debug "Clang AST parse failed for $header, skipping enum extraction" exception=e
+        end
+    end
+end
+
+"""
+Recursively walk the Clang AST to find enum declarations, descending into namespaces.
+"""
+function _walk_enums!(enums::Dict{String,Vector{Tuple{String,Int}}}, cursor)
+    for child in Clang.children(cursor)
+        k = Clang.kind(child)
+
+        if k == Clang.CXCursor_EnumDecl
+            enum_name = Clang.spelling(child)
+            # Skip anonymous/unnamed enums (Clang may return descriptive names like
+            # "(unnamed enum at ...)" or "(anonymous enum at ...)" for these)
+            # Also skip names with special characters that aren't valid identifiers
+            if isempty(enum_name) || startswith(enum_name, "(") || !occursin(r"^[A-Za-z_]\w*$", enum_name)
+                continue
+            end
+            if haskey(enums, enum_name)
+                continue  # already extracted from another header
+            end
+
+            members = Tuple{String,Int}[]
+            for ec in Clang.children(child)
+                if Clang.kind(ec) == Clang.CXCursor_EnumConstantDecl
+                    member_name = Clang.spelling(ec)
+                    member_value = Int(Clang.value(ec))
+                    push!(members, (member_name, member_value))
+                end
+            end
+
+            if !isempty(members)
+                enums[enum_name] = members
+            end
+
+        elseif k == Clang.CXCursor_Namespace || k == Clang.CXCursor_LinkageSpec
+            _walk_enums!(enums, child)
+        end
+    end
 end
 
 end # module ClangJLBridge

@@ -24,6 +24,35 @@ export is_struct_like, is_enum_like, is_function_pointer_like
 # HELPER FUNCTIONS
 # =============================================================================
 
+# Complete set of Julia reserved keywords and soft keywords for enum member escaping
+const _JULIA_KEYWORDS = Set([
+    "baremodule", "begin", "break", "catch", "const", "continue", "do",
+    "else", "elseif", "end", "export", "false", "finally", "for",
+    "function", "global", "if", "import", "in", "let", "local",
+    "macro", "module", "mutable", "nothing", "quote", "return",
+    "struct", "true", "try", "type", "using", "while", "abstract",
+    "primitive", "where", "isa",
+    # Not technically reserved but conflict as identifiers in enum context
+    "and", "or", "not",
+])
+
+# Internal/compiler types that leak through DWARF but shouldn't be exported
+const _INTERNAL_TYPE_BLOCKLIST = Set([
+    "__va_list_tag", "__mbstate_t", "__loadu_pd", "__storeu_pd",
+    "__loadu_ps", "__storeu_ps", "__loadu_si128", "__storeu_si128",
+    "_va_list_tag", "_mbstate_t", "_loadu_pd", "_storeu_pd",
+    "_loadu_ps", "_storeu_ps",
+    "ldiv_t", "lldiv_t", "div_t", "max_align_t", "imaxdiv_t",
+])
+
+"""Escape a name if it's a Julia keyword, using var\"...\" syntax."""
+function _escape_keyword(name::String)::String
+    if name in _JULIA_KEYWORDS
+        return "var\"$name\""
+    end
+    return name
+end
+
 # Helper: sanitize a C++ type name to a valid Julia struct/type identifier
 function _sanitize_julia_type_name(name::AbstractString)::String
     s = replace(string(name), "::" => "_")
@@ -1428,11 +1457,11 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     functions = metadata["functions"]
 
     # Extract supplementary types from headers (enums, unused types, etc.)
+    include_dirs = get(metadata, "include_dirs", String[])
     header_types = if !isempty(headers)
-        ClangJLBridge.extract_header_types(headers)
+        ClangJLBridge.extract_header_types(headers, include_dirs)
     else
         # Auto-discover headers from include directories
-        include_dirs = get(metadata, "include_dirs", String[])
         discovered_headers = String[]
         for inc_dir in include_dirs
             if isdir(inc_dir)
@@ -1440,7 +1469,7 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
             end
         end
         if !isempty(discovered_headers)
-            ClangJLBridge.extract_header_types(discovered_headers)
+            ClangJLBridge.extract_header_types(discovered_headers, include_dirs)
         else
             Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
         end
@@ -2112,9 +2141,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     name = get(enumerator, "name", "Unknown")
                     name = _sanitize_julia_type_name(name)
                     value = get(enumerator, "value", 0)
-                    if name in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "true", "false", "abstract", "type", "mutable", "primitive")
-                        name = "var\"$name\""
-                    end
+                    name = _escape_keyword(name)
                     
                     if name in seen_names
                         continue
@@ -2166,9 +2193,20 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                     """
                 end
 
+                # Choose underlying type based on value range
+                min_val = minimum(v for (_, v) in members)
+                max_val = maximum(v for (_, v) in members)
+                underlying = if min_val >= 0 && max_val > typemax(Int32)
+                    "UInt32"
+                elseif min_val < typemin(Int32) || max_val > typemax(Int32)
+                    "Int64"
+                else
+                    "Cint"
+                end
+
                 enum_definitions *= """
                 # C++ enum: $enum_name (from header - not in DWARF)
-                @enum $enum_name::Cint begin
+                @enum $enum_name::$underlying begin
                 """
 
                 seen_values = Set{Any}()
@@ -2176,9 +2214,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
                 duplicate_defs = String[]
                 for (member_name, value) in members
                     member_name = _sanitize_julia_type_name(string(member_name))
-                    if member_name in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "true", "false", "abstract", "type", "mutable", "primitive")
-                        member_name = "var\"$member_name\""
-                    end
+                    member_name = _escape_keyword(member_name)
                     
                     if member_name in seen_names
                         continue
@@ -2497,6 +2533,11 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             # Skip STL internal implementation types (they leak from DWARF when
             # template instantiation is forced, but are not useful to Julia users)
             if _is_stl_internal_type(struct_name)
+                continue
+            end
+
+            # Skip compiler/libc internal types
+            if struct_name in _INTERNAL_TYPE_BLOCKLIST
                 continue
             end
 
@@ -4345,7 +4386,7 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
     end
 
-    # Add struct types
+    # Add struct types (filter internal/compiler types)
     for struct_name in struct_types
         if !(struct_name in enum_names)
             # Sanitize struct name for export
@@ -4353,6 +4394,10 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             julia_struct_name = replace(julia_struct_name, "*" => "Ptr")
             julia_struct_name = replace(julia_struct_name, "&" => "Ref")
             julia_struct_name = replace(julia_struct_name, r"[^a-zA-Z0-9_]" => "_")
+            # Skip internal/compiler types
+            if julia_struct_name in _INTERNAL_TYPE_BLOCKLIST || struct_name in _INTERNAL_TYPE_BLOCKLIST
+                continue
+            end
             push!(all_exports, julia_struct_name)
         end
     end
