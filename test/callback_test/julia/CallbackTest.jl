@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for callback_test
-# Generated: 2026-03-06 19:17:56
+# Generated: 2026-03-06 19:42:22
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libcallback_test.so
 # Metadata: compilation_metadata.json

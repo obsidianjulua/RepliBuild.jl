@@ -37,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "stress_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test"
-uuid = "82e8e985-cef7-4012-b930-2988758470e7"
+uuid = "31867af6-1480-4017-8c01-85f3b70204a9"
 
 [paths]
 build = "build"

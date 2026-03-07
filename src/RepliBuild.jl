@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.3.0"
+const VERSION = v"2.4.0"
 
 # ============================================================================
 # LOAD CORE MODULES
@@ -37,7 +37,7 @@ include("Introspect.jl")
 
 # Polish modules
 include("EnvironmentDoctor.jl")
-include("Scaffold.jl")
+include("PackageRegistry.jl")
 
 # Import submodules for internal use
 using .LLVMEnvironment
@@ -56,7 +56,7 @@ using .JITManager
 using .STLWrappers
 using .Introspect
 using .EnvironmentDoctor
-using .Scaffold
+using .PackageRegistry
 
 # ============================================================================
 # EXPORTS - Clean Build Orchestration API
@@ -74,8 +74,8 @@ export clean
 # Environment diagnostics
 export check_environment
 
-# Package scaffolding
-export scaffold_package
+# Package registry & scaffolding
+export use, register, unregister, list_registry, scaffold_package
 
 # Advanced modules (for power users who know what they're doing)
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser, JLCSIRGenerator, MLIRNative, STLWrappers
@@ -116,8 +116,52 @@ your C/C++ source, then `Pkg.build()` compiles and wraps automatically.
 RepliBuild.scaffold_package("MyEigenWrapper")
 ```
 """
-function scaffold_package(name::String; path::String=".")
-    return Scaffold.scaffold_package(name; path=path)
+function scaffold_package(name::String; path::String=".", from_registry::Bool=true)
+    return PackageRegistry.scaffold_package(name; path=path, from_registry=from_registry)
+end
+
+"""
+    use(name::String; force_rebuild=false, verbose=true) -> Module
+
+Load a wrapper by registry name. Resolves dependencies, checks environment,
+builds if needed, and returns the loaded Julia module.
+
+# Example
+```julia
+Lua = RepliBuild.use("lua")
+Lua.luaL_newstate()
+```
+"""
+function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)
+    return PackageRegistry.use(name; force_rebuild=force_rebuild, verbose=verbose)
+end
+
+"""
+    register(toml_path::String; name="", verified=false) -> RegistryEntry
+
+Hash and store a replibuild.toml in the global registry (~/.replibuild/registry/).
+Name is inferred from [project].name if not provided. Called automatically by `discover()`.
+"""
+function register(toml_path::String; name::String="", verified::Bool=false)
+    return PackageRegistry.register(toml_path; name=name, verified=verified)
+end
+
+"""
+    unregister(name::String)
+
+Remove a package from the global registry.
+"""
+function unregister(name::String)
+    PackageRegistry.unregister(name)
+end
+
+"""
+    list_registry()
+
+Print all registered packages in the global RepliBuild registry.
+"""
+function list_registry()
+    PackageRegistry.list_registry()
 end
 
 # ============================================================================

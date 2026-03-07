@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.4.0
+
+### New: Global Package Registry
+
+- **`RepliBuild.use("lua")`** — One-call wrapper loading: looks up the registry, resolves git/system/local dependencies, checks the environment, builds if needed, wraps, caches artifacts, and returns a loaded Julia module.
+- **`RepliBuild.register(toml_path)`** — Hash (SHA256) and store a replibuild.toml in the global registry at `~/.replibuild/registry/`. Auto-called by `discover()`.
+- **`RepliBuild.list_registry()`** — Print all registered packages with hash, source, build status, and registration date.
+- **`RepliBuild.unregister(name)`** — Remove a package from the registry and clean cached builds.
+- **Global build artifact caching** in `~/.replibuild/builds/<hash>/` — repeated `use()` calls load cached builds instantly.
+- **Environment check caching** in `~/.replibuild/toolchain.toml` — avoids re-probing LLVM/Clang on every call (24h TTL).
+- `discover()` now auto-registers the generated TOML in the global registry.
+- `scaffold_package()` pulls TOML from registry when the name matches a registered package.
+- Scaffold.jl merged into PackageRegistry.jl — single unified module for package management.
+- Respects `REPLIBUILD_HOME` env var for custom registry location (default: `~/.replibuild/`).
+
+### Fixed: Enum Extraction
+
+- Replaced regex-based enum extraction with Clang.jl AST walker — correctly ignores Doxygen comments, handles `enum class`, hex values, and namespaces.
+- Complete Julia keyword escaping (`in`, `and`, `or`, `not`, `isa`, `where` etc.) via shared `_JULIA_KEYWORDS` set.
+- Internal type blocklist (`__va_list_tag`, `ldiv_t`, etc.) filters compiler internals from exports.
+- Auto-detects enum underlying type (`UInt32`/`Int64`) for values exceeding `Int32` range.
+- Eigen wrapper: 1507 → 1106 lines, all 14 verify.jl tests pass.
+
 ## v2.3.0
 
 ### New: Environment Diagnostics ("Doctor")

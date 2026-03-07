@@ -121,6 +121,14 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
 
     ConfigurationManager.save_config(config)
 
+    # Auto-register in global package registry
+    try
+        register_func = getfield(parentmodule(@__MODULE__), :register)
+        register_func(config_path)
+    catch e
+        @debug "Auto-registration skipped" exception=e
+    end
+
     if build
         build_func = getfield(parentmodule(@__MODULE__), :build)
         library_path = build_func(config_path)
