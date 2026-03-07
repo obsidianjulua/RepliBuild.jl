@@ -3648,7 +3648,30 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         end
 
         # llvmcall needs Tuple{Type1, Type2} — built from raw param_types (no trailing comma)
-        llvmcall_types = isempty(param_types) ? "" : join(param_types, ", ")
+        # CRITICAL: Ref{T} in Julia maps to ptr addrspace(10) in LLVM, but C++ IR uses
+        # plain ptr (addrspace 0). For llvmcall we must use Ptr{T} and convert explicitly.
+        llvmcall_param_types = String[]
+        llvmcall_arg_names = String[]
+        llvmcall_ref_args = String[]  # args that need GC.@preserve
+        llvmcall_conversion_lines = String[]
+        for (i, pt) in enumerate(param_types)
+            arg_name = ccall_param_names[i]
+            m = match(r"^Ref\{(.+)\}$", pt)
+            if m !== nothing
+                inner_type = m.captures[1]
+                push!(llvmcall_param_types, "Ptr{$inner_type}")
+                ptr_name = "__ptr_$(arg_name)"
+                push!(llvmcall_arg_names, ptr_name)
+                push!(llvmcall_ref_args, arg_name)
+                push!(llvmcall_conversion_lines, "        $ptr_name = Base.unsafe_convert(Ptr{$inner_type}, $arg_name)")
+            else
+                push!(llvmcall_param_types, pt)
+                push!(llvmcall_arg_names, arg_name)
+            end
+        end
+        llvmcall_types = isempty(llvmcall_param_types) ? "" : join(llvmcall_param_types, ", ")
+        llvmcall_args = join(llvmcall_arg_names, ", ")
+        has_ref_params = !isempty(llvmcall_ref_args)
 
         # Generate function body based on return type and conversions
         julia_return_type = return_type["julia_type"]
@@ -3666,6 +3689,25 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
 
         # Check if this is a virtual method that requires dynamic dispatch
         is_virtual = get(func, "is_virtual", false)
+
+        # Build the llvmcall expression with proper Ref{T} → Ptr{T} handling.
+        # ccall handles Ref{T} → C pointer automatically, but llvmcall sees Ref{T}
+        # as ptr addrspace(10) while C++ IR uses plain ptr (addrspace 0).
+        function _build_llvmcall_expr(ret_type_str, indent="        ")
+            call_expr = "Base.llvmcall((LTO_IR, \"$mangled\"), $ret_type_str, Tuple{$llvmcall_types}, $llvmcall_args)"
+            if !has_ref_params
+                return "$(indent)return $call_expr"
+            end
+            lines = String[]
+            for l in llvmcall_conversion_lines
+                push!(lines, "$indent$l")
+            end
+            preserve_list = join(llvmcall_ref_args, " ")
+            push!(lines, "$(indent)GC.@preserve $preserve_list begin")
+            push!(lines, "$(indent)    return $call_expr")
+            push!(lines, "$(indent)end")
+            return join(lines, "\n")
+        end
 
         # LTO eligibility: safe for primitive/pointer/small-POD structs (filtered earlier by is_ccall_safe),
         # non-virtual, no Cstring anywhere (llvmcall won't auto-convert String→Cstring like ccall does),
@@ -3745,11 +3787,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
             end
 
             if lto_eligible
+                llvmcall_body = _build_llvmcall_expr(safe_c_ret)
                 func_def = """
                 $doc_comment
                 function $julia_name($param_sig)::$safe_c_ret
                 $conversion_code    if !isempty(LTO_IR)
-                        return Base.llvmcall((LTO_IR, "$mangled"), $safe_c_ret, Tuple{$llvmcall_types}, $ccall_args)
+                $llvmcall_body
                     else
                         return ccall((:$mangled, LIBRARY_PATH), $safe_c_ret, $ccall_types, $ccall_args)
                     end
@@ -3781,11 +3824,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         elseif !isempty(conversion_code)
             # Has parameter conversions
             if lto_eligible
+                llvmcall_body = _build_llvmcall_expr(julia_return_type)
                 func_def = """
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
                 $conversion_code    if !isempty(LTO_IR)
-                        return Base.llvmcall((LTO_IR, "$mangled"), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
+                $llvmcall_body
                     else
                         return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
                     end
@@ -3804,11 +3848,12 @@ function generate_introspective_module(config::RepliBuildConfig, lib_path::Strin
         else
             # Standard wrapper - no conversions needed
             if lto_eligible
+                llvmcall_body = _build_llvmcall_expr(julia_return_type)
                 func_def = """
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
                     if !isempty(LTO_IR)
-                        return Base.llvmcall((LTO_IR, "$mangled"), $julia_return_type, Tuple{$llvmcall_types}, $ccall_args)
+                $llvmcall_body
                     else
                         return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $ccall_args)
                     end
