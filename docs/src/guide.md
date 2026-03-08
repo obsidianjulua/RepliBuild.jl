@@ -88,7 +88,7 @@ See the **[Configuration Reference](config.md)** for a complete list of availabl
 
 ## C vs C++ Projects
 
-RepliBuild has separate, fully-independent generators for C and C++. Set the language in `[wrap]`:
+RepliBuild uses `wrap.language` as an extensible dispatch key to select the generator, compiler toolchain, and build defaults for a project. `"c"` and `"cpp"` are the first two targets:
 
 ```toml
 [wrap]
@@ -97,6 +97,8 @@ language = "cpp" # C++ project (default): uses clang++
 ```
 
 `discover()` sets this automatically from the scanned source file extensions. For C projects the `enable_lto` default is `true`, so you get zero-cost `llvmcall` dispatch out of the box without any extra configuration.
+
+Additional language targets are planned — the `language` field is the hook that will route each new language to its own generator and toolchain.
 
 ## Git & External Dependencies
 

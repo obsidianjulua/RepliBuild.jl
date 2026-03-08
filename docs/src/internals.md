@@ -23,13 +23,15 @@ The `Wrapper` package generates Julia FFI modules from DWARF metadata and binary
 
 ### Language Selection
 
+`wrap.language` is an extensible dispatch key — `"c"` and `"cpp"` are the first two targets, with additional language generators planned:
+
 ```toml
 [wrap]
 language = "c"   # selects C generator + clang toolchain
 language = "cpp" # selects C++ generator + clang++ toolchain (default)
 ```
 
-`discover()` sets this automatically based on the scanned source files.
+`discover()` sets this automatically based on the scanned source files. Adding a new language means adding a generator under `src/Wrapper/<Lang>/` and registering it in `Wrapper/Generator.jl`.
 
 ## Compiler
 

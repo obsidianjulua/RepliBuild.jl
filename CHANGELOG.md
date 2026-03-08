@@ -34,7 +34,7 @@ The C and C++ generators are now fully independent — no shared mutable state, 
 
 ### New: `wrap.language` Configuration Field
 
-A new `language` field in the `[wrap]` section of `replibuild.toml` controls which generator and compiler toolchain are used:
+A new `language` field in the `[wrap]` section of `replibuild.toml` selects the generator and compiler toolchain for the project. This field is designed as an extensible language dispatch key — `"c"` and `"cpp"` are the first two targets, with more languages planned.
 
 ```toml
 [wrap]
