@@ -498,7 +498,9 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         has_cpp ? :cpp : :c,                     # language
         "",                                      # module_name (auto-generate)
         true,                                    # use_clang_jl
-        Dict{String,Vector{Vector{String}}}()    # varargs_overloads
+        Dict{String,Vector{Vector{String}}}(),   # varargs_overloads
+        Dict{String,Dict{String,Any}}(),         # macros
+        String[]                                 # shim_headers
     )
 
     llvm_config = ConfigurationManager.LLVMConfig(

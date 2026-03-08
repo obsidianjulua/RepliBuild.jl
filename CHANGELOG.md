@@ -2,6 +2,12 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.4.3
+
+### Bug Fix: `WrapConfig` constructor mismatch in Discovery
+
+Fixed a `MethodError` when calling `discover()` caused by the `WrapConfig` constructor in `Discovery.jl` missing the `macros` and `shim_headers` fields added to the struct definition. Empty defaults are now passed for both fields.
+
 ## v2.4.2
 
 ### Refactor: Wrapper Modularization
