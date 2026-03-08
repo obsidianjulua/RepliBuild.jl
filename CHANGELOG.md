@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.6.0
+## v2.4.0
 
 ### Refactor: Wrapper Modularization
 
@@ -62,7 +62,7 @@ language = "c"   # or "cpp" (default)
 - Added `*.bak` to suppress editor backup files.
 - Added `__pycache__/` and `*.pyc` to suppress Python bytecache from helper scripts.
 
-## v2.5.0
+## v2.4.0
 
 ### Improved: LTO Pipeline — Bitcode-First Loading
 
