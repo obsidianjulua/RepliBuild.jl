@@ -1916,6 +1916,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         julia_name = replace(julia_name, "]" => "")
         julia_name = replace(julia_name, ":" => "_")
         julia_name = replace(julia_name, r"_+" => "_")  # collapse consecutive underscores
+        julia_name = replace(julia_name, r"^replibuild_shim_" => "") # Remove macro shim prefix
         julia_name = String(rstrip(julia_name, '_'))
 
         # Build function signature using ergonomic Julia types
@@ -2041,7 +2042,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             \"\"\"
                 $julia_name($param_sig) -> $(return_type["julia_type"])
 
-            Wrapper for C++ function: `$demangled`
+            Wrapper for `$demangled`
 
             # Arguments
             $(join(arg_docs, "\n"))
@@ -2103,9 +2104,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 
                 ptr_setup = ""
                 if !isempty(invoke_args)
-                    ptr_setup *= "    refs = ($(join(["Ref($a)" for a in param_names], ", ")),)\n"
-                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[$(join(["Base.unsafe_convert(Ptr{Cvoid}, r)" for r in ["refs[$i]" for i in 1:length(param_names)]], ", "))]\n"
-                    ptr_setup *= "    GC.@preserve refs inner_ptrs begin\n"
+                    ptr_setup *= "    c_args = ($(join(["Base.cconvert($(param_types[i]), $(param_names[i]))" for i in 1:length(param_names)], ", ")),)\n"
+                    ptr_setup *= "    refs = ($(join(["Ref(Base.unsafe_convert($(param_types[i]), c_args[$i]))" for i in 1:length(param_names)], ", ")),)\n"
+                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[$(join(["Base.unsafe_convert(Ptr{Cvoid}, refs[$i])" for i in 1:length(param_names)], ", "))]\n"
+                    ptr_setup *= "    GC.@preserve c_args refs inner_ptrs begin\n"
                 else
                     ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[]\n"
                     ptr_setup *= "    GC.@preserve inner_ptrs begin\n"
@@ -2120,8 +2122,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     invoke_call *= "        return nothing\n"
                     invoke_call *= "    end"
                 elseif jit_ret_type in ("Int8","UInt8","Int16","UInt16","Int32","UInt32","Int64","UInt64",
-                                        "Float32","Float64","Cint","Clong","Culong","Csize_t","Cchar",
-                                        "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring")
+                                        "Float32","Float64","Cint","Cuint","Clong","Culong","Clonglong","Culonglong","Cshort","Cushort","Csize_t","Cchar","Cuchar",
+                                        "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring") || startswith(jit_ret_type, "Ptr{")
                     # Scalar return directly
                     invoke_call = "        if !isempty(THUNKS_LTO_IR)\n"
                     invoke_call *= "            ret = Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), $jit_ret_type, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"

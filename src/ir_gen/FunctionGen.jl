@@ -56,6 +56,13 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict())
         if mangled in generated
             continue
         end
+
+        # Skip varargs functions — they use va_start/va_end which MLIR cannot handle.
+        # These are already routed through direct ccall via varargs interception.
+        if get(func, "is_vararg", false)
+            continue
+        end
+
         push!(generated, mangled)
 
         params = copy(get(func, "parameters", []))

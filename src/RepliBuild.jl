@@ -263,8 +263,13 @@ function _build_aot_thunks(config, library_path)
         lib_name = basename(library_path)
         thunks_name = replace(lib_name, ".so" => "_thunks.so", ".dylib" => "_thunks.dylib", ".dll" => "_thunks.dll")
         thunks_so = joinpath(output_dir, thunks_name)
-        
-        (output, exitcode) = BuildBridge.execute("clang++", ["-shared", "-fPIC", "-o", thunks_so, thunks_obj])
+
+        # Link thunks against the main library so C function symbols resolve
+        lib_dir = dirname(abspath(library_path))
+        linker = config.wrap.language == :c ? "clang" : "clang++"
+        link_args = ["-shared", "-fPIC", "-o", thunks_so, thunks_obj,
+                     "-L", lib_dir, "-l:$lib_name", "-Wl,-rpath,$lib_dir"]
+        (output, exitcode) = BuildBridge.execute(linker, link_args)
         if exitcode != 0
             error("Failed to link thunks.o: $output")
         end
@@ -275,35 +280,10 @@ function _build_aot_thunks(config, library_path)
             thunks_lto_path = joinpath(output_dir, thunks_lto_name)
             if MLIRNative.emit_llvmir(mod, thunks_lto_path)
                 lto_ir_text = read(thunks_lto_path, String)
-                lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
-                lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
-                lto_ir_text = replace(lto_ir_text,
-                    r"^attributes\s+#(\d+)\s*=\s*\{[^}]*\}"m =>
-                    s"attributes #\1 = { alwaysinline }")
-                lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
-                lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
-                lto_ir_text = replace(lto_ir_text, r"\binrange\([^)]*\)\s*" => "")
-                lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
-                lto_ir_text = replace(lto_ir_text, r"\bcaptures\([^)]*\)\s*" => "")
-                lto_ir_text = replace(lto_ir_text, r"\bdead_on_unwind\b\s*" => "")
-                lto_ir_text = replace(lto_ir_text, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
-                lto_ir_text = replace(lto_ir_text, r"\ballocptr\b\s*" => "")
-                lto_ir_text = replace(lto_ir_text, r"\bicmp samesign\b" => "icmp")
-                lto_ir_text = replace(lto_ir_text, r"\brange\([^)]*\)\s*" => "")
-                lto_ir_text = replace(lto_ir_text, r"\btrunc (nuw |nsw )+" => "trunc ")
-                lto_ir_text = replace(lto_ir_text, r"\b(uitofp|zext) nneg " => s"\1 ")
-                lto_ir_text = replace(lto_ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
-                lines = split(lto_ir_text, '\n')
-                filtered = filter(lines) do l
-                    !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
-                end
-                filtered2 = filter(filtered) do l
-                    !occursin(r"^![a-zA-Z].*=\s*!\{", l)
-                end
-                lto_ir_text = join(filtered2, '\n')
+                lto_ir_text = Compiler.sanitize_ir_for_julia(lto_ir_text)
                 write(thunks_lto_path, lto_ir_text)
-                
-                # Assemble to bitcode for much faster llvmcall loading
+
+                # Assemble to bitcode via Julia's libLLVM for version-matched bc
                 thunks_bc_path = replace(thunks_lto_path, ".ll" => ".bc")
                 Compiler.assemble_bitcode(thunks_lto_path, thunks_bc_path)
             else
@@ -582,6 +562,21 @@ function info(toml_path::String="replibuild.toml")
             println("  wrapper: $(jl_files[1])")
         else
             println("  wrapper: not generated")
+        end
+
+        lto_bc_files = filter(f -> endswith(f, "_lto.bc") && !contains(f, "thunks"), readdir(julia_dir))
+        if !isempty(lto_bc_files)
+            println("  lto_ir:  $(lto_bc_files[1])")
+        end
+
+        aot_bc_files = filter(f -> endswith(f, "_thunks_lto.bc"), readdir(julia_dir))
+        if !isempty(aot_bc_files)
+            println("  aot_ir:  $(aot_bc_files[1])")
+        end
+
+        aot_lib_files = filter(f -> contains(f, "_thunks") && (endswith(f, ".so") || endswith(f, ".dylib") || endswith(f, ".dll")), readdir(julia_dir))
+        if !isempty(aot_lib_files)
+            println("  aot_lib: $(aot_lib_files[1])")
         end
     else
         println("  not built yet")

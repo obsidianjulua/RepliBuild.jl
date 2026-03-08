@@ -25,17 +25,11 @@ end
 include(wrapper_path)
 using .DuktapeTest
 
-# duk_peval_string(ctx, src) expands to duk_eval_raw with these flags:
-#   DUK_COMPILE_EVAL (1<<3) | DUK_COMPILE_SAFE (1<<7) |
-#   DUK_COMPILE_NOSOURCE (1<<9) | DUK_COMPILE_STRLEN (1<<10) |
-#   DUK_COMPILE_NOFILENAME (1<<11)
-const DUK_PEVAL_STRING_FLAGS = UInt32(8 | 128 | 512 | 1024 | 2048)  # 3720
-
 """Create a default Duktape heap (equivalent to duk_create_heap_default macro)."""
 create_heap() = DuktapeTest.duk_create_heap(C_NULL, C_NULL, C_NULL, C_NULL, C_NULL)
 
 """Protected eval of a JS string (equivalent to duk_peval_string macro)."""
-peval_string(ctx, src::String) = DuktapeTest.duk_eval_raw(ctx, src, Csize_t(0), DUK_PEVAL_STRING_FLAGS)
+peval_string(ctx, src::String) = DuktapeTest.duk_peval_string(ctx, src)
 
 @testset "Duktape Verification" begin
 
@@ -70,7 +64,7 @@ peval_string(ctx, src::String) = DuktapeTest.duk_eval_raw(ctx, src, Csize_t(0), 
         @test ret == 0
 
         result = DuktapeTest.duk_get_string(ctx, Int32(-1))
-        @test result == "hello world"
+        @test unsafe_string(result) == "hello world"
 
         DuktapeTest.duk_pop(ctx)
         DuktapeTest.duk_destroy_heap(ctx)

@@ -71,6 +71,8 @@ struct WrapConfig
     module_name::String  # Empty = auto from project.name
     use_clang_jl::Bool
     varargs_overloads::Dict{String,Vector{Vector{String}}}
+    macros::Dict{String,Dict{String,Any}}
+    shim_headers::Vector{String}
 end
 
 """Nested struct for [llvm] section"""
@@ -162,12 +164,28 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     wrap_config = parse_wrap_config(data)
 
     # Parse each section with defaults
+    compile_config = parse_compile_config(data)
+    link_config = parse_link_config(data, wrap_config.language)
+
+    # Auto-enable aot_thunks for C+LTO projects when not explicitly set by user
+    compile_data = get(data, "compile", Dict())
+    if !haskey(compile_data, "aot_thunks") && wrap_config.language == :c && link_config.enable_lto
+        compile_config = CompileConfig(
+            compile_config.source_files,
+            compile_config.include_dirs,
+            compile_config.flags,
+            compile_config.defines,
+            compile_config.parallel,
+            true  # auto-enable aot_thunks
+        )
+    end
+
     config = RepliBuildConfig(
         parse_project_config(data, toml_path),
         parse_paths_config(data),
         parse_discovery_config(data),
-        parse_compile_config(data),
-        parse_link_config(data, wrap_config.language),
+        compile_config,
+        link_config,
         parse_binary_config(data),
         wrap_config,
         parse_llvm_config(data),
@@ -320,6 +338,17 @@ function parse_wrap_config(data::Dict)::WrapConfig
         varargs_overloads[String(func)] = sig_list
     end
 
+    # Parse macros
+    macros_raw = get(wrap, "macros", Dict())
+    macros = Dict{String,Dict{String,Any}}()
+    for (m_name, m_val) in macros_raw
+        if isa(m_val, Dict)
+            macros[String(m_name)] = m_val
+        end
+    end
+
+    shim_headers = get(wrap, "shim_headers", String[])
+
     language_str = get(wrap, "language", "cpp")
     language_sym = Symbol(language_str)
 
@@ -329,7 +358,9 @@ function parse_wrap_config(data::Dict)::WrapConfig
         language_sym,
         get(wrap, "module_name", ""),  # Empty = auto-generate
         get(wrap, "use_clang_jl", true),
-        varargs_overloads
+        varargs_overloads,
+        macros,
+        shim_headers
     )
 end
 
@@ -458,7 +489,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
         LinkConfig("2", false, String[], String[]),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}()),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[]),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -559,6 +590,12 @@ function save_config(config::RepliBuildConfig)
     end
     if !isempty(config.wrap.varargs_overloads)
         wrap_dict["varargs"] = config.wrap.varargs_overloads
+    end
+    if !isempty(config.wrap.macros)
+        wrap_dict["macros"] = config.wrap.macros
+    end
+    if !isempty(config.wrap.shim_headers)
+        wrap_dict["shim_headers"] = config.wrap.shim_headers
     end
     data["wrap"] = wrap_dict
 

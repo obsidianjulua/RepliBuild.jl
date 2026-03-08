@@ -23,8 +23,12 @@ include("Introspect/Binary.jl")
 include("Introspect/Julia.jl")
 include("Introspect/LLVM.jl")
 include("Introspect/Benchmarking.jl")
+include("Introspect/Project.jl")
 
 # Re-export public APIs from submodules
+
+# Project Introspection
+export project_artifacts, lto_ir, aot_ir, aot_symbols
 
 # Binary Introspection
 export symbols, dwarf_info, disassemble, headers, dwarf_dump

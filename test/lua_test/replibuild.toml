@@ -14,9 +14,10 @@ exclude = ["onelua.c", "lua.c", "luac.c", "ltests.c"]
 
 [compile]
 flags = ["-O2", "-fPIC"]
+aot_thunks = true
 
 [link]
-enable_lto = false
+enable_lto = true
 optimization_level = "2"
 
 [wrap]

@@ -7,6 +7,7 @@ module Compiler
 
 using Dates
 using JSON
+using Libdl
 
 # Import from parent RepliBuild module
 import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_dirs,
@@ -19,7 +20,7 @@ import ..LLVMEnvironment
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
        extract_compilation_metadata, save_compilation_metadata,
        compute_project_hash, is_project_cache_valid, save_project_hash,
-       assemble_bitcode
+       assemble_bitcode, sanitize_ir_for_julia
 
 # =============================================================================
 # INCREMENTAL BUILD SUPPORT
@@ -352,71 +353,15 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         end
     end
 
-    # If LTO is enabled, also emit a binary bitcode file (.bc) 
+    # If LTO is enabled, also emit a binary bitcode file (.bc)
     # for Julia's LLVM compiler to consume via llvmcall
     if config.link.enable_lto
         output_dir = get_output_path(config)
         mkpath(output_dir)
-        
-        # Also copy the text IR (.ll) — Base.llvmcall with string arg needs LLVM assembly text
-        # Inject alwaysinline, strip debug info and LLVM 19+ attributes that Julia's internal
-        # LLVM (which may be older) cannot parse.
+
         lto_ir_text = read(linked_ir, String)
-        lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
-        lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
-        # Replace all attribute blocks: strip LLVM-version-sensitive keywords that
-        # Julia's internal LLVM may not recognise (allockind, allocsize, memory(...), etc.),
-        # but PRESERVE "target-cpu" and "target-features" so that Julia's JIT can apply
-        # machine-specific optimisations (AVX2, FMA, etc.) when it re-JITs the inlined IR.
-        lto_ir_text = replace(lto_ir_text,
-            r"^(attributes\s+#\d+\s*=\s*\{)[^}]*(\})"m => function(m)
-                # Extract target-cpu and target-features if present
-                cpu_m  = match(r"\"target-cpu\"=\"([^\"]+)\"", m)
-                feat_m = match(r"\"target-features\"=\"([^\"]+)\"", m)
-                extras = String[]
-                cpu_m  !== nothing && push!(extras, "\"target-cpu\"=\"$(cpu_m[1])\"")
-                feat_m !== nothing && push!(extras, "\"target-features\"=\"$(feat_m[1])\"")
-                inner = isempty(extras) ? "alwaysinline" : "alwaysinline " * join(extras, " ")
-                hdr_end = findfirst('{', m)
-                "$(m[1:hdr_end]) $inner }"
-            end)
-        # --- LLVM 19+ instruction-level compatibility ---
-        # nuw on getelementptr
-        lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
-        lto_ir_text = replace(lto_ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
-        # inrange(-16, 24) on getelementptr
-        lto_ir_text = replace(lto_ir_text, r"\binrange\([^)]*\)\s*" => "")
-        # new-style debug intrinsics
-        lto_ir_text = replace(lto_ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
-        # captures(...) attribute on pointer params
-        lto_ir_text = replace(lto_ir_text, r"\bcaptures\([^)]*\)\s*" => "")
-        # dead_on_unwind attribute
-        lto_ir_text = replace(lto_ir_text, r"\bdead_on_unwind\b\s*" => "")
-        # initializes attribute (handles multiple ranges)
-        lto_ir_text = replace(lto_ir_text, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
-        # allocptr attribute
-        lto_ir_text = replace(lto_ir_text, r"\ballocptr\b\s*" => "")
-        # samesign flag on icmp
-        lto_ir_text = replace(lto_ir_text, r"\bicmp samesign\b" => "icmp")
-        # range() attribute on return types / call results
-        lto_ir_text = replace(lto_ir_text, r"\brange\([^)]*\)\s*" => "")
-        # nuw/nsw on trunc, nneg on zext/uitofp
-        lto_ir_text = replace(lto_ir_text, r"\btrunc (nuw |nsw )+" => "trunc ")
-        lto_ir_text = replace(lto_ir_text, r"\b(uitofp|zext) nneg " => s"\1 ")
-        # Strip all metadata references from anywhere (instructions, function definitions)
-        # This catches !dbg, !tbaa, !llvm.loop, etc.
-        lto_ir_text = replace(lto_ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
-        # Strip all numbered debug metadata entries (!NNN = !DIxxx / distinct !DIxxx)
-        lines = split(lto_ir_text, '\n')
-        filtered = filter(lines) do l
-            !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
-        end
-        # Remove all named debug metadata references entirely to avoid referencing undefined nodes
-        filtered2 = filter(filtered) do l
-            !occursin(r"^![a-zA-Z].*=\s*!\{", l)
-        end
-        lto_ir_text = join(filtered2, '\n')
-        
+        lto_ir_text = sanitize_ir_for_julia(lto_ir_text)
+
         filtered_ll_path = joinpath(output_dir, "$(output_name)_lto.ll")
         write(filtered_ll_path, lto_ir_text)
 
@@ -429,29 +374,184 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
 end
 
 """
+    sanitize_ir_for_julia(ir_text::String) -> String
+
+Sanitize LLVM IR text for compatibility with Julia's internal LLVM.
+Strips LLVM 19+ attributes/instructions, debug metadata, and converts varargs
+function bodies to extern declarations (va_start/va_end can't be JIT-compiled).
+Uses `inlinehint` (not `alwaysinline`) to avoid recursive inliner explosion on
+large modules.
+
+This is the single source of truth for IR compatibility — used by both the C source
+LTO pipeline and the MLIR AOT thunks pipeline.
+"""
+function sanitize_ir_for_julia(ir_text::String)::String
+    ir_text = replace(ir_text, r"\bnoinline\b" => "")
+    ir_text = replace(ir_text, r"\boptnone\b" => "")
+    # Replace all attribute blocks: strip LLVM-version-sensitive keywords,
+    # but PRESERVE "target-cpu" and "target-features" for machine-specific JIT opts.
+    ir_text = replace(ir_text,
+        r"^(attributes\s+#\d+\s*=\s*\{)[^}]*(\})"m => function(m)
+            cpu_m  = match(r"\"target-cpu\"=\"([^\"]+)\"", m)
+            feat_m = match(r"\"target-features\"=\"([^\"]+)\"", m)
+            extras = String[]
+            cpu_m  !== nothing && push!(extras, "\"target-cpu\"=\"$(cpu_m[1])\"")
+            feat_m !== nothing && push!(extras, "\"target-features\"=\"$(feat_m[1])\"")
+            inner = isempty(extras) ? "inlinehint" : "inlinehint " * join(extras, " ")
+            hdr_end = findfirst('{', m)
+            "$(m[1:hdr_end]) $inner }"
+        end)
+    # --- LLVM 19+ instruction-level compatibility ---
+    ir_text = replace(ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
+    ir_text = replace(ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
+    ir_text = replace(ir_text, r"\binrange\([^)]*\)\s*" => "")
+    ir_text = replace(ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
+    ir_text = replace(ir_text, r"\bcaptures\([^)]*\)\s*" => "")
+    ir_text = replace(ir_text, r"\bdead_on_unwind\b\s*" => "")
+    ir_text = replace(ir_text, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
+    ir_text = replace(ir_text, r"\ballocptr\b\s*" => "")
+    ir_text = replace(ir_text, r"\bicmp samesign\b" => "icmp")
+    ir_text = replace(ir_text, r"\brange\([^)]*\)\s*" => "")
+    ir_text = replace(ir_text, r"\btrunc (nuw |nsw )+" => "trunc ")
+    ir_text = replace(ir_text, r"\b(uitofp|zext) nneg " => s"\1 ")
+    # Strip all metadata references (!dbg, !tbaa, !llvm.loop, etc.)
+    ir_text = replace(ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
+    # Strip numbered debug metadata entries
+    lines = split(ir_text, '\n')
+    filtered = filter(lines) do l
+        !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
+    end
+    filtered2 = filter(filtered) do l
+        !occursin(r"^![a-zA-Z].*=\s*!\{", l)
+    end
+    ir_text = join(filtered2, '\n')
+
+    # Remove varargs function bodies — va_start/va_end intrinsics can't be JIT-resolved.
+    # Convert to extern declarations so calls route through the shared library.
+    ir_text = replace(ir_text,
+        r"^(define\s[^\n]*\.\.\.[^\n]*\{)\n(.*?)\n(\})"ms => function(m)
+            sig_match = match(r"define\s+(.*?)\s+(@\w+)\s*\(([^)]*)\)", m)
+            if sig_match !== nothing
+                "declare $(sig_match[1]) $(sig_match[2])($(sig_match[3]))"
+            else
+                m
+            end
+        end)
+    ir_text = replace(ir_text, r"^declare\s+void\s+@llvm\.va_(start|end)[^\n]*\n"m => "")
+
+    return ir_text
+end
+
+"""
 Assemble LLVM IR text (.ll) to bitcode (.bc).
-Prioritizes pure Julia internal Clang_unified_jll (to ensure perfect llvmcall compatibility)
-before falling back to the system LLVM toolchain.
+Uses Julia's own libLLVM via the C API (LLVMParseIRInContext + LLVMWriteBitcodeToFile)
+to guarantee bitcode version compatibility with Base.llvmcall.
+Falls back to Clang_unified_jll, then system llvm-as.
 """
 function assemble_bitcode(ll_path::String, bc_path::String)
-    pure_julia_success = false
+    # Primary: use Julia's own libLLVM directly — guaranteed version match
+    if _assemble_bitcode_libllvm(ll_path, bc_path)
+        return
+    end
+
+    # Fallback 1: Clang_unified_jll
     try
-        # Attempt to use Julia's internal Clang to emit a .bc file that perfectly matches the Julia LLVM version
         Clang_mod = Base.require(Base.PkgId(Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
         if isdefined(Clang_mod, :Clang_unified_jll)
             clang_cmd = Clang_mod.Clang_unified_jll.clang()
-            cmd = `$(clang_cmd) -Wno-override-module -x ir -emit-llvm -c $ll_path -o $bc_path`
+            cmd = `$(clang_cmd) -Wno-override-module -O0 -x ir -emit-llvm -c $ll_path -o $bc_path`
             run(cmd)
-            pure_julia_success = isfile(bc_path)
+            if isfile(bc_path)
+                return
+            end
         end
     catch e
         # Silently fallback
     end
-    
-    if !pure_julia_success
-        (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [ll_path, "-o", bc_path])
-        if bc_exit != 0
-            @warn "Failed to assemble bitcode for LTO: $bc_out"
+
+    # Fallback 2: system llvm-as
+    (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [ll_path, "-o", bc_path])
+    if bc_exit != 0
+        @warn "Failed to assemble bitcode for LTO: $bc_out"
+    end
+end
+
+# libLLVM path cached at module level
+const _LIBLLVM_PATH = Ref{String}("")
+
+function _get_libllvm_path()
+    if isempty(_LIBLLVM_PATH[])
+        for lib in Libdl.dllist()
+            if occursin("libLLVM", lib)
+                _LIBLLVM_PATH[] = lib
+                break
+            end
+        end
+    end
+    return _LIBLLVM_PATH[]
+end
+
+"""
+Parse LLVM IR text and write bitcode using Julia's own libLLVM C API.
+Returns true on success, false on failure.
+"""
+function _assemble_bitcode_libllvm(ll_path::String, bc_path::String)::Bool
+    libllvm = _get_libllvm_path()
+    isempty(libllvm) && return false
+
+    ir_text = read(ll_path, String)
+    ctx = C_NULL
+    mod_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+    msg_ptr = Ref{Ptr{UInt8}}(C_NULL)
+
+    try
+        ctx = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMContextCreate), Ptr{Cvoid}, ())
+        ctx == C_NULL && return false
+
+        # Create a memory buffer from the IR text
+        buf = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMCreateMemoryBufferWithMemoryRange),
+            Ptr{Cvoid},
+            (Ptr{UInt8}, Csize_t, Cstring, Cint),
+            ir_text, sizeof(ir_text), "lto_ir", 0)
+        buf == C_NULL && return false
+
+        # Parse the IR into a module
+        status = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMParseIRInContext),
+            Cint,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Ptr{Cvoid}}, Ref{Ptr{UInt8}}),
+            ctx, buf, mod_ptr, msg_ptr)
+        # Note: LLVMParseIRInContext takes ownership of buf — do not dispose it
+
+        if status != 0
+            if msg_ptr[] != C_NULL
+                errmsg = unsafe_string(msg_ptr[])
+                ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMDisposeMessage), Cvoid, (Ptr{UInt8},), msg_ptr[])
+                @warn "libLLVM IR parse failed: $(first(errmsg, 200))"
+            end
+            return false
+        end
+
+        # Write bitcode to file
+        rc = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMWriteBitcodeToFile),
+            Cint,
+            (Ptr{Cvoid}, Cstring),
+            mod_ptr[], bc_path)
+
+        if rc != 0
+            @warn "libLLVM failed to write bitcode to $bc_path"
+            return false
+        end
+
+        return isfile(bc_path)
+    catch e
+        @debug "libLLVM assemble_bitcode failed" exception=(e, catch_backtrace())
+        return false
+    finally
+        if mod_ptr[] != C_NULL
+            ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMDisposeModule), Cvoid, (Ptr{Cvoid},), mod_ptr[])
+        end
+        if ctx != C_NULL
+            ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMContextDispose), Cvoid, (Ptr{Cvoid},), ctx)
         end
     end
 end
@@ -628,6 +728,62 @@ function generate_template_instantiations(config::RepliBuildConfig, cpp_files::V
         println(io, "")
         for t in config.types.templates
             println(io, "template class $t;")
+        end
+    end
+
+    return vcat(cpp_files, [dummy_file])
+end
+
+"""
+Generate a C/C++ shim file to instantiate requested macros as typed functions
+so they appear in the DWARF metadata and can be wrapped.
+"""
+function generate_macro_shims(config::RepliBuildConfig, cpp_files::Vector{String})::Vector{String}
+    if isempty(config.wrap.macros)
+        return cpp_files
+    end
+
+    cache_dir = get_cache_path(config)
+    mkpath(cache_dir)
+    ext = config.wrap.language == :c ? "c" : "cpp"
+    dummy_file = joinpath(cache_dir, "replibuild_shims.$ext")
+
+    open(dummy_file, "w") do io
+        println(io, "// Auto-generated by RepliBuild to wrap macros into typed functions")
+        
+        for header in config.wrap.shim_headers
+            if startswith(header, "<") || startswith(header, "\\\"")
+                println(io, "#include $header")
+            else
+                println(io, "#include \"$header\"")
+            end
+        end
+        println(io, "")
+
+        for (macro_name, def) in config.wrap.macros
+            ret_type = get(def, "ret", "void")
+            args = get(def, "args", String[])
+            
+            # Create parameter string (e.g. "void* arg0, const char* arg1")
+            param_strs = String[]
+            arg_names = String[]
+            for (i, arg_t) in enumerate(args)
+                pname = "arg$(i-1)"
+                push!(param_strs, "$arg_t $pname")
+                push!(arg_names, pname)
+            end
+            
+            sig = "$ret_type replibuild_shim_$macro_name($(join(param_strs, ", ")))"
+            println(io, "$sig {")
+            
+            call_str = "$macro_name($(join(arg_names, ", ")))"
+            if ret_type == "void"
+                println(io, "    $call_str;")
+            else
+                println(io, "    return $call_str;")
+            end
+            println(io, "}")
+            println(io, "")
         end
     end
 
@@ -921,6 +1077,9 @@ function compile_project(config::RepliBuildConfig)
 
     # Generate template instantiations
     cpp_files = generate_template_instantiations(config, cpp_files)
+
+    # Generate macro shims
+    cpp_files = generate_macro_shims(config, cpp_files)
 
     if isempty(cpp_files)
         @warn "No source files found in config"

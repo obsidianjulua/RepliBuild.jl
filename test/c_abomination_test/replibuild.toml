@@ -6,14 +6,14 @@ allow_function_pointers = true
 
 [compile]
 parallel = true
-flags = ["-fPIC"]
+flags = ["-fPIC", "-O2"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test/src/c_abomination.c"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test/src"]
-aot_thunks = false
+aot_thunks = true
 
 [link]
-enable_lto = false
-optimization_level = "0"
+enable_lto = true
+optimization_level = "2"
 
 [binary]
 strip_symbols = false

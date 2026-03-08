@@ -2,257 +2,241 @@
 
 [![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/stable/)
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/dev/)
+[![Julia 1.10+](https://img.shields.io/badge/julia-1.10+-9558B2?logo=julia)](https://julialang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**ABI-aware C/C++ compiler bridge for Julia, powered by MLIR.**
+ABI-aware C/C++ compiler bridge for Julia. Compiles C/C++ source through an LLVM/MLIR pipeline, introspects DWARF debug metadata, and emits type-safe Julia bindings with correct struct layout, enum definitions, and calling conventions. Functions are automatically routed to one of three calling tiers — `llvmcall` with LTO bitcode, MLIR AOT thunks, or `ccall` — based on ABI complexity.
 
-RepliBuild ingests C/C++ source code, compiles it through an LLVM/MLIR pipeline, introspects DWARF debug metadata, and emits type-safe Julia bindings with correct struct layout, enum definitions, and calling conventions. Functions that require non-trivial ABI handling (packed structs, unions, virtual dispatch) are automatically routed through a JIT tier built on a custom MLIR dialect.
+## Requirements
 
-## Philosophy
+- Julia 1.10+
+- LLVM 21+ and Clang (system install; auto-detected, JLL fallback available for Tier 1)
+- CMake 3.20+ and `mlir-tblgen` (required for the `jlcs` MLIR dialect / Tier 2 only)
+- `libJLCS.so` built from `src/mlir/` via `./build.sh` (Tier 2 only; built automatically by `deps/build.jl`)
 
-RepliBuild is a **source-based wrapper generator**. It intentionally bypasses JLLs and BinaryBuilder to utilize modern LLVM 21 and MLIR for perfect, zero-edit C++ bindings. This requires the user to have a local toolchain installed, but in exchange provides:
+Run `RepliBuild.check_environment()` to verify which tiers are available.
 
-- **Perfectly optimized binaries** tailored to the host machine (native `-march`, LTO across the FFI boundary)
-- **Automatic DWARF-based wrappers** that standard tools cannot generate — struct layout, enum mappings, virtual dispatch, and idiomatic Julia types are all derived from debug metadata, not manual annotations
-- **Zero-cost abstractions** — eligible functions are inlined across the C++/Julia boundary via `Base.llvmcall`
-
-By owning the heavy toolchain requirement, RepliBuild occupies a different point in the design space than BinaryBuilder: instead of distributing pre-compiled binaries that work everywhere, it generates *exact* bindings on your machine with *zero* manual FFI boilerplate. If you are wrapping a C++ library with templates, virtual methods, or complex ABI, this is the tool for it.
-
-Run `RepliBuild.check_environment()` to verify your toolchain is ready.
-
-## Install
+## Installation
 
 ```julia
-using Pkg
-Pkg.add("RepliBuild")
+julia> using Pkg; Pkg.add("RepliBuild")
 ```
 
-Requires Julia 1.10+ and a system LLVM/Clang toolchain (auto-detected, falls back to JLL).
-
-## Usage
-
-### Step by step
+## Quick start
 
 ```julia
 using RepliBuild
 
-# 1. Scan source files, resolve #include dependencies, generate replibuild.toml
-RepliBuild.discover("path/to/project")
-
-# 2. Compile to LLVM IR, optimize, link, emit shared library
-RepliBuild.build("path/to/project/replibuild.toml")
-
-# 3. Parse DWARF metadata, generate Julia module with ccall wrappers
-RepliBuild.wrap("path/to/project/replibuild.toml")
-```
-
-Or chain everything in one call:
-
-```julia
+# Scan a C/C++ project, generate replibuild.toml, compile, and wrap in one call
 RepliBuild.discover("path/to/project", build=true, wrap=true)
+
+# Load the generated module
+include("path/to/project/julia/MyProject.jl")
+using .MyProject
 ```
 
-### One-liner with the package registry
+Or step by step:
 
 ```julia
-using RepliBuild
-
-# Verify your toolchain is ready.
-RepliBuild.check_environment()
-
-# Register a project once
-RepliBuild.register("path/to/project/replibuild.toml")
-
-# Then load it anywhere — builds on first call, cached thereafter
-Lua = RepliBuild.use("lua_wrapper")
-```
-
-The generated module lives in `julia/ProjectName.jl` and can be loaded directly:
-
-```julia
-include("path/to/project/julia/ProjectName.jl")
-using .ProjectName
-```
-
-### Utilities
-
-```julia
-# Show project info (source files, config, build status)
-RepliBuild.info("path/to/project/replibuild.toml")
-
-# Clean build artifacts
-RepliBuild.clean("path/to/project/replibuild.toml")
-
-# Check LLVM/Clang/MLIR toolchain status
-RepliBuild.check_environment()
+toml = RepliBuild.discover("path/to/project")  # generates replibuild.toml
+RepliBuild.build(toml)                          # Clang → LLVM IR → .so + DWARF metadata
+RepliBuild.wrap(toml)                           # DWARF → Julia module in julia/
 ```
 
 ### Package registry
 
+`use` is the one-call path: resolves dependencies, builds if needed, caches artifacts in `~/.replibuild/builds/<hash>/`, and returns a loaded `Module`.
+
 ```julia
-# Register a project in the global registry (~/.replibuild/registry/)
-RepliBuild.register("replibuild.toml")
-
-# List all registered packages
-RepliBuild.list_registry()
-
-# Load a registered package (builds + wraps + caches automatically)
-MyLib = RepliBuild.use("my_lib")
-
-# Remove a package from the registry
-RepliBuild.unregister("my_lib")
-
-# Scaffold a distributable Julia package from a registered project
-RepliBuild.scaffold_package("MyLibWrapper")
+RepliBuild.register("path/to/project/replibuild.toml")  # one-time registration
+Lua = RepliBuild.use("lua")                              # build + wrap + load, cached
+Lua.luaL_newstate()
 ```
 
-## What it handles
+```julia
+RepliBuild.list_registry()                    # print all registered packages
+RepliBuild.unregister("lua")                  # remove from registry
+RepliBuild.scaffold_package("LuaWrapper")     # generate a distributable Julia package
+```
 
-- **Structs** with correct field order, alignment padding, and forward declarations for circular references
-- **Enums** mapped to Julia `@enum` with correct underlying types
-- **Unions** as `NTuple{N,UInt8}` with typed getter/setter accessors
-- **Bitfields** with bit-level extraction
-- **Function pointers** and variadic functions (typed overloads via config)
-- **Multi-level pointers** (`T**` -> `Ptr{Ptr{T}}`) and reference types (`T&` -> `Ref{T}`)
-- **C++ virtual methods** via MLIR JIT thunks (or statically via AOT thunks)
-- **Idiomatic Julia structs** — factory/destructor pairs are detected and wrapped into `mutable struct` types with GC-managed finalizers and multiple-dispatch method proxies
-- **Automatic finalizers** for types with destructors (generates `ManagedX` wrappers with GC integration)
-- **Global variables** via `cglobal` accessors
-- **Git/local/system dependencies** — external C/C++ libraries fetched, filtered, and compiled automatically via `[dependencies]` in `replibuild.toml`
-- **Template instantiation** — declare `templates = ["std::vector<int>"]` and RepliBuild forces Clang to emit the DWARF for those types
-- **Zero-cost LTO dispatch** — when `enable_lto = true`, eligible functions are emitted as `Base.llvmcall` paths that let Julia's JIT inline C++ code directly into hot loops
+## Three-tier dispatch
 
-## Architecture
+Tier selection is automatic. The wrapper generator analyses each function signature against DWARF metadata and emits the appropriate calling convention.
 
-RepliBuild operates as a two-tier dispatch system:
+| Tier | Mechanism | When selected |
+|------|-----------|---------------|
+| **1** | `Base.llvmcall((bitcode, sym), ...)` | POD args, scalar/pointer return, LTO bitcode available |
+| **2** | MLIR AOT thunks via `libJLCS.so` | Packed structs, unions, large struct return, C++ virtual dispatch |
+| **3** | `ccall` | Fallback when bitcode is unavailable |
 
-**Tier 1 (ccall / llvmcall)** — Standard functions with POD arguments and scalar/small struct returns go through direct `ccall`. Zero overhead beyond the foreign call itself. When `enable_lto = true`, eligible functions are upgraded to `Base.llvmcall`, embedding the C++ LLVM bitcode directly into Julia's JIT pipeline so the compiler can inline across the language boundary. This makes the C++ IR visible to Julia's optimizer, enabling cross-language AD with tools like Enzyme.jl.
+**Tier 1 (llvmcall / LTO)** — LTO artifacts are LLVM bitcode (`.bc`) assembled by `Clang_unified_jll` to guarantee version-matched IR. The C++ IR merges into Julia's JIT pipeline, enabling cross-language inlining, vectorization, and AD (e.g. Enzyme.jl). Enabled by `enable_lto = true` in `[link]`; defaults to `true` for pure-C projects.
 
-**Tier 2 (MLIR JIT / AOT)** — Functions involving packed structs, unions, large struct returns, or virtual dispatch are compiled through a custom MLIR dialect (`jlcs`) that handles ABI marshalling correctly. The JIT engine caches compiled symbols with a lock-free read path for hot calls. When `aot_thunks = true`, these thunks are pre-compiled to a static `.so` at build time, eliminating JIT startup cost entirely.
+**Tier 2 (MLIR JIT / AOT)** — A custom MLIR dialect (`jlcs`) handles ABI marshalling for non-trivial types. JIT symbols are cached with a lock-free read path. Set `aot_thunks = true` to pre-compile thunks to a `_thunks.so` at build time, eliminating JIT startup cost.
 
-The tier selection is automatic. The wrapper generator analyzes each function's signature against DWARF metadata and routes accordingly.
+**Tier 3 (ccall)** — Direct `ccall` with zero setup. The unconditional fallback.
 
-**Idiomatic wrappers** — On top of the raw bindings, `Wrapper.jl` clusters factory functions, destructors, and methods by C++ class name and emits `mutable struct` types with GC-managed finalizers and multiple-dispatch method proxies, so user code reads like natural Julia rather than raw FFI.
+## What gets wrapped
 
-### Pipeline
+- **Structs** — correct field order, alignment padding, topological sort for circular references, `Ptr{X}` soft-dependency handling
+- **Enums** — `@enum` with correct underlying types; Clang.jl AST walker (not regex) handles `enum class`, hex values, namespaces
+- **Unions** — `NTuple{N,UInt8}` with typed getter/setter accessors
+- **Bitfields** — bit-level extraction
+- **Function pointers** — DWARF signature parsing to `@cfunction`-compatible type strings
+- **Variadic functions** — typed overloads declared in `[wrap.varargs]`
+- **Multi-level pointers / references** — `T**` → `Ptr{Ptr{T}}`, `T&` → `Ref{T}`
+- **C++ virtual methods** — MLIR JIT thunks or static AOT thunks
+- **Idiomatic wrappers** — factory/destructor pairs clustered by class name into `mutable struct` with GC-managed finalizers and multiple-dispatch method proxies (`ManagedX`)
+- **Global variables** — `cglobal` accessors
+- **Templates** — declare `templates = ["std::vector<int>"]`; RepliBuild forces Clang to emit DWARF for those instantiations
+
+## Pipeline
 
 ```
-C/C++ Source + [dependencies] (git/local/system)
-    |
-    v
-Dependency Resolver (clone/update, filter excludes, inject into compile graph)
-    |
-    v
-Discovery (scan files, parse #include graph)
-    |
-    v
-Compilation (Clang -> LLVM IR, per-file caching, parallel)
-    |
-    v
-Linking (IR merge, LTO, optimization → .so + optional _lto.ll + optional _thunks.so)
-    |
-    v
-Binary (shared library + DWARF metadata extraction)
-    |
-    v
-Wrapping (DWARF introspection -> raw ccall/llvmcall wrappers + idiomatic mutable structs)
-    |
-    v
-JIT Init (MLIR IR generation -> execution engine, on demand — or AOT .so, if pre-compiled)
+C/C++ Source + [dependencies]
+    │
+    ▼
+DependencyResolver   — clone/update git deps, filter excludes, inject into compile graph
+    │
+    ▼
+Discovery            — scan files, resolve #include graph, emit replibuild.toml
+    │
+    ▼
+Compiler             — Clang/clang++ → per-file LLVM IR; incremental mtime + project-hash cache; parallel
+    │
+    ▼
+Linker               — llvm-link + llvm-opt → .so/.dylib + _lto.bc (Tier 1) + _thunks.so (Tier 2, optional)
+    │
+    ▼
+DWARFParser          — llvm-dwarfdump → ClassInfo / VtableInfo structs
+    │
+    ▼
+Wrapper              — DWARF + nm symbols → Julia module (C and C++ generators are independent)
+    │
+    ▼
+JITManager           — on-demand: JLCSIRGenerator emits jlcs IR → MLIRNative JIT → thunk cache
 ```
+
+### Caching
+
+Two independent layers:
+- **Per-file IR cache** (`.replibuild_cache/`) — mtime-based, skips individual source files whose IR is current.
+- **Project content hash** — hashes `replibuild.toml`, all source and header contents, and git HEAD. If the hash matches, `build()` exits in sub-second time without invoking any compiler.
 
 ## Configuration
 
-`replibuild.toml` is generated by `discover()` and can be customized:
+`replibuild.toml` is generated by `discover()` and is hand-editable:
 
 ```toml
 [project]
 name = "MyProject"
 
 [compile]
-flags = ["-std=c++17", "-fPIC", "-O3"]
+flags    = ["-std=c++17", "-fPIC", "-O3"]
 parallel = true
-aot_thunks = false        # Pre-compile MLIR C++ vtable thunks into a static .so
 
 [link]
 optimization_level = "3"
-enable_lto = false        # Emit LLVM IR for Base.llvmcall zero-cost dispatch
+enable_lto         = false   # true → emit _lto.bc for Base.llvmcall (Tier 1)
+
+[binary]
+type           = "shared"    # "shared" | "static" | "executable"
+strip_symbols  = false
 
 [wrap]
-style = "clang"
+language     = "cpp"         # "c" | "cpp"  (auto-detected by discover())
 use_clang_jl = true
+aot_thunks   = false         # true → pre-compile MLIR thunks to _thunks.so (Tier 2)
 
 [wrap.varargs]
-# Typed overloads for variadic functions
 printf = [["Cstring", "Cint"], ["Cstring", "Cdouble"]]
 
 [types]
-strictness = "warn"           # "strict", "warn", or "permissive"
-allow_unknown_structs = true
+strictness             = "warn"   # "strict" | "warn" | "permissive"
+allow_unknown_structs  = true
 allow_function_pointers = true
-templates = ["std::vector<int>", "std::vector<double>"]
-template_headers = ["<vector>"]
+templates              = ["std::vector<int>"]
+template_headers       = ["<vector>"]
 
-# External git dependency: fetched, filtered, and compiled automatically
+[cache]
+enabled   = true
+directory = ".replibuild_cache"
+
 [dependencies.cjson]
-type = "git"
-url = "https://github.com/DaveGamble/cJSON"
-tag = "v1.7.18"
+type    = "git"
+url     = "https://github.com/DaveGamble/cJSON"
+tag     = "v1.7.18"
 exclude = ["test", "fuzzing", "CMakeLists.txt"]
 ```
 
-See [docs/src/config.md](docs/src/config.md) for the full reference.
+`language = "c"` defaults `enable_lto = true`; `language = "cpp"` defaults `enable_lto = false`.
 
-## Tested against
-
-The test suite compiles and wraps real-world C/C++ projects end-to-end:
-
-| Project | Source | What it validates |
-|---------|--------|-------------------|
-| **Lua 5.4.6** | 30 files, full VM + stdlib | State management, stack ops, code eval, Julia<->Lua callbacks, coroutines |
-| **Duktape 2.7.0** | 101K-line JS engine amalgamation | Compiles monolithic C, evaluates JavaScript from Julia |
-| **SQLite 3.49.1** | 261K-line database engine | Full C API wrap with varargs support |
-| **Stress test** | Vectors, matrices, complex numerics | DWARF extraction, struct layout, introspection toolkit |
-| **VTable test** | C++ inheritance hierarchy | Virtual dispatch via MLIR JIT (Circle/Rectangle polymorphism) |
-| **Callback test** | Bidirectional FFI | Julia `@cfunction` passed to C++ event loops |
-| **Benchmark test** | Strided matrix views | Zero-copy struct pointer passing, matches bare `ccall` at ~94ns for 4x4 matmul |
-| **JIT edge cases** | Scalars, structs, packed structs | 3-tier benchmark: bare ccall vs wrapper vs MLIR JIT |
-
-Test sources for Lua, Duktape, and SQLite are downloaded on demand via `setup.jl` scripts or git config's in replibuild.toml (not vendored).
+Full reference: [docs/src/config.md](docs/src/config.md)
 
 ## Introspection
 
-RepliBuild includes a built-in analysis toolkit covering binary analysis, Julia IR inspection, LLVM tooling, benchmarking, and data export:
+`RepliBuild.Introspect` provides binary analysis, Julia IR inspection, LLVM pass tooling, and benchmarking:
 
 ```julia
 using RepliBuild.Introspect
 
-# Binary analysis
 Introspect.symbols("lib.so", filter=:functions)
 Introspect.dwarf_info("lib.so")
 Introspect.disassemble("lib.so", "my_function")
 
-# Julia IR inspection
 Introspect.code_llvm(my_func, (Cint, Cint))
 Introspect.analyze_type_stability(my_func, (Cint, Cint))
 Introspect.analyze_simd(my_func, (Cint, Cint))
 
-# LLVM tooling
 Introspect.optimize_ir("build/module.ll", "3")
 Introspect.compare_optimization("build/module.ll", ["0", "2", "3"])
 
-# Benchmarking
 result = Introspect.benchmark(f, args...; samples=1000)
 Introspect.export_json(result, "bench.json")
 ```
 
-See [docs/src/introspect.md](docs/src/introspect.md) for the full 25+ function reference.
+Full reference (25+ functions): [docs/src/introspect.md](docs/src/introspect.md)
+
+## Test coverage
+
+The CI suite (`test/runtests.jl`) runs the stress test, MLIR dialect tests, and integration tests. The full developer suite (`test/devtests.jl`) additionally wraps real-world C/C++ projects end-to-end:
+
+| Project | Source | Coverage |
+|---------|--------|----------|
+| Lua 5.4.6 | 30 files, full VM + stdlib | State management, stack ops, `lua_pcall`, Julia↔Lua callbacks, coroutines |
+| SQLite 3.49.1 | 261 K-line database engine | Full C API, varargs, opaque pointer lifecycle |
+| Duktape 2.7.0 | 101 K-line JS engine (amalgamation) | Monolithic C compile, `duk_eval_string`, stack round-trips |
+| cJSON | Multi-file C library | Git dependency resolution, `[dependencies]` workflow |
+| Stress test | Vectors, matrices, numerics | DWARF extraction, struct layout, all wrapper generator paths |
+| VTable test | C++ inheritance hierarchy | Virtual dispatch via MLIR JIT (Circle/Rectangle polymorphism) |
+| Callback test | Bidirectional FFI | Julia `@cfunction` passed to C++ event loops |
+| Benchmark test | Strided 4×4 matrix views | Zero-copy struct pointer passing; wrapper overhead ~94 ns vs bare `ccall` |
+| JIT edge cases | Scalars, packed structs, unions | Three-tier benchmark: `ccall` vs wrapper vs MLIR JIT |
+
+External sources (Lua, SQLite, Duktape) are downloaded on demand by `setup.jl` scripts and are not vendored.
+
+## Public API
+
+```
+discover(path; force, build, wrap)   → toml_path
+build(toml_path; clean)              → library_path
+wrap(toml_path; headers)             → wrapper_path
+use(name; force_rebuild, verbose)    → Module
+register(toml_path; name, verified)  → RegistryEntry
+unregister(name)
+list_registry()
+clean(toml_path)
+info(toml_path)
+check_environment(; verbose, throw_on_error) → ToolchainStatus
+scaffold_package(name; path)         → package_path
+```
 
 ## Documentation
 
-- [User Guide](docs/src/guide.md) — Workflow and configuration
-- [Configuration Reference](docs/src/config.md) — All `replibuild.toml` options
-- [Introspection Tools](docs/src/introspect.md) — Binary analysis, benchmarking, data export
-- [MLIR / JLCS Dialect](docs/src/mlir.md) — JIT internals and the custom dialect
+- [User Guide](docs/src/guide.md)
+- [Configuration Reference](docs/src/config.md)
+- [Introspection Tools](docs/src/introspect.md)
+- [MLIR / JLCS Dialect](docs/src/mlir.md)
+- [Architecture](docs/architecture.md)
 - [Changelog](CHANGELOG.md)
 
 ## License

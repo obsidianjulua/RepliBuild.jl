@@ -109,9 +109,18 @@ function get_struct_definition_string(name::String, info::Any)
     
     members = get(info, "members", [])
     member_types = String[]
+    sum_size = 0
 
     for m in members
         t = get(m, "c_type", "void*")
+        m_size = try
+            s = get(m, "size", 0)
+            s isa String ? parse(Int, s) : s
+        catch
+            0
+        end
+        sum_size += m_size
+        
         mlir_t = map_cpp_type(t)
         # Convert bare named struct references (!llvm.struct<"Name">) to aliases (!Struct_Name)
         # because bare named struct refs are only valid in recursive struct contexts in MLIR
@@ -121,6 +130,12 @@ function get_struct_definition_string(name::String, info::Any)
             mlir_t = "!Struct_$(safe_name)"
         end
         push!(member_types, mlir_t)
+    end
+    
+    if !is_packed && dwarf_size > 0 && sum_size < dwarf_size
+        # Struct size is larger than sum of parsed members (missing fields/unions or trailing padding).
+        # We append a byte array to make up the difference so ABI sizing matches.
+        push!(member_types, "!llvm.array<$(dwarf_size - sum_size) x i8>")
     end
 
     if is_packed
@@ -168,15 +183,34 @@ Used for constructing values of packed structs.
 function get_llvm_equivalent_type_string(name::String, info::Any)
     members = get(info, "members", [])
     member_types = String[]
+    sum_size = 0
     
     for m in members
         t = get(m, "c_type", "void*")
+        m_size = try
+            s = get(m, "size", 0)
+            s isa String ? parse(Int, s) : s
+        catch
+            0
+        end
+        sum_size += m_size
         mlir_t = map_cpp_type(t)
         push!(member_types, mlir_t)
     end
     
+    dwarf_size_str = get(info, "byte_size", "0")
+    dwarf_size = try
+        startswith(dwarf_size_str, "0x") ? parse(Int, dwarf_size_str[3:end], base=16) : parse(Int, dwarf_size_str)
+    catch
+        0
+    end
+
     is_packed = is_struct_packed(info)
     packed_attr = is_packed ? "packed " : ""
+    
+    if !is_packed && dwarf_size > 0 && sum_size < dwarf_size
+        push!(member_types, "!llvm.array<$(dwarf_size - sum_size) x i8>")
+    end
     
     if isempty(member_types)
          return "!llvm.struct<\"$(name)\", opaque>" # Fallback
@@ -195,11 +229,32 @@ Used for thunk return types so Julia can read the struct with natural alignment.
 function get_llvm_aligned_type_string(name::String, info::Any)
     members = get(info, "members", [])
     member_types = String[]
+    sum_size = 0
 
     for m in members
         t = get(m, "c_type", "void*")
+        m_size = try
+            s = get(m, "size", 0)
+            s isa String ? parse(Int, s) : s
+        catch
+            0
+        end
+        sum_size += m_size
         mlir_t = map_cpp_type(t)
         push!(member_types, mlir_t)
+    end
+    
+    dwarf_size_str = get(info, "byte_size", "0")
+    dwarf_size = try
+        startswith(dwarf_size_str, "0x") ? parse(Int, dwarf_size_str[3:end], base=16) : parse(Int, dwarf_size_str)
+    catch
+        0
+    end
+    
+    is_packed = is_struct_packed(info)
+
+    if !is_packed && dwarf_size > 0 && sum_size < dwarf_size
+        push!(member_types, "!llvm.array<$(dwarf_size - sum_size) x i8>")
     end
 
     if isempty(member_types)
