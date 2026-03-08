@@ -1,60 +1,71 @@
 # RepliBuild.jl
 
-**A No-BS, Zero-Overhead C++ ↔ Julia JIT Bridge.**
+```@meta
+CurrentModule = RepliBuild
+```
 
-RepliBuild.jl isn't just another `ccall` wrapper generator. It is a full ABI-aware compiler bridge powered by a custom MLIR dialect (`jlcs`). It ingests raw C++ source code, parses the DWARF debug info, maps out deep C++ inheritance and vtables, and JIT-compiles it directly into type-safe, native Julia bindings.
+ABI-aware C/C++ compiler bridge for Julia. Compiles C/C++ source through an LLVM/MLIR pipeline, introspects DWARF debug metadata, and emits type-safe Julia bindings with correct struct layout, enum definitions, and calling conventions.
 
-## What it actually does
+Functions are automatically routed to one of three calling tiers — `Base.llvmcall` with LTO bitcode, MLIR AOT thunks, or `ccall` — based on ABI complexity.
 
-1. **JIT-to-JIT Execution**: Passes Julia closures into C++ event loops and executes C++ virtual methods from Julia. It crosses the boundary seamlessly.
-2. **Native VTable Dispatch**: Automatically resolves and calls C++ virtual methods directly in IR (`jlcs.vcall`). No "fragile base class" hacks. 
-3. **Zero-Copy Arrays**: Implements N-dimensional strided array views natively in MLIR (`jlcs.load_array_element`). Your `Vector{Float64}` maps exactly to C++ multi-dimensional memory layouts without copies.
-4. **Dependency-Aware Builds**: Discovers your C++ files, parses `#include` trees, caches aggressively, and builds parallelized shared libraries via an embedded LLVM/MLIR toolchain.
-5. **No Boilerplate**: You don't write bindings. It extracts `struct` layouts, enums, function pointers, and methods straight from the compiled DWARF metadata.
-6. **Git Dependencies**: Declare `[dependencies.mylib]` with a git URL and tag — RepliBuild clones, filters, and compiles the external library automatically alongside your own sources.
-7. **Idiomatic Julia Wrappers**: Factory/destructor pairs are automatically detected and wrapped into `mutable struct` types with GC finalizers and multiple-dispatch method proxies.
-8. **Zero-Cost LTO**: With `enable_lto = true`, hot C++ functions are emitted as `Base.llvmcall` paths so Julia's LLVM JIT can inline them directly into your Julia hot loops.
-9. **AOT Thunks**: Pre-compile all virtual dispatch thunks at build time (`aot_thunks = true`) for zero-latency polymorphic calls in production.
-10. **Template Instantiation**: Declare `templates = ["std::vector<int>"]` and RepliBuild forces Clang to emit the DWARF for those types automatically.
-11. **Package Registry**: `use("pkg")` builds on first call, caches globally, loads instantly on subsequent calls. `register`, `list_registry`, `unregister`, `scaffold_package` for full lifecycle management.
+## Overview
 
-## Quickstart (The No-BS Workflow)
+RepliBuild is a source-based wrapper generator. Rather than wrapping pre-compiled binaries, it compiles C/C++ source code locally using LLVM 21+ and MLIR, then derives Julia bindings from the resulting DWARF debug metadata. This approach produces exact ABI-correct wrappers without manual annotations.
 
-Drop this in the root of your C++ project:
+### Three-tier dispatch
+
+| Tier | Mechanism | When selected |
+|------|-----------|---------------|
+| 1 | `Base.llvmcall` | POD args, scalar/pointer return, LTO bitcode available |
+| 2 | MLIR AOT thunks (`libJLCS.so`) | Packed structs, unions, large struct return, C++ virtual dispatch |
+| 3 | `ccall` | Fallback when bitcode is unavailable |
+
+Tier selection is automatic — the wrapper generator analyses each function signature against DWARF metadata and emits the appropriate calling convention.
+
+## Quick start
 
 ```julia
-using Pkg; Pkg.add("RepliBuild")
 using RepliBuild
 
-# 1. Scans your C++ files, builds the `#include` graph, and generates `replibuild.toml`
-RepliBuild.discover()
+# Scan a C/C++ project, generate replibuild.toml, compile, and wrap
+RepliBuild.discover("path/to/project", build=true, wrap=true)
 
-# 2. Compiles your C++ code to LLVM IR, optimizes it, and emits a shared library
-RepliBuild.build()
-
-# 3. Parses the DWARF data and generates the native Julia wrapper module
-RepliBuild.wrap()
+# Load the generated module
+include("path/to/project/julia/MyProject.jl")
+using .MyProject
 ```
 
-Or just do it all at once:
-```julia
-RepliBuild.discover(build=true, wrap=true)
-```
-
-### Use the package registry for instant loads
+Or step by step:
 
 ```julia
-# First time: builds and caches the project
-Lua = RepliBuild.use("lua_wrapper")
-
-# Second time onward: loads from cache in milliseconds
-Lua = RepliBuild.use("lua_wrapper")
-
-# List registered packages
-RepliBuild.list_registry()
+toml = RepliBuild.discover("path/to/project")  # generates replibuild.toml
+RepliBuild.build(toml)                          # Clang → LLVM IR → .so + DWARF metadata
+RepliBuild.wrap(toml)                           # DWARF → Julia module in julia/
 ```
 
-## Example: wrapping an external git library
+### Package registry
+
+```julia
+RepliBuild.register("path/to/project/replibuild.toml")  # one-time registration
+Lua = RepliBuild.use("lua")                              # build + wrap + load, cached
+Lua.luaL_newstate()
+```
+
+## What gets wrapped
+
+- **Structs** with correct field order, alignment padding, and topological sort for circular references
+- **Enums** via `@enum` with correct underlying types (Clang.jl AST walker)
+- **Unions** as `NTuple{N,UInt8}` with typed getter/setter accessors
+- **Bitfields** with bit-level extraction
+- **Function pointers** with DWARF signature parsing to `@cfunction`-compatible types
+- **Variadic functions** with typed overloads via `[wrap.varargs]` config
+- **Multi-level pointers / references** — `T**` → `Ptr{Ptr{T}}`, `T&` → `Ref{T}`
+- **C++ virtual methods** via MLIR JIT thunks or static AOT thunks
+- **Idiomatic wrappers** — factory/destructor pairs → `mutable struct` with GC finalizers
+- **Global variables** via `cglobal` accessors
+- **Templates** — declare in `[types].templates`; RepliBuild forces DWARF emission
+
+## Example: wrapping a git dependency
 
 ```toml
 # replibuild.toml
@@ -76,45 +87,46 @@ obj = cJSON_CreateObject()
 cJSON_AddStringToObject(obj, "key", "value")
 ```
 
-## Documentation
+## Configuration
 
-- **[No-BS User Guide](guide.md)**: Detailed instructions on workflows, git dependencies, idiomatic wrappers, LTO, AOT thunks, template instantiation, and the package registry.
-- **[Configuration Reference](config.md)**: Complete `replibuild.toml` option reference including the new `[dependencies]` section.
-- **[API Reference](api.md)**: Documentation for the public API.
-- **[Introspection](introspect.md)**: Deep dive into binary analysis and performance tools.
-- **[MLIR / JLCS Dialect Internals](mlir.md)**: Advanced guide for MLIR integration.
-
-## Realistic Configuration
-
-The `replibuild.toml` file gives you full control over the build process:
+The [`replibuild.toml`](config.md) file controls the entire build. Generated by `discover()`, hand-editable:
 
 ```toml
 [project]
 name = "MyEngine"
-root = "."
 
 [compile]
-flags        = ["-O3", "-std=c++17", "-fPIC"]
-parallel     = true
-aot_thunks   = false   # set true to pre-compile vtable thunks
+flags    = ["-O3", "-std=c++17", "-fPIC"]
+parallel = true
 
 [link]
-enable_lto         = false   # set true for Base.llvmcall zero-cost dispatch
+enable_lto         = false   # true → emit _lto.bc for Base.llvmcall (Tier 1)
 optimization_level = "3"
 
 [wrap]
-style        = "clang"
+language     = "cpp"         # "c" | "cpp" (auto-detected by discover())
 use_clang_jl = true
+aot_thunks   = false         # true → pre-compile MLIR thunks (Tier 2)
 
 [types]
-allow_unknown_structs   = true
-allow_function_pointers = true
-strictness              = "warn"
-templates               = ["std::vector<int>"]
-template_headers        = ["<vector>"]
+strictness = "warn"
+templates  = ["std::vector<int>"]
+template_headers = ["<vector>"]
 
 [dependencies.mylib]
 type = "git"
 url  = "https://github.com/example/mylib"
 tag  = "v1.0.0"
 ```
+
+See the [Configuration Reference](config.md) for all available options.
+
+## Documentation
+
+- **[User Guide](guide.md)** — Workflows, dependencies, LTO, AOT thunks, templates, registry
+- **[Configuration Reference](config.md)** — Complete `replibuild.toml` option reference
+- **[API Reference](api.md)** — Public API documentation
+- **[Introspection Tools](introspect.md)** — Binary analysis, IR inspection, benchmarking
+- **[MLIR / JLCS Dialect](mlir.md)** — Custom MLIR dialect internals
+- **[Benchmarks](benchmarks.md)** — Zero-copy benchmark data
+- **[Internals](internals.md)** — Module architecture for contributors

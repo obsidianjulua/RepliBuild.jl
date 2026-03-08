@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.4.0"
+const VERSION = v"2.4.2"
 
 # ============================================================================
 # LOAD CORE MODULES

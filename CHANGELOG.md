@@ -1,6 +1,8 @@
 # Changelog
 
-## v2.4.0
+All notable changes to RepliBuild.jl are documented in this file.
+
+## v2.4.2
 
 ### Refactor: Wrapper Modularization
 
@@ -62,7 +64,7 @@ language = "c"   # or "cpp" (default)
 - Added `*.bak` to suppress editor backup files.
 - Added `__pycache__/` and `*.pyc` to suppress Python bytecache from helper scripts.
 
-## v2.4.0
+## v2.4.1
 
 ### Improved: LTO Pipeline — Bitcode-First Loading
 

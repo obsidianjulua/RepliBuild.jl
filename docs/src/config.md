@@ -58,7 +58,7 @@ Settings for linking and optimizing the LLVM IR.
 | Key | Type | Description | Default |
 |:--- |:---- |:----------- |:------- |
 | `optimization_level` | String | Optimization level (`"0"`, `"1"`, `"2"`, `"3"`, `"s"`, `"z"`). | `"2"` |
-| `enable_lto` | Bool | Enable Link-Time Optimization. When `true`, also emits `<name>_lto.ll` (LLVM text IR) alongside the shared library. The generated Julia wrapper loads this file at parse time and routes eligible functions through `Base.llvmcall` so Julia's JIT can inline C++ code directly into hot loops. Falls back to `ccall` automatically if the file is absent. | `false` |
+| `enable_lto` | Bool | Enable Link-Time Optimization. When `true`, emits `<name>_lto.bc` (LLVM bitcode) alongside the shared library. The generated Julia wrapper loads this bitcode at parse time and routes eligible functions through `Base.llvmcall` so Julia's JIT can inline C++ code directly into hot loops. Falls back to `ccall` automatically if the `.bc` file is absent. Bitcode is assembled via `Clang_unified_jll` to guarantee LLVM version compatibility with Julia's internal LLVM. | `false` |
 | `link_libraries` | Vector{String} | External libraries to link against (e.g., `["stdc++fs"]`). | `[]` |
 
 ## `[binary]`

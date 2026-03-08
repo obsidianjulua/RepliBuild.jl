@@ -251,14 +251,16 @@ This is the recommended setting for production deployments where predictable lat
 
 ## Running Tests
 
-The CI-friendly suite (stress test + MLIR unit tests + registry tests) runs in under a minute:
+The CI suite (stress test + MLIR unit tests + registry tests):
 
 ```bash
 julia --project=. test/runtests.jl
 ```
 
-For a full integration run against real-world libraries (Lua, SQLite, cJSON, Duktape, vtable, JIT edge cases), use the developer test runner. External sources are downloaded on first run:
+The full developer integration suite (Lua, SQLite, cJSON, Duktape, vtable, JIT edge cases):
 
 ```bash
 julia --project=. test/devtests.jl
 ```
+
+External sources are downloaded on first run via `setup.jl` scripts.

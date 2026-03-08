@@ -23,6 +23,7 @@ makedocs(;
         "Advanced" => [
             "Introspection Tools" => "introspect.md",
             "MLIR / JLCS" => "mlir.md",
+            "Benchmarks" => "benchmarks.md",
         ],
         "Internals" => "internals.md",
     ],
