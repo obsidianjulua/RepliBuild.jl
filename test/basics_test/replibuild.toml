@@ -8,7 +8,7 @@ allow_function_pointers = true
 parallel = true
 flags = ["-std=c++17", "-fPIC"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src/basics.cpp"]
-include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src"]
+include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src"]
 aot_thunks = false
 
 [link]
@@ -36,9 +36,9 @@ enabled = true
 toolchain = "auto"
 
 [project]
-name = "basics_test"
-root = "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test"
-uuid = "fec8dc8b-97b2-45c7-b5e3-a3eb7512d547"
+name = "project"
+root = "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/"
+uuid = "f44fcb42-af7d-4cb3-ad77-0c06e312efa1"
 
 [paths]
 build = "build"
