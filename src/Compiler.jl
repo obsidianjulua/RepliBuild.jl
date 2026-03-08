@@ -341,11 +341,6 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         optimized_ir = joinpath(build_dir, output_name * "_opt.ll")
         opt_args = ["-S", "-O$opt_level"]
 
-        # Add LTO if enabled
-        if config.link.enable_lto
-            push!(opt_args, "-lto")
-        end
-
         push!(opt_args, linked_ir, "-o", optimized_ir)
 
         (output, exitcode) = BuildBridge.execute("opt", opt_args)
@@ -369,14 +364,22 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         lto_ir_text = read(linked_ir, String)
         lto_ir_text = replace(lto_ir_text, r"\bnoinline\b" => "")
         lto_ir_text = replace(lto_ir_text, r"\boptnone\b" => "")
-        # Replace all attribute blocks with minimal alwaysinline.
-        # Julia's internal LLVM may be older than the system clang that produced
-        # this IR, so attributes like allockind, allocsize, memory(errnomem:...),
-        # etc. can cause parse failures.  Stripping to just alwaysinline is safe
-        # because the IR has already been optimised by the system LLVM opt pass.
+        # Replace all attribute blocks: strip LLVM-version-sensitive keywords that
+        # Julia's internal LLVM may not recognise (allockind, allocsize, memory(...), etc.),
+        # but PRESERVE "target-cpu" and "target-features" so that Julia's JIT can apply
+        # machine-specific optimisations (AVX2, FMA, etc.) when it re-JITs the inlined IR.
         lto_ir_text = replace(lto_ir_text,
-            r"^attributes\s+#(\d+)\s*=\s*\{[^}]*\}"m =>
-            s"attributes #\1 = { alwaysinline }")
+            r"^(attributes\s+#\d+\s*=\s*\{)[^}]*(\})"m => function(m)
+                # Extract target-cpu and target-features if present
+                cpu_m  = match(r"\"target-cpu\"=\"([^\"]+)\"", m)
+                feat_m = match(r"\"target-features\"=\"([^\"]+)\"", m)
+                extras = String[]
+                cpu_m  !== nothing && push!(extras, "\"target-cpu\"=\"$(cpu_m[1])\"")
+                feat_m !== nothing && push!(extras, "\"target-features\"=\"$(feat_m[1])\"")
+                inner = isempty(extras) ? "alwaysinline" : "alwaysinline " * join(extras, " ")
+                hdr_end = findfirst('{', m)
+                "$(m[1:hdr_end]) $inner }"
+            end)
         # --- LLVM 19+ instruction-level compatibility ---
         # nuw on getelementptr
         lto_ir_text = replace(lto_ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")

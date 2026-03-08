@@ -6,14 +6,14 @@ allow_function_pointers = true
 
 [compile]
 parallel = true
-flags = ["-std=c++17", "-fPIC"]
-source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/mydir/src/main.cpp"]
+flags = ["-fPIC", "-O3", "-march=native", "-ffast-math"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/mydir/src/main.c"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/mydir/", "/home/john/Desktop/Projects/RepliBuild.jl/test/mydir/src"]
-aot_thunks = true
+aot_thunks = false
 
 [link]
 enable_lto = true
-optimization_level = "0"
+optimization_level = "3"
 
 [binary]
 strip_symbols = false
@@ -29,6 +29,7 @@ directory = ".replibuild_cache"
 [wrap]
 use_clang_jl = true
 style = "clang"
+language = "c"
 enabled = true
 
 [llvm]
@@ -37,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "project"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/mydir/"
-uuid = "f2e7e919-b0bb-4f50-a348-dcf7ac8aac97"
+uuid = "96a78bc4-b45e-47b7-b51f-5605b095b297"
 
 [paths]
 build = "build"
