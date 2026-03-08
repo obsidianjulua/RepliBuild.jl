@@ -1,5 +1,67 @@
 # Changelog
 
+## v2.6.0
+
+### Refactor: Wrapper Modularization
+
+The monolithic `src/Wrapper.jl` (~4600 lines) has been split into a structured `src/Wrapper/` package with separate C and C++ sub-packages. `src/Wrapper.jl` is now a thin re-export shim.
+
+**New module layout:**
+
+| File | Lines | Role |
+|------|-------|------|
+| `src/Wrapper/Generator.jl` | 727 | Top-level `wrap_library()` API; routes to C or C++ generator based on `config.wrap.language` |
+| `src/Wrapper/TypeRegistry.jl` | 99 | `TypeRegistry` struct and `TypeStrictness` enum (`:strict`/`:warn`/`:permissive`) |
+| `src/Wrapper/Symbols.jl` | 193 | `ParamInfo` and `SymbolInfo` structs for structured symbol representation |
+| `src/Wrapper/FunctionPointers.jl` | 77 | DWARF function-pointer signature parser → Julia `@cfunction`-compatible type strings |
+| `src/Wrapper/Utils.jl` | 69 | Shared identifier escaping and keyword utilities |
+| `src/Wrapper/C/GeneratorC.jl` | 2060 | Full C introspective wrapper generator |
+| `src/Wrapper/C/TypesC.jl` | 281 | C type heuristics (`is_c_struct_like`, `is_c_enum_like`) and base type mapping |
+| `src/Wrapper/C/IdentifiersC.jl` | 35 | C identifier sanitization |
+| `src/Wrapper/C/UtilsC.jl` | 21 | C-specific utilities |
+| `src/Wrapper/Cpp/GeneratorCpp.jl` | 2806 | C++ introspective wrapper generator |
+| `src/Wrapper/Cpp/TypesCpp.jl` | 428 | C++ type mapping including STL, template, and reference types |
+| `src/Wrapper/Cpp/IdentifiersCpp.jl` | 81 | C++ identifier sanitization (namespace stripping, operator handling) |
+| `src/Wrapper/Cpp/UtilsCpp.jl` | 44 | C++ utilities |
+
+The C and C++ generators are now fully independent — no shared mutable state, no conditional branching on language inside generation loops. Each generator emits correct stdout-unbuffering preamble, LTO/thunks blocks, struct definitions, and function wrappers for its language.
+
+### Improved: Compiler — JLL-First C Compilation
+
+- C source files (`.c`) are now compiled via `Clang_unified_jll.clang` when available. This produces LLVM IR that exactly matches Julia's internal LLVM version, guaranteeing `Base.llvmcall` compatibility for LTO-enabled C projects. Falls back to system `clang` if the JLL is unavailable.
+- `create_library()` and `create_executable()` now select `clang` vs `clang++` based on `config.wrap.language` (previously always used `clang++`).
+- `clang --version` probe in metadata extraction also respects `config.wrap.language`.
+
+### New: `wrap.language` Configuration Field
+
+A new `language` field in the `[wrap]` section of `replibuild.toml` controls which generator and compiler toolchain are used:
+
+```toml
+[wrap]
+language = "c"   # or "cpp" (default)
+```
+
+- **`"c"`** — Selects the C generator, compiles with `clang`, and defaults `enable_lto = true` so pure-C libraries get zero-cost `llvmcall` dispatch automatically.
+- **`"cpp"`** — Selects the C++ generator (existing behavior), defaults `enable_lto = false`.
+- `discover()` auto-detects language from the scanned source files and sets this field accordingly.
+
+### New: C Abomination Stress Test
+
+`test/c_abomination_test/` — a C stress test deliberately constructed to exercise the hardest edge cases the C wrapper generator must handle:
+
+- Deeply nested anonymous structs and unions (3 levels)
+- Bitfield members (`uint8_t f1 : 1`, `f2 : 3`, `f3 : 4`)
+- Multi-dimensional arrays of structs
+- Nested function pointer typedefs (`OuterCallback` returning `InnerCallback`)
+- Flexible array members
+- Opaque pointer lifecycle (`init_opaque` / `destroy_opaque`)
+- Multi-file C project (header + source, pure C, LTO enabled)
+
+### Changed: `.gitignore`
+
+- Added `*.bak` to suppress editor backup files.
+- Added `__pycache__/` and `*.pyc` to suppress Python bytecache from helper scripts.
+
 ## v2.5.0
 
 ### Improved: LTO Pipeline — Bitcode-First Loading

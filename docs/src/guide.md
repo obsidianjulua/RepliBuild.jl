@@ -86,6 +86,18 @@ The `replibuild.toml` file controls the build process. You can edit this file to
 
 See the **[Configuration Reference](config.md)** for a complete list of available options and sections.
 
+## C vs C++ Projects
+
+RepliBuild has separate, fully-independent generators for C and C++. Set the language in `[wrap]`:
+
+```toml
+[wrap]
+language = "c"   # pure-C project: uses clang, LTO on by default
+language = "cpp" # C++ project (default): uses clang++
+```
+
+`discover()` sets this automatically from the scanned source file extensions. For C projects the `enable_lto` default is `true`, so you get zero-cost `llvmcall` dispatch out of the box without any extra configuration.
+
 ## Git & External Dependencies
 
 RepliBuild can automatically pull external C/C++ libraries from git, local paths, or your system into the compilation pipeline. Declare them in `replibuild.toml` under `[dependencies]`:
@@ -183,7 +195,7 @@ RepliBuild auto-generates a stub `.cpp` file that explicitly instantiates each r
 
 ## Zero-Cost LTO Dispatch
 
-When `enable_lto = true`, the linker emits both the shared library **and** LLVM bitcode (`<name>_lto.bc`) in the `julia/` output directory.
+When `enable_lto = true` (or for C projects, where it is the default), the linker emits both the shared library **and** LLVM bitcode (`<name>_lto.bc`) in the `julia/` output directory.
 
 ```toml
 [link]
