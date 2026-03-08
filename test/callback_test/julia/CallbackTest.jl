@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for callback_test
-# Generated: 2026-03-07 00:23:01
+# Generated: 2026-03-08 01:03:02
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libcallback_test.so
 # Metadata: compilation_metadata.json
@@ -21,6 +21,14 @@ if !isfile(LIBRARY_PATH)
     error("Library not found: $LIBRARY_PATH")
 end
 
+# Flush C stdout so printf output appears immediately in the Julia REPL
+@inline _flush_cstdout() = ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
+
+# Unbuffer C stdout on module load so printf output is visible in the REPL
+let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
+    ccall(:setvbuf, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Csize_t), c_stdout, C_NULL, 2, 0)
+end
+
 # Library handle for manual management if needed
 const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
@@ -38,7 +46,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 2,
-    "generated_at" => "2026-03-07T00:23:01.822"
+    "generated_at" => "2026-03-08T01:02:57.627"
 )
 
 const LTO_IR = ""  # LTO disabled for this build

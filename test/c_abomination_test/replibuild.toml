@@ -6,9 +6,9 @@ allow_function_pointers = true
 
 [compile]
 parallel = true
-flags = ["-std=c++17", "-fPIC"]
-source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src/basics.cpp"]
-include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test/src"]
+flags = ["-fPIC"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test/src/c_abomination.c"]
+include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test/src"]
 aot_thunks = false
 
 [link]
@@ -29,16 +29,16 @@ directory = ".replibuild_cache"
 [wrap]
 use_clang_jl = true
 style = "clang"
-language = "cpp"
+language = "c"
 enabled = true
 
 [llvm]
 toolchain = "auto"
 
 [project]
-name = "basics_test"
-root = "/home/john/Desktop/Projects/RepliBuild.jl/test/basics_test"
-uuid = "fec8dc8b-97b2-45c7-b5e3-a3eb7512d547"
+name = "c_abomination_test"
+root = "/home/john/Desktop/Projects/RepliBuild.jl/test/c_abomination_test"
+uuid = "9856cb30-6f99-41b6-a84e-4cc269fc5b08"
 
 [paths]
 build = "build"

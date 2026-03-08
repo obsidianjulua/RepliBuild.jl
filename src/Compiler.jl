@@ -187,9 +187,40 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
         ["-o", ir_file, cpp_file]
     )
 
-    # Compile using BuildBridge
+    # Compile using BuildBridge or Clang_unified_jll for C
     compiler = endswith(cpp_file, ".c") ? "clang" : "clang++"
-    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+    
+    output = ""
+    exitcode = 1
+    if compiler == "clang"
+        try
+            # Use Julia's internal Clang to emit IR that perfectly matches the Julia LLVM version
+            Clang_mod = Base.require(Base.PkgId(Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
+            if isdefined(Clang_mod, :Clang_unified_jll)
+                clang_cmd = Clang_mod.Clang_unified_jll.clang()
+                cmd = ignorestatus(`$(clang_cmd) $cmd_args`)
+                
+                # Capture output
+                out_pipe = Pipe()
+                err_pipe = Pipe()
+                process = run(pipeline(cmd, stdout=out_pipe, stderr=err_pipe))
+                close(out_pipe.in)
+                close(err_pipe.in)
+                
+                out_str = String(read(out_pipe))
+                err_str = String(read(err_pipe))
+                
+                output = out_str * "\n" * err_str
+                exitcode = process.exitcode
+            else
+                (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+            end
+        catch e
+            (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+        end
+    else
+        (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+    end
 
     if !isempty(output) && exitcode != 0
         println("  $(basename(cpp_file)): $output")
@@ -465,7 +496,8 @@ function create_library(config::RepliBuildConfig, ir_file::String, lib_name::Str
         push!(cmd_args, "-l$lib")
     end
 
-    (output, exitcode) = BuildBridge.execute("clang++", cmd_args)
+    compiler = config.wrap.language == :c ? "clang" : "clang++"
+    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
 
     if exitcode != 0
         error("Library creation failed: $output")
@@ -513,7 +545,8 @@ function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::
         push!(cmd_args, "-l$lib")
     end
 
-    (output, exitcode) = BuildBridge.execute("clang++", cmd_args)
+    compiler = config.wrap.language == :c ? "clang" : "clang++"
+    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
 
     if exitcode != 0
         error("Executable creation failed: $output")
@@ -2682,7 +2715,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     end
 
     clang_version = try
-        (out, _) = BuildBridge.execute("clang++", ["--version"])
+        compiler_cmd = config.wrap.language == :c ? "clang" : "clang++"
+        (out, _) = BuildBridge.execute(compiler_cmd, ["--version"])
         first(split(out, '\n'))
     catch
         "unknown"

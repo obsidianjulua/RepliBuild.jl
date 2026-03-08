@@ -495,6 +495,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
     wrap_config = ConfigurationManager.WrapConfig(
         true,                                    # enabled
         :clang,                                  # style
+        has_cpp ? :cpp : :c,                     # language
         "",                                      # module_name (auto-generate)
         true,                                    # use_clang_jl
         Dict{String,Vector{Vector{String}}}()    # varargs_overloads

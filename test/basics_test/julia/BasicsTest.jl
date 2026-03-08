@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for basics_test
-# Generated: 2026-03-07 00:22:54
+# Generated: 2026-03-08 01:02:30
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libbasics_test.so
 # Metadata: compilation_metadata.json
@@ -21,6 +21,14 @@ if !isfile(LIBRARY_PATH)
     error("Library not found: $LIBRARY_PATH")
 end
 
+# Flush C stdout so printf output appears immediately in the Julia REPL
+@inline _flush_cstdout() = ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
+
+# Unbuffer C stdout on module load so printf output is visible in the REPL
+let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
+    ccall(:setvbuf, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Csize_t), c_stdout, C_NULL, 2, 0)
+end
+
 function __init__()
     # Initialize the global JIT context with this library's vtables
     RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
@@ -35,11 +43,16 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 6,
-    "generated_at" => "2026-03-07T00:22:54.192"
+    "generated_at" => "2026-03-08T01:02:25.415"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
 const THUNKS_LTO_IR = ""
+
+# =============================================================================
+# Forward Declarations (Opaque + Ptr-referenced types)
+# =============================================================================
+
 
 # =============================================================================
 # Struct Definitions (from DWARF debug info)
@@ -50,26 +63,6 @@ mutable struct NumberUnion
     data::NTuple{4, UInt8}
 end
 NumberUnion() = NumberUnion(ntuple(i -> 0x00, 4))
-
-"""Get union member `i` as `Cint` from `NumberUnion`."""
-function get_i(u::NumberUnion)::Cint
-    return unsafe_load(Ptr{Cint}(pointer_from_objref(u)))
-end
-
-"""Set union member `i` as `Cint` in `NumberUnion`."""
-function set_i!(u::NumberUnion, v::Cint)
-    unsafe_store!(Ptr{Cint}(pointer_from_objref(u)), v)
-end
-
-"""Get union member `f` as `Cfloat` from `NumberUnion`."""
-function get_f(u::NumberUnion)::Cfloat
-    return unsafe_load(Ptr{Cfloat}(pointer_from_objref(u)))
-end
-
-"""Set union member `f` as `Cfloat` in `NumberUnion`."""
-function set_f!(u::NumberUnion, v::Cfloat)
-    unsafe_store!(Ptr{Cfloat}(pointer_from_objref(u)), v)
-end
 
 # C++ struct: PackedStruct (2 members)
 struct PackedStruct
@@ -102,6 +95,26 @@ function PaddedStruct()
     return ref[]
 end
 
+
+"""Get union member `i` as `Cint` from `NumberUnion`."""
+function get_i(u::NumberUnion)::Cint
+    return unsafe_load(Ptr{Cint}(pointer_from_objref(u)))
+end
+
+"""Set union member `i` as `Cint` in `NumberUnion`."""
+function set_i!(u::NumberUnion, v::Cint)
+    unsafe_store!(Ptr{Cint}(pointer_from_objref(u)), v)
+end
+
+"""Get union member `f` as `Cfloat` from `NumberUnion`."""
+function get_f(u::NumberUnion)::Cfloat
+    return unsafe_load(Ptr{Cfloat}(pointer_from_objref(u)))
+end
+
+"""Set union member `f` as `Cfloat` in `NumberUnion`."""
+function set_f!(u::NumberUnion, v::Cfloat)
+    unsafe_store!(Ptr{Cfloat}(pointer_from_objref(u)), v)
+end
 
 export get_i, set_i!, get_f, set_f!, global_string, global_string_ptr, global_int, global_int_ptr, make_packed, make_padded, process_packed, process_padded, process_union, sum_ints, PaddedStruct, PackedStruct, NumberUnion
 

@@ -29,6 +29,7 @@ directory = ".replibuild_cache"
 [wrap]
 use_clang_jl = true
 style = "clang"
+language = "cpp"
 enabled = true
 
 [llvm]
@@ -37,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "vtable_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test"
-uuid = "ab5f7f4c-5ff0-4298-8db2-82adab1de62e"
+uuid = "f592e67a-9777-46ce-9608-64861e62f85a"
 
 [paths]
 build = "build"

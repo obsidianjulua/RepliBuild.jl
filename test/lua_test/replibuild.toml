@@ -18,3 +18,7 @@ flags = ["-O2", "-fPIC"]
 [link]
 enable_lto = false
 optimization_level = "2"
+
+[wrap]
+language = "c"
+

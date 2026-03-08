@@ -67,6 +67,7 @@ end
 struct WrapConfig
     enabled::Bool
     style::Symbol  # :clang, :basic, :none
+    language::Symbol # :c, :cpp
     module_name::String  # Empty = auto from project.name
     use_clang_jl::Bool
     varargs_overloads::Dict{String,Vector{Vector{String}}}
@@ -158,15 +159,17 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     # Validate required sections
     validate_toml_data(data, toml_path)
 
+    wrap_config = parse_wrap_config(data)
+
     # Parse each section with defaults
     config = RepliBuildConfig(
         parse_project_config(data, toml_path),
         parse_paths_config(data),
         parse_discovery_config(data),
         parse_compile_config(data),
-        parse_link_config(data),
+        parse_link_config(data, wrap_config.language),
         parse_binary_config(data),
-        parse_wrap_config(data),
+        wrap_config,
         parse_llvm_config(data),
         parse_workflow_config(data),
         parse_cache_config(data),
@@ -246,7 +249,7 @@ function parse_compile_config(data::Dict)::CompileConfig
 end
 
 """Parse [link] section"""
-function parse_link_config(data::Dict)::LinkConfig
+function parse_link_config(data::Dict, wrap_language::Symbol=:cpp)::LinkConfig
     link = get(data, "link", Dict())
 
     # Parse optimization level (strip "O" prefix if present)
@@ -255,9 +258,12 @@ function parse_link_config(data::Dict)::LinkConfig
         opt_level = opt_level[2:end]
     end
 
+    # Default LTO to true for C projects to ensure Julia's llvmcall inlines natively
+    default_lto = wrap_language == :c ? true : false
+
     return LinkConfig(
         opt_level,
-        get(link, "enable_lto", false),
+        get(link, "enable_lto", default_lto),
         get(link, "link_libraries", String[]),
         get(link, "link_dirs", String[])
     )
@@ -314,9 +320,13 @@ function parse_wrap_config(data::Dict)::WrapConfig
         varargs_overloads[String(func)] = sig_list
     end
 
+    language_str = get(wrap, "language", "cpp")
+    language_sym = Symbol(language_str)
+
     return WrapConfig(
         get(wrap, "enabled", true),
         wrap_style,
+        language_sym,
         get(wrap, "module_name", ""),  # Empty = auto-generate
         get(wrap, "use_clang_jl", true),
         varargs_overloads
@@ -448,7 +458,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
         LinkConfig("2", false, String[], String[]),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, "", true, Dict{String,Vector{Vector{String}}}()),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}()),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -541,6 +551,7 @@ function save_config(config::RepliBuildConfig)
     wrap_dict = Dict(
         "enabled" => config.wrap.enabled,
         "style" => string(config.wrap.style),
+        "language" => string(config.wrap.language),
         "use_clang_jl" => config.wrap.use_clang_jl
     )
     if !isempty(config.wrap.module_name)

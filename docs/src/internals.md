@@ -6,6 +6,12 @@ This section documents the internal modules that power RepliBuild. These are gen
 
 The `Compiler` module handles the translation of C++ source code into LLVM IR and shared libraries.
 
+### Bitcode Assembly
+
+`Compiler.assemble_bitcode(ll_path, bc_path)` converts a sanitized LLVM IR text file (`.ll`) to binary bitcode (`.bc`). It prefers `Clang_unified_jll.clang -emit-llvm` so the resulting bitcode exactly matches the LLVM version bundled with Julia, maximising `Base.llvmcall` compatibility. If the JLL is unavailable it falls back to the system `llvm-as`.
+
+This function is called by both the main LTO pipeline (`link_optimize_ir`) and the AOT thunks path (`_build_aot_thunks`).
+
 ```@autodocs
 Modules = [RepliBuild.Compiler]
 Order = [:function, :type]

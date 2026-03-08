@@ -29,6 +29,7 @@ directory = ".replibuild_cache"
 [wrap]
 use_clang_jl = true
 style = "clang"
+language = "cpp"
 enabled = true
 
 [llvm]
@@ -37,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "jit_edge_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test"
-uuid = "7a16a40f-a6cc-4894-904b-3a88294820fc"
+uuid = "2034a265-7c30-4ee8-84e0-157084453945"
 
 [paths]
 build = "build"

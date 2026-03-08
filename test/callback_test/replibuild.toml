@@ -29,6 +29,7 @@ directory = ".replibuild_cache"
 [wrap]
 use_clang_jl = true
 style = "clang"
+language = "cpp"
 enabled = true
 
 [llvm]
@@ -37,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "callback_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/callback_test"
-uuid = "b62f8970-d1f7-41f0-9af0-a0ae9b0966f9"
+uuid = "29d23c9a-3b1d-432b-a23e-48b31ed78e38"
 
 [paths]
 build = "build"

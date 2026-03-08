@@ -1,6 +1,13 @@
 # Julia package - do not track Manifest
 Manifest.toml
 
+# Backup files
+*.bak
+
+# Python cache
+__pycache__/
+*.pyc
+
 # Build artifacts
 *.so
 *.dylib

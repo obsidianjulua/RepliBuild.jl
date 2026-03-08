@@ -29,7 +29,7 @@ RepliBuild.build()
 ```
 
 This step performs:
-- Compilation of C++ to LLVM IR.
+- Compilation of C++ to LLVM IR (`.c` files use `clang`, `.cpp` files use `clang++`).
 - Linking and optimization.
 - Generation of the shared library.
 - Extraction of metadata for wrapping.
@@ -234,3 +234,17 @@ end
 ```
 
 This is the recommended setting for production deployments where predictable latency matters. Requires `src/mlir/build/libJLCS.so` to be built first (`cd src/mlir && ./build.sh`).
+
+## Running Tests
+
+The CI-friendly suite (stress test + MLIR unit tests + registry tests) runs in under a minute:
+
+```bash
+julia --project=. test/runtests.jl
+```
+
+For a full integration run against real-world libraries (Lua, SQLite, cJSON, Duktape, vtable, JIT edge cases), use the developer test runner. External sources are downloaded on first run:
+
+```bash
+julia --project=. test/devtests.jl
+```
