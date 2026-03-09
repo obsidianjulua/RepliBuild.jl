@@ -1725,13 +1725,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             return join(lines, "\n")
         end
 
-        # LTO eligibility: safe for primitive/pointer/small-POD structs (filtered earlier by is_ccall_safe),
-        # non-virtual, no Cstring anywhere (llvmcall won't auto-convert String→Cstring like ccall does),
-        # and NOT returning a struct by value (Base.llvmcall doesn't handle the sret ABI).
+        # LTO eligibility: safe for primitive/pointer args only.
+        # Struct-by-value params are excluded because Base.llvmcall doesn't
+        # reliably map Julia struct layouts to LLVM aggregate types.
         lto_eligible = config.link.enable_lto &&
             !returns_known_struct &&
             julia_return_type != "Cstring" &&
-            !any(t -> t == "Cstring", param_types)
+            !any(t -> t == "Cstring", param_types) &&
+            !any(t -> t in struct_types, param_types)
 
         # Check for _UnsafeUnknown trap to prevent segfaults
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
