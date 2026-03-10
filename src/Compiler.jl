@@ -1064,6 +1064,59 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
 end
 
 """
+Compile a Rust project to a cdylib and extract metadata.
+"""
+function compile_rust_project(config::RepliBuildConfig, start_time::Float64)
+    # Get source files
+    rs_files = get_source_files(config)
+    if isempty(rs_files)
+        @warn "No source files found in config"
+        println("Run discover() first to find Rust sources")
+        return nothing
+    end
+
+    # Assume the first .rs file is the main entry point
+    main_src = rs_files[1]
+    
+    output_dir = get_output_path(config)
+    mkpath(output_dir)
+    lib_name = get_library_name(config)
+    binary_path = joinpath(output_dir, lib_name)
+    
+    build_dir = get_build_path(config)
+    mkpath(build_dir)
+    
+    println("  sources: $(length(rs_files)) (Rust)")
+    
+    cmd_args = [
+        "--crate-type", "cdylib",
+        "--crate-name", config.project.name,
+        "--edition", "2021",
+        "--emit=link",
+        "-g",
+        "-o", binary_path,
+        main_src
+    ]
+    
+    (output, exitcode) = BuildBridge.execute("rustc", cmd_args)
+    if exitcode != 0
+        error("Rust compilation failed:\n$output")
+    end
+    
+    elapsed = round(time() - start_time, digits=2)
+    
+    # Extract and save compilation metadata
+    metadata_path = save_compilation_metadata(config, rs_files, binary_path)
+
+    # Save project hash for future cache hits
+    save_project_hash(config)
+
+    println("  done: $(elapsed)s")
+
+    return binary_path
+end
+
+"""
 Complete compilation workflow: discover sources, compile, link, create binary.
 This is the main entry point for building a project.
 """
@@ -1080,6 +1133,10 @@ function compile_project(config::RepliBuildConfig)
         elapsed = round(time() - start_time, digits=4)
         println("  cache: project unchanged ($(elapsed)s)")
         return library_path
+    end
+
+    if config.wrap.language == :rust
+        return compile_rust_project(config, start_time)
     end
 
     # Get source files (from config or discovery)
@@ -1414,7 +1471,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
 
     if exitcode != 0
         @warn "Failed to read DWARF info: $output"
-        return Dict{String,Dict{String,Any}}()
+        return (Dict{String,Dict{String,Any}}(), Dict{String,Dict{String,Any}}(), Dict{String,Any}(), Dict{String,String}())
     end
 
     return_types = Dict{String,Dict{String,Any}}()
@@ -1863,11 +1920,11 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
                         val_str = value_match.captures[1]
                         val = if startswith(val_str, "0x") || startswith(val_str, "0X")
-                            parse(Int, val_str[3:end], base=16)
+                            parse(Int128, val_str[3:end], base=16)
                         elseif startswith(val_str, "-0x") || startswith(val_str, "-0X")
-                            -parse(Int, val_str[4:end], base=16)
+                            -parse(Int128, val_str[4:end], base=16)
                         else
-                            parse(Int, val_str)
+                            parse(Int128, val_str)
                         end
                         type_refs[tag_offset]["value"] = val
                     end

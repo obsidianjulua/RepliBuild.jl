@@ -1,3 +1,7 @@
+include("Rust/IdentifiersRust.jl")
+include("Rust/TypesRust.jl")
+include("Rust/GeneratorRust.jl")
+
 # =============================================================================
 # HIGH-LEVEL WRAPPER API
 # =============================================================================
@@ -426,6 +430,9 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     wrapper_content = if registry.language == :c
         generate_introspective_module_c(config, library_path, metadata,
                                         module_name, registry, generate_docs, thunks_lib_path)
+    elseif registry.language == :rust
+        generate_introspective_module_rust(config, library_path, metadata,
+                                          module_name, registry, generate_docs, thunks_lib_path)
     else
         generate_introspective_module_cpp(config, library_path, metadata,
                                           module_name, registry, generate_docs, thunks_lib_path)

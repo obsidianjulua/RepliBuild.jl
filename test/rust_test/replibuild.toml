@@ -1,0 +1,11 @@
+[project]
+name = "RustTest"
+version = "0.1.0"
+
+[compile]
+source_files = ["src/lib.rs"]
+include_dirs = []
+
+[wrap]
+language = "rust"
+module_name = "RustTest"
