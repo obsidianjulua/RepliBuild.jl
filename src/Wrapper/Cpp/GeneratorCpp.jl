@@ -1177,6 +1177,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     end""")
                             # Nested struct types — extract sub-blob
                             else
+                                if _is_stl_internal_type(String(m_c_type))
+                                    continue
+                                end
                                 m_sanitized = _sanitize_cpp_type_name(m_c_type)
                                 if !isempty(m_sanitized) && m_sanitized != m_c_type
                                     # Find the nested struct's byte_size using best_dwarf_key map
@@ -1766,8 +1769,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # This handles by-value returns of template types
         ret_type_str = get(return_type, "julia_type", "Cvoid")
         if occursin(r"[<>]", ret_type_str) && !startswith(ret_type_str, "Ptr{") && !startswith(ret_type_str, "Ref{")
-            # If the raw return type is an STL-internal opaque type, use Ptr{Cvoid}
-            if _is_stl_internal_type(ret_type_str)
+            # If the raw return type is an STL container, use NTuple with correct ABI size
+            stl_sz = get_stl_container_size(ret_type_str)
+            if stl_sz > 0
+                return_type["julia_type"] = "NTuple{$stl_sz, UInt8}"
+            elseif _is_stl_internal_type(ret_type_str)
                 return_type["julia_type"] = "Ptr{Cvoid}"
             else
                 safe_ret = _sanitize_cpp_type_name(ret_type_str)
@@ -2082,13 +2088,29 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # This is critical: invoke(name, Any, ...) creates Ref{Any}() which corrupts
             # memory when the JIT writes raw struct bytes into it.
             if jit_ret_type == "Any" && jit_c_ret != "void"
-                if haskey(dwarf_structs, jit_c_ret)
+                stl_size = _is_stl_internal_type(jit_c_ret) ? get_stl_container_size(jit_c_ret) : 0
+                if stl_size > 0
+                    jit_ret_type = "NTuple{$stl_size, UInt8}"
+                elseif _is_stl_internal_type(jit_c_ret)
+                    info = get(dwarf_structs, jit_c_ret, nothing)
+                    bs = isnothing(info) ? 0 : (let s = string(get(info, "byte_size", "0x0")); startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s) end)
+                    jit_ret_type = bs > 0 ? "NTuple{$bs, UInt8}" : "Ptr{Cvoid}"
+                elseif haskey(dwarf_structs, jit_c_ret)
                     jit_ret_type = _sanitize_cpp_type_name(jit_c_ret)
                 else
                     # Fuzzy match: DWARF keys may have trailing " >" nesting artifacts
                     matched_key = _fuzzy_dwarf_lookup(jit_c_ret, dwarf_structs)
                     if matched_key !== nothing
-                        jit_ret_type = _sanitize_cpp_type_name(matched_key)
+                        stl_size = _is_stl_internal_type(matched_key) ? get_stl_container_size(matched_key) : 0
+                        if stl_size > 0
+                            jit_ret_type = "NTuple{$stl_size, UInt8}"
+                        elseif _is_stl_internal_type(matched_key)
+                            info = dwarf_structs[matched_key]
+                            bs = let s = string(get(info, "byte_size", "0x0")); startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s) end
+                            jit_ret_type = bs > 0 ? "NTuple{$bs, UInt8}" : "Ptr{Cvoid}"
+                        else
+                            jit_ret_type = _sanitize_cpp_type_name(matched_key)
+                        end
                     end
                 end
             end
@@ -2738,6 +2760,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Add struct types (filter internal/compiler types)
     for struct_name in struct_types
         if !(struct_name in enum_names)
+            if _is_stl_internal_type(struct_name)
+                continue
+            end
             # Sanitize struct name for export
             julia_struct_name = _sanitize_cpp_type_name(struct_name)
             julia_struct_name = replace(julia_struct_name, "*" => "Ptr")

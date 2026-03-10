@@ -65,7 +65,43 @@ function is_stl_container_type(c_type::String)::Bool
         ("std::vector", "std::basic_string", "std::string",
          "std::map", "std::unordered_map", "std::set", "std::unordered_set",
          "std::deque", "std::list", "std::forward_list",
-         "std::multimap", "std::multiset"))
+         "std::multimap", "std::multiset",
+         # DWARF often strips the std:: namespace prefix
+         "vector<", "basic_string<",
+         "map<", "unordered_map<", "set<", "unordered_set<",
+         "deque<", "list<", "forward_list<",
+         "multimap<", "multiset<"))
+end
+
+"""
+    get_stl_container_size(c_type::String) -> Int
+
+Returns the exact ABI byte size of common STL containers on x86_64 SysV.
+Returns 0 if unknown.
+"""
+function get_stl_container_size(c_type::String)::Int
+    clean = strip(replace(c_type, r"^(const|struct|class|union)\b" => ""))
+    clean = strip(replace(clean, r"[*&]+$" => ""))
+    
+    # Check for both "std::..." and raw prefixes (since DWARF sometimes strips std::)
+    if startswith(clean, "std::vector") || startswith(clean, "vector<")
+        return 24
+    elseif startswith(clean, "std::basic_string") || startswith(clean, "std::string") || startswith(clean, "basic_string<") || startswith(clean, "string")
+        return 32 # libstdc++ SSO string size is 32 bytes on 64-bit
+    elseif startswith(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
+        return 16
+    elseif startswith(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
+        return 8
+    elseif startswith(clean, "std::map") || startswith(clean, "map<") || startswith(clean, "std::set") || startswith(clean, "set<")
+        return 48 # Typical rb_tree size
+    elseif startswith(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || startswith(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
+        return 56 # Typical hashtable size
+    elseif startswith(clean, "std::list") || startswith(clean, "list<")
+        return 24
+    elseif startswith(clean, "std::deque") || startswith(clean, "deque<")
+        return 80
+    end
+    return 0
 end
 
 """

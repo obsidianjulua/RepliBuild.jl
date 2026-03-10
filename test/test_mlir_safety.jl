@@ -10,9 +10,12 @@ using RepliBuild.MLIRNative
         
         # Define a simple function that adds two 32-bit integers
         # func @add(%arg0: i32, %arg1: i32) -> i32
+        # llvm.emit_c_interface generates the _mlir_ciface_ wrapper required by
+        # invokePacked (used by jit_invoke). Without it, invokePacked can't find
+        # the packed entry point and silently fails.
         ir = """
         module {
-            func.func @add(%arg0: i32, %arg1: i32) -> i32 {
+            func.func @add(%arg0: i32, %arg1: i32) -> i32 attributes {llvm.emit_c_interface} {
                 %0 = arith.addi %arg0, %arg1 : i32
                 return %0 : i32
             }

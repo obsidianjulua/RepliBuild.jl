@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for basics_test
-# Generated: 2026-03-08 01:02:30
+# Generated: 2026-03-09 23:42:18
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libbasics_test.so
 # Metadata: compilation_metadata.json
@@ -43,7 +43,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 6,
-    "generated_at" => "2026-03-08T01:02:25.415"
+    "generated_at" => "2026-03-09T23:42:18.886"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
@@ -164,7 +164,7 @@ end
 """
     make_packed(a::UInt8, b::Integer) -> PackedStruct
 
-Wrapper for C++ function: `make_packed`
+Wrapper for `make_packed`
 
 # Arguments
 - `a::UInt8`
@@ -184,7 +184,7 @@ end
 """
     make_padded(a::UInt8, b::Integer) -> PaddedStruct
 
-Wrapper for C++ function: `make_padded`
+Wrapper for `make_padded`
 
 # Arguments
 - `a::UInt8`
@@ -205,7 +205,7 @@ end
 """
     process_packed(s::PackedStruct) -> Cvoid
 
-Wrapper for C++ function: `process_packed`
+Wrapper for `process_packed`
 
 # Arguments
 - `s::PackedStruct`
@@ -224,7 +224,7 @@ end
 """
     process_padded(s::PaddedStruct) -> Cvoid
 
-Wrapper for C++ function: `process_padded`
+Wrapper for `process_padded`
 
 # Arguments
 - `s::PaddedStruct`
@@ -243,7 +243,7 @@ end
 """
     process_union(u::Any) -> Cvoid
 
-Wrapper for C++ function: `process_union`
+Wrapper for `process_union`
 
 # Arguments
 - `u::Any`

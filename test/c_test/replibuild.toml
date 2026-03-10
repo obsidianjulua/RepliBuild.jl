@@ -6,13 +6,13 @@ allow_function_pointers = true
 
 [compile]
 parallel = true
-flags = ["-std=c++17", "-fPIC"]
-source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/src/jit_edges.cpp"]
-include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/src"]
+flags = ["-fPIC"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_test/src/mathkit.c"]
+include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_test/src"]
 aot_thunks = false
 
 [link]
-enable_lto = false
+enable_lto = true
 optimization_level = "0"
 
 [binary]
@@ -29,16 +29,16 @@ directory = ".replibuild_cache"
 [wrap]
 use_clang_jl = true
 style = "clang"
-language = "cpp"
+language = "c"
 enabled = true
 
 [llvm]
 toolchain = "auto"
 
 [project]
-name = "jit_edge_test"
-root = "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test"
-uuid = "a2cb3744-3103-40d0-acb3-8c6434210449"
+name = "c_test"
+root = "/home/john/Desktop/Projects/RepliBuild.jl/test/c_test"
+uuid = "5fafeb3a-5061-4128-9bda-c890ea465ff9"
 
 [paths]
 build = "build"

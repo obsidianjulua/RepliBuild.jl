@@ -496,7 +496,12 @@ function is_ccall_safe(func_info, dwarf_structs)
         return false
     end
     for param in func_info["parameters"]
-        if is_stl_container_type(get(param, "c_type", ""))
+        c_type = get(param, "c_type", "")
+        # References and pointers to STL containers are ccall-safe (just pointers at ABI level)
+        if contains(c_type, "&") || contains(c_type, "*")
+            continue
+        end
+        if is_stl_container_type(c_type)
             return false
         end
     end

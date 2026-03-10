@@ -64,7 +64,7 @@ peval_string(ctx, src::String) = DuktapeTest.duk_peval_string(ctx, src)
         @test ret == 0
 
         result = DuktapeTest.duk_get_string(ctx, Int32(-1))
-        @test unsafe_string(result) == "hello world"
+        @test result == "hello world"
 
         DuktapeTest.duk_pop(ctx)
         DuktapeTest.duk_destroy_heap(ctx)

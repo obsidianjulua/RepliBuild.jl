@@ -3,12 +3,14 @@ allow_unknown_enums = false
 strictness = "warn"
 allow_unknown_structs = true
 allow_function_pointers = true
+templates = ["std::vector<int>", "std::string"]
+template_headers = ["<vector>", "<string>"]
 
 [compile]
 parallel = true
 flags = ["-std=c++17", "-fPIC"]
-source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/src/jit_edges.cpp"]
-include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test/src"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stl_test/src/stl_api.cpp"]
+include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stl_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/stl_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/stl_test/src"]
 aot_thunks = false
 
 [link]
@@ -36,9 +38,9 @@ enabled = true
 toolchain = "auto"
 
 [project]
-name = "jit_edge_test"
-root = "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test"
-uuid = "a2cb3744-3103-40d0-acb3-8c6434210449"
+name = "stl_test"
+root = "/home/john/Desktop/Projects/RepliBuild.jl/test/stl_test"
+uuid = "94a9aaed-9dc0-4df9-9a3d-4cd12e49e5f2"
 
 [paths]
 build = "build"

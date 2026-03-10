@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for callback_test
-# Generated: 2026-03-08 01:03:02
+# Generated: 2026-03-09 23:42:26
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libcallback_test.so
 # Metadata: compilation_metadata.json
@@ -46,7 +46,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 2,
-    "generated_at" => "2026-03-08T01:02:57.627"
+    "generated_at" => "2026-03-09T23:42:26.747"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
@@ -57,7 +57,7 @@ export execute_binary_op, simulate_work
 """
     execute_binary_op(op::Any, a::Integer, b::Integer) -> Cint
 
-Wrapper for C++ function: `execute_binary_op`
+Wrapper for `execute_binary_op`
 
 # Arguments
 - `op::Ptr{Cvoid}` - Callback function
@@ -86,7 +86,7 @@ end
 """
     simulate_work(iterations::Integer, cb::Any) -> Cvoid
 
-Wrapper for C++ function: `simulate_work`
+Wrapper for `simulate_work`
 
 # Arguments
 - `iterations::Cint`

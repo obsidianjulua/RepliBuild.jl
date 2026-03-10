@@ -105,8 +105,9 @@ function generate_stl_thunks(stl_methods::Dict, metadata::Dict=Dict())::String
                 println(io, "  %val_ptr_$(i) = llvm.load %arg_ptr_$(i) : !llvm.ptr -> !llvm.ptr")
 
                 if mlir_t == "!llvm.ptr"
-                    # Pointer arg: the loaded value IS the pointer
-                    push!(call_args, "%val_ptr_$(i)")
+                    # Pointer arg: dereference the pointer to get the actual pointer value
+                    println(io, "  %val_$(i) = llvm.load %val_ptr_$(i) : !llvm.ptr -> !llvm.ptr")
+                    push!(call_args, "%val_$(i)")
                 elseif mlir_t == "i64"
                     # Integer arg: dereference the pointer to get the value
                     println(io, "  %val_$(i) = llvm.load %val_ptr_$(i) : !llvm.ptr -> i64")

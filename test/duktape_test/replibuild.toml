@@ -6,14 +6,14 @@ allow_function_pointers = true
 
 [compile]
 parallel = true
-flags = ["-fPIC", "-O2"]
-source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/duktape_test/src/duktape.c"]
+flags = ["-fPIC"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/duktape_test/src/duk_shim.c", "/home/john/Desktop/Projects/RepliBuild.jl/test/duktape_test/src/duktape.c"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/duktape_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/duktape_test/src"]
-aot_thunks = true
+aot_thunks = false
 
 [link]
-enable_lto = true
-optimization_level = "2"
+enable_lto = false
+optimization_level = "0"
 
 [binary]
 strip_symbols = false
@@ -31,11 +31,6 @@ use_clang_jl = true
 style = "clang"
 language = "c"
 enabled = true
-shim_headers = ["duktape.h"]
-
-[wrap.macros.duk_peval_string]
-ret = "int"
-args = ["void*", "const char*"]
 
 [llvm]
 toolchain = "auto"
@@ -43,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "duktape_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/duktape_test"
-uuid = "f405da6b-0e20-43c4-8598-5986a0e13ea1"
+uuid = "4aa92593-41a4-4f31-abb6-f9a9e360de33"
 
 [paths]
 build = "build"

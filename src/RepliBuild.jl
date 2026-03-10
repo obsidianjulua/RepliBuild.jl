@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
-# RepliBuild.jl - C++ → Julia Build Orchestration System
-# Focus: Dependency-aware parallel compilation for single and multi-library C++ projects
+
+# Focus: ABI Compiler/Generator
 
 module RepliBuild
 
@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.4.2"
+const VERSION = v"2.4.3"
 
 # ============================================================================
 # LOAD CORE MODULES
