@@ -89,6 +89,17 @@ Tier selection is automatic. The wrapper generator analyses each function signat
 - **Global variables** — `cglobal` accessors
 - **Templates** — declare `templates = ["std::vector<int>"]`; RepliBuild forces Clang to emit DWARF for those instantiations
 
+## Rust Integration (Experimental)
+
+RepliBuild supports generating introspective wrappers for Rust via DWARF debug metadata. To use it, set `language = "rust"` in the `[wrap]` section of your `replibuild.toml`.
+
+**Current Requirements:**
+Because Rust does not have a stable ABI, you must expose a C-compatible interface for RepliBuild to successfully bind to it:
+- Functions must be marked with `extern "C"` and `#[no_mangle]`.
+- Structs and enums must use `#[repr(C)]` or `#[repr(IntType)]`.
+
+The wrapper generator will automatically strip internal Rust standard library leakage (like `core::fmt`, `alloc::string`, etc.) from the DWARF output, resolving only the public C-compatible types. Native Rust ABI integration is planned for a future release.
+
 ## Pipeline
 
 ```

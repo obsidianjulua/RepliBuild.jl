@@ -84,13 +84,6 @@ function infer_rust_type(registry::TypeRegistry, rust_type::AbstractString; cont
 
     # Fallback for structs/opaque types
     if registry.allow_unknown_structs
-        # Temporary heuristic: if it looks like an enum or struct
-        if clean_type == "Color" || clean_type == "Result" || clean_type == "Option"
-            return "Cint"
-        end
-        if clean_type == "CapacityOverflow" || clean_type == "AllocError" || clean_type == "FormattingOptions" || clean_type == "Count"
-            return "Cvoid"
-        end
         return make_rust_identifier(clean_type)
     end
 

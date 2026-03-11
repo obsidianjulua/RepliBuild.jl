@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for callback_test
-# Generated: 2026-03-09 23:42:26
+# Generated: 2026-03-10 19:39:04
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libcallback_test.so
 # Metadata: compilation_metadata.json
@@ -46,7 +46,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 2,
-    "generated_at" => "2026-03-09T23:42:26.747"
+    "generated_at" => "2026-03-10T19:39:04.137"
 )
 
 const LTO_IR = ""  # LTO disabled for this build

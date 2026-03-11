@@ -370,8 +370,11 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     functions = metadata["functions"]
 
     # Extract supplementary types from headers (enums, unused types, etc.)
+    # Rust has no C headers — skip Clang.jl header extraction entirely
     include_dirs = get(metadata, "include_dirs", String[])
-    header_types = if !isempty(headers)
+    header_types = if config.wrap.language == :rust
+        Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
+    elseif !isempty(headers)
         ClangJLBridge.extract_header_types(headers, include_dirs)
     else
         # Auto-discover headers from include directories
@@ -422,8 +425,6 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         end
     end
 
-    # Generate wrapper module
-    module_name = get_module_name(config)
     # Generate wrapper module
     module_name = get_module_name(config)
     

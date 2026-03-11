@@ -1354,6 +1354,23 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         # Special types
         "__int128" => "Int128",
         "__uint128_t" => "UInt128",
+
+        # Rust primitive types (from DWARF)
+        "i8" => "Int8",
+        "u8" => "UInt8",
+        "i16" => "Int16",
+        "u16" => "UInt16",
+        "i32" => "Int32",
+        "u32" => "UInt32",
+        "i64" => "Int64",
+        "u64" => "UInt64",
+        "i128" => "Int128",
+        "u128" => "UInt128",
+        "f32" => "Cfloat",
+        "f64" => "Cdouble",
+        "isize" => "Cssize_t",
+        "usize" => "Csize_t",
+        "()" => "Cvoid",
     )
 
     # Direct match
@@ -1369,8 +1386,8 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         base_type = replace(base_type, r"\bvolatile\b" => "")
         base_type = strip(base_type)
 
-        # Special case: char* / signed char* → Cstring (null-terminated C strings)
-        if base_type == "char" || base_type == "signed char"
+        # Special case: char* / signed char* / i8* → Cstring (null-terminated C strings)
+        if base_type == "char" || base_type == "signed char" || base_type == "i8"
             return "Cstring"
         end
 
@@ -1447,6 +1464,14 @@ function get_type_size(c_type::AbstractString)::Int
         "intptr_t" => 8, "uintptr_t" => 8,
         "wchar_t" => 4,
         "__int128" => 16, "__uint128_t" => 16,
+        # Rust primitive types (from DWARF)
+        "i8" => 1, "u8" => 1,
+        "i16" => 2, "u16" => 2,
+        "i32" => 4, "u32" => 4,
+        "i64" => 8, "u64" => 8,
+        "i128" => 16, "u128" => 16,
+        "f32" => 4, "f64" => 8,
+        "isize" => 8, "usize" => 8,  # x86_64
     )
 
     # Check for pointers/references (always 8 bytes on x86_64)

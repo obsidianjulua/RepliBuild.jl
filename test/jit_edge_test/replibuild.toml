@@ -38,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "jit_edge_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/jit_edge_test"
-uuid = "a2cb3744-3103-40d0-acb3-8c6434210449"
+uuid = "fcfc5056-82ce-44b1-a875-119eeabba9f3"
 
 [paths]
 build = "build"

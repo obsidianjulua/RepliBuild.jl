@@ -93,6 +93,8 @@ end
 function infer_julia_type(registry::TypeRegistry, type_str::String; context::String="")::String
     if registry.language == :c
         return infer_c_type(registry, type_str; context=context)
+    elseif registry.language == :rust
+        return infer_rust_type(registry, type_str; context=context)
     else
         return infer_cpp_type(registry, type_str; context=context)
     end

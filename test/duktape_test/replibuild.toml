@@ -38,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "duktape_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/duktape_test"
-uuid = "4aa92593-41a4-4f31-abb6-f9a9e360de33"
+uuid = "141c002f-ec71-4e88-9ebf-0c6a520deebe"
 
 [paths]
 build = "build"

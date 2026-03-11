@@ -2,6 +2,18 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.5.0
+
+### New: Rust Introspective Wrapper Generator
+
+Introduced full support for Rust C-compatible libraries via a dedicated DWARF-based introspective wrapper generator (`src/Wrapper/Rust/`).
+
+- **New `language = "rust"` configuration:** Automatically selects the `rustc` compiler and the Rust generator backend.
+- **Topological Struct Ordering:** Autonomously sorts custom structures by dependency, handling pointers (`Ptr{X}`) as soft dependencies to seamlessly emit idiomatic `mutable struct` forward-declarations.
+- **DWARF Standard Library Filtering:** Actively identifies and strips out deep internal compiler/stdlib types (like `core::fmt`, `alloc::string`, `std::io::error`, and closure environments) that "leak" through the DWARF metadata, ensuring the Julia wrapper only exposes your public API.
+- **Native Enum Resolution:** Correctly infers the underlying primitive types (`Int32`, `UInt32`, `UInt64`, etc.) from DWARF representations, successfully converting signed negative DWARF enum values into their corresponding unsigned native values.
+- **ABI Safety Requirements:** Currently, only C-compatible Rust endpoints are supported. Functions must be marked with `extern "C"` and `#[no_mangle]`, and structures/enums must use `#[repr(C)]` or `#[repr(u32)]` to lock their layout for FFI. True native Rust ABI integration (via compiler AST injection) is planned for a future release.
+
 ## v2.4.3
 
 ### Bug Fix: `WrapConfig` constructor mismatch in Discovery

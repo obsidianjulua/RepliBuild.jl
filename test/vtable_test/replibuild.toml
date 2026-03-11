@@ -38,7 +38,7 @@ toolchain = "auto"
 [project]
 name = "vtable_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/vtable_test"
-uuid = "573ab8e6-cc40-4a17-a3e3-7d83d9c83368"
+uuid = "87921cb9-3858-4122-9746-d323c69e22a3"
 
 [paths]
 build = "build"
