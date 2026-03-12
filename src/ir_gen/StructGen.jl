@@ -138,22 +138,25 @@ function get_struct_definition_string(name::String, info::Any)
         push!(member_types, "!llvm.array<$(dwarf_size - sum_size) x i8>")
     end
 
-    if isempty(member_types)
-         return "!llvm.struct<\"$(name)\", opaque>"
+    if is_packed
+        # Emit !jlcs.c_struct for packed structs
+        offsets = get_julia_offsets(info, true) # packed offsets
+        
+        # Format: !jlcs.c_struct<"Name", [types], [[offsets]], packed=true>
+        types_str = join(member_types, ", ")
+        
+        offsets_typed = ["$(o) : i64" for o in offsets]
+        offsets_str = "[$(join(offsets_typed, ", "))]"
+        
+        return "!jlcs.c_struct<\"$(name)\", [$(types_str)], [$(offsets_str)], packed = true>"
+    else
+        # Standard LLVM struct
+        if isempty(member_types)
+             return "!llvm.struct<\"$(name)\", opaque>"
+        else
+             return "!llvm.struct<\"$(name)\", ($(join(member_types, ", ")))>"
+        end
     end
-
-    # Emit !jlcs.c_struct for all defined structs (packed or unpacked)
-    # to avoid dialect nesting errors (!llvm.struct cannot contain !jlcs.c_struct)
-    offsets = get_julia_offsets(info, is_packed) # get accurate offsets
-    
-    # Format: !jlcs.c_struct<"Name", [types], [[offsets]], packed=true/false>
-    types_str = join(member_types, ", ")
-    
-    offsets_typed = ["$(o) : i64" for o in offsets]
-    offsets_str = "[$(join(offsets_typed, ", "))]"
-    
-    packed_val = is_packed ? "true" : "false"
-    return "!jlcs.c_struct<\"$(name)\", [$(types_str)], [$(offsets_str)], packed = $(packed_val)>"
 end
 
 """

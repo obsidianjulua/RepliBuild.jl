@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for basics_test
-# Generated: 2026-03-10 19:38:56
+# Generated: 2026-03-11 23:02:13
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libbasics_test.so
 # Metadata: compilation_metadata.json
@@ -43,7 +43,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 6,
-    "generated_at" => "2026-03-10T19:38:56.083"
+    "generated_at" => "2026-03-11T23:02:13.506"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
@@ -198,7 +198,7 @@ Wrapper for `make_padded`
 """
 
 function make_padded(a::UInt8, b::Integer)::PaddedStruct
-    b_c = Cint(b)  # Auto-converts with overflow check
+    b_c = Cint(b)
     return ccall((:make_padded, LIBRARY_PATH), PaddedStruct, (UInt8, Cint,), a, b_c)
 end
 

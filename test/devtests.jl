@@ -13,7 +13,7 @@ const TEST_DIR = @__DIR__
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 function clean_test_dir(dir::String)
-    for name in ["build", "julia", ".replibuild_cache", "replibuild.toml"]
+    for name in ["build", "julia", ".replibuild_cache"]
         p = joinpath(dir, name)
         ispath(p) && rm(p, recursive=true, force=true)
     end
@@ -90,7 +90,13 @@ for (name, label) in INTEGRATION_TESTS
         @test isdir(dir)
 
         clean_test_dir(dir)
-        toml = RepliBuild.discover(dir, force=true, build=true, wrap=true)
+        toml = joinpath(dir, "replibuild.toml")
+        if !isfile(toml)
+            toml = RepliBuild.discover(dir, force=true, build=true, wrap=true)
+        else
+            RepliBuild.build(toml)
+            RepliBuild.wrap(toml)
+        end
         @test isfile(toml)
         @test isdir(joinpath(dir, "julia"))
 

@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for callback_test
-# Generated: 2026-03-10 19:39:04
+# Generated: 2026-03-11 23:02:21
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libcallback_test.so
 # Metadata: compilation_metadata.json
@@ -46,7 +46,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 2,
-    "generated_at" => "2026-03-10T19:39:04.137"
+    "generated_at" => "2026-03-11T23:02:21.005"
 )
 
 const LTO_IR = ""  # LTO disabled for this build
@@ -78,8 +78,8 @@ callback = @cfunction(my_callback, Cint, (Cint, Cint,)) Ptr{Cvoid}
 """
 
 function execute_binary_op(op::Any, a::Integer, b::Integer)::Cint
-    a_c = Cint(a)  # Auto-converts with overflow check
-    b_c = Cint(b)  # Auto-converts with overflow check
+    a_c = Cint(a)
+    b_c = Cint(b)
     return ccall((:execute_binary_op, LIBRARY_PATH), Cint, (Ptr{Cvoid}, Cint, Cint,), op, a_c, b_c)
 end
 
@@ -106,7 +106,7 @@ callback = @cfunction(my_callback, Cvoid, (Cfloat,)) Ptr{Cvoid}
 """
 
 function simulate_work(iterations::Integer, cb::Any)::Cvoid
-    iterations_c = Cint(iterations)  # Auto-converts with overflow check
+    iterations_c = Cint(iterations)
     return ccall((:simulate_work, LIBRARY_PATH), Cvoid, (Cint, Ptr{Cvoid},), iterations_c, cb)
 end
 
