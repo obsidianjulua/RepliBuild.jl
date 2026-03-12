@@ -452,6 +452,13 @@ struct FFECallOpLowering : public ConversionPattern {
             if (auto calleeFn = moduleOp.lookupSymbol<func::FuncOp>(calleeAttr.getValue())) {
                 auto newFuncType = FunctionType::get(rewriter.getContext(), coercedArgTypes, callResultTypes);
                 calleeFn.setFunctionType(newFuncType);
+            } else if (auto llvmCalleeFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(calleeAttr.getValue())) {
+                auto newFuncType = LLVM::LLVMFunctionType::get(
+                    callResultTypes.empty() ? LLVM::LLVMVoidType::get(rewriter.getContext()) : callResultTypes[0],
+                    coercedArgTypes,
+                    false // isVarArg
+                );
+                llvmCalleeFn.setFunctionType(newFuncType);
             }
         }
 
