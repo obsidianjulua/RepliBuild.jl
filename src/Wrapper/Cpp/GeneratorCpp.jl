@@ -601,6 +601,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         for name in sort(collect(all_forward_decls))
             # Skip STL internal types
             _is_stl_internal_type(name) && continue
+            # Skip blocklisted internal/system types
+            name in _INTERNAL_TYPE_BLOCKLIST && continue
 
             # Sanitize
             s_name = _sanitize_cpp_type_name(name)
@@ -1747,6 +1749,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
         end
 
+        # Replace blocklisted internal types in return type (e.g. _IO_FILE -> Cvoid)
+        let bm = match(r"^(Ref|Ptr)\{(.*)\}$", get(return_type, "julia_type", ""))
+            if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
+                return_type["julia_type"] = "Ptr{Cvoid}"
+            end
+        end
+
         # BUG FIX: Refine return types (Ptr{Cvoid} -> Ptr{Struct})
         # If c_type indicates a pointer to a known struct, but julia_type is generic Ptr{Cvoid}, fix it.
         c_ret = get(return_type, "c_type", "")
@@ -1836,6 +1845,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(param_names, safe_name)
             julia_type = param["julia_type"]
 
+            # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
+            let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+                if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
+                    julia_type = "Ptr{Cvoid}"
+                end
+            end
+
             # Sanitize C++ template types in parameter julia_type (e.g. "Ref{allocator<int> >}")
             if occursin(r"[<>]", julia_type)
                 m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
@@ -1878,13 +1894,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(param_types, actual_c_type)
 
             # Map C integer types to natural Julia types with range checking
-            if actual_c_type == "Cint"  # Int32 in Julia
-                push!(julia_param_types, "Integer")  # Accept any Integer, will validate
-                push!(needs_conversion, true)
-            elseif actual_c_type == "Clong"  # Platform-dependent
-                push!(julia_param_types, "Integer")
-                push!(needs_conversion, true)
-            elseif actual_c_type == "Cshort"  # Int16
+            if actual_c_type in ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort", "Clonglong", "Culonglong", "Csize_t", "Cssize_t")
                 push!(julia_param_types, "Integer")
                 push!(needs_conversion, true)
             elseif startswith(actual_c_type, "Ptr{")
@@ -2219,13 +2229,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 push!(ccall_param_names, converted_name)
 
                 # Generate range-checked conversion
-                if c_type == "Cint"
-                    conversion_code *= "    $converted_name = Cint($name)  # Auto-converts with overflow check\n"
-                elseif c_type == "Clong"
-                    conversion_code *= "    $converted_name = Clong($name)\n"
-                elseif c_type == "Cshort"
-                    conversion_code *= "    $converted_name = Cshort($name)\n"
-                end
+                conversion_code *= "    $converted_name = $c_type($name)\n"
             else
                 push!(ccall_param_names, name)
             end
