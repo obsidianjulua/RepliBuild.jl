@@ -19,7 +19,7 @@ function map_cpp_type(type_str::String)
         return "f32"
     elseif type_str == "double" || type_str == "Cdouble"
         return "f64"
-    elseif type_str == "bool" || type_str == "Bool"
+    elseif type_str == "bool" || type_str == "_Bool" || type_str == "Bool"
         return "i1"
     elseif type_str == "char" || type_str == "int8_t" || type_str == "UInt8" || type_str == "Cchar"
         return "i8"

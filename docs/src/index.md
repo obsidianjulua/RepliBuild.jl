@@ -59,6 +59,7 @@ Lua.luaL_newstate()
 - **Bitfields** with bit-level extraction
 - **Function pointers** with DWARF signature parsing to `@cfunction`-compatible types
 - **Variadic functions** with typed overloads via `[wrap.varargs]` config
+- **Macros** with auto-generated typed shims via `[wrap.macros]` config
 - **Multi-level pointers / references** — `T**` → `Ptr{Ptr{T}}`, `T&` → `Ref{T}`
 - **C++ virtual methods** via MLIR JIT thunks or static AOT thunks
 - **Idiomatic wrappers** — factory/destructor pairs → `mutable struct` with GC finalizers

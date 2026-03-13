@@ -40,7 +40,7 @@ function map_cpp_type_to_mlir(cpp_type::String)
         return "i32"
     elseif t == "short" || t == "unsigned short" || t == "int16_t" || t == "uint16_t"
         return "i16"
-    elseif t == "char" || t == "unsigned char" || t == "int8_t" || t == "uint8_t" || t == "bool"
+    elseif t == "char" || t == "unsigned char" || t == "int8_t" || t == "uint8_t" || t == "bool" || t == "_Bool"
         return "i8"
     elseif t == "long" || t == "unsigned long" || t == "long long" || t == "unsigned long long" || t == "int64_t" || t == "uint64_t" || t == "size_t"
         return "i64"

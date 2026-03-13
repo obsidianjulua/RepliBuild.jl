@@ -81,6 +81,30 @@ Settings for the Julia wrapper generator.
 | `style` | String | Wrapping style: `"clang"` (full), `"basic"` (simple ccall), `"none"`. | `"clang"` |
 | `module_name` | String | Name of the generated Julia module. | Project Name (CamelCase) |
 | `use_clang_jl` | Bool | Use Clang.jl for AST parsing during wrapping. | `true` |
+| `language` | String | Extensible dispatch key for the generator: `"c"` or `"cpp"`. | `"cpp"` |
+| `shim_headers` | Vector{String} | Headers `#include`d in the auto-generated macro shim stub. | `[]` |
+
+### `[wrap.varargs]`
+
+Overrides for C varargs functions (`...`). Since Julia cannot easily call C varargs functions natively via `ccall` without knowing the exact types, you can define type-specific overloads here. RepliBuild will generate concrete function bindings for each signature, bypassing the need for manual shims.
+
+```toml
+[wrap.varargs]
+printf = [
+    ["const char*", "int"],
+    ["const char*", "double", "int"]
+]
+```
+
+### `[wrap.macros]`
+
+Auto-generates typed C/C++ shims for preprocessor macros so they appear in DWARF metadata and can be safely wrapped as regular functions. This replaces the need to write your own wrapper functions for macros.
+
+```toml
+[wrap.macros.MY_MATH_MACRO]
+ret = "int"
+args = ["int", "float"]
+```
 
 ## `[types]`
 

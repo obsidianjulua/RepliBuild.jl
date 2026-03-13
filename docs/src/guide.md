@@ -183,7 +183,11 @@ get_area(c)          # dispatch on Circle type, no .handle needed
 # c goes out of scope → GC calls delete_shape automatically
 ```
 
-## Template Instantiation
+## Replacing Manual Shims
+
+When wrapping C/C++ libraries, developers often have to write manual C wrappers ("shims") for things that aren't native functions: templates, varargs, and preprocessor macros. RepliBuild handles all of these automatically via `replibuild.toml` without you having to write a single line of C/C++ code.
+
+### Template Instantiation
 
 C++ templates are only emitted into DWARF if the compiler actually instantiates them. To force instantiation for types you want to wrap, add them to `[types]` in your config:
 
@@ -194,6 +198,35 @@ template_headers = ["<vector>", "<utility>"]
 ```
 
 RepliBuild auto-generates a stub `.cpp` file that explicitly instantiates each requested type, ensuring it appears in the DWARF metadata and is available in the generated Julia module.
+
+### Varargs Interception
+
+Julia's `ccall` cannot call C `...` (varargs) functions natively without knowing the exact types at the call site. Instead of writing a manual C wrapper for each type combination, you can configure overloads in `[wrap.varargs]`:
+
+```toml
+[wrap.varargs]
+printf = [
+    ["const char*", "int"],
+    ["const char*", "double", "int"]
+]
+```
+
+RepliBuild generates concrete Julia bindings for `printf` for each of these signatures, completely bypassing the varargs limitation.
+
+### Macro Expansion
+
+C/C++ preprocessor macros don't exist in compiled binaries or DWARF metadata. To expose them to Julia, you can configure `[wrap.macros]`:
+
+```toml
+[wrap]
+shim_headers = ["<stdio.h>"]
+
+[wrap.macros.MY_MATH_MACRO]
+ret = "int"
+args = ["int", "float"]
+```
+
+RepliBuild automatically generates a C/C++ source file that wraps `MY_MATH_MACRO` inside a typed function and compiles it alongside your project. The resulting wrapper gives you a native Julia function.
 
 ## Zero-Cost LTO Dispatch
 

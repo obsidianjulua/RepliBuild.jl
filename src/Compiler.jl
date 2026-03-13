@@ -432,12 +432,17 @@ function sanitize_ir_for_julia(ir_text::String)::String
         r"^(define\s[^\n]*\.\.\.[^\n]*\{)\n(.*?)\n(\})"ms => function(m)
             sig_match = match(r"define\s+(.*?)\s+(@\w+)\s*\(([^)]*)\)", m)
             if sig_match !== nothing
-                "declare $(sig_match[1]) $(sig_match[2])($(sig_match[3]))"
+                # Strip internal/private linkage — declarations can't have module-local linkage
+                linkage = replace(sig_match[1], r"\b(internal|private)\s*" => "")
+                "declare $(linkage) $(sig_match[2])($(sig_match[3]))"
             else
                 m
             end
         end)
     ir_text = replace(ir_text, r"^declare\s+void\s+@llvm\.va_(start|end)[^\n]*\n"m => "")
+
+    # Strip noalias scope intrinsics — they reference metadata we've already removed
+    ir_text = replace(ir_text, r"^\s*(tail\s+)?call void @llvm\.experimental\.noalias\.scope\.decl\(metadata ![0-9]+\)\s*$"m => "")
 
     return ir_text
 end
@@ -3220,6 +3225,7 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         "float" => "Cfloat",
         "double" => "Cdouble",
         "bool" => "Bool",
+        "_Bool" => "Bool",
         "void" => "Cvoid",
         "char*" => "Cstring",
         "const char*" => "Cstring",
