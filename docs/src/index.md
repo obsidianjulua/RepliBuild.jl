@@ -124,10 +124,11 @@ See the [Configuration Reference](config.md) for all available options.
 
 ## Documentation
 
+- **[Architecture](architecture.md)** — Full system architecture, pipeline stages, tier dispatch, design decisions
 - **[User Guide](guide.md)** — Workflows, dependencies, LTO, AOT thunks, templates, registry
 - **[Configuration Reference](config.md)** — Complete `replibuild.toml` option reference
 - **[API Reference](api.md)** — Public API documentation
+- **[MLIR / JLCS Dialect](mlir.md)** — Custom MLIR dialect, type system, operations, JIT manager
 - **[Introspection Tools](introspect.md)** — Binary analysis, IR inspection, benchmarking
-- **[MLIR / JLCS Dialect](mlir.md)** — Custom MLIR dialect internals
 - **[Benchmarks](benchmarks.md)** — Zero-copy benchmark data
 - **[Internals](internals.md)** — Module architecture for contributors

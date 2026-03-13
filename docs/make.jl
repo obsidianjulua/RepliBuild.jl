@@ -15,14 +15,15 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Architecture" => "architecture.md",
         "User Guide" => [
             "Workflow" => "guide.md",
             "Configuration" => "config.md",
         ],
         "API Reference" => "api.md",
         "Advanced" => [
+            "MLIR / JLCS Dialect" => "mlir.md",
             "Introspection Tools" => "introspect.md",
-            "MLIR / JLCS" => "mlir.md",
             "Benchmarks" => "benchmarks.md",
         ],
         "Internals" => "internals.md",
