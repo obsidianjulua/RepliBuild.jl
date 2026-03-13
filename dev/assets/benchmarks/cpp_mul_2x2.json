@@ -1,0 +1,13 @@
+{
+  "median_time": 320.0,
+  "memory": 720000,
+  "function_name": "cpp_wrapper_multiply",
+  "max_time": 4840.0,
+  "allocations": 5000,
+  "gc_time": 0.0,
+  "samples": 5000,
+  "std_time": 172.24057854297686,
+  "mean_time": 378.0216,
+  "min_time": 250.0,
+  "timestamp": "2026-03-03 21:18:47"
+}
