@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>How It Works · RepliBuild.jl</title><meta name="title" content="How It Works · RepliBuild.jl"/><meta property="og:title" content="How It Works · RepliBuild.jl"/><meta property="twitter:title" content="How It Works · RepliBuild.jl"/><meta name="description" content="Documentation for RepliBuild.jl."/><meta property="og:description" content="Documentation for RepliBuild.jl."/><meta property="twitter:description" content="Documentation for RepliBuild.jl."/><meta property="og:url" content="https://obsidianjulua.github.io/RepliBuild.jl/how-it-works/"/><meta property="twitter:url" content="https://obsidianjulua.github.io/RepliBuild.jl/how-it-works/"/><link rel="canonical" href="https://obsidianjulua.github.io/RepliBuild.jl/how-it-works/"/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../">RepliBuild.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li class="is-active"><a class="tocitem" href>How It Works</a><ul class="internal"><li><a class="tocitem" href="#The-easy-case:-scalar-functions"><span>The easy case: scalar functions</span></a></li><li><a class="tocitem" href="#LTO:-the-boundary-vanishes"><span>LTO: the boundary vanishes</span></a></li><li><a class="tocitem" href="#When-alignment-breaks:-packed-structs"><span>When alignment breaks: packed structs</span></a></li><li><a class="tocitem" href="#The-MLIR-thunk:-translating-between-ABIs"><span>The MLIR thunk: translating between ABIs</span></a></li><li><a class="tocitem" href="#Virtual-dispatch:-same-problem,-same-solution"><span>Virtual dispatch: same problem, same solution</span></a></li><li><a class="tocitem" href="#Both-JITs-produce-IR-for-the-same-function"><span>Both JITs produce IR for the same function</span></a></li><li><a class="tocitem" href="#The-full-picture"><span>The full picture</span></a></li></ul></li><li><a class="tocitem" href="../architecture/">Architecture</a></li><li><span class="tocitem">User Guide</span><ul><li><a class="tocitem" href="../guide/">Workflow</a></li><li><a class="tocitem" href="../config/">Configuration</a></li></ul></li><li><a class="tocitem" href="../api/">API Reference</a></li><li><span class="tocitem">Advanced</span><ul><li><a class="tocitem" href="../mlir/">MLIR / JLCS Dialect</a></li><li><a class="tocitem" href="../introspect/">Introspection Tools</a></li><li><a class="tocitem" href="../benchmarks/">Benchmarks</a></li></ul></li><li><a class="tocitem" href="../internals/">Internals</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>How It Works</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>How It Works</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/obsidianjulua/RepliBuild.jl/blob/main/docs/src/how-it-works.md#" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="How-It-Works:-Two-JITs,-One-IR"><a class="docs-heading-anchor" href="#How-It-Works:-Two-JITs,-One-IR">How It Works: Two JITs, One IR</a><a id="How-It-Works:-Two-JITs,-One-IR-1"></a><a class="docs-heading-anchor-permalink" href="#How-It-Works:-Two-JITs,-One-IR" title="Permalink"></a></h1><p>Most people think of FFI as a wall between languages — you call a C function, pay some overhead, and get a result back. RepliBuild works differently. Instead of bridging two separate worlds, it makes both languages converge at the same level: <strong>LLVM intermediate representation</strong>. The FFI boundary is not a wall — it is two compilers meeting in the middle.</p><pre><code class="nohighlight hljs">Julia source                          C++ source
+     |                                     |
+     v                                     v
+Julia compiler                         Clang
+     |                                     |
+     v                                     v
+Julia LLVM IR  -------- merge ------&gt;  C++ LLVM IR
+                          |
+                          v
+                    Machine code</code></pre><p>Both Julia and C++ compile to LLVM IR. When both IRs are visible to the same JIT compiler, the language boundary ceases to exist — the optimizer can inline, vectorize, and constant-fold across it as if everything were written in one language.</p><p>But LLVM IR alone is not enough. When the two languages disagree on how data is laid out in memory (packed structs, vtable dispatch, platform-specific alignment), a second compiler — the MLIR JIT — steps in with the JLCS dialect to translate between them.</p><p>This page walks through concrete examples from the RepliBuild test suite to show exactly what happens at each level.</p><h2 id="The-easy-case:-scalar-functions"><a class="docs-heading-anchor" href="#The-easy-case:-scalar-functions">The easy case: scalar functions</a><a id="The-easy-case:-scalar-functions-1"></a><a class="docs-heading-anchor-permalink" href="#The-easy-case:-scalar-functions" title="Permalink"></a></h2><p>Consider the simplest possible C function:</p><pre><code class="language-cpp hljs">// test/jit_edge_test/src/jit_edges.cpp
+int scalar_add(int a, int b) {
+    return a + b;
+}</code></pre><p>Clang compiles this to LLVM IR:</p><pre><code class="language-llvm hljs">; test/jit_edge_test/build/jit_edges.ll
+define i32 @scalar_add(i32 noundef %0, i32 noundef %1) {
+  %5 = load i32, ptr %3, align 4
+  %6 = load i32, ptr %4, align 4
+  %7 = add nsw i32 %5, %6
+  ret i32 %7
+}</code></pre><p>The operation is a single <code>add nsw i32</code> instruction. RepliBuild&#39;s wrapper generator sees that both arguments and the return type are primitives, so <code>is_ccall_safe()</code> returns <code>true</code> and the function is routed to Tier 1:</p><pre><code class="language-julia hljs"># test/jit_edge_test/julia/JitEdgeTest.jl (generated)
+function scalar_add(a::Integer, b::Integer)::Cint
+    a_c = Cint(a)
+    b_c = Cint(b)
+    return ccall((:scalar_add, LIBRARY_PATH), Cint, (Cint, Cint), a_c, b_c)
+end</code></pre><p>When Julia&#39;s JIT compiles this wrapper, we can inspect the LLVM IR it actually produces with <code>@code_llvm</code>:</p><pre><code class="language-llvm hljs">; @code_llvm scalar_add(1, 2) — Julia&#39;s compiled IR for the wrapper
+define i32 @julia_scalar_add(i64 signext %&quot;a::Int64&quot;, i64 signext %&quot;b::Int64&quot;) {
+top:
+  ; Julia truncates Int64 → Int32 (with bounds check)
+  %7 = trunc i64 %&quot;a::Int64&quot; to i32
+  %6 = trunc i64 %&quot;b::Int64&quot; to i32
+
+  ; The ccall — a direct call to the C++ symbol within LLVM IR
+  %8 = call i32 @jlplt_scalar_add_got.jit(i32 %7, i32 %6)
+  ret i32 %8
+}</code></pre><p>Both the C++ function and the Julia wrapper exist as LLVM IR. The <code>ccall</code> compiles to a <code>call</code> instruction <strong>within</strong> LLVM IR — not a call across a language boundary. The PLT stub (<code>@jlplt_scalar_add_got.jit</code>) resolves to the compiled C++ code at load time.</p><p>For an even simpler case where the types already match, the Julia IR becomes almost trivial:</p><pre><code class="language-llvm hljs">; @code_llvm scalar_mul(1.0, 2.0) — Float64 types match directly
+define double @julia_scalar_mul(double %&quot;a::Float64&quot;, double %&quot;b::Float64&quot;) {
+top:
+  %0 = call double @jlplt_scalar_mul_got.jit(double %&quot;a::Float64&quot;, double %&quot;b::Float64&quot;)
+  ret double %0
+}</code></pre><p>Two lines: call the C++ function, return the result. No conversion, no boxing, no overhead beyond the indirect call itself.</p><p>This is already efficient (one indirect call), but the language boundary still exists as a call instruction. LTO removes it entirely.</p><h2 id="LTO:-the-boundary-vanishes"><a class="docs-heading-anchor" href="#LTO:-the-boundary-vanishes">LTO: the boundary vanishes</a><a id="LTO:-the-boundary-vanishes-1"></a><a class="docs-heading-anchor-permalink" href="#LTO:-the-boundary-vanishes" title="Permalink"></a></h2><p>When <code>enable_lto = true</code>, RepliBuild embeds the C++ LLVM bitcode directly into the Julia module as a constant:</p><pre><code class="language-julia hljs"># Generated wrapper with LTO enabled
+const LTO_IR = read(&quot;mylib_lto.bc&quot;)  # C++ LLVM bitcode
+
+function scalar_add(a::Cint, b::Cint)::Cint
+    if !isempty(LTO_IR)
+        return Base.llvmcall((LTO_IR, &quot;scalar_add&quot;), Cint, Tuple{Cint, Cint}, a, b)
+    else
+        return ccall((:scalar_add, LIBRARY_PATH), Cint, (Cint, Cint), a, b)
+    end
+end</code></pre><p><code>Base.llvmcall</code> passes the C++ bitcode to Julia&#39;s LLVM JIT at compile time. The JIT reads the C++ IR, sees <code>add nsw i32</code>, and <strong>inlines it</strong> into the calling Julia function. The result:</p><pre><code class="language-llvm hljs">; Julia&#39;s JIT output — C++ code inlined, no call instruction
+define void @julia_run_cpp_math_loop(...) {
+top:
+  br label %L22
+
+L22:
+  %value_phi = phi double [ 0.0, %top ], [ %next_val, %L22 ]
+
+  ; These were C++ operations — now inlined into the Julia loop:
+  %cpp_mul_result = fmul double %value_phi, 3.14159
+  %cpp_add_result = fadd double %cpp_mul_result, 1.0
+
+  %next_val = add i64 %iv, 1
+  %exitcond = icmp eq i64 %next_val, %max_iters
+  br i1 %exitcond, label %L_exit, label %L22
+
+L_exit:
+  ret void
+}</code></pre><p>There are <strong>zero <code>call</code> instructions</strong>. The C++ <code>fmul</code> and <code>fadd</code> operations are fused directly into the Julia loop nest. The language boundary has ceased to exist at the IR level — Julia&#39;s optimizer treats the C++ code as its own.</p><p>The performance confirms it:</p><table><tr><th style="text-align: right">Path</th><th style="text-align: right">ns/iter</th></tr><tr><td style="text-align: right">Pure Julia</td><td style="text-align: right">0.677</td></tr><tr><td style="text-align: right">LTO <code>llvmcall</code></td><td style="text-align: right">0.677</td></tr><tr><td style="text-align: right">Wrapper <code>ccall</code></td><td style="text-align: right">2.026</td></tr></table><p>The LTO path matches pure Julia exactly because the optimizer sees identical IR.</p><h2 id="When-alignment-breaks:-packed-structs"><a class="docs-heading-anchor" href="#When-alignment-breaks:-packed-structs">When alignment breaks: packed structs</a><a id="When-alignment-breaks:-packed-structs-1"></a><a class="docs-heading-anchor-permalink" href="#When-alignment-breaks:-packed-structs" title="Permalink"></a></h2><p>Not all functions can merge at the IR level. Consider this packed struct:</p><pre><code class="language-cpp hljs">// test/jit_edge_test/include/jit_edges.h
+#pragma pack(push, 1)
+typedef struct PackedTriplet {
+    char tag;       // offset 0, 1 byte
+    int value;      // offset 1, 4 bytes (NOT offset 4 — packed, no padding)
+    char flag;      // offset 5, 1 byte
+} PackedTriplet;    // total: 6 bytes
+#pragma pack(pop)
+
+PackedTriplet pack_three(char tag, int value, char flag);</code></pre><p>Clang compiles this to LLVM IR with a packed struct type and 1-byte alignment:</p><pre><code class="language-llvm hljs">; The angle brackets &lt;{ }&gt; mean &quot;packed&quot; — no padding between fields
+%struct.PackedTriplet = type &lt;{ i8, i32, i8 }&gt;
+
+define void @pack_three(ptr sret(%struct.PackedTriplet) align 1 %0,
+                        i8 signext %1, i32 %2, i8 signext %3) {
+  ; Stores at offsets 0, 1, 5 — no alignment padding
+  %9  = getelementptr inbounds %struct.PackedTriplet, ptr %0, i32 0, i32 0
+  store i8  %1,  ptr %9,  align 1
+  %11 = getelementptr inbounds %struct.PackedTriplet, ptr %0, i32 0, i32 1
+  store i32 %2,  ptr %11, align 1    ; i32 at offset 1, aligned to 1 byte
+  %13 = getelementptr inbounds %struct.PackedTriplet, ptr %0, i32 0, i32 2
+  store i8  %3,  ptr %13, align 1
+  ret void
+}</code></pre><p>The critical detail: <code>align 1</code> on the <code>sret</code> pointer and all stores. The <code>i32</code> field sits at byte offset 1, not offset 4.</p><p>Now look at what Julia sees:</p><pre><code class="language-julia hljs"># Generated struct definition (from DWARF metadata)
+struct PackedTriplet
+    tag::UInt8      # offset 0, 1 byte
+    value::Cint     # offset 4, 4 bytes — Julia aligns i32 to 4 bytes!
+    flag::UInt8     # offset 8, 1 byte
+end
+# sizeof(PackedTriplet) == 12 in Julia (with padding)
+# sizeof(PackedTriplet) == 6 in C++ (packed)</code></pre><p>Julia&#39;s type system enforces natural alignment: an <code>Int32</code> must start at a 4-byte boundary. Julia&#39;s <code>PackedTriplet</code> is 12 bytes with padding. C++ expects 6 bytes with no padding. If Julia passed this struct via <code>ccall</code>, the <code>value</code> field would be at the wrong offset — undefined behavior, likely a crash.</p><p>This is exactly what <code>is_ccall_safe()</code> detects. It compares the DWARF-reported struct size (6 bytes) against Julia&#39;s aligned size (12 bytes). When they differ, the function is routed to Tier 2:</p><pre><code class="language-julia hljs"># Generated wrapper — routed to MLIR JIT (Tier 2)
+function pack_three(tag::UInt8, value::Integer, flag::UInt8)
+    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+    return RepliBuild.JITManager.invoke(
+        &quot;_mlir_ciface_pack_three_thunk&quot;, PackedTriplet, tag, value, flag)
+end</code></pre><h2 id="The-MLIR-thunk:-translating-between-ABIs"><a class="docs-heading-anchor" href="#The-MLIR-thunk:-translating-between-ABIs">The MLIR thunk: translating between ABIs</a><a id="The-MLIR-thunk:-translating-between-ABIs-1"></a><a class="docs-heading-anchor-permalink" href="#The-MLIR-thunk:-translating-between-ABIs" title="Permalink"></a></h2><p>The MLIR JIT generates a thunk that bridges Julia&#39;s natural alignment and C++&#39;s packed layout. Here is the <strong>actual generated MLIR IR</strong> for <code>pack_three</code>, produced by the <code>JLCSIRGenerator</code> from the DWARF metadata:</p><pre><code class="language-mlir hljs">// Struct aliases — the dialect registers both packed and aligned layouts
+!Struct_PackedTriplet = !jlcs.c_struct&lt;&quot;PackedTriplet&quot;, [i8, i32, i8],
+    [[0 : i64, 1 : i64, 5 : i64]], packed = true&gt;
+
+module {
+  // External C++ function — returns packed struct
+  func.func private @pack_three(i8, i32, i8) -&gt; !llvm.struct&lt;packed (i8, i32, i8)&gt;
+
+  // Thunk: bridges Julia&#39;s ciface calling convention to C++ packed sret
+  func.func @pack_three_thunk(%args_ptr: !llvm.ptr)
+      -&gt; !llvm.struct&lt;(i8, i32, i8)&gt;
+      attributes { llvm.emit_c_interface } {
+
+    // Step 1: Extract each argument from Julia&#39;s pointer array
+    //         Julia passed: [ptr_to_tag, ptr_to_value, ptr_to_flag]
+    %idx_1 = arith.constant 0 : i64
+    %arg_ptr_1 = llvm.getelementptr %args_ptr[%idx_1] : (!llvm.ptr, i64) -&gt; !llvm.ptr, !llvm.ptr
+    %val_ptr_1 = llvm.load %arg_ptr_1 : !llvm.ptr -&gt; !llvm.ptr
+    %val_1 = llvm.load %val_ptr_1 : !llvm.ptr -&gt; i8        // tag
+
+    %idx_2 = arith.constant 1 : i64
+    %arg_ptr_2 = llvm.getelementptr %args_ptr[%idx_2] : (!llvm.ptr, i64) -&gt; !llvm.ptr, !llvm.ptr
+    %val_ptr_2 = llvm.load %arg_ptr_2 : !llvm.ptr -&gt; !llvm.ptr
+    %val_2 = llvm.load %val_ptr_2 : !llvm.ptr -&gt; i32       // value
+
+    %idx_3 = arith.constant 2 : i64
+    %arg_ptr_3 = llvm.getelementptr %args_ptr[%idx_3] : (!llvm.ptr, i64) -&gt; !llvm.ptr, !llvm.ptr
+    %val_ptr_3 = llvm.load %arg_ptr_3 : !llvm.ptr -&gt; !llvm.ptr
+    %val_3 = llvm.load %val_ptr_3 : !llvm.ptr -&gt; i8        // flag
+
+    // Step 2: Call C++ function — returns packed struct (6 bytes)
+    %ret_packed = jlcs.ffe_call %val_1, %val_2, %val_3
+        { callee = @pack_three } : (i8, i32, i8) -&gt; !llvm.struct&lt;packed (i8, i32, i8)&gt;
+
+    // Step 3: Convert packed result to aligned layout for Julia
+    //         Extract each field from packed, insert into aligned struct
+    %ret_aligned_undef = llvm.mlir.undef : !llvm.struct&lt;(i8, i32, i8)&gt;
+    %ret_field_1 = llvm.extractvalue %ret_packed[0] : !llvm.struct&lt;packed (i8, i32, i8)&gt;
+    %ret_aligned_1 = llvm.insertvalue %ret_field_1, %ret_aligned_undef[0] : !llvm.struct&lt;(i8, i32, i8)&gt;
+    %ret_field_2 = llvm.extractvalue %ret_packed[1] : !llvm.struct&lt;packed (i8, i32, i8)&gt;
+    %ret_aligned_2 = llvm.insertvalue %ret_field_2, %ret_aligned_1[1] : !llvm.struct&lt;(i8, i32, i8)&gt;
+    %ret_field_3 = llvm.extractvalue %ret_packed[2] : !llvm.struct&lt;packed (i8, i32, i8)&gt;
+    %ret_aligned_3 = llvm.insertvalue %ret_field_3, %ret_aligned_2[2] : !llvm.struct&lt;(i8, i32, i8)&gt;
+
+    return %ret_aligned_3 : !llvm.struct&lt;(i8, i32, i8)&gt;
+  }
+}</code></pre><p>The key operation is in three steps:</p><ol><li><strong>Load arguments</strong> from Julia&#39;s pointer array (Julia passed <code>Ref</code>s, the thunk dereferences them)</li><li><strong>Call C++</strong> via <code>jlcs.ffe_call</code> which handles the packed sret convention</li><li><strong>Convert the result</strong> from <code>packed (i8, i32, i8)</code> (6 bytes, C++ layout) to <code>(i8, i32, i8)</code> (12 bytes, Julia-aligned layout) by extracting and reinserting each field</li></ol><p>The <code>llvm.emit_c_interface</code> attribute tells MLIR to generate the <code>_mlir_ciface_pack_three_thunk</code> entry point that Julia&#39;s <code>JITManager</code> calls.</p><p>Meanwhile, Julia&#39;s JIT compiles the <code>pack_three</code> wrapper to this LLVM IR:</p><pre><code class="language-llvm hljs">; @code_llvm pack_three(UInt8(1), Int32(42), UInt8(1))
+define void @julia_pack_three(ptr sret({ i8, i32, i8 }) align 8 %sret_return,
+                              i8 zeroext %&quot;tag::UInt8&quot;,
+                              i32 signext %&quot;value::Int32&quot;,
+                              i8 zeroext %&quot;flag::UInt8&quot;) {
+top:
+  %sret_box = alloca [3 x i32], align 4
+  call void @j_invoke(%sret_box, @&quot;jl_global_thunk_name&quot;,
+                      i8 %&quot;tag::UInt8&quot;, i32 %&quot;value::Int32&quot;, i8 %&quot;flag::UInt8&quot;)
+  call void @llvm.memcpy(ptr %sret_return, ptr %sret_box, i64 12)
+  ret void
+}</code></pre><p>Julia&#39;s IR calls <code>JITManager.invoke()</code> (compiled as <code>@j_invoke</code>), which resolves to the MLIR-compiled thunk via the lock-free symbol cache. The result comes back through an sret buffer. Both JITs produced their IR independently — Julia compiled the wrapper, MLIR compiled the thunk — and they meet at the <code>call</code> instruction.</p><h3 id="The-call-sequence"><a class="docs-heading-anchor" href="#The-call-sequence">The call sequence</a><a id="The-call-sequence-1"></a><a class="docs-heading-anchor-permalink" href="#The-call-sequence" title="Permalink"></a></h3><p>Here is what happens when Julia calls <code>pack_three(UInt8(1), Int32(42), UInt8(1))</code>:</p><pre><code class="nohighlight hljs">Julia                          MLIR Thunk                        C++
+─────                          ──────────                        ───
+1. Create Refs:
+   r1 = Ref(UInt8(1))
+   r2 = Ref(Int32(42))
+   r3 = Ref(UInt8(1))
+
+2. Build pointer array:
+   inner_ptrs = [&amp;r1, &amp;r2, &amp;r3]
+                    │
+                    ▼
+              3. ciface entry:
+                 _mlir_ciface_pack_three_thunk(inner_ptrs)
+                    │
+              4. Load from Julia-aligned ptrs:
+                 tag   = load i8  from inner_ptrs[0]
+                 value = load i32 from inner_ptrs[1]
+                 flag  = load i8  from inner_ptrs[2]
+                    │
+              5. Call with packed sret (align 1):
+                 @pack_three(%sret, tag, value, flag)
+                                                          │
+                                                    6. Store packed:
+                                                       offset 0: tag
+                                                       offset 1: value
+                                                       offset 5: flag
+                                                          │
+              7. Return packed result ◄───────────────────┘
+                    │
+8. Read result  ◄───┘
+   from sret buffer</code></pre><p>The MLIR thunk is a <strong>translator between two valid but incompatible memory layouts</strong>. Julia&#39;s layout is correct for Julia (natural alignment). C++&#39;s layout is correct for C++ (packed). The thunk bridges them at the IR level by moving individual field values — not by copying memory blocks.</p><h2 id="Virtual-dispatch:-same-problem,-same-solution"><a class="docs-heading-anchor" href="#Virtual-dispatch:-same-problem,-same-solution">Virtual dispatch: same problem, same solution</a><a id="Virtual-dispatch:-same-problem,-same-solution-1"></a><a class="docs-heading-anchor-permalink" href="#Virtual-dispatch:-same-problem,-same-solution" title="Permalink"></a></h2><p>C++ and Julia both solve the same fundamental problem: given a value, select the right implementation of a function based on its runtime type. They just use different mechanisms.</p><h3 id="C-approach:-vtables"><a class="docs-heading-anchor" href="#C-approach:-vtables">C++ approach: vtables</a><a id="C-approach:-vtables-1"></a><a class="docs-heading-anchor-permalink" href="#C-approach:-vtables" title="Permalink"></a></h3><pre><code class="language-cpp hljs">// test/vtable_test/include/shapes.h
+class Shape {
+public:
+    virtual double area() const { return 0.0; }
+    virtual double perimeter() const { return 0.0; }
+};
+
+class Circle : public Shape {
+    double radius;
+public:
+    double area() const override;       // slot 1 in vtable
+    double perimeter() const override;  // slot 2 in vtable
+};
+
+class Rectangle : public Shape {
+    double width, height;
+public:
+    double area() const override;
+    double perimeter() const override;
+};</code></pre><p>At the machine level, calling <code>shape-&gt;area()</code> means:</p><ol><li>Read the vtable pointer from <code>shape</code> (first 8 bytes of the object)</li><li>Index into the vtable to get the function pointer for <code>area</code> (slot 1)</li><li>Call the function pointer</li></ol><p>The JLCS dialect makes this explicit as a verifiable IR operation:</p><pre><code class="language-mlir hljs">// jlcs.vcall encodes the vtable dispatch contract:
+// &quot;read vtable at offset 0, index slot 1, call with %obj&quot;
+%result = jlcs.vcall @Shape::area(%obj)
+    { vtable_offset = 0 : i64, slot = 1 : i64 } : (!llvm.ptr) -&gt; f64</code></pre><p>This lowers through MLIR&#39;s pass pipeline to the same LLVM IR that a C++ compiler would generate: a GEP to the vtable pointer, a load of the function pointer at the slot offset, and an indirect call.</p><h3 id="Julia-approach:-multiple-dispatch"><a class="docs-heading-anchor" href="#Julia-approach:-multiple-dispatch">Julia approach: multiple dispatch</a><a id="Julia-approach:-multiple-dispatch-1"></a><a class="docs-heading-anchor-permalink" href="#Julia-approach:-multiple-dispatch" title="Permalink"></a></h3><p>RepliBuild generates idiomatic Julia wrappers that use Julia&#39;s own dispatch mechanism:</p><pre><code class="language-julia hljs"># test/vtable_test/julia/VtableTest.jl (generated)
+
+# Idiomatic types wrapping C++ objects
+mutable struct Circle
+    handle::Ptr{Cvoid}
+    function Circle(r::Cdouble)
+        handle = create_circle(r)
+        obj = new(Ptr{Cvoid}(handle))
+        finalizer(obj) do o
+            delete_shape(o.handle)
+        end
+        return obj
+    end
+end
+
+mutable struct Rectangle
+    handle::Ptr{Cvoid}
+    function Rectangle(w::Cdouble, h::Cdouble)
+        handle = create_rectangle(w, h)
+        obj = new(Ptr{Cvoid}(handle))
+        finalizer(obj) do o
+            delete_shape(o.handle)
+        end
+        return obj
+    end
+end
+
+# Multiple dispatch — Julia selects the method by type
+area(obj::Circle) = Circle_area(obj.handle)
+area(obj::Rectangle) = Rectangle_area(obj.handle)</code></pre><p>User code reads naturally:</p><pre><code class="language-julia hljs">c = Circle(5.0)
+r = Rectangle(3.0, 4.0)
+
+area(c)  # → Julia dispatches to Circle_area → calls _ZNK6Circle4areaEv
+area(r)  # → Julia dispatches to Rectangle_area → calls _ZNK9Rectangle4areaEv</code></pre><p>Julia&#39;s JIT compiles each dispatch path independently. Here is the actual LLVM IR for <code>area(::Circle)</code>:</p><pre><code class="language-llvm hljs">; @code_llvm area(Circle(5.0))
+define double @julia_area(ptr noundef nonnull align 8 dereferenceable(8) %&quot;obj::Circle&quot;) {
+top:
+  ; Load the raw C++ pointer from the Circle handle field
+  %&quot;obj::Circle.handle&quot; = load ptr, ptr %&quot;obj::Circle&quot;, align 8
+
+  ; Call the mangled C++ symbol directly — one instruction
+  %0 = call double @jlplt__ZNK6Circle4areaEv_got.jit(ptr %&quot;obj::Circle.handle&quot;)
+  ret double %0
+}</code></pre><p>And the x86 assembly it compiles to:</p><pre><code class="language-asm hljs">; @code_native area(Circle(5.0))
+julia_area:
+  push    rbp
+  mov     rdi, qword ptr [rdi]           ; load handle from Circle struct
+  movabs  rax, offset _ZNK6Circle4areaEv  ; address of C++ Circle::area()
+  mov     rbp, rsp
+  call    rax                             ; call C++ directly
+  pop     rbp
+  ret</code></pre><p>Three real instructions: load the pointer, call the C++ function, return. Julia&#39;s multiple dispatch resolved <code>area(::Circle)</code> to <code>Circle_area</code> at compile time, and the JIT compiled it down to a direct call to the mangled C++ symbol. No vtable indirection, no runtime type check — Julia already knows the concrete type.</p><h3 id="The-parallel"><a class="docs-heading-anchor" href="#The-parallel">The parallel</a><a id="The-parallel-1"></a><a class="docs-heading-anchor-permalink" href="#The-parallel" title="Permalink"></a></h3><p>Both languages solve the same problem — <strong>select the right implementation based on the runtime type</strong> — using different mechanisms that compile to the same kind of machine code:</p><table><tr><th style="text-align: right"></th><th style="text-align: right">C++</th><th style="text-align: right">Julia</th><th style="text-align: right">MLIR (JLCS)</th></tr><tr><td style="text-align: right"><strong>Mechanism</strong></td><td style="text-align: right">vtable pointer + slot index</td><td style="text-align: right">method table + type tag</td><td style="text-align: right"><code>jlcs.vcall</code> operation</td></tr><tr><td style="text-align: right"><strong>Dispatch</strong></td><td style="text-align: right">Indirect call through function pointer</td><td style="text-align: right">Compiled specialization per type</td><td style="text-align: right">Lowers to indirect call</td></tr><tr><td style="text-align: right"><strong>Result</strong></td><td style="text-align: right">Same machine code</td><td style="text-align: right">Same machine code</td><td style="text-align: right">Same machine code</td></tr></table><p>The JLCS dialect does not invent a new dispatch mechanism. It encodes the <strong>existing</strong> C++ vtable dispatch as a structured, verifiable IR operation that MLIR can reason about, optimize, and lower to correct native code.</p><h2 id="Both-JITs-produce-IR-for-the-same-function"><a class="docs-heading-anchor" href="#Both-JITs-produce-IR-for-the-same-function">Both JITs produce IR for the same function</a><a id="Both-JITs-produce-IR-for-the-same-function-1"></a><a class="docs-heading-anchor-permalink" href="#Both-JITs-produce-IR-for-the-same-function" title="Permalink"></a></h2><p>To see the two JITs operating side by side, consider that the MLIR JIT generates thunks for <strong>every</strong> function in the library — even scalar ones that Tier 1 handles via <code>ccall</code>. Here is the MLIR thunk for <code>scalar_add</code> alongside Julia&#39;s compiled IR for the same function:</p><p><strong>Julia&#39;s JIT</strong> produces this LLVM IR for <code>scalar_add</code> (via <code>@code_llvm</code>):</p><pre><code class="language-llvm hljs">define i32 @julia_scalar_add(i64 signext %&quot;a::Int64&quot;, i64 signext %&quot;b::Int64&quot;) {
+  %6 = trunc i64 %&quot;b::Int64&quot; to i32
+  %7 = trunc i64 %&quot;a::Int64&quot; to i32
+  %8 = call i32 @jlplt_scalar_add_got.jit(i32 %7, i32 %6)
+  ret i32 %8
+}</code></pre><p>Julia reasons: truncate <code>Int64</code> to <code>Int32</code>, call the C++ symbol, return.</p><p><strong>MLIR&#39;s JIT</strong> produces this IR for the same function (via <code>JLCSIRGenerator</code>):</p><pre><code class="language-mlir hljs">func.func private @scalar_add(i32, i32) -&gt; i32
+
+func.func @scalar_add_thunk(%args_ptr: !llvm.ptr) -&gt; i32
+    attributes { llvm.emit_c_interface } {
+  %idx_1 = arith.constant 0 : i64
+  %arg_ptr_1 = llvm.getelementptr %args_ptr[%idx_1] : (!llvm.ptr, i64) -&gt; !llvm.ptr, !llvm.ptr
+  %val_ptr_1 = llvm.load %arg_ptr_1 : !llvm.ptr -&gt; !llvm.ptr
+  %val_1 = llvm.load %val_ptr_1 : !llvm.ptr -&gt; i32
+
+  %idx_2 = arith.constant 1 : i64
+  %arg_ptr_2 = llvm.getelementptr %args_ptr[%idx_2] : (!llvm.ptr, i64) -&gt; !llvm.ptr, !llvm.ptr
+  %val_ptr_2 = llvm.load %arg_ptr_2 : !llvm.ptr -&gt; !llvm.ptr
+  %val_2 = llvm.load %val_ptr_2 : !llvm.ptr -&gt; i32
+
+  %ret_val = jlcs.ffe_call %val_1, %val_2 { callee = @scalar_add } : (i32, i32) -&gt; i32
+  return %ret_val : i32
+}</code></pre><p>MLIR reasons: dereference the pointer array to get <code>i32</code> values, call the C++ symbol via <code>jlcs.ffe_call</code>, return.</p><p>Both JITs are reasoning about the <strong>same operation</strong> — &quot;call <code>scalar_add</code> with two <code>i32</code> arguments&quot; — using their own IR and their own type system. Julia uses <code>trunc</code> to convert from its native <code>Int64</code>. MLIR uses <code>llvm.getelementptr</code> + <code>llvm.load</code> to unpack the ciface pointer array. Both arrive at the same <code>call @scalar_add(i32, i32) -&gt; i32</code> in the final machine code.</p><p>For <code>scalar_add</code>, Tier 1 (<code>ccall</code>) wins because it skips the pointer array overhead. But for <code>pack_three</code>, only the MLIR thunk can correctly marshal the packed struct layout. The tier selection in <code>is_ccall_safe()</code> picks the right path automatically.</p><p><strong>Clang</strong> produced this LLVM IR for the C++ side — the target both JITs ultimately call:</p><pre><code class="language-llvm hljs">define i32 @scalar_add(i32 noundef %0, i32 noundef %1) {
+  %5 = load i32, ptr %3, align 4
+  %6 = load i32, ptr %4, align 4
+  %7 = add nsw i32 %5, %6
+  ret i32 %7
+}</code></pre><p>Three compilers. Three IRs. One <code>add</code> instruction. The language boundary exists only in source code — by the time any of these reach the CPU, they are all the same machine code.</p><h2 id="The-full-picture"><a class="docs-heading-anchor" href="#The-full-picture">The full picture</a><a id="The-full-picture-1"></a><a class="docs-heading-anchor-permalink" href="#The-full-picture" title="Permalink"></a></h2><p>Both compilation pipelines produce LLVM IR. For simple functions (POD types, scalar returns), the IRs merge directly — either through <code>ccall</code> (a function call within LLVM IR) or <code>llvmcall</code> (the C++ IR is inlined into the Julia IR by the JIT).</p><p>For complex cases (packed structs, unions, virtual dispatch), the MLIR JIT generates thunks in the JLCS dialect that translate between the two ABIs. These thunks are lowered through MLIR&#39;s standard pipeline to LLVM IR and compiled to native machine code:</p><pre><code class="nohighlight hljs">Julia source                                C++ source
+     |                                           |
+     v                                           v
+Julia compiler                               Clang
+     |                                           |
+     v                                           v
+Julia LLVM IR                              C++ LLVM IR
+     |                                           |
+     +--- Tier 1 (simple): ccall ─────────&gt; symbol resolution
+     |                                           |
+     +--- Tier 1 (LTO): llvmcall ──&gt; merge ─────+──&gt; Machine code
+     |                                           |
+     +--- Tier 2: JITManager.invoke() ──────────&gt;|
+                    |                             |
+                    v                             |
+              JLCS MLIR dialect                   |
+                    |                             |
+                    v                             |
+              func dialect                        |
+                    |                             |
+                    v                             |
+              LLVM dialect                        |
+                    |                             |
+                    v                             |
+              MLIR LLVM IR ──&gt; Machine code ──&gt; calls C++ symbols</code></pre><p>The JLCS dialect is the <strong>missing piece</strong> — it handles the cases where Julia&#39;s LLVM IR and C++&#39;s LLVM IR cannot merge directly because they disagree on data layout. The dialect encodes the ABI contract (field offsets, packing flags, vtable slots) as first-class IR operations that MLIR can verify and lower to correct code.</p><p>After the first call to any Tier 2 function, the compiled machine code is cached in the <code>JITManager</code>&#39;s lock-free symbol dictionary. Subsequent calls are a single <code>Dict</code> read (no lock, no JIT overhead) followed by a <code>ccall</code> to the cached function pointer — the same cost as a regular <code>ccall</code>.</p><p>The result: whether a function goes through Tier 1 (<code>ccall</code>/<code>llvmcall</code>) or Tier 2 (MLIR thunks), the generated machine code is equivalent. The dispatch tier is chosen automatically based on ABI complexity, and the user never needs to know which path a given function takes.</p></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../architecture/">Architecture »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Friday 13 March 2026 22:24">Friday 13 March 2026</span>. Using Julia version 1.12.5.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
