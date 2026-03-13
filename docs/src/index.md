@@ -124,6 +124,7 @@ See the [Configuration Reference](config.md) for all available options.
 
 ## Documentation
 
+- **[How It Works](how-it-works.md)** — Two JITs, one IR: how Julia and C++ converge at the LLVM level
 - **[Architecture](architecture.md)** — Full system architecture, pipeline stages, tier dispatch, design decisions
 - **[User Guide](guide.md)** — Workflows, dependencies, LTO, AOT thunks, templates, registry
 - **[Configuration Reference](config.md)** — Complete `replibuild.toml` option reference
