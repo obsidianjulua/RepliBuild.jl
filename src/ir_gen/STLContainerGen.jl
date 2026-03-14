@@ -40,6 +40,9 @@ const STL_METHOD_SIGNATURES = Dict{String,NamedTuple{(:arg_types, :ret_type), Tu
     "find"         => (arg_types = ["!llvm.ptr"],    ret_type = "!llvm.ptr"),  # returns iterator
     "count"        => (arg_types = ["!llvm.ptr"],    ret_type = "i64"),
     "insert"       => (arg_types = ["!llvm.ptr", "!llvm.ptr"], ret_type = "!llvm.ptr"),
+    # Map-specific: keys passed by const reference (ptr), not integer index
+    "map_at"       => (arg_types = ["!llvm.ptr"],    ret_type = "!llvm.ptr"),  # at(const K&) -> V&
+    "map_subscript"=> (arg_types = ["!llvm.ptr"],    ret_type = "!llvm.ptr"),  # operator[](const K&) -> V&
 )
 
 """

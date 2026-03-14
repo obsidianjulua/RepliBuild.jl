@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.5.2"
+const VERSION = v"2.5.3"
 
 # ============================================================================
 # LOAD CORE MODULES
@@ -75,7 +75,7 @@ export clean
 export check_environment
 
 # Package registry & scaffolding
-export use, register, unregister, list_registry, scaffold_package
+export use, register, unregister, list_registry, search, scaffold_package
 
 # Advanced modules
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser, JLCSIRGenerator, MLIRNative, STLWrappers
@@ -162,6 +162,21 @@ Print all registered packages in the global RepliBuild registry.
 """
 function list_registry()
     PackageRegistry.list_registry()
+end
+
+"""
+    search(query::String="")
+
+Search the RepliBuild Hub for available packages. Matches against names,
+descriptions, tags, and language. Call with no arguments to list everything.
+
+```julia
+RepliBuild.search()           # list all hub packages
+RepliBuild.search("json")     # filter by keyword
+```
+"""
+function search(query::String="")
+    PackageRegistry.search(query)
 end
 
 # ============================================================================

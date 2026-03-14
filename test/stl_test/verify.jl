@@ -82,5 +82,49 @@ using .StlTest
         @test StlTest.string_len(s.handle) == 0
     end
 
+    # ── 6. CppMap{Cint,Cint} factory ────────────────────────────────────────
+    @testset "CppMap{Cint,Cint} lifecycle" begin
+        m = StlTest.create_std_map_int_int()
+        @test m isa RepliBuild.STLWrappers.CppMap{Cint,Cint}
+        @test length(m) == 0
+        @test isempty(m)
+
+        # Insert via operator[]
+        m[Cint(1)] = Cint(42)
+        @test length(m) == 1
+        @test !isempty(m)
+
+        # Read back via at()
+        @test m[Cint(1)] == 42
+
+        # haskey
+        @test haskey(m, Cint(1))
+        @test !haskey(m, Cint(99))
+
+        # Insert more
+        m[Cint(2)] = Cint(100)
+        m[Cint(3)] = Cint(200)
+        @test length(m) == 3
+
+        # delete!
+        delete!(m, Cint(2))
+        @test length(m) == 2
+        @test !haskey(m, Cint(2))
+
+        # empty!
+        empty!(m)
+        @test length(m) == 0
+    end
+
+    # ── 7. map_lookup (takes const std::map<int,int>&) ───────────────────────
+    @testset "map_lookup" begin
+        m = StlTest.create_std_map_int_int()
+        m[Cint(0)] = Cint(0)
+        m[Cint(1)] = Cint(10)
+        m[Cint(2)] = Cint(20)
+        @test StlTest.map_lookup(m.handle, Cint(1)) == 10
+        @test StlTest.map_size(m.handle) == 3
+    end
+
     println("✓ STL Template Pipeline Passed")
 end

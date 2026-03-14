@@ -454,36 +454,36 @@ end
 # 3. REGISTRY INTEGRATION TEST — register → build → wrap → use → unregister
 # =============================================================================
 
-@testset "Registry Integration (basics_test)" begin
-    basics_dir = joinpath(TEST_DIR, "basics_test")
-    if !isdir(basics_dir)
-        @warn "basics_test/ not found — skipping registry integration"
+@testset "Registry Integration (c_test)" begin
+    ctest_dir = joinpath(TEST_DIR, "c_test")
+    if !isdir(ctest_dir)
+        @warn "c_test/ not found — skipping registry integration"
         return
     end
 
-    # Make sure basics_test has a TOML (may need discover)
-    basics_toml = joinpath(basics_dir, "replibuild.toml")
-    if !isfile(basics_toml)
-        RepliBuild.discover(basics_dir; force=true)
+    # Make sure c_test has a TOML (may need discover)
+    ctest_toml = joinpath(ctest_dir, "replibuild.toml")
+    if !isfile(ctest_toml)
+        RepliBuild.discover(ctest_dir; force=true)
     end
 
     with_temp_registry() do home
-        @testset "register basics_test" begin
-            entry = PR.register(basics_toml; name="basics_test_reg")
-            @test entry.name == "basics_test_reg"
+        @testset "register c_test" begin
+            entry = PR.register(ctest_toml; name="c_test_reg")
+            @test entry.name == "c_test_reg"
             @test isfile(entry.toml_path)
             @test !entry.verified
         end
 
-        @testset "list shows basics_test" begin
+        @testset "list shows c_test" begin
             output = capture_stdout(PR.list_registry)
-            @test contains(output, "basics_test_reg")
+            @test contains(output, "c_test_reg")
         end
 
-        @testset "unregister basics_test" begin
-            PR.unregister("basics_test_reg")
+        @testset "unregister c_test" begin
+            PR.unregister("c_test_reg")
             index = PR._load_index()
-            @test !haskey(index.entries, "basics_test_reg")
+            @test !haskey(index.entries, "c_test_reg")
 
             output = capture_stdout(PR.list_registry)
             @test contains(output, "no packages registered")

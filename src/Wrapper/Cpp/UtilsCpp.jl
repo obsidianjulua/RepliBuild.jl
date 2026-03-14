@@ -26,6 +26,22 @@ function _sanitize_cpp_type_name(name::AbstractString)::String
     return s
 end
 
+"""Normalize an inferred Julia type string to a ccall-compatible type alias."""
+function _normalize_stl_elem_type(jtype::String)::String
+    if jtype in ("Cint", "Int32")
+        return "Cint"
+    elseif jtype in ("Cdouble", "Float64")
+        return "Cdouble"
+    elseif jtype in ("Cfloat", "Float32")
+        return "Cfloat"
+    elseif jtype == "Int64"
+        return "Int64"
+    elseif jtype == "UInt64"
+        return "UInt64"
+    end
+    return jtype
+end
+
 """
     _fuzzy_dwarf_lookup(c_type, dwarf_structs) -> Union{String, Nothing}
 

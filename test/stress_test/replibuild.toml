@@ -7,7 +7,7 @@ allow_function_pointers = true
 [compile]
 parallel = true
 flags = ["-std=c++17", "-fPIC"]
-source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src/numerics.cpp", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src/shapes.cpp", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src/tracker.cpp"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/src"]
 aot_thunks = false
 

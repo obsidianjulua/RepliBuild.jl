@@ -11,13 +11,14 @@ using RepliBuild
 @testset "RepliBuild.jl" begin
 
     @testset "Package loads" begin
-        @test RepliBuild.VERSION == v"2.5.0"
+        @test RepliBuild.VERSION == v"2.5.3"
         @test isdefined(RepliBuild, :discover)
         @test isdefined(RepliBuild, :build)
         @test isdefined(RepliBuild, :wrap)
         @test isdefined(RepliBuild, :clean)
         @test isdefined(RepliBuild, :info)
         @test isdefined(RepliBuild, :check_environment)
+        @test isdefined(RepliBuild, :search)
     end
 
     @testset "ConfigurationManager" begin

@@ -146,14 +146,22 @@ should not be exposed to Julia users.
 function _is_stl_internal_type(name::String)::Bool
     # STL internal types from libstdc++ / libc++
     stl_internal_prefixes = (
-        "_Alloc_hider", "_Guard", "_Guard_alloc", "_Storage",
+        # libstdc++ / libc++ internal types
+        "_Alloc_hider", "_Alloc_node", "_Auto_node",
+        "_Guard", "_Guard_alloc", "_Storage",
         "_Temporary_value", "_UninitDestroyGuard", "_Vector_impl",
         "_Vector_base", "_Bvector", "_Deque_impl", "_List_impl",
         "_Rb_tree", "_Hashtable", "_Node_base", "_Node_alloc",
+        "_Node_handle", "_Node_insert_return",
+        "_Map_base", "_Insert", "_Rehash",
+        "_Reuse_or_alloc_node", "_Head_base",
         "__gnu_cxx::", "std::_", "std::__", "__cxx",
+        "__aligned_membuf", "__sv_wrapper", "__uses_alloc",
         "allocator<", "char_traits<", "less<", "hash<", "equal_to<",
         "iterator<", "reverse_iterator<", "__normal_iterator<",
         "__wrap_iter<", "initializer_list<",
+        "pair<", "move_iterator<", "basic_string_view<",
+        "value_compare", "Select1st<",
     )
     for prefix in stl_internal_prefixes
         if startswith(name, prefix)

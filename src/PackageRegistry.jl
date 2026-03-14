@@ -13,8 +13,9 @@ using TOML
 using SHA
 using Dates
 using UUIDs
+using Downloads
 
-export register, unregister, use, list_registry, scaffold_package
+export register, unregister, use, list_registry, search, scaffold_package
 export RegistryEntry, RegistryIndex
 
 # =============================================================================
@@ -25,6 +26,7 @@ const REGISTRY_DIR = "registry"
 const BUILDS_DIR = "builds"
 const INDEX_FILE = "index.toml"
 const TOOLCHAIN_CACHE = "toolchain.toml"
+const DEFAULT_HUB_URL = "https://raw.githubusercontent.com/obsidianjulua/RepliBuild-Hub/main"
 
 """Return the global RepliBuild home directory, respecting REPLIBUILD_HOME env var."""
 function _replibuild_home()::String
@@ -332,6 +334,108 @@ function list_registry()
         println("    registered: $(Dates.format(entry.registered_at, "yyyy-mm-dd HH:MM"))")
         println()
     end
+end
+
+# =============================================================================
+# HUB SEARCH
+# =============================================================================
+
+"""Return the hub base URL, respecting REPLIBUILD_HUB_URL env var."""
+function _hub_url()::String
+    get(ENV, "REPLIBUILD_HUB_URL", DEFAULT_HUB_URL)
+end
+
+"""Fetch and parse the hub index.toml from the remote hub URL."""
+function _fetch_hub_index()::Dict{String, Any}
+    url = _hub_url() * "/index.toml"
+    local body::String
+    try
+        body = sprint() do io
+            Downloads.download(url, io)
+        end
+    catch e
+        error("Failed to fetch hub index from $url: $e")
+    end
+    return TOML.parse(body)
+end
+
+"""
+    search(query::String="")
+
+Search the RepliBuild Hub for available packages. Matches against package names,
+descriptions, and tags. Call with no arguments to list everything.
+
+```julia
+RepliBuild.search()           # list all hub packages
+RepliBuild.search("json")     # filter by keyword
+```
+"""
+function search(query::String="")
+    hub_index = _fetch_hub_index()
+
+    if isempty(hub_index)
+        println("  (hub index is empty)")
+        return
+    end
+
+    query_lower = lowercase(strip(query))
+
+    # Filter packages matching query (or show all if empty)
+    matches = Pair{String, Dict{String,Any}}[]
+    for (name, info) in hub_index
+        info isa Dict || continue
+        if isempty(query_lower) || _matches_query(name, info, query_lower)
+            push!(matches, name => info)
+        end
+    end
+    sort!(matches; by=first)
+
+    if isempty(matches)
+        println("  no packages matching \"$query\"")
+        return
+    end
+
+    # Check local registry to show install status
+    local_index = _load_index()
+
+    println("  ┌─────────────────────────────────────────────────────────────┐")
+    println("  │ RepliBuild Hub", isempty(query_lower) ? "" : "  ▸ \"$query_lower\"",
+            repeat(" ", max(0, 45 - (isempty(query_lower) ? 0 : length(query_lower) + 5))), "│")
+    println("  └─────────────────────────────────────────────────────────────┘")
+    println()
+
+    for (name, info) in matches
+        desc = get(info, "description", "")
+        ver = get(info, "version", "")
+        lang = get(info, "language", "")
+        tags = get(info, "tags", String[])
+        local_status = haskey(local_index.entries, name) ? " (installed)" : ""
+
+        println("  $name $ver [$lang]$local_status")
+        !isempty(desc) && println("    $desc")
+        !isempty(tags) && println("    tags: $(join(tags, ", "))")
+        println()
+    end
+
+    println("  $(length(matches)) package$(length(matches) == 1 ? "" : "s") found")
+    println("  Install: RepliBuild.use(\"<name>\")")
+end
+
+function _matches_query(name::String, info::Dict, query::String)::Bool
+    # Match against name
+    occursin(query, lowercase(name)) && return true
+    # Match against description
+    desc = get(info, "description", "")
+    occursin(query, lowercase(desc)) && return true
+    # Match against tags
+    tags = get(info, "tags", String[])
+    for tag in tags
+        occursin(query, lowercase(tag)) && return true
+    end
+    # Match against language
+    lang = get(info, "language", "")
+    occursin(query, lowercase(lang)) && return true
+    return false
 end
 
 # =============================================================================

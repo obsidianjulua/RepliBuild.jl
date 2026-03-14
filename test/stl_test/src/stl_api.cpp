@@ -23,3 +23,23 @@ std::string greet(const char* name) {
 int string_len(const std::string& s) {
     return static_cast<int>(s.size());
 }
+
+std::map<int, int> make_int_map(int n) {
+    std::map<int, int> m;
+    for (int i = 0; i < n; i++) {
+        m[i] = i * 10;
+    }
+    return m;
+}
+
+int map_lookup(const std::map<int, int>& m, int key) {
+    auto it = m.find(key);
+    if (it != m.end()) {
+        return it->second;
+    }
+    return -1;
+}
+
+int map_size(const std::map<int, int>& m) {
+    return static_cast<int>(m.size());
+}

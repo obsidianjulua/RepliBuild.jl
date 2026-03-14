@@ -863,8 +863,9 @@ end
 Classify an STL method from its demangled name.
 Returns (method_name, is_const) or nothing if not a recognized method.
 """
-function _classify_stl_method(method_sig::String)::Union{Tuple{String,Bool}, Nothing}
+function _classify_stl_method(method_sig::String, container_type::String="")::Union{Tuple{String,Bool}, Nothing}
     sig = strip(method_sig)
+    is_map = startswith(container_type, "std::map") || startswith(container_type, "std::unordered_map")
 
     # Constructor: ClassName(...)  or ClassName()
     # The method_sig is just the part after "::", e.g., "vector()" or "basic_string(char const*)"
@@ -888,7 +889,8 @@ function _classify_stl_method(method_sig::String)::Union{Tuple{String,Bool}, Not
     elseif startswith(sig, "push_back(")
         return ("push_back", false)
     elseif startswith(sig, "operator[](")
-        return ("subscript", is_const)
+        # Map operator[] takes key by const ref (ptr), vector takes size_t (i64)
+        return (is_map ? "map_subscript" : "subscript", is_const)
     elseif startswith(sig, "clear(")
         return ("clear", false)
     elseif startswith(sig, "reserve(")
@@ -924,7 +926,8 @@ function _classify_stl_method(method_sig::String)::Union{Tuple{String,Bool}, Not
     elseif startswith(sig, "count(")
         return ("count", true)
     elseif startswith(sig, "at(")
-        return ("at", is_const)
+        # Map at() takes key by const ref (ptr), vector takes size_t (i64)
+        return (is_map ? "map_at" : "at", is_const)
     end
 
     return nothing
@@ -1027,7 +1030,7 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
         container_normalized in template_set || continue
 
         # Classify the method
-        classification = _classify_stl_method(method_sig)
+        classification = _classify_stl_method(method_sig, container_normalized)
         isnothing(classification) && continue
 
         (method_name, is_const) = classification

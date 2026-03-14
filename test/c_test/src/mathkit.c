@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <float.h>
+#include <stdarg.h>
 
 /* --- Scalar arithmetic --- */
 
@@ -93,4 +94,67 @@ Stats array_stats(const double *data, size_t n) {
 size_t greet(const char *name, char *buf, size_t buf_len) {
     int written = snprintf(buf, buf_len, "Hello, %s!", name);
     return (written < 0) ? 0 : (size_t)written;
+}
+
+/* --- Struct layout edge cases (from basics_test) --- */
+
+int global_int = 42;
+const char *global_string = "Hello from Global";
+
+PaddedStruct make_padded(char a, int b) {
+    PaddedStruct s;
+    s.a = a;
+    s.b = b;
+    return s;
+}
+
+PackedStruct make_packed(char a, int b) {
+    PackedStruct s;
+    s.a = a;
+    s.b = b;
+    return s;
+}
+
+int get_union_int(NumberUnion u) {
+    return u.i;
+}
+
+float get_union_float(NumberUnion u) {
+    return u.f;
+}
+
+int sum_ints(int count, ...) {
+    va_list args;
+    va_start(args, count);
+    int sum = 0;
+    for (int i = 0; i < count; i++) {
+        sum += va_arg(args, int);
+    }
+    va_end(args);
+    return sum;
+}
+
+/* --- JIT edge cases (from jit_edge_test) --- */
+
+int identity(int x) {
+    return x;
+}
+
+void write_sum(const int *a, const int *b, int *out) {
+    *out = *a + *b;
+}
+
+PairResult make_pair(int a, int b) {
+    PairResult r;
+    r.first = a;
+    r.second = b;
+    return r;
+}
+
+PackedTriplet pack_three(char tag, int value, char flag) {
+    PackedTriplet t;
+    t.tag = tag;
+    t.value = value;
+    t.flag = flag;
+    return t;
 }

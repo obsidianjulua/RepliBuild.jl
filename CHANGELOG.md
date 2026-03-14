@@ -2,6 +2,43 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.5.3
+
+### New: STL Map Support (`std::map`, `std::unordered_map`)
+
+Full wrapper generation for `std::map<K,V>` and `std::unordered_map<K,V>` containers, matching the existing `CppVector{T}` and `CppString` pattern.
+
+- **`CppMap{K,V} <: AbstractDict{K,V}`** — New mutable wrapper type in `STLWrappers.jl` that holds an opaque pointer to the C++ map. Lifetime managed by GC finalizer. Supports `getindex`, `setindex!`, `haskey`, `delete!`, `length`, `isempty`, and `empty!` via JIT-compiled MLIR thunks.
+- **`CppUnorderedMap{K,V}`** — Type alias for `CppMap{K,V}` (same thunk interface).
+- **Map-specific thunk signatures** — `map_at` (key by const ref → value ref) and `map_subscript` (key by const ref → value ref) added to `STLContainerGen.jl`, distinguishing map key-lookup semantics from vector index-lookup.
+- **`_classify_stl_method`** — Now accepts an optional `container_type` parameter. `operator[]` and `at()` are classified as `map_subscript`/`map_at` for map containers vs `subscript`/`at` for vectors.
+- **Wrapper codegen** — `GeneratorCpp.jl` emits `create_std_map_*()` factory functions for map templates, mirroring the existing vector factory pattern. Template args are parsed via `_split_template_args` to extract K and V types.
+- **`_normalize_stl_elem_type`** — Extracted from inline type mapping into a shared helper in `UtilsCpp.jl`. Used by both vector and map factory codegen.
+- **`_is_stl_internal_type`** — Expanded blocklist with 13 additional libstdc++/libc++ internal types (`_Alloc_node`, `_Node_handle`, `_Map_base`, `_Insert`, `_Rehash`, `pair<`, `Select1st<`, etc.) that leak through DWARF when wrapping map containers.
+- **DWARF byte_size lookup** — Improved container size resolution: uses `get_stl_container_size` first, then fuzzy-matches DWARF keys (now also matches stripped `std::` prefix).
+
+### New: Hub Search (`RepliBuild.search`)
+
+- **`RepliBuild.search(query="")`** — Search the RepliBuild Hub (community package registry) for available packages. Matches against name, description, tags, and language. Shows install status for locally registered packages.
+- **`_fetch_hub_index()`** — Fetches and parses `index.toml` from the hub URL via `Downloads.jl`.
+- **`REPLIBUILD_HUB_URL`** — Environment variable override for private registries/mirrors.
+- Added `Downloads` to `Project.toml` dependencies.
+
+### New: STL Map Test Suite
+
+- `test/stl_test/` — Extended with `std::map<int,int>` coverage: `make_int_map`, `map_lookup`, `map_size` C++ API functions, `CppMap` lifecycle tests (create, insert, read, haskey, delete, empty), and map-passing tests through `const std::map<int,int>&` parameters.
+
+### Changed: Test Directory Consolidation
+
+Reduced the test directory from 14 subdirectories + 8 top-level files to 6 subdirectories + 3 top-level files. All test content preserved through merges:
+
+- **`c_test/`** — Absorbed `basics_test` (PaddedStruct, PackedStruct, NumberUnion, globals, variadic `sum_ints`) and `jit_edge_test` (identity, write_sum, make_pair, PackedTriplet). Pure C with LTO.
+- **`stress_test/`** — Absorbed `vtable_test` (Shape/Rectangle/Circle virtual dispatch), `raii_test` (Tracker ctor/dtor), and all standalone MLIR test files (`test_mlir.jl`, `test_mlir_safety.jl`, `test_aot.jl`, `test_raii.jl`). New `verify.jl` covers numerics, vtable dispatch, and conditional MLIR/AOT/RAII sections.
+- **`devtests.jl`** — Rewritten to reference the consolidated 6-test suite. Removed duktape setup and standalone MLIR includes.
+- **`runtests.jl`** — Added `search` to API surface check.
+- **`test_registry.jl`** — Registry integration test updated from `basics_test` to `c_test`.
+- **Deleted:** `lua_test/`, `duktape_test/`, `mydir/`, `rust_demo/`, `basics_test/`, `jit_edge_test/`, `vtable_test/`, `raii_test/`, `pugixml_test.jl`, `test_mlir.jl`, `test_mlir_safety.jl`, `test_aot.jl`, `test_raii.jl`.
+
 ## v2.5.2
 
 ### New: RAII Dialect Operations

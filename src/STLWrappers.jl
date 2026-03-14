@@ -9,7 +9,7 @@ module STLWrappers
 
 import ..JITManager
 
-export CppVector, CppString
+export CppVector, CppString, CppMap, CppUnorderedMap
 
 # =============================================================================
 # CppVector{T} - Wrapper for std::vector<T>
@@ -236,6 +236,150 @@ function Base.show(io::IO, s::CppString)
         print(io, "CppString(null)")
     else
         print(io, "CppString(\"", String(s), "\")")
+    end
+end
+
+# =============================================================================
+# CppMap{K,V} - Wrapper for std::map<K,V> and std::unordered_map<K,V>
+# =============================================================================
+
+"""
+    CppMap{K,V} <: AbstractDict{K,V}
+
+Julia wrapper for `std::map<K,V>` (or `std::unordered_map<K,V>`). Holds an
+opaque pointer to the C++ object. Lifetime is managed by a GC finalizer.
+
+Keys and values are passed by reference through JIT-compiled MLIR thunks.
+Iteration is not yet supported — use `getindex`, `setindex!`, `haskey`,
+`delete!`, `length`, `isempty`, and `empty!`.
+"""
+mutable struct CppMap{K,V} <: AbstractDict{K,V}
+    handle::Ptr{Cvoid}
+    owns::Bool
+    thunks::Dict{String,String}  # method_name -> mangled_name
+    byte_size::Int               # sizeof(std::map<K,V>) from DWARF
+
+    function CppMap{K,V}(handle::Ptr{Cvoid}, owns::Bool,
+                         thunks::Dict{String,String};
+                         byte_size::Int=48) where {K,V}
+        obj = new{K,V}(handle, owns, thunks, byte_size)
+        if owns && haskey(thunks, "destructor")
+            finalizer(_cpp_map_destroy, obj)
+        end
+        return obj
+    end
+end
+
+"""Alias for `CppMap{K,V}` — the thunk interface is identical."""
+const CppUnorderedMap{K,V} = CppMap{K,V}
+
+function _cpp_map_destroy(m::CppMap)
+    if m.handle != C_NULL && m.owns
+        dtor = get(m.thunks, "destructor", "")
+        if !isempty(dtor)
+            JITManager.invoke("_mlir_ciface_$(dtor)_thunk", m.handle)
+        end
+        Libc.free(m.handle)
+        m.handle = C_NULL
+    end
+end
+
+function Base.length(m::CppMap)
+    m.handle == C_NULL && error("CppMap: null handle")
+    thunk = get(m.thunks, "size", "")
+    isempty(thunk) && error("CppMap: no size thunk available")
+    n = JITManager.invoke("_mlir_ciface_$(thunk)_thunk", UInt64, m.handle)
+    return Int(n)
+end
+
+function Base.isempty(m::CppMap)
+    thunk = get(m.thunks, "empty", "")
+    if length(thunk) > 0
+        result = JITManager.invoke("_mlir_ciface_$(thunk)_thunk", UInt8, m.handle)
+        return result != 0
+    end
+    return length(m) == 0
+end
+
+function Base.getindex(m::CppMap{K,V}, key) where {K,V}
+    m.handle == C_NULL && error("CppMap: null handle")
+    thunk = get(m.thunks, "map_at", "")
+    isempty(thunk) && error("CppMap: no map_at thunk available")
+    k = convert(K, key)
+    key_ref = Ref(k)
+    local val_ptr::Ptr{Cvoid}
+    GC.@preserve key_ref begin
+        val_ptr = JITManager.invoke(
+            "_mlir_ciface_$(thunk)_thunk",
+            Ptr{Cvoid}, m.handle, Base.unsafe_convert(Ptr{Cvoid}, key_ref))
+    end
+    return unsafe_load(Ptr{V}(val_ptr))
+end
+
+function Base.setindex!(m::CppMap{K,V}, val, key) where {K,V}
+    m.handle == C_NULL && error("CppMap: null handle")
+    # operator[] inserts default on miss, returns V& — then we store into it
+    thunk = get(m.thunks, "map_subscript", "")
+    isempty(thunk) && error("CppMap: no map_subscript thunk available")
+    k = convert(K, key)
+    key_ref = Ref(k)
+    local val_ptr::Ptr{Cvoid}
+    GC.@preserve key_ref begin
+        val_ptr = JITManager.invoke(
+            "_mlir_ciface_$(thunk)_thunk",
+            Ptr{Cvoid}, m.handle, Base.unsafe_convert(Ptr{Cvoid}, key_ref))
+    end
+    unsafe_store!(Ptr{V}(val_ptr), convert(V, val))
+    return val
+end
+
+function Base.haskey(m::CppMap{K,V}, key) where {K,V}
+    m.handle == C_NULL && error("CppMap: null handle")
+    thunk = get(m.thunks, "count", "")
+    isempty(thunk) && error("CppMap: no count thunk available")
+    k = convert(K, key)
+    key_ref = Ref(k)
+    local n::UInt64
+    GC.@preserve key_ref begin
+        n = JITManager.invoke(
+            "_mlir_ciface_$(thunk)_thunk",
+            UInt64, m.handle, Base.unsafe_convert(Ptr{Cvoid}, key_ref))
+    end
+    return n > 0
+end
+
+function Base.delete!(m::CppMap{K,V}, key) where {K,V}
+    m.handle == C_NULL && error("CppMap: null handle")
+    thunk = get(m.thunks, "erase", "")
+    isempty(thunk) && error("CppMap: no erase thunk available")
+    k = convert(K, key)
+    key_ref = Ref(k)
+    GC.@preserve key_ref begin
+        JITManager.invoke(
+            "_mlir_ciface_$(thunk)_thunk",
+            Ptr{Cvoid}, m.handle, Base.unsafe_convert(Ptr{Cvoid}, key_ref))
+    end
+    return m
+end
+
+function Base.empty!(m::CppMap)
+    m.handle == C_NULL && error("CppMap: null handle")
+    thunk = get(m.thunks, "clear", "")
+    isempty(thunk) && error("CppMap: no clear thunk available")
+    JITManager.invoke("_mlir_ciface_$(thunk)_thunk", m.handle)
+    return m
+end
+
+# iterate stub — returns nothing (iteration requires C++ iterator thunks)
+Base.iterate(::CppMap) = nothing
+Base.iterate(::CppMap, ::Any) = nothing
+
+function Base.show(io::IO, m::CppMap{K,V}) where {K,V}
+    if m.handle == C_NULL
+        print(io, "CppMap{$K,$V}(null)")
+    else
+        n = length(m)
+        print(io, "CppMap{$K,$V}($n entries)")
     end
 end
 

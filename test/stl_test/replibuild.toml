@@ -3,8 +3,8 @@ allow_unknown_enums = false
 strictness = "warn"
 allow_unknown_structs = true
 allow_function_pointers = true
-templates = ["std::vector<int>", "std::string"]
-template_headers = ["<vector>", "<string>"]
+templates = ["std::vector<int>", "std::string", "std::map<int, int>"]
+template_headers = ["<vector>", "<string>", "<map>"]
 
 [compile]
 parallel = true

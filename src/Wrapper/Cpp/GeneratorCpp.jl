@@ -2655,11 +2655,19 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             thunks_dict_str = "Dict{String,String}(" * join(thunks_entries, ", ") * ")"
 
             # Get container byte_size from DWARF struct_definitions
-            byte_size = 24  # default for vector on 64-bit
+            byte_size = get_stl_container_size(container_type)
+            if byte_size == 0
+                byte_size = 24  # fallback default
+            end
+            # Try to get exact size from DWARF if available
+            # DWARF keys may lack std:: prefix and include allocator args
+            container_short = replace(container_type, "std::" => "")
             for (sname, sinfo) in dwarf_structs
-                if contains(sname, container_type) || _normalize_stl_for_dwarf(sname) == container_type
-                    bs_str = get(sinfo, "byte_size", "24")
-                    byte_size = bs_str isa Integer ? bs_str : (startswith(bs_str, "0x") ? parse(Int, bs_str[3:end], base=16) : parse(Int, bs_str))
+                if contains(sname, container_type) || contains(sname, container_short) || _normalize_stl_for_dwarf(sname) == container_type
+                    bs_str = get(sinfo, "byte_size", "")
+                    if !isempty(bs_str)
+                        byte_size = bs_str isa Integer ? bs_str : (startswith(bs_str, "0x") ? parse(Int, bs_str[3:end], base=16) : parse(Int, bs_str))
+                    end
                     break
                 end
             end
@@ -2673,19 +2681,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 elem_match = match(r"std::vector<(.+)>$", container_type)
                 if !isnothing(elem_match)
                     elem_cpp = String(strip(elem_match.captures[1]))
-                    elem_julia = infer_julia_type(registry, elem_cpp; context="STL factory element type")
-                    # Map to ccall-compatible type
-                    if elem_julia in ("Cint", "Int32")
-                        elem_julia = "Cint"
-                    elseif elem_julia in ("Cdouble", "Float64")
-                        elem_julia = "Cdouble"
-                    elseif elem_julia in ("Cfloat", "Float32")
-                        elem_julia = "Cfloat"
-                    elseif elem_julia in ("Int64",)
-                        elem_julia = "Int64"
-                    elseif elem_julia in ("UInt64",)
-                        elem_julia = "UInt64"
-                    end
+                    elem_julia = _normalize_stl_elem_type(infer_julia_type(registry, elem_cpp; context="STL factory element type"))
 
                     factory_name = "create_$(safe_name)"
                     push!(exports, factory_name)
@@ -2735,6 +2731,48 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end
 
                 """
+
+            elseif startswith(container_type, "std::map<") || startswith(container_type, "std::unordered_map<")
+                # Extract K, V from "std::map<K, V>" or "std::unordered_map<K, V>"
+                tmpl_start = findfirst('<', container_type)
+                tmpl_end = findlast('>', container_type)
+                if !isnothing(tmpl_start) && !isnothing(tmpl_end)
+                    inner = container_type[tmpl_start+1:tmpl_end-1]
+                    parts = _split_template_args(inner)
+                    if length(parts) >= 2
+                        key_cpp = String(strip(parts[1]))
+                        val_cpp = String(strip(parts[2]))
+                        key_julia = infer_julia_type(registry, key_cpp; context="STL map key type")
+                        val_julia = infer_julia_type(registry, val_cpp; context="STL map value type")
+
+                        # Normalize to ccall-compatible types
+                        key_julia = _normalize_stl_elem_type(key_julia)
+                        val_julia = _normalize_stl_elem_type(val_julia)
+
+                        factory_name = "create_$(safe_name)"
+                        push!(exports, factory_name)
+
+                        function_wrappers *= """
+                    const _THUNKS_$(uppercase(safe_name)) = $thunks_dict_str
+
+                    \"\"\"
+                        $factory_name() -> CppMap{$key_julia,$val_julia}
+
+                    Create a new `$container_type` and return a Julia `CppMap{$key_julia,$val_julia}` wrapper.
+                    \"\"\"
+                    function $factory_name()
+                        buf = Libc.malloc($byte_size)
+                        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), buf, 0, $byte_size)
+                        ctor = get(_THUNKS_$(uppercase(safe_name)), "constructor", "")
+                        if !isempty(ctor)
+                            RepliBuild.JITManager.invoke("_mlir_ciface_\$(ctor)_thunk", buf)
+                        end
+                        return RepliBuild.STLWrappers.CppMap{$key_julia,$val_julia}(buf, true, _THUNKS_$(uppercase(safe_name)); byte_size=$byte_size)
+                    end
+
+                        """
+                    end
+                end
             end
         end
     end
