@@ -15,6 +15,7 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Why RepliBuild" => "why-replibuild.md",
         "How It Works" => "how-it-works.md",
         "Architecture" => "architecture.md",
         "User Guide" => [

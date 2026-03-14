@@ -1,16 +1,22 @@
 # MLIR & JLCS Dialect
 
+## For Julia developers: why this page matters
+
+Julia doesn't ship DWARF tools, an IR sanitizer, or a way to call `llvm-as` from a package. RepliBuild fills that gap — and this page documents the piece that handles the cases `ccall` can't: packed structs, virtual method dispatch, strided array views, and unions. If your wrapped function uses any of those, its generated code goes through the MLIR pipeline described here (Tier 2). You don't need to understand MLIR to *use* RepliBuild — tier selection is automatic — but this page explains what happens under the hood when `ccall` isn't safe.
+
 ## Background: what is MLIR?
 
 [MLIR](https://mlir.llvm.org/) (Multi-Level Intermediate Representation) is a compiler infrastructure developed as part of the LLVM project. Unlike traditional compilers that operate on a single IR (e.g., LLVM IR), MLIR supports **multiple levels of abstraction** through user-defined *dialects* — each dialect defines its own types, operations, and semantics. Dialects can be progressively *lowered* from high-level domain-specific operations down to LLVM IR and then to native machine code.
 
-MLIR is used in production by TensorFlow (MHLO dialect), PyTorch (Torch-MLIR), and hardware compilers (CIRCT). RepliBuild uses MLIR because C++ ABI interop involves operations (struct field access at byte offsets, vtable-based virtual dispatch, strided array views) that are error-prone to express directly as LLVM IR but natural to represent as structured, typed MLIR operations.
+MLIR is used in production by TensorFlow (MHLO dialect), PyTorch (Torch-MLIR), and hardware compilers (CIRCT). In the Julia ecosystem, Enzyme's Reactant uses MLIR to optimize IR. RepliBuild uses MLIR differently — not for optimization, but for **safe ABI marshalling**. C++ ABI interop involves operations (struct field access at byte offsets, vtable-based virtual dispatch, strided array views) that are error-prone to express directly as LLVM IR but natural to represent as structured, typed MLIR operations.
 
 **Reference:** [MLIR Language Reference](https://mlir.llvm.org/docs/LangRef/), [Defining Dialects](https://mlir.llvm.org/docs/DefiningDialects/)
 
 ## Why a custom dialect?
 
-Calling a C++ virtual method from Julia requires:
+When RepliBuild's cross-verification detects that a struct's DWARF size doesn't match Julia's alignment calculation (i.e., the struct is packed), or encounters virtual methods or unions, it can't emit a safe `ccall`. These cases need machine code that respects the exact byte offsets from DWARF. That's what JLCS does.
+
+Concretely, calling a C++ virtual method from Julia requires:
 
 1. Reading the vtable pointer from the object at a known byte offset
 2. Indexing into the vtable to get the function pointer for the correct slot

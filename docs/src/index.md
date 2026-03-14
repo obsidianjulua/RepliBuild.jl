@@ -4,13 +4,20 @@
 CurrentModule = RepliBuild
 ```
 
-ABI-aware C/C++ compiler bridge for Julia. Compiles C/C++ source through an LLVM/MLIR pipeline, introspects DWARF debug metadata, and emits type-safe Julia bindings with correct struct layout, enum definitions, and calling conventions.
+ABI-aware C/C++ compiler bridge for Julia. Point it at source code, get type-safe Julia bindings — correct struct layouts, enum definitions, calling conventions, and virtual dispatch — without writing a single `ccall` by hand.
 
-Functions are automatically routed to one of three calling tiers — `Base.llvmcall` with LTO bitcode, MLIR AOT thunks, or `ccall` — based on ABI complexity.
+**New to RepliBuild?** Read [Why RepliBuild](why-replibuild.md) for background on what problem it solves and how it compares to CxxWrap.jl, Clang.jl, and manual `ccall`.
 
 ## Overview
 
-RepliBuild is a source-based wrapper generator. Rather than wrapping pre-compiled binaries, it compiles C/C++ source code locally using LLVM 21+ and MLIR, then derives Julia bindings from the resulting DWARF debug metadata. This approach produces exact ABI-correct wrappers without manual annotations.
+RepliBuild compiles your C/C++ source with Clang, then combines multiple information sources to generate bindings that are correct by construction:
+
+- **DWARF debug metadata** — struct member offsets, sizes, function signatures, vtable layout, bitfield positions. This is the compiler's own record of what it produced — always accurate for the target platform.
+- **Symbol tables** (`nm`) — mangled C++ names and function addresses. The authoritative linking identity.
+- **Clang.jl AST** — enums the compiler optimized away, function pointer typedefs, macro definitions. Fills gaps where DWARF is incomplete.
+- **Cross-verification** — DWARF struct size is checked against Julia's alignment calculation. If they disagree, the struct is packed and gets routed to an MLIR thunk instead of `ccall` (which would silently misalign fields).
+
+Functions are automatically routed to one of three calling tiers — `Base.llvmcall` with LTO bitcode, MLIR AOT thunks, or `ccall` — based on ABI complexity.
 
 ### Three-tier dispatch
 
@@ -124,6 +131,7 @@ See the [Configuration Reference](config.md) for all available options.
 
 ## Documentation
 
+- **[Why RepliBuild](why-replibuild.md)** — What problem it solves, how it combines DWARF + symbols + AST, comparison to alternatives
 - **[How It Works](how-it-works.md)** — Two JITs, one IR: how Julia and C++ converge at the LLVM level
 - **[Architecture](architecture.md)** — Full system architecture, pipeline stages, tier dispatch, design decisions
 - **[User Guide](guide.md)** — Workflows, dependencies, LTO, AOT thunks, templates, registry

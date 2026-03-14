@@ -242,6 +242,7 @@ scaffold_package(name; path)         → package_path
 
 ## Documentation
 
+- [Why RepliBuild](https://obsidianjulua.github.io/RepliBuild.jl/dev/why-replibuild/) — What it solves, how it combines DWARF + symbols + AST, comparison to alternatives
 - [User Guide](https://obsidianjulua.github.io/RepliBuild.jl/dev/guide/)
 - [Configuration Reference](https://obsidianjulua.github.io/RepliBuild.jl/dev/config/)
 - [Introspection Tools](https://obsidianjulua.github.io/RepliBuild.jl/dev/introspect/)
