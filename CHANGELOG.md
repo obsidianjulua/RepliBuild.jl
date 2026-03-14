@@ -2,6 +2,42 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.5.2
+
+### New: RAII Dialect Operations
+
+Added C++ constructor, destructor, and scoped lifetime operations to the JLCS MLIR dialect — encoding RAII semantics directly in the IR rather than relying on ad-hoc `llvm.call` emission.
+
+**New operations:**
+
+| Operation | Mnemonic | Purpose |
+|-----------|----------|---------|
+| `ConstructorCallOp` | `jlcs.ctor_call` | Call a C++ constructor with `this` pointer + parameters |
+| `DestructorCallOp` | `jlcs.dtor_call` | Call a C++ destructor with `this` pointer |
+| `ScopeOp` | `jlcs.scope` | Region-based RAII scope that guarantees destructor calls at exit |
+| `YieldOp` | `jlcs.yield` | Terminator for `jlcs.scope` regions |
+
+- **`jlcs.ctor_call`** — Takes a `FlatSymbolRefAttr` callee and variadic arguments. First argument is always the object pointer (`this`). Lowers to a direct `llvm.call`.
+- **`jlcs.dtor_call`** — Takes a `FlatSymbolRefAttr` callee and a single object pointer. Lowers to a direct `llvm.call`.
+- **`jlcs.scope`** — Takes managed object pointers as operands and an `ArrayAttr` of matching destructor symbols. Contains a single-block body region. During lowering, body ops are inlined and destructor calls are emitted in **reverse order** (C++ destruction semantics). Not `IsolatedFromAbove` — body can reference values from the enclosing scope.
+
+```mlir
+jlcs.scope(%ptr : !llvm.ptr) dtors([@_ZN4BaseD1Ev]) {
+  jlcs.ctor_call @_ZN4BaseC1Ev(%ptr) : (!llvm.ptr) -> ()
+  // ... use object ...
+  jlcs.yield
+}
+// destructor called automatically here
+```
+
+### Changed: `TypeInfoOp` — Destructor Metadata
+
+- `jlcs.type_info` now accepts a fourth argument `destructorName` (default `""`), storing the mangled C++ destructor symbol for the class. IR generators updated to emit the new format.
+
+### New: RAII Test Suite
+
+- `test/test_raii.jl` — 26 tests covering parsing, lowering, and JIT execution of all RAII ops against a compiled C++ test library (`test/raii_test/tracker.cpp`). Validates constructor side effects, destructor side effects, parameterized constructors, scoped lifetime with automatic cleanup, and multi-object scopes with reverse destruction order.
+
 ## v2.5.0
 
 ### New: Rust Introspective Wrapper Generator

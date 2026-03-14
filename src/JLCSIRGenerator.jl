@@ -117,7 +117,7 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
     struct_type_str = "!jlcs.c_struct<\"$(class_name)\", [$(field_types_str)], [$(field_offsets_attr)], packed = false>"
 
     ir = """
-  jlcs.type_info "$(mlir_name)", $(struct_type_str), "$(super_type)" """
+  jlcs.type_info "$(mlir_name)", $(struct_type_str), "$(super_type)", "" """
 
     return ir
 end

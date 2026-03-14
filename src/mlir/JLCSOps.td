@@ -23,15 +23,17 @@ def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
     // The MLIR Type definition (must be CStructType)
     TypeAttr  :$structType,
     // The C++ class name of the *supertype* (for inheritance)
-    DefaultValuedStrAttr<StrAttr, "\"\"">:$superType
+    DefaultValuedStrAttr<StrAttr, "\"\"">:$superType,
+    // Mangled name of the C++ destructor (e.g., "_ZN4BaseD1Ev")
+    DefaultValuedStrAttr<StrAttr, "\"\"">:$destructorName
   );
 
-  // Custom assembly: jlcs.type_info "TypeName", !jlcs.c_struct<...>, "SuperType"
-  let assemblyFormat = "$typeName `,` $structType `,` $superType attr-dict";
+  // Custom assembly: jlcs.type_info "TypeName", !jlcs.c_struct<...>, "SuperType", "DtorName"
+  let assemblyFormat = "$typeName `,` $structType `,` $superType `,` $destructorName attr-dict";
 
   let skipDefaultBuilders = 1;
   let builders = [
-    OpBuilder<(ins "StringAttr":$typeName, "TypeAttr":$structType, "StringAttr":$superType)>
+    OpBuilder<(ins "StringAttr":$typeName, "TypeAttr":$structType, "StringAttr":$superType, "StringAttr":$destructorName)>
   ];
 
   let extraClassDeclaration = [{
@@ -205,8 +207,113 @@ def StoreArrayElementOp : JLCS_Op<"store_array_element"> {
 
 // 7. FFE Call Op (Foreign Function Execution)
 def FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[]>]> {
-  let summary = "Call an external C function using FFE metadata";
+  let summary = "Call an external function using FFE metadata";
   let arguments = (ins Variadic<AnyType>:$args);
   let results = (outs Variadic<AnyType>:$results);
   let assemblyFormat = "$args attr-dict `:` functional-type($args, $results)";
+}
+
+// ====================================================================
+// RAII Operations (Constructor / Destructor)
+// ====================================================================
+
+// 8. Constructor Call Op
+def ConstructorCallOp : JLCS_Op<"ctor_call"> {
+  let summary = "Call a C++ constructor on an object pointer.";
+  let description = [{
+    Calls a C++ constructor by invoking the named symbol with the object
+    pointer as the first argument (the implicit `this`), followed by any
+    additional constructor parameters.
+
+    The first argument must always be a pointer to the memory where the
+    object is being constructed (stack alloca or heap allocation).
+
+    Example:
+    ```mlir
+    jlcs.ctor_call @_ZN4BaseC1Ei(%ptr, %val) : (!llvm.ptr, i32) -> ()
+    ```
+  }];
+
+  let arguments = (ins
+    FlatSymbolRefAttr:$callee,    // Mangled constructor symbol
+    Variadic<AnyType>:$args       // First arg = this pointer, rest = ctor params
+  );
+
+  let results = (outs);
+
+  let assemblyFormat = "$callee `(` $args `)` attr-dict `:` `(` type($args) `)` `->` `(` `)`";
+}
+
+// 9. Destructor Call Op
+def DestructorCallOp : JLCS_Op<"dtor_call"> {
+  let summary = "Call a C++ destructor on an object pointer.";
+  let description = [{
+    Calls a C++ destructor by invoking the named symbol with the object
+    pointer as the sole argument (the implicit `this`).
+
+    This operation guarantees single-argument semantics — the destructor
+    takes only the `this` pointer and returns void.
+
+    Example:
+    ```mlir
+    jlcs.dtor_call @_ZN4BaseD1Ev(%ptr) : (!llvm.ptr) -> ()
+    ```
+  }];
+
+  let arguments = (ins
+    FlatSymbolRefAttr:$callee,    // Mangled destructor symbol
+    AnyType:$obj_ptr              // Object pointer (this)
+  );
+
+  let results = (outs);
+
+  let assemblyFormat = "$callee `(` $obj_ptr `)` attr-dict `:` `(` type($obj_ptr) `)` `->` `(` `)`";
+}
+
+// ====================================================================
+// RAII Scope Operations
+// ====================================================================
+
+// 10. Yield Op (Scope terminator)
+def YieldOp : JLCS_Op<"yield", [Terminator]> {
+  let summary = "Terminator for jlcs.scope regions.";
+  let arguments = (ins);
+  let results = (outs);
+  let assemblyFormat = "attr-dict";
+}
+
+// 11. Scope Op (RAII scoped lifetime)
+def ScopeOp : JLCS_Op<"scope", [SingleBlockImplicitTerminator<"YieldOp">]> {
+  let summary = "RAII scope that guarantees destructor calls at scope exit.";
+  let description = [{
+    Defines a scoped lifetime for C++ objects. The scope takes pointers to
+    managed objects as operands and an array of destructor symbols. When the
+    scope exits (during lowering), destructor calls are emitted in reverse
+    order — matching C++ destruction semantics.
+
+    The body region can reference any SSA value visible in the enclosing
+    scope (not IsolatedFromAbove).
+
+    Example:
+    ```mlir
+    %alloca = llvm.alloca 1 x !llvm.struct<(i32, i32)> : (i64) -> !llvm.ptr
+    jlcs.scope(%alloca : !llvm.ptr) dtors([@_ZN4BaseD1Ev]) {
+      jlcs.ctor_call @_ZN4BaseC1Ev(%alloca) : (!llvm.ptr) -> ()
+      // ... use object ...
+      jlcs.yield
+    }
+    // destructor called automatically here
+    ```
+  }];
+
+  let arguments = (ins
+    Variadic<AnyType>:$managed_ptrs,   // Object pointers whose lifetime is managed
+    ArrayAttr:$destructors             // Matching destructor symbols (FlatSymbolRefAttrs)
+  );
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let results = (outs);
+
+  let assemblyFormat = "`(` $managed_ptrs `:` type($managed_ptrs) `)` `dtors` `(` $destructors `)` $body attr-dict";
 }

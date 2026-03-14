@@ -483,6 +483,142 @@ struct FFECallOpLowering : public ConversionPattern {
 };
 
 //===----------------------------------------------------------------------===//
+// ConstructorCallOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct ConstructorCallOpLowering : public ConversionPattern {
+    ConstructorCallOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter,
+              ConstructorCallOp::getOperationName(), 1, ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto ctorOp = cast<ConstructorCallOp>(op);
+        Location loc = ctorOp.getLoc();
+        ConstructorCallOp::Adaptor adaptor(operands);
+
+        auto calleeAttr = ctorOp.getCalleeAttr();
+        ValueRange args = adaptor.getArgs();
+
+        if (args.empty()) {
+            return op->emitError("ctor_call requires at least the object pointer argument");
+        }
+
+        // Direct call to the constructor symbol — void return
+        rewriter.create<LLVM::CallOp>(
+            loc, TypeRange(), calleeAttr.getValue(), ValueRange(args));
+
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
+// DestructorCallOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct DestructorCallOpLowering : public ConversionPattern {
+    DestructorCallOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter,
+              DestructorCallOp::getOperationName(), 1, ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto dtorOp = cast<DestructorCallOp>(op);
+        Location loc = dtorOp.getLoc();
+        DestructorCallOp::Adaptor adaptor(operands);
+
+        auto calleeAttr = dtorOp.getCalleeAttr();
+        Value objPtr = adaptor.getObjPtr();
+
+        // Direct call to the destructor symbol — void return, single arg
+        rewriter.create<LLVM::CallOp>(
+            loc, TypeRange(), calleeAttr.getValue(), ValueRange({objPtr}));
+
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
+// YieldOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct YieldOpLowering : public ConversionPattern {
+    YieldOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter,
+              YieldOp::getOperationName(), 1, ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        // Yield is a scope terminator — erase during lowering
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
+// ScopeOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct ScopeOpLowering : public ConversionPattern {
+    ScopeOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter,
+              ScopeOp::getOperationName(), 1, ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto scopeOp = cast<ScopeOp>(op);
+        Location loc = scopeOp.getLoc();
+        ScopeOp::Adaptor adaptor(operands);
+
+        // Get the body block
+        Region& bodyRegion = scopeOp.getBody();
+        Block& bodyBlock = bodyRegion.front();
+
+        // Erase the yield terminator before inlining
+        Operation* terminator = bodyBlock.getTerminator();
+        if (terminator)
+            rewriter.eraseOp(terminator);
+
+        // Inline body ops before the scope op in the parent block
+        rewriter.inlineBlockBefore(&bodyBlock, op);
+
+        // Emit destructor calls in reverse order (C++ destruction semantics)
+        ValueRange managedPtrs = adaptor.getManagedPtrs();
+        ArrayAttr destructors = scopeOp.getDestructors();
+
+        for (int i = (int)destructors.size() - 1; i >= 0; --i) {
+            auto dtorRef = cast<FlatSymbolRefAttr>(destructors[i]);
+            Value ptr = managedPtrs[i];
+
+            rewriter.create<LLVM::CallOp>(
+                loc, TypeRange(), dtorRef.getValue(), ValueRange({ptr}));
+        }
+
+        // Erase the scope op
+        rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
 // Lower JLCS to LLVM Pass
 //===----------------------------------------------------------------------===//
 
@@ -513,7 +649,9 @@ struct LowerJLCSToLLVMPass
 
         // Define illegal ops (source dialect)
         target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp,
-            LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp, FFECallOp>();
+            LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp, FFECallOp,
+            ConstructorCallOp, DestructorCallOp,
+            ScopeOp, YieldOp>();
 
         // Define legal dialects (target dialects)
         target.addLegalDialect<LLVM::LLVMDialect, arith::ArithDialect>();
@@ -537,6 +675,10 @@ struct LowerJLCSToLLVMPass
         patterns.add<StoreArrayElementOpLowering>(typeConverter, &getContext());
         patterns.add<TypeInfoOpLowering>(typeConverter, &getContext());
         patterns.add<FFECallOpLowering>(typeConverter, &getContext());
+        patterns.add<ConstructorCallOpLowering>(typeConverter, &getContext());
+        patterns.add<DestructorCallOpLowering>(typeConverter, &getContext());
+        patterns.add<YieldOpLowering>(typeConverter, &getContext());
+        patterns.add<ScopeOpLowering>(typeConverter, &getContext());
 
         // Execute the conversion
         if (failed(applyPartialConversion(getOperation(), target,

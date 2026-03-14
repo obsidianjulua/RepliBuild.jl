@@ -1,5 +1,5 @@
 # Auto-generated Julia wrapper for basics_test
-# Generated: 2026-03-11 23:02:13
+# Generated: 2026-03-13 20:14:05
 # Generator: RepliBuild Wrapper (Introspective: DWARF metadata)
 # Library: libbasics_test.so
 # Metadata: compilation_metadata.json
@@ -43,7 +43,7 @@ const METADATA = Dict(
     "optimization" => "0",
     "target_triple" => "x86_64-unknown-linux-gnu",
     "function_count" => 6,
-    "generated_at" => "2026-03-11T23:02:13.506"
+    "generated_at" => "2026-03-13T20:14:05.197"
 )
 
 const LTO_IR = ""  # LTO disabled for this build

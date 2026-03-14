@@ -407,7 +407,7 @@ function test_dialect()
     println("\nTesting parsing of jlcs.type_info...")
     ir = """
     module {
-      jlcs.type_info "TestClass", !jlcs.c_struct<"TestClass", [i64], [[0 : i64]], packed = false>, ""
+      jlcs.type_info "TestClass", !jlcs.c_struct<"TestClass", [i64], [[0 : i64]], packed = false>, "", ""
     }"""
     
     parsed_mod = parse_module(ctx, ir)
