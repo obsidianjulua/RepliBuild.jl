@@ -1,7 +1,6 @@
 # RepliBuild.jl
 
-[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/stable/)
-[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/dev/)
+[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/dev/)
 [![Julia 1.10+](https://img.shields.io/badge/julia-1.10+-9558B2?logo=julia)](https://julialang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -181,7 +180,7 @@ exclude = ["test", "fuzzing", "CMakeLists.txt"]
 
 `language = "c"` defaults `enable_lto = true`; `language = "cpp"` defaults `enable_lto = false`.
 
-Full reference: [docs/src/config.md](docs/src/config.md)
+Full reference: [Configuration Reference](https://obsidianjulua.github.io/RepliBuild.jl/dev/config/)
 
 ## Introspection
 
@@ -205,7 +204,7 @@ result = Introspect.benchmark(f, args...; samples=1000)
 Introspect.export_json(result, "bench.json")
 ```
 
-Full reference (25+ functions): [docs/src/introspect.md](docs/src/introspect.md)
+Full reference (25+ functions): [Introspection Tools](https://obsidianjulua.github.io/RepliBuild.jl/dev/introspect/)
 
 ## Test coverage
 
@@ -243,11 +242,11 @@ scaffold_package(name; path)         → package_path
 
 ## Documentation
 
-- [User Guide](docs/src/guide.md)
-- [Configuration Reference](docs/src/config.md)
-- [Introspection Tools](docs/src/introspect.md)
-- [MLIR / JLCS Dialect](docs/src/mlir.md)
-- [Architecture](docs/architecture.md)
+- [User Guide](https://obsidianjulua.github.io/RepliBuild.jl/dev/guide/)
+- [Configuration Reference](https://obsidianjulua.github.io/RepliBuild.jl/dev/config/)
+- [Introspection Tools](https://obsidianjulua.github.io/RepliBuild.jl/dev/introspect/)
+- [MLIR / JLCS Dialect](https://obsidianjulua.github.io/RepliBuild.jl/dev/mlir/)
+- [Architecture](https://obsidianjulua.github.io/RepliBuild.jl/dev/architecture/)
 - [Changelog](CHANGELOG.md)
 
 ## License

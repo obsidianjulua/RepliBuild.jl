@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.5.0"
+const VERSION = v"2.5.2"
 
 # ============================================================================
 # LOAD CORE MODULES
@@ -62,7 +62,7 @@ using .PackageRegistry
 # EXPORTS - Clean Build Orchestration API
 # ============================================================================
 
-# Core 3-function user API (THIS IS ALL YOU NEED)
+# Core 3-function user API
 export build, wrap, info
 
 # Discovery function for setup
@@ -77,7 +77,7 @@ export check_environment
 # Package registry & scaffolding
 export use, register, unregister, list_registry, scaffold_package
 
-# Advanced modules (for power users who know what they're doing)
+# Advanced modules
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser, JLCSIRGenerator, MLIRNative, STLWrappers
 
 # Introspection API
