@@ -1528,26 +1528,37 @@ Returns: (return_types_dict, struct_defs_dict)
 function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
     # Parse DWARF debug info
 
-    # Run readelf/llvm-readelf to get DWARF debug info (cross-platform)
-    readelf_tool = LLVMEnvironment.has_tool("llvm-readelf") ? LLVMEnvironment.get_tool("llvm-readelf") : ""
-    if isempty(readelf_tool)
-        # Fallback chain: system readelf (Linux), then llvm-dwarfdump
-        readelf_tool = try
-            (_, ec) = BuildBridge.execute("readelf", ["--version"])
-            ec == 0 ? "readelf" : ""
-        catch
-            ""
-        end
-    end
-
+    # Extract DWARF debug info using readelf (parser is written for GNU readelf format).
+    # Prefer system GNU readelf, then llvm-dwarfdump as last resort (macOS).
     output = ""
     exitcode = 1
+
+    # Try system GNU readelf first (Linux) — parser expects this output format
+    readelf_tool = try
+        (_, ec) = BuildBridge.execute("readelf", ["--version"])
+        ec == 0 ? "readelf" : ""
+    catch
+        ""
+    end
+
     if !isempty(readelf_tool)
         (output, exitcode) = BuildBridge.execute(readelf_tool, ["--debug-dump=info", binary_path])
-    else
-        # Last resort: llvm-dwarfdump (different output format, but try it)
-        dwarfdump_tool = LLVMEnvironment.has_tool("llvm-dwarfdump") ? LLVMEnvironment.get_tool("llvm-dwarfdump") : "llvm-dwarfdump"
-        (output, exitcode) = BuildBridge.execute(dwarfdump_tool, ["--debug-info", binary_path])
+    end
+
+    # Fallback: llvm-dwarfdump (macOS, or when readelf unavailable)
+    if exitcode != 0
+        dwarfdump_tool = LLVMEnvironment.has_tool("llvm-dwarfdump") ? LLVMEnvironment.get_tool("llvm-dwarfdump") : ""
+        if isempty(dwarfdump_tool)
+            dwarfdump_tool = try
+                (_, ec) = BuildBridge.execute("llvm-dwarfdump", ["--version"])
+                ec == 0 ? "llvm-dwarfdump" : ""
+            catch
+                ""
+            end
+        end
+        if !isempty(dwarfdump_tool)
+            (output, exitcode) = BuildBridge.execute(dwarfdump_tool, ["--debug-info", binary_path])
+        end
     end
 
     if exitcode != 0

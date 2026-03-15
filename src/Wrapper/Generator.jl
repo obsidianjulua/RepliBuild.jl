@@ -371,11 +371,18 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
 
     # Extract supplementary types from headers (enums, unused types, etc.)
     # Rust has no C headers — skip Clang.jl header extraction entirely
+    # use_clang_jl = false skips AST-based extraction (DWARF-only path)
     include_dirs = get(metadata, "include_dirs", String[])
-    header_types = if config.wrap.language == :rust
-        Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
+    empty_header_types = Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
+    header_types = if config.wrap.language == :rust || !config.wrap.use_clang_jl
+        empty_header_types
     elseif !isempty(headers)
-        ClangJLBridge.extract_header_types(headers, include_dirs)
+        try
+            ClangJLBridge.extract_header_types(headers, include_dirs)
+        catch e
+            @warn "Clang.jl header extraction failed, falling back to DWARF-only wrapping" exception=e
+            empty_header_types
+        end
     else
         # Auto-discover headers from include directories
         discovered_headers = String[]
@@ -385,9 +392,14 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
             end
         end
         if !isempty(discovered_headers)
-            ClangJLBridge.extract_header_types(discovered_headers, include_dirs)
+            try
+                ClangJLBridge.extract_header_types(discovered_headers, include_dirs)
+            catch e
+                @warn "Clang.jl header extraction failed, falling back to DWARF-only wrapping" exception=e
+                empty_header_types
+            end
         else
-            Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
+            empty_header_types
         end
     end
 

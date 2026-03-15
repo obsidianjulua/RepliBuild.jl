@@ -404,6 +404,22 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
         push!(flags, "-I$(abspath(dir))")
     end
 
+    # Add Clang.jl's bundled resource directory so system headers resolve correctly
+    # (the JLL clang needs its own limits.h, stdarg.h, stddef.h, etc.)
+    try
+        libclang_dir = dirname(dirname(Clang.LibClang.libclang))
+        clang_lib_dir = joinpath(libclang_dir, "lib", "clang")
+        if isdir(clang_lib_dir)
+            for ver_dir in readdir(clang_lib_dir, join=true)
+                inc = joinpath(ver_dir, "include")
+                if isdir(inc)
+                    push!(flags, "-isystem", inc)
+                    break
+                end
+            end
+        end
+    catch; end
+
     idx = Clang.Index()
 
     for header in headers
@@ -413,20 +429,21 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
 
         try
             tu = Clang.parse_header(idx, header, flags)
-            # Check for fatal diagnostics before walking — a corrupted TU will segfault
+            # Check for ANY errors before walking — even non-fatal errors can leave
+            # the TU in a state where clang_visitChildren segfaults
             n_diags = Clang.LibClang.clang_getNumDiagnostics(tu.ptr)
-            has_fatal = false
+            has_errors = false
             for i in 0:(n_diags - 1)
                 diag = Clang.LibClang.clang_getDiagnostic(tu.ptr, i)
                 severity = Clang.LibClang.clang_getDiagnosticSeverity(diag)
                 Clang.LibClang.clang_disposeDiagnostic(diag)
-                if severity == Clang.LibClang.CXDiagnostic_Fatal
-                    has_fatal = true
+                if severity >= Clang.LibClang.CXDiagnostic_Error
+                    has_errors = true
                     break
                 end
             end
-            if has_fatal
-                @debug "Clang reported fatal errors for $header, skipping enum extraction"
+            if has_errors
+                @debug "Clang reported errors for $header, skipping enum extraction"
                 continue
             end
             root = Clang.getTranslationUnitCursor(tu)

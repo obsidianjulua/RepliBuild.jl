@@ -1,0 +1,4491 @@
+{
+  "symbols": [
+    {
+      "mangled": "lua_absindex",
+      "demangled": "lua_absindex",
+      "type": "T",
+      "address": "0000000000007ce0"
+    },
+    {
+      "mangled": "lua_arith",
+      "demangled": "lua_arith",
+      "type": "T",
+      "address": "0000000000009140"
+    },
+    {
+      "mangled": "lua_atpanic",
+      "demangled": "lua_atpanic",
+      "type": "T",
+      "address": "0000000000007cb0"
+    },
+    {
+      "mangled": "lua_callk",
+      "demangled": "lua_callk",
+      "type": "T",
+      "address": "000000000000dab0"
+    },
+    {
+      "mangled": "lua_checkstack",
+      "demangled": "lua_checkstack",
+      "type": "T",
+      "address": "00000000000079b0"
+    },
+    {
+      "mangled": "lua_close",
+      "demangled": "lua_close",
+      "type": "T",
+      "address": "000000000006d7d0"
+    },
+    {
+      "mangled": "lua_closeslot",
+      "demangled": "lua_closeslot",
+      "type": "T",
+      "address": "0000000000007f50"
+    },
+    {
+      "mangled": "lua_closethread",
+      "demangled": "lua_closethread",
+      "type": "T",
+      "address": "000000000006c690"
+    },
+    {
+      "mangled": "lua_compare",
+      "demangled": "lua_compare",
+      "type": "T",
+      "address": "00000000000091d0"
+    },
+    {
+      "mangled": "lua_concat",
+      "demangled": "lua_concat",
+      "type": "T",
+      "address": "000000000000f340"
+    },
+    {
+      "mangled": "lua_copy",
+      "demangled": "lua_copy",
+      "type": "T",
+      "address": "0000000000008180"
+    },
+    {
+      "mangled": "lua_createtable",
+      "demangled": "lua_createtable",
+      "type": "T",
+      "address": "000000000000bff0"
+    },
+    {
+      "mangled": "lua_dump",
+      "demangled": "lua_dump",
+      "type": "T",
+      "address": "000000000000e590"
+    },
+    {
+      "mangled": "lua_error",
+      "demangled": "lua_error",
+      "type": "T",
+      "address": "000000000000f0d0"
+    },
+    {
+      "mangled": "lua_gc",
+      "demangled": "lua_gc",
+      "type": "T",
+      "address": "000000000000e610"
+    },
+    {
+      "mangled": "lua_getallocf",
+      "demangled": "lua_getallocf",
+      "type": "T",
+      "address": "000000000000f520"
+    },
+    {
+      "mangled": "lua_getfield",
+      "demangled": "lua_getfield",
+      "type": "T",
+      "address": "000000000000b370"
+    },
+    {
+      "mangled": "lua_getglobal",
+      "demangled": "lua_getglobal",
+      "type": "T",
+      "address": "000000000000ae60"
+    },
+    {
+      "mangled": "lua_gethook",
+      "demangled": "lua_gethook",
+      "type": "T",
+      "address": "0000000000030000"
+    },
+    {
+      "mangled": "lua_gethookcount",
+      "demangled": "lua_gethookcount",
+      "type": "T",
+      "address": "0000000000030020"
+    },
+    {
+      "mangled": "lua_gethookmask",
+      "demangled": "lua_gethookmask",
+      "type": "T",
+      "address": "0000000000030010"
+    },
+    {
+      "mangled": "lua_geti",
+      "demangled": "lua_geti",
+      "type": "T",
+      "address": "000000000000b7e0"
+    },
+    {
+      "mangled": "lua_getinfo",
+      "demangled": "lua_getinfo",
+      "type": "T",
+      "address": "0000000000030a10"
+    },
+    {
+      "mangled": "lua_getiuservalue",
+      "demangled": "lua_getiuservalue",
+      "type": "T",
+      "address": "000000000000c320"
+    },
+    {
+      "mangled": "lua_getlocal",
+      "demangled": "lua_getlocal",
+      "type": "T",
+      "address": "00000000000303b0"
+    },
+    {
+      "mangled": "lua_getmetatable",
+      "demangled": "lua_getmetatable",
+      "type": "T",
+      "address": "000000000000c140"
+    },
+    {
+      "mangled": "lua_getstack",
+      "demangled": "lua_getstack",
+      "type": "T",
+      "address": "0000000000030030"
+    },
+    {
+      "mangled": "lua_gettable",
+      "demangled": "lua_gettable",
+      "type": "T",
+      "address": "000000000000b190"
+    },
+    {
+      "mangled": "lua_gettop",
+      "demangled": "lua_gettop",
+      "type": "T",
+      "address": "0000000000007d20"
+    },
+    {
+      "mangled": "lua_getupvalue",
+      "demangled": "lua_getupvalue",
+      "type": "T",
+      "address": "000000000000f650"
+    },
+    {
+      "mangled": "lua_iscfunction",
+      "demangled": "lua_iscfunction",
+      "type": "T",
+      "address": "0000000000008740"
+    },
+    {
+      "mangled": "lua_isinteger",
+      "demangled": "lua_isinteger",
+      "type": "T",
+      "address": "0000000000008880"
+    },
+    {
+      "mangled": "lua_isnumber",
+      "demangled": "lua_isnumber",
+      "type": "T",
+      "address": "00000000000089c0"
+    },
+    {
+      "mangled": "lua_isstring",
+      "demangled": "lua_isstring",
+      "type": "T",
+      "address": "0000000000008bf0"
+    },
+    {
+      "mangled": "lua_isuserdata",
+      "demangled": "lua_isuserdata",
+      "type": "T",
+      "address": "0000000000008d30"
+    },
+    {
+      "mangled": "lua_isyieldable",
+      "demangled": "lua_isyieldable",
+      "type": "T",
+      "address": "0000000000038a30"
+    },
+    {
+      "mangled": "luaL_addgsub",
+      "demangled": "luaL_addgsub",
+      "type": "T",
+      "address": "0000000000019f90"
+    },
+    {
+      "mangled": "luaL_addlstring",
+      "demangled": "luaL_addlstring",
+      "type": "T",
+      "address": "0000000000015ef0"
+    },
+    {
+      "mangled": "luaL_addstring",
+      "demangled": "luaL_addstring",
+      "type": "T",
+      "address": "0000000000012f70"
+    },
+    {
+      "mangled": "luaL_addvalue",
+      "demangled": "luaL_addvalue",
+      "type": "T",
+      "address": "0000000000012ff0"
+    },
+    {
+      "mangled": "luaL_argerror",
+      "demangled": "luaL_argerror",
+      "type": "T",
+      "address": "00000000000133b0"
+    },
+    {
+      "mangled": "luaL_buffinit",
+      "demangled": "luaL_buffinit",
+      "type": "T",
+      "address": "0000000000012f30"
+    },
+    {
+      "mangled": "luaL_buffinitsize",
+      "demangled": "luaL_buffinitsize",
+      "type": "T",
+      "address": "0000000000016170"
+    },
+    {
+      "mangled": "luaL_callmeta",
+      "demangled": "luaL_callmeta",
+      "type": "T",
+      "address": "0000000000017c30"
+    },
+    {
+      "mangled": "luaL_checkany",
+      "demangled": "luaL_checkany",
+      "type": "T",
+      "address": "0000000000015620"
+    },
+    {
+      "mangled": "luaL_checkinteger",
+      "demangled": "luaL_checkinteger",
+      "type": "T",
+      "address": "00000000000159d0"
+    },
+    {
+      "mangled": "luaL_checklstring",
+      "demangled": "luaL_checklstring",
+      "type": "T",
+      "address": "00000000000152c0"
+    },
+    {
+      "mangled": "luaL_checknumber",
+      "demangled": "luaL_checknumber",
+      "type": "T",
+      "address": "0000000000015790"
+    },
+    {
+      "mangled": "luaL_checkoption",
+      "demangled": "luaL_checkoption",
+      "type": "T",
+      "address": "0000000000014ea0"
+    },
+    {
+      "mangled": "luaL_checkstack",
+      "demangled": "luaL_checkstack",
+      "type": "T",
+      "address": "0000000000015300"
+    },
+    {
+      "mangled": "luaL_checktype",
+      "demangled": "luaL_checktype",
+      "type": "T",
+      "address": "0000000000015480"
+    },
+    {
+      "mangled": "luaL_checkudata",
+      "demangled": "luaL_checkudata",
+      "type": "T",
+      "address": "0000000000014910"
+    },
+    {
+      "mangled": "luaL_checkversion_",
+      "demangled": "luaL_checkversion_",
+      "type": "T",
+      "address": "000000000001a900"
+    },
+    {
+      "mangled": "lua_len",
+      "demangled": "lua_len",
+      "type": "T",
+      "address": "000000000000f3d0"
+    },
+    {
+      "mangled": "luaL_error",
+      "demangled": "luaL_error",
+      "type": "T",
+      "address": "00000000000125b0"
+    },
+    {
+      "mangled": "luaL_execresult",
+      "demangled": "luaL_execresult",
+      "type": "T",
+      "address": "0000000000014280"
+    },
+    {
+      "mangled": "luaL_fileresult",
+      "demangled": "luaL_fileresult",
+      "type": "T",
+      "address": "0000000000014190"
+    },
+    {
+      "mangled": "luaL_getmetafield",
+      "demangled": "luaL_getmetafield",
+      "type": "T",
+      "address": "0000000000013cb0"
+    },
+    {
+      "mangled": "luaL_getsubtable",
+      "demangled": "luaL_getsubtable",
+      "type": "T",
+      "address": "0000000000019910"
+    },
+    {
+      "mangled": "luaL_gsub",
+      "demangled": "luaL_gsub",
+      "type": "T",
+      "address": "000000000001a170"
+    },
+    {
+      "mangled": "luaL_len",
+      "demangled": "luaL_len",
+      "type": "T",
+      "address": "00000000000183d0"
+    },
+    {
+      "mangled": "luaL_loadbufferx",
+      "demangled": "luaL_loadbufferx",
+      "type": "T",
+      "address": "0000000000017af0"
+    },
+    {
+      "mangled": "luaL_loadfilex",
+      "demangled": "luaL_loadfilex",
+      "type": "T",
+      "address": "0000000000016d80"
+    },
+    {
+      "mangled": "luaL_loadstring",
+      "demangled": "luaL_loadstring",
+      "type": "T",
+      "address": "0000000000017bb0"
+    },
+    {
+      "mangled": "luaL_newmetatable",
+      "demangled": "luaL_newmetatable",
+      "type": "T",
+      "address": "0000000000012730"
+    },
+    {
+      "mangled": "luaL_newstate",
+      "demangled": "luaL_newstate",
+      "type": "T",
+      "address": "000000000001a540"
+    },
+    {
+      "mangled": "lua_load",
+      "demangled": "lua_load",
+      "type": "T",
+      "address": "000000000000e3c0"
+    },
+    {
+      "mangled": "luaL_openlibs",
+      "demangled": "luaL_openlibs",
+      "type": "T",
+      "address": "00000000000446c0"
+    },
+    {
+      "mangled": "luaL_optinteger",
+      "demangled": "luaL_optinteger",
+      "type": "T",
+      "address": "0000000000015be0"
+    },
+    {
+      "mangled": "luaL_optlstring",
+      "demangled": "luaL_optlstring",
+      "type": "T",
+      "address": "00000000000150f0"
+    },
+    {
+      "mangled": "luaL_optnumber",
+      "demangled": "luaL_optnumber",
+      "type": "T",
+      "address": "0000000000015800"
+    },
+    {
+      "mangled": "luaL_prepbuffsize",
+      "demangled": "luaL_prepbuffsize",
+      "type": "T",
+      "address": "0000000000012fe0"
+    },
+    {
+      "mangled": "luaL_pushresult",
+      "demangled": "luaL_pushresult",
+      "type": "T",
+      "address": "0000000000013190"
+    },
+    {
+      "mangled": "luaL_pushresultsize",
+      "demangled": "luaL_pushresultsize",
+      "type": "T",
+      "address": "0000000000015f50"
+    },
+    {
+      "mangled": "luaL_ref",
+      "demangled": "luaL_ref",
+      "type": "T",
+      "address": "00000000000161d0"
+    },
+    {
+      "mangled": "luaL_requiref",
+      "demangled": "luaL_requiref",
+      "type": "T",
+      "address": "0000000000019b40"
+    },
+    {
+      "mangled": "luaL_setfuncs",
+      "demangled": "luaL_setfuncs",
+      "type": "T",
+      "address": "0000000000012840"
+    },
+    {
+      "mangled": "luaL_setmetatable",
+      "demangled": "luaL_setmetatable",
+      "type": "T",
+      "address": "0000000000014360"
+    },
+    {
+      "mangled": "luaL_testudata",
+      "demangled": "luaL_testudata",
+      "type": "T",
+      "address": "0000000000014390"
+    },
+    {
+      "mangled": "luaL_tolstring",
+      "demangled": "luaL_tolstring",
+      "type": "T",
+      "address": "0000000000018630"
+    },
+    {
+      "mangled": "luaL_traceback",
+      "demangled": "luaL_traceback",
+      "type": "T",
+      "address": "0000000000010480"
+    },
+    {
+      "mangled": "luaL_typeerror",
+      "demangled": "luaL_typeerror",
+      "type": "T",
+      "address": "0000000000013590"
+    },
+    {
+      "mangled": "luaL_unref",
+      "demangled": "luaL_unref",
+      "type": "T",
+      "address": "0000000000016a20"
+    },
+    {
+      "mangled": "luaL_where",
+      "demangled": "luaL_where",
+      "type": "T",
+      "address": "0000000000014040"
+    },
+    {
+      "mangled": "lua_newstate",
+      "demangled": "lua_newstate",
+      "type": "T",
+      "address": "000000000006cc20"
+    },
+    {
+      "mangled": "lua_newthread",
+      "demangled": "lua_newthread",
+      "type": "T",
+      "address": "000000000006bdf0"
+    },
+    {
+      "mangled": "lua_newuserdatauv",
+      "demangled": "lua_newuserdatauv",
+      "type": "T",
+      "address": "000000000000f5e0"
+    },
+    {
+      "mangled": "lua_next",
+      "demangled": "lua_next",
+      "type": "T",
+      "address": "000000000000f120"
+    },
+    {
+      "mangled": "luaopen_base",
+      "demangled": "luaopen_base",
+      "type": "T",
+      "address": "000000000001a970"
+    },
+    {
+      "mangled": "luaopen_coroutine",
+      "demangled": "luaopen_coroutine",
+      "type": "T",
+      "address": "00000000000297f0"
+    },
+    {
+      "mangled": "luaopen_debug",
+      "demangled": "luaopen_debug",
+      "type": "T",
+      "address": "000000000002abd0"
+    },
+    {
+      "mangled": "luaopen_io",
+      "demangled": "luaopen_io",
+      "type": "T",
+      "address": "0000000000044b90"
+    },
+    {
+      "mangled": "luaopen_math",
+      "demangled": "luaopen_math",
+      "type": "T",
+      "address": "0000000000051110"
+    },
+    {
+      "mangled": "luaopen_os",
+      "demangled": "luaopen_os",
+      "type": "T",
+      "address": "000000000005bdd0"
+    },
+    {
+      "mangled": "luaopen_package",
+      "demangled": "luaopen_package",
+      "type": "T",
+      "address": "0000000000055d10"
+    },
+    {
+      "mangled": "luaopen_string",
+      "demangled": "luaopen_string",
+      "type": "T",
+      "address": "000000000006f2f0"
+    },
+    {
+      "mangled": "luaopen_table",
+      "demangled": "luaopen_table",
+      "type": "T",
+      "address": "00000000000800a0"
+    },
+    {
+      "mangled": "luaopen_utf8",
+      "demangled": "luaopen_utf8",
+      "type": "T",
+      "address": "000000000008ca20"
+    },
+    {
+      "mangled": "lua_pcallk",
+      "demangled": "lua_pcallk",
+      "type": "T",
+      "address": "000000000000dda0"
+    },
+    {
+      "mangled": "lua_pushboolean",
+      "demangled": "lua_pushboolean",
+      "type": "T",
+      "address": "000000000000adc0"
+    },
+    {
+      "mangled": "lua_pushcclosure",
+      "demangled": "lua_pushcclosure",
+      "type": "T",
+      "address": "000000000000ab80"
+    },
+    {
+      "mangled": "lua_pushfstring",
+      "demangled": "lua_pushfstring",
+      "type": "T",
+      "address": "000000000000aa90"
+    },
+    {
+      "mangled": "lua_pushinteger",
+      "demangled": "lua_pushinteger",
+      "type": "T",
+      "address": "000000000000a7c0"
+    },
+    {
+      "mangled": "lua_pushlightuserdata",
+      "demangled": "lua_pushlightuserdata",
+      "type": "T",
+      "address": "000000000000ae10"
+    },
+    {
+      "mangled": "lua_pushlstring",
+      "demangled": "lua_pushlstring",
+      "type": "T",
+      "address": "000000000000a7e0"
+    },
+    {
+      "mangled": "lua_pushnil",
+      "demangled": "lua_pushnil",
+      "type": "T",
+      "address": "000000000000a780"
+    },
+    {
+      "mangled": "lua_pushnumber",
+      "demangled": "lua_pushnumber",
+      "type": "T",
+      "address": "000000000000a7a0"
+    },
+    {
+      "mangled": "lua_pushstring",
+      "demangled": "lua_pushstring",
+      "type": "T",
+      "address": "000000000000a900"
+    },
+    {
+      "mangled": "lua_pushthread",
+      "demangled": "lua_pushthread",
+      "type": "T",
+      "address": "000000000000ae30"
+    },
+    {
+      "mangled": "lua_pushvalue",
+      "demangled": "lua_pushvalue",
+      "type": "T",
+      "address": "0000000000008450"
+    },
+    {
+      "mangled": "lua_pushvfstring",
+      "demangled": "lua_pushvfstring",
+      "type": "T",
+      "address": "000000000000aa50"
+    },
+    {
+      "mangled": "lua_rawequal",
+      "demangled": "lua_rawequal",
+      "type": "T",
+      "address": "0000000000008e70"
+    },
+    {
+      "mangled": "lua_rawget",
+      "demangled": "lua_rawget",
+      "type": "T",
+      "address": "000000000000ba50"
+    },
+    {
+      "mangled": "lua_rawgeti",
+      "demangled": "lua_rawgeti",
+      "type": "T",
+      "address": "000000000000bc20"
+    },
+    {
+      "mangled": "lua_rawgetp",
+      "demangled": "lua_rawgetp",
+      "type": "T",
+      "address": "000000000000bde0"
+    },
+    {
+      "mangled": "lua_rawlen",
+      "demangled": "lua_rawlen",
+      "type": "T",
+      "address": "0000000000009f40"
+    },
+    {
+      "mangled": "lua_rawset",
+      "demangled": "lua_rawset",
+      "type": "T",
+      "address": "000000000000ced0"
+    },
+    {
+      "mangled": "lua_rawseti",
+      "demangled": "lua_rawseti",
+      "type": "T",
+      "address": "000000000000d1b0"
+    },
+    {
+      "mangled": "lua_rawsetp",
+      "demangled": "lua_rawsetp",
+      "type": "T",
+      "address": "000000000000d160"
+    },
+    {
+      "mangled": "lua_resetthread",
+      "demangled": "lua_resetthread",
+      "type": "T",
+      "address": "000000000006c970"
+    },
+    {
+      "mangled": "lua_resume",
+      "demangled": "lua_resume",
+      "type": "T",
+      "address": "0000000000037c10"
+    },
+    {
+      "mangled": "lua_rotate",
+      "demangled": "lua_rotate",
+      "type": "T",
+      "address": "0000000000007fc0"
+    },
+    {
+      "mangled": "lua_setallocf",
+      "demangled": "lua_setallocf",
+      "type": "T",
+      "address": "000000000000f560"
+    },
+    {
+      "mangled": "lua_setcstacklimit",
+      "demangled": "lua_setcstacklimit",
+      "type": "T",
+      "address": "000000000006bad0"
+    },
+    {
+      "mangled": "lua_setfield",
+      "demangled": "lua_setfield",
+      "type": "T",
+      "address": "000000000000cae0"
+    },
+    {
+      "mangled": "lua_setglobal",
+      "demangled": "lua_setglobal",
+      "type": "T",
+      "address": "000000000000c4f0"
+    },
+    {
+      "mangled": "lua_sethook",
+      "demangled": "lua_sethook",
+      "type": "T",
+      "address": "000000000002ff70"
+    },
+    {
+      "mangled": "lua_seti",
+      "demangled": "lua_seti",
+      "type": "T",
+      "address": "000000000000cc20"
+    },
+    {
+      "mangled": "lua_setiuservalue",
+      "demangled": "lua_setiuservalue",
+      "type": "T",
+      "address": "000000000000d890"
+    },
+    {
+      "mangled": "lua_setlocal",
+      "demangled": "lua_setlocal",
+      "type": "T",
+      "address": "0000000000030770"
+    },
+    {
+      "mangled": "lua_setmetatable",
+      "demangled": "lua_setmetatable",
+      "type": "T",
+      "address": "000000000000d440"
+    },
+    {
+      "mangled": "lua_settable",
+      "demangled": "lua_settable",
+      "type": "T",
+      "address": "000000000000c8b0"
+    },
+    {
+      "mangled": "lua_settop",
+      "demangled": "lua_settop",
+      "type": "T",
+      "address": "0000000000007d40"
+    },
+    {
+      "mangled": "lua_setupvalue",
+      "demangled": "lua_setupvalue",
+      "type": "T",
+      "address": "000000000000f8b0"
+    },
+    {
+      "mangled": "lua_setwarnf",
+      "demangled": "lua_setwarnf",
+      "type": "T",
+      "address": "000000000000f570"
+    },
+    {
+      "mangled": "lua_status",
+      "demangled": "lua_status",
+      "type": "T",
+      "address": "000000000000e600"
+    },
+    {
+      "mangled": "lua_stringtonumber",
+      "demangled": "lua_stringtonumber",
+      "type": "T",
+      "address": "0000000000009500"
+    },
+    {
+      "mangled": "lua_toboolean",
+      "demangled": "lua_toboolean",
+      "type": "T",
+      "address": "0000000000009a40"
+    },
+    {
+      "mangled": "lua_tocfunction",
+      "demangled": "lua_tocfunction",
+      "type": "T",
+      "address": "000000000000a110"
+    },
+    {
+      "mangled": "lua_toclose",
+      "demangled": "lua_toclose",
+      "type": "T",
+      "address": "000000000000f290"
+    },
+    {
+      "mangled": "lua_tointegerx",
+      "demangled": "lua_tointegerx",
+      "type": "T",
+      "address": "0000000000009870"
+    },
+    {
+      "mangled": "lua_tolstring",
+      "demangled": "lua_tolstring",
+      "type": "T",
+      "address": "0000000000009b80"
+    },
+    {
+      "mangled": "lua_tonumberx",
+      "demangled": "lua_tonumberx",
+      "type": "T",
+      "address": "0000000000009550"
+    },
+    {
+      "mangled": "lua_topointer",
+      "demangled": "lua_topointer",
+      "type": "T",
+      "address": "000000000000a580"
+    },
+    {
+      "mangled": "lua_tothread",
+      "demangled": "lua_tothread",
+      "type": "T",
+      "address": "000000000000a430"
+    },
+    {
+      "mangled": "lua_touserdata",
+      "demangled": "lua_touserdata",
+      "type": "T",
+      "address": "000000000000a290"
+    },
+    {
+      "mangled": "lua_type",
+      "demangled": "lua_type",
+      "type": "T",
+      "address": "00000000000085b0"
+    },
+    {
+      "mangled": "lua_typename",
+      "demangled": "lua_typename",
+      "type": "T",
+      "address": "0000000000008720"
+    },
+    {
+      "mangled": "lua_upvalueid",
+      "demangled": "lua_upvalueid",
+      "type": "T",
+      "address": "000000000000fcc0"
+    },
+    {
+      "mangled": "lua_upvaluejoin",
+      "demangled": "lua_upvaluejoin",
+      "type": "T",
+      "address": "0000000000010010"
+    },
+    {
+      "mangled": "lua_version",
+      "demangled": "lua_version",
+      "type": "T",
+      "address": "0000000000007cd0"
+    },
+    {
+      "mangled": "lua_warning",
+      "demangled": "lua_warning",
+      "type": "T",
+      "address": "000000000000f590"
+    },
+    {
+      "mangled": "lua_xmove",
+      "demangled": "lua_xmove",
+      "type": "T",
+      "address": "0000000000007b20"
+    },
+    {
+      "mangled": "lua_yieldk",
+      "demangled": "lua_yieldk",
+      "type": "T",
+      "address": "0000000000038a50"
+    },
+    {
+      "mangled": "replibuild_shim_lua_call",
+      "demangled": "replibuild_shim_lua_call",
+      "type": "T",
+      "address": "00000000000a0110"
+    },
+    {
+      "mangled": "replibuild_shim_lua_getuservalue",
+      "demangled": "replibuild_shim_lua_getuservalue",
+      "type": "T",
+      "address": "00000000000a0660"
+    },
+    {
+      "mangled": "replibuild_shim_lua_insert",
+      "demangled": "replibuild_shim_lua_insert",
+      "type": "T",
+      "address": "00000000000a0850"
+    },
+    {
+      "mangled": "replibuild_shim_lua_isboolean",
+      "demangled": "replibuild_shim_lua_isboolean",
+      "type": "T",
+      "address": "00000000000a1910"
+    },
+    {
+      "mangled": "replibuild_shim_lua_isfunction",
+      "demangled": "replibuild_shim_lua_isfunction",
+      "type": "T",
+      "address": "00000000000a01c0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_islightuserdata",
+      "demangled": "replibuild_shim_lua_islightuserdata",
+      "type": "T",
+      "address": "00000000000a15e0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_isnil",
+      "demangled": "replibuild_shim_lua_isnil",
+      "type": "T",
+      "address": "00000000000a1190"
+    },
+    {
+      "mangled": "replibuild_shim_lua_isnone",
+      "demangled": "replibuild_shim_lua_isnone",
+      "type": "T",
+      "address": "00000000000a0d80"
+    },
+    {
+      "mangled": "replibuild_shim_lua_isnoneornil",
+      "demangled": "replibuild_shim_lua_isnoneornil",
+      "type": "T",
+      "address": "00000000000a1300"
+    },
+    {
+      "mangled": "replibuild_shim_lua_istable",
+      "demangled": "replibuild_shim_lua_istable",
+      "type": "T",
+      "address": "000000000009fdd0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_isthread",
+      "demangled": "replibuild_shim_lua_isthread",
+      "type": "T",
+      "address": "000000000009ff40"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_argcheck",
+      "demangled": "replibuild_shim_luaL_argcheck",
+      "type": "T",
+      "address": "00000000000a1140"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_checkstring",
+      "demangled": "replibuild_shim_luaL_checkstring",
+      "type": "T",
+      "address": "00000000000a0cc0"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_checkversion",
+      "demangled": "replibuild_shim_luaL_checkversion",
+      "type": "T",
+      "address": "00000000000a00c0"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_dofile",
+      "demangled": "replibuild_shim_luaL_dofile",
+      "type": "T",
+      "address": "00000000000a0ee0"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_dostring",
+      "demangled": "replibuild_shim_luaL_dostring",
+      "type": "T",
+      "address": "00000000000a0a90"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_getmetatable",
+      "demangled": "replibuild_shim_luaL_getmetatable",
+      "type": "T",
+      "address": "00000000000a00e0"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_loadbuffer",
+      "demangled": "replibuild_shim_luaL_loadbuffer",
+      "type": "T",
+      "address": "00000000000a0820"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_loadfile",
+      "demangled": "replibuild_shim_luaL_loadfile",
+      "type": "T",
+      "address": "00000000000a0d70"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_optstring",
+      "demangled": "replibuild_shim_luaL_optstring",
+      "type": "T",
+      "address": "00000000000a1780"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_pushfail",
+      "demangled": "replibuild_shim_luaL_pushfail",
+      "type": "T",
+      "address": "00000000000a1750"
+    },
+    {
+      "mangled": "replibuild_shim_luaL_typename",
+      "demangled": "replibuild_shim_luaL_typename",
+      "type": "T",
+      "address": "00000000000a0370"
+    },
+    {
+      "mangled": "replibuild_shim_lua_newtable",
+      "demangled": "replibuild_shim_lua_newtable",
+      "type": "T",
+      "address": "00000000000a00f0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_newuserdata",
+      "demangled": "replibuild_shim_lua_newuserdata",
+      "type": "T",
+      "address": "00000000000a10c0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_pcall",
+      "demangled": "replibuild_shim_lua_pcall",
+      "type": "T",
+      "address": "00000000000a1900"
+    },
+    {
+      "mangled": "replibuild_shim_lua_pop",
+      "demangled": "replibuild_shim_lua_pop",
+      "type": "T",
+      "address": "00000000000a0100"
+    },
+    {
+      "mangled": "replibuild_shim_lua_pushcfunction",
+      "demangled": "replibuild_shim_lua_pushcfunction",
+      "type": "T",
+      "address": "00000000000a1170"
+    },
+    {
+      "mangled": "replibuild_shim_lua_pushglobaltable",
+      "demangled": "replibuild_shim_lua_pushglobaltable",
+      "type": "T",
+      "address": "00000000000a0960"
+    },
+    {
+      "mangled": "replibuild_shim_lua_register",
+      "demangled": "replibuild_shim_lua_register",
+      "type": "T",
+      "address": "00000000000a0330"
+    },
+    {
+      "mangled": "replibuild_shim_lua_remove",
+      "demangled": "replibuild_shim_lua_remove",
+      "type": "T",
+      "address": "00000000000a04f0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_replace",
+      "demangled": "replibuild_shim_lua_replace",
+      "type": "T",
+      "address": "00000000000a0d00"
+    },
+    {
+      "mangled": "replibuild_shim_lua_setuservalue",
+      "demangled": "replibuild_shim_lua_setuservalue",
+      "type": "T",
+      "address": "00000000000a00d0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_tointeger",
+      "demangled": "replibuild_shim_lua_tointeger",
+      "type": "T",
+      "address": "00000000000a1470"
+    },
+    {
+      "mangled": "replibuild_shim_lua_tonumber",
+      "demangled": "replibuild_shim_lua_tonumber",
+      "type": "T",
+      "address": "00000000000a00b0"
+    },
+    {
+      "mangled": "replibuild_shim_lua_tostring",
+      "demangled": "replibuild_shim_lua_tostring",
+      "type": "T",
+      "address": "00000000000a1770"
+    },
+    {
+      "mangled": "replibuild_shim_lua_upvalueindex",
+      "demangled": "replibuild_shim_lua_upvalueindex",
+      "type": "T",
+      "address": "00000000000a1a80"
+    },
+    {
+      "mangled": "replibuild_shim_lua_yield",
+      "demangled": "replibuild_shim_lua_yield",
+      "type": "T",
+      "address": "00000000000a0120"
+    }
+  ],
+  "compile_flags": [
+    "-O2",
+    "-fPIC",
+    "-DLUA_USE_LINUX"
+  ],
+  "binary_path": "./julia/liblua.so",
+  "binary_type": "shared",
+  "functions": [
+    {
+      "exported": true,
+      "mangled": "lua_absindex",
+      "demangled": "lua_absindex",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_absindex",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_arith",
+      "demangled": "lua_arith",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_arith",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_atpanic",
+      "demangled": "lua_atpanic",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_atpanic",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_callk",
+      "demangled": "lua_callk",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_callk",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_checkstack",
+      "demangled": "lua_checkstack",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_checkstack",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_close",
+      "demangled": "lua_close",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_close",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_closeslot",
+      "demangled": "lua_closeslot",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_closeslot",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_closethread",
+      "demangled": "lua_closethread",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_closethread",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_compare",
+      "demangled": "lua_compare",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_compare",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_concat",
+      "demangled": "lua_concat",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_concat",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_copy",
+      "demangled": "lua_copy",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_copy",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_createtable",
+      "demangled": "lua_createtable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_createtable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_dump",
+      "demangled": "lua_dump",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_dump",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_error",
+      "demangled": "lua_error",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_error",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_gc",
+      "demangled": "lua_gc",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_gc",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getallocf",
+      "demangled": "lua_getallocf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getallocf",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getfield",
+      "demangled": "lua_getfield",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getfield",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getglobal",
+      "demangled": "lua_getglobal",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getglobal",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_gethook",
+      "demangled": "lua_gethook",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_gethook",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_gethookcount",
+      "demangled": "lua_gethookcount",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_gethookcount",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_gethookmask",
+      "demangled": "lua_gethookmask",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_gethookmask",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_geti",
+      "demangled": "lua_geti",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_geti",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getinfo",
+      "demangled": "lua_getinfo",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getinfo",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getiuservalue",
+      "demangled": "lua_getiuservalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getiuservalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getlocal",
+      "demangled": "lua_getlocal",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getlocal",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getmetatable",
+      "demangled": "lua_getmetatable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getmetatable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getstack",
+      "demangled": "lua_getstack",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getstack",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_gettable",
+      "demangled": "lua_gettable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_gettable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_gettop",
+      "demangled": "lua_gettop",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_gettop",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_getupvalue",
+      "demangled": "lua_getupvalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_getupvalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_iscfunction",
+      "demangled": "lua_iscfunction",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_iscfunction",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_isinteger",
+      "demangled": "lua_isinteger",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_isinteger",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_isnumber",
+      "demangled": "lua_isnumber",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_isnumber",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_isstring",
+      "demangled": "lua_isstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_isstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_isuserdata",
+      "demangled": "lua_isuserdata",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_isuserdata",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_isyieldable",
+      "demangled": "lua_isyieldable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_isyieldable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_addgsub",
+      "demangled": "luaL_addgsub",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_addgsub",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_addlstring",
+      "demangled": "luaL_addlstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_addlstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_addstring",
+      "demangled": "luaL_addstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_addstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_addvalue",
+      "demangled": "luaL_addvalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_addvalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_argerror",
+      "demangled": "luaL_argerror",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_argerror",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_buffinit",
+      "demangled": "luaL_buffinit",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_buffinit",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_buffinitsize",
+      "demangled": "luaL_buffinitsize",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_buffinitsize",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_callmeta",
+      "demangled": "luaL_callmeta",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_callmeta",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checkany",
+      "demangled": "luaL_checkany",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checkany",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checkinteger",
+      "demangled": "luaL_checkinteger",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checkinteger",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checklstring",
+      "demangled": "luaL_checklstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checklstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checknumber",
+      "demangled": "luaL_checknumber",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checknumber",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checkoption",
+      "demangled": "luaL_checkoption",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checkoption",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checkstack",
+      "demangled": "luaL_checkstack",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checkstack",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checktype",
+      "demangled": "luaL_checktype",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checktype",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checkudata",
+      "demangled": "luaL_checkudata",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checkudata",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_checkversion_",
+      "demangled": "luaL_checkversion_",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_checkversion_",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_len",
+      "demangled": "lua_len",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_len",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_error",
+      "demangled": "luaL_error",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_error",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_execresult",
+      "demangled": "luaL_execresult",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_execresult",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_fileresult",
+      "demangled": "luaL_fileresult",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_fileresult",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_getmetafield",
+      "demangled": "luaL_getmetafield",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_getmetafield",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_getsubtable",
+      "demangled": "luaL_getsubtable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_getsubtable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_gsub",
+      "demangled": "luaL_gsub",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_gsub",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_len",
+      "demangled": "luaL_len",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_len",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_loadbufferx",
+      "demangled": "luaL_loadbufferx",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_loadbufferx",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_loadfilex",
+      "demangled": "luaL_loadfilex",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_loadfilex",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_loadstring",
+      "demangled": "luaL_loadstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_loadstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_newmetatable",
+      "demangled": "luaL_newmetatable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_newmetatable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_newstate",
+      "demangled": "luaL_newstate",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_newstate",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_load",
+      "demangled": "lua_load",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_load",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_openlibs",
+      "demangled": "luaL_openlibs",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_openlibs",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_optinteger",
+      "demangled": "luaL_optinteger",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_optinteger",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_optlstring",
+      "demangled": "luaL_optlstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_optlstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_optnumber",
+      "demangled": "luaL_optnumber",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_optnumber",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_prepbuffsize",
+      "demangled": "luaL_prepbuffsize",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_prepbuffsize",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_pushresult",
+      "demangled": "luaL_pushresult",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_pushresult",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_pushresultsize",
+      "demangled": "luaL_pushresultsize",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_pushresultsize",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_ref",
+      "demangled": "luaL_ref",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_ref",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_requiref",
+      "demangled": "luaL_requiref",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_requiref",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_setfuncs",
+      "demangled": "luaL_setfuncs",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_setfuncs",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_setmetatable",
+      "demangled": "luaL_setmetatable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_setmetatable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_testudata",
+      "demangled": "luaL_testudata",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_testudata",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_tolstring",
+      "demangled": "luaL_tolstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_tolstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_traceback",
+      "demangled": "luaL_traceback",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_traceback",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_typeerror",
+      "demangled": "luaL_typeerror",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_typeerror",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_unref",
+      "demangled": "luaL_unref",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_unref",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaL_where",
+      "demangled": "luaL_where",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaL_where",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_newstate",
+      "demangled": "lua_newstate",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_newstate",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_newthread",
+      "demangled": "lua_newthread",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_newthread",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_newuserdatauv",
+      "demangled": "lua_newuserdatauv",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_newuserdatauv",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_next",
+      "demangled": "lua_next",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_next",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_base",
+      "demangled": "luaopen_base",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_base",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_coroutine",
+      "demangled": "luaopen_coroutine",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_coroutine",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_debug",
+      "demangled": "luaopen_debug",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_debug",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_io",
+      "demangled": "luaopen_io",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_io",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_math",
+      "demangled": "luaopen_math",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_math",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_os",
+      "demangled": "luaopen_os",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_os",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_package",
+      "demangled": "luaopen_package",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_package",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_string",
+      "demangled": "luaopen_string",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_string",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_table",
+      "demangled": "luaopen_table",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_table",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "luaopen_utf8",
+      "demangled": "luaopen_utf8",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "luaopen_utf8",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pcallk",
+      "demangled": "lua_pcallk",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pcallk",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushboolean",
+      "demangled": "lua_pushboolean",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushboolean",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushcclosure",
+      "demangled": "lua_pushcclosure",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushcclosure",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushfstring",
+      "demangled": "lua_pushfstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushfstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushinteger",
+      "demangled": "lua_pushinteger",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushinteger",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushlightuserdata",
+      "demangled": "lua_pushlightuserdata",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushlightuserdata",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushlstring",
+      "demangled": "lua_pushlstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushlstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushnil",
+      "demangled": "lua_pushnil",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushnil",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushnumber",
+      "demangled": "lua_pushnumber",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushnumber",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushstring",
+      "demangled": "lua_pushstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushthread",
+      "demangled": "lua_pushthread",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushthread",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushvalue",
+      "demangled": "lua_pushvalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushvalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_pushvfstring",
+      "demangled": "lua_pushvfstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_pushvfstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawequal",
+      "demangled": "lua_rawequal",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawequal",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawget",
+      "demangled": "lua_rawget",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawget",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawgeti",
+      "demangled": "lua_rawgeti",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawgeti",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawgetp",
+      "demangled": "lua_rawgetp",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawgetp",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawlen",
+      "demangled": "lua_rawlen",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawlen",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawset",
+      "demangled": "lua_rawset",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawset",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawseti",
+      "demangled": "lua_rawseti",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawseti",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rawsetp",
+      "demangled": "lua_rawsetp",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rawsetp",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_resetthread",
+      "demangled": "lua_resetthread",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_resetthread",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_resume",
+      "demangled": "lua_resume",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_resume",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_rotate",
+      "demangled": "lua_rotate",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_rotate",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setallocf",
+      "demangled": "lua_setallocf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setallocf",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setcstacklimit",
+      "demangled": "lua_setcstacklimit",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setcstacklimit",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setfield",
+      "demangled": "lua_setfield",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setfield",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setglobal",
+      "demangled": "lua_setglobal",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setglobal",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_sethook",
+      "demangled": "lua_sethook",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_sethook",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_seti",
+      "demangled": "lua_seti",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_seti",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setiuservalue",
+      "demangled": "lua_setiuservalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setiuservalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setlocal",
+      "demangled": "lua_setlocal",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setlocal",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setmetatable",
+      "demangled": "lua_setmetatable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setmetatable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_settable",
+      "demangled": "lua_settable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_settable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_settop",
+      "demangled": "lua_settop",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_settop",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setupvalue",
+      "demangled": "lua_setupvalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setupvalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_setwarnf",
+      "demangled": "lua_setwarnf",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_setwarnf",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_status",
+      "demangled": "lua_status",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_status",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_stringtonumber",
+      "demangled": "lua_stringtonumber",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_stringtonumber",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_toboolean",
+      "demangled": "lua_toboolean",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_toboolean",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_tocfunction",
+      "demangled": "lua_tocfunction",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_tocfunction",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_toclose",
+      "demangled": "lua_toclose",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_toclose",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_tointegerx",
+      "demangled": "lua_tointegerx",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_tointegerx",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_tolstring",
+      "demangled": "lua_tolstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_tolstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_tonumberx",
+      "demangled": "lua_tonumberx",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_tonumberx",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_topointer",
+      "demangled": "lua_topointer",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_topointer",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_tothread",
+      "demangled": "lua_tothread",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_tothread",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_touserdata",
+      "demangled": "lua_touserdata",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_touserdata",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_type",
+      "demangled": "lua_type",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_type",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_typename",
+      "demangled": "lua_typename",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_typename",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_upvalueid",
+      "demangled": "lua_upvalueid",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_upvalueid",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_upvaluejoin",
+      "demangled": "lua_upvaluejoin",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_upvaluejoin",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_version",
+      "demangled": "lua_version",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_version",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_warning",
+      "demangled": "lua_warning",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_warning",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_xmove",
+      "demangled": "lua_xmove",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_xmove",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "lua_yieldk",
+      "demangled": "lua_yieldk",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "lua_yieldk",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_call",
+      "demangled": "replibuild_shim_lua_call",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_call",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_getuservalue",
+      "demangled": "replibuild_shim_lua_getuservalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_getuservalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_insert",
+      "demangled": "replibuild_shim_lua_insert",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_insert",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_isboolean",
+      "demangled": "replibuild_shim_lua_isboolean",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_isboolean",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_isfunction",
+      "demangled": "replibuild_shim_lua_isfunction",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_isfunction",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_islightuserdata",
+      "demangled": "replibuild_shim_lua_islightuserdata",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_islightuserdata",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_isnil",
+      "demangled": "replibuild_shim_lua_isnil",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_isnil",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_isnone",
+      "demangled": "replibuild_shim_lua_isnone",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_isnone",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_isnoneornil",
+      "demangled": "replibuild_shim_lua_isnoneornil",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_isnoneornil",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_istable",
+      "demangled": "replibuild_shim_lua_istable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_istable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_isthread",
+      "demangled": "replibuild_shim_lua_isthread",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_isthread",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_argcheck",
+      "demangled": "replibuild_shim_luaL_argcheck",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_argcheck",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_checkstring",
+      "demangled": "replibuild_shim_luaL_checkstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_checkstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_checkversion",
+      "demangled": "replibuild_shim_luaL_checkversion",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_checkversion",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_dofile",
+      "demangled": "replibuild_shim_luaL_dofile",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_dofile",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_dostring",
+      "demangled": "replibuild_shim_luaL_dostring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_dostring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_getmetatable",
+      "demangled": "replibuild_shim_luaL_getmetatable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_getmetatable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_loadbuffer",
+      "demangled": "replibuild_shim_luaL_loadbuffer",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_loadbuffer",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_loadfile",
+      "demangled": "replibuild_shim_luaL_loadfile",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_loadfile",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_optstring",
+      "demangled": "replibuild_shim_luaL_optstring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_optstring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_pushfail",
+      "demangled": "replibuild_shim_luaL_pushfail",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_pushfail",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_luaL_typename",
+      "demangled": "replibuild_shim_luaL_typename",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_luaL_typename",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_newtable",
+      "demangled": "replibuild_shim_lua_newtable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_newtable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_newuserdata",
+      "demangled": "replibuild_shim_lua_newuserdata",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_newuserdata",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_pcall",
+      "demangled": "replibuild_shim_lua_pcall",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_pcall",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_pop",
+      "demangled": "replibuild_shim_lua_pop",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_pop",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_pushcfunction",
+      "demangled": "replibuild_shim_lua_pushcfunction",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_pushcfunction",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_pushglobaltable",
+      "demangled": "replibuild_shim_lua_pushglobaltable",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_pushglobaltable",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_register",
+      "demangled": "replibuild_shim_lua_register",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_register",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_remove",
+      "demangled": "replibuild_shim_lua_remove",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_remove",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_replace",
+      "demangled": "replibuild_shim_lua_replace",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_replace",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_setuservalue",
+      "demangled": "replibuild_shim_lua_setuservalue",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_setuservalue",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_tointeger",
+      "demangled": "replibuild_shim_lua_tointeger",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_tointeger",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_tonumber",
+      "demangled": "replibuild_shim_lua_tonumber",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_tonumber",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_tostring",
+      "demangled": "replibuild_shim_lua_tostring",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_tostring",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_upvalueindex",
+      "demangled": "replibuild_shim_lua_upvalueindex",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_upvalueindex",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    },
+    {
+      "exported": true,
+      "mangled": "replibuild_shim_lua_yield",
+      "demangled": "replibuild_shim_lua_yield",
+      "return_type": {
+        "c_type": "int",
+        "size": 4,
+        "julia_type": "Cint"
+      },
+      "name": "replibuild_shim_lua_yield",
+      "parameters": [],
+      "parameters_source": "inferred",
+      "class": "",
+      "is_method": false,
+      "is_vararg": false,
+      "return_type_source": "inferred"
+    }
+  ],
+  "project": "lua",
+  "source_files": [
+    "./.replibuild_cache/deps/lua/lapi.c",
+    "./.replibuild_cache/deps/lua/lauxlib.c",
+    "./.replibuild_cache/deps/lua/lbaselib.c",
+    "./.replibuild_cache/deps/lua/lcode.c",
+    "./.replibuild_cache/deps/lua/lcorolib.c",
+    "./.replibuild_cache/deps/lua/lctype.c",
+    "./.replibuild_cache/deps/lua/ldblib.c",
+    "./.replibuild_cache/deps/lua/ldebug.c",
+    "./.replibuild_cache/deps/lua/ldo.c",
+    "./.replibuild_cache/deps/lua/ldump.c",
+    "./.replibuild_cache/deps/lua/lfunc.c",
+    "./.replibuild_cache/deps/lua/lgc.c",
+    "./.replibuild_cache/deps/lua/linit.c",
+    "./.replibuild_cache/deps/lua/liolib.c",
+    "./.replibuild_cache/deps/lua/llex.c",
+    "./.replibuild_cache/deps/lua/lmathlib.c",
+    "./.replibuild_cache/deps/lua/lmem.c",
+    "./.replibuild_cache/deps/lua/loadlib.c",
+    "./.replibuild_cache/deps/lua/lobject.c",
+    "./.replibuild_cache/deps/lua/lopcodes.c",
+    "./.replibuild_cache/deps/lua/loslib.c",
+    "./.replibuild_cache/deps/lua/lparser.c",
+    "./.replibuild_cache/deps/lua/lstate.c",
+    "./.replibuild_cache/deps/lua/lstring.c",
+    "./.replibuild_cache/deps/lua/lstrlib.c",
+    "./.replibuild_cache/deps/lua/ltable.c",
+    "./.replibuild_cache/deps/lua/ltablib.c",
+    "./.replibuild_cache/deps/lua/ltm.c",
+    "./.replibuild_cache/deps/lua/lundump.c",
+    "./.replibuild_cache/deps/lua/lutf8lib.c",
+    "./.replibuild_cache/deps/lua/lvm.c",
+    "./.replibuild_cache/deps/lua/lzio.c",
+    "./.replibuild_cache/replibuild_shims.c"
+  ],
+  "type_registry": {
+    "int": {
+      "c_type": "int",
+      "size": 4,
+      "julia_type": "Cint"
+    },
+    "char": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "UInt8"
+    },
+    "double": {
+      "alignment": 8,
+      "size": 8,
+      "julia_type": "Cdouble"
+    },
+    "float": {
+      "alignment": 4,
+      "size": 4,
+      "julia_type": "Cfloat"
+    },
+    "bool": {
+      "alignment": 1,
+      "size": 1,
+      "julia_type": "Bool"
+    },
+    "void": {
+      "alignment": 0,
+      "size": 0,
+      "julia_type": "Cvoid"
+    }
+  },
+  "function_count": 191,
+  "stl_methods": {},
+  "compiler_info": {
+    "lto_enabled": true,
+    "target_triple": "x86_64-pc-linux-gnu",
+    "clang_version": "clang version 21.1.8",
+    "optimization_level": "2",
+    "llvm_version": "21.1.8"
+  },
+  "globals": {},
+  "include_dirs": [
+    "/home/john/.replibuild/registry/.replibuild_cache/deps/lua"
+  ],
+  "typedef_table": {},
+  "metadata_version": "1.0",
+  "timestamp": "2026-03-14T23:51:16.919",
+  "struct_definitions": {}
+}
