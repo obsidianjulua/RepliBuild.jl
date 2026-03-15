@@ -6,7 +6,11 @@ module DWARFParser
 
 using JSON
 
-export parse_vtables, VirtualMethod, MemberInfo, ClassInfo, VtableInfo
+export parse_vtables, VirtualMethod, MemberInfo, ClassInfo, VtableInfo,
+       export_vtable_json,
+       # DWARF utilities
+       parse_dwarf_output, parse_dwarf_output_robust,
+       parse_symbol_table, read_vtable_data
 
 """
 Information about a virtual method

@@ -20,7 +20,16 @@ import ..LLVMEnvironment
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
        extract_compilation_metadata, save_compilation_metadata,
        compute_project_hash, is_project_cache_valid, save_project_hash,
-       assemble_bitcode, sanitize_ir_for_julia
+       assemble_bitcode, sanitize_ir_for_julia,
+       # Compiler utilities
+       needs_recompile, compile_single_to_ir,
+       generate_template_instantiations, generate_macro_shims,
+       extract_stl_method_symbols, extract_symbols_from_binary,
+       extract_mangled_name, extract_dwarf_return_types,
+       extract_function_name, extract_class_name,
+       dwarf_type_to_julia, get_type_size,
+       cpp_to_julia_type, build_type_registry,
+       infer_return_type, parse_parameters, parse_function_signatures
 
 # =============================================================================
 # INCREMENTAL BUILD SUPPORT
@@ -106,6 +115,26 @@ function _get_git_head(dir::String)::String
     catch
     end
     return ""
+end
+
+"""
+Detect the host target triple from clang or Julia's Sys.MACHINE.
+"""
+function _detect_target_triple()::String
+    # Try clang -dumpmachine first (most accurate for the actual compiler in use)
+    try
+        (output, exitcode) = BuildBridge.execute("clang", ["-dumpmachine"])
+        if exitcode == 0
+            triple = strip(output)
+            if !isempty(triple) && contains(triple, '-')
+                return triple
+            end
+        end
+    catch
+    end
+
+    # Fallback: Julia's Sys.MACHINE (always available, matches the Julia build target)
+    return Sys.MACHINE
 end
 
 """
@@ -1499,8 +1528,27 @@ Returns: (return_types_dict, struct_defs_dict)
 function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
     # Parse DWARF debug info
 
-    # Run readelf to get DWARF debug info
-    (output, exitcode) = BuildBridge.execute("readelf", ["--debug-dump=info", binary_path])
+    # Run readelf/llvm-readelf to get DWARF debug info (cross-platform)
+    readelf_tool = LLVMEnvironment.has_tool("llvm-readelf") ? LLVMEnvironment.get_tool("llvm-readelf") : ""
+    if isempty(readelf_tool)
+        # Fallback chain: system readelf (Linux), then llvm-dwarfdump
+        readelf_tool = try
+            (_, ec) = BuildBridge.execute("readelf", ["--version"])
+            ec == 0 ? "readelf" : ""
+        catch
+            ""
+        end
+    end
+
+    output = ""
+    exitcode = 1
+    if !isempty(readelf_tool)
+        (output, exitcode) = BuildBridge.execute(readelf_tool, ["--debug-dump=info", binary_path])
+    else
+        # Last resort: llvm-dwarfdump (different output format, but try it)
+        dwarfdump_tool = LLVMEnvironment.has_tool("llvm-dwarfdump") ? LLVMEnvironment.get_tool("llvm-dwarfdump") : "llvm-dwarfdump"
+        (output, exitcode) = BuildBridge.execute(dwarfdump_tool, ["--debug-info", binary_path])
+    end
 
     if exitcode != 0
         @warn "Failed to read DWARF info: $output"
@@ -3041,7 +3089,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         "compiler_info" => Dict(
             "llvm_version" => llvm_version,
             "clang_version" => clang_version,
-            "target_triple" => "x86_64-unknown-linux-gnu",  # TODO: detect
+            "target_triple" => _detect_target_triple(),
             "optimization_level" => config.link.optimization_level,
             "lto_enabled" => config.link.enable_lto
         ),
@@ -3140,17 +3188,88 @@ function extract_class_name(demangled::String)::String
 end
 
 """
-Infer return type from function signature (basic heuristic).
-In future: extract from debug info or DWARF.
+Infer return type from demangled function signature using pattern matching.
+This is a fallback when DWARF debug info is unavailable for a given function.
 """
 function infer_return_type(demangled::String)::Dict{String,Any}
-    # Default: assume int return for now
-    # TODO: Parse DWARF debug info for exact types
-    return Dict(
-        "c_type" => "int",
-        "julia_type" => "Cint",
-        "size" => 4
-    )
+    name = extract_function_name(demangled)
+    class = extract_class_name(demangled)
+
+    # Constructors and destructors return void
+    if !isempty(class)
+        bare_class = last(split(class, "::"))
+        if name == bare_class || name == "~$bare_class"
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+    end
+
+    # Operator patterns with known return types
+    if startswith(name, "operator")
+        op = replace(name, "operator" => "")
+        op = strip(op)
+        # Boolean operators
+        if op in ["==", "!=", "<", ">", "<=", ">=", "!", "&&", "||", "bool"]
+            return Dict("c_type" => "bool", "julia_type" => "Bool", "size" => 1)
+        end
+        # Assignment/compound assignment returns reference (effectively void for FFI)
+        if op in ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+        # new/new[] return pointer
+        if startswith(op, "new")
+            return Dict("c_type" => "void*", "julia_type" => "Ptr{Cvoid}", "size" => sizeof(Ptr))
+        end
+        # delete/delete[] return void
+        if startswith(op, "delete")
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+    end
+
+    # Common naming conventions
+    lower_name = lowercase(name)
+
+    # void patterns: set_, init_, destroy_, free_, clear_, reset_, print_, write_, close_
+    for prefix in ["set_", "init_", "destroy_", "free_", "clear_", "reset_",
+                    "print_", "write_", "close_", "release_", "cleanup_", "remove_",
+                    "delete_", "push_", "pop_", "insert_", "erase_", "swap_"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+    end
+
+    # bool patterns: is_, has_, can_, should_, contains_, empty_, valid_
+    for prefix in ["is_", "has_", "can_", "should_", "contains_", "empty_", "valid_",
+                    "check_", "exists_", "equals_", "matches_"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "bool", "julia_type" => "Bool", "size" => 1)
+        end
+    end
+
+    # size/count patterns → size_t
+    for prefix in ["size", "count", "length", "num_", "get_size", "get_count", "get_length",
+                    "get_num", "capacity"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "size_t", "julia_type" => "Csize_t", "size" => sizeof(Csize_t))
+        end
+    end
+
+    # Pointer-returning patterns: create_, alloc_, malloc_, new_, get_ptr, make_
+    for prefix in ["create_", "alloc_", "malloc_", "new_", "make_", "open_"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "void*", "julia_type" => "Ptr{Cvoid}", "size" => sizeof(Ptr))
+        end
+    end
+
+    # String-returning patterns
+    for prefix in ["to_string", "get_name", "get_string", "get_path", "get_message",
+                    "get_error", "strerror", "name", "what"]
+        if startswith(lower_name, prefix) || lower_name == prefix
+            return Dict("c_type" => "const char*", "julia_type" => "Cstring", "size" => sizeof(Ptr))
+        end
+    end
+
+    # Default fallback: int (most common return type in C APIs)
+    return Dict("c_type" => "int", "julia_type" => "Cint", "size" => 4)
 end
 
 """

@@ -8,6 +8,12 @@ module BuildBridge
 # Import modules already loaded by RepliBuild.jl
 import ..LLVMEnvironment
 
+export run_command, execute, capture,
+       find_executable, command_exists,
+       analyze_compiler_error, compile_with_analysis,
+       throw_compilation_error, execute_with_retry,
+       get_llvm_version, get_compiler_info
+
 # ============================================================================
 # SIMPLE COMMAND EXECUTION
 # ============================================================================

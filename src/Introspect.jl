@@ -40,11 +40,19 @@ export compilation_pipeline
 
 # LLVM Tooling
 export llvm_ir, optimize_ir, compare_optimization, run_passes, compile_to_asm
+export analyze_ir_structure, extract_function_names, compare_ir_files
 
 # Benchmarking
-export benchmark, benchmark_suite, track_allocations  # profile not yet supported
+export benchmark, benchmark_suite, track_allocations
+export compare_benchmarks, fastest, slowest, is_significant, speedup
 
 # Dataset Export
-export export_json, export_csv, export_dataset
+export export_json, export_csv, export_dataset, to_json_dict, to_dataframe
+
+# Types (structured result types)
+export BenchmarkResult, TypeStabilityAnalysis, SIMDAnalysis, AllocationAnalysis,
+       CompilationPipelineResult, OptimizationResult,
+       CodeLoweredInfo, CodeTypedInfo, LLVMIRInfo, AssemblyInfo,
+       DWARFInfo, HeaderInfo, FunctionInfo, StructInfo
 
 end # module Introspect

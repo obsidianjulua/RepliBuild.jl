@@ -7,8 +7,14 @@
 module MLIRNative
 
 export create_context, create_module, destroy_context, parse_module, clone_module
-export create_jit, destroy_jit, register_symbol, lookup, jit_invoke, invoke_safe, lower_to_llvm
-export test_dialect, print_module
+export get_module_operation, print_module
+export get_function_op, get_function_type, get_num_inputs, get_input_type
+export is_integer, get_integer_width, is_f32, is_f64
+export lower_to_llvm
+export create_jit, destroy_jit, register_symbol, register_symbol_global, lookup
+export jit_invoke, invoke_safe
+export emit_llvmir, emit_object
+export check_library, test_dialect
 
 # =============================================================================
 # MLIR C API Bindings

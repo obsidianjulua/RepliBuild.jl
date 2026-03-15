@@ -9,7 +9,9 @@ using Clang
 using TOML
 using Dates
 
-export generate_bindings_clangjl, extract_header_types
+export generate_bindings_clangjl, extract_header_types,
+       sanitize_module_name, add_replibuild_metadata,
+       discover_headers, generate_from_config
 
 """
     generate_bindings_clangjl(config::Dict, lib_path::String, headers::Vector{String})
