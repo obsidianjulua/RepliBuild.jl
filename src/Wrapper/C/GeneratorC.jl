@@ -1025,12 +1025,62 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                         continue
                     end
 
+                    # Packed struct detection: DWARF byte_size < Julia aligned size
+                    # Julia structs always use natural alignment, so packed C structs
+                    # must use a byte blob to maintain correct ABI layout.
+                    julia_aligned_size = get_julia_aligned_size(members)
+                    if byte_size > 0 && byte_size < julia_aligned_size
+                        push!(blob_struct_names, julia_struct_name)
+                        struct_definitions *= """
+                        # C packed struct: $struct_name ($(length(members)) members, $byte_size bytes packed)
+                        struct $julia_struct_name
+                            _data::NTuple{$(byte_size), UInt8}
+                        end
+
+                        # Zero-initializer for $julia_struct_name
+                        function $julia_struct_name()
+                            return $julia_struct_name(ntuple(i -> 0x00, $byte_size))
+                        end
+
+                        """
+
+                        # Generate Base.getproperty accessor for packed byte-blob structs
+                        _packed_branches = String[]
+                        for m in members
+                            m_name = get(m, "name", nothing)
+                            isnothing(m_name) && continue
+                            m_offset_raw = get(m, "offset", nothing)
+                            isnothing(m_offset_raw) && continue
+                            m_offset = startswith(string(m_offset_raw), "0x") ?
+                                parse(Int, string(m_offset_raw)[3:end], base=16) :
+                                parse(Int, string(m_offset_raw))
+                            m_julia_type = get(m, "julia_type", "")
+                            push!(_packed_branches, """
+                                    if s === :$(make_c_identifier(m_name))
+                                        return GC.@preserve x unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                    end""")
+                        end
+                        if !isempty(_packed_branches)
+                            accessor_code = join(_packed_branches, "\n")
+                            struct_definitions *= """
+                            function Base.getproperty(x::$julia_struct_name, s::Symbol)
+                                s === :_data && return getfield(x, :_data)
+                            $accessor_code
+                                error("type $julia_struct_name has no field \$s")
+                            end
+
+                            """
+                        end
+
+                        continue
+                    end
+
                     member_count = length(members)
                     struct_definitions *= """
                     # C++ struct: $struct_name ($member_count members)
                     struct $julia_struct_name
                     """
-                    
+
                     current_offset = 0
                     pad_idx = 0
 
@@ -1518,119 +1568,90 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         end
 
         # =========================================================
-        # BRANCH 1: MLIR DISPATCH (Robust Path)
+        # PER-FUNCTION C SAFETY DECISION
         # =========================================================
-        if config.compile.aot_thunks
-            requires_jit = true
+        # C-specific gate: only packed struct returns and union-by-value
+        # returns are unsafe.  Unlike C++ (which routes to MLIR), C thunks
+        # are compiled by the same Clang that built the library — no LLVM
+        # version mismatch, no sanitizing needed.
+        c_safe = is_c_lto_safe(func, dwarf_structs)
 
-            # Build argument list for invoke
-            invoke_args = join(param_names, ", ")
-            jit_ret_type = return_type["julia_type"]
-            jit_c_ret = get(return_type, "c_type", "void")
+        # =========================================================
+        # BRANCH 0: UNSAFE — C sret thunk dispatch
+        # =========================================================
+        if !c_safe
+            thunk_ret_type = return_type["julia_type"]
+            thunk_c_ret = get(return_type, "c_type", "void")
 
-            # Resolve "Any" return type to the Julia struct if we have a DWARF definition
-            # This is critical: invoke(name, Any, ...) creates Ref{Any}() which corrupts
-            # memory when the JIT writes raw struct bytes into it.
-            if jit_ret_type == "Any" && jit_c_ret != "void"
-                if haskey(dwarf_structs, jit_c_ret)
-                    jit_ret_type = _sanitize_c_type_name(jit_c_ret)
+            # Resolve "Any" return type to the Julia struct name
+            if thunk_ret_type == "Any" && thunk_c_ret != "void"
+                if haskey(dwarf_structs, thunk_c_ret)
+                    thunk_ret_type = _sanitize_c_type_name(thunk_c_ret)
                 else
-                    # Fuzzy match: DWARF keys may have trailing " >" nesting artifacts
-                    matched_key = _fuzzy_dwarf_lookup(jit_c_ret, dwarf_structs)
+                    matched_key = _fuzzy_dwarf_lookup(thunk_c_ret, dwarf_structs)
                     if matched_key !== nothing
-                        jit_ret_type = _sanitize_c_type_name(matched_key)
+                        thunk_ret_type = _sanitize_c_type_name(matched_key)
                     end
                 end
             end
 
-            # Determine if we need the return type overload of invoke
-            # Void returns: invoke(name, args...)
-            # Struct returns: invoke(name, RetType, args...)
-            is_void_ret = jit_ret_type == "Cvoid" || jit_c_ret == "void"
+            thunk_sym = "_c_sret_$mangled"
 
-            if config.compile.aot_thunks
-                # The AOT compiled thunks expect a single argument: void** args
-                thunk_sym = ":_mlir_ciface_$(mangled)_thunk"
-                
-                ptr_setup = ""
-                if !isempty(invoke_args)
-                    ptr_setup *= "    c_args = ($(join(["Base.cconvert($(param_types[i]), $(param_names[i]))" for i in 1:length(param_names)], ", ")),)\n"
-                    ptr_setup *= "    refs = ($(join(["Ref(Base.unsafe_convert($(param_types[i]), c_args[$i]))" for i in 1:length(param_names)], ", ")),)\n"
-                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[$(join(["Base.unsafe_convert(Ptr{Cvoid}, refs[$i])" for i in 1:length(param_names)], ", "))]\n"
-                    ptr_setup *= "    GC.@preserve c_args refs inner_ptrs begin\n"
-                else
-                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[]\n"
-                    ptr_setup *= "    GC.@preserve inner_ptrs begin\n"
-                end
-                
-                if is_void_ret
-                    invoke_call = "        if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_call *= "            Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
-                    invoke_call *= "        else\n"
-                    invoke_call *= "            ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
-                    invoke_call *= "        end\n"
-                    invoke_call *= "        return nothing\n"
-                    invoke_call *= "    end"
-                elseif jit_ret_type in ("Int8","UInt8","Int16","UInt16","Int32","UInt32","Int64","UInt64",
-                                        "Float32","Float64","Cint","Cuint","Clong","Culong","Clonglong","Culonglong","Cshort","Cushort","Csize_t","Cchar","Cuchar",
-                                        "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring") || startswith(jit_ret_type, "Ptr{")
-                    # Scalar return directly
-                    invoke_call = "        if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_call *= "            ret = Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), $jit_ret_type, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
-                    invoke_call *= "        else\n"
-                    invoke_call *= "            ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
-                    invoke_call *= "        end\n"
-                    invoke_call *= "    end\n"
-                    invoke_call *= "    return ret"
-                else
-                    # Struct return via sret pointer
-                    invoke_call = "        ret_buf = Ref{$jit_ret_type}()\n"
-                    invoke_call *= "        GC.@preserve ret_buf begin\n"
-                    invoke_call *= "            if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_call *= "                Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}}, ret_buf, inner_ptrs)\n"
-                    invoke_call *= "            else\n"
-                    invoke_call *= "                ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)\n"
-                    invoke_call *= "            end\n"
-                    invoke_call *= "        end\n"
-                    invoke_call *= "    end\n"
-                    invoke_call *= "    return ret_buf[]"
-                end
+            # Direct sret call: thunk has same args as original but returns
+            # void and takes a leading Ptr{RetType} output parameter.
+            # ccall types: (Ptr{Ret}, Arg1, Arg2, ...)
+            sret_ccall_types = "(Ptr{$thunk_ret_type}, $(join(param_types, ", "))$(isempty(param_types) ? "" : ","))"
+            sret_ccall_args  = "ret_buf, $(join(param_names, ", "))"
 
+            if config.link.enable_lto
+                # LTO path: try llvmcall first, fall back to ccall
+                sret_llvm_types = "Tuple{Ptr{$thunk_ret_type}, $(join(param_types, ", "))}"
+                sret_llvm_args  = sret_ccall_args
                 func_def = """
                 $doc_comment
                 function $julia_name($param_sig)
-                    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-                $ptr_setup
-                $invoke_call
+                    # [C Thunk] sret dispatch — packed/union return
+                    ret_buf = Ref{$thunk_ret_type}()
+                    GC.@preserve ret_buf begin
+                        if !isempty(THUNKS_LTO_IR)
+                            Base.llvmcall((THUNKS_LTO_IR, "$thunk_sym"), Cvoid, $sret_llvm_types, $sret_llvm_args)
+                        else
+                            ccall((:$thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_llvm_args)
+                        end
+                    end
+                    return ret_buf[]
                 end
+
+                """
+            elseif !isempty(thunks_lib_path)
+                # No LTO but thunks library exists
+                func_def = """
+                $doc_comment
+                function $julia_name($param_sig)
+                    # [C Thunk] sret dispatch — packed/union return
+                    ret_buf = Ref{$thunk_ret_type}()
+                    GC.@preserve ret_buf begin
+                        ccall((:$thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
+                    end
+                    return ret_buf[]
+                end
+
                 """
             else
-                if is_void_ret
-                    invoke_call = if isempty(invoke_args)
-                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\")"
-                    else
-                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\", $invoke_args)"
-                    end
-                else
-                    invoke_call = if isempty(invoke_args)
-                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type)"
-                    else
-                        "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type, $invoke_args)"
-                    end
-                end
-
+                # No thunks available at all — error trap
                 func_def = """
                 $doc_comment
                 function $julia_name($param_sig)
-                    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-                    return $invoke_call
+                    error("Cannot call '$julia_name': packed/union return ($(thunk_c_ret)) requires AOT thunks.\\n" *
+                          "Rebuild with: [compile] aot_thunks = true  in your replibuild.toml")
                 end
+
                 """
             end
 
             function_wrappers *= func_def
             push!(exports, julia_name)
-            continue # Skip the rest of the loop (ccall generation)
+            continue
         end
 
         # =========================================================
@@ -1671,14 +1692,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         llvmcall_conversion_lines = String[]
         for (i, pt) in enumerate(param_types)
             arg_name = ccall_param_names[i]
-            m = match(r"^Ref\{(.+)\}$", pt)
-            if m !== nothing
-                inner_type = m.captures[1]
+            m_ref = match(r"^Ref\{(.+)\}$", pt)
+            m_ptr = match(r"^Ptr\{(.+)\}$", pt)
+            if m_ref !== nothing
+                # Ref{T} → Ptr{T}: llvmcall sees Ref as ptr addrspace(10),
+                # but C IR uses plain ptr (addrspace 0)
+                inner_type = m_ref.captures[1]
                 push!(llvmcall_param_types, "Ptr{$inner_type}")
                 ptr_name = "__ptr_$(arg_name)"
                 push!(llvmcall_arg_names, ptr_name)
                 push!(llvmcall_ref_args, arg_name)
                 push!(llvmcall_conversion_lines, "        $ptr_name = Base.unsafe_convert(Ptr{$inner_type}, $arg_name)")
+            elseif m_ptr !== nothing
+                # Ptr{T} params: the Julia signature is relaxed to ::Any,
+                # so callers may pass Ref{T} or Vector{T}. ccall auto-converts
+                # via cconvert/unsafe_convert, but llvmcall doesn't.
+                # Mirror ccall's conversion chain here.
+                push!(llvmcall_param_types, pt)
+                ptr_name = "__ptr_$(arg_name)"
+                cc_name = "__cc_$(arg_name)"
+                push!(llvmcall_arg_names, ptr_name)
+                push!(llvmcall_ref_args, cc_name)  # preserve cconvert result (holds the GC root)
+                push!(llvmcall_conversion_lines, "        $cc_name = Base.cconvert($pt, $arg_name)")
+                push!(llvmcall_conversion_lines, "        $ptr_name = Base.unsafe_convert($pt, $cc_name)")
             else
                 push!(llvmcall_param_types, pt)
                 push!(llvmcall_arg_names, arg_name)

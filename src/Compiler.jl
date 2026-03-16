@@ -473,6 +473,20 @@ function sanitize_ir_for_julia(ir_text::String)::String
     # Strip noalias scope intrinsics — they reference metadata we've already removed
     ir_text = replace(ir_text, r"^\s*(tail\s+)?call void @llvm\.experimental\.noalias\.scope\.decl\(metadata ![0-9]+\)\s*$"m => "")
 
+    # Convert externally-visible global variable definitions to external declarations.
+    # Prevents "Duplicate definition" JIT errors when the shared library is also loaded
+    # via dlopen (both the .so and the LTO bitcode define the same globals).
+    # Private/internal globals (string constants, etc.) are kept as-is.
+    lines = split(ir_text, '\n')
+    for i in eachindex(lines)
+        m = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:\[\d+\s+x\s+\S+\]|\S+))\s+\S", lines[i])
+        if m !== nothing && !occursin(r"\b(?:private|internal)\b", m[2])
+            type_str = rstrip(m[4], ',')  # \S+ may capture trailing comma from "ptr, align 8"
+            lines[i] = "$(m[1])external $(m[3]) $(type_str)"
+        end
+    end
+    ir_text = join(lines, '\n')
+
     return ir_text
 end
 

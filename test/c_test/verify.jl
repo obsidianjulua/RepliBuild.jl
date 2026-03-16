@@ -27,7 +27,10 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         println("  ✓ discover")
     end
 
-    # ── 2b. enable LTO for Tier 1 llvmcall dispatch ────────────────────
+    # ── 2b. enable LTO ────────────────────────────────────────────────
+    # LTO enables Tier 1 (llvmcall) for safe functions.
+    # C+LTO auto-enables aot_thunks → Clang-compiled sret wrappers for
+    # packed struct / union returns (no MLIR, no version mismatch).
     let cfg = read(toml, String)
         cfg = replace(cfg, "enable_lto = false" => "enable_lto = true")
         write(toml, cfg)
@@ -50,7 +53,8 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test occursin("add_i32", code)
         @test occursin("Point2D", code)
         @test occursin("Base.llvmcall", code)          # LTO Tier 1 dispatch
-        println("  ✓ wrap → $wrapper (LTO Tier 1 active)")
+        @test occursin("_c_sret_", code)               # C sret thunks for packed returns
+        println("  ✓ wrap → $wrapper (LTO + C thunks active)")
     end
 
     # ── 5. info ─────────────────────────────────────────────────────────
@@ -68,15 +72,15 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
     end
 
     # ── 7. load wrapper and call into the library ───────────────────────
-    @testset "use / call" begin
-        wrapper_path = joinpath(C_TEST_DIR, "julia")
-        jl_files = filter(f -> endswith(f, ".jl"), readdir(wrapper_path))
-        @test length(jl_files) >= 1
-        mod_file = joinpath(wrapper_path, first(jl_files))
-        include(mod_file)
+    wrapper_path = joinpath(C_TEST_DIR, "julia")
+    jl_files = filter(f -> endswith(f, ".jl"), readdir(wrapper_path))
+    mod_file = joinpath(wrapper_path, first(jl_files))
+    include(mod_file)
+    mod_name = Symbol(first(split(first(jl_files), ".")))
+    M = getfield(Main, mod_name)
 
-        mod_name = Symbol(first(split(first(jl_files), ".")))
-        M = getfield(Main, mod_name)
+    @testset "use / call" begin
+        @test length(jl_files) >= 1
 
         # ── scalar arithmetic ───────────────────────────────────────
         @test M.add_i32(Int32(10), Int32(32)) == Int32(42)
@@ -143,11 +147,11 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test ps.b == Int32(20)
         println("  ✓ PaddedStruct")
 
-        # PackedStruct
+        # PackedStruct — packed return via Clang-compiled sret thunk
         pk = M.make_packed(UInt8(30), Int32(40))
         @test pk.a == UInt8(30)
         @test pk.b == Int32(40)
-        println("  ✓ PackedStruct")
+        println("  ✓ PackedStruct (C sret thunk)")
 
         # NumberUnion via getter helpers
         # (union layout is opaque — test through get_union_int / get_union_float)
@@ -171,11 +175,12 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test pair.second == Cint(22)
         println("  ✓ make_pair (struct return)")
 
+        # pack_three — packed return via Clang-compiled sret thunk
         triplet = M.pack_three(UInt8('A'), Cint(999), UInt8('Z'))
         @test triplet.tag   == UInt8('A')
         @test triplet.value == Cint(999)
         @test triplet.flag  == UInt8('Z')
-        println("  ✓ pack_three (packed struct return)")
+        println("  ✓ pack_three (C sret thunk)")
     end
 
     # ── 10. unregister ──────────────────────────────────────────────────

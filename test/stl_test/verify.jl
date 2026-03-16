@@ -67,7 +67,7 @@ using .StlTest
         for i in 1:4
             push!(v, Cint(i))
         end
-        result = StlTest.sum_vec(v.handle)
+        result = StlTest.sum_vec(v)
         @test result == 10
     end
 
@@ -79,7 +79,7 @@ using .StlTest
             # push_back takes a char
         end
         # Empty string should have length 0
-        @test StlTest.string_len(s.handle) == 0
+        @test StlTest.string_len(s) == 0
     end
 
     # ── 6. CppMap{Cint,Cint} factory ────────────────────────────────────────
@@ -122,8 +122,8 @@ using .StlTest
         m[Cint(0)] = Cint(0)
         m[Cint(1)] = Cint(10)
         m[Cint(2)] = Cint(20)
-        @test StlTest.map_lookup(m.handle, Cint(1)) == 10
-        @test StlTest.map_size(m.handle) == 3
+        @test StlTest.map_lookup(m, Cint(1)) == 10
+        @test StlTest.map_size(m) == 3
     end
 
     println("✓ STL Template Pipeline Passed")

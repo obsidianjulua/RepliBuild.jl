@@ -9,7 +9,6 @@ parallel = true
 flags = ["-fPIC"]
 source_files = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_test/src/mathkit.c"]
 include_dirs = ["/home/john/Desktop/Projects/RepliBuild.jl/test/c_test", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_test/include", "/home/john/Desktop/Projects/RepliBuild.jl/test/c_test/src"]
-aot_thunks = false
 
 [link]
 enable_lto = true
@@ -38,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "c_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/c_test"
-uuid = "5fafeb3a-5061-4128-9bda-c890ea465ff9"
+uuid = "f2391989-5ec5-4985-bfc1-3b8f92f58efa"
 
 [paths]
 build = "build"

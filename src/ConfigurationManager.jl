@@ -541,8 +541,12 @@ function save_config(config::RepliBuildConfig)
     compile_dict = Dict(
         "flags" => config.compile.flags,
         "parallel" => config.compile.parallel,
-        "aot_thunks" => config.compile.aot_thunks
     )
+    # Only write aot_thunks when explicitly enabled — omitting it lets the
+    # auto-enable logic (C+LTO → aot_thunks=true) work on reload.
+    if config.compile.aot_thunks
+        compile_dict["aot_thunks"] = true
+    end
     # Only save if non-empty
     if !isempty(config.compile.source_files)
         compile_dict["source_files"] = config.compile.source_files

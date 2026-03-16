@@ -396,16 +396,29 @@ end
 """
 Extract enum definitions from C++ headers using Clang.jl's AST parser.
 Correctly ignores comments, handles enum class, hex/octal/binary values, and namespaces.
+
+Runs in a subprocess to isolate libclang from the parent process's LLVM state.
+clang_visitChildren can segfault when libclang's internal TU state is corrupted
+(observed when build() and wrap() share a process), and signals can't be caught
+by Julia's try/catch.
 """
 function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_dirs::Vector)
-    # Build compiler flags
+    isempty(headers) && return
+
+    # Serialize the extraction to a subprocess to isolate libclang crashes.
+    # The subprocess writes JSON to stdout; if it crashes, we get nothing and fall back.
+    script = """
+    using Clang
+    using Clang.Generators
+
+    headers = $(repr(headers))
+    include_dirs = $(repr(Vector{String}(include_dirs)))
+
     flags = String["-xc++", "-std=c++17"]
     for dir in include_dirs
-        push!(flags, "-I$(abspath(dir))")
+        push!(flags, "-I\$(abspath(dir))")
     end
 
-    # Add Clang.jl's bundled resource directory so system headers resolve correctly
-    # (the JLL clang needs its own limits.h, stdarg.h, stddef.h, etc.)
     try
         libclang_dir = dirname(dirname(Clang.LibClang.libclang))
         clang_lib_dir = joinpath(libclang_dir, "lib", "clang")
@@ -420,17 +433,13 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
         end
     catch; end
 
+    enums = Dict{String,Vector{Tuple{String,Int}}}()
     idx = Clang.Index()
 
     for header in headers
-        if !isfile(header)
-            continue
-        end
-
+        isfile(header) || continue
         try
             tu = Clang.parse_header(idx, header, flags)
-            # Check for ANY errors before walking — even non-fatal errors can leave
-            # the TU in a state where clang_visitChildren segfaults
             n_diags = Clang.LibClang.clang_getNumDiagnostics(tu.ptr)
             has_errors = false
             for i in 0:(n_diags - 1)
@@ -442,15 +451,61 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
                     break
                 end
             end
-            if has_errors
-                @debug "Clang reported errors for $header, skipping enum extraction"
-                continue
-            end
+            has_errors && continue
             root = Clang.getTranslationUnitCursor(tu)
-            _walk_enums!(result["enums"], root)
-        catch e
-            @debug "Clang AST parse failed for $header, skipping enum extraction" exception=e
+
+            # Inline walk (same logic as _walk_enums!)
+            function walk!(enums, cursor)
+                for child in Clang.children(cursor)
+                    k = Clang.kind(child)
+                    if k == Clang.CXCursor_EnumDecl
+                        enum_name = Clang.spelling(child)
+                        (isempty(enum_name) || startswith(enum_name, "(") || !occursin(r"^[A-Za-z_]\\w*\$", enum_name)) && continue
+                        haskey(enums, enum_name) && continue
+                        members = Tuple{String,Int}[]
+                        for ec in Clang.children(child)
+                            Clang.kind(ec) == Clang.CXCursor_EnumConstantDecl || continue
+                            push!(members, (Clang.spelling(ec), Int(Clang.value(ec))))
+                        end
+                        !isempty(members) && (enums[enum_name] = members)
+                    elseif k == Clang.CXCursor_Namespace || k == Clang.CXCursor_LinkageSpec
+                        walk!(enums, child)
+                    end
+                end
+            end
+            walk!(enums, root)
+        catch; end
+    end
+
+    # Output line-based format: ENUM\tname\tMEMBER\tvalue per line
+    for (k, v) in enums
+        for (m, val) in v
+            println("ENUM\t\$(k)\t\$(m)\t\$(val)")
         end
+    end
+    """
+
+    project_dir = dirname(dirname(abspath(@__DIR__)))
+    cmd = `$(Base.julia_cmd()) --project=$(project_dir) -e $(script)`
+
+    try
+        output = read(pipeline(cmd, stderr=devnull), String)
+        isempty(strip(output)) && return
+
+        # Parse line-based format: ENUM\tname\tMEMBER\tvalue
+        for line in split(output, '\n')
+            parts = split(line, '\t')
+            length(parts) == 4 && parts[1] == "ENUM" || continue
+            enum_name = String(parts[2])
+            member_name = String(parts[3])
+            member_value = parse(Int, parts[4])
+            if !haskey(result["enums"], enum_name)
+                result["enums"][enum_name] = Tuple{String,Int}[]
+            end
+            push!(result["enums"][enum_name], (member_name, member_value))
+        end
+    catch e
+        @debug "Subprocess Clang enum extraction failed, using DWARF data only" exception=e
     end
 end
 

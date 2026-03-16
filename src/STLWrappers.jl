@@ -383,4 +383,6 @@ function Base.show(io::IO, m::CppMap{K,V}) where {K,V}
     end
 end
 
+Base.unsafe_convert(::Type{Ptr{Cvoid}}, x::Union{CppVector, CppString, CppMap}) = x.handle
+
 end # module STLWrappers
