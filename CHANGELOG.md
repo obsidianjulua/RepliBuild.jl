@@ -39,6 +39,21 @@ Reduced the test directory from 14 subdirectories + 8 top-level files to 6 subdi
 - **`test_registry.jl`** — Registry integration test updated from `basics_test` to `c_test`.
 - **Deleted:** `lua_test/`, `duktape_test/`, `mydir/`, `rust_demo/`, `basics_test/`, `jit_edge_test/`, `vtable_test/`, `raii_test/`, `pugixml_test.jl`, `test_mlir.jl`, `test_mlir_safety.jl`, `test_aot.jl`, `test_raii.jl`.
 
+### Refactor: Dispatch Logic
+
+- **`DispatchLogic.jl`** — Extracted routing logic (`is_ccall_safe`, `is_c_lto_safe`) into a dedicated module, decoupling it from `Utils.jl` and `Generator.jl`.
+- **C-Specific LTO Safety** — Introduced `is_c_lto_safe()` for fine-grained C dispatch gates, routing functions with packed struct or union returns to sret thunks while preserving direct `ccall` for safe returns.
+
+### Improved: Cross-Platform DWARF & Target Detection
+
+- **Target Triple Detection** — Added `_detect_target_triple()` in `Compiler.jl` to gracefully determine the host target via `clang -dumpmachine` with a fallback to `Sys.MACHINE`.
+- **Robust DWARF Parsing** — `extract_dwarf_return_types` now searches for `llvm-readelf` and `llvm-dwarfdump` as fallbacks when the system `readelf` is missing, improving cross-platform reliability.
+- **Return Type Inference** — Added `infer_return_type()` to fallback to demangled C++ function name patterns (e.g. `is_*` -> `bool`, `create_*` -> `void*`) when DWARF debug info is unavailable.
+
+### Refactor: Core API Exports
+
+- **Organized Exports** — Completely reorganized `RepliBuild.jl` exports into categorized sections (Core Build Orchestration, Configuration, Compiler Tooling, DWARF Analysis, LLVM Environment, etc.) for better module discoverability.
+
 ## v2.5.2
 
 ### New: RAII Dialect Operations
