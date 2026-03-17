@@ -479,7 +479,7 @@ function sanitize_ir_for_julia(ir_text::String)::String
     # Private/internal globals (string constants, etc.) are kept as-is.
     lines = split(ir_text, '\n')
     for i in eachindex(lines)
-        m = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:\[\d+\s+x\s+\S+\]|\S+))\s+\S", lines[i])
+        m = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:<\{.*?\}>|\{.*?\}|\[\d+\s+x\s+\S+\]|\S+))\s+\S", lines[i])
         if m !== nothing && !occursin(r"\b(?:private|internal)\b", m[2])
             type_str = rstrip(m[4], ',')  # \S+ may capture trailing comma from "ptr, align 8"
             lines[i] = "$(m[1])external $(m[3]) $(type_str)"
