@@ -324,6 +324,32 @@ struct TypeInfoOpLowering : public ConversionPattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Shared ABI helpers
+//===----------------------------------------------------------------------===//
+
+// Calculate the packed (no-padding) size of a type in bits.
+// Used by FFECallOp and TryCallOp lowering for ABI coercion decisions.
+static uint64_t getPackedSizeInBits(Type type) {
+    if (auto structType = dyn_cast<LLVM::LLVMStructType>(type)) {
+        uint64_t sum = 0;
+        for (Type elem : structType.getBody()) {
+            sum += getPackedSizeInBits(elem);
+        }
+        return sum;
+    }
+    if (auto arrType = dyn_cast<LLVM::LLVMArrayType>(type)) {
+        return arrType.getNumElements() * getPackedSizeInBits(arrType.getElementType());
+    }
+    if (type.isIntOrFloat()) {
+        return type.getIntOrFloatBitWidth();
+    }
+    if (isa<LLVM::LLVMPointerType>(type)) {
+        return 64; // Assume 64-bit pointers
+    }
+    return 0; // Unknown
+}
+
+//===----------------------------------------------------------------------===//
 // FFECallOp Lowering
 //===----------------------------------------------------------------------===//
 
@@ -332,27 +358,6 @@ struct FFECallOpLowering : public ConversionPattern {
         : ConversionPattern(typeConverter, FFECallOp::getOperationName(), 1,
               ctx)
     {
-    }
-
-    // Helper to calculate size of a struct type (simple sum for packed)
-    uint64_t getPackedSizeInBits(Type type) const {
-        if (auto structType = dyn_cast<LLVM::LLVMStructType>(type)) {
-            uint64_t sum = 0;
-            for (Type elem : structType.getBody()) {
-                sum += getPackedSizeInBits(elem);
-            }
-            return sum;
-        }
-        if (auto arrType = dyn_cast<LLVM::LLVMArrayType>(type)) {
-            return arrType.getNumElements() * getPackedSizeInBits(arrType.getElementType());
-        }
-        if (type.isIntOrFloat()) {
-            return type.getIntOrFloatBitWidth();
-        }
-        if (isa<LLVM::LLVMPointerType>(type)) {
-            return 64; // Assume 64-bit pointers
-        }
-        return 0; // Unknown
     }
 
     LogicalResult
@@ -491,27 +496,6 @@ struct TryCallOpLowering : public ConversionPattern {
         : ConversionPattern(typeConverter, TryCallOp::getOperationName(), 1,
               ctx)
     {
-    }
-
-    // Reuse packed size calculation from FFECallOpLowering
-    uint64_t getPackedSizeInBits(Type type) const {
-        if (auto structType = dyn_cast<LLVM::LLVMStructType>(type)) {
-            uint64_t sum = 0;
-            for (Type elem : structType.getBody()) {
-                sum += getPackedSizeInBits(elem);
-            }
-            return sum;
-        }
-        if (auto arrType = dyn_cast<LLVM::LLVMArrayType>(type)) {
-            return arrType.getNumElements() * getPackedSizeInBits(arrType.getElementType());
-        }
-        if (type.isIntOrFloat()) {
-            return type.getIntOrFloatBitWidth();
-        }
-        if (isa<LLVM::LLVMPointerType>(type)) {
-            return 64;
-        }
-        return 0;
     }
 
     /// Get or declare an external function in the module

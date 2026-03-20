@@ -183,7 +183,76 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         println("  ✓ pack_three (C sret thunk)")
     end
 
-    # ── 10. unregister ──────────────────────────────────────────────────
+    # ── 10. bitfield structs ──────────────────────────────────────────────
+    @testset "bitfield structs" begin
+        # ── SingleByteBits: all fields in one byte ──
+        sb = M.make_single_bits(UInt32(5), UInt32(11), UInt32(1))
+        @test M.get_a(sb) == UInt32(5)
+        @test M.get_b(sb) == UInt32(11)
+        @test M.get_c(sb) == UInt32(1)
+
+        # Round-trip through setter
+        sb2 = M.SingleByteBits()
+        M.set_a!(sb2, 7)
+        M.set_b!(sb2, 15)
+        M.set_c!(sb2, 1)
+        @test M.get_a(sb2) == UInt32(7)
+        @test M.get_b(sb2) == UInt32(15)
+        @test M.get_c(sb2) == UInt32(1)
+
+        # Verify against C side
+        a_ref = Ref(UInt32(0)); b_ref = Ref(UInt32(0)); c_ref = Ref(UInt32(0))
+        M.read_single_bits(sb2, a_ref, b_ref, c_ref)
+        @test a_ref[] == UInt32(7)
+        @test b_ref[] == UInt32(15)
+        @test c_ref[] == UInt32(1)
+        println("  ✓ SingleByteBits (single-byte bitfield get/set)")
+
+        # ── MultiByteBits: field spans byte boundary ──
+        mb = M.make_multi_bits(UInt32(17), UInt32(3000), UInt32(100))
+        @test M.get_x(mb) == UInt32(17)
+        @test M.get_y(mb) == UInt32(3000)
+        @test M.get_z(mb) == UInt32(100)
+
+        # Round-trip through setter
+        mb2 = M.MultiByteBits()
+        M.set_x!(mb2, 31)
+        M.set_y!(mb2, 4095)
+        M.set_z!(mb2, 127)
+        @test M.get_x(mb2) == UInt32(31)
+        @test M.get_y(mb2) == UInt32(4095)
+        @test M.get_z(mb2) == UInt32(127)
+
+        x_ref = Ref(UInt32(0)); y_ref = Ref(UInt32(0)); z_ref = Ref(UInt32(0))
+        M.read_multi_bits(mb2, x_ref, y_ref, z_ref)
+        @test x_ref[] == UInt32(31)
+        @test y_ref[] == UInt32(4095)
+        @test z_ref[] == UInt32(127)
+        println("  ✓ MultiByteBits (multi-byte bitfield get/set)")
+
+        # ── WideBits: 24-bit data field ──
+        wb = M.make_wide_bits(UInt32(0xA), UInt32(0xABCDEF), UInt32(0xF))
+        @test M.get_tag(wb) == UInt32(0xA)
+        @test M.get_data(wb) == UInt32(0xABCDEF)
+        @test M.get_flag(wb) == UInt32(0xF)
+
+        wb2 = M.WideBits()
+        M.set_tag!(wb2, 0x5)
+        M.set_data!(wb2, 0x123456)
+        M.set_flag!(wb2, 0xC)
+        @test M.get_tag(wb2) == UInt32(0x5)
+        @test M.get_data(wb2) == UInt32(0x123456)
+        @test M.get_flag(wb2) == UInt32(0xC)
+
+        tag_ref = Ref(UInt32(0)); data_ref = Ref(UInt32(0)); flag_ref = Ref(UInt32(0))
+        M.read_wide_bits(wb2, tag_ref, data_ref, flag_ref)
+        @test tag_ref[] == UInt32(0x5)
+        @test data_ref[] == UInt32(0x123456)
+        @test flag_ref[] == UInt32(0xC)
+        println("  ✓ WideBits (wide multi-byte bitfield get/set)")
+    end
+
+    # ── 11. unregister ──────────────────────────────────────────────────
     @testset "unregister" begin
         RepliBuild.unregister(toml)
         println("  ✓ unregister")

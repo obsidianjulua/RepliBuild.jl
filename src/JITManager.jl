@@ -16,13 +16,14 @@ export get_jit_thunk, ensure_jit_initialized, JITContext, invoke, CxxException
 mutable struct JITContext
     mlir_ctx::Ptr{Cvoid}
     jit_engine::Union{Ptr{Cvoid}, Nothing}
-    compiled_symbols::Dict{String, Ptr{Cvoid}}
+    @atomic compiled_symbols::Dict{String, Ptr{Cvoid}}
     vtable_info::Union{VtableInfo, Nothing}
-    initialized::Bool
+    @atomic initialized::Bool
+    init_error::Union{Exception, Nothing}
     lock::ReentrantLock
 
     function JITContext()
-        new(C_NULL, nothing, Dict{String, Ptr{Cvoid}}(), nothing, false, ReentrantLock())
+        new(C_NULL, nothing, Dict{String, Ptr{Cvoid}}(), nothing, false, nothing, ReentrantLock())
     end
 end
 
@@ -66,20 +67,27 @@ end
     _lookup_cached(func_name::String) -> Ptr{Cvoid}
 
 Look up a JIT function pointer with caching.
-Fast path: lock-free Dict read for already-cached symbols.
-Slow path: JIT engine lookup + cache with lock.
+Fast path: atomic snapshot read of an immutable Dict copy — no lock needed.
+Slow path: JIT engine lookup + copy-on-write Dict swap under lock.
 """
 @inline function _lookup_cached(func_name::String)::Ptr{Cvoid}
-    # Fast path: Dict reads are safe without lock (single-writer pattern)
-    ptr = get(GLOBAL_JIT.compiled_symbols, func_name, C_NULL)
+    # Fast path: read an atomic snapshot of the Dict reference.
+    # Thread safety relies on copy-on-write: the slow path creates a NEW Dict
+    # via copy(), mutates the copy, then atomically publishes it. Published
+    # Dicts are never mutated, so readers always see a fully-constructed,
+    # stable hash table. Julia's @atomic provides seq_cst ordering, ensuring
+    # all mutations to the new Dict are visible before the reference is published.
+    snapshot = @atomic GLOBAL_JIT.compiled_symbols
+    ptr = get(snapshot, func_name, C_NULL)
     if ptr != C_NULL
         return ptr
     end
 
-    # Slow path: look up in JIT engine and cache
+    # Slow path: look up in JIT engine and publish a new Dict copy
     lock(GLOBAL_JIT.lock) do
-        # Double-check after acquiring lock
-        ptr = get(GLOBAL_JIT.compiled_symbols, func_name, C_NULL)
+        # Double-check after acquiring lock (re-read atomic)
+        current = @atomic GLOBAL_JIT.compiled_symbols
+        ptr = get(current, func_name, C_NULL)
         if ptr != C_NULL
             return ptr
         end
@@ -92,9 +100,21 @@ Slow path: JIT engine lookup + cache with lock.
             throw(ErrorException("JIT Error: Symbol not found: $func_name. This may indicate a missing library or complex C++ type that failed to compile through the MLIR backend."))
         end
 
-        GLOBAL_JIT.compiled_symbols[func_name] = ptr
+        # Copy-on-write: create a new Dict so readers on the fast path
+        # never observe a half-mutated hash table.
+        updated = copy(current)
+        updated[func_name] = ptr
+        @atomic GLOBAL_JIT.compiled_symbols = updated
         return ptr
     end
+end
+
+@noinline function _jit_not_initialized_error()
+    msg = "JIT not initialized."
+    if GLOBAL_JIT.init_error !== nothing
+        msg *= " Root cause: $(GLOBAL_JIT.init_error)"
+    end
+    error(msg)
 end
 
 # =============================================================================
@@ -139,7 +159,7 @@ Handles both scalar returns (direct) and struct returns (sret) correctly.
 
 # 1-arg specialization
 function invoke(func_name::String, ::Type{T}, a1) where T
-    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1)]
@@ -152,7 +172,7 @@ end
 
 # 2-arg specialization
 function invoke(func_name::String, ::Type{T}, a1, a2) where T
-    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1); r2 = Ref(a2)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2)]
@@ -165,7 +185,7 @@ end
 
 # 3-arg specialization
 function invoke(func_name::String, ::Type{T}, a1, a2, a3) where T
-    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3)]
@@ -178,7 +198,7 @@ end
 
 # 4-arg specialization
 function invoke(func_name::String, ::Type{T}, a1, a2, a3, a4) where T
-    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3); r4 = Ref(a4)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3), Base.unsafe_convert(Ptr{Cvoid}, r4)]
@@ -191,7 +211,7 @@ end
 
 # Generic fallback for 5+ args
 function invoke(func_name::String, ::Type{T}, args::Vararg{Any, N}) where {T, N}
-    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
     fptr = _lookup_cached(func_name)
 
     ref_args = Vector{Any}(undef, N)
@@ -214,7 +234,7 @@ end
 # =============================================================================
 
 function invoke(func_name::String, args::Vararg{Any, N}) where N
-    GLOBAL_JIT.initialized || error("JIT not initialized.")
+    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
     fptr = _lookup_cached(func_name)
 
     ref_args = Vector{Any}(undef, N)
@@ -244,7 +264,7 @@ This is called once when the wrapper module is loaded.
 """
 function initialize_global_jit(binary_path::String)
     lock(GLOBAL_JIT.lock) do
-        if GLOBAL_JIT.initialized
+        if @atomic GLOBAL_JIT.initialized
             return
         end
 
@@ -323,9 +343,10 @@ function initialize_global_jit(binary_path::String)
             jlcs_lib_path = MLIRNative.libJLCS
             GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=3, shared_libs=[binary_path, jlcs_lib_path])
 
-            GLOBAL_JIT.initialized = true
+            @atomic GLOBAL_JIT.initialized = true
             # println("JIT Initialized for $binary_path")
         catch e
+            GLOBAL_JIT.init_error = e isa Exception ? e : ErrorException(string(e))
             @error "Failed to initialize JIT" exception=e
             @warn "JIT initialization failed. Functions using JIT dispatch (Tier 2) will not work, but ccall-based wrappers (Tier 1) will still function."
         end
@@ -339,8 +360,8 @@ Get a function pointer to a JIT-compiled thunk that performs virtual dispatch.
 The thunk signature matches the C++ method (with 'this' as first arg).
 """
 function get_jit_thunk(class_name::String, method_name::String)
-    if !GLOBAL_JIT.initialized
-        error("JIT not initialized. Call initialize_global_jit() first.")
+    if !(@atomic GLOBAL_JIT.initialized)
+        _jit_not_initialized_error()
     end
 
     safe_class = replace(class_name, "::" => "_")
@@ -367,8 +388,8 @@ function cleanup()
             GLOBAL_JIT.mlir_ctx = C_NULL
         end
 
-        GLOBAL_JIT.initialized = false
-        empty!(GLOBAL_JIT.compiled_symbols)
+        @atomic GLOBAL_JIT.initialized = false
+        @atomic GLOBAL_JIT.compiled_symbols = Dict{String, Ptr{Cvoid}}()
     end
 end
 

@@ -3,8 +3,6 @@
 include "JLCSDialect.td"
 include "Types.td"
 include "JLCSOps.td"
-include "JLInterfaces.td"
-
 //===----------------------------------------------------------------------===//
 // Legacy Operation Definitions (To be migrated)
 //===----------------------------------------------------------------------===//

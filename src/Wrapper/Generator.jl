@@ -1,7 +1,3 @@
-include("Rust/IdentifiersRust.jl")
-include("Rust/TypesRust.jl")
-include("Rust/GeneratorRust.jl")
-
 # =============================================================================
 # HIGH-LEVEL WRAPPER API
 # =============================================================================
@@ -374,7 +370,7 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     # use_clang_jl = false skips AST-based extraction (DWARF-only path)
     include_dirs = get(metadata, "include_dirs", String[])
     empty_header_types = Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
-    header_types = if config.wrap.language == :rust || !config.wrap.use_clang_jl
+    header_types = if !config.wrap.use_clang_jl
         empty_header_types
     elseif !isempty(headers)
         try
@@ -443,9 +439,6 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     wrapper_content = if registry.language == :c
         generate_introspective_module_c(config, library_path, metadata,
                                         module_name, registry, generate_docs, thunks_lib_path)
-    elseif registry.language == :rust
-        generate_introspective_module_rust(config, library_path, metadata,
-                                          module_name, registry, generate_docs, thunks_lib_path)
     else
         generate_introspective_module_cpp(config, library_path, metadata,
                                           module_name, registry, generate_docs, thunks_lib_path)

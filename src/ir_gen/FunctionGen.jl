@@ -153,14 +153,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 end
             else
                 # Fallback for known STL containers that might be missing from DWARF struct_defs
-                # We dynamically invoke the function from the Wrapper module
-                # Note: FunctionGen is in the ir_gen submodule, so we must qualify
-                stl_size = try 
-                    Main.RepliBuild.Wrapper.get_stl_container_size(ret_c_type)
-                catch
-                    # If called from a context where Wrapper isn't loaded, fallback
-                    0
-                end
+                stl_size = get_stl_container_size(ret_c_type)
                 if stl_size > 0
                     ret_type = _byte_blob_type(stl_size)
                 end

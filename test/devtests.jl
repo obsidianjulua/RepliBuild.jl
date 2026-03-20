@@ -72,7 +72,6 @@ INTEGRATION_TESTS = [
     ("c_test",             "C Fundamentals (structs, enums, LTO, packed, unions)"),
     ("c_abomination_test", "C Edge Cases (opaque structs, nested callbacks)"),
     ("callback_test",      "Callbacks (Julia ↔ C++)"),
-    ("rust_test",          "Rust FFI (cdylib, repr(C))"),
 ]
 
 for (name, label) in INTEGRATION_TESTS

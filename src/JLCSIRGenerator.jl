@@ -21,45 +21,6 @@ using .STLContainerGen
 export generate_jlcs_ir, generate_mlir_module
 
 """
-    map_cpp_type_to_mlir(cpp_type::String) -> String
-
-Map C++ DWARF type names to MLIR types.
-"""
-function map_cpp_type_to_mlir(cpp_type::String)
-    t = strip(cpp_type)
-    
-    if endswith(t, "*") || endswith(t, "&") || contains(t, "(*)")
-        return "!llvm.ptr"
-    end
-    
-    if t == "double"
-        return "f64"
-    elseif t == "float"
-        return "f32"
-    elseif t == "int" || t == "unsigned int" || t == "int32_t" || t == "uint32_t"
-        return "i32"
-    elseif t == "short" || t == "unsigned short" || t == "int16_t" || t == "uint16_t"
-        return "i16"
-    elseif t == "char" || t == "unsigned char" || t == "int8_t" || t == "uint8_t" || t == "bool" || t == "_Bool"
-        return "i8"
-    elseif t == "long" || t == "unsigned long" || t == "long long" || t == "unsigned long long" || t == "int64_t" || t == "uint64_t" || t == "size_t"
-        return "i64"
-    elseif t == "void"
-        return "none" # Should handle carefully
-    end
-    
-    # Fallback for unknown structs/classes
-    # Ideally we would map them to their own named type, but for now pointer or opaque.
-    # If it's a value type member, we might want to assume it's a struct and handle it.
-    # But DWARF parser might not give us full nested info easily yet.
-    # Let's fallback to i8 array of correct size? No, that's hard.
-    # Let's fallback to !llvm.ptr if we can't determine.
-    # Actually, for members, if it is a struct by value, we need to know.
-    # For now, let's assume primitives or pointers.
-    return "!llvm.ptr" 
-end
-
-"""
     generate_type_info_ir(class_name::String, info::ClassInfo, vtable_addr::UInt64) -> String
 
 Generate JLCS type_info operation for a class.
@@ -94,7 +55,7 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
     
     # Explicitly add members
     for m in sorted_members
-        push!(field_types, map_cpp_type_to_mlir(m.type_name))
+        push!(field_types, map_cpp_type(m.type_name))
         push!(field_offsets, m.offset)
     end
     

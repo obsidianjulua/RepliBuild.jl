@@ -1115,59 +1115,6 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
 end
 
 """
-Compile a Rust project to a cdylib and extract metadata.
-"""
-function compile_rust_project(config::RepliBuildConfig, start_time::Float64)
-    # Get source files
-    rs_files = get_source_files(config)
-    if isempty(rs_files)
-        @warn "No source files found in config"
-        println("Run discover() first to find Rust sources")
-        return nothing
-    end
-
-    # Assume the first .rs file is the main entry point
-    main_src = rs_files[1]
-    
-    output_dir = get_output_path(config)
-    mkpath(output_dir)
-    lib_name = get_library_name(config)
-    binary_path = joinpath(output_dir, lib_name)
-    
-    build_dir = get_build_path(config)
-    mkpath(build_dir)
-    
-    println("  sources: $(length(rs_files)) (Rust)")
-    
-    cmd_args = [
-        "--crate-type", "cdylib",
-        "--crate-name", config.project.name,
-        "--edition", "2021",
-        "--emit=link",
-        "-g",
-        "-o", binary_path,
-        main_src
-    ]
-    
-    (output, exitcode) = BuildBridge.execute("rustc", cmd_args)
-    if exitcode != 0
-        error("Rust compilation failed:\n$output")
-    end
-    
-    elapsed = round(time() - start_time, digits=2)
-    
-    # Extract and save compilation metadata
-    metadata_path = save_compilation_metadata(config, rs_files, binary_path)
-
-    # Save project hash for future cache hits
-    save_project_hash(config)
-
-    println("  done: $(elapsed)s")
-
-    return binary_path
-end
-
-"""
 Complete compilation workflow: discover sources, compile, link, create binary.
 This is the main entry point for building a project.
 """
@@ -1184,10 +1131,6 @@ function compile_project(config::RepliBuildConfig)
         elapsed = round(time() - start_time, digits=4)
         println("  cache: project unchanged ($(elapsed)s)")
         return library_path
-    end
-
-    if config.wrap.language == :rust
-        return compile_rust_project(config, start_time)
     end
 
     # Get source files (from config or discovery)
@@ -1451,22 +1394,14 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         "__int128" => "Int128",
         "__uint128_t" => "UInt128",
 
-        # Rust primitive types (from DWARF)
-        "i8" => "Int8",
-        "u8" => "UInt8",
-        "i16" => "Int16",
-        "u16" => "UInt16",
-        "i32" => "Int32",
-        "u32" => "UInt32",
-        "i64" => "Int64",
-        "u64" => "UInt64",
-        "i128" => "Int128",
-        "u128" => "UInt128",
-        "f32" => "Cfloat",
-        "f64" => "Cdouble",
-        "isize" => "Cssize_t",
-        "usize" => "Csize_t",
-        "()" => "Cvoid",
+        # C11 _Complex types
+        "_Complex float" => "ComplexF32",
+        "_Complex double" => "ComplexF64",
+        "complex float" => "ComplexF32",
+        "complex double" => "ComplexF64",
+        "float _Complex" => "ComplexF32",
+        "double _Complex" => "ComplexF64",
+
     )
 
     # Direct match
@@ -1560,14 +1495,6 @@ function get_type_size(c_type::AbstractString)::Int
         "intptr_t" => 8, "uintptr_t" => 8,
         "wchar_t" => 4,
         "__int128" => 16, "__uint128_t" => 16,
-        # Rust primitive types (from DWARF)
-        "i8" => 1, "u8" => 1,
-        "i16" => 2, "u16" => 2,
-        "i32" => 4, "u32" => 4,
-        "i64" => 8, "u64" => 8,
-        "i128" => 16, "u128" => 16,
-        "f32" => 4, "f64" => 8,
-        "isize" => 8, "usize" => 8,  # x86_64
     )
 
     # Check for pointers/references (always 8 bytes on x86_64)
@@ -3207,7 +3134,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         ),
 
         # Language information
-        "language" => config.wrap.language == :c ? "c" : (config.wrap.language == :rust ? "rust" : "c++"),
+        "language" => config.wrap.language == :c ? "c" : "c++",
 
         # Metadata version (for future compatibility)
         "metadata_version" => "1.0"
@@ -3480,8 +3407,19 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         "int64_t" => "Int64",
         "uint64_t" => "UInt64",
         "long long" => "Clonglong",
-        "unsigned long long" => "Culonglong"
+        "unsigned long long" => "Culonglong",
+        # C11 _Complex types
+        "_Complex float" => "ComplexF32",
+        "_Complex double" => "ComplexF64",
+        "complex float" => "ComplexF32",
+        "complex double" => "ComplexF64",
+        "float _Complex" => "ComplexF32",
+        "double _Complex" => "ComplexF64"
     )
+
+    # Strip _Atomic qualifier — same ABI layout as the underlying type
+    cpp_type = replace(cpp_type, r"\b_Atomic\b\s*" => "")
+    cpp_type = strip(cpp_type)
 
     # Handle arrays: type[size] or type[size1][size2]
     # Examples: "double[3]" -> "NTuple{3, Cdouble}"

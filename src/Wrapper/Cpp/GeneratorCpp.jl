@@ -294,7 +294,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # ENUM GENERATION (from DWARF)
     # =============================================================================
 
-    enum_definitions = ""
+    enum_chunks = String[]
 
     # Extract enums (stored with __enum__ prefix)
     enum_types = filter(k -> startswith(k, "__enum__"), keys(dwarf_structs))
@@ -307,12 +307,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     end
 
     if !isempty(enum_types)
-        enum_definitions *= """
+        push!(enum_chunks, """
         # =============================================================================
         # Enum Definitions (from DWARF debug info)
         # =============================================================================
 
-        """
+        """)
 
         for enum_key in sort(collect(enum_types))
             enum_name = replace(enum_key, "__enum__" => "")
@@ -330,10 +330,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             enumerators = get(enum_info, "enumerators", [])
 
             if !isempty(enumerators)
-                enum_definitions *= """
+                push!(enum_chunks, """
                 # C++ enum: $enum_name (underlying type: $underlying_type)
                 @enum $enum_name::$julia_underlying begin
-                """
+                """)
 
                 seen_values = Set{Any}()
                 seen_names = Set{String}()
@@ -353,21 +353,21 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         push!(duplicate_defs, "const $name = $enum_name($value)")
                     else
                         push!(seen_values, value)
-                        enum_definitions *= "    $name = $value\n"
+                        push!(enum_chunks, "    $name = $value\n")
                     end
                 end
 
-                enum_definitions *= """
+                push!(enum_chunks, """
                 end
 
-                """
+                """)
                 if !isempty(duplicate_defs)
-                    enum_definitions *= join(duplicate_defs, "\n") * "\n\n"
+                    push!(enum_chunks, join(duplicate_defs, "\n") * "\n\n")
                 end
             end
         end
 
-        enum_definitions *= "\n"
+        push!(enum_chunks, "\n")
     end
 
     # =============================================================================
@@ -385,13 +385,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             if !isempty(members)
                 if added_header_enums == 0
-                    enum_definitions *= """
+                    push!(enum_chunks, """
                     # =============================================================================
                     # Enum Definitions (from Headers - supplementary)
                     # =============================================================================
                     # These enums were not in DWARF (unused code eliminated by compiler)
 
-                    """
+                    """)
                 end
 
                 # Choose underlying type based on value range
@@ -405,10 +405,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     "Cint"
                 end
 
-                enum_definitions *= """
+                push!(enum_chunks, """
                 # C++ enum: $enum_name (from header - not in DWARF)
                 @enum $enum_name::$underlying begin
-                """
+                """)
 
                 seen_values = Set{Any}()
                 seen_names = Set{String}()
@@ -426,23 +426,23 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         push!(duplicate_defs, "const $member_name = $enum_name($value)")
                     else
                         push!(seen_values, value)
-                        enum_definitions *= "    $member_name = $value\n"
+                        push!(enum_chunks, "    $member_name = $value\n")
                     end
                 end
 
-                enum_definitions *= """
+                push!(enum_chunks, """
                 end
 
-                """
+                """)
                 if !isempty(duplicate_defs)
-                    enum_definitions *= join(duplicate_defs, "\n") * "\n\n"
+                    push!(enum_chunks, join(duplicate_defs, "\n") * "\n\n")
                 end
                 added_header_enums += 1
             end
         end
 
         if added_header_enums > 0
-            enum_definitions *= "\n"
+            push!(enum_chunks, "\n")
         end
     end
 
@@ -566,7 +566,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         end
     end
 
-    struct_definitions = ""
+    struct_chunks = String[]
     union_accessor_defs = ""  # Deferred union accessors (emitted after all struct defs)
 
     # Emit forward declarations for:
@@ -591,12 +591,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     union!(dwarf_defined_names, enum_names)
 
     if !isempty(all_forward_decls)
-        struct_definitions *= """
+        push!(struct_chunks, """
         # =============================================================================
         # Forward Declarations (Opaque + Ptr-referenced types)
         # =============================================================================
 
-        """
+        """)
         seen_forward_decls = Set{String}()
         for name in sort(collect(all_forward_decls))
             # Skip STL internal types
@@ -624,18 +624,18 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             # Both opaque types and pointer-referenced types should be immutable structs
             # to preserve inline C++ ABI layout (0-byte empty structs) if they are used by value.
-            struct_definitions *= "struct $s_name end\n"
+            push!(struct_chunks, "struct $s_name end\n")
         end
-        struct_definitions *= "\n"
+        push!(struct_chunks, "\n")
     end
 
     if !isempty(struct_types)
-        struct_definitions *= """
+        push!(struct_chunks, """
         # =============================================================================
         # Struct Definitions (from DWARF debug info)
         # =============================================================================
 
-        """
+        """)
 
         # Topologically sort structs by dependencies
         # Build dependency graph: struct_name => [dependencies]
@@ -681,9 +681,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         dep_type = julia_type
                     end
 
-                    if !isnothing(dep_type) && haskey(julia_to_cpp_struct, dep_type)
-                        cpp_dep = julia_to_cpp_struct[dep_type]
-                        if cpp_dep != struct_name
+                    if !isnothing(dep_type)
+                        # Look up by raw name first, then by sanitized name
+                        # (template types in Ref{...}/Ptr{...} use raw C++ names
+                        #  but the dictionary is keyed by sanitized Julia names)
+                        cpp_dep = if haskey(julia_to_cpp_struct, dep_type)
+                            julia_to_cpp_struct[dep_type]
+                        else
+                            sanitized = _sanitize_cpp_type_name(dep_type)
+                            haskey(julia_to_cpp_struct, sanitized) ? julia_to_cpp_struct[sanitized] : nothing
+                        end
+                        if !isnothing(cpp_dep) && cpp_dep != struct_name
                             if is_soft
                                 push!(soft_deps, cpp_dep)
                             else
@@ -865,14 +873,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         if byte_size == 0; byte_size = 8; end # Panic fallback
                     end
 
-                    struct_definitions *= """
+                    push!(struct_chunks, """
                     # C union: $struct_name (size $byte_size bytes)
                     mutable struct $julia_struct_name
                         data::NTuple{$byte_size, UInt8}
                     end
                     $julia_struct_name() = $julia_struct_name(ntuple(i -> 0x00, $byte_size))
 
-                    """
+                    """)
 
                     # Collect all struct names being generated for reference
                     known_struct_names = Set{String}()
@@ -959,14 +967,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         byte_size = parse(Int, byte_size_str)
                         if byte_size == 0; byte_size = 8; end
 
-                        struct_definitions *= """
+                        push!(struct_chunks, """
                         # C struct with bitfields: $struct_name (size $byte_size bytes)
                         mutable struct $julia_struct_name
                             _data::NTuple{$byte_size, UInt8}
                         end
                         $julia_struct_name() = $julia_struct_name(ntuple(i -> 0x00, $byte_size))
 
-                        """
+                        """)
 
                         # Generate accessor functions for each member
                         for member in members
@@ -1018,7 +1026,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                 # Getter with bit extraction
                                 if bit_size <= 8 && bit_within_byte + bit_size <= 8
                                     # Single byte access
-                                    struct_definitions *= """
+                                    push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
                                     function get_$(safe_member)(s::$julia_struct_name)::UInt32
                                         return UInt32((s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask))
@@ -1032,10 +1040,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                         s._data = NTuple{$byte_size, UInt8}(data)
                                     end
 
-                                    """
+                                    """)
                                 else
                                     # Multi-byte bitfield — use unsafe_load for the containing integer
-                                    struct_definitions *= """
+                                    push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
                                     function get_$(safe_member)(s::$julia_struct_name)::UInt32
                                         p = pointer(collect(s._data)) + $byte_pos
@@ -1043,7 +1051,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                         return (raw >> $bit_within_byte) & UInt32($(mask))
                                     end
 
-                                    """
+                                    """)
                                 end
                                 push!(exports, "get_$(safe_member)")
                                 push!(exports, "set_$(safe_member)!")
@@ -1051,14 +1059,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                 # Non-bitfield member in a bitfield struct — byte-offset accessor
                                 byte_off = parse(Int, get(member, "offset", "0x0"))
                                 if julia_type != "Any" && !startswith(julia_type, "NTuple{")
-                                    struct_definitions *= """
+                                    push!(struct_chunks, """
                                     \"\"\"Get non-bitfield member `$member_name` from `$julia_struct_name`.\"\"\"
                                     function get_$(safe_member)(s::$julia_struct_name)::$julia_type
                                         p = pointer(collect(s._data)) + $byte_off
                                         return unsafe_load(Ptr{$julia_type}(p))
                                     end
 
-                                    """
+                                    """)
                                     push!(exports, "get_$(safe_member)")
                                 end
                             end
@@ -1104,7 +1112,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     if has_unresolvable && byte_size > 0
                         member_count = length(members)
                         push!(blob_struct_names, julia_struct_name)
-                        struct_definitions *= """
+                        push!(struct_chunks, """
                         # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
                         struct $julia_struct_name
                             _data::NTuple{$(byte_size), UInt8}
@@ -1115,7 +1123,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             return $julia_struct_name(ntuple(i -> 0x00, $byte_size))
                         end
 
-                        """
+                        """)
 
                         # Generate Base.getproperty accessor for named member access on byte-blob structs
                         _accessor_branches = String[]
@@ -1236,24 +1244,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         end
                         if !isempty(_accessor_branches)
                             accessor_code = join(_accessor_branches, "\n")
-                            struct_definitions *= """
+                            push!(struct_chunks, """
                             function Base.getproperty(x::$julia_struct_name, s::Symbol)
                                 s === :_data && return getfield(x, :_data)
                             $accessor_code
                                 error("type $julia_struct_name has no field \$s")
                             end
 
-                            """
+                            """)
                         end
 
                         continue
                     end
 
                     member_count = length(members)
-                    struct_definitions *= """
+                    push!(struct_chunks, """
                     # C++ struct: $struct_name ($member_count members)
                     struct $julia_struct_name
-                    """
+                    """)
                     
                     current_offset = 0
                     pad_idx = 0
@@ -1268,7 +1276,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         # Insert padding if needed
                         if offset > current_offset
                             pad_size = offset - current_offset
-                            struct_definitions *= "    _pad_$(pad_idx)::NTuple{$(pad_size), UInt8}\n"
+                            push!(struct_chunks, "    _pad_$(pad_idx)::NTuple{$(pad_size), UInt8}\n")
                             pad_idx += 1
                             current_offset = offset
                         end
@@ -1330,7 +1338,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         # substitute Ptr{Cvoid} to avoid UndefVarError (same ABI size).
                         sanitized_type = _resolve_forward_ptr(sanitized_type, defined_struct_names)
 
-                        struct_definitions *= "    $sanitized_name::$sanitized_type\n"
+                        push!(struct_chunks, "    $sanitized_name::$sanitized_type\n")
                         
                         # Update current offset
                         member_size = get(member, "size", 0)
@@ -1342,10 +1350,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     # Add trailing padding if the struct size from DWARF is larger than the final offset
                     if byte_size > current_offset
                         pad_size = byte_size - current_offset
-                        struct_definitions *= "    _pad_tail::NTuple{$(pad_size), UInt8}\n"
+                        push!(struct_chunks, "    _pad_tail::NTuple{$(pad_size), UInt8}\n")
                     end
 
-                    struct_definitions *= """
+                    push!(struct_chunks, """
                     end
 
                     # Zero-initializer for $julia_struct_name
@@ -1357,30 +1365,30 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         return ref[]
                     end
 
-                    """
+                    """)
                 else
                     # Struct found but no members (empty struct or incomplete info)
-                    struct_definitions *= """
+                    push!(struct_chunks, """
                     # Opaque struct: $struct_name (no member info available)
                     mutable struct $julia_struct_name
                         data::NTuple{8, UInt8}  # Placeholder
                     end
 
-                    """
+                    """)
                 end
             else
                 # No DWARF info available - generate opaque struct
-                struct_definitions *= """
+                push!(struct_chunks, """
                 # Opaque struct: $struct_name (no DWARF info)
                 mutable struct $julia_struct_name
                     data::NTuple{32, UInt8}  # Placeholder - compile with -g for member info
                 end
 
-                """
+                """)
             end
         end
 
-        struct_definitions *= "\n"
+        push!(struct_chunks, "\n")
     end
 
     # =============================================================================
@@ -1388,15 +1396,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # =============================================================================
     
     global_vars = get(metadata, "globals", Dict())
-    global_var_defs = ""
+    func_chunks = String[]
     
     if !isempty(global_vars)
-        global_var_defs *= """
+        push!(func_chunks, """
         # =============================================================================
         # Global Variables
         # =============================================================================
 
-        """
+        """)
         
         for (var_name, var_info) in global_vars
             julia_type = get(var_info, "julia_type", "Any")
@@ -1407,7 +1415,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # Only for simple types or pointers, struct values might be tricky
             # We use unsafe_load on the pointer
             
-            global_var_defs *= """
+            push!(func_chunks, """
             \"""
                 $safe_name()
 
@@ -1427,27 +1435,26 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 return cglobal((:$var_name, LIBRARY_PATH), $julia_type)
             end
 
-            """
+            """)
             
             push!(exports, safe_name)
             push!(exports, "$(safe_name)_ptr")
         end
         
-        global_var_defs *= "\n"
+        push!(func_chunks, "\n")
     end
 
     # Function wrappers
-    function_wrappers = global_var_defs
 
     # 2. Generate Managed Types
-    managed_types_def = ""
+    managed_chunks = String[]
     if !isempty(deleters)
-        managed_types_def *= """
+        push!(managed_chunks, """
         # =============================================================================
         # Managed Types (Auto-Finalizers)
         # =============================================================================
 
-        """
+        """)
         
         for (s_name, deleter) in deleters
             # Skip: a full idiomatic wrapper will be generated for this class
@@ -1461,7 +1468,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             deleter_sym = get(deleters_mangled, s_name, deleter)
             
             # Generate mutable struct with finalizer
-            managed_types_def *= """
+            push!(managed_chunks, """
             mutable struct $managed_name
                 handle::Ptr{$safe_s_name}
                 
@@ -1483,10 +1490,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             
             export $managed_name
 
-            """
+            """)
         end
         
-        struct_definitions *= managed_types_def
+        append!(struct_chunks, managed_chunks)
     end
 
     # =============================================================================
@@ -1501,7 +1508,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     #   2. An `unsafe_convert` for transparent use in raw FFI calls.
     #   3. Proxy methods `method(obj::ClassName, ...) = ClassName_method(obj.handle, ...)`.
     if !isempty(idiomatic_classes)
-        struct_definitions *= """
+        push!(struct_chunks, """
         # =============================================================================
         # Idiomatic Class Wrappers
         # =============================================================================
@@ -1509,7 +1516,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # Memory is automatically managed: Julia's GC calls the C++ destructor when
         # the last reference to the object is dropped.
 
-        """
+        """)
 
         for cls_nm in sort(collect(keys(idiomatic_classes)))
             cls_info   = idiomatic_classes[cls_nm]
@@ -1560,7 +1567,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             ctors_str = join(ctor_blocks, "\n")
 
-            struct_definitions *= """
+            push!(struct_chunks, """
             \"\"\"
                 $cls_nm
 
@@ -1577,7 +1584,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             Base.unsafe_convert(::Type{Ptr{Cvoid}}, obj::$cls_nm) = obj.handle
             Base.unsafe_convert(::Type{Ptr{$cls_nm}}, obj::$cls_nm) = Ptr{$cls_nm}(obj.handle)
 
-            """
+            """)
 
             push!(exports, cls_nm)
         end
@@ -1595,9 +1602,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             methods = get(class_methods, cls_nm, Any[])
             isempty(methods) && continue
 
-            struct_definitions *= """
+            push!(struct_chunks, """
             # Method proxies for $cls_nm
-            """
+            """)
 
             seen_proxy_sigs = Set{String}()
 
@@ -1639,14 +1646,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                 full_sig = isempty(other_sig) ? "obj::$cls_nm" : "obj::$cls_nm, $other_sig"
 
-                struct_definitions *= """
+                push!(struct_chunks, """
                 $proxy_nm($full_sig) = $raw_jl($call_sig_str)
-                """
+                """)
 
                 push!(exports, proxy_nm)
             end
 
-            struct_definitions *= "\n"
+            push!(struct_chunks, "\n")
         end
     end
 
@@ -1824,7 +1831,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 params, return_type, overloads,
                 generate_docs, demangled, :cpp
             )
-            function_wrappers *= va_code
+            push!(func_chunks, va_code)
             append!(exports, va_exports)
             continue  # Skip normal wrapper generation
         end
@@ -2210,7 +2217,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 """
             end
 
-            function_wrappers *= func_def
+            push!(func_chunks, func_def)
             push!(exports, julia_name)
             continue # Skip the rest of the loop (ccall generation)
         end
@@ -2468,7 +2475,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
         end
 
-        function_wrappers *= func_def
+        push!(func_chunks, func_def)
         push!(exports, julia_name)
 
         # Generate safe wrapper if return type is a managed struct
@@ -2493,7 +2500,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 end
                 """
                 
-                function_wrappers *= safe_wrapper
+                push!(func_chunks, safe_wrapper)
                 push!(exports, safe_func_name)
             end
         end
@@ -2624,7 +2631,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 """
             end
 
-            function_wrappers *= convenience_func
+            push!(func_chunks, convenience_func)
         end
     end
 
@@ -2634,13 +2641,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     stl_methods = get(metadata, "stl_methods", Dict())
     if !isempty(stl_methods)
         requires_jit = true
-        function_wrappers *= """
+        push!(func_chunks, """
 
         # =============================================================================
         # STL Container Factories
         # =============================================================================
 
-        """
+        """)
 
         for (container_type, methods) in stl_methods
             # Build thunks dict for this container
@@ -2686,7 +2693,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     factory_name = "create_$(safe_name)"
                     push!(exports, factory_name)
 
-                    function_wrappers *= """
+                    push!(func_chunks, """
                     const _THUNKS_$(uppercase(safe_name)) = $thunks_dict_str
 
                     \"\"\"
@@ -2706,13 +2713,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         return RepliBuild.STLWrappers.CppVector{$elem_julia}(buf, true, _THUNKS_$(uppercase(safe_name)); byte_size=$byte_size)
                     end
 
-                    """
+                    """)
                 end
             elseif startswith(container_type, "std::basic_string") || container_type == "std::string"
                 factory_name = "create_$(safe_name)"
                 push!(exports, factory_name)
 
-                function_wrappers *= """
+                push!(func_chunks, """
                     const _THUNKS_$(uppercase(safe_name)) = $thunks_dict_str
 
                     \"\"\"
@@ -2730,7 +2737,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         return RepliBuild.STLWrappers.CppString(buf, true, _THUNKS_$(uppercase(safe_name)); byte_size=$byte_size)
                     end
 
-                """
+                """)
 
             elseif startswith(container_type, "std::map<") || startswith(container_type, "std::unordered_map<")
                 # Extract K, V from "std::map<K, V>" or "std::unordered_map<K, V>"
@@ -2752,7 +2759,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         factory_name = "create_$(safe_name)"
                         push!(exports, factory_name)
 
-                        function_wrappers *= """
+                        push!(func_chunks, """
                     const _THUNKS_$(uppercase(safe_name)) = $thunks_dict_str
 
                     \"\"\"
@@ -2770,7 +2777,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         return RepliBuild.STLWrappers.CppMap{$key_julia,$val_julia}(buf, true, _THUNKS_$(uppercase(safe_name)); byte_size=$byte_size)
                     end
 
-                        """
+                        """)
                     end
                 end
             end
@@ -2870,6 +2877,6 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         end
     end
 
-    return header * init_block * metadata_section * enum_definitions * struct_definitions * union_accessor_defs * export_statement * function_wrappers * footer
+    return join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), union_accessor_defs, export_statement, join(func_chunks), footer])
 end
 

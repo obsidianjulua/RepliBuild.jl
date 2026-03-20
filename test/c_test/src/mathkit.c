@@ -158,3 +158,47 @@ PackedTriplet pack_three(char tag, int value, char flag) {
     t.flag = flag;
     return t;
 }
+
+/* --- Bitfield helpers --- */
+
+SingleByteBits make_single_bits(unsigned a, unsigned b, unsigned c) {
+    SingleByteBits s;
+    s.a = a;
+    s.b = b;
+    s.c = c;
+    return s;
+}
+
+void read_single_bits(SingleByteBits s, unsigned *a, unsigned *b, unsigned *c) {
+    *a = s.a;
+    *b = s.b;
+    *c = s.c;
+}
+
+MultiByteBits make_multi_bits(unsigned x, unsigned y, unsigned z) {
+    MultiByteBits s;
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    return s;
+}
+
+void read_multi_bits(MultiByteBits s, unsigned *x, unsigned *y, unsigned *z) {
+    *x = s.x;
+    *y = s.y;
+    *z = s.z;
+}
+
+WideBits make_wide_bits(unsigned tag, unsigned data, unsigned flag) {
+    WideBits s;
+    s.tag = tag;
+    s.data = data;
+    s.flag = flag;
+    return s;
+}
+
+void read_wide_bits(WideBits s, unsigned *tag, unsigned *data, unsigned *flag) {
+    *tag = s.tag;
+    *data = s.data;
+    *flag = s.flag;
+}

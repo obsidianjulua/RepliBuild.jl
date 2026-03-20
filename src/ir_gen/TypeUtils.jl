@@ -1,6 +1,6 @@
 module TypeUtils
 
-export map_cpp_type, get_llvm_signature
+export map_cpp_type, get_llvm_signature, get_stl_container_size
 
 """
     map_cpp_type(type_str::String) -> String
@@ -68,6 +68,36 @@ function get_llvm_signature(method)
     end
     
     return (ret_type, join(arg_types, ", "))
+end
+
+"""
+    get_stl_container_size(c_type::String) -> Int
+
+Returns the exact ABI byte size of common STL containers on x86_64 SysV.
+Returns 0 if unknown.
+"""
+function get_stl_container_size(c_type::String)::Int
+    clean = strip(replace(c_type, r"^(const|struct|class|union)\b" => ""))
+    clean = strip(replace(clean, r"[*&]+$" => ""))
+
+    if startswith(clean, "std::vector") || startswith(clean, "vector<")
+        return 24
+    elseif startswith(clean, "std::basic_string") || startswith(clean, "std::string") || startswith(clean, "basic_string<") || startswith(clean, "string")
+        return 32
+    elseif startswith(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
+        return 16
+    elseif startswith(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
+        return 8
+    elseif startswith(clean, "std::map") || startswith(clean, "map<") || startswith(clean, "std::set") || startswith(clean, "set<")
+        return 48
+    elseif startswith(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || startswith(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
+        return 56
+    elseif startswith(clean, "std::list") || startswith(clean, "list<")
+        return 24
+    elseif startswith(clean, "std::deque") || startswith(clean, "deque<")
+        return 80
+    end
+    return 0
 end
 
 end

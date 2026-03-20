@@ -42,7 +42,7 @@ def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
 }
 
 // 2. Generic Field Access Op (Universal Getter)
-def GetFieldOp : JLCS_Op<"get_field"> {
+def GetFieldOp : JLCS_Op<"get_field", [MemoryEffects<[MemRead]>]> {
   let summary = "Generic operation to read a field from a C-compatible struct.";
 
   let arguments = (ins
@@ -63,7 +63,7 @@ def GetFieldOp : JLCS_Op<"get_field"> {
 }
 
 // 3. Generic Field Mutate Op (Universal Setter)
-def SetFieldOp : JLCS_Op<"set_field", [Pure]> {
+def SetFieldOp : JLCS_Op<"set_field", [MemoryEffects<[MemWrite]>]> {
   let summary = "Generic operation to write a field into a C-compatible struct.";
 
   let arguments = (ins
@@ -90,7 +90,7 @@ def SetFieldOp : JLCS_Op<"set_field", [Pure]> {
 // ====================================================================
 
 // 4. Virtual Call Op (Call C++ virtual method via vtable)
-def VirtualCallOp : JLCS_Op<"vcall"> {
+def VirtualCallOp : JLCS_Op<"vcall", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Call a C++ virtual method through vtable dispatch.";
   let description = [{
     Calls a C++ virtual method by:
@@ -135,7 +135,7 @@ def VirtualCallOp : JLCS_Op<"vcall"> {
 // ====================================================================
 
 // 5. Load Array Element Op (Strided Array Access)
-def LoadArrayElementOp : JLCS_Op<"load_array_element"> {
+def LoadArrayElementOp : JLCS_Op<"load_array_element", [MemoryEffects<[MemRead]>]> {
   let summary = "Load element from strided array view.";
   let description = [{
     Loads an element from a multi-dimensional array using strided indexing.
@@ -173,7 +173,7 @@ def LoadArrayElementOp : JLCS_Op<"load_array_element"> {
 }
 
 // 6. Store Array Element Op (Strided Array Mutation)
-def StoreArrayElementOp : JLCS_Op<"store_array_element"> {
+def StoreArrayElementOp : JLCS_Op<"store_array_element", [MemoryEffects<[MemWrite]>]> {
   let summary = "Store element to strided array view.";
   let description = [{
     Stores an element to a multi-dimensional array using strided indexing.
@@ -206,7 +206,7 @@ def StoreArrayElementOp : JLCS_Op<"store_array_element"> {
 }
 
 // 7. FFE Call Op (Foreign Function Execution)
-def FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[]>]> {
+def FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Call an external function using FFE metadata";
   let arguments = (ins Variadic<AnyType>:$args);
   let results = (outs Variadic<AnyType>:$results);
@@ -218,7 +218,7 @@ def FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[]>]> {
 // ====================================================================
 
 // 12. Try Call Op (FFE Call with C++ exception catching)
-def TryCallOp : JLCS_Op<"try_call", [MemoryEffects<[]>]> {
+def TryCallOp : JLCS_Op<"try_call", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Call external function with C++ exception catching";
   let description = [{
     Like ffe_call but emits invoke + landing pad to catch C++ exceptions.
@@ -244,7 +244,7 @@ def TryCallOp : JLCS_Op<"try_call", [MemoryEffects<[]>]> {
 // ====================================================================
 
 // 8. Constructor Call Op
-def ConstructorCallOp : JLCS_Op<"ctor_call"> {
+def ConstructorCallOp : JLCS_Op<"ctor_call", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Call a C++ constructor on an object pointer.";
   let description = [{
     Calls a C++ constructor by invoking the named symbol with the object
@@ -271,7 +271,7 @@ def ConstructorCallOp : JLCS_Op<"ctor_call"> {
 }
 
 // 9. Destructor Call Op
-def DestructorCallOp : JLCS_Op<"dtor_call"> {
+def DestructorCallOp : JLCS_Op<"dtor_call", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Call a C++ destructor on an object pointer.";
   let description = [{
     Calls a C++ destructor by invoking the named symbol with the object

@@ -211,12 +211,15 @@ function infer_c_type(registry::TypeRegistry, c_type::String; context::String=""
     is_const = contains(clean_type, "const")
     clean_type = replace(clean_type, r"\bconst\b" => "")
     clean_type = replace(clean_type, r"\bvolatile\b" => "")
-    
+
+    # Strip C11 _Atomic qualifier — atomic types have the same ABI layout
+    clean_type = replace(clean_type, r"\b_Atomic\b" => "")
+
     # Strip C/C++ keywords that might come from DWARF
     clean_type = replace(clean_type, r"\bstruct\b" => "")
     clean_type = replace(clean_type, r"\bunion\b" => "")
     clean_type = replace(clean_type, r"\bclass\b" => "")
-    
+
     clean_type = strip(clean_type)
 
     if clean_type in _INTERNAL_TYPE_BLOCKLIST
@@ -273,6 +276,27 @@ function infer_c_type(registry::TypeRegistry, c_type::String; context::String=""
         return "NTuple{$size,$julia_elem}"
     end
 
+    # GCC/Clang vector types: __attribute__((vector_size(N))) or __vector(N) T
+    # DWARF emits these as e.g. "__vector(4) float" or "float __attribute__((__vector_size__(16)))"
+    vec_match = match(r"^__vector\((\d+)\)\s+(.+)$", clean_type)
+    if !isnothing(vec_match)
+        vec_len = parse(Int, vec_match.captures[1])
+        elem = strip(vec_match.captures[2])
+        julia_elem = infer_c_type(registry, String(elem); context="$context (vector element)")
+        return "NTuple{$vec_len,$julia_elem}"
+    end
+    # Alternative DWARF format: "T __attribute__((__vector_size__(N)))"
+    vec_attr_match = match(r"^(.+?)\s*__attribute__\(\(__vector_size__\((\d+)\)\)\)$", clean_type)
+    if !isnothing(vec_attr_match)
+        elem = strip(vec_attr_match.captures[1])
+        total_bytes = parse(Int, vec_attr_match.captures[2])
+        julia_elem = infer_c_type(registry, String(elem); context="$context (vector element)")
+        # vector_size is in bytes; compute element count from element size
+        elem_size = get(Dict("float" => 4, "double" => 8, "int" => 4, "short" => 2, "char" => 1,
+                             "long" => 8, "long long" => 8), elem, 4)
+        vec_len = max(1, total_bytes ÷ elem_size)
+        return "NTuple{$vec_len,$julia_elem}"
+    end
 
     # Unknown type - no matching rules
     ctx = context == "" ? "type inference" : context

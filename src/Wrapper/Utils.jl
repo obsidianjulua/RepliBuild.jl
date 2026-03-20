@@ -104,18 +104,27 @@ function get_julia_aligned_size(members::Vector)
 end
 
 """
-    _parse_dwarf_size(s_info) -> Int
+    _parse_int_or_hex(raw) -> Int
 
-Parse byte_size from a DWARF struct info dict, handling both decimal and hex.
+Parse a value that may be decimal, hex (0x…), or a non-string number.
+Returns 0 on failure.
 """
-function _parse_dwarf_size(s_info)::Int
-    raw = get(s_info, "byte_size", "0")
+function _parse_int_or_hex(raw)::Int
     s = raw isa String ? raw : string(raw)
     try
         startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
     catch
         0
     end
+end
+
+"""
+    _parse_dwarf_size(s_info) -> Int
+
+Parse byte_size from a DWARF struct info dict, handling both decimal and hex.
+"""
+function _parse_dwarf_size(s_info)::Int
+    _parse_int_or_hex(get(s_info, "byte_size", "0"))
 end
 
 """

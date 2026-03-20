@@ -114,4 +114,37 @@ typedef struct {
 
 PackedTriplet pack_three(char tag, int value, char flag);
 
+/* ── Bitfield structs ─────────────────────────────────────────────────── */
+
+/* Single-byte bitfield: all fields fit in one byte */
+typedef struct {
+    unsigned int a : 3;   /* bits 0-2 */
+    unsigned int b : 4;   /* bits 3-6 */
+    unsigned int c : 1;   /* bit  7   */
+} SingleByteBits;
+
+/* Multi-byte bitfield: field spans byte boundary */
+typedef struct {
+    unsigned int x : 5;   /* bits 0-4  */
+    unsigned int y : 12;  /* bits 5-16 (crosses byte 0-1-2) */
+    unsigned int z : 7;   /* bits 17-23 */
+} MultiByteBits;
+
+/* Wide bitfield: field wider than 16 bits */
+typedef struct {
+    unsigned int tag  : 4;    /* bits 0-3   */
+    unsigned int data : 24;   /* bits 4-27 (crosses 3+ bytes) */
+    unsigned int flag : 4;    /* bits 28-31 */
+} WideBits;
+
+/* Read/write helpers for verification from C side */
+SingleByteBits make_single_bits(unsigned a, unsigned b, unsigned c);
+void read_single_bits(SingleByteBits s, unsigned *a, unsigned *b, unsigned *c);
+
+MultiByteBits make_multi_bits(unsigned x, unsigned y, unsigned z);
+void read_multi_bits(MultiByteBits s, unsigned *x, unsigned *y, unsigned *z);
+
+WideBits make_wide_bits(unsigned tag, unsigned data, unsigned flag);
+void read_wide_bits(WideBits s, unsigned *tag, unsigned *data, unsigned *flag);
+
 #endif /* MATHKIT_H */

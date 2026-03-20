@@ -62,7 +62,11 @@ function create_type_registry(config; custom_types::Dict{String,String}=Dict{Str
         "int32_t" => "Int32", "uint32_t" => "UInt32", "int64_t" => "Int64", "uint64_t" => "UInt64",
         "float" => "Cfloat", "double" => "Cdouble", "long double" => "Float64",
         "size_t" => "Csize_t", "ssize_t" => "Cssize_t", "ptrdiff_t" => "Cptrdiff_t",
-        "intptr_t" => "Int64", "uintptr_t" => "UInt64", "off_t" => "Int64", "time_t" => "Int64", "clock_t" => "Int64"
+        "intptr_t" => "Int64", "uintptr_t" => "UInt64", "off_t" => "Int64", "time_t" => "Int64", "clock_t" => "Int64",
+        # C11 _Complex types
+        "_Complex float" => "ComplexF32", "complex float" => "ComplexF32", "float _Complex" => "ComplexF32",
+        "_Complex double" => "ComplexF64", "complex double" => "ComplexF64", "double _Complex" => "ComplexF64",
+        "_Complex long double" => "ComplexF64", "complex long double" => "ComplexF64", "long double _Complex" => "ComplexF64"
     )
 
     stl_types = Dict{String,String}(
@@ -93,8 +97,6 @@ end
 function infer_julia_type(registry::TypeRegistry, type_str::String; context::String="")::String
     if registry.language == :c
         return infer_c_type(registry, type_str; context=context)
-    elseif registry.language == :rust
-        return infer_rust_type(registry, type_str; context=context)
     else
         return infer_cpp_type(registry, type_str; context=context)
     end
