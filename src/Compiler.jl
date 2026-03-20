@@ -1239,6 +1239,51 @@ end
 # =============================================================================
 
 """
+    _scan_noexcept_functions(source_files, include_dirs) -> Set{String}
+
+Scan C++ source and header files for function declarations containing the
+`noexcept` specifier.  Returns the set of function names that are noexcept.
+
+DWARF doesn't emit a DW_AT_noexcept attribute, so we detect it from source.
+We look for patterns like `func_name(...) noexcept` in both source files
+and any headers found in include directories.
+"""
+function _scan_noexcept_functions(source_files::Vector{String},
+                                  include_dirs)::Set{String}
+    noexcept_names = Set{String}()
+
+    # Collect all files to scan: source files + headers in include dirs
+    files_to_scan = copy(source_files)
+    for dir in include_dirs
+        isdir(dir) || continue
+        for f in readdir(dir, join=true)
+            isfile(f) || continue
+            if endswith(f, ".h") || endswith(f, ".hpp") || endswith(f, ".hxx")
+                push!(files_to_scan, f)
+            end
+        end
+    end
+
+    # Regex: function_name followed by ( ... ) and then noexcept
+    # Handles multi-line by joining continuation lines
+    noexcept_re = r"(\w+)\s*\([^)]*\)\s*(?:const\s*)?noexcept\b"
+
+    for filepath in files_to_scan
+        isfile(filepath) || continue
+        try
+            content = read(filepath, String)
+            for m in eachmatch(noexcept_re, content)
+                push!(noexcept_names, m.captures[1])
+            end
+        catch
+            # Ignore unreadable files
+        end
+    end
+
+    return noexcept_names
+end
+
+"""
 Extract symbol information from compiled binary using nm.
 Returns vector of symbol dictionaries with mangled/demangled names.
 """
@@ -2493,10 +2538,17 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         
                         # Case 2: Function not registered yet (void return type implied by missing DW_AT_type)
                         elseif !haskey(return_types, function_key_prev)
+                            # Check for noexcept on the previous function
+                            prev_noexcept = false
+                            if !isnothing(current_function_offset) && haskey(type_refs, current_function_offset) &&
+                               isa(type_refs[current_function_offset], Dict)
+                                prev_noexcept = get(type_refs[current_function_offset], "is_noexcept", false)
+                            end
                             return_types[function_key_prev] = Dict(
                                 "c_type" => "void",
                                 "julia_type" => "Cvoid",
                                 "size" => 0,
+                                "is_noexcept" => prev_noexcept,
                                 "parameters" => params_for_this_function
                             )
                         end
@@ -2651,6 +2703,20 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
+        # Extract noexcept specification
+        # DWARF5+: DW_AT_noexcept (or inferred from demangled name)
+        # GCC/Clang may also use DW_AT_calling_convention or encode in type
+        if (contains(line, "DW_AT_noexcept") || contains(line, "noexcept")) && in_function_context
+            if !isnothing(current_function_offset)
+                if !haskey(type_refs, current_function_offset)
+                    type_refs[current_function_offset] = Dict{String,Any}()
+                end
+                if isa(type_refs[current_function_offset], Dict)
+                    type_refs[current_function_offset]["is_noexcept"] = true
+                end
+            end
+        end
+
         # Extract virtuality
         # Example: <60>   DW_AT_virtuality  : 1 (virtual)
         if contains(line, "DW_AT_virtuality") && in_function_context
@@ -2694,13 +2760,15 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 # Use linkage name (C++) or fall back to function name (C)
                 function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
 
-                # Check for virtuality and varargs stored earlier
+                # Check for virtuality, varargs, and noexcept stored earlier
                 is_virtual = false
                 is_vararg = false
+                is_noexcept = false
                 if !isnothing(current_function_offset) && haskey(type_refs, current_function_offset) &&
                    isa(type_refs[current_function_offset], Dict)
                     is_virtual = get(type_refs[current_function_offset], "is_virtual", false)
                     is_vararg = get(type_refs[current_function_offset], "is_vararg", false)
+                    is_noexcept = get(type_refs[current_function_offset], "is_noexcept", false)
                 end
 
                 # Store if we have a function identifier
@@ -2711,6 +2779,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         "size" => type_size,
                         "is_virtual" => is_virtual, # NEW: Store virtuality
                         "is_vararg" => is_vararg,   # NEW: Store varargs status
+                        "is_noexcept" => is_noexcept, # NEW: Store noexcept status
                         "parameters" => params_for_this_function  # NEW: Use params_for_this_function
                     )
                 end
@@ -3042,6 +3111,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             # Merge is_vararg
             func["is_vararg"] = get(dwarf_info, "is_vararg", false)
 
+            # Merge is_noexcept from DWARF info or demangled name
+            func["is_noexcept"] = get(dwarf_info, "is_noexcept", false)
+
             # Merge parameters if available from DWARF (at function level, not in return_type)
             if haskey(dwarf_info, "parameters") && !isempty(dwarf_info["parameters"])
                 func["parameters"] = dwarf_info["parameters"]
@@ -3053,6 +3125,21 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             func["return_type_source"] = "inferred"
             func["parameters_source"] = "inferred"
             func["is_vararg"] = false
+            # Detect noexcept from demangled name as fallback
+            demangled = get(func, "demangled", "")
+            func["is_noexcept"] = occursin("noexcept", demangled)
+        end
+    end
+
+    # Detect noexcept from source files (DWARF doesn't emit DW_AT_noexcept).
+    # Scan source + header files for function declarations with 'noexcept' specifier.
+    if config.wrap.language != :c
+        noexcept_names = _scan_noexcept_functions(source_files, get_include_dirs(config))
+        for func in functions
+            name = get(func, "name", "")
+            if name in noexcept_names && !get(func, "is_noexcept", false)
+                func["is_noexcept"] = true
+            end
         end
     end
 
@@ -3118,6 +3205,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             "optimization_level" => config.link.optimization_level,
             "lto_enabled" => config.link.enable_lto
         ),
+
+        # Language information
+        "language" => config.wrap.language == :c ? "c" : (config.wrap.language == :rust ? "rust" : "c++"),
 
         # Metadata version (for future compatibility)
         "metadata_version" => "1.0"

@@ -17,6 +17,29 @@ void simulate_work(int iterations, ProgressCallback cb);
 
 #ifdef __cplusplus
 }
-#endif
+
+// =============================================================================
+// C++ exception test functions (NOT extern "C" — uses C++ ABI)
+// =============================================================================
+
+// Always throws std::runtime_error
+int always_throws(int x);
+
+// Throws std::runtime_error if x < 0, otherwise returns x * 2
+int throws_if_negative(int x);
+
+// Throws a non-std::exception type (plain int)
+int throws_int(int x);
+
+// Void function that throws
+void void_thrower();
+
+// Marked noexcept — should stay on fast ccall path
+int safe_multiply(int a, int b) noexcept;
+
+// Throws during iteration of a callback-like loop
+int throws_midway(int iterations);
+
+#endif // __cplusplus
 
 #endif // CALLBACKS_H

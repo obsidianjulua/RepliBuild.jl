@@ -38,7 +38,18 @@
 
 #include "JLCSDialect.h"
 
+#include <cstring>
+#include <exception>
+#include <stdexcept>
+
 using namespace mlir;
+
+// =============================================================================
+// Thread-local exception buffer for C++ → Julia exception propagation
+// =============================================================================
+
+static thread_local char jlcs_exception_buffer[1024] = {0};
+static thread_local bool jlcs_has_exception = false;
 
 // --- Helper Functions ---
 
@@ -182,7 +193,30 @@ extern "C" {
         // Cleanup casts
         pm.addPass(mlir::createReconcileUnrealizedCastsPass());
 
-        return mlir::succeeded(pm.run(mod));
+        bool ok = mlir::succeeded(pm.run(mod));
+
+        // Post-pipeline fixup: ensure any llvm.func containing llvm.invoke
+        // has the __gxx_personality_v0 personality set. This must happen after
+        // ALL passes (including ConvertFuncToLLVM) have completed.
+        mod.walk([&](mlir::LLVM::LLVMFuncOp funcOp) {
+            bool hasInvoke = false;
+            funcOp.walk([&](mlir::LLVM::InvokeOp) { hasInvoke = true; });
+            if (hasInvoke && !funcOp.getPersonalityAttr()) {
+                // Ensure __gxx_personality_v0 is declared
+                if (!mod.lookupSymbol<mlir::LLVM::LLVMFuncOp>("__gxx_personality_v0")) {
+                    mlir::OpBuilder builder(mod.getContext());
+                    builder.setInsertionPointToStart(mod.getBody());
+                    auto i32Type = builder.getI32Type();
+                    auto personalityFnType = mlir::LLVM::LLVMFunctionType::get(i32Type, {}, true);
+                    builder.create<mlir::LLVM::LLVMFuncOp>(mod.getLoc(), "__gxx_personality_v0", personalityFnType);
+                }
+                auto personalityRef = mlir::FlatSymbolRefAttr::get(
+                    mod.getContext(), "__gxx_personality_v0");
+                funcOp.setPersonalityAttr(personalityRef);
+            }
+        });
+
+        return ok;
     }
 
     // --- JIT Execution Engine ---
@@ -252,6 +286,47 @@ extern "C" {
         MlirStringRef funcName = mlirStringRefCreateFromCString(name);
         MlirLogicalResult res = mlirExecutionEngineInvokePacked(jit, funcName, args);
         return mlirLogicalResultIsSuccess(res);
+    }
+
+    // --- Exception Handling C API ---
+
+    void jlcs_set_pending_exception(const char* msg) {
+        if (msg) {
+            std::strncpy(jlcs_exception_buffer, msg, sizeof(jlcs_exception_buffer) - 1);
+            jlcs_exception_buffer[sizeof(jlcs_exception_buffer) - 1] = '\0';
+        } else {
+            std::strncpy(jlcs_exception_buffer, "unknown C++ exception",
+                         sizeof(jlcs_exception_buffer) - 1);
+            jlcs_exception_buffer[sizeof(jlcs_exception_buffer) - 1] = '\0';
+        }
+        jlcs_has_exception = true;
+    }
+
+    bool jlcs_has_pending_exception() {
+        return jlcs_has_exception;
+    }
+
+    const char* jlcs_get_pending_exception() {
+        return jlcs_exception_buffer;
+    }
+
+    void jlcs_clear_pending_exception() {
+        jlcs_has_exception = false;
+        jlcs_exception_buffer[0] = '\0';
+    }
+
+    /// Called from JIT'd landing pad code to extract the exception message
+    /// from the caught C++ exception and store it in the thread-local buffer.
+    const char* jlcs_catch_current_exception() {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::exception& e) {
+            jlcs_set_pending_exception(e.what());
+            return jlcs_exception_buffer;
+        } catch (...) {
+            jlcs_set_pending_exception("unknown C++ exception");
+            return jlcs_exception_buffer;
+        }
     }
 
 }

@@ -10,7 +10,7 @@ using ..DWARFParser
 using Libdl
 import JSON
 
-export get_jit_thunk, ensure_jit_initialized, JITContext, invoke
+export get_jit_thunk, ensure_jit_initialized, JITContext, invoke, CxxException
 
 # Global singleton to manage JIT state
 mutable struct JITContext
@@ -27,6 +27,36 @@ mutable struct JITContext
 end
 
 const GLOBAL_JIT = JITContext()
+
+# =============================================================================
+# C++ Exception Propagation
+# =============================================================================
+
+"""
+    CxxException <: Exception
+
+Exception type for C++ exceptions caught by JLCS try_call thunks.
+The message contains the C++ exception's what() string.
+"""
+struct CxxException <: Exception
+    message::String
+end
+
+Base.showerror(io::IO, e::CxxException) = print(io, "C++ exception: ", e.message)
+
+"""
+    _check_pending_exception()
+
+Check if a C++ exception was caught by the last JIT call and throw it as CxxException.
+Called after every JIT invoke to propagate C++ exceptions to Julia.
+"""
+@inline function _check_pending_exception()
+    if MLIRNative.has_pending_exception()
+        msg = MLIRNative.get_pending_exception()
+        MLIRNative.clear_pending_exception()
+        throw(CxxException(msg))
+    end
+end
 
 # =============================================================================
 # Fast function pointer lookup with lock-free read path
@@ -113,9 +143,11 @@ function invoke(func_name::String, ::Type{T}, a1) where T
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1)]
-    GC.@preserve r1 begin
-        return _invoke_call(fptr, T, inner_ptrs)
+    result = GC.@preserve r1 begin
+        _invoke_call(fptr, T, inner_ptrs)
     end
+    _check_pending_exception()
+    return result
 end
 
 # 2-arg specialization
@@ -124,9 +156,11 @@ function invoke(func_name::String, ::Type{T}, a1, a2) where T
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1); r2 = Ref(a2)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2)]
-    GC.@preserve r1 r2 begin
-        return _invoke_call(fptr, T, inner_ptrs)
+    result = GC.@preserve r1 r2 begin
+        _invoke_call(fptr, T, inner_ptrs)
     end
+    _check_pending_exception()
+    return result
 end
 
 # 3-arg specialization
@@ -135,9 +169,11 @@ function invoke(func_name::String, ::Type{T}, a1, a2, a3) where T
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3)]
-    GC.@preserve r1 r2 r3 begin
-        return _invoke_call(fptr, T, inner_ptrs)
+    result = GC.@preserve r1 r2 r3 begin
+        _invoke_call(fptr, T, inner_ptrs)
     end
+    _check_pending_exception()
+    return result
 end
 
 # 4-arg specialization
@@ -146,9 +182,11 @@ function invoke(func_name::String, ::Type{T}, a1, a2, a3, a4) where T
     fptr = _lookup_cached(func_name)
     r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3); r4 = Ref(a4)
     inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3), Base.unsafe_convert(Ptr{Cvoid}, r4)]
-    GC.@preserve r1 r2 r3 r4 begin
-        return _invoke_call(fptr, T, inner_ptrs)
+    result = GC.@preserve r1 r2 r3 r4 begin
+        _invoke_call(fptr, T, inner_ptrs)
     end
+    _check_pending_exception()
+    return result
 end
 
 # Generic fallback for 5+ args
@@ -164,9 +202,11 @@ function invoke(func_name::String, ::Type{T}, args::Vararg{Any, N}) where {T, N}
         inner_ptrs[i] = Base.unsafe_convert(Ptr{Cvoid}, r)
     end
 
-    GC.@preserve ref_args begin
-        return _invoke_call(fptr, T, inner_ptrs)
+    result = GC.@preserve ref_args begin
+        _invoke_call(fptr, T, inner_ptrs)
     end
+    _check_pending_exception()
+    return result
 end
 
 # =============================================================================
@@ -188,6 +228,7 @@ function invoke(func_name::String, args::Vararg{Any, N}) where N
     GC.@preserve ref_args inner_ptrs begin
         ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
     end
+    _check_pending_exception()
     return nothing
 end
 
@@ -234,6 +275,39 @@ function initialize_global_jit(binary_path::String)
                 end
             end
 
+            # 2b. Register exception handling helper symbols for JIT'd code
+            for sym in (:jlcs_set_pending_exception, :jlcs_catch_current_exception,
+                        :jlcs_has_pending_exception, :jlcs_clear_pending_exception)
+                ptr = Libdl.dlsym(Libdl.dlopen(MLIRNative.libJLCS), sym, throw_error=false)
+                if ptr != C_NULL
+                    MLIRNative.register_symbol_global(string(sym), ptr)
+                end
+            end
+
+            # Register C++ runtime EH symbols (__gxx_personality_v0, __cxa_begin/end_catch)
+            # Use C_NULL handle to search the default global symbol space
+            cxxrt_handle = C_NULL
+            try
+                # Try libstdc++ first, then libc++abi
+                cxxrt_handle = Libdl.dlopen("libstdc++.so.6", Libdl.RTLD_LAZY | Libdl.RTLD_NOLOAD, throw_error=false)
+                if cxxrt_handle == C_NULL
+                    cxxrt_handle = Libdl.dlopen("libstdc++.so", Libdl.RTLD_LAZY, throw_error=false)
+                end
+            catch; end
+            for sym in (:__gxx_personality_v0, :__cxa_begin_catch, :__cxa_end_catch)
+                ptr = C_NULL
+                if cxxrt_handle != C_NULL
+                    ptr = Libdl.dlsym(cxxrt_handle, sym, throw_error=false)
+                end
+                if ptr == C_NULL
+                    # Fallback: search in already-loaded libraries (the C++ .so we built loads libstdc++)
+                    ptr = Libdl.dlsym(lib_handle, sym, throw_error=false)
+                end
+                if ptr != C_NULL
+                    MLIRNative.register_symbol_global(string(sym), ptr)
+                end
+            end
+
             # 3. Generate MLIR Module for all vtables
             ir_source = JLCSIRGenerator.generate_jlcs_ir(GLOBAL_JIT.vtable_info, metadata)
 
@@ -245,8 +319,9 @@ function initialize_global_jit(binary_path::String)
                 error("Failed to lower JLCS dialect to LLVM")
             end
 
-            # 5. Create JIT Engine with the C++ library registered for symbol resolution
-            GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=3, shared_libs=[binary_path])
+            # 5. Create JIT Engine with the C++ library and libJLCS for EH symbol resolution
+            jlcs_lib_path = MLIRNative.libJLCS
+            GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=3, shared_libs=[binary_path, jlcs_lib_path])
 
             GLOBAL_JIT.initialized = true
             # println("JIT Initialized for $binary_path")

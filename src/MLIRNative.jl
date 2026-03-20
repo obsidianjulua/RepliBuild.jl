@@ -15,6 +15,7 @@ export create_jit, destroy_jit, register_symbol, register_symbol_global, lookup
 export jit_invoke, invoke_safe
 export emit_llvmir, emit_object
 export check_library, test_dialect
+export has_pending_exception, get_pending_exception, clear_pending_exception
 
 # =============================================================================
 # MLIR C API Bindings
@@ -200,6 +201,38 @@ Returns true on success.
 """
 function lower_to_llvm(mod::MlirModule)
     return ccall((:jlcs_lower_to_llvm, libJLCS), Bool, (MlirModule,), mod)
+end
+
+# =============================================================================
+# C++ Exception Buffer API
+# =============================================================================
+
+"""
+    has_pending_exception() -> Bool
+
+Check if a C++ exception was caught by a jlcs.try_call thunk.
+"""
+@inline function has_pending_exception()::Bool
+    return ccall((:jlcs_has_pending_exception, libJLCS), Bool, ())
+end
+
+"""
+    get_pending_exception() -> String
+
+Get the message from the last caught C++ exception.
+"""
+function get_pending_exception()::String
+    cstr = ccall((:jlcs_get_pending_exception, libJLCS), Cstring, ())
+    return unsafe_string(cstr)
+end
+
+"""
+    clear_pending_exception()
+
+Clear the pending C++ exception state.
+"""
+function clear_pending_exception()
+    ccall((:jlcs_clear_pending_exception, libJLCS), Cvoid, ())
 end
 
 # =============================================================================

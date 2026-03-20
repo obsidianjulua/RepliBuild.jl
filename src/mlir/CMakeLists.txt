@@ -20,6 +20,9 @@ include(AddMLIR)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 
+# Enable C++ exceptions (required for jlcs_catch_current_exception)
+add_compile_options(-fexceptions)
+
 # Include directories
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})

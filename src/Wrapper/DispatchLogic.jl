@@ -91,10 +91,36 @@ function is_c_lto_safe(func_info, dwarf_structs)::Bool
 end
 
 """
+    _is_noexcept(func_info) -> Bool
+
+Check if a function is marked `noexcept` in metadata.
+Functions marked noexcept are guaranteed not to throw C++ exceptions,
+so they can safely use ccall/llvmcall without exception handling.
+"""
+function _is_noexcept(func_info)::Bool
+    return get(func_info, "is_noexcept", false)
+end
+
+"""
+    _is_cpp_function(func_info) -> Bool
+
+Check if a function has C++ linkage (Itanium ABI mangled name starting with `_Z`).
+C++ functions may throw exceptions unless marked `noexcept`.
+Plain C functions (unmangled names) never throw C++ exceptions.
+"""
+function _is_cpp_function(func_info)::Bool
+    mangled = get(func_info, "mangled", "")
+    return startswith(mangled, "_Z")
+end
+
+"""
     is_ccall_safe(func_info, dwarf_structs)::Bool
 
 Determine if a function is safe for standard `ccall`.
 Returns false (→ route to MLIR Tier 2) if any of:
+
+**Exception safety:**
+- C++ function not marked `noexcept` (may throw → needs MLIR try_call)
 
 **Return type:**
 - STL container by value
@@ -118,6 +144,14 @@ Returns false (→ route to MLIR Tier 2) if any of:
 - Unknown struct not in DWARF
 """
 function is_ccall_safe(func_info, dwarf_structs)
+    # ── -1. Exception safety: C++ functions that may throw ───────────────
+    # Conservative: all C++ functions (mangled _Z* names) may throw unless
+    # noexcept. Route to MLIR Tier 2 for exception-safe thunks.
+    # Plain C functions (unmangled) never throw C++ exceptions.
+    if _is_cpp_function(func_info) && !_is_noexcept(func_info)
+        return false
+    end
+
     # ── 0. STL containers (never ccall-safe by value) ───────────────────
     ret_type_str = String(get(func_info["return_type"], "c_type", ""))
     if is_stl_container_type(ret_type_str)

@@ -43,7 +43,7 @@ function _parse_byte_size(s::AbstractString)
     startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
 end
 
-function generate_function_thunks(functions::Vector, structs::Any=Dict())
+function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_throw::Bool=false)
     io = IOBuffer()
     println(io, "// Function Thunks")
 
@@ -260,14 +260,20 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict())
             push!(call_args, arg_value_name)
         end
 
-        # Call using jlcs.ffe_call (via Dialect)
+        # Determine whether to use jlcs.try_call (exception-safe) or jlcs.ffe_call
+        # Per-function noexcept: if the function is marked noexcept, use ffe_call even when may_throw is set
+        func_is_noexcept = get(func, "is_noexcept", false)
+        use_try_call = may_throw && !func_is_noexcept
+        call_op = use_try_call ? "jlcs.try_call" : "jlcs.ffe_call"
+
+        # Call using jlcs.ffe_call or jlcs.try_call (via Dialect)
         if func_ret == ""
              # Void return
-             println(io, "  jlcs.ffe_call $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+             println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
              println(io, "  return")
         elseif is_packed_ret
              # Packed struct return: call returns packed type, convert to aligned for Julia
-             println(io, "  %ret_packed = jlcs.ffe_call $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(ret_packed_type)")
+             println(io, "  %ret_packed = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(ret_packed_type)")
              # Extract fields from packed struct, insert into aligned struct
              println(io, "  %ret_aligned_undef = llvm.mlir.undef : $(ret_aligned_type)")
              prev_ret = "%ret_aligned_undef"
@@ -283,7 +289,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict())
              println(io, "  return $(prev_ret) : $(ret_aligned_type)")
         else
              # Value return
-             println(io, "  %ret_val = jlcs.ffe_call $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(func_ret)")
+             println(io, "  %ret_val = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(func_ret)")
              println(io, "  return %ret_val : $(func_ret)")
         end
 

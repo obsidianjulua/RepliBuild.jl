@@ -483,6 +483,268 @@ struct FFECallOpLowering : public ConversionPattern {
 };
 
 //===----------------------------------------------------------------------===//
+// TryCallOp Lowering (Exception-safe FFE Call)
+//===----------------------------------------------------------------------===//
+
+struct TryCallOpLowering : public ConversionPattern {
+    TryCallOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter, TryCallOp::getOperationName(), 1,
+              ctx)
+    {
+    }
+
+    // Reuse packed size calculation from FFECallOpLowering
+    uint64_t getPackedSizeInBits(Type type) const {
+        if (auto structType = dyn_cast<LLVM::LLVMStructType>(type)) {
+            uint64_t sum = 0;
+            for (Type elem : structType.getBody()) {
+                sum += getPackedSizeInBits(elem);
+            }
+            return sum;
+        }
+        if (auto arrType = dyn_cast<LLVM::LLVMArrayType>(type)) {
+            return arrType.getNumElements() * getPackedSizeInBits(arrType.getElementType());
+        }
+        if (type.isIntOrFloat()) {
+            return type.getIntOrFloatBitWidth();
+        }
+        if (isa<LLVM::LLVMPointerType>(type)) {
+            return 64;
+        }
+        return 0;
+    }
+
+    /// Get or declare an external function in the module
+    LLVM::LLVMFuncOp getOrInsertFunction(ModuleOp module,
+                                          ConversionPatternRewriter& rewriter,
+                                          StringRef name,
+                                          LLVM::LLVMFunctionType fnType) const {
+        if (auto fn = module.lookupSymbol<LLVM::LLVMFuncOp>(name))
+            return fn;
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(module.getBody());
+        return rewriter.create<LLVM::LLVMFuncOp>(module.getLoc(), name, fnType);
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto tryCallOp = cast<TryCallOp>(op);
+        Location loc = tryCallOp.getLoc();
+        TryCallOp::Adaptor adaptor(operands);
+        ValueRange args = adaptor.getArgs();
+
+        auto calleeAttr = op->getAttrOfType<FlatSymbolRefAttr>("callee");
+        if (!calleeAttr) {
+            return op->emitError("try_call requires a 'callee' symbol reference attribute");
+        }
+
+        auto moduleOp = op->getParentOfType<ModuleOp>();
+        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+        auto voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
+        auto i8Type = rewriter.getI8Type();
+        auto i32Type = rewriter.getI32Type();
+        auto i64Type = rewriter.getI64Type();
+        Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
+
+        // --- ABI coercion (same logic as FFECallOpLowering) ---
+        SmallVector<Type, 1> resultTypeVec;
+        for (Type t : tryCallOp.getResults().getTypes()) {
+            Type converted = typeConverter->convertType(t);
+            if (!converted)
+                return op->emitError("TryCallOp: Could not convert result type");
+            resultTypeVec.push_back(converted);
+        }
+
+        bool needsSret = false;
+        Type sretStructType;
+        Value sretSlot;
+        if (!resultTypeVec.empty()) {
+            if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
+                if (retStructType.isPacked()) {
+                    needsSret = true;
+                    sretStructType = retStructType;
+                    sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                } else {
+                    uint64_t sizeBits = getPackedSizeInBits(retStructType);
+                    if (sizeBits > 128) {
+                        needsSret = true;
+                        sretStructType = retStructType;
+                        sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                    }
+                }
+            }
+        }
+
+        SmallVector<Value, 4> coercedArgs;
+        SmallVector<Type, 4> coercedArgTypes;
+
+        if (needsSret) {
+            coercedArgs.push_back(sretSlot);
+            coercedArgTypes.push_back(ptrType);
+        }
+
+        for (Value arg : args) {
+            Type argType = arg.getType();
+            if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
+                if (structType.isPacked()) {
+                    Value stackSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, argType, one);
+                    rewriter.create<LLVM::StoreOp>(loc, arg, stackSlot);
+                    coercedArgs.push_back(stackSlot);
+                    coercedArgTypes.push_back(ptrType);
+                    continue;
+                }
+            }
+            coercedArgs.push_back(arg);
+            coercedArgTypes.push_back(arg.getType());
+        }
+
+        SmallVector<Type, 1> callResultTypes;
+        if (!needsSret) {
+            callResultTypes = resultTypeVec;
+        }
+
+        // Update external function declaration signature
+        {
+            if (auto calleeFn = moduleOp.lookupSymbol<func::FuncOp>(calleeAttr.getValue())) {
+                auto newFuncType = FunctionType::get(rewriter.getContext(), coercedArgTypes, callResultTypes);
+                calleeFn.setFunctionType(newFuncType);
+            } else if (auto llvmCalleeFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(calleeAttr.getValue())) {
+                auto newFuncType = LLVM::LLVMFunctionType::get(
+                    callResultTypes.empty() ? voidType : callResultTypes[0],
+                    coercedArgTypes, false);
+                llvmCalleeFn.setFunctionType(newFuncType);
+            }
+        }
+
+        // --- Ensure EH helper functions are declared ---
+
+        // __gxx_personality_v0
+        auto personalityFnType = LLVM::LLVMFunctionType::get(i32Type, {}, true);
+        getOrInsertFunction(moduleOp, rewriter, "__gxx_personality_v0", personalityFnType);
+
+        // __cxa_begin_catch(void*) -> void*
+        auto cxaBeginType = LLVM::LLVMFunctionType::get(ptrType, {ptrType}, false);
+        getOrInsertFunction(moduleOp, rewriter, "__cxa_begin_catch", cxaBeginType);
+
+        // __cxa_end_catch() -> void
+        auto cxaEndType = LLVM::LLVMFunctionType::get(voidType, {}, false);
+        getOrInsertFunction(moduleOp, rewriter, "__cxa_end_catch", cxaEndType);
+
+        // jlcs_set_pending_exception(const char*) -> void
+        auto setPendingType = LLVM::LLVMFunctionType::get(voidType, {ptrType}, false);
+        getOrInsertFunction(moduleOp, rewriter, "jlcs_set_pending_exception", setPendingType);
+
+        // jlcs_catch_current_exception() -> const char*
+        auto catchCurrentType = LLVM::LLVMFunctionType::get(ptrType, {}, false);
+        getOrInsertFunction(moduleOp, rewriter, "jlcs_catch_current_exception", catchCurrentType);
+
+        // --- Set personality function on parent function ---
+        // Must handle both func.func (pre-lowering) and llvm.func (post-lowering)
+        if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
+            llvmFunc.setPersonalityAttr(FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+        } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
+            // Set as a generic attribute that FuncToLLVM will carry through
+            funcOp->setAttr("llvm.personality",
+                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+        }
+
+        // --- Emit invoke + landing pad ---
+        // Block structure:
+        //   currentBlock: ... alloca resultSlot ... invoke → invokeOkBlock / catchBlock
+        //   invokeOkBlock: store invoke result → resultSlot, br → mergeBlock
+        //   catchBlock: landingpad, __cxa_begin_catch, jlcs_catch_current_exception,
+        //               __cxa_end_catch, br → mergeBlock
+        //   mergeBlock: load resultSlot → replacement value, [remaining ops from split]
+
+        // Allocate result storage (initialized to zero for the exception path)
+        Value resultSlot;
+        Type resultType;
+        if (!callResultTypes.empty()) {
+            resultType = callResultTypes[0];
+            resultSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, resultType, one);
+            Value zero = rewriter.create<LLVM::ZeroOp>(loc, resultType);
+            rewriter.create<LLVM::StoreOp>(loc, zero, resultSlot);
+        }
+
+        Block *currentBlock = rewriter.getInsertionBlock();
+        auto *parentRegion = currentBlock->getParent();
+
+        // Split: ops after try_call go to mergeBlock
+        Block *mergeBlock = rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+
+        // Create invokeOkBlock (single predecessor: invoke normal dest)
+        Block *invokeOkBlock = new Block();
+        parentRegion->getBlocks().insertAfter(currentBlock->getIterator(), invokeOkBlock);
+
+        // Create catchBlock
+        Block *catchBlock = new Block();
+        parentRegion->getBlocks().insertAfter(invokeOkBlock->getIterator(), catchBlock);
+
+        // --- currentBlock: emit invoke ---
+        rewriter.setInsertionPointToEnd(currentBlock);
+
+        auto invokeOp = rewriter.create<LLVM::InvokeOp>(
+            loc,
+            callResultTypes,
+            calleeAttr,
+            ValueRange(coercedArgs),
+            invokeOkBlock,   // normal dest
+            ValueRange{},
+            catchBlock,       // unwind dest
+            ValueRange{});
+
+        // --- invokeOkBlock: store result, branch to mergeBlock ---
+        rewriter.setInsertionPointToEnd(invokeOkBlock);
+        if (!callResultTypes.empty()) {
+            rewriter.create<LLVM::StoreOp>(loc, invokeOp.getResult(), resultSlot);
+        }
+        if (needsSret) {
+            // sret result is already in sretSlot from the invoke ABI
+        }
+        rewriter.create<LLVM::BrOp>(loc, ValueRange{}, mergeBlock);
+
+        // --- catchBlock: landing pad + exception handling ---
+        rewriter.setInsertionPointToEnd(catchBlock);
+
+        auto lpStructType = LLVM::LLVMStructType::getLiteral(
+            rewriter.getContext(), {ptrType, i32Type}, false);
+
+        Value nullPtr = rewriter.create<LLVM::ZeroOp>(loc, ptrType);
+        auto landingPad = rewriter.create<LLVM::LandingpadOp>(
+            loc, lpStructType, /*cleanup=*/false, ValueRange{nullPtr});
+
+        Value exnPtr = rewriter.create<LLVM::ExtractValueOp>(loc, ptrType, landingPad, 0);
+
+        rewriter.create<LLVM::CallOp>(loc, TypeRange{ptrType},
+            "__cxa_begin_catch", ValueRange{exnPtr});
+        rewriter.create<LLVM::CallOp>(loc, TypeRange{ptrType},
+            "jlcs_catch_current_exception", ValueRange{});
+        rewriter.create<LLVM::CallOp>(loc, TypeRange{},
+            "__cxa_end_catch", ValueRange{});
+
+        // Branch to mergeBlock (resultSlot still has zero sentinel)
+        rewriter.create<LLVM::BrOp>(loc, ValueRange{}, mergeBlock);
+
+        // --- mergeBlock: load result, replace try_call op ---
+        rewriter.setInsertionPointToStart(mergeBlock);
+
+        if (needsSret) {
+            Value result = rewriter.create<LLVM::LoadOp>(loc, sretStructType, sretSlot);
+            rewriter.replaceOp(op, result);
+        } else if (!resultTypeVec.empty()) {
+            Value result = rewriter.create<LLVM::LoadOp>(loc, resultType, resultSlot);
+            rewriter.replaceOp(op, result);
+        } else {
+            rewriter.eraseOp(op);
+        }
+
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
 // ConstructorCallOp Lowering
 //===----------------------------------------------------------------------===//
 
@@ -580,6 +842,26 @@ struct ScopeOpLowering : public ConversionPattern {
     {
     }
 
+    /// Check if any op in the body is a try_call (needs exception-safe RAII)
+    bool bodyContainsTryCall(Region& bodyRegion) const {
+        for (auto& op : bodyRegion.front()) {
+            if (isa<TryCallOp>(&op))
+                return true;
+        }
+        return false;
+    }
+
+    /// Emit destructor calls in reverse order for a given set of managed pointers
+    void emitDestructors(Location loc, ConversionPatternRewriter& rewriter,
+                         ValueRange managedPtrs, ArrayAttr destructors) const {
+        for (int i = (int)destructors.size() - 1; i >= 0; --i) {
+            auto dtorRef = cast<FlatSymbolRefAttr>(destructors[i]);
+            Value ptr = managedPtrs[i];
+            rewriter.create<LLVM::CallOp>(
+                loc, TypeRange(), dtorRef.getValue(), ValueRange({ptr}));
+        }
+    }
+
     LogicalResult
     matchAndRewrite(Operation* op, ArrayRef<Value> operands,
         ConversionPatternRewriter& rewriter) const override
@@ -592,6 +874,9 @@ struct ScopeOpLowering : public ConversionPattern {
         Region& bodyRegion = scopeOp.getBody();
         Block& bodyBlock = bodyRegion.front();
 
+        ValueRange managedPtrs = adaptor.getManagedPtrs();
+        ArrayAttr destructors = scopeOp.getDestructors();
+
         // Erase the yield terminator before inlining
         Operation* terminator = bodyBlock.getTerminator();
         if (terminator)
@@ -600,17 +885,8 @@ struct ScopeOpLowering : public ConversionPattern {
         // Inline body ops before the scope op in the parent block
         rewriter.inlineBlockBefore(&bodyBlock, op);
 
-        // Emit destructor calls in reverse order (C++ destruction semantics)
-        ValueRange managedPtrs = adaptor.getManagedPtrs();
-        ArrayAttr destructors = scopeOp.getDestructors();
-
-        for (int i = (int)destructors.size() - 1; i >= 0; --i) {
-            auto dtorRef = cast<FlatSymbolRefAttr>(destructors[i]);
-            Value ptr = managedPtrs[i];
-
-            rewriter.create<LLVM::CallOp>(
-                loc, TypeRange(), dtorRef.getValue(), ValueRange({ptr}));
-        }
+        // Normal path: destructor calls in reverse order (C++ destruction semantics)
+        emitDestructors(loc, rewriter, managedPtrs, destructors);
 
         // Erase the scope op
         rewriter.eraseOp(op);
@@ -650,7 +926,7 @@ struct LowerJLCSToLLVMPass
         // Define illegal ops (source dialect)
         target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp,
             LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp, FFECallOp,
-            ConstructorCallOp, DestructorCallOp,
+            TryCallOp, ConstructorCallOp, DestructorCallOp,
             ScopeOp, YieldOp>();
 
         // Define legal dialects (target dialects)
@@ -675,6 +951,7 @@ struct LowerJLCSToLLVMPass
         patterns.add<StoreArrayElementOpLowering>(typeConverter, &getContext());
         patterns.add<TypeInfoOpLowering>(typeConverter, &getContext());
         patterns.add<FFECallOpLowering>(typeConverter, &getContext());
+        patterns.add<TryCallOpLowering>(typeConverter, &getContext());
         patterns.add<ConstructorCallOpLowering>(typeConverter, &getContext());
         patterns.add<DestructorCallOpLowering>(typeConverter, &getContext());
         patterns.add<YieldOpLowering>(typeConverter, &getContext());
@@ -684,6 +961,20 @@ struct LowerJLCSToLLVMPass
         if (failed(applyPartialConversion(getOperation(), target,
                 std::move(patterns))))
             signalPassFailure();
+
+        // Post-conversion fixup: set personality function on any llvm.func
+        // that contains llvm.invoke ops (needed for landing pads).
+        // This runs after func.func → llvm.func conversion, so personality
+        // can be properly set on the LLVM function.
+        getOperation().walk([&](LLVM::LLVMFuncOp funcOp) {
+            bool hasInvoke = false;
+            funcOp.walk([&](LLVM::InvokeOp) { hasInvoke = true; });
+            if (hasInvoke && !funcOp.getPersonalityAttr()) {
+                auto personalityRef = FlatSymbolRefAttr::get(
+                    &getContext(), "__gxx_personality_v0");
+                funcOp.setPersonalityAttr(personalityRef);
+            }
+        });
     }
 };
 

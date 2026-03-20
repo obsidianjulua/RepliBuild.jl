@@ -214,6 +214,32 @@ def FFECallOp : JLCS_Op<"ffe_call", [MemoryEffects<[]>]> {
 }
 
 // ====================================================================
+// Exception-Handling Call Operation
+// ====================================================================
+
+// 12. Try Call Op (FFE Call with C++ exception catching)
+def TryCallOp : JLCS_Op<"try_call", [MemoryEffects<[]>]> {
+  let summary = "Call external function with C++ exception catching";
+  let description = [{
+    Like ffe_call but emits invoke + landing pad to catch C++ exceptions.
+    On exception: stores error message in thread-local buffer via
+    jlcs_set_pending_exception(), returns zero/null sentinel value.
+    The caller (Julia side) checks jlcs_has_pending_exception() after
+    the call and throws a CxxException if set.
+
+    Example:
+    ```mlir
+    %result = jlcs.try_call %arg0, %arg1
+      { callee = @_Z3fooi }
+      : (i32, f64) -> i32
+    ```
+  }];
+  let arguments = (ins Variadic<AnyType>:$args);
+  let results = (outs Variadic<AnyType>:$results);
+  let assemblyFormat = "$args attr-dict `:` functional-type($args, $results)";
+}
+
+// ====================================================================
 // RAII Operations (Constructor / Destructor)
 // ====================================================================
 
