@@ -34,9 +34,6 @@ include("Builder/ThunkBuilder.jl")
 # Introspect: analysis tooling
 include("Introspect.jl")
 
-# Hub: package registry
-include("Hub.jl")
-
 # Import submodules for internal use
 using .LLVMEnvironment
 using .ConfigurationManager
