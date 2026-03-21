@@ -1,0 +1,3578 @@
+#!/usr/bin/env julia
+# Compiler.jl - C++ to LLVM IR compilation and linking
+# Full control over LLVM/Clang for Julia interoperability
+# Extracts metadata during compilation for automatic wrapper generation
+
+module Compiler
+
+using Dates
+using JSON
+using Libdl
+
+# Import from parent RepliBuild module
+import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_dirs,
+                                get_compile_flags, get_build_path, get_output_path,
+                                get_library_name, get_module_name, is_parallel_enabled,
+                                is_cache_enabled, get_cache_path
+import ..BuildBridge
+import ..LLVMEnvironment
+
+export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
+       extract_compilation_metadata, save_compilation_metadata,
+       compute_project_hash, is_project_cache_valid, save_project_hash,
+       assemble_bitcode, sanitize_ir_for_julia,
+       # Compiler utilities
+       needs_recompile, compile_single_to_ir,
+       generate_template_instantiations, generate_macro_shims,
+       extract_stl_method_symbols, extract_symbols_from_binary,
+       extract_mangled_name, extract_dwarf_return_types,
+       extract_function_name, extract_class_name,
+       dwarf_type_to_julia, get_type_size,
+       cpp_to_julia_type, build_type_registry,
+       infer_return_type, parse_parameters, parse_function_signatures
+
+# =============================================================================
+# INCREMENTAL BUILD SUPPORT
+# =============================================================================
+
+"""
+Check if source file needs recompilation (based on mtime).
+"""
+function needs_recompile(source_file::String, ir_file::String, cache_enabled::Bool)::Bool
+    if !cache_enabled
+        return true  # Always recompile if cache disabled
+    end
+
+    if !isfile(ir_file)
+        return true  # IR doesn't exist
+    end
+
+    # Compare modification times
+    source_mtime = mtime(source_file)
+    ir_mtime = mtime(ir_file)
+
+    return source_mtime > ir_mtime
+end
+
+# =============================================================================
+# AGGRESSIVE PROJECT-LEVEL CACHE (hash-based)
+# =============================================================================
+
+"""
+Compute a content hash for the entire project: replibuild.toml + source files + git HEAD.
+Returns a hex string that changes when anything relevant changes.
+"""
+function compute_project_hash(config::RepliBuildConfig)::String
+    h = UInt64(0)
+
+    # Hash the replibuild.toml content
+    toml_path = config.config_file
+    if isfile(toml_path)
+        h = hash(read(toml_path), h)
+    end
+
+    # Hash all source files by content
+    for src in get_source_files(config)
+        if isfile(src)
+            h = hash(read(src), h)
+        end
+    end
+
+    # Hash include directory contents (header files)
+    for inc_dir in get_include_dirs(config)
+        if isdir(inc_dir)
+            for f in readdir(inc_dir; join=true)
+                if isfile(f) && any(endswith(f, ext) for ext in [".h", ".hpp", ".hxx", ".hh"])
+                    h = hash(read(f), h)
+                end
+            end
+        end
+    end
+
+    # Hash git HEAD of the project root (captures upstream repo state)
+    project_root = config.project.root
+    git_head = _get_git_head(project_root)
+    if !isempty(git_head)
+        h = hash(git_head, h)
+    end
+
+    return string(h, base=16)
+end
+
+function _get_git_head(dir::String)::String
+    try
+        head_file = joinpath(dir, ".git", "HEAD")
+        if isfile(head_file)
+            head_content = strip(read(head_file, String))
+            if startswith(head_content, "ref: ")
+                ref_path = joinpath(dir, ".git", head_content[6:end])
+                if isfile(ref_path)
+                    return strip(read(ref_path, String))
+                end
+            end
+            return head_content
+        end
+    catch
+    end
+    return ""
+end
+
+"""
+Detect the host target triple from clang or Julia's Sys.MACHINE.
+"""
+function _detect_target_triple()::String
+    # Try clang -dumpmachine first (most accurate for the actual compiler in use)
+    try
+        (output, exitcode) = BuildBridge.execute("clang", ["-dumpmachine"])
+        if exitcode == 0
+            triple = strip(output)
+            if !isempty(triple) && contains(triple, '-')
+                return triple
+            end
+        end
+    catch
+    end
+
+    # Fallback: Julia's Sys.MACHINE (always available, matches the Julia build target)
+    return Sys.MACHINE
+end
+
+"""
+Check if the project-level cache is valid. Returns `true` if all artifacts exist
+and the content hash matches, meaning the build can be skipped entirely.
+"""
+function is_project_cache_valid(config::RepliBuildConfig)::Bool
+    if !is_cache_enabled(config)
+        return false
+    end
+
+    cache_dir = get_cache_path(config)
+    hash_file = joinpath(cache_dir, "project_hash")
+
+    # Check hash file exists
+    if !isfile(hash_file)
+        return false
+    end
+
+    # Check all required artifacts exist
+    output_dir = get_output_path(config)
+    lib_name = get_library_name(config)
+    library_path = joinpath(output_dir, lib_name)
+    metadata_path = joinpath(output_dir, "compilation_metadata.json")
+
+    if !isfile(library_path) || !isfile(metadata_path)
+        return false
+    end
+
+    # Compare stored hash with current
+    stored_hash = strip(read(hash_file, String))
+    current_hash = compute_project_hash(config)
+
+    return stored_hash == current_hash
+end
+
+"""
+Save the project hash after a successful build.
+"""
+function save_project_hash(config::RepliBuildConfig)
+    cache_dir = get_cache_path(config)
+    mkpath(cache_dir)
+    hash_file = joinpath(cache_dir, "project_hash")
+    write(hash_file, compute_project_hash(config))
+end
+
+# =============================================================================
+# COMPILATION: C++ → LLVM IR
+# =============================================================================
+
+"""
+Compile a single C++ file to LLVM IR.
+Returns (ir_file_path, success, exitcode).
+"""
+function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
+    # Generate IR file path
+    build_dir = get_build_path(config)
+    mkpath(build_dir)
+
+    base_name = splitext(basename(cpp_file))[1]
+    ir_file = joinpath(build_dir, base_name * ".ll")
+
+    # Check if recompilation needed
+    if !needs_recompile(cpp_file, ir_file, is_cache_enabled(config))
+        return (ir_file, true, 0)  # Cache hit
+    end
+
+    # Build compiler command
+    # Ensure -g is always present for DWARF metadata extraction
+    base_flags = get_compile_flags(config)
+    if !("-g" in base_flags)
+        base_flags = vcat(base_flags, ["-g"])
+    end
+
+    cmd_args = vcat(
+        ["-S", "-emit-llvm"],  # Emit LLVM IR
+        base_flags,
+        ["-I$dir" for dir in get_include_dirs(config)],
+        ["-D$k=$v" for (k, v) in config.compile.defines],
+        ["-o", ir_file, cpp_file]
+    )
+
+    # Compile using BuildBridge or Clang_unified_jll for C
+    compiler = endswith(cpp_file, ".c") ? "clang" : "clang++"
+    
+    output = ""
+    exitcode = 1
+    if compiler == "clang"
+        try
+            # Use Julia's internal Clang to emit IR that perfectly matches the Julia LLVM version
+            Clang_mod = Base.require(Base.PkgId(Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
+            if isdefined(Clang_mod, :Clang_unified_jll)
+                clang_cmd = Clang_mod.Clang_unified_jll.clang()
+                cmd = ignorestatus(`$(clang_cmd) $cmd_args`)
+                
+                # Capture output
+                out_pipe = Pipe()
+                err_pipe = Pipe()
+                process = run(pipeline(cmd, stdout=out_pipe, stderr=err_pipe))
+                close(out_pipe.in)
+                close(err_pipe.in)
+                
+                out_str = String(read(out_pipe))
+                err_str = String(read(err_pipe))
+                
+                output = out_str * "\n" * err_str
+                exitcode = process.exitcode
+            else
+                (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+            end
+        catch e
+            (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+        end
+    else
+        (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+    end
+
+    if !isempty(output) && exitcode != 0
+        println("  $(basename(cpp_file)): $output")
+    end
+
+    success = isfile(ir_file)
+    return (ir_file, success, exitcode)
+end
+
+"""
+Compile multiple C++ files to LLVM IR (with parallel support).
+Returns vector of IR file paths.
+"""
+function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
+    # Compile to LLVM IR
+
+    if isempty(cpp_files)
+        @warn "No source files to compile"
+        return String[]
+    end
+
+    # Check which files need compilation
+    build_dir = get_build_path(config)
+    mkpath(build_dir)
+
+    files_to_compile = String[]
+    ir_files = String[]
+    cached_files = 0
+
+    for cpp_file in cpp_files
+        base_name = splitext(basename(cpp_file))[1]
+        ir_file = joinpath(build_dir, base_name * ".ll")
+
+        if needs_recompile(cpp_file, ir_file, is_cache_enabled(config))
+            push!(files_to_compile, cpp_file)
+        else
+            cached_files += 1
+        end
+        push!(ir_files, ir_file)
+    end
+
+    if isempty(files_to_compile)
+        println("  compile: $(length(cpp_files)) cached")
+        return ir_files
+    end
+
+    if cached_files > 0
+        print("  compile: $(length(files_to_compile))/$(length(cpp_files)) files ($(cached_files) cached)")
+    else
+        print("  compile: $(length(files_to_compile)) files")
+    end
+
+    # Compile in parallel if enabled
+    if is_parallel_enabled(config) && length(files_to_compile) > 1
+
+        results = Vector{Tuple{String,Bool,Int}}(undef, length(files_to_compile))
+        Threads.@threads for i in 1:length(files_to_compile)
+            results[i] = compile_single_to_ir(config, files_to_compile[i])
+        end
+
+        println()
+        # Check for failures
+        failures = [(file, res) for (file, res) in zip(files_to_compile, results) if !res[2]]
+        if !isempty(failures)
+            for (file, (_, _, exitcode)) in failures
+                println("    FAIL: $(basename(file)) (exit $exitcode)")
+            end
+            error("Compilation failed for $(length(failures)) files")
+        end
+    else
+        # Sequential compilation
+        for cpp_file in files_to_compile
+            (ir_file, success, exitcode) = compile_single_to_ir(config, cpp_file)
+            if !success
+                println()
+                error("Compilation failed for $cpp_file (exit: $exitcode)")
+            end
+        end
+        println()
+    end
+    return ir_files
+end
+
+# =============================================================================
+# LINKING: LLVM IR → Optimized IR
+# =============================================================================
+
+"""
+Link multiple LLVM IR files and optimize.
+Returns path to linked IR file.
+"""
+function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, output_name::String)
+    # Link and optimize IR
+
+    if isempty(ir_files)
+        error("No IR files to link")
+    end
+
+    # Output path
+    build_dir = get_build_path(config)
+    linked_ir = joinpath(build_dir, output_name * "_linked.ll")
+
+    # Link using llvm-link
+    (output, exitcode) = BuildBridge.execute("llvm-link", vcat(["-S"], ir_files, ["-o", linked_ir]))
+
+    if exitcode != 0
+        error("Linking failed: $output")
+    end
+
+    if !isfile(linked_ir)
+        error("Linked IR file not created: $linked_ir")
+    end
+
+    # Optimize if requested
+    opt_level = config.link.optimization_level
+    if opt_level != "0"
+
+        optimized_ir = joinpath(build_dir, output_name * "_opt.ll")
+        opt_args = ["-S", "-O$opt_level"]
+
+        push!(opt_args, linked_ir, "-o", optimized_ir)
+
+        (output, exitcode) = BuildBridge.execute("opt", opt_args)
+
+        if exitcode != 0
+            @warn "Optimization failed, using unoptimized IR"
+        elseif isfile(optimized_ir)
+            linked_ir = optimized_ir
+        end
+    end
+
+    # If LTO is enabled, also emit a binary bitcode file (.bc)
+    # for Julia's LLVM compiler to consume via llvmcall
+    if config.link.enable_lto
+        output_dir = get_output_path(config)
+        mkpath(output_dir)
+
+        lto_ir_text = read(linked_ir, String)
+        lto_ir_text = sanitize_ir_for_julia(lto_ir_text)
+
+        filtered_ll_path = joinpath(output_dir, "$(output_name)_lto.ll")
+        write(filtered_ll_path, lto_ir_text)
+
+        # Now compile the filtered IR to bitcode
+        bitcode_file = joinpath(output_dir, "$(output_name)_lto.bc")
+        assemble_bitcode(filtered_ll_path, bitcode_file)
+    end
+
+    return linked_ir
+end
+
+"""
+    sanitize_ir_for_julia(ir_text::String) -> String
+
+Sanitize LLVM IR text for compatibility with Julia's internal LLVM.
+Strips LLVM 19+ attributes/instructions, debug metadata, and converts varargs
+function bodies to extern declarations (va_start/va_end can't be JIT-compiled).
+Uses `inlinehint` (not `alwaysinline`) to avoid recursive inliner explosion on
+large modules.
+
+This is the single source of truth for IR compatibility — used by both the C source
+LTO pipeline and the MLIR AOT thunks pipeline.
+"""
+function sanitize_ir_for_julia(ir_text::String)::String
+    ir_text = replace(ir_text, r"\bnoinline\b" => "")
+    ir_text = replace(ir_text, r"\boptnone\b" => "")
+    # Replace all attribute blocks: strip LLVM-version-sensitive keywords,
+    # but PRESERVE "target-cpu" and "target-features" for machine-specific JIT opts.
+    ir_text = replace(ir_text,
+        r"^(attributes\s+#\d+\s*=\s*\{)[^}]*(\})"m => function(m)
+            cpu_m  = match(r"\"target-cpu\"=\"([^\"]+)\"", m)
+            feat_m = match(r"\"target-features\"=\"([^\"]+)\"", m)
+            extras = String[]
+            cpu_m  !== nothing && push!(extras, "\"target-cpu\"=\"$(cpu_m[1])\"")
+            feat_m !== nothing && push!(extras, "\"target-features\"=\"$(feat_m[1])\"")
+            inner = isempty(extras) ? "inlinehint" : "inlinehint " * join(extras, " ")
+            hdr_end = findfirst('{', m)
+            "$(m[1:hdr_end]) $inner }"
+        end)
+    # --- LLVM 19+ instruction-level compatibility ---
+    ir_text = replace(ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
+    ir_text = replace(ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
+    ir_text = replace(ir_text, r"\binrange\([^)]*\)\s*" => "")
+    ir_text = replace(ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
+    ir_text = replace(ir_text, r"\bcaptures\([^)]*\)\s*" => "")
+    ir_text = replace(ir_text, r"\bdead_on_unwind\b\s*" => "")
+    ir_text = replace(ir_text, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
+    ir_text = replace(ir_text, r"\ballocptr\b\s*" => "")
+    ir_text = replace(ir_text, r"\bicmp samesign\b" => "icmp")
+    ir_text = replace(ir_text, r"\brange\([^)]*\)\s*" => "")
+    ir_text = replace(ir_text, r"\btrunc (nuw |nsw )+" => "trunc ")
+    ir_text = replace(ir_text, r"\b(uitofp|zext) nneg " => s"\1 ")
+    # Strip all metadata references (!dbg, !tbaa, !llvm.loop, etc.)
+    ir_text = replace(ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
+    # Strip numbered debug metadata entries
+    lines = split(ir_text, '\n')
+    filtered = filter(lines) do l
+        !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
+    end
+    filtered2 = filter(filtered) do l
+        !occursin(r"^![a-zA-Z].*=\s*!\{", l)
+    end
+    ir_text = join(filtered2, '\n')
+
+    # Remove varargs function bodies — va_start/va_end intrinsics can't be JIT-resolved.
+    # Convert to extern declarations so calls route through the shared library.
+    ir_text = replace(ir_text,
+        r"^(define\s[^\n]*\.\.\.[^\n]*\{)\n(.*?)\n(\})"ms => function(m)
+            sig_match = match(r"define\s+(.*?)\s+(@\w+)\s*\(([^)]*)\)", m)
+            if sig_match !== nothing
+                # Strip internal/private linkage — declarations can't have module-local linkage
+                linkage = replace(sig_match[1], r"\b(internal|private)\s*" => "")
+                "declare $(linkage) $(sig_match[2])($(sig_match[3]))"
+            else
+                m
+            end
+        end)
+    ir_text = replace(ir_text, r"^declare\s+void\s+@llvm\.va_(start|end)[^\n]*\n"m => "")
+
+    # Strip noalias scope intrinsics — they reference metadata we've already removed
+    ir_text = replace(ir_text, r"^\s*(tail\s+)?call void @llvm\.experimental\.noalias\.scope\.decl\(metadata ![0-9]+\)\s*$"m => "")
+
+    # Convert externally-visible global variable definitions to external declarations.
+    # Prevents "Duplicate definition" JIT errors when the shared library is also loaded
+    # via dlopen (both the .so and the LTO bitcode define the same globals).
+    # Private/internal globals (string constants, etc.) are kept as-is.
+    lines = split(ir_text, '\n')
+    for i in eachindex(lines)
+        m = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:<\{.*?\}>|\{.*?\}|\[\d+\s+x\s+\S+\]|\S+))\s+\S", lines[i])
+        if m !== nothing && !occursin(r"\b(?:private|internal)\b", m[2])
+            type_str = rstrip(m[4], ',')  # \S+ may capture trailing comma from "ptr, align 8"
+            lines[i] = "$(m[1])external $(m[3]) $(type_str)"
+        end
+    end
+    ir_text = join(lines, '\n')
+
+    return ir_text
+end
+
+"""
+Assemble LLVM IR text (.ll) to bitcode (.bc).
+Uses Julia's own libLLVM via the C API (LLVMParseIRInContext + LLVMWriteBitcodeToFile)
+to guarantee bitcode version compatibility with Base.llvmcall.
+Falls back to Clang_unified_jll, then system llvm-as.
+"""
+function assemble_bitcode(ll_path::String, bc_path::String)
+    # Primary: use Julia's own libLLVM directly — guaranteed version match
+    if _assemble_bitcode_libllvm(ll_path, bc_path)
+        return
+    end
+
+    # Fallback 1: Clang_unified_jll
+    try
+        Clang_mod = Base.require(Base.PkgId(Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
+        if isdefined(Clang_mod, :Clang_unified_jll)
+            clang_cmd = Clang_mod.Clang_unified_jll.clang()
+            cmd = `$(clang_cmd) -Wno-override-module -O0 -x ir -emit-llvm -c $ll_path -o $bc_path`
+            run(cmd)
+            if isfile(bc_path)
+                return
+            end
+        end
+    catch e
+        # Silently fallback
+    end
+
+    # Fallback 2: system llvm-as
+    (bc_out, bc_exit) = BuildBridge.execute("llvm-as", [ll_path, "-o", bc_path])
+    if bc_exit != 0
+        @warn "Failed to assemble bitcode for LTO: $bc_out"
+    end
+end
+
+# libLLVM path cached at module level
+const _LIBLLVM_PATH = Ref{String}("")
+
+function _get_libllvm_path()
+    if isempty(_LIBLLVM_PATH[])
+        for lib in Libdl.dllist()
+            if occursin("libLLVM", lib)
+                _LIBLLVM_PATH[] = lib
+                break
+            end
+        end
+    end
+    return _LIBLLVM_PATH[]
+end
+
+"""
+Parse LLVM IR text and write bitcode using Julia's own libLLVM C API.
+Returns true on success, false on failure.
+"""
+function _assemble_bitcode_libllvm(ll_path::String, bc_path::String)::Bool
+    libllvm = _get_libllvm_path()
+    isempty(libllvm) && return false
+
+    ir_text = read(ll_path, String)
+    ctx = C_NULL
+    mod_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+    msg_ptr = Ref{Ptr{UInt8}}(C_NULL)
+
+    try
+        ctx = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMContextCreate), Ptr{Cvoid}, ())
+        ctx == C_NULL && return false
+
+        # Create a memory buffer from the IR text
+        buf = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMCreateMemoryBufferWithMemoryRange),
+            Ptr{Cvoid},
+            (Ptr{UInt8}, Csize_t, Cstring, Cint),
+            ir_text, sizeof(ir_text), "lto_ir", 0)
+        buf == C_NULL && return false
+
+        # Parse the IR into a module
+        status = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMParseIRInContext),
+            Cint,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Ptr{Cvoid}}, Ref{Ptr{UInt8}}),
+            ctx, buf, mod_ptr, msg_ptr)
+        # Note: LLVMParseIRInContext takes ownership of buf — do not dispose it
+
+        if status != 0
+            if msg_ptr[] != C_NULL
+                errmsg = unsafe_string(msg_ptr[])
+                ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMDisposeMessage), Cvoid, (Ptr{UInt8},), msg_ptr[])
+                @warn "libLLVM IR parse failed: $(first(errmsg, 200))"
+            end
+            return false
+        end
+
+        # Write bitcode to file
+        rc = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMWriteBitcodeToFile),
+            Cint,
+            (Ptr{Cvoid}, Cstring),
+            mod_ptr[], bc_path)
+
+        if rc != 0
+            @warn "libLLVM failed to write bitcode to $bc_path"
+            return false
+        end
+
+        return isfile(bc_path)
+    catch e
+        @debug "libLLVM assemble_bitcode failed" exception=(e, catch_backtrace())
+        return false
+    finally
+        if mod_ptr[] != C_NULL
+            ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMDisposeModule), Cvoid, (Ptr{Cvoid},), mod_ptr[])
+        end
+        if ctx != C_NULL
+            ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMContextDispose), Cvoid, (Ptr{Cvoid},), ctx)
+        end
+    end
+end
+
+# =============================================================================
+# BINARY CREATION: IR → Shared Library / Executable
+# =============================================================================
+
+"""
+Create shared library from LLVM IR.
+Returns path to library file.
+"""
+function create_library(config::RepliBuildConfig, ir_file::String, lib_name::String="")
+    # Create shared library
+
+    if !isfile(ir_file)
+        error("IR file not found: $ir_file")
+    end
+
+    # Determine library name
+    if isempty(lib_name)
+        lib_name = get_library_name(config)
+    end
+
+    # Output path
+    output_dir = get_output_path(config)
+    mkpath(output_dir)
+    lib_path = joinpath(output_dir, lib_name)
+
+    # Compile IR to shared library
+    cmd_args = [
+        "-shared",  # Create shared library
+        "-fPIC",    # Position independent code
+        ir_file,
+        "-o", lib_path
+    ]
+
+    # Add library search paths
+    for dir in config.link.link_dirs
+        push!(cmd_args, "-L$dir")
+    end
+
+    # Add link libraries
+    for lib in config.link.link_libraries
+        push!(cmd_args, "-l$lib")
+    end
+
+    compiler = config.wrap.language == :c ? "clang" : "clang++"
+    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+
+    if exitcode != 0
+        error("Library creation failed: $output")
+    end
+
+    if !isfile(lib_path)
+        error("Library file not created: $lib_path")
+    end
+
+    size_mb = round(filesize(lib_path) / 1024 / 1024, digits=2)
+    println("  link: $lib_name ($size_mb MB)")
+
+    return lib_path
+end
+
+"""
+Create executable from LLVM IR.
+Returns path to executable file.
+"""
+function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::String,
+                          link_libraries::Vector{String}=String[],
+                          lib_dirs::Vector{String}=String[])
+    # Create executable
+
+    if !isfile(ir_file)
+        error("IR file not found: $ir_file")
+    end
+
+    # Output path
+    output_dir = get_output_path(config)
+    mkpath(output_dir)
+    exe_path = joinpath(output_dir, exe_name)
+
+    # Compile IR to executable
+    cmd_args = [ir_file, "-o", exe_path]
+
+    # Add library directories
+    for dir in lib_dirs
+        push!(cmd_args, "-L$dir")
+    end
+
+    # Add link libraries (config + additional)
+    all_libs = vcat(config.link.link_libraries, link_libraries)
+    for lib in all_libs
+        push!(cmd_args, "-l$lib")
+    end
+
+    compiler = config.wrap.language == :c ? "clang" : "clang++"
+    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+
+    if exitcode != 0
+        error("Executable creation failed: $output")
+    end
+
+    if !isfile(exe_path)
+        error("Executable file not created: $exe_path")
+    end
+
+    # Make executable
+    chmod(exe_path, 0o755)
+
+    size_kb = round(filesize(exe_path) / 1024, digits=1)
+    println("  link: $exe_name ($size_kb KB)")
+
+    return exe_path
+end
+
+# =============================================================================
+# HIGH-LEVEL COMPILATION
+# =============================================================================
+
+"""
+Auto-detect STL headers needed for template instantiations.
+"""
+function _auto_detect_stl_headers(templates::Vector{String})::Vector{String}
+    headers = Set{String}()
+    for t in templates
+        if startswith(t, "std::vector")
+            push!(headers, "<vector>")
+        elseif startswith(t, "std::basic_string") || startswith(t, "std::string")
+            push!(headers, "<string>")
+        elseif startswith(t, "std::map")
+            push!(headers, "<map>")
+        elseif startswith(t, "std::unordered_map")
+            push!(headers, "<unordered_map>")
+        elseif startswith(t, "std::set")
+            push!(headers, "<set>")
+        elseif startswith(t, "std::unordered_set")
+            push!(headers, "<unordered_set>")
+        elseif startswith(t, "std::deque")
+            push!(headers, "<deque>")
+        elseif startswith(t, "std::list")
+            push!(headers, "<list>")
+        end
+    end
+    return collect(headers)
+end
+
+"""
+Generate a dummy C++ file to explicitly instantiate requested templates
+so they appear in the DWARF metadata.
+"""
+function generate_template_instantiations(config::RepliBuildConfig, cpp_files::Vector{String})::Vector{String}
+    if isempty(config.types.templates)
+        return cpp_files
+    end
+
+    cache_dir = get_cache_path(config)
+    mkpath(cache_dir)
+    dummy_file = joinpath(cache_dir, "replibuild_templates.cpp")
+
+    # Merge user-specified headers with auto-detected STL headers
+    auto_headers = _auto_detect_stl_headers(config.types.templates)
+    all_headers = unique(vcat(config.types.template_headers, auto_headers))
+
+    # STL typedefs that must be expanded to their underlying template class
+    # for explicit instantiation to be valid C++.
+    stl_typedef_expansions = Dict{String,String}(
+        "std::string"  => "std::basic_string<char>",
+        "std::wstring" => "std::basic_string<wchar_t>",
+        "std::u16string" => "std::basic_string<char16_t>",
+        "std::u32string" => "std::basic_string<char32_t>",
+    )
+
+    open(dummy_file, "w") do io
+        println(io, "// Auto-generated by RepliBuild to force template instantiations")
+        for header in all_headers
+            if startswith(header, "<") || startswith(header, "\\\"")
+                println(io, "#include $header")
+            else
+                println(io, "#include \"$header\"")
+            end
+        end
+        println(io, "")
+        for t in config.types.templates
+            instantiation_type = get(stl_typedef_expansions, t, t)
+            println(io, "template class $instantiation_type;")
+        end
+    end
+
+    return vcat(cpp_files, [dummy_file])
+end
+
+"""
+Generate a C/C++ shim file to instantiate requested macros as typed functions
+so they appear in the DWARF metadata and can be wrapped.
+"""
+function generate_macro_shims(config::RepliBuildConfig, cpp_files::Vector{String})::Vector{String}
+    if isempty(config.wrap.macros)
+        return cpp_files
+    end
+
+    cache_dir = get_cache_path(config)
+    mkpath(cache_dir)
+    ext = config.wrap.language == :c ? "c" : "cpp"
+    dummy_file = joinpath(cache_dir, "replibuild_shims.$ext")
+
+    open(dummy_file, "w") do io
+        println(io, "// Auto-generated by RepliBuild to wrap macros into typed functions")
+        
+        for header in config.wrap.shim_headers
+            if startswith(header, "<") || startswith(header, "\\\"")
+                println(io, "#include $header")
+            else
+                println(io, "#include \"$header\"")
+            end
+        end
+        println(io, "")
+
+        for (macro_name, def) in config.wrap.macros
+            ret_type = get(def, "ret", "void")
+            args = get(def, "args", String[])
+            
+            # Create parameter string (e.g. "void* arg0, const char* arg1")
+            param_strs = String[]
+            arg_names = String[]
+            for (i, arg_t) in enumerate(args)
+                pname = "arg$(i-1)"
+                push!(param_strs, "$arg_t $pname")
+                push!(arg_names, pname)
+            end
+            
+            sig = "$ret_type replibuild_shim_$macro_name($(join(param_strs, ", ")))"
+            println(io, "$sig {")
+            
+            call_str = "$macro_name($(join(arg_names, ", ")))"
+            if ret_type == "void"
+                println(io, "    $call_str;")
+            else
+                println(io, "    return $call_str;")
+            end
+            println(io, "}")
+            println(io, "")
+        end
+    end
+
+    return vcat(cpp_files, [dummy_file])
+end
+
+# =============================================================================
+# STL METHOD SYMBOL EXTRACTION
+# =============================================================================
+
+"""
+Normalize an STL container type by stripping default allocator arguments.
+E.g., "std::vector<int, std::allocator<int> >" -> "std::vector<int>"
+Handles extra spaces that nm -C outputs (e.g., "allocator<int> >").
+Also strips __cxx11:: namespace prefix.
+"""
+function _normalize_stl_type(demangled_type::String)::String
+    t = strip(demangled_type)
+
+    # Remove __cxx11:: namespace
+    t = replace(t, "std::__cxx11::" => "std::")
+
+    # Normalize spaces around angle brackets for consistent matching
+    # nm -C outputs "allocator<int> >" with space before final >
+    # Collapse "  >" to ">"
+    while contains(t, " >")
+        t = replace(t, " >" => ">")
+    end
+
+    # std::vector<T, std::allocator<T>> -> std::vector<T>
+    m = match(r"^std::vector<(.+),\s*std::allocator<.*>>$", t)
+    if !isnothing(m)
+        elem = strip(m.captures[1])
+        # Remove trailing comma if present
+        elem = rstrip(elem, [',', ' '])
+        return "std::vector<$elem>"
+    end
+
+    # std::basic_string<char, std::char_traits<char>, std::allocator<char>>
+    if startswith(t, "std::basic_string<char")
+        return "std::basic_string<char>"
+    end
+
+    # std::map<K, V, std::less<K>, std::allocator<...>>
+    m = match(r"^std::map<(.+),\s*std::less<.*>,\s*std::allocator<.*>>$", t)
+    if !isnothing(m)
+        inner = strip(m.captures[1])
+        return "std::map<$inner>"
+    end
+
+    # std::unordered_map<K, V, std::hash<K>, std::equal_to<K>, std::allocator<...>>
+    m = match(r"^std::unordered_map<(.+),\s*std::hash<.*>,\s*std::equal_to<.*>,\s*std::allocator<.*>>$", t)
+    if !isnothing(m)
+        inner = strip(m.captures[1])
+        return "std::unordered_map<$inner>"
+    end
+
+    return t
+end
+
+"""
+Classify an STL method from its demangled name.
+Returns (method_name, is_const) or nothing if not a recognized method.
+"""
+function _classify_stl_method(method_sig::String, container_type::String="")::Union{Tuple{String,Bool}, Nothing}
+    sig = strip(method_sig)
+    is_map = startswith(container_type, "std::map") || startswith(container_type, "std::unordered_map")
+
+    # Constructor: ClassName(...)  or ClassName()
+    # The method_sig is just the part after "::", e.g., "vector()" or "basic_string(char const*)"
+    # Check if it looks like a constructor (starts with the class name part)
+    if occursin(r"^(vector|basic_string|map|unordered_map|set|deque|list)\(", sig)
+        return ("constructor", false)
+    end
+
+    # Destructor: ~ClassName()
+    if startswith(sig, "~")
+        return ("destructor", false)
+    end
+
+    # Known methods
+    is_const = endswith(sig, " const") || endswith(sig, ") const")
+
+    if startswith(sig, "size(")
+        return ("size", true)
+    elseif startswith(sig, "data(")
+        return ("data", is_const)
+    elseif startswith(sig, "push_back(")
+        return ("push_back", false)
+    elseif startswith(sig, "operator[](")
+        # Map operator[] takes key by const ref (ptr), vector takes size_t (i64)
+        return (is_map ? "map_subscript" : "subscript", is_const)
+    elseif startswith(sig, "clear(")
+        return ("clear", false)
+    elseif startswith(sig, "reserve(")
+        return ("reserve", false)
+    elseif startswith(sig, "resize(")
+        return ("resize", false)
+    elseif startswith(sig, "empty(")
+        return ("empty", true)
+    elseif startswith(sig, "begin(")
+        return ("begin", is_const)
+    elseif startswith(sig, "end(")
+        return ("end_", is_const)
+    elseif startswith(sig, "c_str(")
+        return ("c_str", true)
+    elseif startswith(sig, "length(")
+        return ("length", true)
+    elseif startswith(sig, "append(")
+        return ("append", false)
+    elseif startswith(sig, "capacity(")
+        return ("capacity", true)
+    elseif startswith(sig, "back(")
+        return ("back", is_const)
+    elseif startswith(sig, "front(")
+        return ("front", is_const)
+    elseif startswith(sig, "pop_back(")
+        return ("pop_back", false)
+    elseif startswith(sig, "erase(")
+        return ("erase", false)
+    elseif startswith(sig, "insert(")
+        return ("insert", false)
+    elseif startswith(sig, "find(")
+        return ("find", is_const)
+    elseif startswith(sig, "count(")
+        return ("count", true)
+    elseif startswith(sig, "at(")
+        # Map at() takes key by const ref (ptr), vector takes size_t (i64)
+        return (is_map ? "map_at" : "at", is_const)
+    end
+
+    return nothing
+end
+
+"""
+Extract STL method symbols from the compiled binary.
+Uses nm to find mangled names of template-instantiated STL methods.
+Returns Dict mapping normalized container type -> vector of method info dicts.
+"""
+function extract_stl_method_symbols(binary_path::String, templates::Vector{String})::Dict{String,Any}
+    if isempty(templates)
+        return Dict{String,Any}()
+    end
+
+    # Run nm to get mangled names (include W=weak symbols for template instantiations)
+    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+    if exitcode1 != 0
+        @warn "nm failed for STL symbol extraction"
+        return Dict{String,Any}()
+    end
+
+    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    if exitcode2 != 0
+        @warn "nm demangled failed for STL symbol extraction"
+        return Dict{String,Any}()
+    end
+
+    # Build address -> mangled mapping (include T and W symbol types)
+    address_to_mangled = Dict{String,String}()
+    address_to_type = Dict{String,String}()
+    for line in split(mangled_output, '\n')
+        line = strip(line)
+        isempty(line) && continue
+        parts = split(line)
+        if length(parts) >= 3 && parts[2] in ("T", "W", "t", "w")
+            address_to_mangled[parts[1]] = parts[3]
+            address_to_type[parts[1]] = parts[2]
+        end
+    end
+
+    # Build normalized template set for matching
+    template_set = Set{String}()
+    for t in templates
+        push!(template_set, t)
+        # Also add common aliases
+        if t == "std::string"
+            push!(template_set, "std::basic_string<char>")
+        elseif t == "std::basic_string<char>"
+            push!(template_set, "std::string")
+        end
+    end
+
+    # Debug: print what we're looking for
+    @debug "STL template set: $template_set"
+
+    stl_methods = Dict{String,Any}()
+
+    for line in split(demangled_output, '\n')
+        line = strip(line)
+        isempty(line) && continue
+        parts = split(line)
+        length(parts) >= 3 || continue
+
+        address = parts[1]
+        sym_type = parts[2]
+        demangled = join(parts[3:end], " ")
+
+        # Only consider T (text) and W (weak) symbols
+        sym_type in ("T", "W", "t", "w") || continue
+
+        # Match pattern: ContainerType::MethodSignature
+        # Need bracket-aware split on "::" - find the last "::" that separates class from method
+        # For "std::vector<int, std::allocator<int>>::push_back(int const&)"
+        # We want: class = "std::vector<int, std::allocator<int>>", method = "push_back(int const&)"
+
+        # Find "::" separators that are NOT inside angle brackets
+        depth = 0
+        last_sep = -1
+        for i in eachindex(demangled)
+            c = demangled[i]
+            if c == '<'
+                depth += 1
+            elseif c == '>'
+                depth -= 1
+            elseif depth == 0 && c == ':' && i < lastindex(demangled) && demangled[nextind(demangled, i)] == ':'
+                last_sep = i
+            end
+        end
+
+        last_sep > 0 || continue
+
+        container_full = demangled[1:last_sep-1]
+        method_sig = demangled[last_sep+2:end]
+
+        # Normalize the container type
+        container_normalized = _normalize_stl_type(container_full)
+
+        # Check if this container matches any configured template
+        container_normalized in template_set || continue
+
+        # Classify the method
+        classification = _classify_stl_method(method_sig, container_normalized)
+        isnothing(classification) && continue
+
+        (method_name, is_const) = classification
+
+        # Get mangled name
+        mangled = get(address_to_mangled, address, "")
+        isempty(mangled) && continue
+
+        # For constructors/destructors, accept C1/C2 and D1/D2 variants
+        # (no filtering — we'll deduplicate later by keeping the first match per method)
+        if method_name == "destructor"
+            # Skip D0 (deleting destructor) — it calls operator delete which we don't want
+            if occursin("D0", mangled)
+                continue
+            end
+        end
+
+        # Store (deduplicate: keep first match per method name per container)
+        if !haskey(stl_methods, container_normalized)
+            stl_methods[container_normalized] = Dict{String,Any}[]
+        end
+
+        # Check if we already have this method (dedup overloads — keep first)
+        existing_methods = Set(get(m, "method", "") for m in stl_methods[container_normalized])
+        if method_name in existing_methods
+            continue
+        end
+
+        push!(stl_methods[container_normalized], Dict{String,Any}(
+            "mangled" => mangled,
+            "demangled" => demangled,
+            "method" => method_name,
+            "is_const" => is_const,
+            "full_signature" => method_sig
+        ))
+    end
+
+    return stl_methods
+end
+
+"""
+Complete compilation workflow: discover sources, compile, link, create binary.
+This is the main entry point for building a project.
+"""
+function compile_project(config::RepliBuildConfig)
+    println("RepliBuild | $(config.project.name)")
+
+    start_time = time()
+
+    # Fast path: check project-level content hash cache
+    if is_project_cache_valid(config)
+        output_dir = get_output_path(config)
+        lib_name = get_library_name(config)
+        library_path = joinpath(output_dir, lib_name)
+        elapsed = round(time() - start_time, digits=4)
+        println("  cache: project unchanged ($(elapsed)s)")
+        return library_path
+    end
+
+    # Get source files (from config or discovery)
+    cpp_files = get_source_files(config)
+
+    # Generate template instantiations
+    cpp_files = generate_template_instantiations(config, cpp_files)
+
+    # Generate macro shims
+    cpp_files = generate_macro_shims(config, cpp_files)
+
+    if isempty(cpp_files)
+        @warn "No source files found in config"
+        println("Run discover() first to find C++ sources")
+        return nothing
+    end
+
+    println("  sources: $(length(cpp_files))  includes: $(length(get_include_dirs(config)))")
+
+    # Step 1: Compile C++ → IR
+    ir_files = compile_to_ir(config, cpp_files)
+
+    # Step 2: Link & optimize IR
+    output_name = config.project.name
+    linked_ir = link_optimize_ir(config, ir_files, output_name)
+
+    # Step 3: Create binary (library or executable)
+    binary_path = if config.binary.type == :executable
+        create_executable(config, linked_ir, config.project.name)
+    else
+        create_library(config, linked_ir)
+    end
+
+    elapsed = round(time() - start_time, digits=2)
+
+    # Step 4: Extract and save compilation metadata
+    metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
+
+    # Step 5: Save project hash for future cache hits
+    save_project_hash(config)
+
+    println("  done: $(elapsed)s")
+
+    return binary_path
+end
+
+# =============================================================================
+# METADATA EXTRACTION - The Key to Automatic Wrapping
+# =============================================================================
+
+"""
+    _scan_noexcept_functions(source_files, include_dirs) -> Set{String}
+
+Scan C++ source and header files for function declarations containing the
+`noexcept` specifier.  Returns the set of function names that are noexcept.
+
+DWARF doesn't emit a DW_AT_noexcept attribute, so we detect it from source.
+We look for patterns like `func_name(...) noexcept` in both source files
+and any headers found in include directories.
+"""
+function _scan_noexcept_functions(source_files::Vector{String},
+                                  include_dirs)::Set{String}
+    noexcept_names = Set{String}()
+
+    # Collect all files to scan: source files + headers in include dirs
+    files_to_scan = copy(source_files)
+    for dir in include_dirs
+        isdir(dir) || continue
+        for f in readdir(dir, join=true)
+            isfile(f) || continue
+            if endswith(f, ".h") || endswith(f, ".hpp") || endswith(f, ".hxx")
+                push!(files_to_scan, f)
+            end
+        end
+    end
+
+    # Regex: function_name followed by ( ... ) and then noexcept
+    # Handles multi-line by joining continuation lines
+    noexcept_re = r"(\w+)\s*\([^)]*\)\s*(?:const\s*)?noexcept\b"
+
+    for filepath in files_to_scan
+        isfile(filepath) || continue
+        try
+            content = read(filepath, String)
+            for m in eachmatch(noexcept_re, content)
+                push!(noexcept_names, m.captures[1])
+            end
+        catch
+            # Ignore unreadable files
+        end
+    end
+
+    return noexcept_names
+end
+
+"""
+Extract symbol information from compiled binary using nm.
+Returns vector of symbol dictionaries with mangled/demangled names.
+"""
+function extract_symbols_from_binary(binary_path::String)
+    # Run nm WITHOUT demangling to get mangled names
+    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+    if exitcode1 != 0
+        @warn "nm command failed: $mangled_output"
+        return Dict{String,Any}[]
+    end
+
+    # Run nm WITH demangling to get human-readable names
+    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    if exitcode2 != 0
+        @warn "nm demangled command failed: $demangled_output"
+        return Dict{String,Any}[]
+    end
+
+    # Build address → mangled mapping
+    address_to_mangled = Dict{String,String}()
+    for line in split(mangled_output, '\n')
+        line = strip(line)
+        if isempty(line)
+            continue
+        end
+        parts = split(line)
+        if length(parts) >= 3 && parts[2] == "T"
+            address = parts[1]
+            mangled = parts[3]
+            address_to_mangled[address] = mangled
+        end
+    end
+
+    # Build symbols array with both mangled and demangled
+    symbols = Dict{String,Any}[]
+    for line in split(demangled_output, '\n')
+        line = strip(line)
+        if isempty(line)
+            continue
+        end
+
+        parts = split(line)
+        if length(parts) >= 3
+            address = parts[1]
+            symbol_type = parts[2]
+            demangled_name = join(parts[3:end], " ")
+
+            # Only export T (text/code) symbols
+            if symbol_type == "T"
+                mangled_name = get(address_to_mangled, address, demangled_name)
+
+                push!(symbols, Dict(
+                    "mangled" => mangled_name,
+                    "demangled" => demangled_name,
+                    "type" => symbol_type,
+                    "address" => address
+                ))
+            end
+        end
+    end
+
+    return symbols
+end
+
+"""
+Extract mangled symbol name from nm output.
+"""
+function extract_mangled_name(nm_output::String, demangled::String)::String
+    # Try to find the mangled version
+    for line in split(nm_output, '\n')
+        if contains(line, " T ")
+            parts = split(strip(line))
+            if length(parts) >= 3
+                # parts[3] is the mangled name
+                return parts[3]
+            end
+        end
+    end
+    return demangled  # Fallback
+end
+
+# =============================================================================
+# DWARF DEBUG INFO PARSING - Type Extraction
+# =============================================================================
+
+"""
+Comprehensive C/C++ type to Julia type mapping.
+Handles all standard C/C++ types including sized integers, pointers, and qualifiers.
+"""
+function dwarf_type_to_julia(c_type::AbstractString)::String
+    # Clean up type (remove extra spaces, trailing qualifiers)
+    c_type = strip(c_type)
+
+    # Map based on comprehensive C/C++ type system
+    type_map = Dict(
+        # Void
+        "void" => "Cvoid",
+
+        # Boolean
+        "bool" => "Bool",
+        "_Bool" => "Bool",
+
+        # Character types
+        "char" => "Cchar",
+        "signed char" => "Cchar",
+        "unsigned char" => "Cuchar",
+        "wchar_t" => "Cwchar_t",
+        "char16_t" => "UInt16",
+        "char32_t" => "UInt32",
+
+        # Standard integers (platform-dependent sizes)
+        "short" => "Cshort",
+        "short int" => "Cshort",
+        "signed short" => "Cshort",
+        "signed short int" => "Cshort",
+        "unsigned short" => "Cushort",
+        "unsigned short int" => "Cushort",
+
+        "int" => "Cint",
+        "signed int" => "Cint",
+        "signed" => "Cint",
+        "unsigned int" => "Cuint",
+        "unsigned" => "Cuint",
+
+        "long" => "Clong",
+        "long int" => "Clong",
+        "signed long" => "Clong",
+        "signed long int" => "Clong",
+        "unsigned long" => "Culong",
+        "unsigned long int" => "Culong",
+
+        "long long" => "Clonglong",
+        "long long int" => "Clonglong",
+        "signed long long" => "Clonglong",
+        "signed long long int" => "Clonglong",
+        "unsigned long long" => "Culonglong",
+        "unsigned long long int" => "Culonglong",
+
+        # Fixed-width integers (stdint.h)
+        "int8_t" => "Int8",
+        "int16_t" => "Int16",
+        "int32_t" => "Int32",
+        "int64_t" => "Int64",
+        "uint8_t" => "UInt8",
+        "uint16_t" => "UInt16",
+        "uint32_t" => "UInt32",
+        "uint64_t" => "UInt64",
+
+        # Floating point
+        "float" => "Cfloat",
+        "double" => "Cdouble",
+        "long double" => "Float64",  # Julia doesn't have 80-bit float, use Float64
+
+        # Size types
+        "size_t" => "Csize_t",
+        "ssize_t" => "Cssize_t",
+        "ptrdiff_t" => "Cptrdiff_t",
+        "intptr_t" => "Cintptr_t",
+        "uintptr_t" => "Cuintptr_t",
+
+        # Time types
+        "time_t" => "Ctime_t",
+
+        # Special types
+        "__int128" => "Int128",
+        "__uint128_t" => "UInt128",
+
+        # C11 _Complex types
+        "_Complex float" => "ComplexF32",
+        "_Complex double" => "ComplexF64",
+        "complex float" => "ComplexF32",
+        "complex double" => "ComplexF64",
+        "float _Complex" => "ComplexF32",
+        "double _Complex" => "ComplexF64",
+
+    )
+
+    # Direct match
+    if haskey(type_map, c_type)
+        return type_map[c_type]
+    end
+
+    # Handle pointer types (T*)
+    if endswith(c_type, "*")
+        # Strip pointer and get base type
+        base_type = strip(replace(c_type, r"\*$" => ""))
+        base_type = replace(base_type, r"\bconst\b" => "")
+        base_type = replace(base_type, r"\bvolatile\b" => "")
+        base_type = strip(base_type)
+
+        # Special case: char* / signed char* / i8* → Cstring (null-terminated C strings)
+        if base_type == "char" || base_type == "signed char" || base_type == "i8"
+            return "Cstring"
+        end
+
+        # void* → Ptr{Cvoid}
+        if base_type == "void" || isempty(base_type)
+            return "Ptr{Cvoid}"
+        end
+
+        # Nested pointers: T** → Ptr{Ptr{...}}
+        if endswith(base_type, "*")
+            inner = dwarf_type_to_julia(base_type)
+            return "Ptr{$inner}"
+        end
+
+        # Resolve base type through the type map
+        julia_base = dwarf_type_to_julia(base_type)
+        if julia_base != "Any"
+            return "Ptr{$julia_base}"
+        end
+
+        # Unknown base type — keep as Ptr{Cvoid}
+        return "Ptr{Cvoid}"
+    end
+
+    # Handle reference types (T&)
+    if endswith(c_type, "&")
+        base_type = strip(replace(c_type, r"&$" => ""))
+        base_type = replace(base_type, r"\bconst\b" => "")
+        base_type = replace(base_type, r"\bvolatile\b" => "")
+        base_type = strip(base_type)
+
+        julia_base = dwarf_type_to_julia(base_type)
+        if julia_base != "Any"
+            return "Ref{$julia_base}"
+        end
+        return "Ref{Cvoid}"
+    end
+
+    # Handle const/volatile qualifiers
+    if startswith(c_type, "const ") || startswith(c_type, "volatile ")
+        clean_type = replace(c_type, "const " => "")
+        clean_type = replace(clean_type, "volatile " => "")
+        return dwarf_type_to_julia(strip(clean_type))
+    end
+
+    # Unknown type - return Any for safety
+    return "Any"
+end
+
+"""
+Get type size in bytes from C/C++ type name.
+"""
+function get_type_size(c_type::AbstractString)::Int
+    # Strip cv-qualifiers for lookup
+    stripped = replace(strip(c_type), r"\b(const|volatile|mutable)\b\s*" => "")
+    stripped = strip(stripped)
+    size_map = Dict(
+        "void" => 0,
+        "bool" => 1, "_Bool" => 1,
+        "char" => 1, "signed char" => 1, "unsigned char" => 1,
+        "int8_t" => 1, "uint8_t" => 1,
+        "short" => 2, "unsigned short" => 2,
+        "int16_t" => 2, "uint16_t" => 2,
+        "int" => 4, "unsigned int" => 4,
+        "int32_t" => 4, "uint32_t" => 4,
+        "long" => 8, "unsigned long" => 8,  # x86_64
+        "long long" => 8, "unsigned long long" => 8,
+        "int64_t" => 8, "uint64_t" => 8,
+        "float" => 4,
+        "double" => 8,
+        "long double" => 16,  # x86_64 extended precision
+        "size_t" => 8, "ssize_t" => 8,  # x86_64
+        "ptrdiff_t" => 8,
+        "intptr_t" => 8, "uintptr_t" => 8,
+        "wchar_t" => 4,
+        "__int128" => 16, "__uint128_t" => 16,
+    )
+
+    # Check for pointers/references (always 8 bytes on x86_64)
+    if endswith(stripped, "*") || endswith(stripped, "&")
+        return 8
+    end
+
+    return get(size_map, stripped, 0)
+end
+
+"""
+Extract return types and struct definitions from DWARF debug info.
+Returns: (return_types_dict, struct_defs_dict)
+  - return_types: Dict{mangled_name => {c_type, julia_type, size}}
+  - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
+"""
+function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
+    # Parse DWARF debug info
+
+    # Extract DWARF debug info using readelf (parser is written for GNU readelf format).
+    # Prefer system GNU readelf, then llvm-dwarfdump as last resort (macOS).
+    output = ""
+    exitcode = 1
+
+    # Try system GNU readelf first (Linux) — parser expects this output format
+    readelf_tool = try
+        (_, ec) = BuildBridge.execute("readelf", ["--version"])
+        ec == 0 ? "readelf" : ""
+    catch
+        ""
+    end
+
+    if !isempty(readelf_tool)
+        (output, exitcode) = BuildBridge.execute(readelf_tool, ["--debug-dump=info", binary_path])
+    end
+
+    # Fallback: llvm-dwarfdump (macOS, or when readelf unavailable)
+    if exitcode != 0
+        dwarfdump_tool = LLVMEnvironment.has_tool("llvm-dwarfdump") ? LLVMEnvironment.get_tool("llvm-dwarfdump") : ""
+        if isempty(dwarfdump_tool)
+            dwarfdump_tool = try
+                (_, ec) = BuildBridge.execute("llvm-dwarfdump", ["--version"])
+                ec == 0 ? "llvm-dwarfdump" : ""
+            catch
+                ""
+            end
+        end
+        if !isempty(dwarfdump_tool)
+            (output, exitcode) = BuildBridge.execute(dwarfdump_tool, ["--debug-info", binary_path])
+        end
+    end
+
+    if exitcode != 0
+        @warn "Failed to read DWARF info: $output"
+        return (Dict{String,Dict{String,Any}}(), Dict{String,Dict{String,Any}}(), Dict{String,Any}(), Dict{String,String}())
+    end
+
+    return_types = Dict{String,Dict{String,Any}}()
+
+    # Parse DWARF output to extract type information
+    # Strategy: Find DW_TAG_subprogram entries, extract linkage_name and return type
+
+    current_function = nothing
+    current_linkage_name = nothing
+    type_refs = Dict{String,Any}()  # offset => type_name (String) or type_info (Dict)
+
+    # First pass: Build type reference table
+    # We need to handle: base types, pointer types, const types, reference types
+    offset_to_kind = Dict{String,Symbol}()  # Track what kind each offset is
+    current_type_offset = nothing  # Track current type/struct being processed
+    current_struct_context = nothing  # Track parent struct for members
+    current_subroutine_offset = nothing  # Track current subroutine type for parameters
+
+    # Flush a completed member into its parent struct's members array.
+    # Called on each new DW_TAG_* to ensure all attributes (name, type, offset)
+    # are collected before the member dict is copied to the parent.
+    function flush_pending_member()
+        if !haskey(type_refs, "_pending_member_offset")
+            return
+        end
+        mo = type_refs["_pending_member_offset"]
+        if haskey(type_refs, mo) && isa(type_refs[mo], Dict) && get(type_refs[mo], "kind", "") == "member"
+            mi = type_refs[mo]
+            parent_off = get(mi, "parent", nothing)
+            if !isnothing(parent_off) && haskey(type_refs, parent_off) &&
+               isa(type_refs[parent_off], Dict) && haskey(type_refs[parent_off], "members")
+                if !isnothing(mi["name"]) && !isnothing(mi["type"])
+                    existing_names = [m["name"] for m in type_refs[parent_off]["members"]]
+                    if !(mi["name"] in existing_names)
+                        member_dict = Dict{String, Any}(
+                            "name" => mi["name"],
+                            "type" => mi["type"],
+                            "offset" => mi["offset"]
+                        )
+                        for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy"]
+                            if haskey(mi, bf_key)
+                                member_dict[bf_key] = mi[bf_key]
+                            end
+                        end
+                        push!(type_refs[parent_off]["members"], member_dict)
+                    end
+                end
+            end
+        end
+        delete!(type_refs, "_pending_member_offset")
+    end
+
+    for line in split(output, '\n')
+        line = strip(line)
+
+        # Track ANY tag to avoid attribute pollution
+        # Tags have format: <level><offset>: Abbrev Number: N (DW_TAG_*)
+        if contains(line, "DW_TAG_")
+            # Flush any pending member before starting a new tag
+            flush_pending_member()
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                tag_offset = "0x" * offset_match.captures[1]
+                type_refs["last_tag_offset"] = tag_offset  # Always update for ANY tag
+            end
+        end
+
+        # Extract base type definitions (DW_TAG_base_type)
+        # Example: <1><27>: Abbrev Number: 2 (DW_TAG_base_type)
+        if contains(line, "DW_TAG_base_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = "unknown"
+                offset_to_kind[current_type_offset] = :base
+            end
+        end
+
+        # Extract pointer type definitions (DW_TAG_pointer_type)
+        # Example: <1><9f6>: Abbrev Number: 40 (DW_TAG_pointer_type)
+        #          <9f7>   DW_AT_type        : <0x41>
+        if contains(line, "DW_TAG_pointer_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "pointer", "target" => nothing)
+                offset_to_kind[current_type_offset] = :pointer
+            end
+        end
+
+        # Extract const type definitions (DW_TAG_const_type)
+        # Example: <1><41>: Abbrev Number: 5 (DW_TAG_const_type)
+        #          <42>   DW_AT_type        : <0x46>
+        if contains(line, "DW_TAG_const_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "const", "target" => nothing)
+                offset_to_kind[current_type_offset] = :const
+            end
+        end
+
+        # Extract reference type definitions (DW_TAG_reference_type)
+        if contains(line, "DW_TAG_reference_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "reference", "target" => nothing)
+                offset_to_kind[current_type_offset] = :reference
+            end
+        end
+
+        # Extract struct type definitions (DW_TAG_structure_type)
+        # Example: <1><1f5f3e>: DW_TAG_structure_type
+        #          DW_AT_name: "Vector3d"
+        #          DW_AT_byte_size: 0x18
+        if contains(line, "DW_TAG_structure_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                current_struct_context = current_type_offset  # Set context for members
+                # Store struct info as a dict with members array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "struct",
+                    "name" => "unknown_struct",
+                    "members" => []
+                )
+                offset_to_kind[current_type_offset] = :struct
+            end
+        end
+
+        # Extract union type definitions (DW_TAG_union_type)
+        if contains(line, "DW_TAG_union_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                current_struct_context = current_type_offset  # Set context for members
+                # Store union info as a dict with members array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "union",
+                    "name" => "unknown_union",
+                    "members" => []
+                )
+                offset_to_kind[current_type_offset] = :struct  # Treat as struct for generic handling
+            end
+        end
+
+        # Extract class type definitions (DW_TAG_class_type)
+        # Similar to struct, C++ distinguishes but for our purposes treat the same
+        if contains(line, "DW_TAG_class_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                current_struct_context = current_type_offset  # Set context for members
+                # Store class info as a dict with members array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "class",
+                    "name" => "unknown_class",
+                    "members" => []
+                )
+                offset_to_kind[current_type_offset] = :class
+            end
+        end
+
+        # Extract enum type definitions (DW_TAG_enumeration_type)
+        # Example: <1><abc>: DW_TAG_enumeration_type
+        #          DW_AT_name: "Color"
+        #          DW_AT_type: <0x27>  (underlying type, e.g., int)
+        #          DW_AT_byte_size: 0x04
+        if contains(line, "DW_TAG_enumeration_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                current_struct_context = current_type_offset  # Use for enumerators
+                # Store enum info as a dict with enumerators array
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "enum",
+                    "name" => "unknown_enum",
+                    "underlying_type" => nothing,
+                    "byte_size" => nothing,
+                    "enumerators" => []
+                )
+                offset_to_kind[current_type_offset] = :enum
+            end
+        end
+
+        # Extract array type definitions (DW_TAG_array_type)
+        # Example: <1><def>: DW_TAG_array_type
+        #          DW_AT_type: <0x27>  (element type)
+        if contains(line, "DW_TAG_array_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                # Store array info with element type and dimensions
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "array",
+                    "element_type" => nothing,
+                    "dimensions" => []
+                )
+                offset_to_kind[current_type_offset] = :array
+            end
+        end
+
+        # Extract array subrange (dimensions)
+        # Example: <2><xyz>: DW_TAG_subrange_type
+        #          DW_AT_type: <0x123>  (index type)
+        #          DW_AT_upper_bound: 8  (for array[9])
+        if contains(line, "DW_TAG_subrange_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                subrange_offset = "0x" * offset_match.captures[1]
+                type_refs[subrange_offset] = Dict{String,Any}(
+                    "kind" => "subrange",
+                    "upper_bound" => nothing,
+                    "parent" => current_type_offset  # Link to parent array
+                )
+                offset_to_kind[subrange_offset] = :subrange
+            end
+        end
+
+        # Extract enumerator (enum member)
+        # Example: <2><ghi>: DW_TAG_enumerator
+        #          DW_AT_name: "Red"
+        #          DW_AT_const_value: 0
+        if contains(line, "DW_TAG_enumerator")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                enumerator_offset = "0x" * offset_match.captures[1]
+                type_refs[enumerator_offset] = Dict{String,Any}(
+                    "kind" => "enumerator",
+                    "name" => nothing,
+                    "value" => nothing,
+                    "parent" => current_struct_context  # Track which enum this belongs to
+                )
+                offset_to_kind[enumerator_offset] = :enumerator
+            end
+        end
+
+        # Extract subroutine type (function pointer signature)
+        # Example: <1><jkl>: DW_TAG_subroutine_type
+        #          DW_AT_type: <0x27>  (return type)
+        if contains(line, "DW_TAG_subroutine_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                current_subroutine_offset = current_type_offset  # Track for param collection
+                # Store function signature info
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "subroutine",
+                    "return_type" => nothing,
+                    "parameters" => []
+                )
+                offset_to_kind[current_type_offset] = :subroutine
+            end
+        end
+
+        # Extract typedef (type aliases)
+        # Example: <1><390>: Abbrev Number: 34 (DW_TAG_typedef)
+        #          <391>   DW_AT_type        : <0x398>
+        #          <395>   DW_AT_name        : int32_t
+        if contains(line, "DW_TAG_typedef")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                # Store typedef info - will resolve to underlying type
+                type_refs[current_type_offset] = Dict{String,Any}(
+                    "kind" => "typedef",
+                    "name" => nothing,
+                    "target" => nothing
+                )
+                offset_to_kind[current_type_offset] = :typedef
+            end
+        end
+
+        # Extract inheritance (base class)
+        # Example: <2><218>: DW_TAG_inheritance
+        #          <219>   DW_AT_type        : <0x135>  (base class ref)
+        #          <21d>   DW_AT_data_member_location: 0
+        #          <21e>   DW_AT_accessibility: DW_ACCESS_public
+        if contains(line, "DW_TAG_inheritance")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                inheritance_offset = "0x" * offset_match.captures[1]
+                type_refs[inheritance_offset] = Dict{String,Any}(
+                    "kind" => "inheritance",
+                    "base_type" => nothing,
+                    "offset" => 0,
+                    "accessibility" => "public",  # default
+                    "parent" => current_struct_context
+                )
+                offset_to_kind[inheritance_offset] = :inheritance
+            end
+        end
+
+        # Extract template type parameter
+        # Example: <2><2448>: DW_TAG_template_type_parameter
+        #          <2449>   DW_AT_type        : <0x1d9>  (actual type in instantiation)
+        #          <244d>   DW_AT_name        : T
+        if contains(line, "DW_TAG_template_type_parameter")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                template_offset = "0x" * offset_match.captures[1]
+                type_refs[template_offset] = Dict{String,Any}(
+                    "kind" => "template_type",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "parent" => current_struct_context
+                )
+                offset_to_kind[template_offset] = :template_type
+            end
+        end
+
+        # Extract template value parameter
+        # Example: <2><247b>: DW_TAG_template_value_parameter
+        #          <247c>   DW_AT_type        : <0x1d9>
+        #          <2480>   DW_AT_name        : N
+        #          <2481>   DW_AT_const_value : 10
+        if contains(line, "DW_TAG_template_value_parameter")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                template_offset = "0x" * offset_match.captures[1]
+                type_refs[template_offset] = Dict{String,Any}(
+                    "kind" => "template_value",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "value" => nothing,
+                    "parent" => current_struct_context
+                )
+                offset_to_kind[template_offset] = :template_value
+            end
+        end
+
+        # Extract namespace
+        # Example: <1><8bf>: DW_TAG_namespace
+        #          <8c0>   DW_AT_name        : math
+        if contains(line, "DW_TAG_namespace")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                ns_offset = "0x" * offset_match.captures[1]
+                type_refs[ns_offset] = Dict{String,Any}(
+                    "kind" => "namespace",
+                    "name" => nothing
+                )
+                offset_to_kind[ns_offset] = :namespace
+            end
+        end
+
+        # Extract type name for base types, structs, classes, enums, and new types
+        # Example: <28>   DW_AT_name        : (indexed string: 0x3): int
+        if contains(line, "DW_AT_name") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:base, :struct, :class, :enum, :enumerator, :typedef, :template_type, :template_value, :namespace]
+                name_match_quotes = match(r"DW_AT_name\s*\(\"([^\"]+)\"\)", line)
+                type_name = ""
+                if !isnothing(name_match_quotes)
+                    type_name = String(name_match_quotes.captures[1])
+                else
+                    name_match = match(r"DW_AT_name\s*:\s*(?:\([^)]*\):\s*)?(.*)$", line)
+                    if !isnothing(name_match)
+                        type_name = String(strip(name_match.captures[1]))
+                    end
+                end
+                
+                if !isempty(type_name)
+                    if offset_to_kind[tag_offset] == :base
+                        # Base types are stored as simple strings
+                        type_refs[tag_offset] = type_name
+                    elseif offset_to_kind[tag_offset] in [:struct, :class, :enum, :typedef, :template_type, :template_value, :namespace]
+                        # These types are dicts - update the name field
+                        if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                            type_refs[tag_offset]["name"] = type_name
+                        end
+                    elseif offset_to_kind[tag_offset] == :enumerator
+                        # Enumerator: store name
+                        if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                            type_refs[tag_offset]["name"] = type_name
+                        end
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_type for pointer/const/reference/enum/array/subroutine/typedef/template/inheritance types
+        # Example: <9f7>   DW_AT_type        : <0x41>
+        if contains(line, "DW_AT_type") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :enum, :array, :subroutine, :typedef, :template_type, :template_value, :inheritance]
+                type_match = match(r"<(0x[^>]+)>", line)
+                if !isnothing(type_match)
+                    target_offset = String(type_match.captures[1])  # Convert SubString to String
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        # Pointer/const/reference: target
+                        if offset_to_kind[tag_offset] in [:pointer, :const, :reference]
+                            type_refs[tag_offset]["target"] = target_offset
+                        # Enum: underlying type
+                        elseif offset_to_kind[tag_offset] == :enum
+                            type_refs[tag_offset]["underlying_type"] = target_offset
+                        # Array: element type
+                        elseif offset_to_kind[tag_offset] == :array
+                            type_refs[tag_offset]["element_type"] = target_offset
+                        # Subroutine: return type
+                        elseif offset_to_kind[tag_offset] == :subroutine
+                            type_refs[tag_offset]["return_type"] = target_offset
+                        # Typedef: target type
+                        elseif offset_to_kind[tag_offset] == :typedef
+                            type_refs[tag_offset]["target"] = target_offset
+                        # Template type/value parameter: actual type
+                        elseif offset_to_kind[tag_offset] in [:template_type, :template_value]
+                            type_refs[tag_offset]["type"] = target_offset
+                        # Inheritance: base class type
+                        elseif offset_to_kind[tag_offset] == :inheritance
+                            type_refs[tag_offset]["base_type"] = target_offset
+                        end
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_byte_size for enums, structs, classes, and unions
+        if contains(line, "DW_AT_byte_size") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union]
+                # Match value after colon
+                size_match = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
+                if !isnothing(size_match)
+                    val_str = size_match.captures[1]
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        if !startswith(val_str, "0x")
+                            val = parse(Int, val_str)
+                            type_refs[tag_offset]["byte_size"] = "0x" * string(val, base=16)
+                        else
+                            type_refs[tag_offset]["byte_size"] = val_str
+                        end
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_const_value for enumerators and template value parameters
+        if contains(line, "DW_AT_const_value") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enumerator, :template_value]
+                # Value can be decimal or hex (0x...)
+                value_match = match(r":\s*(-?(?:0x[0-9a-fA-F]+|\d+))", line)
+                if !isnothing(value_match)
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        val_str = value_match.captures[1]
+                        val = if startswith(val_str, "0x") || startswith(val_str, "0X")
+                            parse(Int128, val_str[3:end], base=16)
+                        elseif startswith(val_str, "-0x") || startswith(val_str, "-0X")
+                            -parse(Int128, val_str[4:end], base=16)
+                        else
+                            parse(Int128, val_str)
+                        end
+                        type_refs[tag_offset]["value"] = val
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_upper_bound for array subranges (DWARF 4 and earlier)
+        if contains(line, "DW_AT_upper_bound") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :subrange
+                # Upper bound can be decimal or hex
+                bound_match = match(r":\s*(\d+)", line)
+                if !isnothing(bound_match)
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        # Upper bound is size-1, so actual size is upper_bound + 1
+                        type_refs[tag_offset]["upper_bound"] = parse(Int, bound_match.captures[1])
+
+                        # Add dimension to parent array
+                        parent_offset = get(type_refs[tag_offset], "parent", nothing)
+                        if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
+                           isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "dimensions")
+                            size = parse(Int, bound_match.captures[1]) + 1  # Array[9] has upper_bound=8
+                            push!(type_refs[parent_offset]["dimensions"], size)
+                        end
+                    end
+                end
+            end
+        end
+
+        # Extract DW_AT_count for array subranges (DWARF 5+, more common)
+        if contains(line, "DW_AT_count") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :subrange
+                # Count is the actual array size
+                count_match = match(r":\s*(\d+)", line)
+                if !isnothing(count_match)
+                    if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                        # Count is the actual size
+                        size = parse(Int, count_match.captures[1])
+                        type_refs[tag_offset]["count"] = size
+
+                        # Add dimension to parent array
+                        parent_offset = get(type_refs[tag_offset], "parent", nothing)
+                        if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
+                           isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "dimensions")
+                            push!(type_refs[parent_offset]["dimensions"], size)
+                        end
+                    end
+                end
+            end
+        end
+
+        # Extract struct/class members (DW_TAG_member)
+        # Example: <2><aa>: DW_TAG_member
+        #          DW_AT_name: "x"
+        #          DW_AT_type: <0xbd>
+        #          DW_AT_data_member_location: 0x00
+        if contains(line, "DW_TAG_member")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                member_offset = "0x" * offset_match.captures[1]
+                type_refs[member_offset] = Dict{String,Any}(
+                    "kind" => "member",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "offset" => nothing,
+                    "parent" => current_struct_context  # Track which struct/class this belongs to
+                )
+                offset_to_kind[member_offset] = :member
+                type_refs["_pending_member_offset"] = member_offset
+            end
+        end
+
+        # Extract member attributes
+        if haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :member
+                member_info = type_refs[tag_offset]
+
+                # Member name
+                if contains(line, "DW_AT_name")
+                    name_match = match(r":\s*([^:]+)\s*$", line)
+                    if !isnothing(name_match)
+                        member_info["name"] = String(strip(name_match.captures[1]))
+                    end
+                end
+
+                # Member type reference
+                if contains(line, "DW_AT_type")
+                    type_match = match(r"<(0x[^>]+)>", line)
+                    if !isnothing(type_match)
+                        member_info["type"] = String(type_match.captures[1])
+                    end
+                end
+
+                # Member byte offset within struct
+                if contains(line, "DW_AT_data_member_location")
+                    # Match explicit attribute name and value
+                    offset_match = match(r"DW_AT_data_member_location\s*:\s*(0x[0-9a-fA-F]+|\d+)", line)
+                    if !isnothing(offset_match)
+                        val_str = offset_match.captures[1]
+                        # Normalize to hex string if decimal
+                        if !startswith(val_str, "0x")
+                            val = parse(Int, val_str)
+                            member_info["offset"] = "0x" * string(val, base=16)
+                        else
+                            member_info["offset"] = val_str
+                        end
+                    end
+                end
+
+                # Bitfield: DW_AT_bit_size (number of bits in bitfield member)
+                if contains(line, "DW_AT_bit_size")
+                    bit_size_match = match(r"DW_AT_bit_size\s*:\s*(\d+)", line)
+                    if !isnothing(bit_size_match)
+                        member_info["bit_size"] = parse(Int, bit_size_match.captures[1])
+                    end
+                end
+
+                # Bitfield: DW_AT_data_bit_offset (DWARF 4+ — absolute bit offset from struct start)
+                if contains(line, "DW_AT_data_bit_offset")
+                    dbo_match = match(r"DW_AT_data_bit_offset\s*:\s*(\d+)", line)
+                    if !isnothing(dbo_match)
+                        member_info["data_bit_offset"] = parse(Int, dbo_match.captures[1])
+                    end
+                end
+
+                # Bitfield: DW_AT_bit_offset (DWARF 2/3 — offset from MSB of containing unit)
+                if contains(line, "DW_AT_bit_offset") && !contains(line, "DW_AT_data_bit_offset")
+                    bo_match = match(r"DW_AT_bit_offset\s*:\s*(\d+)", line)
+                    if !isnothing(bo_match)
+                        member_info["bit_offset_legacy"] = parse(Int, bo_match.captures[1])
+                    end
+                end
+
+                # Member addition to parent is deferred to flush_pending_member()
+                # which runs at the next DW_TAG_* boundary to ensure all attributes are collected.
+            end
+
+            # Extract enumerator attributes and add to parent enum
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :enumerator
+                enumerator_info = type_refs[tag_offset]
+
+                # When we have all info, add to parent enum
+                parent_offset = get(enumerator_info, "parent", nothing)
+                if !isnothing(parent_offset) && haskey(type_refs, parent_offset) &&
+                   isa(type_refs[parent_offset], Dict) && haskey(type_refs[parent_offset], "enumerators")
+                    if !isnothing(enumerator_info["name"]) && !isnothing(enumerator_info["value"])
+                        # Only add if we haven't already added this enumerator
+                        existing_names = [e["name"] for e in type_refs[parent_offset]["enumerators"]]
+                        if !(enumerator_info["name"] in existing_names)
+                            push!(type_refs[parent_offset]["enumerators"], Dict(
+                                "name" => enumerator_info["name"],
+                                "value" => enumerator_info["value"]
+                            ))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    # Flush any remaining pending member after the last line
+    flush_pending_member()
+
+    # Debug: Show type refs collected
+    base_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :base && isa(type_refs[k], String), keys(type_refs))
+    pointer_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :pointer, keys(type_refs))
+    struct_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :struct && isa(type_refs[k], Dict), keys(type_refs))
+    class_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :class && isa(type_refs[k], Dict), keys(type_refs))
+    enum_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :enum && isa(type_refs[k], Dict), keys(type_refs))
+    array_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :array && isa(type_refs[k], Dict), keys(type_refs))
+    subroutine_count = count(k -> haskey(offset_to_kind, k) && offset_to_kind[k] == :subroutine && isa(type_refs[k], Dict), keys(type_refs))
+
+    # Count total members/enumerators extracted
+    total_members = 0
+    total_enumerators = 0
+    for (k, v) in type_refs
+        if isa(v, Dict)
+            if haskey(v, "members")
+                total_members += length(v["members"])
+            end
+            if haskey(v, "enumerators")
+                total_enumerators += length(v["enumerators"])
+            end
+        end
+    end
+
+    # Propagate typedef names to anonymous structs, unions, and enums
+    # C-style code often defines structs as: typedef struct { ... } Name;
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict) && get(type_info, "kind", "") == "typedef"
+            typedef_name = get(type_info, "name", "")
+            target_ref = get(type_info, "target", nothing)
+            if !isempty(typedef_name) && !isnothing(target_ref) && haskey(type_refs, target_ref)
+                target_info = type_refs[target_ref]
+                if isa(target_info, Dict)
+                    target_kind = get(target_info, "kind", "")
+                    target_name = get(target_info, "name", "")
+                    if target_kind in ["struct", "class", "union", "enum"] && 
+                       (isempty(target_name) || startswith(target_name, "unknown_"))
+                        target_info["name"] = typedef_name
+                    end
+                end
+            end
+        end
+    end
+
+    # Types collected from DWARF
+
+    # Collect all struct/class/enum names for type resolution
+    struct_names = Set{String}()
+    enum_names = Set{String}()
+
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict)
+            kind = get(type_info, "kind", "")
+            name = get(type_info, "name", "")
+
+            if kind in ["struct", "class"] && !isempty(name) && name != "unknown" && name != "unknown_struct" && name != "unknown_class"
+                push!(struct_names, name)
+            elseif kind == "enum" && !isempty(name) && name != "unknown" && name != "unknown_enum"
+                push!(enum_names, name)
+            end
+        end
+    end
+
+    # Helper function to resolve type references (follows pointer/const/reference chains)
+    function resolve_type(type_ref::String, type_refs::Dict, visited::Set{String}=Set{String}())::String
+        # Avoid infinite loops
+        if type_ref in visited
+            return "unknown"
+        end
+        push!(visited, type_ref)
+
+        if !haskey(type_refs, type_ref)
+            # Type not found in our table - likely a forward reference or external type
+            return "unknown"
+        end
+
+        type_info = type_refs[type_ref]
+
+        # Base type - just return the name
+        if isa(type_info, String)
+            return type_info
+        end
+
+        # Pointer/const/reference/enum/array/subroutine type - follow the chain
+        if isa(type_info, Dict)
+            kind = get(type_info, "kind", nothing)
+
+            # Struct or class - return the name
+            if kind in ["struct", "class"]
+                return get(type_info, "name", "unknown")
+            end
+
+            # Enum - return the name
+            if kind == "enum"
+                return get(type_info, "name", "unknown_enum")
+            end
+
+            # Array - return element_type[size] or element_type[size1][size2]...
+            if kind == "array"
+                element_type_ref = get(type_info, "element_type", nothing)
+                dimensions = get(type_info, "dimensions", [])
+
+                if !isnothing(element_type_ref)
+                    element_type = resolve_type(element_type_ref, type_refs, visited)
+                    if !isempty(dimensions)
+                        # Build array notation: type[size1][size2]...
+                        dim_str = join(["[$d]" for d in dimensions], "")
+                        return element_type * dim_str
+                    else
+                        # No dimensions specified (incomplete DWARF)
+                        return element_type * "[]"
+                    end
+                end
+                return "unknown[]"
+            end
+
+            # Subroutine (function pointer) - return detailed signature with parameters
+            if kind == "subroutine"
+                return_type_ref = get(type_info, "return_type", nothing)
+                param_refs = get(type_info, "parameters", [])
+
+                # Resolve return type
+                ret_type_str = if !isnothing(return_type_ref)
+                    resolve_type(return_type_ref, type_refs, visited)
+                else
+                    "void"
+                end
+
+                # Resolve parameter types
+                param_type_strs = String[]
+                for param_ref in param_refs
+                    if isa(param_ref, String)
+                        param_type = resolve_type(param_ref, type_refs, visited)
+                        push!(param_type_strs, param_type)
+                    elseif isa(param_ref, Dict)
+                        # Parameter might have additional info (name, etc.)
+                        param_type_ref = get(param_ref, "type", nothing)
+                        if !isnothing(param_type_ref)
+                            param_type = resolve_type(param_type_ref, type_refs, visited)
+                            push!(param_type_strs, param_type)
+                        end
+                    end
+                end
+
+                # Build signature: function_ptr(return_type; param1, param2, ...)
+                # Using semicolon to separate return from params for easier parsing
+                if isempty(param_type_strs)
+                    return "function_ptr($ret_type_str)"
+                else
+                    param_list = join(param_type_strs, ", ")
+                    return "function_ptr($ret_type_str; $param_list)"
+                end
+            end
+
+            # Typedef - special handling for well-known types
+            if kind == "typedef"
+                typedef_name = get(type_info, "name", "")
+
+                # Preserve well-known typedefs that have portable Julia mappings
+                # These should NOT be resolved to their underlying type
+                well_known_typedefs = [
+                    "size_t", "ssize_t", "ptrdiff_t",
+                    "intptr_t", "uintptr_t",
+                    "int8_t", "int16_t", "int32_t", "int64_t",
+                    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+                    "wchar_t", "char16_t", "char32_t"
+                ]
+
+                if typedef_name in well_known_typedefs
+                    # Preserve the typedef name for portable mapping
+                    return typedef_name
+                end
+
+                # For other typedefs, resolve to underlying type
+                target_ref = get(type_info, "target", nothing)
+                if !isnothing(target_ref)
+                    resolved_target = resolve_type(target_ref, type_refs, visited)
+                    if resolved_target == "unknown_struct" && !isempty(typedef_name)
+                        # If the target is an anonymous struct, use the typedef name instead
+                        return typedef_name
+                    end
+                    return resolved_target
+                else
+                    # If no target, return the typedef name itself
+                    return typedef_name == "" ? "unknown" : typedef_name
+                end
+            end
+
+            target = get(type_info, "target", nothing)
+
+            if isnothing(target)
+                # Pointer/const/reference without target (shouldn't happen but handle it)
+                return kind == "pointer" ? "void*" : "unknown"
+            end
+
+            # Recursively resolve the target type
+            target_type = resolve_type(target, type_refs, visited)
+
+            # Build the full type string
+            if kind == "pointer"
+                return target_type * "*"
+            elseif kind == "const"
+                return "const " * target_type
+            elseif kind == "reference"
+                return target_type * "&"
+            end
+        end
+
+        return "unknown"
+    end
+
+    # Second pass: Extract function return types and parameters
+    current_function_offset = nothing
+    current_function_name = nothing
+    current_function_linkage = nothing
+    current_function_level = nothing
+    function_processed = false  # State flag: true once we leave function's own level
+    params_for_this_function = []  # Collect parameters for current function, NEW name and usage
+
+    params_for_this_function = [] # NEW: Temporary storage for parameters of the current function being parsed
+
+    # Track formal parameters (similar to struct members)
+    current_param_offset = nothing
+    
+    # NEW: Track global variables
+    current_variable_offset = nothing
+    
+    # NEW: Track unspecified parameters (varargs)
+    current_unspecified_offset = nothing
+
+    last_seen_level = nothing  # Track last level for attribute lines
+
+    for line in split(output, '\n')
+        line = strip(line)
+
+        # Extract nesting level from DWARF format: <level><offset>
+        # Tags have: <level><offset>: ...
+        # Attributes have: <offset>   DW_AT_...
+        level_match = match(r"^\s*<(\d+)><", line)
+        if !isnothing(level_match)
+            last_seen_level = parse(Int, level_match.captures[1])
+        end
+        # Use last seen level for attributes (which don't have level prefix)
+        current_level = last_seen_level
+        
+        # Generic context reset for major tags to prevent leakage
+        if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_variable") && 
+           !contains(line, "DW_TAG_subprogram") && !contains(line, "DW_TAG_formal_parameter") &&
+           !contains(line, "DW_TAG_unspecified_parameters")
+            # If we hit a tag we don't explicitly handle as a "child" container in this pass
+            # we should reset the variable context.
+            # Base types, const types, etc. are handled in Pass 1, but we see them here too.
+            current_variable_offset = nothing
+        end
+
+        # Detect when we've left the function's own level (entered child tags)
+        if !isnothing(current_function_offset) && !isnothing(current_level) && !isnothing(current_function_level)
+            if current_level > current_function_level && !function_processed
+                # If a function was just processed and its parameters haven't been associated
+                # (e.g., if it was a void function without DW_AT_type), associate them now.
+                function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                if !isnothing(function_key_prev) && haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
+                     return_types[function_key_prev]["parameters"] = params_for_this_function
+                end
+
+                # We've entered a child tag (like DW_TAG_formal_parameter)
+                # This means we've finished processing the function's own attributes
+                # If no return type was found, it's void
+                function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                if !isnothing(function_key) && !haskey(return_types, function_key)
+                    return_types[function_key] = Dict(
+                        "c_type" => "void",
+                        "julia_type" => "Cvoid",
+                        "size" => 0,
+                        "parameters" => params_for_this_function # Ensure parameters are passed here too
+                    )
+                end
+                function_processed = true
+            end
+        end
+
+        # Detect function start (DW_TAG_subprogram)
+        if contains(line, "DW_TAG_subprogram")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                # Before resetting for new function, check if the previous function was processed
+                # This handles void functions (no DW_AT_type) and ensures parameters are attached
+                if !isnothing(current_function_offset)
+                    function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                    
+                    if !isnothing(function_key_prev)
+                        # Case 1: Function exists but missing parameters (already had return type)
+                        if haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
+                            return_types[function_key_prev]["parameters"] = params_for_this_function
+                        
+                        # Case 2: Function not registered yet (void return type implied by missing DW_AT_type)
+                        elseif !haskey(return_types, function_key_prev)
+                            # Check for noexcept on the previous function
+                            prev_noexcept = false
+                            if !isnothing(current_function_offset) && haskey(type_refs, current_function_offset) &&
+                               isa(type_refs[current_function_offset], Dict)
+                                prev_noexcept = get(type_refs[current_function_offset], "is_noexcept", false)
+                            end
+                            return_types[function_key_prev] = Dict(
+                                "c_type" => "void",
+                                "julia_type" => "Cvoid",
+                                "size" => 0,
+                                "is_noexcept" => prev_noexcept,
+                                "parameters" => params_for_this_function
+                            )
+                        end
+                    end
+                end
+
+                current_function_offset = "0x" * offset_match.captures[1]
+                current_function_level = current_level
+                current_function_name = nothing
+                current_function_linkage = nothing
+                function_processed = false  # Reset flag for new function
+                params_for_this_function = []  # NEW: Reset for the new function
+                current_subroutine_offset = nothing  # Reset subroutine context when entering function
+                
+                # RESET VARIABLE CONTEXT to prevent leakage
+                current_variable_offset = nothing
+            end
+        end
+        
+        # NEW: Detect global variable (DW_TAG_variable)
+        if contains(line, "DW_TAG_variable")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_variable_offset = "0x" * offset_match.captures[1]
+                
+                type_refs[current_variable_offset] = Dict{String,Any}(
+                    "kind" => "variable",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "external" => false,
+                    "declaration" => false
+                )
+                offset_to_kind[current_variable_offset] = :variable
+                
+                # Ensure we don't leak param context
+                current_param_offset = nothing
+            end
+        end
+        
+        # NEW: Detect varargs (DW_TAG_unspecified_parameters)
+        if contains(line, "DW_TAG_unspecified_parameters")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                # If we are inside a function context, mark it as varargs
+                if !isnothing(current_function_offset) && !isnothing(current_level) &&
+                   !isnothing(current_function_level) && current_level > current_function_level
+                   
+                   # Update type_refs
+                   if !haskey(type_refs, current_function_offset)
+                       type_refs[current_function_offset] = Dict{String,Any}()
+                   end
+                   if isa(type_refs[current_function_offset], Dict)
+                       type_refs[current_function_offset]["is_vararg"] = true
+                   end
+                   
+                   # Update return_types if function is already registered
+                   function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+                   if !isnothing(function_key) && haskey(return_types, function_key)
+                       return_types[function_key]["is_vararg"] = true
+                   end
+                end
+            end
+        end
+
+        # Detect formal parameter (child of subprogram or subroutine_type)
+        # Example: <2><7a>: DW_TAG_formal_parameter
+        if contains(line, "DW_TAG_formal_parameter")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_param_offset = "0x" * offset_match.captures[1]
+                
+                # RESET VARIABLE CONTEXT
+                current_variable_offset = nothing
+
+                # Determine position based on context (function or subroutine type)
+                position = if !isnothing(current_subroutine_offset) && haskey(type_refs, current_subroutine_offset)
+                    # Parameter belongs to subroutine type
+                    length(type_refs[current_subroutine_offset]["parameters"])
+                else
+                    # Parameter belongs to function
+                    length(params_for_this_function)
+                end
+
+                type_refs[current_param_offset] = Dict{String,Any}(
+                    "kind" => "parameter",
+                    "name" => nothing,
+                    "type" => nothing,
+                    "position" => position,
+                    "parent_subroutine" => current_subroutine_offset  # Track which subroutine this belongs to
+                )
+                offset_to_kind[current_param_offset] = :parameter
+            end
+        end
+        
+        # Process Global Variable Attributes
+        if !isnothing(current_variable_offset) && haskey(type_refs, current_variable_offset) &&
+           haskey(offset_to_kind, current_variable_offset) && offset_to_kind[current_variable_offset] == :variable
+           
+           var_info = type_refs[current_variable_offset]
+           
+           if contains(line, "DW_AT_name")
+               name_match = match(r":\s*([^:]+)\s*$", line)
+               if !isnothing(name_match)
+                   var_info["name"] = String(strip(name_match.captures[1]))
+               end
+           end
+           
+           if contains(line, "DW_AT_type")
+               type_match = match(r"<(0x[^>]+)>", line)
+               if !isnothing(type_match)
+                   var_info["type"] = String(type_match.captures[1])
+               end
+           end
+           
+           if contains(line, "DW_AT_external")
+               # Usually DW_AT_external : 1
+               var_info["external"] = true
+           end
+           
+           if contains(line, "DW_AT_declaration")
+               var_info["declaration"] = true
+           end
+        end
+
+        # Only process attributes at the function level (not in child tags like parameters)
+        in_function_context = !isnothing(current_function_offset) &&
+                             !isnothing(current_level) &&
+                             !isnothing(current_function_level) &&
+                             current_level == current_function_level
+
+        # Extract function name (for C functions without mangling)
+        # Example: <2f>   DW_AT_name        : (indexed string: 0xc): test_sin
+        if contains(line, "DW_AT_name") && in_function_context && isnothing(current_function_name)
+            name_match_quotes = match(r"DW_AT_name\s*\(\"([^\"]+)\"\)", line)
+            if !isnothing(name_match_quotes)
+                current_function_name = String(name_match_quotes.captures[1])
+            else
+                name_match = match(r"DW_AT_name\s*:\s*(?:\([^)]*\):\s*)?(.*)$", line)
+                if !isnothing(name_match)
+                    current_function_name = String(strip(name_match.captures[1]))
+                end
+            end
+        end
+
+        # Extract linkage name (mangled name for C++ functions)
+        # Example: <5c>   DW_AT_linkage_name: (indexed string: 0x8): _ZN10Calculator5powerEdd
+        if contains(line, "DW_AT_linkage_name") && in_function_context
+            # Extract just the mangled name after the last colon
+            linkage_match = match(r":\s*([^:\s]+)\s*$", line)
+            if !isnothing(linkage_match)
+                current_function_linkage = String(strip(linkage_match.captures[1]))  # Convert SubString to String
+            end
+        end
+
+        # Extract noexcept specification
+        # DWARF5+: DW_AT_noexcept (or inferred from demangled name)
+        # GCC/Clang may also use DW_AT_calling_convention or encode in type
+        if (contains(line, "DW_AT_noexcept") || contains(line, "noexcept")) && in_function_context
+            if !isnothing(current_function_offset)
+                if !haskey(type_refs, current_function_offset)
+                    type_refs[current_function_offset] = Dict{String,Any}()
+                end
+                if isa(type_refs[current_function_offset], Dict)
+                    type_refs[current_function_offset]["is_noexcept"] = true
+                end
+            end
+        end
+
+        # Extract virtuality
+        # Example: <60>   DW_AT_virtuality  : 1 (virtual)
+        if contains(line, "DW_AT_virtuality") && in_function_context
+            # Virtuality is usually 1 (virtual) or 2 (pure virtual)
+            virt_match = match(r":\s*(\d+)", line)
+            if !isnothing(virt_match)
+                is_virtual = parse(Int, virt_match.captures[1]) > 0
+                
+                # Store this temporarily in type_refs for the current function offset
+                if !isnothing(current_function_offset)
+                    if !haskey(type_refs, current_function_offset)
+                        type_refs[current_function_offset] = Dict{String,Any}()
+                    end
+                    if isa(type_refs[current_function_offset], Dict)
+                        type_refs[current_function_offset]["is_virtual"] = is_virtual
+                    end
+                end
+            end
+        end
+
+        # Extract function return type reference
+        # CRITICAL: Only match DW_AT_type at the function's own level, not from parameters!
+        if contains(line, "DW_AT_type") && in_function_context && !function_processed
+            type_match = match(r"<(0x[^>]+)>", line)
+            if !isnothing(type_match)
+                type_ref = String(type_match.captures[1])  # Convert SubString to String
+                # Resolve the type reference (follows pointer/const/reference chains)
+                c_type = resolve_type(type_ref, type_refs)
+
+                # Map to Julia type using comprehensive mapping
+                # Check if it's a struct/class type first
+                julia_type = if haskey(type_refs, type_ref) && isa(type_refs[type_ref], Dict) &&
+                               get(type_refs[type_ref], "kind", nothing) in ["struct", "class"]
+                    # It's a struct/class - use the struct name as the Julia type
+                    c_type
+                else
+                    dwarf_type_to_julia(c_type)
+                end
+                type_size = get_type_size(c_type)
+
+                # Use linkage name (C++) or fall back to function name (C)
+                function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+
+                # Check for virtuality, varargs, and noexcept stored earlier
+                is_virtual = false
+                is_vararg = false
+                is_noexcept = false
+                if !isnothing(current_function_offset) && haskey(type_refs, current_function_offset) &&
+                   isa(type_refs[current_function_offset], Dict)
+                    is_virtual = get(type_refs[current_function_offset], "is_virtual", false)
+                    is_vararg = get(type_refs[current_function_offset], "is_vararg", false)
+                    is_noexcept = get(type_refs[current_function_offset], "is_noexcept", false)
+                end
+
+                # Store if we have a function identifier
+                if !isnothing(function_key)
+                    return_types[function_key] = Dict(
+                        "c_type" => c_type,
+                        "julia_type" => julia_type,
+                        "size" => type_size,
+                        "is_virtual" => is_virtual, # NEW: Store virtuality
+                        "is_vararg" => is_vararg,   # NEW: Store varargs status
+                        "is_noexcept" => is_noexcept, # NEW: Store noexcept status
+                        "parameters" => params_for_this_function  # NEW: Use params_for_this_function
+                    )
+                end
+                function_processed = true  # Mark as processed
+            end
+        end
+
+        # Extract parameter attributes (name and type)
+        # Parameters are child tags (level > function_level)
+        if !isnothing(current_param_offset) && haskey(type_refs, current_param_offset) &&
+           haskey(offset_to_kind, current_param_offset) && offset_to_kind[current_param_offset] == :parameter
+
+            param_info = type_refs[current_param_offset]
+
+            # Extract parameter name
+            if contains(line, "DW_AT_name") && !isnothing(current_level) &&
+               !isnothing(current_function_level) && current_level > current_function_level
+                name_match_quotes = match(r"DW_AT_name\s*\(\"([^\"]+)\"\)", line)
+                if !isnothing(name_match_quotes)
+                    param_info["name"] = String(name_match_quotes.captures[1])
+                else
+                    name_match = match(r"DW_AT_name\s*:\s*(?:\([^)]*\):\s*)?(.*)$", line)
+                    if !isnothing(name_match)
+                        param_info["name"] = String(strip(name_match.captures[1]))
+                    end
+                end
+            end
+
+            # Extract parameter type
+            if contains(line, "DW_AT_type") && !isnothing(current_level) &&
+               !isnothing(current_function_level) && current_level > current_function_level
+                type_match = match(r"<(0x[^>]+)>", line)
+                if !isnothing(type_match)
+                    param_info["type"] = String(type_match.captures[1])
+
+                    # Check if this parameter belongs to a subroutine type or a function
+                    parent_subroutine = get(param_info, "parent_subroutine", nothing)
+
+                    if !isnothing(parent_subroutine) && haskey(type_refs, parent_subroutine)
+                        # Add to subroutine type's parameter list
+                        type_ref = param_info["type"]
+                        # Store just the type reference for now, will resolve later
+                        push!(type_refs[parent_subroutine]["parameters"], type_ref)
+                        current_param_offset = nothing
+                    elseif !isnothing(param_info["name"]) && !isnothing(param_info["type"])
+                        # Add to function's parameter list (needs both name and type)
+                        # Resolve type
+                        type_ref = param_info["type"]
+                        c_type = resolve_type(type_ref, type_refs)
+                        julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+
+                        param_dict = Dict(
+                            "name" => param_info["name"],
+                            "c_type" => c_type,
+                            "julia_type" => julia_type,
+                            "position" => param_info["position"]
+                        )
+
+                        # If this is a function pointer, preserve the full signature
+                        if startswith(c_type, "function_ptr(")
+                            param_dict["function_pointer_signature"] = c_type
+                        end
+
+                        push!(params_for_this_function, param_dict)
+
+                        # Reset param offset to avoid re-processing
+                        current_param_offset = nothing
+                    end
+                end
+            end
+        end
+    end
+
+    # Handle last function in file (might be void)
+    if !isnothing(current_function_offset)
+        function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+        if !isnothing(function_key)
+            if !haskey(return_types, function_key)
+                # No DW_AT_type found = void return
+                return_types[function_key] = Dict(
+                    "c_type" => "void",
+                    "julia_type" => "Cvoid",
+                    "size" => 0,
+                    "parameters" => params_for_this_function # NEW: Use params_for_this_function
+                )
+            elseif !haskey(return_types[function_key], "parameters")
+                # Function already has return type, but may need parameters added
+                return_types[function_key]["parameters"] = params_for_this_function # NEW: Use params_for_this_function
+            end
+        end
+    end
+
+    # Handle the very last function (if it was void and loop finished)
+    if !isnothing(current_function_offset)
+        function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+        
+        if !isnothing(function_key_prev)
+            if haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
+                return_types[function_key_prev]["parameters"] = params_for_this_function
+            elseif !haskey(return_types, function_key_prev)
+                return_types[function_key_prev] = Dict(
+                    "c_type" => "void",
+                    "julia_type" => "Cvoid",
+                    "size" => 0,
+                    "parameters" => params_for_this_function
+                )
+            end
+        end
+    end
+
+    if isempty(return_types)
+        @warn "No DWARF return type info found (compile with -g flag)"
+    end
+
+    # Extract struct definitions with member information
+    struct_defs = Dict{String,Dict{String,Any}}()
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class", "union"]
+            struct_name = get(type_info, "name", "unknown")
+            if struct_name != "unknown" && struct_name != "unknown_struct" && struct_name != "unknown_class" && struct_name != "unknown_union"
+                # Resolve member types to Julia types
+                resolved_members = []
+                for member in get(type_info, "members", [])
+                    member_type_ref = get(member, "type", nothing)
+                    if !isnothing(member_type_ref)
+                        c_type = resolve_type(member_type_ref, type_refs)
+                        julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+                        member_resolved = Dict(
+                            "name" => get(member, "name", "unknown"),
+                            "c_type" => c_type,
+                            "julia_type" => julia_type,
+                            "size" => get_type_size(c_type),
+                            "offset" => let v = get(member, "offset", nothing); isnothing(v) ? nothing : v end
+                        )
+                        # Propagate bitfield attributes if present
+                        for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy"]
+                            if haskey(member, bf_key)
+                                member_resolved[bf_key] = member[bf_key]
+                            end
+                        end
+                        push!(resolved_members, member_resolved)
+                    end
+                end
+
+                if !isempty(resolved_members)
+                    struct_def = Dict{String,Any}(
+                        "kind" => get(type_info, "kind", "struct"),
+                        "byte_size" => get(type_info, "byte_size", "0x0"),
+                        "members" => resolved_members
+                    )
+
+                    # Add inheritance information if available
+                    base_classes = []
+                    for (inh_offset, inh_info) in type_refs
+                        if isa(inh_info, Dict) && get(inh_info, "kind", nothing) == "inheritance" &&
+                           get(inh_info, "parent", nothing) == offset
+                            base_type_ref = get(inh_info, "base_type", nothing)
+                            if !isnothing(base_type_ref)
+                                base_type = resolve_type(base_type_ref, type_refs)
+                                push!(base_classes, Dict(
+                                    "type" => base_type,
+                                    "accessibility" => get(inh_info, "accessibility", "public")
+                                ))
+                            end
+                        end
+                    end
+                    if !isempty(base_classes)
+                        struct_def["base_classes"] = base_classes
+                    end
+
+                    # Add template parameters if available
+                    template_params = []
+                    for (tmpl_offset, tmpl_info) in type_refs
+                        if isa(tmpl_info, Dict) && get(tmpl_info, "parent", nothing) == offset
+                            if get(tmpl_info, "kind", nothing) == "template_type"
+                                type_ref = get(tmpl_info, "type", nothing)
+                                param_type = !isnothing(type_ref) ? resolve_type(type_ref, type_refs) : "Any"
+                                push!(template_params, Dict(
+                                    "kind" => "type",
+                                    "name" => get(tmpl_info, "name", "T"),
+                                    "type" => param_type
+                                ))
+                            elseif get(tmpl_info, "kind", nothing) == "template_value"
+                                type_ref = get(tmpl_info, "type", nothing)
+                                param_type = !isnothing(type_ref) ? resolve_type(type_ref, type_refs) : "Int"
+                                push!(template_params, Dict(
+                                    "kind" => "value",
+                                    "name" => get(tmpl_info, "name", "N"),
+                                    "type" => param_type,
+                                    "value" => get(tmpl_info, "value", nothing)
+                                ))
+                            end
+                        end
+                    end
+                    if !isempty(template_params)
+                        struct_def["template_params"] = template_params
+                    end
+
+                    struct_defs[struct_name] = struct_def
+                end
+            end
+        end
+    end
+
+
+    # Extract enum definitions with enumerator information
+    enum_defs = Dict{String,Dict{String,Any}}()
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict) && get(type_info, "kind", nothing) == "enum"
+            enum_name = get(type_info, "name", "unknown")
+            if enum_name != "unknown" && enum_name != "unknown_enum"
+                # Get underlying type
+                underlying_type_ref = get(type_info, "underlying_type", nothing)
+                underlying_c_type = "int"  # Default
+                if !isnothing(underlying_type_ref)
+                    underlying_c_type = resolve_type(underlying_type_ref, type_refs)
+                end
+                underlying_julia_type = cpp_to_julia_type(underlying_c_type, struct_names, enum_names)
+
+                # Get enumerators
+                enumerators = get(type_info, "enumerators", [])
+
+                if !isempty(enumerators)
+                    enum_defs[enum_name] = Dict(
+                        "kind" => "enum",
+                        "underlying_type" => underlying_c_type,
+                        "julia_type" => underlying_julia_type,
+                        "byte_size" => get(type_info, "byte_size", "0x04"),
+                        "enumerators" => enumerators
+                    )
+                end
+            end
+        end
+    end
+
+
+    # Store enum_defs in struct_defs with special marker (for now, to maintain API compatibility)
+    # Later we can extend the return type
+    for (enum_name, enum_info) in enum_defs
+        struct_defs["__enum__" * enum_name] = enum_info
+    end
+    
+    # Process extracted variables into a clean dictionary
+    global_vars = Dict{String,Any}()
+    for (offset, info) in type_refs
+        if isa(info, Dict) && get(info, "kind", nothing) == "variable" && 
+           get(info, "external", false) == true && !get(info, "declaration", false)
+           
+           name = get(info, "name", "unknown")
+           type_ref = get(info, "type", nothing)
+           
+           if name != "unknown" && !isnothing(type_ref)
+               c_type = resolve_type(type_ref, type_refs)
+               julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+               
+               global_vars[name] = Dict(
+                   "name" => name,
+                   "c_type" => c_type,
+                   "julia_type" => julia_type
+               )
+           end
+        end
+    end
+    
+
+    # Build typedef resolution table: typedef name -> resolved Julia type
+    typedef_table = Dict{String,String}()
+    for (offset, type_info) in type_refs
+        if isa(type_info, Dict) && get(type_info, "kind", nothing) == "typedef"
+            td_name = get(type_info, "name", "")
+            if !isempty(td_name)
+                target_ref = get(type_info, "target", nothing)
+                if !isnothing(target_ref)
+                    c_type = resolve_type(target_ref, type_refs)
+                    julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+                    if julia_type != "Any"
+                        typedef_table[td_name] = julia_type
+                    end
+                end
+            end
+        end
+    end
+
+
+    return (return_types, struct_defs, global_vars, typedef_table)
+end
+
+"""
+Extract compilation metadata from source files and binary.
+This is the core of automatic wrapper generation!
+"""
+function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
+                                      binary_path::String)::Dict{String,Any}
+    # Extract compilation metadata
+    symbols = extract_symbols_from_binary(binary_path)
+
+    # Extract return types and struct definitions from DWARF debug info (if available)
+    (dwarf_return_types, struct_defs, global_vars, typedef_table) = extract_dwarf_return_types(binary_path)
+
+    # Collect struct/enum names for type resolution in function signatures
+    sig_struct_names = Set{String}()
+    sig_enum_names = Set{String}()
+    for (name, info) in struct_defs
+        if startswith(name, "__enum__")
+            enum_name = replace(name, "__enum__" => "")
+            push!(sig_enum_names, enum_name)
+        else
+            push!(sig_struct_names, name)
+        end
+    end
+
+    # Parse function signatures (basic type inference from symbol names)
+    functions = parse_function_signatures(symbols, sig_struct_names, sig_enum_names)
+
+    # Merge DWARF return types and parameters into function metadata (overrides inference)
+    for func in functions
+        mangled = func["mangled"]
+        if haskey(dwarf_return_types, mangled)
+            dwarf_info = dwarf_return_types[mangled]
+
+            # Merge return type (only the return type fields, not parameters)
+            func["return_type"] = Dict(
+                "c_type" => get(dwarf_info, "c_type", "void"),
+                "julia_type" => get(dwarf_info, "julia_type", "Cvoid"),
+                "size" => get(dwarf_info, "size", 0)
+            )
+            func["return_type_source"] = "dwarf"
+            
+            # Merge is_vararg
+            func["is_vararg"] = get(dwarf_info, "is_vararg", false)
+
+            # Merge is_noexcept from DWARF info or demangled name
+            func["is_noexcept"] = get(dwarf_info, "is_noexcept", false)
+
+            # Merge parameters if available from DWARF (at function level, not in return_type)
+            if haskey(dwarf_info, "parameters") && !isempty(dwarf_info["parameters"])
+                func["parameters"] = dwarf_info["parameters"]
+                func["parameters_source"] = "dwarf"
+            else
+                func["parameters_source"] = "inferred"
+            end
+        else
+            func["return_type_source"] = "inferred"
+            func["parameters_source"] = "inferred"
+            func["is_vararg"] = false
+            # Detect noexcept from demangled name as fallback
+            demangled = get(func, "demangled", "")
+            func["is_noexcept"] = occursin("noexcept", demangled)
+        end
+    end
+
+    # Detect noexcept from source files (DWARF doesn't emit DW_AT_noexcept).
+    # Scan source + header files for function declarations with 'noexcept' specifier.
+    if config.wrap.language != :c
+        noexcept_names = _scan_noexcept_functions(source_files, get_include_dirs(config))
+        for func in functions
+            name = get(func, "name", "")
+            if name in noexcept_names && !get(func, "is_noexcept", false)
+                func["is_noexcept"] = true
+            end
+        end
+    end
+
+    # Build type registry (basic types + inferred types)
+    type_registry = build_type_registry(functions)
+
+    # Gather compiler info
+    llvm_version = try
+        (out, _) = BuildBridge.execute("llvm-config", ["--version"])
+        strip(out)
+    catch
+        "unknown"
+    end
+
+    clang_version = try
+        compiler_cmd = config.wrap.language == :c ? "clang" : "clang++"
+        (out, _) = BuildBridge.execute(compiler_cmd, ["--version"])
+        first(split(out, '\n'))
+    catch
+        "unknown"
+    end
+
+    # Extract STL method symbols if templates are configured
+    stl_methods = Dict{String,Any}()
+    if !isempty(config.types.templates)
+        stl_methods = extract_stl_method_symbols(binary_path, config.types.templates)
+        if !isempty(stl_methods)
+            stl_count = sum(length(v) for v in values(stl_methods))
+            println("  metadata: $(length(stl_methods)) STL containers, $stl_count methods")
+        end
+    end
+
+    metadata = Dict{String,Any}(
+        "timestamp" => string(now()),
+        "project" => config.project.name,
+        "binary_path" => binary_path,
+        "binary_type" => string(config.binary.type),
+
+        # Source information
+        "source_files" => source_files,
+        "include_dirs" => [abspath(d) for d in get_include_dirs(config)],
+        "compile_flags" => get_compile_flags(config),
+
+        # Symbols and functions
+        "symbols" => symbols,
+        "functions" => functions,
+        "globals" => global_vars,  # NEW: Global variables
+        "function_count" => length(functions),
+
+        # Type mappings
+        "type_registry" => type_registry,
+        "struct_definitions" => struct_defs,  # Struct member layout from DWARF
+        "typedef_table" => typedef_table,      # Typedef name -> Julia type resolution
+
+        # STL container method symbols (for JIT thunk generation)
+        "stl_methods" => stl_methods,
+
+        # Compiler information
+        "compiler_info" => Dict(
+            "llvm_version" => llvm_version,
+            "clang_version" => clang_version,
+            "target_triple" => _detect_target_triple(),
+            "optimization_level" => config.link.optimization_level,
+            "lto_enabled" => config.link.enable_lto
+        ),
+
+        # Language information
+        "language" => config.wrap.language == :c ? "c" : "c++",
+
+        # Metadata version (for future compatibility)
+        "metadata_version" => "1.0"
+    )
+
+    return metadata
+end
+
+"""
+Parse function signatures from symbol information.
+Infers parameter types and return types from demangled names.
+"""
+function parse_function_signatures(symbols::Vector{Dict{String,Any}},
+                                   struct_names::Set{String}=Set{String}(),
+                                   enum_names::Set{String}=Set{String}())::Vector{Dict{String,Any}}
+    functions = Dict{String,Any}[]
+
+    for sym in symbols
+        demangled = sym["demangled"]
+
+        # Skip vtables, typeinfo, etc.
+        if startswith(demangled, "vtable") || startswith(demangled, "typeinfo")
+            continue
+        end
+
+        func_info = Dict{String,Any}(
+            "name" => extract_function_name(demangled),
+            "mangled" => sym["mangled"],
+            "demangled" => demangled,
+            "return_type" => infer_return_type(demangled),
+            "parameters" => parse_parameters(demangled, struct_names, enum_names),
+            "is_method" => contains(_name_prefix(demangled), "::"),
+            "class" => extract_class_name(demangled),
+            "exported" => true
+        )
+
+        push!(functions, func_info)
+    end
+
+    return functions
+end
+
+"""
+Return the index of the first '(' at angle-bracket depth 0, or 0 if not found.
+This correctly handles template parameters like `std::vector<int, std::allocator<int>>`.
+"""
+function _find_toplevel_paren(s::String)::Int
+    depth = 0
+    for (i, c) in enumerate(s)
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth -= 1
+        elseif c == '(' && depth == 0
+            return i
+        end
+    end
+    return 0
+end
+
+"""
+Return the function-name prefix of a demangled signature, i.e. the portion before
+the first top-level '('.  For `"Calculator::compute(int)"` this is `"Calculator::compute"`;
+for `"sum_vector(std::vector<int>)"` this is `"sum_vector"`.
+"""
+function _name_prefix(demangled::String)::String
+    p = _find_toplevel_paren(demangled)
+    return p == 0 ? demangled : demangled[1:p-1]
+end
+
+"""
+Extract function name from demangled signature.
+Example: "Calculator::compute(int, int, char)" -> "compute"
+Example: "sum_vector(std::vector<int, std::allocator<int> > const&)" -> "sum_vector"
+"""
+function extract_function_name(demangled::String)::String
+    prefix = _name_prefix(demangled)
+    # Split only on '::' within the prefix (safe – no templates here)
+    parts = split(prefix, "::")
+    return strip(parts[end])
+end
+
+"""
+Extract class name from method signature (only considers '::' in the function-name prefix).
+Example: "Calculator::compute(int, int)" -> "Calculator"
+Example: "sum_vector(std::vector<int> const&)"  -> ""  (free function)
+"""
+function extract_class_name(demangled::String)::String
+    prefix = _name_prefix(demangled)
+    parts = split(prefix, "::")
+    length(parts) >= 2 || return ""
+    return join(parts[1:end-1], "::")
+end
+
+"""
+Infer return type from demangled function signature using pattern matching.
+This is a fallback when DWARF debug info is unavailable for a given function.
+"""
+function infer_return_type(demangled::String)::Dict{String,Any}
+    name = extract_function_name(demangled)
+    class = extract_class_name(demangled)
+
+    # Constructors and destructors return void
+    if !isempty(class)
+        bare_class = last(split(class, "::"))
+        if name == bare_class || name == "~$bare_class"
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+    end
+
+    # Operator patterns with known return types
+    if startswith(name, "operator")
+        op = replace(name, "operator" => "")
+        op = strip(op)
+        # Boolean operators
+        if op in ["==", "!=", "<", ">", "<=", ">=", "!", "&&", "||", "bool"]
+            return Dict("c_type" => "bool", "julia_type" => "Bool", "size" => 1)
+        end
+        # Assignment/compound assignment returns reference (effectively void for FFI)
+        if op in ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+        # new/new[] return pointer
+        if startswith(op, "new")
+            return Dict("c_type" => "void*", "julia_type" => "Ptr{Cvoid}", "size" => sizeof(Ptr))
+        end
+        # delete/delete[] return void
+        if startswith(op, "delete")
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+    end
+
+    # Common naming conventions
+    lower_name = lowercase(name)
+
+    # void patterns: set_, init_, destroy_, free_, clear_, reset_, print_, write_, close_
+    for prefix in ["set_", "init_", "destroy_", "free_", "clear_", "reset_",
+                    "print_", "write_", "close_", "release_", "cleanup_", "remove_",
+                    "delete_", "push_", "pop_", "insert_", "erase_", "swap_"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "void", "julia_type" => "Cvoid", "size" => 0)
+        end
+    end
+
+    # bool patterns: is_, has_, can_, should_, contains_, empty_, valid_
+    for prefix in ["is_", "has_", "can_", "should_", "contains_", "empty_", "valid_",
+                    "check_", "exists_", "equals_", "matches_"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "bool", "julia_type" => "Bool", "size" => 1)
+        end
+    end
+
+    # size/count patterns → size_t
+    for prefix in ["size", "count", "length", "num_", "get_size", "get_count", "get_length",
+                    "get_num", "capacity"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "size_t", "julia_type" => "Csize_t", "size" => sizeof(Csize_t))
+        end
+    end
+
+    # Pointer-returning patterns: create_, alloc_, malloc_, new_, get_ptr, make_
+    for prefix in ["create_", "alloc_", "malloc_", "new_", "make_", "open_"]
+        if startswith(lower_name, prefix)
+            return Dict("c_type" => "void*", "julia_type" => "Ptr{Cvoid}", "size" => sizeof(Ptr))
+        end
+    end
+
+    # String-returning patterns
+    for prefix in ["to_string", "get_name", "get_string", "get_path", "get_message",
+                    "get_error", "strerror", "name", "what"]
+        if startswith(lower_name, prefix) || lower_name == prefix
+            return Dict("c_type" => "const char*", "julia_type" => "Cstring", "size" => sizeof(Ptr))
+        end
+    end
+
+    # Default fallback: int (most common return type in C APIs)
+    return Dict("c_type" => "int", "julia_type" => "Cint", "size" => 4)
+end
+
+"""
+Parse parameter types from demangled signature.
+Example: "add(int, int)" -> [{"type": "int", "julia_type": "Cint"}, ...]
+"""
+function parse_parameters(demangled::String,
+                         struct_names::Set{String}=Set{String}(),
+                         enum_names::Set{String}=Set{String}())::Vector{Dict{String,Any}}
+    params = Dict{String,Any}[]
+
+    # Extract parameter list from signature
+    if !contains(demangled, '(')
+        return params
+    end
+
+    param_str = match(r"\((.*?)\)", demangled)
+    if isnothing(param_str)
+        return params
+    end
+
+    param_types = split(param_str.captures[1], ',')
+
+    for (i, ptype) in enumerate(param_types)
+        ptype = strip(ptype)
+        if isempty(ptype)
+            continue
+        end
+
+        julia_type = cpp_to_julia_type(ptype, struct_names, enum_names)
+
+        push!(params, Dict(
+            "name" => "arg$i",
+            "c_type" => ptype,
+            "julia_type" => julia_type,
+            "position" => i-1
+        ))
+    end
+
+    return params
+end
+
+"""
+Convert C++ type to Julia type.
+Basic type mapping - can be enhanced with type registry.
+
+# Arguments
+- `cpp_type`: C++ type string
+- `struct_names`: Set of known struct/class names from DWARF
+- `enum_names`: Set of known enum names from DWARF
+"""
+function cpp_to_julia_type(cpp_type::AbstractString,
+                           struct_names::Set{String}=Set{String}(),
+                           enum_names::Set{String}=Set{String}())::String
+    # Strip qualifiers
+    cpp_type = strip(cpp_type)
+    cpp_type = replace(cpp_type, r"^const\s+" => "")
+    cpp_type = replace(cpp_type, r"^volatile\s+" => "")
+
+    # Clean up internal compiler types to avoid leaking them
+    base_type_for_check = strip(replace(cpp_type, r"[*&\[\]\s\d]+$" => ""))
+    if base_type_for_check in ["__va_list_tag", "__mbstate_t", "_va_list_tag", "_mbstate_t", "max_align_t"]
+        cpp_type = replace(cpp_type, base_type_for_check => "void")
+    end
+
+    type_map = Dict(
+        "int" => "Cint",
+        "unsigned int" => "Cuint",
+        "long" => "Clong",
+        "unsigned long" => "Culong",
+        "short" => "Cshort",
+        "unsigned short" => "Cushort",
+        "char" => "UInt8",
+        "unsigned char" => "UInt8",
+        "float" => "Cfloat",
+        "double" => "Cdouble",
+        "bool" => "Bool",
+        "_Bool" => "Bool",
+        "void" => "Cvoid",
+        "char*" => "Cstring",
+        "const char*" => "Cstring",
+        "size_t" => "Csize_t",
+        "ssize_t" => "Cssize_t",
+        "ptrdiff_t" => "Cptrdiff_t",
+        "intptr_t" => "Cintptr_t",
+        "uintptr_t" => "Cuintptr_t",
+        "int8_t" => "Int8",
+        "uint8_t" => "UInt8",
+        "int16_t" => "Int16",
+        "uint16_t" => "UInt16",
+        "int32_t" => "Int32",
+        "uint32_t" => "UInt32",
+        "int64_t" => "Int64",
+        "uint64_t" => "UInt64",
+        "long long" => "Clonglong",
+        "unsigned long long" => "Culonglong",
+        # C11 _Complex types
+        "_Complex float" => "ComplexF32",
+        "_Complex double" => "ComplexF64",
+        "complex float" => "ComplexF32",
+        "complex double" => "ComplexF64",
+        "float _Complex" => "ComplexF32",
+        "double _Complex" => "ComplexF64"
+    )
+
+    # Strip _Atomic qualifier — same ABI layout as the underlying type
+    cpp_type = replace(cpp_type, r"\b_Atomic\b\s*" => "")
+    cpp_type = strip(cpp_type)
+
+    # Handle arrays: type[size] or type[size1][size2]
+    # Examples: "double[3]" -> "NTuple{3, Cdouble}"
+    #           "int[3][4]" -> "NTuple{12, Cint}"  (flattened)
+    if contains(cpp_type, "[") && contains(cpp_type, "]")
+        # Extract element type and dimensions
+        array_match = match(r"^(.+?)(\[.+\])$", cpp_type)
+        if !isnothing(array_match)
+            element_type_str = strip(array_match.captures[1])
+            dims_str = array_match.captures[2]
+
+            # Parse dimensions: [3][4] -> [3, 4]
+            dims = Int[]
+            for dim_match in eachmatch(r"\[(\d+)\]", dims_str)
+                push!(dims, parse(Int, dim_match.captures[1]))
+            end
+
+            if !isempty(dims)
+                # Calculate total size (product of dimensions)
+                total_size = prod(dims)
+
+                # Map element type to Julia (with struct/enum awareness)
+                element_julia_type = cpp_to_julia_type(element_type_str, struct_names, enum_names)
+
+                # Return as NTuple (flattened)
+                return "NTuple{$total_size, $element_julia_type}"
+            end
+        end
+    end
+
+    # Handle function pointers (and pointers to function pointers)
+    # First, strip trailing '*' if present, and then check for "function_ptr("
+    temp_cpp_type = replace(cpp_type, r"\*+$" => "") # Temporarily strip pointers for the check
+    if startswith(temp_cpp_type, "function_ptr(")
+        return "Ptr{Cvoid}"
+    end
+
+    # Check if it's a user-defined struct/class (before pointer handling)
+    base_type = replace(cpp_type, r"[*&\s]+$" => "")  # Strip pointer/ref/spaces
+    base_type = strip(base_type)
+
+    if base_type in struct_names
+        # Count pointer levels: sqlite3** → 2, sqlite3* → 1
+        ptr_suffix = match(r"(\*+)\s*$", cpp_type)
+        if !isnothing(ptr_suffix)
+            ptr_count = length(ptr_suffix.captures[1])
+            result = base_type
+            for _ in 1:ptr_count
+                result = "Ptr{$result}"
+            end
+            return result
+        elseif contains(cpp_type, "&")
+            return "Ref{$base_type}"
+        else
+            return base_type  # Use struct name directly
+        end
+    end
+
+    # Check for enums
+    if base_type in enum_names
+        # Enums are used directly by name (will be @enum in Julia)
+        return base_type
+    end
+
+    # Handle pointers (for non-struct types)
+    if endswith(cpp_type, "*")
+        # Map the base type first, then wrap in Ptr{}
+        base = strip(cpp_type[1:end-1])
+        base_julia = cpp_to_julia_type(base, struct_names, enum_names)
+        # If base mapped to a specific type, use it; otherwise fall back to Ptr{Cvoid}
+        if base_julia != "Any" && base_julia != base
+            return "Ptr{$base_julia}"
+        else
+            return "Ptr{Cvoid}"
+        end
+    end
+
+    # Handle references (for non-struct types)
+    if endswith(cpp_type, "&")
+        base = strip(cpp_type[1:end-1])
+        return "Ref{$(cpp_to_julia_type(base, struct_names, enum_names))}"
+    end
+
+    # Fallback to type map or Any
+    return get(type_map, cpp_type, "Any")
+end
+
+"""
+Build type registry from functions.
+Collects all unique types used in the codebase.
+"""
+function build_type_registry(functions::Vector{Dict{String,Any}})::Dict{String,Any}
+    registry = Dict{String,Any}()
+
+    # Add standard types
+    standard_types = Dict(
+        "int" => Dict("size" => 4, "alignment" => 4, "julia_type" => "Cint"),
+        "float" => Dict("size" => 4, "alignment" => 4, "julia_type" => "Cfloat"),
+        "double" => Dict("size" => 8, "alignment" => 8, "julia_type" => "Cdouble"),
+        "char" => Dict("size" => 1, "alignment" => 1, "julia_type" => "UInt8"),
+        "bool" => Dict("size" => 1, "alignment" => 1, "julia_type" => "Bool"),
+        "void" => Dict("size" => 0, "alignment" => 0, "julia_type" => "Cvoid")
+    )
+
+    merge!(registry, standard_types)
+
+    # Collect types from functions
+    for func in functions
+        # Add return type
+        if haskey(func, "return_type")
+            rt = func["return_type"]
+            if haskey(rt, "c_type")
+                registry[rt["c_type"]] = rt
+            end
+        end
+
+        # Add parameter types
+        if haskey(func, "parameters")
+            for param in func["parameters"]
+                if haskey(param, "c_type")
+                    registry[param["c_type"]] = Dict(
+                        "julia_type" => get(param, "julia_type", "Any"),
+                        "inferred" => true
+                    )
+                end
+            end
+        end
+    end
+
+    return registry
+end
+
+"""
+Save compilation metadata to JSON file next to binary.
+This enables automatic wrapper generation!
+"""
+function save_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
+                                   binary_path::String)::String
+    # Extract metadata
+    metadata = extract_compilation_metadata(config, source_files, binary_path)
+
+    # Save to JSON file next to binary
+    output_dir = get_output_path(config)
+    metadata_path = joinpath(output_dir, "compilation_metadata.json")
+
+    open(metadata_path, "w") do io
+        JSON.print(io, metadata, 2)  # Pretty print with indent=2
+    end
+
+    nfuncs = length(get(metadata, "functions", []))
+    nstructs = length(get(metadata, "structs", Dict()))
+    println("  dwarf: $(nfuncs) functions, $(nstructs) types")
+    return metadata_path
+end
+
+end # module Compiler
