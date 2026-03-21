@@ -2,6 +2,49 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.5.4
+
+### New: C++ Exception Catching via `jlcs.try_call`
+
+Added `TryCallOp` (`jlcs.try_call`) to the JLCS MLIR dialect — a variant of `ffe_call` that emits LLVM `invoke` + landing pad to catch C++ exceptions at the ABI boundary.
+
+- **`jlcs.try_call`** — On exception: catches via `__gxx_personality_v0`, extracts the `std::exception::what()` message, stores it in a thread-local buffer via `jlcs_set_pending_exception()`, and returns a zero/null sentinel. The Julia caller checks `jlcs_has_pending_exception()` after return and throws a `CxxException` if set.
+- **`CxxException <: Exception`** — New Julia exception type in `JITManager.jl`, wrapping the C++ error message string. Thrown automatically by Tier 2 thunks when the callee raises.
+- **Dispatch routing** — `DispatchLogic.jl` updated to route functions marked `noexcept=false` through `try_call` instead of `ffe_call`.
+- **C API wrappers** — `jlcs_create_try_call_op`, `jlcs_set_pending_exception`, `jlcs_has_pending_exception`, `jlcs_get_pending_exception`, `jlcs_clear_pending_exception` added to `JLCSCAPIWrappers.cpp` and `MLIRNative.jl`.
+- **Lowering** — `TryCallOpLowering` in `JLCSPasses.cpp`: emits `llvm.invoke` to the callee with a landing pad that calls `__cxa_begin_catch`, extracts the `what()` string, calls `jlcs_set_pending_exception`, then `__cxa_end_catch`. Non-exception path falls through normally.
+- **Callback test suite** — Extended with C++ functions that throw (`throw std::runtime_error`), verifying that exceptions propagate as `CxxException` on the Julia side.
+
+### Refactor: JIT Symbol Cache — Atomic Copy-on-Write
+
+Replaced the lock-free Dict read pattern in `JITManager.jl` with a proper atomic copy-on-write scheme:
+
+- `compiled_symbols` field is now `@atomic` on `JITContext`.
+- **Fast path**: reads an atomic snapshot of the Dict reference — no lock, no race.
+- **Slow path**: creates a new Dict copy with the added entry, then atomically swaps the reference.
+- Added `init_error` field to `JITContext`; initialization failures are stored and surfaced via `_jit_not_initialized_error()` at all 7 call sites.
+
+### Refactor: Code Cleanup
+
+- **Eliminated `map_cpp_type_to_mlir`** — Deleted the duplicate in `JLCSIRGenerator.jl`, replaced the one call site with `map_cpp_type` from `TypeUtils`.
+- **Fixed cross-module reach-through** — Moved `get_stl_container_size` into `TypeUtils.jl`, replaced `Main.RepliBuild.Wrapper.get_stl_container_size` with a direct call.
+- **Extracted `getPackedSizeInBits`** — Moved to a static free function in `JLCSPasses.cpp`, removed from both `FFECallOpLowering` and `TryCallOpLowering`.
+- **Removed `JL_SubtypeInterface` dead code** — Deleted `JLInterfaces.td`, removed its include from `JLCS.td`.
+- **Moved `ASTWalker.jl`** → `Wrapper/ASTWalker.jl`, **`STLWrappers.jl`** → `Wrapper/Cpp/STLWrappers.jl`.
+- **MLIR API migration** — All `rewriter.create<Op>(...)` calls in `JLCSPasses.cpp` updated to LLVM 21's `Op::create(rewriter, ...)` builder pattern.
+
+### Removed: Rust Wrapper Generator
+
+Deleted `src/Wrapper/Rust/` (GeneratorRust.jl, TypesRust.jl, IdentifiersRust.jl) and `compile_rust_project()` from Compiler.jl. The experimental Rust generator required `extern "C"` + `#[repr(C)]` on everything, making it effectively a C-ABI wrapper with extra steps. Would need a julia/rust contributer to help with rust because I dont understand the borrow checker enough to deal with it hands on.
+
+### Changed: LTO Global Variable Deduplication
+
+`sanitize_ir_for_julia` now converts externally-visible global variable definitions to `external` declarations in the LTO bitcode. Prevents "Duplicate definition" JIT errors when the shared library is also loaded via `dlopen`.
+
+### Changed: Exports Reorganization
+
+Reorganized `RepliBuild.jl` exports into categorized sections (Core Build Orchestration, Configuration, Compiler Tooling, DWARF Analysis, etc.) and exported additional compiler utility functions for advanced use.
+
 ## v2.5.3
 
 ### New: STL Map Support (`std::map`, `std::unordered_map`)
