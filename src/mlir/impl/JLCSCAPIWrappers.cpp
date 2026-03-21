@@ -55,7 +55,7 @@ static thread_local bool jlcs_has_exception = false;
 
 // helper to attach host data layout
 static void attachHostDataLayout(mlir::ModuleOp module) {
-    auto triple = llvm::sys::getProcessTriple();
+    llvm::Triple triple(llvm::sys::getProcessTriple());
     std::string error;
     const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, error);
     if (!target) {
@@ -208,7 +208,7 @@ extern "C" {
                     builder.setInsertionPointToStart(mod.getBody());
                     auto i32Type = builder.getI32Type();
                     auto personalityFnType = mlir::LLVM::LLVMFunctionType::get(i32Type, {}, true);
-                    builder.create<mlir::LLVM::LLVMFuncOp>(mod.getLoc(), "__gxx_personality_v0", personalityFnType);
+                    mlir::LLVM::LLVMFuncOp::create(builder, mod.getLoc(), "__gxx_personality_v0", personalityFnType);
                 }
                 auto personalityRef = mlir::FlatSymbolRefAttr::get(
                     mod.getContext(), "__gxx_personality_v0");

@@ -37,8 +37,8 @@ function check_library()
             cd src/mlir
             ./build.sh
 
-        For more information, see:
-            docs/mlir/README.md
+        Only Linux Compatible.
+        No Windows support planned.
         """)
     end
 end

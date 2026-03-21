@@ -21,7 +21,7 @@ include("BuildBridge.jl")
 include("DependencyResolver.jl")
 
 # Core build system modules
-include("ASTWalker.jl")
+include("Wrapper/ASTWalker.jl")
 include("Discovery.jl")
 include("ClangJLBridge.jl")
 include("Compiler.jl")
@@ -30,7 +30,7 @@ include("MLIRNative.jl")
 include("JLCSIRGenerator.jl")
 include("JITManager.jl")
 include("Wrapper.jl")
-include("STLWrappers.jl")
+include("Wrapper/Cpp/STLWrappers.jl")
 
 # Introspection module
 include("Introspect.jl")
@@ -678,7 +678,7 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
             end
         end
 
-        return library_path
+        return abspath(library_path)
 
     finally
         cd(original_dir)
@@ -764,7 +764,7 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
         )
 
 
-        return wrapper_path
+        return abspath(wrapper_path)
 
     finally
         cd(original_dir)

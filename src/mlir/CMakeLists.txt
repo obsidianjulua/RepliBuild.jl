@@ -20,8 +20,7 @@ include(AddMLIR)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 
-# Enable C++ exceptions (required for jlcs_catch_current_exception)
-add_compile_options(-fexceptions)
+# C++ exceptions are enabled per-target below (after LLVM's -fno-exceptions)
 
 # Include directories
 include_directories(${LLVM_INCLUDE_DIRS})
@@ -46,8 +45,6 @@ mlir_tablegen(JLCSOps.h.inc -gen-op-decls)
 mlir_tablegen(JLCSOps.cpp.inc -gen-op-defs)
 mlir_tablegen(JLCSTypes.h.inc -gen-typedef-decls)
 mlir_tablegen(JLCSTypes.cpp.inc -gen-typedef-defs)
-mlir_tablegen(JLCSInterfaces.h.inc -gen-type-interface-decls)
-mlir_tablegen(JLCSInterfaces.cpp.inc -gen-type-interface-defs)
 
 add_public_tablegen_target(JLCSIncGen)
 
@@ -85,6 +82,9 @@ add_llvm_library(JLCS SHARED
   MLIRArithToLLVM
   MLIRReconcileUnrealizedCasts
 )
+
+# Enable C++ exceptions for our code (must come after LLVM's -fno-exceptions)
+target_compile_options(JLCS PRIVATE -fexceptions)
 
 # === JIT & Execution Engine Linking ===
 # We must link these explicitly. -Wl,--whole-archive is strictly required on Linux

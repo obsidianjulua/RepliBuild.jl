@@ -32,16 +32,16 @@ inline Value getStructField(Location loc, ConversionPatternRewriter &rewriter,
   auto ctx = rewriter.getContext();
 
   // 1. Create byte offset constant
-  Value offset = rewriter.create<arith::ConstantIntOp>(loc, byteOffset, 64);
+  Value offset = arith::ConstantIntOp::create(rewriter, loc, byteOffset, 64);
 
   // 2. GEP to field address (using i8* as universal pointer)
   Type i8PtrType = LLVM::LLVMPointerType::get(ctx);
-  Value fieldAddrI8 = rewriter.create<LLVM::GEPOp>(
+  Value fieldAddrI8 = LLVM::GEPOp::create(rewriter, 
       loc, i8PtrType, rewriter.getI8Type(), structPtr,
       ArrayRef<LLVM::GEPArg>({offset}));
 
   // 3. Load the value directly (opaque pointers, no bitcast needed)
-  Value loadedVal = rewriter.create<LLVM::LoadOp>(loc, targetType, fieldAddrI8);
+  Value loadedVal = LLVM::LoadOp::create(rewriter, loc, targetType, fieldAddrI8);
 
   return loadedVal;
 }
@@ -60,16 +60,16 @@ inline void setStructField(Location loc, ConversionPatternRewriter &rewriter,
   auto ctx = rewriter.getContext();
 
   // 1. Create byte offset constant
-  Value offset = rewriter.create<arith::ConstantIntOp>(loc, byteOffset, 64);
+  Value offset = arith::ConstantIntOp::create(rewriter, loc, byteOffset, 64);
 
   // 2. GEP to field address
   Type i8PtrType = LLVM::LLVMPointerType::get(ctx);
-  Value fieldAddrI8 = rewriter.create<LLVM::GEPOp>(
+  Value fieldAddrI8 = LLVM::GEPOp::create(rewriter, 
       loc, i8PtrType, rewriter.getI8Type(), structPtr,
       ArrayRef<LLVM::GEPArg>({offset}));
 
   // 3. Store the value
-  rewriter.create<LLVM::StoreOp>(loc, value, fieldAddrI8);
+  LLVM::StoreOp::create(rewriter, loc, value, fieldAddrI8);
 }
 
 } // namespace jlcs

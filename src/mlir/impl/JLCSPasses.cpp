@@ -127,12 +127,12 @@ struct VirtualCallOpLowering : public ConversionPattern {
 
         // Step 2: Index into vtable to get function pointer
         // func_ptr = vtable[slot]
-        Value slotVal = rewriter.create<arith::ConstantIntOp>(loc, slot, 64);
-        Value funcPtrAddr = rewriter.create<LLVM::GEPOp>(
+        Value slotVal = arith::ConstantIntOp::create(rewriter, loc, slot, 64);
+        Value funcPtrAddr = LLVM::GEPOp::create(rewriter, 
             loc, ptrType, ptrType, vtablePtr,
             ArrayRef<LLVM::GEPArg>({ slotVal }));
 
-        Value funcPtr = rewriter.create<LLVM::LoadOp>(loc, ptrType, funcPtrAddr);
+        Value funcPtr = LLVM::LoadOp::create(rewriter, loc, ptrType, funcPtrAddr);
 
         // Step 3: Call the function pointer with arguments (indirect call)
         SmallVector<Value, 4> callArgs(args.begin(), args.end());
@@ -207,35 +207,35 @@ struct LoadArrayElementOpLowering : public ConversionPattern {
         Value stridesPtr = getStructField(loc, rewriter, viewPtr, 16, ptrType);
 
         // 3. Calculate the total offset: Offset = Sum(index_i * stride_i)
-        Value totalOffset = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+        Value totalOffset = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
 
         for (size_t i = 0; i < indices.size(); ++i) {
             Value index = indices[i];
 
             // GEP to the i-th stride in the strides array
-            Value strideIndex = rewriter.create<arith::ConstantIntOp>(loc, i, 64);
-            Value strideAddr = rewriter.create<LLVM::GEPOp>(
+            Value strideIndex = arith::ConstantIntOp::create(rewriter, loc, i, 64);
+            Value strideAddr = LLVM::GEPOp::create(rewriter, 
                 loc, ptrType, i64Type, stridesPtr,
                 ArrayRef<LLVM::GEPArg>({ strideIndex }));
 
             // Load the i-th stride value
-            Value stride = rewriter.create<LLVM::LoadOp>(loc, i64Type, strideAddr);
+            Value stride = LLVM::LoadOp::create(rewriter, loc, i64Type, strideAddr);
 
             // Calculate: index * stride
-            Value elementOffset = rewriter.create<arith::MulIOp>(loc, index, stride);
+            Value elementOffset = arith::MulIOp::create(rewriter, loc, index, stride);
 
             // Accumulate: totalOffset += elementOffset
-            totalOffset = rewriter.create<arith::AddIOp>(loc, totalOffset, elementOffset);
+            totalOffset = arith::AddIOp::create(rewriter, loc, totalOffset, elementOffset);
         }
 
         // 4. Calculate the final address (GEP on the base data pointer)
         Type elemType = loadOp.getResult().getType();
-        Value finalAddr = rewriter.create<LLVM::GEPOp>(
+        Value finalAddr = LLVM::GEPOp::create(rewriter, 
             loc, ptrType, elemType, dataPtr,
             ArrayRef<LLVM::GEPArg>({ totalOffset }));
 
         // 5. Load the element
-        Value result = rewriter.create<LLVM::LoadOp>(loc, elemType, finalAddr);
+        Value result = LLVM::LoadOp::create(rewriter, loc, elemType, finalAddr);
 
         rewriter.replaceOp(op, result);
         return success();
@@ -275,27 +275,27 @@ struct StoreArrayElementOpLowering : public ConversionPattern {
         Value stridesPtr = getStructField(loc, rewriter, viewPtr, 16, ptrType);
 
         // 3. Calculate the total offset
-        Value totalOffset = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+        Value totalOffset = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
 
         for (size_t i = 0; i < indices.size(); ++i) {
             Value index = indices[i];
-            Value strideIndex = rewriter.create<arith::ConstantIntOp>(loc, i, 64);
-            Value strideAddr = rewriter.create<LLVM::GEPOp>(
+            Value strideIndex = arith::ConstantIntOp::create(rewriter, loc, i, 64);
+            Value strideAddr = LLVM::GEPOp::create(rewriter, 
                 loc, ptrType, i64Type, stridesPtr,
                 ArrayRef<LLVM::GEPArg>({ strideIndex }));
 
-            Value stride = rewriter.create<LLVM::LoadOp>(loc, i64Type, strideAddr);
-            Value elementOffset = rewriter.create<arith::MulIOp>(loc, index, stride);
-            totalOffset = rewriter.create<arith::AddIOp>(loc, totalOffset, elementOffset);
+            Value stride = LLVM::LoadOp::create(rewriter, loc, i64Type, strideAddr);
+            Value elementOffset = arith::MulIOp::create(rewriter, loc, index, stride);
+            totalOffset = arith::AddIOp::create(rewriter, loc, totalOffset, elementOffset);
         }
 
         // 4. Calculate the final address
-        Value finalAddr = rewriter.create<LLVM::GEPOp>(
+        Value finalAddr = LLVM::GEPOp::create(rewriter, 
             loc, ptrType, value.getType(), dataPtr,
             ArrayRef<LLVM::GEPArg>({ totalOffset }));
 
         // 5. Store the value
-        rewriter.create<LLVM::StoreOp>(loc, value, finalAddr);
+        LLVM::StoreOp::create(rewriter, loc, value, finalAddr);
 
         rewriter.eraseOp(op);
         return success();
@@ -391,7 +391,7 @@ struct FFECallOpLowering : public ConversionPattern {
         // We must match this convention when calling the external C function.
 
         Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-        Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
+        Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
 
         // Check if return type needs sret (packed struct, or large struct > 16 bytes)
         bool needsSret = false;
@@ -402,14 +402,14 @@ struct FFECallOpLowering : public ConversionPattern {
                 if (retStructType.isPacked()) {
                     needsSret = true;
                     sretStructType = retStructType;
-                    sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                    sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
                 } else {
                     // x86_64 SysV ABI: non-packed structs > 16 bytes use sret
                     uint64_t sizeBits = getPackedSizeInBits(retStructType);
                     if (sizeBits > 128) {
                         needsSret = true;
                         sretStructType = retStructType;
-                        sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                        sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
                     }
                 }
             }
@@ -432,8 +432,8 @@ struct FFECallOpLowering : public ConversionPattern {
             if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
                 if (structType.isPacked()) {
                     // Alloca + store, then pass pointer
-                    Value stackSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, argType, one);
-                    rewriter.create<LLVM::StoreOp>(loc, arg, stackSlot);
+                    Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType, one);
+                    LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
                     coercedArgs.push_back(stackSlot);
                     coercedArgTypes.push_back(ptrType);
                     continue;
@@ -468,14 +468,14 @@ struct FFECallOpLowering : public ConversionPattern {
         }
 
         // Direct named call
-        auto callOp = rewriter.create<LLVM::CallOp>(
+        auto callOp = LLVM::CallOp::create(rewriter, 
             loc, callResultTypes, calleeAttr.getValue(),
             ValueRange(coercedArgs));
 
         // Replace the op
         if (needsSret) {
             // Load the result from the sret pointer
-            Value result = rewriter.create<LLVM::LoadOp>(loc, sretStructType, sretSlot);
+            Value result = LLVM::LoadOp::create(rewriter, loc, sretStructType, sretSlot);
             rewriter.replaceOp(op, result);
         } else if (!resultTypeVec.empty()) {
             rewriter.replaceOp(op, callOp.getResults());
@@ -507,7 +507,7 @@ struct TryCallOpLowering : public ConversionPattern {
             return fn;
         OpBuilder::InsertionGuard guard(rewriter);
         rewriter.setInsertionPointToStart(module.getBody());
-        return rewriter.create<LLVM::LLVMFuncOp>(module.getLoc(), name, fnType);
+        return LLVM::LLVMFuncOp::create(rewriter, module.getLoc(), name, fnType);
     }
 
     LogicalResult
@@ -530,7 +530,7 @@ struct TryCallOpLowering : public ConversionPattern {
         auto i8Type = rewriter.getI8Type();
         auto i32Type = rewriter.getI32Type();
         auto i64Type = rewriter.getI64Type();
-        Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
+        Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
 
         // --- ABI coercion (same logic as FFECallOpLowering) ---
         SmallVector<Type, 1> resultTypeVec;
@@ -549,13 +549,13 @@ struct TryCallOpLowering : public ConversionPattern {
                 if (retStructType.isPacked()) {
                     needsSret = true;
                     sretStructType = retStructType;
-                    sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                    sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
                 } else {
                     uint64_t sizeBits = getPackedSizeInBits(retStructType);
                     if (sizeBits > 128) {
                         needsSret = true;
                         sretStructType = retStructType;
-                        sretSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, sretStructType, one);
+                        sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
                     }
                 }
             }
@@ -573,8 +573,8 @@ struct TryCallOpLowering : public ConversionPattern {
             Type argType = arg.getType();
             if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
                 if (structType.isPacked()) {
-                    Value stackSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, argType, one);
-                    rewriter.create<LLVM::StoreOp>(loc, arg, stackSlot);
+                    Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType, one);
+                    LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
                     coercedArgs.push_back(stackSlot);
                     coercedArgTypes.push_back(ptrType);
                     continue;
@@ -647,9 +647,9 @@ struct TryCallOpLowering : public ConversionPattern {
         Type resultType;
         if (!callResultTypes.empty()) {
             resultType = callResultTypes[0];
-            resultSlot = rewriter.create<LLVM::AllocaOp>(loc, ptrType, resultType, one);
-            Value zero = rewriter.create<LLVM::ZeroOp>(loc, resultType);
-            rewriter.create<LLVM::StoreOp>(loc, zero, resultSlot);
+            resultSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, resultType, one);
+            Value zero = LLVM::ZeroOp::create(rewriter, loc, resultType);
+            LLVM::StoreOp::create(rewriter, loc, zero, resultSlot);
         }
 
         Block *currentBlock = rewriter.getInsertionBlock();
@@ -669,7 +669,7 @@ struct TryCallOpLowering : public ConversionPattern {
         // --- currentBlock: emit invoke ---
         rewriter.setInsertionPointToEnd(currentBlock);
 
-        auto invokeOp = rewriter.create<LLVM::InvokeOp>(
+        auto invokeOp = LLVM::InvokeOp::create(rewriter, 
             loc,
             callResultTypes,
             calleeAttr,
@@ -682,12 +682,12 @@ struct TryCallOpLowering : public ConversionPattern {
         // --- invokeOkBlock: store result, branch to mergeBlock ---
         rewriter.setInsertionPointToEnd(invokeOkBlock);
         if (!callResultTypes.empty()) {
-            rewriter.create<LLVM::StoreOp>(loc, invokeOp.getResult(), resultSlot);
+            LLVM::StoreOp::create(rewriter, loc, invokeOp.getResult(), resultSlot);
         }
         if (needsSret) {
             // sret result is already in sretSlot from the invoke ABI
         }
-        rewriter.create<LLVM::BrOp>(loc, ValueRange{}, mergeBlock);
+        LLVM::BrOp::create(rewriter, loc, ValueRange{}, mergeBlock);
 
         // --- catchBlock: landing pad + exception handling ---
         rewriter.setInsertionPointToEnd(catchBlock);
@@ -695,30 +695,30 @@ struct TryCallOpLowering : public ConversionPattern {
         auto lpStructType = LLVM::LLVMStructType::getLiteral(
             rewriter.getContext(), {ptrType, i32Type}, false);
 
-        Value nullPtr = rewriter.create<LLVM::ZeroOp>(loc, ptrType);
-        auto landingPad = rewriter.create<LLVM::LandingpadOp>(
+        Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+        auto landingPad = LLVM::LandingpadOp::create(rewriter, 
             loc, lpStructType, /*cleanup=*/false, ValueRange{nullPtr});
 
-        Value exnPtr = rewriter.create<LLVM::ExtractValueOp>(loc, ptrType, landingPad, 0);
+        Value exnPtr = LLVM::ExtractValueOp::create(rewriter, loc, ptrType, landingPad, ArrayRef<int64_t>{0});
 
-        rewriter.create<LLVM::CallOp>(loc, TypeRange{ptrType},
+        LLVM::CallOp::create(rewriter, loc, TypeRange{ptrType},
             "__cxa_begin_catch", ValueRange{exnPtr});
-        rewriter.create<LLVM::CallOp>(loc, TypeRange{ptrType},
+        LLVM::CallOp::create(rewriter, loc, TypeRange{ptrType},
             "jlcs_catch_current_exception", ValueRange{});
-        rewriter.create<LLVM::CallOp>(loc, TypeRange{},
+        LLVM::CallOp::create(rewriter, loc, TypeRange{},
             "__cxa_end_catch", ValueRange{});
 
         // Branch to mergeBlock (resultSlot still has zero sentinel)
-        rewriter.create<LLVM::BrOp>(loc, ValueRange{}, mergeBlock);
+        LLVM::BrOp::create(rewriter, loc, ValueRange{}, mergeBlock);
 
         // --- mergeBlock: load result, replace try_call op ---
         rewriter.setInsertionPointToStart(mergeBlock);
 
         if (needsSret) {
-            Value result = rewriter.create<LLVM::LoadOp>(loc, sretStructType, sretSlot);
+            Value result = LLVM::LoadOp::create(rewriter, loc, sretStructType, sretSlot);
             rewriter.replaceOp(op, result);
         } else if (!resultTypeVec.empty()) {
-            Value result = rewriter.create<LLVM::LoadOp>(loc, resultType, resultSlot);
+            Value result = LLVM::LoadOp::create(rewriter, loc, resultType, resultSlot);
             rewriter.replaceOp(op, result);
         } else {
             rewriter.eraseOp(op);
@@ -755,7 +755,7 @@ struct ConstructorCallOpLowering : public ConversionPattern {
         }
 
         // Direct call to the constructor symbol — void return
-        rewriter.create<LLVM::CallOp>(
+        LLVM::CallOp::create(rewriter, 
             loc, TypeRange(), calleeAttr.getValue(), ValueRange(args));
 
         rewriter.eraseOp(op);
@@ -786,7 +786,7 @@ struct DestructorCallOpLowering : public ConversionPattern {
         Value objPtr = adaptor.getObjPtr();
 
         // Direct call to the destructor symbol — void return, single arg
-        rewriter.create<LLVM::CallOp>(
+        LLVM::CallOp::create(rewriter, 
             loc, TypeRange(), calleeAttr.getValue(), ValueRange({objPtr}));
 
         rewriter.eraseOp(op);
@@ -841,7 +841,7 @@ struct ScopeOpLowering : public ConversionPattern {
         for (int i = (int)destructors.size() - 1; i >= 0; --i) {
             auto dtorRef = cast<FlatSymbolRefAttr>(destructors[i]);
             Value ptr = managedPtrs[i];
-            rewriter.create<LLVM::CallOp>(
+            LLVM::CallOp::create(rewriter, 
                 loc, TypeRange(), dtorRef.getValue(), ValueRange({ptr}));
         }
     }
