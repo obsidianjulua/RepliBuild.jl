@@ -1,0 +1,130 @@
+[project]
+name = "simpleble"
+root = "/home/john/Desktop/Projects/RepliBuild.jl/test/simpleble_test"
+uuid = "b3e7a1c0-4f2d-4e8a-9c5b-1d3f6a8e2b90"
+
+[compile]
+parallel = true
+flags = [
+    "-std=c++17",
+    "-fPIC",
+    "-fvisibility=hidden",
+    "-DSIMPLEBLE_BACKEND_PLAIN=1",
+    "-DSIMPLEBLE_BACKEND_LINUX=0",
+    "-DSIMPLEBLE_BACKEND_WINDOWS=0",
+    "-DSIMPLEBLE_BACKEND_MACOS=0",
+    "-DSIMPLEBLE_BACKEND_IOS=0",
+    "-DSIMPLEBLE_BACKEND_ANDROID=0",
+    "-DSIMPLECBLE_EXPORT=__attribute__((visibility(\"default\")))",
+    "-DSIMPLEBLE_EXPORT=__attribute__((visibility(\"default\")))",
+    "-DSIMPLEBLE_VERSION=\"0.12.2\"",
+    "-DSIMPLEBLE_LOG_LEVEL=SIMPLEBLE_LOG_LEVEL_INFO",
+    "-DFMT_HEADER_ONLY",
+]
+source_files = [
+    # C wrapper (simplecble)
+    "simpleble_src/simplecble/src/simplecble.cpp",
+    "simpleble_src/simplecble/src/adapter.cpp",
+    "simpleble_src/simplecble/src/peripheral.cpp",
+    "simpleble_src/simplecble/src/logging.cpp",
+    "simpleble_src/simplecble/src/utils.cpp",
+    # C++ core: frontends
+    "simpleble_src/simpleble/src/frontends/base/Advanced.cpp",
+    "simpleble_src/simpleble/src/frontends/base/Adapter.cpp",
+    "simpleble_src/simpleble/src/frontends/base/Peripheral.cpp",
+    "simpleble_src/simpleble/src/frontends/base/Service.cpp",
+    "simpleble_src/simpleble/src/frontends/base/Characteristic.cpp",
+    "simpleble_src/simpleble/src/frontends/base/Descriptor.cpp",
+    "simpleble_src/simpleble/src/frontends/base/Backend.cpp",
+    "simpleble_src/simpleble/src/frontends/safe/AdapterSafe.cpp",
+    "simpleble_src/simpleble/src/frontends/safe/PeripheralSafe.cpp",
+    # C++ core: common backends
+    "simpleble_src/simpleble/src/backends/common/AdapterBase.cpp",
+    "simpleble_src/simpleble/src/backends/common/ServiceBase.cpp",
+    "simpleble_src/simpleble/src/backends/common/CharacteristicBase.cpp",
+    "simpleble_src/simpleble/src/backends/common/DescriptorBase.cpp",
+    # C++ core: plain backend
+    "simpleble_src/simpleble/src/backends/plain/AdapterPlain.cpp",
+    "simpleble_src/simpleble/src/backends/plain/PeripheralPlain.cpp",
+    "simpleble_src/simpleble/src/backends/plain/BackendPlain.cpp",
+    # C++ core: dongl backend (null USB for plain)
+    "simpleble_src/simpleble/src/backends/dongl/usb/UsbHelper.cpp",
+    "simpleble_src/simpleble/src/backends/dongl/usb/UsbHelperNull.cpp",
+    "simpleble_src/simpleble/src/backends/dongl/BackendDongl.cpp",
+    "simpleble_src/simpleble/src/backends/dongl/AdapterDongl.cpp",
+    "simpleble_src/simpleble/src/backends/dongl/PeripheralDongl.cpp",
+    "simpleble_src/simpleble/src/backends/dongl/serial/Protocol.cpp",
+    "simpleble_src/simpleble/src/backends/dongl/serial/ProtocolBase.cpp",
+    "simpleble_src/simpleble/src/backends/dongl/serial/Wire.cpp",
+    # nanopb (C)
+    "simpleble_src/dependencies/internal/src/nanopb/pb_common.c",
+    "simpleble_src/dependencies/internal/src/nanopb/pb_decode.c",
+    "simpleble_src/dependencies/internal/src/nanopb/pb_encode.c",
+    # dongl protocol (C)
+    "simpleble_src/simpleble/src/backends/dongl/protocol/d2h.pb.c",
+    "simpleble_src/simpleble/src/backends/dongl/protocol/h2d.pb.c",
+    "simpleble_src/simpleble/src/backends/dongl/protocol/basic.pb.c",
+    "simpleble_src/simpleble/src/backends/dongl/protocol/simpleble.pb.c",
+    # C++ core: misc
+    "simpleble_src/simpleble/src/Config.cpp",
+    "simpleble_src/simpleble/src/Exceptions.cpp",
+    "simpleble_src/simpleble/src/Utils.cpp",
+    "simpleble_src/simpleble/src/Logging.cpp",
+]
+include_dirs = [
+    "simpleble_src/simplecble/include",
+    "simpleble_src/simpleble/include",
+    "simpleble_src/simpleble/src",
+    "simpleble_src/simpleble/src/builders",
+    "simpleble_src/simpleble/src/external",
+    "simpleble_src/simpleble/src/backends/common",
+    "simpleble_src/simpleble/src/backends/dongl",
+    "simpleble_src/simpleble/src/frontends/safe",
+    "simpleble_src/dependencies/internal/include",
+    "simpleble_src/dependencies/external",
+]
+aot_thunks = false
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+strip_symbols = false
+type = "shared"
+
+[workflow]
+stages = ["discover", "compile", "link", "binary", "wrap"]
+
+[cache]
+enabled = true
+directory = ".replibuild_cache"
+
+[wrap]
+use_clang_jl = true
+style = "clang"
+language = "c"
+enabled = true
+
+[llvm]
+toolchain = "auto"
+
+[paths]
+build = "build"
+cache = ".replibuild_cache"
+source = "simpleble_src/simplecble/src"
+output = "julia"
+include = "simpleble_src/simplecble/include"
+
+[types]
+allow_unknown_enums = false
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[discovery]
+max_depth = 5
+walk_dependencies = false
+enabled = false
+ignore_patterns = ["build", ".git", ".cache", "cmake_build"]
+parse_ast = true

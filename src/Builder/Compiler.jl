@@ -209,6 +209,11 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
         base_flags = vcat(base_flags, ["-g"])
     end
 
+    # Strip C++-only flags when compiling C files
+    if endswith(cpp_file, ".c")
+        base_flags = filter(f -> !startswith(f, "-std=c++") && !startswith(f, "-std=gnu++"), base_flags)
+    end
+
     cmd_args = vcat(
         ["-S", "-emit-llvm"],  # Emit LLVM IR
         base_flags,
