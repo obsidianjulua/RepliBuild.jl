@@ -420,10 +420,8 @@ This is the single source of truth for IR compatibility — used by both the C s
 LTO pipeline and the MLIR AOT thunks pipeline.
 """
 function sanitize_ir_for_julia(ir_text::String)::String
-    ir_text = replace(ir_text, r"\bnoinline\b" => "")
-    ir_text = replace(ir_text, r"\boptnone\b" => "")
-    # Replace all attribute blocks: strip LLVM-version-sensitive keywords,
-    # but PRESERVE "target-cpu" and "target-features" for machine-specific JIT opts.
+    # ── Phase 1: Multiline patterns (require full-string context) ──────────
+    # Rewrite attribute blocks: keep only inlinehint + target-cpu/features
     ir_text = replace(ir_text,
         r"^(attributes\s+#\d+\s*=\s*\{)[^}]*(\})"m => function(m)
             cpu_m  = match(r"\"target-cpu\"=\"([^\"]+)\"", m)
@@ -435,64 +433,84 @@ function sanitize_ir_for_julia(ir_text::String)::String
             hdr_end = findfirst('{', m)
             "$(m[1:hdr_end]) $inner }"
         end)
-    # --- LLVM 19+ instruction-level compatibility ---
-    ir_text = replace(ir_text, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
-    ir_text = replace(ir_text, r"\bgetelementptr nuw\b" => "getelementptr")
-    ir_text = replace(ir_text, r"\binrange\([^)]*\)\s*" => "")
-    ir_text = replace(ir_text, r"^\s*#dbg_[a-z]+\(.*\)\s*$"m => "")
-    ir_text = replace(ir_text, r"\bcaptures\([^)]*\)\s*" => "")
-    ir_text = replace(ir_text, r"\bdead_on_unwind\b\s*" => "")
-    ir_text = replace(ir_text, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
-    ir_text = replace(ir_text, r"\ballocptr\b\s*" => "")
-    ir_text = replace(ir_text, r"\bicmp samesign\b" => "icmp")
-    ir_text = replace(ir_text, r"\brange\([^)]*\)\s*" => "")
-    ir_text = replace(ir_text, r"\btrunc (nuw |nsw )+" => "trunc ")
-    ir_text = replace(ir_text, r"\b(uitofp|zext) nneg " => s"\1 ")
-    # Strip all metadata references (!dbg, !tbaa, !llvm.loop, etc.)
-    ir_text = replace(ir_text, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
-    # Strip numbered debug metadata entries
-    lines = split(ir_text, '\n')
-    filtered = filter(lines) do l
-        !occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", l)
-    end
-    filtered2 = filter(filtered) do l
-        !occursin(r"^![a-zA-Z].*=\s*!\{", l)
-    end
-    ir_text = join(filtered2, '\n')
-
     # Remove varargs function bodies — va_start/va_end intrinsics can't be JIT-resolved.
     # Convert to extern declarations so calls route through the shared library.
     ir_text = replace(ir_text,
         r"^(define\s[^\n]*\.\.\.[^\n]*\{)\n(.*?)\n(\})"ms => function(m)
             sig_match = match(r"define\s+(.*?)\s+(@\w+)\s*\(([^)]*)\)", m)
             if sig_match !== nothing
-                # Strip internal/private linkage — declarations can't have module-local linkage
                 linkage = replace(sig_match[1], r"\b(internal|private)\s*" => "")
                 "declare $(linkage) $(sig_match[2])($(sig_match[3]))"
             else
                 m
             end
         end)
-    ir_text = replace(ir_text, r"^declare\s+void\s+@llvm\.va_(start|end)[^\n]*\n"m => "")
 
-    # Strip noalias scope intrinsics — they reference metadata we've already removed
-    ir_text = replace(ir_text, r"^\s*(tail\s+)?call void @llvm\.experimental\.noalias\.scope\.decl\(metadata ![0-9]+\)\s*$"m => "")
-
-    # Convert externally-visible global variable definitions to external declarations.
-    # Prevents "Duplicate definition" JIT errors when the shared library is also loaded
-    # via dlopen (both the .so and the LTO bitcode define the same globals).
-    # Private/internal globals (string constants, etc.) are kept as-is.
-    lines = split(ir_text, '\n')
-    for i in eachindex(lines)
-        m = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:<\{.*?\}>|\{.*?\}|\[\d+\s+x\s+\S+\]|\S+))\s+\S", lines[i])
-        if m !== nothing && !occursin(r"\b(?:private|internal)\b", m[2])
-            type_str = rstrip(m[4], ',')  # \S+ may capture trailing comma from "ptr, align 8"
-            lines[i] = "$(m[1])external $(m[3]) $(type_str)"
+    # ── Phase 2: Single-pass line processing ───────────────────────────────
+    # All per-line transformations and filtering in one streaming pass.
+    # Avoids ~15 full-string allocations and 2 split/join cycles from the
+    # original implementation. Per-line replace() on SubString only allocates
+    # when a pattern actually matches, so most lines pass through cheaply.
+    io = IOBuffer(sizehint=sizeof(ir_text))
+    first_line = true
+    for line in eachsplit(ir_text, '\n')
+        # ── Skip lines ──
+        # Debug metadata entries (numbered and named)
+        if occursin(r"^![0-9]+\s*=\s*(distinct\s+)?!", line)
+            continue
         end
-    end
-    ir_text = join(lines, '\n')
+        if occursin(r"^![a-zA-Z].*=\s*!\{", line)
+            continue
+        end
+        # #dbg_* record lines (LLVM 19+ debug records)
+        if occursin(r"^\s*#dbg_[a-z]+\(", line)
+            continue
+        end
+        # noalias scope intrinsics — reference metadata we've already skipped
+        if occursin(r"^\s*(tail\s+)?call void @llvm\.experimental\.noalias\.scope\.decl\(", line)
+            continue
+        end
+        # va_start/va_end intrinsic declarations
+        if occursin(r"^declare\s+void\s+@llvm\.va_(start|end)", line)
+            continue
+        end
 
-    return ir_text
+        # ── Per-line replacements ──
+        line = replace(line, r"\bnoinline\b" => "")
+        line = replace(line, r"\boptnone\b" => "")
+        # LLVM 19+ instruction-level compatibility
+        line = replace(line, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
+        line = replace(line, r"\bgetelementptr nuw\b" => "getelementptr")
+        line = replace(line, r"\binrange\([^)]*\)\s*" => "")
+        line = replace(line, r"\bcaptures\([^)]*\)\s*" => "")
+        line = replace(line, r"\bdead_on_unwind\b\s*" => "")
+        line = replace(line, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
+        line = replace(line, r"\ballocptr\b\s*" => "")
+        line = replace(line, r"\bicmp samesign\b" => "icmp")
+        line = replace(line, r"\brange\([^)]*\)\s*" => "")
+        line = replace(line, r"\btrunc (nuw |nsw )+" => "trunc ")
+        line = replace(line, r"\b(uitofp|zext) nneg " => s"\1 ")
+        # Strip metadata references (!dbg, !tbaa, !llvm.loop, etc.)
+        line = replace(line, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
+
+        # ── Global variable externalization ──
+        # Convert externally-visible global definitions to external declarations.
+        # Prevents "Duplicate definition" JIT errors when .so is also loaded via dlopen.
+        gm = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:<\{.*?\}>|\{.*?\}|\[\d+\s+x\s+\S+\]|\S+))\s+\S", line)
+        if gm !== nothing && !occursin(r"\b(?:private|internal)\b", gm[2])
+            type_str = rstrip(gm[4], ',')
+            line = "$(gm[1])external $(gm[3]) $(type_str)"
+        end
+
+        # ── Write line ──
+        if !first_line
+            write(io, '\n')
+        end
+        first_line = false
+        write(io, line)
+    end
+
+    return String(take!(io))
 end
 
 """
@@ -529,8 +547,9 @@ function assemble_bitcode(ll_path::String, bc_path::String)
     end
 end
 
-# libLLVM path cached at module level
+# libLLVM path and handle cached at module level
 const _LIBLLVM_PATH = Ref{String}("")
+const _LIBLLVM_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
 function _get_libllvm_path()
     if isempty(_LIBLLVM_PATH[])
@@ -544,48 +563,59 @@ function _get_libllvm_path()
     return _LIBLLVM_PATH[]
 end
 
+"""Return a cached dlopen handle for Julia's libLLVM. Opened once, never closed (process-lifetime)."""
+function _get_libllvm_handle()
+    if _LIBLLVM_HANDLE[] == C_NULL
+        path = _get_libllvm_path()
+        isempty(path) && return C_NULL
+        _LIBLLVM_HANDLE[] = Libdl.dlopen(path)
+    end
+    return _LIBLLVM_HANDLE[]
+end
+
 """
 Parse LLVM IR text and write bitcode using Julia's own libLLVM C API.
 Returns true on success, false on failure.
 """
 function _assemble_bitcode_libllvm(ll_path::String, bc_path::String)::Bool
-    libllvm = _get_libllvm_path()
-    isempty(libllvm) && return false
+    h = _get_libllvm_handle()
+    h == C_NULL && return false
 
     ir_text = read(ll_path, String)
     ctx = C_NULL
     mod_ptr = Ref{Ptr{Cvoid}}(C_NULL)
     msg_ptr = Ref{Ptr{UInt8}}(C_NULL)
 
-    try
-        ctx = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMContextCreate), Ptr{Cvoid}, ())
+    # GC.@preserve ir_text: LLVMCreateMemoryBufferWithMemoryRange borrows ir_text's
+    # memory (RequiresNullTerminator=0, no copy). The buffer is consumed by
+    # LLVMParseIRInContext, but the parser reads from ir_text's backing array
+    # during parsing. Without @preserve, GC could collect ir_text mid-parse.
+    GC.@preserve ir_text try
+        ctx = ccall(Libdl.dlsym(h, :LLVMContextCreate), Ptr{Cvoid}, ())
         ctx == C_NULL && return false
 
-        # Create a memory buffer from the IR text
-        buf = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMCreateMemoryBufferWithMemoryRange),
+        buf = ccall(Libdl.dlsym(h, :LLVMCreateMemoryBufferWithMemoryRange),
             Ptr{Cvoid},
             (Ptr{UInt8}, Csize_t, Cstring, Cint),
             ir_text, sizeof(ir_text), "lto_ir", 0)
         buf == C_NULL && return false
 
-        # Parse the IR into a module
-        status = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMParseIRInContext),
+        # LLVMParseIRInContext takes ownership of buf — do not dispose it
+        status = ccall(Libdl.dlsym(h, :LLVMParseIRInContext),
             Cint,
             (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Ptr{Cvoid}}, Ref{Ptr{UInt8}}),
             ctx, buf, mod_ptr, msg_ptr)
-        # Note: LLVMParseIRInContext takes ownership of buf — do not dispose it
 
         if status != 0
             if msg_ptr[] != C_NULL
                 errmsg = unsafe_string(msg_ptr[])
-                ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMDisposeMessage), Cvoid, (Ptr{UInt8},), msg_ptr[])
+                ccall(Libdl.dlsym(h, :LLVMDisposeMessage), Cvoid, (Ptr{UInt8},), msg_ptr[])
                 @warn "libLLVM IR parse failed: $(first(errmsg, 200))"
             end
             return false
         end
 
-        # Write bitcode to file
-        rc = ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMWriteBitcodeToFile),
+        rc = ccall(Libdl.dlsym(h, :LLVMWriteBitcodeToFile),
             Cint,
             (Ptr{Cvoid}, Cstring),
             mod_ptr[], bc_path)
@@ -601,10 +631,10 @@ function _assemble_bitcode_libllvm(ll_path::String, bc_path::String)::Bool
         return false
     finally
         if mod_ptr[] != C_NULL
-            ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMDisposeModule), Cvoid, (Ptr{Cvoid},), mod_ptr[])
+            ccall(Libdl.dlsym(h, :LLVMDisposeModule), Cvoid, (Ptr{Cvoid},), mod_ptr[])
         end
         if ctx != C_NULL
-            ccall(Libdl.dlsym(Libdl.dlopen(libllvm), :LLVMContextDispose), Cvoid, (Ptr{Cvoid},), ctx)
+            ccall(Libdl.dlsym(h, :LLVMContextDispose), Cvoid, (Ptr{Cvoid},), ctx)
         end
     end
 end

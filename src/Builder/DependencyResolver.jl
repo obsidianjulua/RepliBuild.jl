@@ -29,15 +29,34 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
 
     for (name, dep) in config.dependencies.items
         println("  dependency: resolving $name ($(dep.type))")
+
+        # Validate dependency name — used as a directory name; reject traversal
+        if contains(name, "..") || contains(name, "/") || contains(name, "\\") || startswith(name, "-")
+            @warn "Rejecting dependency with unsafe name: $name"
+            continue
+        end
+
         if dep.type == "git"
+            # Validate git URL and tag to prevent git option injection.
+            # Git interprets arguments starting with '-' as options.
+            if startswith(dep.url, "-")
+                @warn "Rejecting git dependency $name: URL starts with '-' (potential option injection)"
+                continue
+            end
+            if !isempty(dep.tag) && startswith(dep.tag, "-")
+                @warn "Rejecting git dependency $name: tag starts with '-' (potential option injection)"
+                continue
+            end
+
             dep_path = joinpath(deps_cache, name)
             if !isdir(dep_path)
                 println("    cloning $(dep.url)...")
                 try
-                    run(`git clone --quiet $(dep.url) $dep_path`)
+                    # Use '--' to separate options from positional arguments
+                    run(`git clone --quiet -- $(dep.url) $dep_path`)
                     if !isempty(dep.tag)
                         cd(dep_path) do
-                            run(`git checkout --quiet $(dep.tag)`)
+                            run(`git checkout --quiet -- $(dep.tag)`)
                         end
                     end
                 catch e

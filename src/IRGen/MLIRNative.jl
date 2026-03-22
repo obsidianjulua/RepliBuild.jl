@@ -309,10 +309,12 @@ Invoke a JIT function with arguments.
 Note: Arguments must be pointers to the actual values (double indirection).
 """
 function jit_invoke(jit::MlirExecutionEngine, name::String, args::Vector{Ptr{Cvoid}})
-    # Pack arguments into an array of pointers
-    # implementation detail: jlcs_jit_invoke expects void**
-    return ccall((:jlcs_jit_invoke, libJLCS), Bool,
-                 (MlirExecutionEngine, Cstring, Ptr{Ptr{Cvoid}}), jit, name, pointer(args))
+    # jlcs_jit_invoke expects void** — pointer(args) borrows the Vector's backing
+    # array, which must stay alive for the duration of the ccall.
+    GC.@preserve args begin
+        return ccall((:jlcs_jit_invoke, libJLCS), Bool,
+                     (MlirExecutionEngine, Cstring, Ptr{Ptr{Cvoid}}), jit, name, pointer(args))
+    end
 end
 
 """
@@ -382,25 +384,26 @@ function invoke_safe(jit::MlirExecutionEngine, mod::MlirModule, name::String, ar
     
     ref_args = Any[]
     ptr_args = Ptr{Cvoid}[]
-    
+
     # Handle Inputs
     for i in 1:num_inputs
         r = Ref(args[i])
         push!(ref_args, r)
         push!(ptr_args, Base.unsafe_convert(Ptr{Cvoid}, r))
     end
-    
+
     # Handle Return Buffer (Last argument)
     # We assume the user passed a Ref for the return value
     ret_buffer = args[end]
     if !(ret_buffer isa Ref)
          error("Last argument must be a Ref for the return value")
     end
-    
+
     push!(ptr_args, Base.unsafe_convert(Ptr{Cvoid}, ret_buffer))
-    
-    # Invoke
-    return jit_invoke(jit, name, ptr_args)
+
+    # GC.@preserve ref_args and ret_buffer: the Ref objects backing the pointers
+    # in ptr_args must stay alive through the ccall inside jit_invoke.
+    return GC.@preserve ref_args ret_buffer jit_invoke(jit, name, ptr_args)
 end
 
 # =============================================================================

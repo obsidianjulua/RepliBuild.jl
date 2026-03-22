@@ -49,22 +49,21 @@ Internal command execution implementation
 function _run_command_impl(cmd::Cmd, capture_output::Bool)
     try
         if capture_output
+            # Use ignorestatus so the pipeline always completes and we capture
+            # stdout+stderr even on non-zero exit. Then check exit code ourselves.
+            # Previous version re-ran the command on failure to capture output,
+            # causing side effects to execute twice.
             io = IOBuffer()
-            pipeline(cmd, stdout=io, stderr=io) |> run
-            return (String(take!(io)), 0)
+            proc = pipeline(ignorestatus(cmd), stdout=io, stderr=io) |> run
+            output = String(take!(io))
+            return (output, proc.exitcode)
         else
             run(cmd)
             return ("", 0)
         end
     catch e
         if isa(e, ProcessFailedException)
-            # Get the error output
-            io = IOBuffer()
-            try
-                pipeline(cmd, stdout=io, stderr=io) |> run
-            catch
-            end
-            return (String(take!(io)), 1)
+            return ("Process failed: $e", 1)
         else
             return ("Error: $e", 1)
         end
