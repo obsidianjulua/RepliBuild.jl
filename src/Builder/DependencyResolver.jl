@@ -56,7 +56,9 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
                     run(`git clone --quiet -- $(dep.url) $dep_path`)
                     if !isempty(dep.tag)
                         cd(dep_path) do
-                            run(`git checkout --quiet -- $(dep.tag)`)
+                            # Tag is validated above (no '-' prefix), so safe to pass directly.
+                            # Do NOT use '--' here — it tells git to treat the arg as a file path.
+                            run(`git checkout --quiet $(dep.tag)`)
                         end
                     end
                 catch e
@@ -65,10 +67,11 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
                 end
             end
             
-            # Simple heuristic: add dep_path and dep_path/include to includes
+            # Heuristic: add common include directories from dep
             push!(extra_includes, dep_path)
-            if isdir(joinpath(dep_path, "include"))
-                push!(extra_includes, joinpath(dep_path, "include"))
+            for subdir in ("include", "src")
+                d = joinpath(dep_path, subdir)
+                isdir(d) && push!(extra_includes, d)
             end
             
             # Find all .cpp/.c files in the dep_path (ignoring tests/examples typically)

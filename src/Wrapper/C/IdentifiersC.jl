@@ -27,7 +27,7 @@ function make_c_identifier(name::String)::String
         "false", "nothing", "missing", "NaN", "Inf"
     ]
 
-    if lowercase(clean) in julia_keywords
+    if clean in julia_keywords
         clean = clean * "_"
     end
 

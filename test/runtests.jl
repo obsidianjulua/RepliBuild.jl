@@ -11,7 +11,7 @@ using RepliBuild
 @testset "RepliBuild.jl" begin
 
     @testset "Package loads" begin
-        @test RepliBuild.VERSION == v"2.5.3"
+        @test RepliBuild.VERSION == v"2.5.4"
         @test isdefined(RepliBuild, :discover)
         @test isdefined(RepliBuild, :build)
         @test isdefined(RepliBuild, :wrap)

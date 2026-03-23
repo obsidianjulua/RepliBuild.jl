@@ -54,16 +54,14 @@ function _resolve_forward_ptr(julia_type::AbstractString, defined_names::Set{Str
     m = match(r"^Ptr\{(.+)\}$", julia_type)
     isnothing(m) && return julia_type
     inner = m.captures[1]
-    # Recurse for nested Ptr
+    # Recurse to resolve the inner type (handles nested Ptr{Ptr{...}})
     resolved_inner = _resolve_forward_ptr(inner, defined_names)
-    # Check if the innermost type is defined or builtin
-    base = inner
-    while (bm = match(r"^Ptr\{(.+)\}$", base)) !== nothing
-        base = bm.captures[1]
-    end
-    if base in _JULIA_BUILTIN_TYPES || base in defined_names
+    # If recursion already produced a Ptr (nested case), it's been validated — keep it.
+    # Otherwise check if the bare type name is known (builtin or already defined).
+    if startswith(resolved_inner, "Ptr{") || resolved_inner in _JULIA_BUILTIN_TYPES || resolved_inner in defined_names
         return "Ptr{$resolved_inner}"
     end
+    # Inner type is an unknown bare name — replace with Cvoid to avoid UndefVarError
     return "Ptr{Cvoid}"
 end
 
@@ -112,7 +110,7 @@ Returns 0 on failure.
 function _parse_int_or_hex(raw)::Int
     s = raw isa String ? raw : string(raw)
     try
-        startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
+        (startswith(s, "0x") || startswith(s, "0X")) ? parse(Int, s[3:end], base=16) : parse(Int, s)
     catch
         0
     end
@@ -222,7 +220,7 @@ const _CCALL_SAFE_PRIMITIVES = Set([
     "char", "unsigned char", "signed char",
     "short", "unsigned short", "short int",
     "long", "unsigned long", "long int", "long long", "unsigned long long",
-    "float", "double", "long double",
+    "float", "double",
     "bool", "_Bool",
     "int8_t", "int16_t", "int32_t", "int64_t",
     "uint8_t", "uint16_t", "uint32_t", "uint64_t",

@@ -41,17 +41,35 @@ function make_cpp_identifier(name::String)::String
     # Remove C++ namespace
     clean = replace(clean, r"^.*::" => "")
 
-    # Handle C++ operators
+    # Handle C++ operators — longest matches first to avoid partial replacement
+    # (e.g. "operator<<" must not match "operator<" first → "op_lt<")
+    clean = replace(clean, "operator<<=" => "op_lshift_assign")
+    clean = replace(clean, "operator>>=" => "op_rshift_assign")
+    clean = replace(clean, "operator<<" => "op_lshift")
+    clean = replace(clean, "operator>>" => "op_rshift")
+    clean = replace(clean, "operator<=" => "op_le")
+    clean = replace(clean, "operator>=" => "op_ge")
+    clean = replace(clean, "operator==" => "op_eq")
+    clean = replace(clean, "operator!=" => "op_neq")
+    clean = replace(clean, "operator+=" => "op_add_assign")
+    clean = replace(clean, "operator-=" => "op_sub_assign")
+    clean = replace(clean, "operator*=" => "op_mul_assign")
+    clean = replace(clean, "operator/=" => "op_div_assign")
+    clean = replace(clean, "operator->" => "op_arrow")
+    clean = replace(clean, "operator()" => "op_call")
+    clean = replace(clean, "operator[]" => "op_getindex")
     clean = replace(clean, "operator+" => "op_add")
     clean = replace(clean, "operator-" => "op_sub")
     clean = replace(clean, "operator*" => "op_mul")
     clean = replace(clean, "operator/" => "op_div")
-    clean = replace(clean, "operator==" => "op_eq")
-    clean = replace(clean, "operator!=" => "op_neq")
     clean = replace(clean, "operator<" => "op_lt")
     clean = replace(clean, "operator>" => "op_gt")
-    clean = replace(clean, "operator[]" => "op_getindex")
-    clean = replace(clean, "operator()" => "op_call")
+    clean = replace(clean, "operator=" => "op_assign")
+    clean = replace(clean, "operator!" => "op_not")
+    clean = replace(clean, "operator~" => "op_bitnot")
+    clean = replace(clean, "operator&" => "op_bitand")
+    clean = replace(clean, "operator|" => "op_bitor")
+    clean = replace(clean, "operator^" => "op_bitxor")
 
     # Replace invalid characters with underscore
     clean = replace(clean, r"[^a-zA-Z0-9_!]" => "_")
@@ -73,7 +91,7 @@ function make_cpp_identifier(name::String)::String
         "false", "nothing", "missing", "NaN", "Inf"
     ]
 
-    if lowercase(clean) in julia_keywords
+    if clean in julia_keywords
         clean = clean * "_"
     end
 

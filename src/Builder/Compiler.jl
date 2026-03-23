@@ -1413,7 +1413,7 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         # Floating point
         "float" => "Cfloat",
         "double" => "Cdouble",
-        "long double" => "Float64",  # Julia doesn't have 80-bit float, use Float64
+        "long double" => "NTuple{2, UInt64}",  # 80-bit extended precision in 16-byte slot; Julia has no native equivalent
 
         # Size types
         "size_t" => "Csize_t",

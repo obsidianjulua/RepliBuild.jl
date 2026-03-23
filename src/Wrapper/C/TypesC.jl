@@ -29,13 +29,16 @@ end
 """
     is_c_enum_like(c_type::String)::Bool
 
-Check if a C++ type looks like an enum (similar heuristics to struct for now).
-Future: enhance with DWARF metadata lookup.
+Check if a C type looks like an enum based on naming conventions.
+Returns false — enum detection is unreliable by name alone (uppercase names
+are more likely structs). Real enum identification uses DWARF metadata
+via `_is_enum_type()` in DispatchLogic.jl which checks `__enum__` prefixed keys.
 """
 function is_c_enum_like(c_type::String)::Bool
-    # For now, use same heuristics as struct
-    # In future: check against extracted enum names from DWARF
-    return is_c_struct_like(c_type)
+    # Enum detection requires DWARF metadata (__enum__ prefix).
+    # Name-based heuristics can't distinguish enums from structs,
+    # and treating an unknown struct as Cint would corrupt memory.
+    return false
 end
 
 """

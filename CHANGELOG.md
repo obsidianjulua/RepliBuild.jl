@@ -4,6 +4,75 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## v2.5.4
 
+### Refactor: Module Hierarchy — Flat Source → Organized Subsystems
+
+Replaced the flat `src/*.jl` layout (14 top-level files, ~12k lines) with a three-subsystem hierarchy. Each subsystem has a thin orchestration shim that controls include order — all implementation lives in subdirectories.
+
+**Top-level shims:**
+- **`Builder.jl`** — Build mechanics: config, environment, compile, link, DWARF, package registry
+- **`IRGen.jl`** — MLIR/JIT: native bindings, IR generation, JIT execution
+- **`Wrapper.jl`** — Julia binding generation: type mapping, dispatch routing, codegen
+- **`Introspect.jl`** — Analysis tooling: binary, Julia code, LLVM IR, benchmarking
+
+**Subsystem layout:**
+```
+src/
+  RepliBuild.jl            ← module root, exports, public API delegation
+  Builder.jl               ← shim: includes Builder/*.jl
+  Builder/
+    LLVMEnvironment.jl, ConfigurationManager.jl, BuildBridge.jl,
+    DependencyResolver.jl, ASTWalker.jl, Discovery.jl, ClangJLBridge.jl,
+    Compiler.jl, DWARFParser.jl, EnvironmentDoctor.jl, PackageRegistry.jl,
+    ThunkBuilder.jl
+  IRGen.jl                 ← shim: includes IRGen/*.jl
+  IRGen/
+    MLIRNative.jl, JLCSIRGenerator.jl, JITManager.jl
+    ir_gen/  (FunctionGen.jl, StructGen.jl, STLContainerGen.jl, TypeUtils.jl)
+  Wrapper.jl               ← shim: includes Wrapper/**/*.jl
+  Wrapper/
+    Utils.jl, TypeRegistry.jl, Symbols.jl, FunctionPointers.jl,
+    DispatchLogic.jl, Generator.jl
+    C/    (GeneratorC.jl, TypesC.jl, IdentifiersC.jl, UtilsC.jl)
+    Cpp/  (GeneratorCpp.jl, TypesCpp.jl, IdentifiersCpp.jl, UtilsCpp.jl, STLWrappers.jl)
+  Introspect.jl            ← shim: includes Introspect/*.jl
+  Introspect/
+    Types.jl, Binary.jl, Julia.jl, LLVM.jl, Benchmarking.jl,
+    DataExport.jl, Project.jl
+```
+
+- **`RepliBuild.jl`** is now a pure delegation layer — loads the four subsystem shims, `using`s their modules, and re-exports the public API. No implementation logic remains at the top level.
+- **`ThunkBuilder.jl`** extracted from `Compiler.jl` — bridges Builder and IRGen (needs `Wrapper.is_c_lto_safe`), loaded after Wrapper to satisfy the cross-subsystem dependency.
+- **`PackageRegistry.jl`** moved from `Hub/` into `Builder/`.
+- Stable path constants (`PROJECT_ROOT`, `SRC_DIR`) in `RepliBuild.jl` replace `@__DIR__` in submodules so file moves don't break paths.
+- Net deletion: ~11,900 lines of duplicated top-level files removed.
+
+### Fixed: Wrapper Generator Bug Audit (23 bugs)
+
+Comprehensive audit and fix pass across C, C++, and shared wrapper subsystems. Full report in `BUG_AUDIT.md`.
+
+**HIGH (8) — Crashes, memory corruption, silent wrong codegen:**
+- **C-1/C-2/CPP-9**: sret llvmcall passed `Ref{T}` (GC addrspace 10) where `Ptr{T}` (raw addrspace 0) was needed — address space mismatch crashes. Fixed with `Base.unsafe_convert` to raw pointer before llvmcall. sret path now also applies integer widening and `Ref→Ptr` conversion matching the main llvmcall path.
+- **C-3**: Use-after-free in bitfield/packed struct accessor — `pointer(collect(s._data))` created a GC-eligible temporary. Wrapped in `GC.@preserve`.
+- **CPP-8**: C++ llvmcall missing `cconvert` for pointer params — ported the C generator's `Ptr` conversion logic.
+- **CPP-10**: Debug `println` statements left in template codegen — removed.
+- **U-1**: `_resolve_forward_ptr` flattened `Ptr{Ptr{T}}` to `Ptr{Cvoid}` — now only collapses bare unknown struct names, preserves nested pointer indirection.
+- **D-1**: `is_ccall_safe` used uncleaned return type (with `const`) for DWARF lookup — changed to `cleaned_ret`.
+
+**MEDIUM (11) — Incorrect output in edge cases, misrouting:**
+- **C-4**: Convenience wrapper DWARF lookup used `"__struct__" * name` prefix that doesn't exist — switched to bare name lookup.
+- **C-5/L-4**: `_sanitize_c_type_name` stripped spaces (`" " => ""`), destroying multi-word types like `"unsigned int"` → `"unsignedint"`. Changed to `" " => "_"`. Same fix applied to C++ side in `_sanitize_cpp_type_name`.
+- **C-6/L-3**: `is_c_enum_like`/`is_enum_like` were identical to their `is_struct_like` counterparts — any uppercase type got dual-classified. Now return `false`; real enum detection uses DWARF `__enum__` keys via `_is_enum_type()`.
+- **C-7**: `long double` mapped to `Float64` (8 bytes) but x86-64 ABI uses 16-byte slots — changed to `NTuple{2, UInt64}` and removed from `_CCALL_SAFE_PRIMITIVES` to force struct safety checks.
+- **CPP-1/L-1**: `make_cpp_identifier`/`make_c_identifier` lowercased before keyword check — `"Begin"` incorrectly matched `"begin"`. Removed `lowercase` call (Julia keywords are case-sensitive).
+- **CPP-2**: Operator replacement ordering hit single-char operators before compounds — `operator<<` became `op_lt<` instead of `op_lshift`. Reordered longest-match-first.
+- **CPP-3/4/5**: STL type detection used `startswith` prefix matching — `std::string_view` false-matched `std::string`, `std::set_difference` matched `std::set`. Added `_stl_name_match()` with word-boundary awareness (requires `<` or ` ` after prefix). Also reordered `unordered_map`/`unordered_set` before `map`/`set` in size lookup.
+- **CPP-6**: Safe wrapper used `ccall_args` (containing converted names like `a_c`) instead of original `param_names` — generated code referenced variables that didn't exist in scope.
+- **CPP-7**: Template this-pointer checked sanitized name against `struct_types` but DWARF stores raw names (e.g. `"Box<double>"` not `"Box_double"`) — now checks both `bare_class` and `safe_class`.
+
+**LOW (4) — Cosmetic, minor edge cases:**
+- **L-2**: `_sanitize_c_type_name` could return empty string from all-special-character input — now returns `"_UnknownType"` fallback.
+- **U-2**: `_parse_int_or_hex` missed uppercase `0X` prefix — added `|| startswith(s, "0X")` check.
+
 ### New: C++ Exception Catching via `jlcs.try_call`
 
 Added `TryCallOp` (`jlcs.try_call`) to the JLCS MLIR dialect — a variant of `ffe_call` that emits LLVM `invoke` + landing pad to catch C++ exceptions at the ABI boundary.

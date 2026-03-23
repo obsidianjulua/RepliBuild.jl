@@ -60,7 +60,7 @@ function create_type_registry(config; custom_types::Dict{String,String}=Dict{Str
         "long long" => "Clonglong", "long long int" => "Clonglong", "signed long long" => "Clonglong", "unsigned long long" => "Culonglong",
         "int8_t" => "Int8", "uint8_t" => "UInt8", "int16_t" => "Int16", "uint16_t" => "UInt16",
         "int32_t" => "Int32", "uint32_t" => "UInt32", "int64_t" => "Int64", "uint64_t" => "UInt64",
-        "float" => "Cfloat", "double" => "Cdouble", "long double" => "Float64",
+        "float" => "Cfloat", "double" => "Cdouble", "long double" => "NTuple{2, UInt64}",
         "size_t" => "Csize_t", "ssize_t" => "Cssize_t", "ptrdiff_t" => "Cptrdiff_t",
         "intptr_t" => "Int64", "uintptr_t" => "UInt64", "off_t" => "Int64", "time_t" => "Int64", "clock_t" => "Int64",
         # C11 _Complex types

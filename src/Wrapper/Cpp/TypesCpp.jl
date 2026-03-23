@@ -29,13 +29,16 @@ end
 """
     is_enum_like(cpp_type::String)::Bool
 
-Check if a C++ type looks like an enum (similar heuristics to struct for now).
-Future: enhance with DWARF metadata lookup.
+Check if a C++ type looks like an enum based on naming conventions.
+Returns false — enum detection is unreliable by name alone (uppercase names
+are more likely structs/classes). Real enum identification uses DWARF metadata
+via `_is_enum_type()` in DispatchLogic.jl which checks `__enum__` prefixed keys.
 """
 function is_enum_like(cpp_type::String)::Bool
-    # For now, use same heuristics as struct
-    # In future: check against extracted enum names from DWARF
-    return is_struct_like(cpp_type)
+    # Enum detection requires DWARF metadata (__enum__ prefix).
+    # Name-based heuristics can't distinguish enums from structs,
+    # and treating an unknown struct as Cint would corrupt memory.
+    return false
 end
 
 """
@@ -53,6 +56,21 @@ function is_function_pointer_like(cpp_type::String)::Bool
 end
 
 """
+    _stl_name_match(clean, prefix) -> Bool
+
+Match an STL type name with word-boundary awareness.
+Returns true if `clean` equals `prefix` exactly, or starts with `prefix`
+followed by `<` or ` ` (template args). Prevents false positives like
+`std::string_view` matching `std::string`.
+"""
+function _stl_name_match(clean::AbstractString, prefix::AbstractString)::Bool
+    startswith(clean, prefix) || return false
+    ncodeunits(clean) == ncodeunits(prefix) && return true
+    c = clean[ncodeunits(prefix) + 1]
+    return c == '<' || c == ' '
+end
+
+"""
     is_stl_container_type(c_type::String)::Bool
 
 Check if a C++ type is an STL container (non-POD, requires opaque handle).
@@ -61,13 +79,17 @@ function is_stl_container_type(c_type::String)::Bool
     clean = strip(replace(c_type, r"\bconst\b" => ""))
     clean = strip(replace(clean, r"[*&]+$" => ""))
     clean = strip(clean)
+    # Exact name or name followed by '<' (template args)
+    stl_names = (
+        "std::vector", "std::basic_string", "std::string",
+        "std::map", "std::unordered_map", "std::set", "std::unordered_set",
+        "std::deque", "std::list", "std::forward_list",
+        "std::multimap", "std::multiset",
+    )
+    any(p -> _stl_name_match(clean, p), stl_names) && return true
+    # DWARF often strips the std:: namespace prefix — these already require '<'
     return any(p -> startswith(clean, p),
-        ("std::vector", "std::basic_string", "std::string",
-         "std::map", "std::unordered_map", "std::set", "std::unordered_set",
-         "std::deque", "std::list", "std::forward_list",
-         "std::multimap", "std::multiset",
-         # DWARF often strips the std:: namespace prefix
-         "vector<", "basic_string<",
+        ("vector<", "basic_string<",
          "map<", "unordered_map<", "set<", "unordered_set<",
          "deque<", "list<", "forward_list<",
          "multimap<", "multiset<"))
@@ -84,21 +106,23 @@ function get_stl_container_size(c_type::String)::Int
     clean = strip(replace(clean, r"[*&]+$" => ""))
     
     # Check for both "std::..." and raw prefixes (since DWARF sometimes strips std::)
-    if startswith(clean, "std::vector") || startswith(clean, "vector<")
+    # Use _stl_name_match for std:: prefixes to avoid false positives
+    # (e.g. "std::string_view" matching "std::string")
+    if _stl_name_match(clean, "std::vector") || startswith(clean, "vector<")
         return 24
-    elseif startswith(clean, "std::basic_string") || startswith(clean, "std::string") || startswith(clean, "basic_string<") || startswith(clean, "string")
+    elseif _stl_name_match(clean, "std::basic_string") || _stl_name_match(clean, "std::string") || startswith(clean, "basic_string<")
         return 32 # libstdc++ SSO string size is 32 bytes on 64-bit
-    elseif startswith(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
+    elseif _stl_name_match(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
         return 16
-    elseif startswith(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
+    elseif _stl_name_match(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
         return 8
-    elseif startswith(clean, "std::map") || startswith(clean, "map<") || startswith(clean, "std::set") || startswith(clean, "set<")
+    elseif _stl_name_match(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || _stl_name_match(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
+        return 56 # Typical hashtable size — check before std::map/std::set to avoid prefix collision
+    elseif _stl_name_match(clean, "std::map") || startswith(clean, "map<") || _stl_name_match(clean, "std::set") || startswith(clean, "set<")
         return 48 # Typical rb_tree size
-    elseif startswith(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || startswith(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
-        return 56 # Typical hashtable size
-    elseif startswith(clean, "std::list") || startswith(clean, "list<")
+    elseif _stl_name_match(clean, "std::list") || startswith(clean, "list<")
         return 24
-    elseif startswith(clean, "std::deque") || startswith(clean, "deque<")
+    elseif _stl_name_match(clean, "std::deque") || startswith(clean, "deque<")
         return 80
     end
     return 0

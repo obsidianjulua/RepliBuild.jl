@@ -1674,12 +1674,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         # Determine if we should use MLIR or ccall
         use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs)
-        if func_name == "pack_record"
-            println("DEBUG: pack_record use_mlir_dispatch = $use_mlir_dispatch")
-            println("DEBUG: is_ccall_safe returned ", is_ccall_safe(func, dwarf_structs))
-            println("DEBUG: dwarf_structs keys = ", collect(keys(dwarf_structs)))
-        end
-        
+
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
         return_type = copy(func["return_type"])
@@ -1741,9 +1736,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     safe_class = "Cvoid"
                 end
                 
-                # Only synthesize 'this' when bare_class is a known struct type.
+                # Only synthesize 'this' when the class is a known struct type.
+                # Check both raw DWARF name (bare_class, e.g. "Box<double>") and
+                # sanitized name (safe_class, e.g. "Box_double") since struct_types
+                # contains raw DWARF names. Without checking bare_class, template
+                # class methods never get a 'this' pointer synthesized.
                 # If it's a namespace name (e.g. "pugi") rather than a class, skip.
-                if !isempty(safe_class) && safe_class != "Cvoid" && safe_class in struct_types
+                if !isempty(safe_class) && safe_class != "Cvoid" && (bare_class in struct_types || safe_class in struct_types)
                     this_param = Dict{String,Any}(
                         "name" => "this",
                         "c_type" => class_name * "*",
@@ -1774,7 +1773,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
              base_c = replace(base_c, r"^(const\s+|struct\s+|class\s+)+" => "")
              base_c = strip(base_c)
              
-             if base_c in struct_types
+             if base_c in struct_types && !(base_c in _INTERNAL_TYPE_BLOCKLIST)
                  # Sanitize
                  safe_base = _sanitize_cpp_type_name(base_c)
                  return_type["julia_type"] = "Ptr{$safe_base}"
@@ -1818,6 +1817,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             va_julia_name = replace(va_julia_name, "[" => "_")
             va_julia_name = replace(va_julia_name, "]" => "")
             va_julia_name = replace(va_julia_name, ":" => "_")
+            va_julia_name = replace(va_julia_name, "@" => "_")
             va_julia_name = replace(va_julia_name, r"_+" => "_")
             va_julia_name = String(rstrip(va_julia_name, '_'))
 
@@ -1878,7 +1878,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
             # Also sanitize namespace separators (::) and other non-identifier chars
             # that can appear in Ptr{namespace::type} style references from DWARF
-            if occursin(r"::|[^A-Za-z0-9_{},\[\]]", julia_type) && julia_type != "Any"
+            # Allow spaces (e.g. "NTuple{4, UInt8}") to pass through unsanitized
+            if occursin(r"::|[^A-Za-z0-9_{},\[\] ]", julia_type) && julia_type != "Any"
                 m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
                 if m !== nothing
                     wrapper_kw, inner = m.captures
@@ -1938,6 +1939,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         julia_name = replace(julia_name, "[" => "_")
         julia_name = replace(julia_name, "]" => "")
         julia_name = replace(julia_name, ":" => "_")
+        julia_name = replace(julia_name, "@" => "_")  # ELF symbol versioning
         julia_name = replace(julia_name, r"_+" => "_")  # collapse consecutive underscores
         julia_name = replace(julia_name, r"^replibuild_shim_" => "") # Remove macro shim prefix
         julia_name = String(rstrip(julia_name, '_'))
@@ -2173,10 +2175,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     invoke_call *= "    return ret"
                 else
                     # Struct return via sret pointer
+                    # ret_buf is Ref{T} (GC-managed, ptr addrspace 10) but llvmcall
+                    # needs Ptr{T} (raw, addrspace 0). Convert via unsafe_convert and
+                    # keep ret_buf alive with GC.@preserve.
                     invoke_call = "        ret_buf = Ref{$jit_ret_type}()\n"
+                    invoke_call *= "        ret_ptr = Base.unsafe_convert(Ptr{$jit_ret_type}, ret_buf)\n"
                     invoke_call *= "        GC.@preserve ret_buf begin\n"
                     invoke_call *= "            if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_call *= "                Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}}, ret_buf, inner_ptrs)\n"
+                    invoke_call *= "                Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}}, ret_ptr, inner_ptrs)\n"
                     invoke_call *= "            else\n"
                     invoke_call *= "                ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)\n"
                     invoke_call *= "            end\n"
@@ -2260,14 +2266,28 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         llvmcall_conversion_lines = String[]
         for (i, pt) in enumerate(param_types)
             arg_name = ccall_param_names[i]
-            m = match(r"^Ref\{(.+)\}$", pt)
-            if m !== nothing
-                inner_type = m.captures[1]
+            m_ref = match(r"^Ref\{(.+)\}$", pt)
+            m_ptr = match(r"^Ptr\{(.+)\}$", pt)
+            if m_ref !== nothing
+                # Ref{T} → Ptr{T}: llvmcall sees Ref as ptr addrspace(10),
+                # but C++ IR uses plain ptr (addrspace 0)
+                inner_type = m_ref.captures[1]
                 push!(llvmcall_param_types, "Ptr{$inner_type}")
                 ptr_name = "__ptr_$(arg_name)"
                 push!(llvmcall_arg_names, ptr_name)
                 push!(llvmcall_ref_args, arg_name)
                 push!(llvmcall_conversion_lines, "        $ptr_name = Base.unsafe_convert(Ptr{$inner_type}, $arg_name)")
+            elseif m_ptr !== nothing
+                # Ptr{T} params: the Julia signature is relaxed to ::Any,
+                # so callers may pass Ref{T} or Vector{T}. ccall auto-converts
+                # via cconvert/unsafe_convert, but llvmcall doesn't.
+                push!(llvmcall_param_types, pt)
+                ptr_name = "__ptr_$(arg_name)"
+                cc_name = "__cc_$(arg_name)"
+                push!(llvmcall_arg_names, ptr_name)
+                push!(llvmcall_ref_args, cc_name)  # preserve cconvert result (holds the GC root)
+                push!(llvmcall_conversion_lines, "        $cc_name = Base.cconvert($pt, $arg_name)")
+                push!(llvmcall_conversion_lines, "        $ptr_name = Base.unsafe_convert($pt, $cc_name)")
             else
                 push!(llvmcall_param_types, pt)
                 push!(llvmcall_arg_names, arg_name)
@@ -2488,6 +2508,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 managed_name = "Managed$safe_target"
                 safe_func_name = "$(julia_name)_safe"
                 
+                # Use original param_names (not ccall_args which may have converted names
+                # like "a_c" that don't exist in the safe wrapper's scope)
+                safe_call_args = join(param_names, ", ")
                 safe_wrapper = """
                 \"""
                     $safe_func_name($param_sig) -> $managed_name
@@ -2495,7 +2518,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 Safe wrapper for `$julia_name` that returns a managed object with automatic finalization.
                 \"""
                 function $safe_func_name($param_sig)::$managed_name
-                    ptr = $julia_name($ccall_args)
+                    ptr = $julia_name($safe_call_args)
                     return $managed_name(ptr)
                 end
                 """
@@ -2524,8 +2547,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 struct_name = replace(ptype, r"^Ptr\{(.+)\}$" => s"\1")
 
                 # Check if this struct exists in our generated types
-                struct_key = "__struct__" * struct_name
-                if haskey(dwarf_structs, struct_key) || struct_name in ["DenseMatrix", "SparseMatrix", "LUDecomposition", "QRDecomposition", "EigenResult", "ODESolution", "FFTResult", "Histogram", "OptimizationState", "OptimizationOptions", "PolynomialFit", "CubicSpline", "Vector3", "Matrix3x3"]
+                # DWARF stores structs under bare names (e.g. "MyStruct"), not "__struct__" prefixed
+                if haskey(dwarf_structs, struct_name) || struct_name in ["DenseMatrix", "SparseMatrix", "LUDecomposition", "QRDecomposition", "EigenResult", "ODESolution", "FFTResult", "Histogram", "OptimizationState", "OptimizationOptions", "PolynomialFit", "CubicSpline", "Vector3", "Matrix3x3"]
                     has_struct_ptr_params = true
                     push!(struct_ptr_indices, i)
                     push!(convenience_param_types, struct_name)

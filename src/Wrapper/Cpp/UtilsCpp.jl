@@ -8,7 +8,7 @@ function _sanitize_cpp_type_name(name::AbstractString)::String
     s = replace(s, "<"  => "_")
     s = replace(s, ">"  => "")
     s = replace(s, ","  => "_")
-    s = replace(s, " "  => "")
+    s = replace(s, " "  => "_")
     s = replace(s, "-"  => "minus_")
     s = replace(s, "+"  => "plus_")
     s = replace(s, "*"  => "star_")

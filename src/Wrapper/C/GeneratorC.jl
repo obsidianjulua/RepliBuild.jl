@@ -855,8 +855,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                     push!(struct_chunks, """
                                     \"\"\"Get non-bitfield member `$member_name` from `$julia_struct_name`.\"\"\"
                                     function get_$(safe_member)(s::$julia_struct_name)::$julia_type
-                                        p = pointer(collect(s._data)) + $byte_off
-                                        return unsafe_load(Ptr{$julia_type}(p))
+                                        buf = collect(s._data)
+                                        GC.@preserve buf begin
+                                            p = pointer(buf) + $byte_off
+                                            return unsafe_load(Ptr{$julia_type}(p))
+                                        end
                                     end
 
                                     """)
@@ -1278,11 +1281,18 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
              base_c = replace(base_c, r"^(const\s+|struct\s+|class\s+)+" => "")
              base_c = strip(base_c)
              
-             if base_c in struct_types
+             if base_c in struct_types && !(base_c in _INTERNAL_TYPE_BLOCKLIST)
                  # Sanitize
                  safe_base = _sanitize_c_type_name(base_c)
                  return_type["julia_type"] = "Ptr{$safe_base}"
              end
+        end
+
+        # Replace blocklisted internal types in return type (e.g. Ptr{_IO_FILE} -> Ptr{Cvoid})
+        let rm = match(r"^(Ref|Ptr)\{(.*)\}$", get(return_type, "julia_type", "Cvoid"))
+            if rm !== nothing && String(rm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
+                return_type["julia_type"] = "Ptr{Cvoid}"
+            end
         end
 
         # BUG FIX: Sanitize return types that are template instantiations (e.g. Box<double> -> Box_double)
@@ -1364,7 +1374,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
             # Also sanitize namespace separators (::) and other non-identifier chars
             # that can appear in Ptr{namespace::type} style references from DWARF
-            if occursin(r"::|[^A-Za-z0-9_{},\[\]]", julia_type) && julia_type != "Any"
+            # Allow spaces (e.g. "NTuple{4, UInt8}") to pass through unsanitized
+            if occursin(r"::|[^A-Za-z0-9_{},\[\] ]", julia_type) && julia_type != "Any"
                 m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
                 if m !== nothing
                     wrapper_kw, inner = m.captures
@@ -1609,19 +1620,62 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             sret_ccall_args  = "ret_buf, $(join(param_names, ", "))"
 
             if config.link.enable_lto
-                # LTO path: try llvmcall first, fall back to ccall
-                sret_llvm_types = "Tuple{Ptr{$thunk_ret_type}, $(join(param_types, ", "))}"
-                sret_llvm_args  = sret_ccall_args
+                # LTO path: Build llvmcall-safe parameter types and conversion code.
+                # llvmcall doesn't auto-convert like ccall:
+                # - Ref{T} is ptr addrspace(10), C IR uses addrspace(0) → must use Ptr{T}
+                # - Ptr{T} args need cconvert/unsafe_convert for String/Array callers
+                # - Integer args need explicit narrowing (e.g., Int64 → Cint)
+                sret_lpt = String["Ptr{$thunk_ret_type}"]
+                sret_lan = String["__sret_ptr"]
+                sret_pres = String["ret_buf"]
+                sret_conv = String["    __sret_ptr = Base.unsafe_convert(Ptr{$thunk_ret_type}, ret_buf)"]
+
+                for (i, pt) in enumerate(param_types)
+                    arg_name = param_names[i]
+                    m_ref = match(r"^Ref\{(.+)\}$", pt)
+                    m_ptr = match(r"^Ptr\{(.+)\}$", pt)
+                    if m_ref !== nothing
+                        inner_type = m_ref.captures[1]
+                        push!(sret_lpt, "Ptr{$inner_type}")
+                        ptr_name = "__ptr_$(arg_name)"
+                        push!(sret_lan, ptr_name)
+                        push!(sret_pres, arg_name)
+                        push!(sret_conv, "    $ptr_name = Base.unsafe_convert(Ptr{$inner_type}, $arg_name)")
+                    elseif m_ptr !== nothing
+                        push!(sret_lpt, pt)
+                        ptr_name = "__ptr_$(arg_name)"
+                        cc_name = "__cc_$(arg_name)"
+                        push!(sret_lan, ptr_name)
+                        push!(sret_pres, cc_name)
+                        push!(sret_conv, "    $cc_name = Base.cconvert($pt, $arg_name)")
+                        push!(sret_conv, "    $ptr_name = Base.unsafe_convert($pt, $cc_name)")
+                    elseif needs_conversion[i]
+                        conv_name = "$(arg_name)_c"
+                        push!(sret_lpt, pt)
+                        push!(sret_lan, conv_name)
+                        push!(sret_conv, "    $conv_name = $pt($arg_name)")
+                    else
+                        push!(sret_lpt, pt)
+                        push!(sret_lan, arg_name)
+                    end
+                end
+
+                sret_llvm_types = "Tuple{$(join(sret_lpt, ", "))}"
+                sret_llvm_args = join(sret_lan, ", ")
+                sret_conv_code = join(sret_conv, "\n")
+                sret_preserve_list = join(sret_pres, " ")
+
                 func_def = """
                 $doc_comment
                 function $julia_name($param_sig)
                     # [C Thunk] sret dispatch — packed/union return
                     ret_buf = Ref($thunk_ret_type())
-                    GC.@preserve ret_buf begin
+                $sret_conv_code
+                    GC.@preserve $sret_preserve_list begin
                         if !isempty(THUNKS_LTO_IR)
                             Base.llvmcall((THUNKS_LTO_IR, "$thunk_sym"), Cvoid, $sret_llvm_types, $sret_llvm_args)
                         else
-                            ccall((:$thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_llvm_args)
+                            ccall((:$thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
                         end
                     end
                     return ret_buf[]
@@ -1908,8 +1962,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 struct_name = replace(ptype, r"^Ptr\{(.+)\}$" => s"\1")
 
                 # Check if this struct exists in our generated types
-                struct_key = "__struct__" * struct_name
-                if haskey(dwarf_structs, struct_key) || struct_name in ["DenseMatrix", "SparseMatrix", "LUDecomposition", "QRDecomposition", "EigenResult", "ODESolution", "FFTResult", "Histogram", "OptimizationState", "OptimizationOptions", "PolynomialFit", "CubicSpline", "Vector3", "Matrix3x3"]
+                # DWARF stores structs under bare names (e.g. "MyStruct"), not "__struct__" prefixed
+                if haskey(dwarf_structs, struct_name) || struct_name in ["DenseMatrix", "SparseMatrix", "LUDecomposition", "QRDecomposition", "EigenResult", "ODESolution", "FFTResult", "Histogram", "OptimizationState", "OptimizationOptions", "PolynomialFit", "CubicSpline", "Vector3", "Matrix3x3"]
                     has_struct_ptr_params = true
                     push!(struct_ptr_indices, i)
                     push!(convenience_param_types, struct_name)

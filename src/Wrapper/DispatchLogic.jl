@@ -187,8 +187,8 @@ function is_ccall_safe(func_info, dwarf_structs)
         cleaned_ret = strip(replace(ret_type, r"\bconst\b" => ""))
         if _is_enum_type(cleaned_ret, dwarf_structs)
             # safe, fall through
-        elseif haskey(dwarf_structs, ret_type)
-            s_info = dwarf_structs[ret_type]
+        elseif haskey(dwarf_structs, cleaned_ret)
+            s_info = dwarf_structs[cleaned_ret]
 
             # Full struct safety check (packed, overaligned, polymorphic, etc.)
             if _is_struct_unsafe(s_info, dwarf_structs)

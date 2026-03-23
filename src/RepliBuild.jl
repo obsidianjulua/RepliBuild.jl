@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.5.3"
+const VERSION = v"2.5.4"
 
 # Stable path constants — modules use these instead of @__DIR__ so file moves don't break paths
 const PROJECT_ROOT = dirname(@__DIR__)
@@ -434,6 +434,10 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
 
         # Compile the project (C++ → IR → library + metadata)
         library_path = Compiler.compile_project(config)
+
+        if library_path === nothing
+            error("Compilation produced no library. Check that source files exist and are listed in the config.")
+        end
 
         # Build thunks if enabled (C uses Clang-compiled sret, C++ uses MLIR)
         if config.compile.aot_thunks && config.binary.type != :executable
