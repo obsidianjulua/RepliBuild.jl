@@ -2,7 +2,7 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## v2.5.4
+## v2.5.5
 
 ### Refactor: Module Hierarchy — Flat Source → Organized Subsystems
 
