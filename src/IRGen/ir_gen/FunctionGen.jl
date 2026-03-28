@@ -210,41 +210,19 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             println(io, "  %val_ptr_$(i) = llvm.load %arg_ptr_$(i) : !llvm.ptr -> !llvm.ptr")
 
             if is_packed_struct
-                # Layout mismatch handling: Julia passes aligned struct pointer, C++ expects packed struct by value.
-                # We must load fields using Julia alignment offsets and reconstruct the packed struct.
-                println(io, "  // Marshalling packed struct from aligned Julia pointer")
-
+                # Layout mismatch: Julia passes aligned struct pointer, C++ expects packed struct by value.
+                # Emit jlcs.marshal_arg op — the MLIR lowering pass handles the field-by-field reconstruction.
                 llvm_t = mlir_t  # Already the LLVM packed type
 
-                # 1. Create undefined struct (LLVM type)
-                println(io, "  %s_undef_$(i) = llvm.mlir.undef : $(llvm_t)")
-
-                # 2. Get Julia offsets
                 offsets = StructGen.get_julia_offsets(struct_info)
                 members = get(struct_info, "members", [])
+                member_types_strs = [map_cpp_type(get(m, "c_type", "void*")) for m in members]
 
-                prev_val = "%s_undef_$(i)"
+                member_types_attr = "[" * join(member_types_strs, ", ") * "]"
+                offsets_attr = "[" * join(["$(o) : i64" for o in offsets], ", ") * "]"
 
-                for (m_idx, (member, offset)) in enumerate(zip(members, offsets))
-                    m_idx_zero = m_idx - 1
-                    m_type_c = get(member, "c_type", "void*")
-                    m_type_mlir = map_cpp_type(m_type_c)
-
-                    # 3. GEP into Julia pointer (byte offset)
-                    println(io, "  %off_$(i)_$(m_idx) = arith.constant $(offset) : i64")
-                    println(io, "  %field_ptr_raw_$(i)_$(m_idx) = llvm.getelementptr %val_ptr_$(i)[%off_$(i)_$(m_idx)] : (!llvm.ptr, i64) -> !llvm.ptr, i8")
-
-                    # 4. Load field (explicitly unaligned load since we are reading packed bytes or unaligned offsets)
-                    println(io, "  %field_val_$(i)_$(m_idx) = llvm.load %field_ptr_raw_$(i)_$(m_idx) {alignment = 1 : i64} : !llvm.ptr -> $(m_type_mlir)")
-
-                    # 5. Insert into packed struct (LLVM type)
-                    curr_val = "%s_packed_$(i)_$(m_idx)"
-                    println(io, "  $(curr_val) = llvm.insertvalue %field_val_$(i)_$(m_idx), $(prev_val)[$(m_idx_zero)] : $(llvm_t)")
-                    prev_val = curr_val
-                end
-
-                # Use the fully reconstructed packed struct directly
-                arg_value_name = prev_val
+                println(io, "  %packed_$(i) = jlcs.marshal_arg %val_ptr_$(i) { memberTypes = $(member_types_attr), juliaOffsets = $(offsets_attr) } : (!llvm.ptr) -> $(llvm_t)")
+                arg_value_name = "%packed_$(i)"
             else
                 println(io, "  %val_$(i) = llvm.load %val_ptr_$(i) : !llvm.ptr -> $(mlir_t)")
                 arg_value_name = "%val_$(i)"
@@ -265,21 +243,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
              println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
              println(io, "  return")
         elseif is_packed_ret
-             # Packed struct return: call returns packed type, convert to aligned for Julia
+             # Packed struct return: call returns packed type, marshal to aligned for Julia
              println(io, "  %ret_packed = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(ret_packed_type)")
-             # Extract fields from packed struct, insert into aligned struct
-             println(io, "  %ret_aligned_undef = llvm.mlir.undef : $(ret_aligned_type)")
-             prev_ret = "%ret_aligned_undef"
-             for m_idx in 1:ret_num_members
-                 m_idx_zero = m_idx - 1
-                 m = get(ret_struct_info, "members", [])[m_idx]
-                 m_type_mlir = map_cpp_type(get(m, "c_type", "void*"))
-                 println(io, "  %ret_field_$(m_idx) = llvm.extractvalue %ret_packed[$(m_idx_zero)] : $(ret_packed_type)")
-                 curr_ret = "%ret_aligned_$(m_idx)"
-                 println(io, "  $(curr_ret) = llvm.insertvalue %ret_field_$(m_idx), $(prev_ret)[$(m_idx_zero)] : $(ret_aligned_type)")
-                 prev_ret = curr_ret
-             end
-             println(io, "  return $(prev_ret) : $(ret_aligned_type)")
+             println(io, "  %ret_aligned = jlcs.marshal_ret %ret_packed { numMembers = $(ret_num_members) : i64 } : ($(ret_packed_type)) -> $(ret_aligned_type)")
+             println(io, "  return %ret_aligned : $(ret_aligned_type)")
         else
              # Value return
              println(io, "  %ret_val = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(func_ret)")

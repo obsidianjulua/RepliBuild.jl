@@ -410,11 +410,19 @@ end
 """
     sanitize_ir_for_julia(ir_text::String) -> String
 
-Sanitize LLVM IR text for compatibility with Julia's internal LLVM.
-Strips LLVM 19+ attributes/instructions, debug metadata, and converts varargs
+Sanitize LLVM IR text for compatibility with Julia's internal LLVM (18).
+Strips LLVM 19–22 attributes/instructions, debug metadata, and converts varargs
 function bodies to extern declarations (va_start/va_end can't be JIT-compiled).
 Uses `inlinehint` (not `alwaysinline`) to avoid recursive inliner explosion on
 large modules.
+
+Coverage by LLVM version:
+  19: GEP nuw, #dbg_* records, inrange(), captures(), dead_on_unwind,
+      initializes(), allocptr, icmp samesign, range(), trunc nuw/nsw,
+      zext/uitofp nneg
+  20: GEP nusw, or disjoint, fptrunc/fpext fast-math flags, ptrtoaddr→ptrtoint
+  21: (covered by 19 patterns — captures/dead_on_unwind/allocptr landed here)
+  22: ptrtoaddr instruction
 
 This is the single source of truth for IR compatibility — used by both the C source
 LTO pipeline and the MLIR AOT thunks pipeline.
@@ -478,9 +486,10 @@ function sanitize_ir_for_julia(ir_text::String)::String
         # ── Per-line replacements ──
         line = replace(line, r"\bnoinline\b" => "")
         line = replace(line, r"\boptnone\b" => "")
-        # LLVM 19+ instruction-level compatibility
-        line = replace(line, r"\bgetelementptr inbounds nuw\b" => "getelementptr inbounds")
-        line = replace(line, r"\bgetelementptr nuw\b" => "getelementptr")
+        # LLVM 19–22 instruction-level compatibility
+        # GEP flags: nuw (19), nusw (20) — strip any combination
+        line = replace(line, r"\bgetelementptr inbounds( nuw| nusw)+" => "getelementptr inbounds")
+        line = replace(line, r"\bgetelementptr( nuw| nusw)+\b" => "getelementptr")
         line = replace(line, r"\binrange\([^)]*\)\s*" => "")
         line = replace(line, r"\bcaptures\([^)]*\)\s*" => "")
         line = replace(line, r"\bdead_on_unwind\b\s*" => "")
@@ -490,6 +499,13 @@ function sanitize_ir_for_julia(ir_text::String)::String
         line = replace(line, r"\brange\([^)]*\)\s*" => "")
         line = replace(line, r"\btrunc (nuw |nsw )+" => "trunc ")
         line = replace(line, r"\b(uitofp|zext) nneg " => s"\1 ")
+        # LLVM 20: disjoint flag on or instruction
+        line = replace(line, r"\bor disjoint\b" => "or")
+        # LLVM 20: fast-math flags on fptrunc/fpext (pre-18 only supported these on fadd/fmul etc.)
+        line = replace(line, r"\bfptrunc\s+(?:(?:fast|nnan|ninf|nsz|arcp|contract|afn|reassoc)\s+)+" => "fptrunc ")
+        line = replace(line, r"\bfpext\s+(?:(?:fast|nnan|ninf|nsz|arcp|contract|afn|reassoc)\s+)+" => "fpext ")
+        # LLVM 22: ptrtoaddr (ptrtoint without provenance capture) — downgrade to ptrtoint
+        line = replace(line, r"\bptrtoaddr\b" => "ptrtoint")
         # Strip metadata references (!dbg, !tbaa, !llvm.loop, etc.)
         line = replace(line, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
 

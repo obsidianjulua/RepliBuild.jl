@@ -140,7 +140,7 @@ export generate_jlcs_ir, generate_mlir_module
 
 # --- DAG Diff (structural mismatch detection + visualization) ---
 export dag_diff, needs_dag_thunk, DAGDiffResult, DAGMismatch, MismatchKind,
-       export_dot, export_graph_dot, render_dot
+       export_dot, export_graph_dot, render_dot, render_html
 
 # --- JIT Manager ---
 export get_jit_thunk, ensure_jit_initialized, JITContext

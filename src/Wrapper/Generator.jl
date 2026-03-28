@@ -441,12 +441,8 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         dag_dir = joinpath(config.project.root, "dag")
         mkpath(dag_dir)
 
-        # Diff view (mismatches highlighted)
-        DAGDiff.render_dot(dag_result, joinpath(dag_dir, "diff.svg"))
-        # C++ (DWARF) graph
-        DAGDiff.render_dot(dag_result, joinpath(dag_dir, "cpp.svg"); side=:cpp)
-        # Julia (inferred alignment) graph
-        DAGDiff.render_dot(dag_result, joinpath(dag_dir, "julia.svg"); side=:julia)
+        # Interactive HTML viewer (pan/zoom + click-to-highlight chains)
+        DAGDiff.render_html(dag_result, joinpath(dag_dir, "index.html"))
         # Raw DOT for external tooling
         DAGDiff.export_dot(dag_result, joinpath(dag_dir, "diff.dot"))
     end

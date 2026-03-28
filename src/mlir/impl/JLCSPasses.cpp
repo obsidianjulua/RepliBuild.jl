@@ -879,6 +879,130 @@ struct ScopeOpLowering : public ConversionPattern {
 };
 
 //===----------------------------------------------------------------------===//
+// MarshalArgOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct MarshalArgOpLowering : public ConversionPattern {
+    MarshalArgOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter, MarshalArgOp::getOperationName(), 1,
+              ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto marshalOp = cast<MarshalArgOp>(op);
+        Location loc = marshalOp.getLoc();
+
+        MarshalArgOp::Adaptor adaptor(operands);
+        Value srcPtr = adaptor.getSrcPtr();
+
+        // Get attributes
+        ArrayAttr memberTypes = marshalOp.getMemberTypes();
+        ArrayAttr juliaOffsets = marshalOp.getJuliaOffsets();
+
+        // Result type is the packed struct
+        Type packedType = typeConverter->convertType(marshalOp.getResult().getType());
+        if (!packedType) {
+            return op->emitError("MarshalArgOp: Could not convert result type");
+        }
+
+        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+
+        // 1. Start with undef packed struct
+        Value result = LLVM::UndefOp::create(rewriter, loc, packedType);
+
+        // 2. For each member: GEP into Julia pointer, load, insert into packed struct
+        for (size_t i = 0; i < memberTypes.size(); ++i) {
+            // Get Julia byte offset for this member
+            int64_t offset = cast<IntegerAttr>(juliaOffsets[i]).getInt();
+
+            // Get member type from the memberTypes attribute
+            Type memberType = cast<TypeAttr>(memberTypes[i]).getValue();
+            // Convert through the type converter in case it's a dialect type
+            Type convertedMemberType = typeConverter->convertType(memberType);
+            if (!convertedMemberType)
+                convertedMemberType = memberType;
+
+            // GEP to field address at Julia byte offset (i8 element type)
+            Value offsetVal = arith::ConstantIntOp::create(rewriter, loc, offset, 64);
+            Value fieldPtr = LLVM::GEPOp::create(rewriter,
+                loc, ptrType, rewriter.getI8Type(), srcPtr,
+                ArrayRef<LLVM::GEPArg>({offsetVal}));
+
+            // Load with alignment=1 (unaligned — Julia may pad differently than C)
+            Value fieldVal = LLVM::LoadOp::create(rewriter, loc, convertedMemberType, fieldPtr,
+                /*alignment=*/1);
+
+            // Insert into packed struct at position [i]
+            result = LLVM::InsertValueOp::create(rewriter, loc, packedType, result, fieldVal,
+                ArrayRef<int64_t>{static_cast<int64_t>(i)});
+        }
+
+        rewriter.replaceOp(op, result);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
+// MarshalRetOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct MarshalRetOpLowering : public ConversionPattern {
+    MarshalRetOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter, MarshalRetOp::getOperationName(), 1,
+              ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto marshalOp = cast<MarshalRetOp>(op);
+        Location loc = marshalOp.getLoc();
+
+        MarshalRetOp::Adaptor adaptor(operands);
+        Value packedValue = adaptor.getPackedValue();
+
+        int64_t numMembers = marshalOp.getNumMembers();
+
+        // Get the packed input type (already converted by type converter)
+        Type packedType = packedValue.getType();
+        auto packedStructType = dyn_cast<LLVM::LLVMStructType>(packedType);
+        if (!packedStructType) {
+            return op->emitError("MarshalRetOp: input must be an LLVM struct type");
+        }
+
+        // Get the aligned output type
+        Type alignedType = typeConverter->convertType(marshalOp.getResult().getType());
+        if (!alignedType) {
+            return op->emitError("MarshalRetOp: Could not convert result type");
+        }
+
+        // 1. Start with undef aligned struct
+        Value result = LLVM::UndefOp::create(rewriter, loc, alignedType);
+
+        // 2. For each member: extract from packed, insert into aligned
+        for (int64_t i = 0; i < numMembers; ++i) {
+            // Extract from packed struct at position [i]
+            Type memberType = packedStructType.getBody()[i];
+            Value field = LLVM::ExtractValueOp::create(rewriter, loc, memberType,
+                packedValue, ArrayRef<int64_t>{i});
+
+            // Insert into aligned struct at same position [i]
+            result = LLVM::InsertValueOp::create(rewriter, loc, alignedType, result, field,
+                ArrayRef<int64_t>{i});
+        }
+
+        rewriter.replaceOp(op, result);
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
 // Lower JLCS to LLVM Pass
 //===----------------------------------------------------------------------===//
 
@@ -911,7 +1035,7 @@ struct LowerJLCSToLLVMPass
         target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp,
             LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp, FFECallOp,
             TryCallOp, ConstructorCallOp, DestructorCallOp,
-            ScopeOp, YieldOp>();
+            ScopeOp, YieldOp, MarshalArgOp, MarshalRetOp>();
 
         // Define legal dialects (target dialects)
         target.addLegalDialect<LLVM::LLVMDialect, arith::ArithDialect>();
@@ -940,6 +1064,8 @@ struct LowerJLCSToLLVMPass
         patterns.add<DestructorCallOpLowering>(typeConverter, &getContext());
         patterns.add<YieldOpLowering>(typeConverter, &getContext());
         patterns.add<ScopeOpLowering>(typeConverter, &getContext());
+        patterns.add<MarshalArgOpLowering>(typeConverter, &getContext());
+        patterns.add<MarshalRetOpLowering>(typeConverter, &getContext());
 
         // Execute the conversion
         if (failed(applyPartialConversion(getOperation(), target,

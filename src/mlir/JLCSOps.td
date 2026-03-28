@@ -343,3 +343,82 @@ def ScopeOp : JLCS_Op<"scope", [SingleBlockImplicitTerminator<"YieldOp">]> {
 
   let assemblyFormat = "`(` $managed_ptrs `:` type($managed_ptrs) `)` `dtors` `(` $destructors `)` $body attr-dict";
 }
+
+// ====================================================================
+// ABI Marshalling Operations
+// ====================================================================
+
+// 13. Marshal Arg Op (Julia-aligned pointer → C-packed struct value)
+def MarshalArgOp : JLCS_Op<"marshal_arg", [MemoryEffects<[MemRead]>]> {
+  let summary = "Pack aligned Julia struct into C-packed layout for FFI call.";
+  let description = [{
+    Reads an aligned Julia struct from a pointer, loading each field at its
+    Julia-aligned byte offset, and assembles them into a packed LLVM struct
+    suitable for passing to a C/C++ function.
+
+    The operation takes a pointer to the Julia-side aligned struct and produces
+    the packed struct value. The attributes carry the layout mismatch info:
+    - memberTypes: the MLIR types of each struct member (for typed loads)
+    - juliaOffsets: the byte offset of each member in the Julia-aligned layout
+
+    Example:
+    ```mlir
+    %packed = jlcs.marshal_arg %ptr
+      { memberTypes = [i32, f64], juliaOffsets = [0 : i64, 8 : i64] }
+      : (!llvm.ptr) -> !llvm.struct<packed (i32, f64)>
+    ```
+  }];
+
+  let arguments = (ins
+    AnyType:$srcPtr,            // Pointer to Julia-aligned struct
+    ArrayAttr:$memberTypes,     // Array of TypeAttr (field types for typed loads)
+    ArrayAttr:$juliaOffsets      // Array of IntegerAttr i64 (byte offsets in Julia layout)
+  );
+
+  let results = (outs AnyType:$result);  // Packed struct value
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "Value":$srcPtr, "ArrayAttr":$memberTypes,
+                   "ArrayAttr":$juliaOffsets, "Type":$resultType)>
+  ];
+
+  let extraClassDeclaration = [{
+    MarshalArgOp(::mlir::Operation *op) : Op(op) {}
+  }];
+}
+
+// 14. Marshal Ret Op (C-packed struct value → Julia-aligned struct value)
+def MarshalRetOp : JLCS_Op<"marshal_ret", [Pure]> {
+  let summary = "Unpack C-packed struct return into Julia-aligned layout.";
+  let description = [{
+    Takes a packed struct value returned from a C/C++ function and repacks
+    its members into a Julia-aligned struct layout. Each member is extracted
+    from the packed struct and inserted into the aligned struct at the
+    corresponding position.
+
+    Example:
+    ```mlir
+    %aligned = jlcs.marshal_ret %packed
+      { numMembers = 2 : i64 }
+      : (!llvm.struct<packed (i32, f64)>) -> !llvm.struct<(i32, f64)>
+    ```
+  }];
+
+  let arguments = (ins
+    AnyType:$packedValue,       // Packed struct from C call
+    I64Attr:$numMembers         // Number of struct members (loop bound for lowering)
+  );
+
+  let results = (outs AnyType:$result);  // Aligned struct value
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "Value":$packedValue, "IntegerAttr":$numMembers,
+                   "Type":$resultType)>
+  ];
+
+  let extraClassDeclaration = [{
+    MarshalRetOp(::mlir::Operation *op) : Op(op) {}
+  }];
+}

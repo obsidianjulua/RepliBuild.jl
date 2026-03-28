@@ -15,7 +15,7 @@ module DAGDiff
 export DAGMismatch, MismatchKind, DAGDiffResult, IRGraph, TypeNode, FunctionNode, MemberLayout
 export build_cpp_graph, build_julia_graph, diff_graphs, topo_sort_mismatches, dag_diff
 export needs_dag_thunk
-export export_dot, export_graph_dot, render_dot
+export export_dot, export_graph_dot, render_dot, render_html
 
 # ============================================================================
 # Mismatch Classification
@@ -560,8 +560,7 @@ Export a DAG diff result to Graphviz DOT format.
 Mismatched types render with red fill, mismatched functions with orange fill.
 Edges that propagate a mismatch are drawn in red.
 """
-function export_dot(result::DAGDiffResult, path::String;
-                    side::Symbol=:diff, show_members::Bool=true)
+function _generate_dot(result::DAGDiffResult; side::Symbol=:diff, show_members::Bool=true)::String
     graph = side == :julia ? result.julia_graph :
             side == :cpp   ? result.cpp_graph   : result.cpp_graph
 
@@ -681,8 +680,12 @@ function export_dot(result::DAGDiffResult, path::String;
     end
 
     println(io, "}")
+    return String(take!(io))
+end
 
-    dot_str = String(take!(io))
+function export_dot(result::DAGDiffResult, path::String;
+                    side::Symbol=:diff, show_members::Bool=true)
+    dot_str = _generate_dot(result; side=side, show_members=show_members)
     write(path, dot_str)
     return path
 end
@@ -724,6 +727,284 @@ function render_dot(result::DAGDiffResult, path::String;
         println("  dag-viz: dot not found, wrote $dot_path (install graphviz to render)")
         return dot_path
     end
+end
+
+"""
+    render_html(result::DAGDiffResult, path::String; side=:diff, show_members=true)
+
+Render an interactive HTML viewer with pan/zoom and click-to-highlight dependency chains.
+SVG is rendered server-side via Graphviz and embedded inline — the output is fully
+self-contained with zero external dependencies.  Works from `file://` or any HTTP server.
+
+The JS interactivity is edge-type agnostic: when new edge kinds (scope, RAII, upstream
+calls) are added to the DOT generator, highlight/trace works on them automatically.
+"""
+function render_html(result::DAGDiffResult, path::String;
+                     side::Symbol=:diff, show_members::Bool=true)
+    dot_str = _generate_dot(result; side=side, show_members=show_members)
+
+    n_types = length(result.cpp_graph.types)
+    n_funcs = length(result.cpp_graph.functions)
+    n_mismatches = length(result.mismatches)
+    n_thunks = length(result.lowering_order)
+
+    # Render DOT → SVG server-side via Graphviz
+    svg_str = try
+        mktempdir() do dir
+            dp = joinpath(dir, "g.dot")
+            sp = joinpath(dir, "g.svg")
+            write(dp, dot_str)
+            run(pipeline(`dot -Tsvg -o $sp $dp`, stderr=devnull))
+            read(sp, String)
+        end
+    catch
+        nothing
+    end
+
+    if svg_str === nothing
+        dot_path = replace(path, ".html" => ".dot")
+        write(dot_path, dot_str)
+        println("  dag-viz: dot not found, wrote $dot_path (install graphviz to render)")
+        return dot_path
+    end
+
+    # Extract <svg>…</svg> and strip fixed width/height so it fills the container
+    svg_match = match(r"(<svg)([\s\S]*?)(</svg>)"s, svg_str)
+    if svg_match !== nothing
+        svg_tag = svg_match[1]
+        svg_body = svg_match[2]
+        svg_close = svg_match[3]
+        # Remove width="..." height="..." so CSS controls sizing
+        svg_body = replace(svg_body, r"\s+width=\"[^\"]*\"" => "")
+        svg_body = replace(svg_body, r"\s+height=\"[^\"]*\"" => "")
+        svg_str = svg_tag * svg_body * svg_close
+    end
+
+    io = IOBuffer()
+
+    # ── HTML head + CSS ───────────────────────────────────────────────
+    print(io, """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DAG Diff — RepliBuild</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;font-family:system-ui,-apple-system,sans-serif;background:#1a1a2e}
+#bar{position:fixed;top:0;left:0;right:0;height:36px;background:#16213e;color:#e0e0e0;display:flex;align-items:center;padding:0 16px;font-size:13px;z-index:10;gap:16px;border-bottom:1px solid #0f3460}
+#bar .stat{color:#94a3b8}
+#bar .stat b{color:#e2e8f0}
+#bar .hint{margin-left:auto;color:#64748b;font-size:11px}
+#container{position:fixed;top:36px;left:0;right:0;bottom:0}
+#container svg{width:100%;height:100%;cursor:grab}
+#container svg.panning{cursor:grabbing}
+.node.dimmed,.edge.dimmed{opacity:0.1;transition:opacity 0.2s}
+.node.highlighted polygon,.node.highlighted ellipse{stroke-width:2.5px}
+.edge.highlighted path,.edge.highlighted polygon{stroke-width:2px}
+.node:not(.dimmed){cursor:pointer}
+.node:not(.dimmed):hover polygon,.node:not(.dimmed):hover ellipse{filter:brightness(1.15)}
+#tooltip{display:none;position:fixed;background:#16213e;color:#e2e8f0;padding:8px 12px;border-radius:6px;font-size:12px;max-width:360px;pointer-events:none;z-index:20;border:1px solid #0f3460;line-height:1.5}
+</style>
+</head>
+<body>
+<div id="bar">
+  <span style="font-weight:600;color:#4fc3f7">DAG Diff</span>
+  <span class="stat"><b>$n_types</b> types</span>
+  <span class="stat"><b>$n_funcs</b> functions</span>
+  <span class="stat"><b>$n_mismatches</b> mismatches</span>
+  <span class="stat"><b>$n_thunks</b> thunks</span>
+  <span class="hint">scroll = zoom &nbsp; drag = pan &nbsp; click node = trace chain &nbsp; Esc = reset</span>
+</div>
+<div id="container">
+""")
+
+    # ── Inline SVG ────────────────────────────────────────────────────
+    print(io, svg_str)
+
+    # ── JavaScript (no external deps) ─────────────────────────────────
+    print(io, raw"""
+</div>
+<div id="tooltip"></div>
+<script>
+(function() {
+const svg     = document.querySelector('#container svg');
+const tooltip = document.getElementById('tooltip');
+if (!svg) return;
+
+// ── ViewBox state ────────────────────────────────────────────────
+const vb = svg.viewBox.baseVal;
+let view = { x: vb.x, y: vb.y, w: vb.width, h: vb.height };
+const orig = { x: vb.x, y: vb.y, w: vb.width, h: vb.height };
+
+function setView() {
+    svg.setAttribute('viewBox', view.x + ' ' + view.y + ' ' + view.w + ' ' + view.h);
+}
+
+function svgPt(e) {
+    var pt = svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+// ── Zoom (scroll wheel) ─────────────────────────────────────────
+svg.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var f = e.deltaY > 0 ? 1.12 : 1/1.12;
+    var p = svgPt(e);
+    view.x = p.x - (p.x - view.x) * f;
+    view.y = p.y - (p.y - view.y) * f;
+    view.w *= f;
+    view.h *= f;
+    setView();
+}, { passive: false });
+
+// ── Pan (click-drag) ────────────────────────────────────────────
+var panning = false, panPt;
+svg.addEventListener('mousedown', function(e) {
+    if (e.button !== 0 || e.target.closest('.node')) return;
+    panning = true; panPt = svgPt(e);
+    svg.classList.add('panning');
+});
+window.addEventListener('mousemove', function(e) {
+    if (!panning) return;
+    var p = svgPt(e);
+    view.x -= p.x - panPt.x;
+    view.y -= p.y - panPt.y;
+    setView();
+    panPt = svgPt(e);
+});
+window.addEventListener('mouseup', function() {
+    panning = false;
+    svg.classList.remove('panning');
+});
+
+// ── Build adjacency from edge titles ─────────────────────────────
+// Edge-type agnostic: works for containment, usage, scope, RAII, call edges
+var fwd = {}, rev = {};
+var edges = svg.querySelectorAll('.edge > title');
+for (var i = 0; i < edges.length; i++) {
+    var raw = edges[i].textContent.replace(/&#45;/g, '-').replace(/&gt;/g, '>');
+    var m = raw.match(/^(.+?)\s*->\s*(.+)$/);
+    if (!m) continue;
+    var from = m[1], to = m[2];
+    if (!fwd[from]) fwd[from] = [];
+    if (!rev[to])   rev[to]   = [];
+    fwd[from].push(to);
+    rev[to].push(from);
+}
+
+// Bidirectional BFS — traces full dependency chain from a seed
+function traceChain(seed) {
+    var chain = {};
+    chain[seed] = true;
+    // Upstream
+    var q = [seed];
+    while (q.length) {
+        var cur = q.shift();
+        var deps = rev[cur] || [];
+        for (var i = 0; i < deps.length; i++) {
+            if (!chain[deps[i]]) { chain[deps[i]] = true; q.push(deps[i]); }
+        }
+    }
+    // Downstream
+    q = [seed];
+    while (q.length) {
+        var cur = q.shift();
+        var deps = fwd[cur] || [];
+        for (var i = 0; i < deps.length; i++) {
+            if (!chain[deps[i]]) { chain[deps[i]] = true; q.push(deps[i]); }
+        }
+    }
+    return chain;
+}
+
+// ── Click-to-highlight ──────────────────────────────────────────
+function highlightChain(nodeId) {
+    var chain = traceChain(nodeId);
+
+    var nodes = svg.querySelectorAll('.node');
+    for (var i = 0; i < nodes.length; i++) {
+        var t = nodes[i].querySelector('title');
+        var id = t ? t.textContent : '';
+        if (chain[id]) {
+            nodes[i].classList.remove('dimmed');
+            nodes[i].classList.add('highlighted');
+        } else {
+            nodes[i].classList.add('dimmed');
+            nodes[i].classList.remove('highlighted');
+        }
+    }
+
+    var edgeEls = svg.querySelectorAll('.edge');
+    for (var i = 0; i < edgeEls.length; i++) {
+        var t = edgeEls[i].querySelector('title');
+        var raw = t ? t.textContent.replace(/&#45;/g, '-').replace(/&gt;/g, '>') : '';
+        var m = raw.match(/^(.+?)\s*->\s*(.+)$/);
+        if (m && chain[m[1]] && chain[m[2]]) {
+            edgeEls[i].classList.remove('dimmed');
+            edgeEls[i].classList.add('highlighted');
+        } else {
+            edgeEls[i].classList.add('dimmed');
+            edgeEls[i].classList.remove('highlighted');
+        }
+    }
+}
+
+function resetHighlight() {
+    var all = svg.querySelectorAll('.node,.edge');
+    for (var i = 0; i < all.length; i++) {
+        all[i].classList.remove('dimmed', 'highlighted');
+    }
+    tooltip.style.display = 'none';
+}
+
+// Node click handlers
+var nodeEls = svg.querySelectorAll('.node');
+for (var i = 0; i < nodeEls.length; i++) {
+    (function(g) {
+        g.addEventListener('click', function(e) {
+            e.stopPropagation();
+            var t = g.querySelector('title');
+            if (t) highlightChain(t.textContent);
+        });
+        // Hover tooltip
+        g.addEventListener('mouseenter', function() {
+            var t = g.querySelector('title');
+            if (!t) return;
+            var id = t.textContent;
+            var up = (rev[id] || []).length;
+            var dn = (fwd[id] || []).length;
+            tooltip.innerHTML = up + ' upstream &middot; ' + dn + ' downstream';
+            tooltip.style.display = 'block';
+        });
+        g.addEventListener('mousemove', function(e) {
+            tooltip.style.left = (e.clientX + 12) + 'px';
+            tooltip.style.top  = (e.clientY + 12) + 'px';
+        });
+        g.addEventListener('mouseleave', function() {
+            tooltip.style.display = 'none';
+        });
+    })(nodeEls[i]);
+}
+
+// Background click or Escape to reset
+svg.addEventListener('click', function(e) {
+    if (!e.target.closest('.node')) resetHighlight();
+});
+window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') resetHighlight();
+    if (e.key === 'Home') { view.x=orig.x; view.y=orig.y; view.w=orig.w; view.h=orig.h; setView(); }
+});
+})();
+</script>
+</body>
+</html>
+""")
+
+    html_str = String(take!(io))
+    write(path, html_str)
+    println("  dag-viz: $path (interactive)")
+    return path
 end
 
 """Escape special characters for DOT HTML labels."""
