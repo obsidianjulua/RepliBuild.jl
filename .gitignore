@@ -25,6 +25,11 @@ test/*/build/
 test/*/julia/
 test/*/.replibuild_cache/
 
+# DAG diff output
+dag/
+*.svg
+*.dot
+
 # Vendored C/C++ sources (downloaded by setup.jl scripts)
 test/lua_test/src/
 test/lua_test/include/

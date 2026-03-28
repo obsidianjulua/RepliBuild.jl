@@ -1,7 +1,8 @@
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
-                                      thunks_lib_path::String="")
+                                      thunks_lib_path::String="";
+                                      dag_result=nothing)
 
     # Track exported symbols
     exports = String[]
@@ -1673,7 +1674,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # =========================================================
 
         # Determine if we should use MLIR or ccall
-        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs)
+        # DAG diff augments: catches transitive layout mismatches and
+        # by-value parameter drift that per-function heuristics miss.
+        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs) || DAGDiff.needs_dag_thunk(mangled, dag_result)
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])

@@ -30,6 +30,7 @@ use_clang_jl = true
 style = "clang"
 language = "cpp"
 enabled = true
+dag = true
 
 [llvm]
 toolchain = "auto"

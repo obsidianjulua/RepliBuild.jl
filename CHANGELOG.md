@@ -2,6 +2,50 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.5.6
+
+### New: DAG Diff — Structural Mismatch Detection Between C++ and Julia IR
+
+Added a DAG-based structural diff algorithm that compares C++ layouts (DWARF ground truth) against Julia's inferred alignment rules. This extends the existing per-function heuristics in `DispatchLogic.jl` — heuristics catch the obvious cases (packed returns, unions, STL), while DAGDiff catches what point-wise checks miss: transitive layout drift through by-value containment chains.
+
+**Algorithm:**
+1. Build C++ graph from DWARF metadata (struct sizes, member offsets, containment edges)
+2. Build Julia graph by computing `min(sizeof(field), 8)` aligned layouts from the same members
+3. Parallel walk — match nodes structurally, record size and per-member offset mismatches
+4. Propagate mismatches transitively through by-value containment (if Inner is packed and Outer contains Inner by value, Outer is also mismatched)
+5. Flag functions that pass or return mismatched types by value
+6. Topo-sort (Kahn's algorithm) all thunk sites for safe lowering order — types before the functions that depend on them
+
+**Integration:**
+- `DAGDiff.needs_dag_thunk(symbol, result)` queries the mismatch map — wrapper generators check this alongside existing heuristics, routing to MLIR thunks if either fires
+- Backward compatible: `needs_dag_thunk(_, nothing)` returns `false` when DAG diff is not computed
+- Wired into both C and C++ generator dispatch sites in `GeneratorC.jl` and `GeneratorCpp.jl`
+
+**Visualization:**
+- `export_dot(result, path)` — Graphviz DOT export with mismatch color-coding (red = layout mismatch, orange = function needs thunk, gray = safe)
+- `render_dot(result, path)` — renders DOT to SVG/PNG/PDF via the `dot` command
+- Per-member offset annotations, containment edges, propagation edge coloring
+- Three view modes: `:diff` (both graphs overlaid), `:cpp` (DWARF only), `:julia` (inferred alignment only)
+
+**TOML configuration:**
+```toml
+[wrap]
+dag = true   # exports DAG graphs to <project_root>/dag/
+```
+
+When enabled, the wrap stage automatically exports `diff.svg`, `cpp.svg`, `julia.svg`, and `diff.dot` to a `dag/` folder in the project root.
+
+**Files:**
+- `src/IRGen/DAGDiff.jl` — New module (~780 lines): graph types, builders, diff algorithm, topo-sort, query API, DOT visualization
+- `src/Builder/ConfigurationManager.jl` — Added `dag::Bool` to `WrapConfig`
+- `src/Wrapper/Generator.jl` — DAG diff computed before wrapper generation; graphs exported when `dag=true`
+- `src/Wrapper/C/GeneratorC.jl`, `src/Wrapper/Cpp/GeneratorCpp.jl` — Dispatch sites augmented with `needs_dag_thunk` check
+- `test/dag_test/` — 178 tests covering graph building, structural diff, transitive propagation, topo-sort, query API, DOT export, and a rendered gallery of 7 scenarios
+
+**Stress test results (73 functions, `test/stress_test/`):**
+- 25 mismatches detected: 14 types (vtable offsets on polymorphic classes, compound struct padding, bool alignment, STL internals), 5 functions routed to thunks (`compute_lu`, `compute_qr`, `compute_eigen`, `solve_ode_rk4`, `solve_ode_adaptive`)
+- Transitive propagation working: `uniform_real_distribution<double>` flagged solely because it contains `param_type` by value
+
 ## v2.5.5
 
 ### Refactor: Module Hierarchy — Flat Source → Organized Subsystems

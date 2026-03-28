@@ -500,7 +500,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         true,                                    # use_clang_jl
         Dict{String,Vector{Vector{String}}}(),   # varargs_overloads
         Dict{String,Dict{String,Any}}(),         # macros
-        String[]                                 # shim_headers
+        String[],                                # shim_headers
+        false                                    # dag
     )
 
     llvm_config = ConfigurationManager.LLVMConfig(

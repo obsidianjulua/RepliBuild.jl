@@ -433,15 +433,35 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         end
     end
 
+    # DAG Diff: structural mismatch detection (augments per-function heuristics)
+    dag_result = DAGDiff.dag_diff(metadata)
+
+    # Export DAG graphs when dag=true in [wrap]
+    if config.wrap.dag
+        dag_dir = joinpath(config.project.root, "dag")
+        mkpath(dag_dir)
+
+        # Diff view (mismatches highlighted)
+        DAGDiff.render_dot(dag_result, joinpath(dag_dir, "diff.svg"))
+        # C++ (DWARF) graph
+        DAGDiff.render_dot(dag_result, joinpath(dag_dir, "cpp.svg"); side=:cpp)
+        # Julia (inferred alignment) graph
+        DAGDiff.render_dot(dag_result, joinpath(dag_dir, "julia.svg"); side=:julia)
+        # Raw DOT for external tooling
+        DAGDiff.export_dot(dag_result, joinpath(dag_dir, "diff.dot"))
+    end
+
     # Generate wrapper module
     module_name = get_module_name(config)
-    
+
     wrapper_content = if registry.language == :c
         generate_introspective_module_c(config, library_path, metadata,
-                                        module_name, registry, generate_docs, thunks_lib_path)
+                                        module_name, registry, generate_docs, thunks_lib_path;
+                                        dag_result=dag_result)
     else
         generate_introspective_module_cpp(config, library_path, metadata,
-                                          module_name, registry, generate_docs, thunks_lib_path)
+                                          module_name, registry, generate_docs, thunks_lib_path;
+                                          dag_result=dag_result)
     end
 
     # Write to file

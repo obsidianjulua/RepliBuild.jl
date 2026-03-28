@@ -1,7 +1,8 @@
 function generate_introspective_module_c(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
-                                      thunks_lib_path::String="")
+                                      thunks_lib_path::String="";
+                                      dag_result=nothing)
 
     # Track exported symbols
     exports = String[]
@@ -1590,7 +1591,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # returns are unsafe.  Unlike C++ (which routes to MLIR), C thunks
         # are compiled by the same Clang that built the library — no LLVM
         # version mismatch, no sanitizing needed.
-        c_safe = is_c_lto_safe(func, dwarf_structs)
+        #
+        # DAG diff augments: catches transitive layout mismatches that
+        # the per-function heuristic misses (e.g. return type contains a
+        # packed inner struct by value).
+        c_safe = is_c_lto_safe(func, dwarf_structs) && !DAGDiff.needs_dag_thunk(mangled, dag_result)
 
         # =========================================================
         # BRANCH 0: UNSAFE — C sret thunk dispatch

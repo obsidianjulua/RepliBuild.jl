@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"2.5.5"
+const VERSION = v"2.5.6"
 
 # Stable path constants — modules use these instead of @__DIR__ so file moves don't break paths
 const PROJECT_ROOT = dirname(@__DIR__)
@@ -46,6 +46,7 @@ using .Compiler
 using .DWARFParser
 using .MLIRNative
 using .JLCSIRGenerator
+using .DAGDiff
 using .JITManager
 using .Wrapper
 using .STLWrappers
@@ -67,7 +68,7 @@ export use, register, unregister, list_registry, search, scaffold_package
 
 # --- Submodules (direct access) ---
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser,
-       JLCSIRGenerator, MLIRNative, STLWrappers, Introspect,
+       JLCSIRGenerator, DAGDiff, MLIRNative, STLWrappers, Introspect,
        LLVMEnvironment, BuildBridge, ASTWalker, JITManager, ClangJLBridge,
        DependencyResolver, EnvironmentDoctor, PackageRegistry
 
@@ -136,6 +137,10 @@ export create_context, create_module, destroy_context, parse_module, clone_modul
 
 # --- JLCS IR Generation ---
 export generate_jlcs_ir, generate_mlir_module
+
+# --- DAG Diff (structural mismatch detection + visualization) ---
+export dag_diff, needs_dag_thunk, DAGDiffResult, DAGMismatch, MismatchKind,
+       export_dot, export_graph_dot, render_dot
 
 # --- JIT Manager ---
 export get_jit_thunk, ensure_jit_initialized, JITContext

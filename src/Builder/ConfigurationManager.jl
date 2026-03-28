@@ -73,6 +73,7 @@ struct WrapConfig
     varargs_overloads::Dict{String,Vector{Vector{String}}}
     macros::Dict{String,Dict{String,Any}}
     shim_headers::Vector{String}
+    dag::Bool  # Export DAG diff graphs to <project>/dag/
 end
 
 """Nested struct for [llvm] section"""
@@ -167,18 +168,9 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     compile_config = parse_compile_config(data)
     link_config = parse_link_config(data, wrap_config.language)
 
-    # Auto-enable aot_thunks for C+LTO projects when not explicitly set by user
-    compile_data = get(data, "compile", Dict())
-    if !haskey(compile_data, "aot_thunks") && wrap_config.language == :c && link_config.enable_lto
-        compile_config = CompileConfig(
-            compile_config.source_files,
-            compile_config.include_dirs,
-            compile_config.flags,
-            compile_config.defines,
-            compile_config.parallel,
-            true  # auto-enable aot_thunks
-        )
-    end
+    # aot_thunks and enable_lto are always read from the toml (no auto-enable):
+    #   C projects:   LTO on by default, aot_thunks off by default
+    #   C++ projects: LTO off by default, aot_thunks off by default
 
     config = RepliBuildConfig(
         parse_project_config(data, toml_path),
@@ -360,7 +352,8 @@ function parse_wrap_config(data::Dict)::WrapConfig
         get(wrap, "use_clang_jl", true),
         varargs_overloads,
         macros,
-        shim_headers
+        shim_headers,
+        get(wrap, "dag", false)
     )
 end
 
@@ -489,7 +482,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
         LinkConfig("2", false, String[], String[]),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[]),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[], false),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -600,6 +593,9 @@ function save_config(config::RepliBuildConfig)
     end
     if !isempty(config.wrap.shim_headers)
         wrap_dict["shim_headers"] = config.wrap.shim_headers
+    end
+    if config.wrap.dag
+        wrap_dict["dag"] = true
     end
     data["wrap"] = wrap_dict
 
