@@ -1,8 +1,7 @@
 function generate_introspective_module_c(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
-                                      thunks_lib_path::String="";
-                                      dag_result=nothing)
+                                      thunks_lib_path::String="")
 
     # Track exported symbols
     exports = String[]
@@ -1590,12 +1589,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # C-specific gate: only packed struct returns and union-by-value
         # returns are unsafe.  Unlike C++ (which routes to MLIR), C thunks
         # are compiled by the same Clang that built the library — no LLVM
-        # version mismatch, no sanitizing needed.
-        #
-        # DAG diff augments: catches transitive layout mismatches that
-        # the per-function heuristic misses (e.g. return type contains a
-        # packed inner struct by value).
-        c_safe = is_c_lto_safe(func, dwarf_structs) && !DAGDiff.needs_dag_thunk(mangled, dag_result)
+        # version mismatch, no sanitizing needed.  DAG is not wired to the
+        # C path — Julia's internal LLVM handles the C ABI natively.
+        c_safe = is_c_lto_safe(func, dwarf_structs)
 
         # =========================================================
         # BRANCH 0: UNSAFE — C sret thunk dispatch

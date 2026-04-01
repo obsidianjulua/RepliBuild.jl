@@ -864,6 +864,24 @@ function validate_config(config::RepliBuildConfig)::Vector{String}
         end
     end
 
+    # Cross-field: source files exist on disk (if explicitly listed)
+    for sf in config.compile.source_files
+        resolved = isabspath(sf) ? sf : joinpath(config.project.root, sf)
+        if !isfile(resolved)
+            push!(errors, "compile.source_files: file not found: $sf")
+        end
+    end
+
+    # Cross-field: optimization level is valid
+    if !(config.link.optimization_level in ["0", "1", "2", "3", "s", "z"])
+        push!(errors, "link.optimization_level must be 0, 1, 2, 3, s, or z (got: $(config.link.optimization_level))")
+    end
+
+    # Cross-field: types strictness is valid
+    if !(config.types.strictness in [:strict, :warn, :permissive])
+        push!(errors, "types.strictness must be :strict, :warn, or :permissive")
+    end
+
     return errors
 end
 

@@ -38,6 +38,8 @@ struct MemberLayout
     type_name::String
     offset::Int
     size::Int
+    bit_size::Int           # 0 = not a bitfield; >0 = number of bits
+    bit_offset::Int         # absolute bit offset from struct start (0 if not a bitfield)
 end
 
 struct TypeNode
@@ -47,6 +49,7 @@ struct TypeNode
     kind::Symbol            # :struct, :union, :enum, :class
     has_vtable::Bool
     base_classes::Vector{String}
+    is_packed::Bool         # true if any member violates natural alignment
 end
 
 struct FunctionNode
@@ -64,8 +67,9 @@ end
 struct IRGraph
     types::Dict{String, TypeNode}
     functions::Dict{String, FunctionNode}
-    type_edges::Dict{String, Set{String}}       # type → by-value contained types
-    func_type_edges::Dict{String, Set{String}}   # function → types it uses by value
+    type_edges::Dict{String, Set{String}}             # type → by-value contained types (includes inheritance)
+    func_type_edges::Dict{String, Set{String}}         # function → types it uses by value
+    inheritance_edges::Dict{String, Set{String}}       # derived → base classes (for visualization)
 end
 
 # ============================================================================
@@ -116,51 +120,29 @@ No-op when DAG diff was not computed (backward compat).
 needs_dag_thunk(::String, ::Nothing) = false
 
 # ============================================================================
-# Build C++ Graph (DWARF ground truth)
+# Shared Topology Builder — edges + functions are identical on both sides
 # ============================================================================
 
 """
-    build_cpp_graph(metadata::Dict) -> IRGraph
+    _build_shared_topology(metadata::Dict) -> (type_edges, func_type_edges, functions)
 
-Build the C++ side DAG from compilation metadata (DWARF struct definitions +
-function signatures).  This represents the *actual* ABI layout.
+Extract the graph topology that is identical between the C++ and Julia DAGs:
+by-value containment edges, function→type edges, and function nodes.  Each
+graph builder then only needs to compute its own TypeNode layouts.
 """
-function build_cpp_graph(metadata::Dict)::IRGraph
-    types = Dict{String, TypeNode}()
-    functions = Dict{String, FunctionNode}()
-    type_edges = Dict{String, Set{String}}()
-    func_type_edges = Dict{String, Set{String}}()
-
+function _build_shared_topology(metadata::Dict)
     dwarf_structs = get(metadata, "struct_definitions", Dict())
 
-    # ── Type nodes from DWARF ──────────────────────────────────────────
+    type_edges = Dict{String, Set{String}}()
+    func_type_edges = Dict{String, Set{String}}()
+    functions = Dict{String, FunctionNode}()
+
+    # ── Type containment edges (by-value, not through pointers/refs) ──
     for (name, info) in dwarf_structs
         startswith(name, "__enum__") && continue
-
-        byte_size = _parse_size(get(info, "byte_size", "0"))
-        kind = Symbol(get(info, "kind", "struct"))
-        members_raw = get(info, "members", [])
-
-        members = MemberLayout[]
         contained = Set{String}()
-
-        for m in members_raw
-            m_name = get(m, "name", "")
+        for m in get(info, "members", [])
             m_type = get(m, "c_type", get(m, "type", ""))
-            m_offset = _parse_size(get(m, "offset", "0"))
-            m_size = _parse_size(get(m, "size", "0"))
-
-            # Resolve nested struct sizes from DWARF when parser left size=0
-            if m_size == 0
-                cleaned = _strip_qualifiers(m_type)
-                if haskey(dwarf_structs, cleaned)
-                    m_size = _parse_size(get(dwarf_structs[cleaned], "byte_size", "0"))
-                end
-            end
-
-            push!(members, MemberLayout(m_name, m_type, m_offset, m_size))
-
-            # Track by-value type edges (not pointers/refs)
             if !_is_indirection(m_type)
                 cleaned = _strip_qualifiers(m_type)
                 if haskey(dwarf_structs, cleaned) && !startswith(cleaned, "__enum__")
@@ -168,17 +150,10 @@ function build_cpp_graph(metadata::Dict)::IRGraph
                 end
             end
         end
-
-        has_vtable = get(info, "is_polymorphic", false) == true ||
-                     get(info, "has_vtable", false) == true
-        base_raw = get(info, "base_classes", [])
-        base_classes = base_raw isa Vector ? String[string(b) for b in base_raw] : String[]
-
-        types[name] = TypeNode(name, byte_size, members, kind, has_vtable, base_classes)
         type_edges[name] = contained
     end
 
-    # ── Function nodes from metadata ───────────────────────────────────
+    # ── Function nodes + function→type edges ──────────────────────────
     for func in get(metadata, "functions", [])
         mangled = get(func, "mangled", "")
         isempty(mangled) && continue
@@ -190,7 +165,6 @@ function build_cpp_graph(metadata::Dict)::IRGraph
 
         functions[mangled] = FunctionNode(mangled, fname, ret_type, param_types, UInt64(0))
 
-        # Function → type edges (by-value params + return)
         deps = Set{String}()
         for pt in vcat([ret_type], param_types)
             if !_is_indirection(pt)
@@ -203,7 +177,93 @@ function build_cpp_graph(metadata::Dict)::IRGraph
         func_type_edges[mangled] = deps
     end
 
-    return IRGraph(types, functions, type_edges, func_type_edges)
+    return (type_edges, func_type_edges, functions)
+end
+
+# ============================================================================
+# Build C++ Graph (DWARF ground truth)
+# ============================================================================
+
+"""
+    build_cpp_graph(metadata::Dict) -> IRGraph
+
+Build the C++ side DAG from compilation metadata (DWARF struct definitions +
+function signatures).  This represents the *actual* ABI layout.
+"""
+function build_cpp_graph(metadata::Dict)::IRGraph
+    type_edges, func_type_edges, functions = _build_shared_topology(metadata)
+    types = Dict{String, TypeNode}()
+    inheritance_edges = Dict{String, Set{String}}()
+    dwarf_structs = get(metadata, "struct_definitions", Dict())
+
+    for (name, info) in dwarf_structs
+        startswith(name, "__enum__") && continue
+
+        byte_size = _parse_size(get(info, "byte_size", "0"))
+        kind = Symbol(get(info, "kind", "struct"))
+
+        members = MemberLayout[]
+        for m in get(info, "members", [])
+            m_name = get(m, "name", "")
+            m_type = get(m, "c_type", get(m, "type", ""))
+            m_offset = _parse_size(get(m, "offset", "0"))
+            m_size = _parse_size(get(m, "size", "0"))
+
+            if m_size == 0
+                cleaned = _strip_qualifiers(m_type)
+                if haskey(dwarf_structs, cleaned)
+                    m_size = _parse_size(get(dwarf_structs[cleaned], "byte_size", "0"))
+                end
+            end
+
+            # Bitfield info from DWARF (bit_size, data_bit_offset, bit_offset_legacy)
+            m_bit_size = _parse_size(get(m, "bit_size", 0))
+            m_bit_offset = _parse_size(get(m, "data_bit_offset", 0))
+            if m_bit_offset == 0
+                m_bit_offset = _parse_size(get(m, "bit_offset_legacy", 0))
+            end
+
+            push!(members, MemberLayout(m_name, m_type, m_offset, m_size, m_bit_size, m_bit_offset))
+        end
+
+        has_vtable = get(info, "is_polymorphic", false) == true ||
+                     get(info, "has_vtable", false) == true
+
+        # Synthesize vptr if vtable present but DWARF didn't emit an explicit member
+        if has_vtable && !any(m -> m.name == "__vtable_ptr" || m.name == "_vptr", members)
+            pushfirst!(members, MemberLayout("__vtable_ptr", "void *", 0, 8, 0, 0))
+        end
+
+        base_raw = get(info, "base_classes", [])
+        base_classes = if base_raw isa Vector
+            String[b isa Dict ? string(get(b, "type", "")) : string(b) for b in base_raw]
+        else
+            String[]
+        end
+
+        # Detect packed layout: any member offset violates natural alignment
+        is_packed = any(members) do m
+            m.size > 0 && m.offset % min(max(m.size, 1), 8) != 0
+        end
+
+        # Add inheritance edges: base classes treated as by-value containment for
+        # mismatch propagation (mismatched base → derived is also mismatched)
+        inh = Set{String}()
+        for bc in base_classes
+            cleaned_bc = _strip_qualifiers(bc)
+            if haskey(dwarf_structs, cleaned_bc)
+                haskey(type_edges, name) && push!(type_edges[name], cleaned_bc)
+                push!(inh, cleaned_bc)
+            end
+        end
+        if !isempty(inh)
+            inheritance_edges[name] = inh
+        end
+
+        types[name] = TypeNode(name, byte_size, members, kind, has_vtable, base_classes, is_packed)
+    end
+
+    return IRGraph(types, functions, type_edges, func_type_edges, inheritance_edges)
 end
 
 # ============================================================================
@@ -218,31 +278,23 @@ member info.  Mirrors the alignment logic in Wrapper/Utils.jl:get_julia_aligned_
 so that the diff detects exactly the same mismatches the runtime would hit.
 """
 function build_julia_graph(metadata::Dict)::IRGraph
+    type_edges, func_type_edges, functions = _build_shared_topology(metadata)
     types = Dict{String, TypeNode}()
-    functions = Dict{String, FunctionNode}()
-    type_edges = Dict{String, Set{String}}()
-    func_type_edges = Dict{String, Set{String}}()
-
     dwarf_structs = get(metadata, "struct_definitions", Dict())
 
-    # ── Julia-aligned type nodes ───────────────────────────────────────
     for (name, info) in dwarf_structs
         startswith(name, "__enum__") && continue
 
         kind = Symbol(get(info, "kind", "struct"))
-        members_raw = get(info, "members", [])
-
         julia_members = MemberLayout[]
         current_offset = 0
         max_align = 1
-        contained = Set{String}()
 
-        for m in members_raw
+        for m in get(info, "members", [])
             m_name = get(m, "name", "")
             m_type = get(m, "c_type", get(m, "type", ""))
             m_size = _parse_size(get(m, "size", "0"))
 
-            # Resolve nested struct sizes
             if m_size == 0
                 cleaned = _strip_qualifiers(m_type)
                 if haskey(dwarf_structs, cleaned)
@@ -252,8 +304,7 @@ function build_julia_graph(metadata::Dict)::IRGraph
 
             # Julia alignment: min(sizeof(field), 8), same as get_julia_aligned_size
             if kind == :union
-                # Union: all members at offset 0
-                push!(julia_members, MemberLayout(m_name, m_type, 0, m_size))
+                push!(julia_members, MemberLayout(m_name, m_type, 0, m_size, 0, 0))
                 max_align = max(max_align, min(max(m_size, 1), 8))
             else
                 alignment = m_size > 8 ? 8 : m_size
@@ -263,19 +314,11 @@ function build_julia_graph(metadata::Dict)::IRGraph
                 padding = (alignment - (current_offset % alignment)) % alignment
                 current_offset += padding
 
-                push!(julia_members, MemberLayout(m_name, m_type, current_offset, m_size))
+                push!(julia_members, MemberLayout(m_name, m_type, current_offset, m_size, 0, 0))
                 current_offset += m_size
-            end
-
-            if !_is_indirection(m_type)
-                cleaned = _strip_qualifiers(m_type)
-                if haskey(dwarf_structs, cleaned) && !startswith(cleaned, "__enum__")
-                    push!(contained, cleaned)
-                end
             end
         end
 
-        # Final struct size
         byte_size = if kind == :union
             isempty(julia_members) ? 0 : maximum(m.size for m in julia_members)
         else
@@ -283,35 +326,10 @@ function build_julia_graph(metadata::Dict)::IRGraph
             current_offset + final_pad
         end
 
-        types[name] = TypeNode(name, byte_size, julia_members, kind, false, String[])
-        type_edges[name] = contained
+        types[name] = TypeNode(name, byte_size, julia_members, kind, false, String[], false)
     end
 
-    # ── Function nodes (same signatures — Julia uses the declared types) ─
-    for func in get(metadata, "functions", [])
-        mangled = get(func, "mangled", "")
-        isempty(mangled) && continue
-
-        fname = get(func, "name", mangled)
-        ret_type = get(get(func, "return_type", Dict()), "c_type", "void")
-        params = get(func, "parameters", [])
-        param_types = String[get(p, "c_type", "") for p in params]
-
-        functions[mangled] = FunctionNode(mangled, fname, ret_type, param_types, UInt64(0))
-
-        deps = Set{String}()
-        for pt in vcat([ret_type], param_types)
-            if !_is_indirection(pt)
-                cleaned = _strip_qualifiers(pt)
-                if haskey(dwarf_structs, cleaned) && !startswith(cleaned, "__enum__")
-                    push!(deps, cleaned)
-                end
-            end
-        end
-        func_type_edges[mangled] = deps
-    end
-
-    return IRGraph(types, functions, type_edges, func_type_edges)
+    return IRGraph(types, functions, type_edges, func_type_edges, Dict{String, Set{String}}())
 end
 
 # ============================================================================
@@ -367,24 +385,43 @@ function diff_graphs(cpp::IRGraph, julia::IRGraph)::Vector{DAGMismatch}
                 "Type '$name': DWARF has $(length(cpp_t.members)) members vs Julia $(length(jl_t.members))"))
             push!(mismatched_type_names, name)
         end
+
+        # Bitfield members — Julia cannot represent sub-byte fields
+        for cm in cpp_t.members
+            if cm.bit_size > 0
+                push!(mismatches, DAGMismatch(name, LAYOUT_MISMATCH, UInt64(cm.offset), 0,
+                    "Type '$name'.$(cm.name): bitfield ($(cm.bit_size) bits at bit offset $(cm.bit_offset)) — Julia cannot match sub-byte layout"))
+                push!(mismatched_type_names, name)
+            end
+        end
+
+        # Packed struct detection — C++ layout violates natural alignment but Julia assumes it
+        if cpp_t.is_packed && !(name in mismatched_type_names)
+            push!(mismatches, DAGMismatch(name, LAYOUT_MISMATCH, UInt64(0), 0,
+                "Type '$name': packed layout detected (unnatural member alignment) — Julia uses natural alignment"))
+            push!(mismatched_type_names, name)
+        end
     end
 
     # ── Pass 2: Propagate type mismatches through containment edges ────
     # If type A contains type B by value and B is mismatched, A is also mismatched.
-    changed = true
-    while changed
-        changed = false
-        for (name, deps) in cpp.type_edges
-            name in mismatched_type_names && continue
-            for dep in deps
-                if dep in mismatched_type_names
-                    push!(mismatches, DAGMismatch(name, LAYOUT_MISMATCH, UInt64(0), 0,
-                        "Type '$name' contains mismatched type '$dep' by value"))
-                    push!(mismatched_type_names, name)
-                    changed = true
-                    break
-                end
-            end
+    # Single-pass reverse DFS from initially-mismatched types: O(V+E) vs the old
+    # fixed-point loop's O(depth × E).
+    reverse_edges = Dict{String, Vector{String}}()
+    for (name, deps) in cpp.type_edges
+        for dep in deps
+            push!(get!(Vector{String}, reverse_edges, dep), name)
+        end
+    end
+    stack = collect(copy(mismatched_type_names))
+    while !isempty(stack)
+        t = pop!(stack)
+        for parent in get(reverse_edges, t, String[])
+            parent in mismatched_type_names && continue
+            push!(mismatches, DAGMismatch(parent, LAYOUT_MISMATCH, UInt64(0), 0,
+                "Type '$parent' contains mismatched type '$t' by value"))
+            push!(mismatched_type_names, parent)
+            push!(stack, parent)
         end
     end
 
@@ -412,11 +449,11 @@ function diff_graphs(cpp::IRGraph, julia::IRGraph)::Vector{DAGMismatch}
             end
         end
 
-        # Transitive: function depends on types whose containment chains reach a mismatch
+        # Transitive: function depends on types whose containment chains reach a mismatch.
+        # Pass 2 already closed over containment edges, so mismatched_type_names is
+        # transitively complete — a direct intersection suffices.
         if !func_flagged
-            deps = get(cpp.func_type_edges, mangled, Set{String}())
-            all_deps = _transitive_closure(deps, cpp.type_edges)
-            for dep in all_deps
+            for dep in get(cpp.func_type_edges, mangled, Set{String}())
                 if dep in mismatched_type_names
                     push!(mismatches, DAGMismatch(mangled, TRANSITIVE_MISMATCH,
                         cpp_func.byte_offset, 0,
@@ -492,8 +529,9 @@ function topo_sort_mismatches(mismatches::Vector{DAGMismatch}, cpp::IRGraph)::Ve
     end
 
     # Remaining nodes form cycles — append them (cycle broken at pointer indirection)
+    sorted_set = Set(sorted)
     for s in thunk_symbols
-        if !(s in Set(sorted))
+        if !(s in sorted_set)
             push!(sorted, s)
         end
     end
@@ -560,9 +598,29 @@ Export a DAG diff result to Graphviz DOT format.
 Mismatched types render with red fill, mismatched functions with orange fill.
 Edges that propagate a mismatch are drawn in red.
 """
-function _generate_dot(result::DAGDiffResult; side::Symbol=:diff, show_members::Bool=true)::String
+function _generate_dot(result::DAGDiffResult; side::Symbol=:diff, show_members::Bool=true,
+                       show_only_mismatches::Bool=false)::String
     graph = side == :julia ? result.julia_graph :
             side == :cpp   ? result.cpp_graph   : result.cpp_graph
+
+    # When filtering, compute visible nodes: mismatched + direct neighbors (1 hop)
+    visible_types = Set{String}()
+    visible_funcs = Set{String}()
+    if show_only_mismatches
+        union!(visible_types, result.mismatched_types)
+        union!(visible_funcs, result.mismatched_functions)
+        # Add direct neighbors for context
+        for name in result.mismatched_types
+            for dep in get(graph.type_edges, name, Set{String}())
+                push!(visible_types, dep)
+            end
+        end
+        for mangled in result.mismatched_functions
+            for dep in get(graph.func_type_edges, mangled, Set{String}())
+                push!(visible_types, dep)
+            end
+        end
+    end
 
     io = IOBuffer()
     println(io, "digraph DAGDiff {")
@@ -585,49 +643,69 @@ function _generate_dot(result::DAGDiffResult; side::Symbol=:diff, show_members::
         println(io, "")
     end
 
-    # ── Type nodes ─────────────────────────────────────────────────────
+    # ── Type nodes (grouped by namespace for clustering) ────────────────
+    # Group types by C++ namespace prefix (split on :: outside angle brackets)
+    ns_groups = Dict{String, Vector{String}}()
+    for (name, _) in graph.types
+        show_only_mismatches && !(name in visible_types) && continue
+        ns = _extract_namespace(name)
+        push!(get!(Vector{String}, ns_groups, ns), name)
+    end
+
     println(io, "  // Type nodes")
-    for (name, tnode) in graph.types
-        is_mismatched = name in result.mismatched_types
-
-        # Node label
-        label_lines = ["<B>$(escape_dot(name))</B>"]
-        push!(label_lines, "$(tnode.kind) | $(tnode.byte_size)B")
-
-        if side == :diff && is_mismatched
-            # Show the delta
-            if haskey(result.julia_graph.types, name)
-                jl_size = result.julia_graph.types[name].byte_size
-                push!(label_lines, "<FONT COLOR=\"red3\">DWARF=$(tnode.byte_size)B  Julia=$(jl_size)B</FONT>")
-            end
+    for (ns, names) in sort!(collect(ns_groups); by=first)
+        if !isempty(ns)
+            safe_ns = replace(replace(ns, "::" => "_"), r"[^A-Za-z0-9_]" => "_")
+            println(io, "  subgraph cluster_$safe_ns {")
+            println(io, "    label=\"$(escape_dot(ns))\"; style=dashed; fontsize=9; color=gray60;")
         end
 
-        if show_members && !isempty(tnode.members)
-            push!(label_lines, " ")
-            for m in tnode.members
-                mline = "+$(m.offset) $(escape_dot(m.name)): $(escape_dot(m.type_name)) ($(m.size)B)"
-                # Highlight offset mismatch per-member
-                if side == :diff && is_mismatched && haskey(result.julia_graph.types, name)
-                    jl_members = result.julia_graph.types[name].members
-                    idx = findfirst(jm -> jm.name == m.name, jl_members)
-                    if idx !== nothing && jl_members[idx].offset != m.offset
-                        mline = "<FONT COLOR=\"red3\">+$(m.offset) $(escape_dot(m.name)): $(escape_dot(m.type_name)) ($(m.size)B)  [Julia: +$(jl_members[idx].offset)]</FONT>"
-                    end
+        indent = isempty(ns) ? "  " : "    "
+        for name in names
+            tnode = graph.types[name]
+            is_mismatched = name in result.mismatched_types
+
+            label_lines = ["<B>$(escape_dot(name))</B>"]
+            push!(label_lines, "$(tnode.kind) | $(tnode.byte_size)B")
+
+            if side == :diff && is_mismatched
+                if haskey(result.julia_graph.types, name)
+                    jl_size = result.julia_graph.types[name].byte_size
+                    push!(label_lines, "<FONT COLOR=\"red3\">DWARF=$(tnode.byte_size)B  Julia=$(jl_size)B</FONT>")
                 end
-                push!(label_lines, mline)
             end
+
+            if show_members && !isempty(tnode.members)
+                push!(label_lines, " ")
+                for m in tnode.members
+                    mline = "+$(m.offset) $(escape_dot(m.name)): $(escape_dot(m.type_name)) ($(m.size)B)"
+                    if side == :diff && is_mismatched && haskey(result.julia_graph.types, name)
+                        jl_members = result.julia_graph.types[name].members
+                        idx = findfirst(jm -> jm.name == m.name, jl_members)
+                        if idx !== nothing && jl_members[idx].offset != m.offset
+                            mline = "<FONT COLOR=\"red3\">+$(m.offset) $(escape_dot(m.name)): $(escape_dot(m.type_name)) ($(m.size)B)  [Julia: +$(jl_members[idx].offset)]</FONT>"
+                        end
+                    end
+                    push!(label_lines, mline)
+                end
+            end
+
+            label = "<" * join(label_lines, "<BR/>") * ">"
+            fill = is_mismatched ? "fillcolor=\"#ffcccc\", style=filled," : ""
+            border_color = is_mismatched ? "red3" : "gray60"
+            println(io, "$indent\"t:$name\" [shape=record, $fill color=$border_color, label=$label];")
         end
 
-        label = "<" * join(label_lines, "<BR/>") * ">"
-        fill = is_mismatched ? "fillcolor=\"#ffcccc\", style=filled," : ""
-        border_color = is_mismatched ? "red3" : "gray60"
-        println(io, "  \"t:$name\" [shape=record, $fill color=$border_color, label=$label];")
+        if !isempty(ns)
+            println(io, "  }")
+        end
     end
     println(io, "")
 
     # ── Function nodes ─────────────────────────────────────────────────
     println(io, "  // Function nodes")
     for (mangled, fnode) in graph.functions
+        show_only_mismatches && !(mangled in visible_funcs) && continue
         is_mismatched = mangled in result.mismatched_functions
 
         # Short label: function name + return type
@@ -653,16 +731,24 @@ function _generate_dot(result::DAGDiffResult; side::Symbol=:diff, show_members::
     end
     println(io, "")
 
-    # ── Type → type edges (by-value containment) ──────────────────────
-    println(io, "  // Type containment edges")
+    # ── Type → type edges (by-value containment + inheritance) ─────────
+    println(io, "  // Type containment and inheritance edges")
     for (name, deps) in graph.type_edges
+        inh_set = get(graph.inheritance_edges, name, Set{String}())
         for dep in deps
             haskey(graph.types, dep) || continue
-            # Red if the edge propagates a mismatch
             propagates = dep in result.mismatched_types && name in result.mismatched_types
-            color = propagates ? "red3" : "gray60"
-            style = propagates ? "bold" : "solid"
-            println(io, "  \"t:$dep\" -> \"t:$name\" [color=$color, style=$style, label=\"contains\", fontcolor=gray50];")
+            is_inheritance = dep in inh_set
+            if is_inheritance
+                color = propagates ? "blue" : "steelblue"
+                style = propagates ? "bold,dashed" : "dashed"
+                label = "inherits"
+            else
+                color = propagates ? "red3" : "gray60"
+                style = propagates ? "bold" : "solid"
+                label = "contains"
+            end
+            println(io, "  \"t:$dep\" -> \"t:$name\" [color=$color, style=$style, label=\"$label\", fontcolor=gray50];")
         end
     end
     println(io, "")
@@ -684,8 +770,10 @@ function _generate_dot(result::DAGDiffResult; side::Symbol=:diff, show_members::
 end
 
 function export_dot(result::DAGDiffResult, path::String;
-                    side::Symbol=:diff, show_members::Bool=true)
-    dot_str = _generate_dot(result; side=side, show_members=show_members)
+                    side::Symbol=:diff, show_members::Bool=true,
+                    show_only_mismatches::Bool=false)
+    dot_str = _generate_dot(result; side=side, show_members=show_members,
+                            show_only_mismatches=show_only_mismatches)
     write(path, dot_str)
     return path
 end
@@ -714,9 +802,11 @@ or the DOT path if `dot` is not available.
 Supported formats: svg, png, pdf
 """
 function render_dot(result::DAGDiffResult, path::String;
-                    format::String="svg", side::Symbol=:diff, show_members::Bool=true)
+                    format::String="svg", side::Symbol=:diff, show_members::Bool=true,
+                    show_only_mismatches::Bool=false)
     dot_path = replace(path, r"\.(svg|png|pdf)$" => "") * ".dot"
-    export_dot(result, dot_path; side=side, show_members=show_members)
+    export_dot(result, dot_path; side=side, show_members=show_members,
+               show_only_mismatches=show_only_mismatches)
 
     out_path = replace(dot_path, ".dot" => ".$format")
     try
@@ -740,8 +830,10 @@ The JS interactivity is edge-type agnostic: when new edge kinds (scope, RAII, up
 calls) are added to the DOT generator, highlight/trace works on them automatically.
 """
 function render_html(result::DAGDiffResult, path::String;
-                     side::Symbol=:diff, show_members::Bool=true)
-    dot_str = _generate_dot(result; side=side, show_members=show_members)
+                     side::Symbol=:diff, show_members::Bool=true,
+                     show_only_mismatches::Bool=false)
+    dot_str = _generate_dot(result; side=side, show_members=show_members,
+                            show_only_mismatches=show_only_mismatches)
 
     n_types = length(result.cpp_graph.types)
     n_funcs = length(result.cpp_graph.functions)
@@ -1019,6 +1111,25 @@ end
 # ============================================================================
 # Internal Helpers
 # ============================================================================
+
+"""Extract the top-level C++ namespace from a type name, ignoring :: inside angle brackets."""
+function _extract_namespace(name::AbstractString)::String
+    depth = 0
+    last_sep = 0
+    i = 1
+    while i <= ncodeunits(name)
+        c = name[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ':' && i < ncodeunits(name) && name[i+1] == ':'
+            last_sep = i
+        end
+        i = nextind(name, i)
+    end
+    return last_sep > 0 ? name[1:prevind(name, last_sep)] : ""
+end
 
 """Parse an integer that may be decimal, hex (0x…), or already numeric."""
 function _parse_size(val)::Int

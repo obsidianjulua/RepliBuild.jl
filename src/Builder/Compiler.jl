@@ -345,7 +345,7 @@ end
 
 """
 Link multiple LLVM IR files and optimize.
-Returns path to linked IR file.
+Returns linked IR path (String) or original IR files (Vector{String}) on llvm-link failure.
 """
 function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, output_name::String)
     # Link and optimize IR
@@ -361,12 +361,11 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
     # Link using llvm-link
     (output, exitcode) = BuildBridge.execute("llvm-link", vcat(["-S"], ir_files, ["-o", linked_ir]))
 
-    if exitcode != 0
-        error("Linking failed: $output")
-    end
-
-    if !isfile(linked_ir)
-        error("Linked IR file not created: $linked_ir")
+    if exitcode != 0 || !isfile(linked_ir)
+        # llvm-link crashed or failed (common with very large IR modules).
+        # Fall back: let clang handle linking at binary creation time.
+        @warn "llvm-link failed (exit $exitcode), falling back to clang-based linking"
+        return ir_files
     end
 
     # Optimize if requested
@@ -663,11 +662,15 @@ end
 Create shared library from LLVM IR.
 Returns path to library file.
 """
-function create_library(config::RepliBuildConfig, ir_file::String, lib_name::String="")
+function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{String}}, lib_name::String="")
     # Create shared library
 
-    if !isfile(ir_file)
-        error("IR file not found: $ir_file")
+    # Normalize to vector
+    files = ir_files isa String ? [ir_files] : ir_files
+    for f in files
+        if !isfile(f)
+            error("IR file not found: $f")
+        end
     end
 
     # Determine library name
@@ -684,9 +687,9 @@ function create_library(config::RepliBuildConfig, ir_file::String, lib_name::Str
     cmd_args = [
         "-shared",  # Create shared library
         "-fPIC",    # Position independent code
-        ir_file,
-        "-o", lib_path
     ]
+    append!(cmd_args, files)
+    append!(cmd_args, ["-o", lib_path])
 
     # Add library search paths
     for dir in config.link.link_dirs
@@ -719,13 +722,16 @@ end
 Create executable from LLVM IR.
 Returns path to executable file.
 """
-function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::String,
+function create_executable(config::RepliBuildConfig, ir_files::Union{String,Vector{String}}, exe_name::String,
                           link_libraries::Vector{String}=String[],
                           lib_dirs::Vector{String}=String[])
     # Create executable
 
-    if !isfile(ir_file)
-        error("IR file not found: $ir_file")
+    files = ir_files isa String ? [ir_files] : ir_files
+    for f in files
+        if !isfile(f)
+            error("IR file not found: $f")
+        end
     end
 
     # Output path
@@ -734,7 +740,7 @@ function create_executable(config::RepliBuildConfig, ir_file::String, exe_name::
     exe_path = joinpath(output_dir, exe_name)
 
     # Compile IR to executable
-    cmd_args = [ir_file, "-o", exe_path]
+    cmd_args = vcat(files, ["-o", exe_path])
 
     # Add library directories
     for dir in lib_dirs
@@ -884,8 +890,14 @@ function generate_macro_shims(config::RepliBuildConfig, cpp_files::Vector{String
             
             sig = "$ret_type replibuild_shim_$macro_name($(join(param_strs, ", ")))"
             println(io, "$sig {")
-            
-            call_str = "$macro_name($(join(arg_names, ", ")))"
+
+            # If "args" key is present → function-like macro, emit MACRO(args...)
+            # If "args" key is absent → value macro, emit bare MACRO
+            if haskey(def, "args")
+                call_str = "$macro_name($(join(arg_names, ", ")))"
+            else
+                call_str = macro_name
+            end
             if ret_type == "void"
                 println(io, "    $call_str;")
             else

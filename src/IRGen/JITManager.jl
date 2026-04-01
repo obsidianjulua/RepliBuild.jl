@@ -152,104 +152,53 @@ end
     invoke(func_name::String, ::Type{T}, args...) where T
 
 Invoke a JIT-compiled function with return type T.
-Arity-specialized methods for 1-4 args eliminate the Any[] boxing overhead.
-Uses _lookup_cached for lock-free symbol resolution on hot paths.
-Handles both scalar returns (direct) and struct returns (sret) correctly.
+@generated: emits arity-specialized code for any N at compile time.
+For N=1..4 this produces identical code to the old hand-written methods.
+For N≥5 this eliminates the Vector{Any}/Vector{Ptr{Cvoid}} allocation
+that the old generic fallback incurred on every call.
 """
+@generated function invoke(func_name::String, ::Type{T}, args::Vararg{Any, N}) where {T, N}
+    ref_syms = [Symbol("r$i") for i in 1:N]
 
-# 1-arg specialization
-function invoke(func_name::String, ::Type{T}, a1) where T
-    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
-    fptr = _lookup_cached(func_name)
-    r1 = Ref(a1)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1)]
-    result = GC.@preserve r1 begin
-        _invoke_call(fptr, T, inner_ptrs)
+    setup = [:($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
+    ptrs = [:(Base.unsafe_convert(Ptr{Cvoid}, $(ref_syms[i]))) for i in 1:N]
+    preserve_args = ref_syms
+
+    quote
+        (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
+        fptr = _lookup_cached(func_name)
+        $(setup...)
+        inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
+        result = GC.@preserve $(preserve_args...) begin
+            _invoke_call(fptr, T, inner_ptrs)
+        end
+        _check_pending_exception()
+        return result
     end
-    _check_pending_exception()
-    return result
-end
-
-# 2-arg specialization
-function invoke(func_name::String, ::Type{T}, a1, a2) where T
-    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
-    fptr = _lookup_cached(func_name)
-    r1 = Ref(a1); r2 = Ref(a2)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2)]
-    result = GC.@preserve r1 r2 begin
-        _invoke_call(fptr, T, inner_ptrs)
-    end
-    _check_pending_exception()
-    return result
-end
-
-# 3-arg specialization
-function invoke(func_name::String, ::Type{T}, a1, a2, a3) where T
-    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
-    fptr = _lookup_cached(func_name)
-    r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3)]
-    result = GC.@preserve r1 r2 r3 begin
-        _invoke_call(fptr, T, inner_ptrs)
-    end
-    _check_pending_exception()
-    return result
-end
-
-# 4-arg specialization
-function invoke(func_name::String, ::Type{T}, a1, a2, a3, a4) where T
-    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
-    fptr = _lookup_cached(func_name)
-    r1 = Ref(a1); r2 = Ref(a2); r3 = Ref(a3); r4 = Ref(a4)
-    inner_ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r1), Base.unsafe_convert(Ptr{Cvoid}, r2), Base.unsafe_convert(Ptr{Cvoid}, r3), Base.unsafe_convert(Ptr{Cvoid}, r4)]
-    result = GC.@preserve r1 r2 r3 r4 begin
-        _invoke_call(fptr, T, inner_ptrs)
-    end
-    _check_pending_exception()
-    return result
-end
-
-# Generic fallback for 5+ args
-function invoke(func_name::String, ::Type{T}, args::Vararg{Any, N}) where {T, N}
-    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
-    fptr = _lookup_cached(func_name)
-
-    ref_args = Vector{Any}(undef, N)
-    inner_ptrs = Vector{Ptr{Cvoid}}(undef, N)
-    for (i, arg) in enumerate(args)
-        r = Ref(arg)
-        ref_args[i] = r
-        inner_ptrs[i] = Base.unsafe_convert(Ptr{Cvoid}, r)
-    end
-
-    result = GC.@preserve ref_args begin
-        _invoke_call(fptr, T, inner_ptrs)
-    end
-    _check_pending_exception()
-    return result
 end
 
 # =============================================================================
 # Void-return invoke (no Type parameter = void return)
 # =============================================================================
 
-function invoke(func_name::String, args::Vararg{Any, N}) where N
-    (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
-    fptr = _lookup_cached(func_name)
+@generated function invoke(func_name::String, args::Vararg{Any, N}) where N
+    ref_syms = [Symbol("r$i") for i in 1:N]
 
-    ref_args = Vector{Any}(undef, N)
-    inner_ptrs = Vector{Ptr{Cvoid}}(undef, N)
-    for (i, arg) in enumerate(args)
-        r = Ref(arg)
-        ref_args[i] = r
-        inner_ptrs[i] = Base.unsafe_convert(Ptr{Cvoid}, r)
-    end
+    setup = [:($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
+    ptrs = [:(Base.unsafe_convert(Ptr{Cvoid}, $(ref_syms[i]))) for i in 1:N]
+    preserve_args = ref_syms
 
-    GC.@preserve ref_args inner_ptrs begin
-        ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+    quote
+        (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
+        fptr = _lookup_cached(func_name)
+        $(setup...)
+        inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
+        GC.@preserve $(preserve_args...) inner_ptrs begin
+            ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+        end
+        _check_pending_exception()
+        return nothing
     end
-    _check_pending_exception()
-    return nothing
 end
 
 # =============================================================================
@@ -328,8 +277,24 @@ function initialize_global_jit(binary_path::String)
                 end
             end
 
-            # 3. Generate MLIR Module for all vtables
-            ir_source = JLCSIRGenerator.generate_jlcs_ir(GLOBAL_JIT.vtable_info, metadata)
+            # 3. Load thunk manifest (dead-thunk elimination)
+            # If the wrapper wrote a manifest of which function thunks it actually
+            # needs, only generate those. Otherwise generate everything (backward compat).
+            manifest_path = joinpath(dirname(binary_path), "thunk_manifest.json")
+            needed_symbols = if isfile(manifest_path)
+                try
+                    manifest = JSON.parsefile(manifest_path)
+                    Set{String}(get(manifest, "function_thunks", String[]))
+                catch
+                    nothing
+                end
+            else
+                nothing
+            end
+
+            # 4. Generate MLIR Module for vtables + needed function thunks
+            ir_source = JLCSIRGenerator.generate_jlcs_ir(GLOBAL_JIT.vtable_info, metadata;
+                                                          needed_symbols=needed_symbols)
 
             # 4. Parse and Lower Module
             mod = parse_module(GLOBAL_JIT.mlir_ctx, ir_source)
@@ -341,7 +306,7 @@ function initialize_global_jit(binary_path::String)
 
             # 5. Create JIT Engine with the C++ library and libJLCS for EH symbol resolution
             jlcs_lib_path = MLIRNative.libJLCS
-            GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=3, shared_libs=[binary_path, jlcs_lib_path])
+            GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=1, shared_libs=[binary_path, jlcs_lib_path])
 
             @atomic GLOBAL_JIT.initialized = true
             # println("JIT Initialized for $binary_path")

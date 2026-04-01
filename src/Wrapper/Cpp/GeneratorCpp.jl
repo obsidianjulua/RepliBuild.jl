@@ -1663,6 +1663,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Track exported function names
     # exports already initialized at top
 
+    # Dead-thunk elimination: collect mangled names of functions that actually
+    # need MLIR thunks (Tier 2 dispatch). Written as thunk_manifest.json so
+    # JITManager can skip generating thunks for Tier 1 (ccall) functions.
+    needed_function_thunks = Set{String}()
 
     for func in functions
         func_name = func["name"]
@@ -2100,6 +2104,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # =========================================================
         if use_mlir_dispatch
             requires_jit = true
+            push!(needed_function_thunks, mangled)
 
             # Build argument list for invoke
             invoke_args = join(param_names, ", ")
@@ -2903,6 +2908,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         end
     end
 
-    return join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), union_accessor_defs, export_statement, join(func_chunks), footer])
+    wrapper_content = join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), union_accessor_defs, export_statement, join(func_chunks), footer])
+    return (wrapper_content, needed_function_thunks)
 end
 

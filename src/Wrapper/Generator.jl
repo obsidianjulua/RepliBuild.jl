@@ -433,28 +433,25 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         end
     end
 
-    # DAG Diff: structural mismatch detection (augments per-function heuristics)
-    dag_result = DAGDiff.dag_diff(metadata)
-
-    # Export DAG graphs when dag=true in [wrap]
-    if config.wrap.dag
-        dag_dir = joinpath(config.project.root, "dag")
-        mkpath(dag_dir)
-
-        # Interactive HTML viewer (pan/zoom + click-to-highlight chains)
-        DAGDiff.render_html(dag_result, joinpath(dag_dir, "index.html"))
-        # Raw DOT for external tooling
-        DAGDiff.export_dot(dag_result, joinpath(dag_dir, "diff.dot"))
-    end
-
     # Generate wrapper module
     module_name = get_module_name(config)
 
-    wrapper_content = if registry.language == :c
-        generate_introspective_module_c(config, library_path, metadata,
-                                        module_name, registry, generate_docs, thunks_lib_path;
-                                        dag_result=dag_result)
+    (wrapper_content, needed_thunks) = if registry.language == :c
+        # C path: no DAG — Julia's internal LLVM handles C ABI correctly.
+        # All dispatch goes through is_c_lto_safe() heuristics alone.
+        (generate_introspective_module_c(config, library_path, metadata,
+                                         module_name, registry, generate_docs, thunks_lib_path), nothing)
     else
+        # C++ path: DAG catches transitive layout drift that per-function heuristics miss
+        dag_result = DAGDiff.dag_diff(metadata)
+
+        if config.wrap.dag
+            dag_dir = joinpath(config.project.root, "dag")
+            mkpath(dag_dir)
+            DAGDiff.render_html(dag_result, joinpath(dag_dir, "index.html"))
+            DAGDiff.export_dot(dag_result, joinpath(dag_dir, "diff.dot"))
+        end
+
         generate_introspective_module_cpp(config, library_path, metadata,
                                           module_name, registry, generate_docs, thunks_lib_path;
                                           dag_result=dag_result)
@@ -466,6 +463,20 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     output_file = joinpath(output_dir, "$(module_name).jl")
 
     write(output_file, wrapper_content)
+
+    # Write thunk manifest for dead-thunk elimination.
+    # JITManager reads this to skip generating MLIR thunks for functions
+    # that are dispatched via ccall (Tier 1) and never need a thunk.
+    if needed_thunks !== nothing
+        manifest = Dict{String,Any}(
+            "function_thunks" => sort!(collect(needed_thunks)),
+            "version" => 1
+        )
+        manifest_path = joinpath(output_dir, "thunk_manifest.json")
+        open(manifest_path, "w") do io
+            JSON.print(io, manifest, 2)
+        end
+    end
 
     println("  wrap: $(basename(output_file))")
 

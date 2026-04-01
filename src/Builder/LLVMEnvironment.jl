@@ -405,6 +405,33 @@ function build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::Str
 end
 
 """
+    check_tool_version_coherence(tools::Dict{String,String}, expected_major::Int)
+
+Verify that critical LLVM tools report the same major version as llvm-config.
+Warns on mismatch to surface potential IR incompatibilities from mixed-version toolchains.
+"""
+function check_tool_version_coherence(tools::Dict{String,String}, expected_major::Int)
+    expected_major <= 0 && return
+    critical_tools = ["clang", "clang++", "llvm-link", "opt", "llc", "llvm-as"]
+    for tool_name in critical_tools
+        tool_path = get(tools, tool_name, "")
+        isempty(tool_path) && continue
+        (isfile(tool_path) || islink(tool_path)) || continue
+        try
+            output = strip(read(`$tool_path --version`, String))
+            m = match(r"version\s+(\d+)\.\d+", output)
+            m === nothing && continue
+            tool_major = parse(Int, m[1])
+            if tool_major != expected_major
+                @warn "LLVM version mismatch: $tool_name reports v$tool_major but llvm-config reports v$expected_major. This may cause IR incompatibilities." tool_path
+            end
+        catch
+            continue
+        end
+    end
+end
+
+"""
     init_toolchain(;isolated::Bool=true, config=nothing, source::Symbol=:auto) -> LLVMToolchain
 
 Initialize the LLVM toolchain.
@@ -461,6 +488,7 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
     (major, minor, patch) = parse_llvm_version(String(version_str))
 
     tools = discover_llvm_tools(llvm_root, toolchain_source)
+    check_tool_version_coherence(tools, major)
 
     # Validate tools exist, warn if missing
     for (name, path) in tools
