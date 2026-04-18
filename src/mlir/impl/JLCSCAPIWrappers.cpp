@@ -288,6 +288,76 @@ extern "C" {
         return mlirLogicalResultIsSuccess(res);
     }
 
+    // --- Self-Test: one-shot JIT diagnostic ---
+    // Does parse → lower → ExecutionEngine → invokePacked entirely in C++.
+    // If this crashes when called from Julia, the Julia runtime environment
+    // (signals, mmap, etc.) is interfering with ORC JIT codegen.
+    // If it succeeds, the multi-ccall orchestration is the problem.
+    int jlcs_selftest_jit_add(int32_t a, int32_t b, int32_t *result) {
+        // 1. Init targets (idempotent)
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeNativeTargetAsmParser();
+
+        // 2. Fresh context + dialects
+        mlir::MLIRContext ctx;
+        ctx.loadDialect<mlir::func::FuncDialect,
+                        mlir::arith::ArithDialect,
+                        mlir::LLVM::LLVMDialect>();
+        mlir::registerBuiltinDialectTranslation(ctx);
+        mlir::registerLLVMDialectTranslation(ctx);
+
+        // 3. Parse trivial IR
+        const char *ir = R"MLIR(
+            module {
+              func.func @add(%a: i32, %b: i32) -> i32
+                  attributes {llvm.emit_c_interface} {
+                %r = arith.addi %a, %b : i32
+                return %r : i32
+              }
+            }
+        )MLIR";
+        auto mod = mlir::parseSourceString<mlir::ModuleOp>(ir, &ctx);
+        if (!mod) { llvm::errs() << "[selftest] parse failed\n"; return 1; }
+
+        // 4. Lower to LLVM dialect
+        {
+            mlir::PassManager pm(&ctx);
+            pm.addPass(mlir::createConvertFuncToLLVMPass());
+            pm.addPass(mlir::createArithToLLVMConversionPass());
+            pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+            if (mlir::failed(pm.run(*mod))) {
+                llvm::errs() << "[selftest] lowering failed\n";
+                return 2;
+            }
+        }
+
+        // 5. Attach data layout
+        attachHostDataLayout(*mod);
+
+        // 6. Create ExecutionEngine
+        mlir::ExecutionEngineOptions opts;
+        opts.jitCodeGenOptLevel = llvm::CodeGenOptLevel::None;
+        opts.transformer = [](llvm::Module *) { return llvm::Error::success(); };
+
+        auto maybeEngine = mlir::ExecutionEngine::create(*mod, opts);
+        if (!maybeEngine) {
+            llvm::errs() << "[selftest] ExecutionEngine::create failed: "
+                         << maybeEngine.takeError() << "\n";
+            return 3;
+        }
+        auto engine = std::move(*maybeEngine);
+
+        // 7. invokePacked — the crash site
+        void *argPtrs[] = { &a, &b, result };
+        if (auto err = engine->invokePacked("add", argPtrs)) {
+            llvm::errs() << "[selftest] invokePacked error: " << err << "\n";
+            return 4;
+        }
+
+        return 0;  // success
+    }
+
     // --- Exception Handling C API ---
 
     void jlcs_set_pending_exception(const char* msg) {

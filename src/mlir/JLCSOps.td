@@ -377,6 +377,8 @@ def MarshalArgOp : JLCS_Op<"marshal_arg", [MemoryEffects<[MemRead]>]> {
 
   let results = (outs AnyType:$result);  // Packed struct value
 
+  let assemblyFormat = "$srcPtr attr-dict `:` functional-type($srcPtr, $result)";
+
   let skipDefaultBuilders = 1;
   let builders = [
     OpBuilder<(ins "Value":$srcPtr, "ArrayAttr":$memberTypes,
@@ -411,6 +413,8 @@ def MarshalRetOp : JLCS_Op<"marshal_ret", [Pure]> {
   );
 
   let results = (outs AnyType:$result);  // Aligned struct value
+
+  let assemblyFormat = "$packedValue attr-dict `:` functional-type($packedValue, $result)";
 
   let skipDefaultBuilders = 1;
   let builders = [
