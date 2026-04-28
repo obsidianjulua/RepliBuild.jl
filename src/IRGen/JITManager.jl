@@ -237,7 +237,7 @@ function initialize_global_jit(binary_path::String)
             for (class_name, class_info) in GLOBAL_JIT.vtable_info.classes
                 for method in class_info.virtual_methods
                     dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
-                    ptr = Libdl.dlsym(lib_handle, method.mangled_name, throw_error=false)
+                    ptr = something(Libdl.dlsym(lib_handle, method.mangled_name, throw_error=false), C_NULL)
                     if ptr != C_NULL
                         MLIRNative.register_symbol_global(dispatch_name, ptr)
                     end
@@ -247,7 +247,7 @@ function initialize_global_jit(binary_path::String)
             # 2b. Register exception handling helper symbols for JIT'd code
             for sym in (:jlcs_set_pending_exception, :jlcs_catch_current_exception,
                         :jlcs_has_pending_exception, :jlcs_clear_pending_exception)
-                ptr = Libdl.dlsym(Libdl.dlopen(MLIRNative.libJLCS), sym, throw_error=false)
+                ptr = something(Libdl.dlsym(Libdl.dlopen(MLIRNative.libJLCS), sym, throw_error=false), C_NULL)
                 if ptr != C_NULL
                     MLIRNative.register_symbol_global(string(sym), ptr)
                 end
@@ -258,19 +258,19 @@ function initialize_global_jit(binary_path::String)
             cxxrt_handle = C_NULL
             try
                 # Try libstdc++ first, then libc++abi
-                cxxrt_handle = Libdl.dlopen("libstdc++.so.6", Libdl.RTLD_LAZY | Libdl.RTLD_NOLOAD, throw_error=false)
+                cxxrt_handle = something(Libdl.dlopen("libstdc++.so.6", Libdl.RTLD_LAZY | Libdl.RTLD_NOLOAD, throw_error=false), C_NULL)
                 if cxxrt_handle == C_NULL
-                    cxxrt_handle = Libdl.dlopen("libstdc++.so", Libdl.RTLD_LAZY, throw_error=false)
+                    cxxrt_handle = something(Libdl.dlopen("libstdc++.so", Libdl.RTLD_LAZY, throw_error=false), C_NULL)
                 end
             catch; end
             for sym in (:__gxx_personality_v0, :__cxa_begin_catch, :__cxa_end_catch)
                 ptr = C_NULL
                 if cxxrt_handle != C_NULL
-                    ptr = Libdl.dlsym(cxxrt_handle, sym, throw_error=false)
+                    ptr = something(Libdl.dlsym(cxxrt_handle, sym, throw_error=false), C_NULL)
                 end
                 if ptr == C_NULL
                     # Fallback: search in already-loaded libraries (the C++ .so we built loads libstdc++)
-                    ptr = Libdl.dlsym(lib_handle, sym, throw_error=false)
+                    ptr = something(Libdl.dlsym(lib_handle, sym, throw_error=false), C_NULL)
                 end
                 if ptr != C_NULL
                     MLIRNative.register_symbol_global(string(sym), ptr)
