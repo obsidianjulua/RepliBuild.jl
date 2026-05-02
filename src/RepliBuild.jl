@@ -444,13 +444,10 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
             error("Compilation produced no library. Check that source files exist and are listed in the config.")
         end
 
-        # Build thunks if enabled (C uses Clang-compiled sret, C++ uses MLIR)
-        if config.compile.aot_thunks && config.binary.type != :executable
-            if config.wrap.language == :c
-                ThunkBuilder.build_c_thunks(config, library_path)
-            else
-                ThunkBuilder.build_aot_thunks(config, library_path)
-            end
+        # Build MLIR AOT thunks for C++ when enabled (C goes through ccall+LTO only,
+        # no thunks — packed/union returns use explicit-sret ccall).
+        if config.compile.aot_thunks && config.binary.type != :executable && config.wrap.language != :c
+            ThunkBuilder.build_aot_thunks(config, library_path)
         end
 
         return abspath(library_path)

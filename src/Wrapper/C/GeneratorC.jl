@@ -745,7 +745,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
                         push!(struct_chunks, """
                         # C struct with bitfields: $struct_name (size $byte_size bytes)
-                        mutable struct $julia_struct_name
+                        struct $julia_struct_name
                             _data::NTuple{$byte_size, UInt8}
                         end
                         $julia_struct_name() = $julia_struct_name(ntuple(i -> 0x00, $byte_size))
@@ -799,12 +799,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         return UInt32((s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask))
                                     end
 
-                                    \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name`.\"\"\"
-                                    function set_$(safe_member)!(s::$julia_struct_name, v::Integer)
+                                    \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name` (returns new instance).\"\"\"
+                                    function set_$(safe_member)(s::$julia_struct_name, v::Integer)::$julia_struct_name
                                         data = collect(s._data)
                                         cleared = data[$(byte_pos + 1)] & ~UInt8($(mask) << $bit_within_byte)
                                         data[$(byte_pos + 1)] = cleared | UInt8((UInt32(v) & $(mask)) << $bit_within_byte)
-                                        s._data = NTuple{$byte_size, UInt8}(data)
+                                        return $julia_struct_name(NTuple{$byte_size, UInt8}(data))
                                     end
 
                                     """)
@@ -831,8 +831,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         return (raw >> $bit_within_byte) & $cmask
                                     end
 
-                                    \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name`.\"\"\"
-                                    function set_$(safe_member)!(s::$julia_struct_name, v::Integer)
+                                    \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name` (returns new instance).\"\"\"
+                                    function set_$(safe_member)(s::$julia_struct_name, v::Integer)::$julia_struct_name
                                         data = collect(s._data)
                                         GC.@preserve data begin
                                             p = pointer(data) + $byte_pos
@@ -841,13 +841,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                             raw = cleared | (($container_type(v) & $cmask) << $bit_within_byte)
                                             unsafe_store!(Ptr{$container_type}(p), raw)
                                         end
-                                        s._data = NTuple{$byte_size, UInt8}(data)
+                                        return $julia_struct_name(NTuple{$byte_size, UInt8}(data))
                                     end
 
                                     """)
                                 end
                                 push!(exports, "get_$(safe_member)")
-                                push!(exports, "set_$(safe_member)!")
+                                push!(exports, "set_$(safe_member)")
                             else
                                 # Non-bitfield member in a bitfield struct — byte-offset accessor
                                 byte_off = _parse_int_or_hex(get(member, "offset", "0"))
@@ -1594,124 +1594,76 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         c_safe = is_c_lto_safe(func, dwarf_structs)
 
         # =========================================================
-        # BRANCH 0: UNSAFE — C sret thunk dispatch
+        # BRANCH 0: MEMORY-CLASS RETURN — explicit-sret ccall
         # =========================================================
+        # SysV classifies an aggregate return as MEMORY only when it has an
+        # unaligned non-bitfield field (true `__attribute__((packed))`) or
+        # is larger than 16 bytes. MEMORY-class returns require the caller
+        # to allocate storage and pass its address as a hidden first arg —
+        # we emit the ccall with that exact shape (`Cvoid` return,
+        # `Ptr{Ret}` first arg) so it matches the SysV sret lowering of
+        # `Ret f(args...)`. No C thunk needed.
+        #
+        # Bitfield-only structs and aligned aggregates ≤ 16 bytes are
+        # INTEGER class (returned in registers) and fall through to
+        # BRANCH 2's normal ccall.
         if !c_safe
-            thunk_ret_type = return_type["julia_type"]
-            thunk_c_ret = get(return_type, "c_type", "void")
-
-            # Resolve "Any" return type to the Julia struct name
-            if thunk_ret_type == "Any" && thunk_c_ret != "void"
-                if haskey(dwarf_structs, thunk_c_ret)
-                    thunk_ret_type = _sanitize_c_type_name(thunk_c_ret)
+            sret_c_ret = get(return_type, "c_type", "void")
+            cleaned_c_ret = String(strip(replace(sret_c_ret, r"\bconst\b" => "")))
+            ret_struct_info = get(dwarf_structs, cleaned_c_ret, nothing)
+            needs_sret = false
+            if ret_struct_info !== nothing
+                rs_size = _parse_dwarf_size(ret_struct_info)
+                if rs_size > 16
+                    needs_sret = true
                 else
-                    matched_key = _fuzzy_dwarf_lookup(thunk_c_ret, dwarf_structs)
-                    if matched_key !== nothing
-                        thunk_ret_type = _sanitize_c_type_name(matched_key)
-                    end
-                end
-            end
-
-            thunk_sym = "_c_sret_$mangled"
-
-            # Direct sret call: thunk has same args as original but returns
-            # void and takes a leading Ptr{RetType} output parameter.
-            # ccall types: (Ptr{Ret}, Arg1, Arg2, ...)
-            sret_ccall_types = "(Ptr{$thunk_ret_type}, $(join(param_types, ", "))$(isempty(param_types) ? "" : ","))"
-            sret_ccall_args  = "ret_buf, $(join(param_names, ", "))"
-
-            if config.link.enable_lto
-                # LTO path: Build llvmcall-safe parameter types and conversion code.
-                # llvmcall doesn't auto-convert like ccall:
-                # - Ref{T} is ptr addrspace(10), C IR uses addrspace(0) → must use Ptr{T}
-                # - Ptr{T} args need cconvert/unsafe_convert for String/Array callers
-                # - Integer args need explicit narrowing (e.g., Int64 → Cint)
-                sret_lpt = String["Ptr{$thunk_ret_type}"]
-                sret_lan = String["__sret_ptr"]
-                sret_pres = String["ret_buf"]
-                sret_conv = String["    __sret_ptr = Base.unsafe_convert(Ptr{$thunk_ret_type}, ret_buf)"]
-
-                for (i, pt) in enumerate(param_types)
-                    arg_name = param_names[i]
-                    m_ref = match(r"^Ref\{(.+)\}$", pt)
-                    m_ptr = match(r"^Ptr\{(.+)\}$", pt)
-                    if m_ref !== nothing
-                        inner_type = m_ref.captures[1]
-                        push!(sret_lpt, "Ptr{$inner_type}")
-                        ptr_name = "__ptr_$(arg_name)"
-                        push!(sret_lan, ptr_name)
-                        push!(sret_pres, arg_name)
-                        push!(sret_conv, "    $ptr_name = Base.unsafe_convert(Ptr{$inner_type}, $arg_name)")
-                    elseif m_ptr !== nothing
-                        push!(sret_lpt, pt)
-                        ptr_name = "__ptr_$(arg_name)"
-                        cc_name = "__cc_$(arg_name)"
-                        push!(sret_lan, ptr_name)
-                        push!(sret_pres, cc_name)
-                        push!(sret_conv, "    $cc_name = Base.cconvert($pt, $arg_name)")
-                        push!(sret_conv, "    $ptr_name = Base.unsafe_convert($pt, $cc_name)")
-                    elseif needs_conversion[i]
-                        conv_name = "$(arg_name)_c"
-                        push!(sret_lpt, pt)
-                        push!(sret_lan, conv_name)
-                        push!(sret_conv, "    $conv_name = $pt($arg_name)")
-                    else
-                        push!(sret_lpt, pt)
-                        push!(sret_lan, arg_name)
-                    end
-                end
-
-                sret_llvm_types = "Tuple{$(join(sret_lpt, ", "))}"
-                sret_llvm_args = join(sret_lan, ", ")
-                sret_conv_code = join(sret_conv, "\n")
-                sret_preserve_list = join(sret_pres, " ")
-
-                func_def = """
-                $doc_comment
-                function $julia_name($param_sig)
-                    # [C Thunk] sret dispatch — packed/union return
-                    ret_buf = Ref($thunk_ret_type())
-                $sret_conv_code
-                    GC.@preserve $sret_preserve_list begin
-                        if !isempty(THUNKS_LTO_IR)
-                            Base.llvmcall((THUNKS_LTO_IR, "$thunk_sym"), Cvoid, $sret_llvm_types, $sret_llvm_args)
-                        else
-                            ccall((:$thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
+                    for m in get(ret_struct_info, "members", [])
+                        haskey(m, "bit_size") && continue
+                        m_size = get(m, "size", 0)
+                        m_size <= 0 && continue
+                        m_align = m_size > 8 ? 8 : m_size
+                        m_off = _parse_int_or_hex(get(m, "offset", "0"))
+                        if m_off % m_align != 0
+                            needs_sret = true
+                            break
                         end
                     end
-                    return ret_buf[]
+                end
+            end
+
+            if needs_sret
+                sret_ret_type = return_type["julia_type"]
+                if sret_ret_type == "Any" && sret_c_ret != "void"
+                    if haskey(dwarf_structs, sret_c_ret)
+                        sret_ret_type = _sanitize_c_type_name(sret_c_ret)
+                    else
+                        matched_key = _fuzzy_dwarf_lookup(sret_c_ret, dwarf_structs)
+                        if matched_key !== nothing
+                            sret_ret_type = _sanitize_c_type_name(matched_key)
+                        end
+                    end
                 end
 
-                """
-            elseif !isempty(thunks_lib_path)
-                # No LTO but thunks library exists
+                sret_ccall_types = "(Ptr{$sret_ret_type}, $(join(param_types, ", "))$(isempty(param_types) ? "" : ","))"
+                sret_ccall_args  = "ret_buf, $(join(param_names, ", "))"
+
                 func_def = """
                 $doc_comment
                 function $julia_name($param_sig)
-                    # [C Thunk] sret dispatch — packed/union return
-                    ret_buf = Ref($thunk_ret_type())
+                    ret_buf = Ref($sret_ret_type())
                     GC.@preserve ret_buf begin
-                        ccall((:$thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
+                        ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
                     end
                     return ret_buf[]
                 end
 
                 """
-            else
-                # No thunks available at all — error trap
-                func_def = """
-                $doc_comment
-                function $julia_name($param_sig)
-                    error("Cannot call '$julia_name': packed/union return ($(thunk_c_ret)) requires AOT thunks.\\n" *
-                          "Rebuild with: [compile] aot_thunks = true  in your replibuild.toml")
-                end
 
-                """
+                push!(func_chunks, func_def)
+                push!(exports, julia_name)
+                continue
             end
-
-            push!(func_chunks, func_def)
-            push!(exports, julia_name)
-            continue
+            # else: fall through to BRANCH 2 — INTEGER-class register return
         end
 
         # =========================================================

@@ -442,10 +442,17 @@ function sanitize_ir_for_julia(ir_text::String)::String
         end)
     # Remove varargs function bodies — va_start/va_end intrinsics can't be JIT-resolved.
     # Convert to extern declarations so calls route through the shared library.
+    # EXCEPTION: hidden/protected visibility symbols are not exported by the .so
+    # (e.g. Lua's LUAI_FUNC marks helpers as visibility("internal")), so converting
+    # them to declarations would create unresolvable JIT references. Leave their
+    # bodies in place; the JIT keeps va_start lowering local to the module.
     ir_text = replace(ir_text,
         r"^(define\s[^\n]*\.\.\.[^\n]*\{)\n(.*?)\n(\})"ms => function(m)
             sig_match = match(r"define\s+(.*?)\s+(@\w+)\s*\(([^)]*)\)", m)
             if sig_match !== nothing
+                if occursin(r"\b(?:hidden|protected)\b", sig_match[1])
+                    return m
+                end
                 linkage = replace(sig_match[1], r"\b(internal|private)\s*" => "")
                 "declare $(linkage) $(sig_match[2])($(sig_match[3]))"
             else
@@ -477,10 +484,8 @@ function sanitize_ir_for_julia(ir_text::String)::String
         if occursin(r"^\s*(tail\s+)?call void @llvm\.experimental\.noalias\.scope\.decl\(", line)
             continue
         end
-        # va_start/va_end intrinsic declarations
-        if occursin(r"^declare\s+void\s+@llvm\.va_(start|end)", line)
-            continue
-        end
+        # va_start/va_end intrinsic declarations are kept: hidden vararg function
+        # bodies survive the Phase-1 strip and need these intrinsics for codegen.
 
         # ── Per-line replacements ──
         line = replace(line, r"\bnoinline\b" => "")
@@ -511,8 +516,12 @@ function sanitize_ir_for_julia(ir_text::String)::String
         # ── Global variable externalization ──
         # Convert externally-visible global definitions to external declarations.
         # Prevents "Duplicate definition" JIT errors when .so is also loaded via dlopen.
+        # EXCEPTION: hidden/protected visibility symbols are not exported by the .so
+        # (e.g. Lua's LUAI_DDEC marks tables like luaP_opmodes as visibility("internal")),
+        # so externalizing them would create unresolvable JIT references. Keep the
+        # definition local to the bitcode — there's no .so symbol to clash with.
         gm = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:<\{.*?\}>|\{.*?\}|\[\d+\s+x\s+\S+\]|\S+))\s+\S", line)
-        if gm !== nothing && !occursin(r"\b(?:private|internal)\b", gm[2])
+        if gm !== nothing && !occursin(r"\b(?:private|internal|hidden|protected)\b", gm[2])
             type_str = rstrip(gm[4], ',')
             line = "$(gm[1])external $(gm[3]) $(type_str)"
         end

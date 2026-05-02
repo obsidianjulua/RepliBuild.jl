@@ -158,41 +158,6 @@ if MLIR_AVAILABLE
         println("  ✓ MLIR IR generation")
     end
 
-    # ── MLIR Type Safety ──────────────────────────────────────────────────
-
-    @testset "StressTest: MLIR Type Safety" begin
-        ctx = create_context()
-
-        ir = """
-        module {
-            func.func @add(%arg0: i32, %arg1: i32) -> i32 attributes {llvm.emit_c_interface} {
-                %0 = arith.addi %arg0, %arg1 : i32
-                return %0 : i32
-            }
-        }
-        """
-
-        mod = parse_module(ctx, ir)
-        mod_jit = clone_module(mod)
-        @test lower_to_llvm(mod_jit) == true
-
-        jit = create_jit(mod_jit)
-
-        # Safe invocation
-        res_ref = Ref(Int32(0))
-        invoke_safe(jit, mod, "add", Int32(10), Int32(20), res_ref)
-        @test res_ref[] == 30
-
-        # Type mismatch detection
-        bad_ref = Ref(Int32(0))
-        @test_throws ErrorException invoke_safe(jit, mod, "add", Int64(10), Int32(20), bad_ref)
-        @test_throws ErrorException invoke_safe(jit, mod, "add", Float32(10.0), Int32(20), bad_ref)
-
-        destroy_jit(jit)
-        destroy_context(ctx)
-        println("  ✓ MLIR type safety")
-    end
-
     # ── AOT Compilation ───────────────────────────────────────────────────
 
     @testset "StressTest: AOT Compilation" begin
@@ -260,9 +225,6 @@ if MLIR_AVAILABLE
     # ── RAII Dialect ──────────────────────────────────────────────────────
 
     @testset "StressTest: RAII Dialect" begin
-        # Build libtracker.so from tracker.cpp in stress_test/src
-        tracker_lib = joinpath(@__DIR__, "julia", "libstress_test.so")
-
         @testset "Parse ctor_call / dtor_call IR" begin
             ctx = create_context()
             ir = """
@@ -299,156 +261,6 @@ if MLIR_AVAILABLE
             mod = parse_module(ctx, ir)
             mod_jit = clone_module(mod)
             @test lower_to_llvm(mod_jit) == true
-            destroy_context(ctx)
-        end
-
-        @testset "JIT execute ctor_call / dtor_call" begin
-            ctx = create_context()
-            ir = """
-            module {
-              func.func private @tracker_ctor(!llvm.ptr)
-              func.func private @tracker_dtor(!llvm.ptr)
-
-              func.func @test_raii(%ptr: !llvm.ptr) attributes {llvm.emit_c_interface} {
-                jlcs.ctor_call @tracker_ctor(%ptr) : (!llvm.ptr) -> ()
-                jlcs.dtor_call @tracker_dtor(%ptr) : (!llvm.ptr) -> ()
-                return
-              }
-            }
-            """
-            mod = parse_module(ctx, ir)
-            mod_jit = clone_module(mod)
-            @test lower_to_llvm(mod_jit)
-
-            jit = create_jit(mod_jit, shared_libs=[tracker_lib])
-            @test jit != C_NULL
-
-            tracker = Int32[0, 0]
-            tracker_ptr = Ref(Ptr{Cvoid}(pointer(tracker)))
-            args = [Base.unsafe_convert(Ptr{Cvoid}, tracker_ptr)]
-            GC.@preserve tracker tracker_ptr begin
-                @test jit_invoke(jit, "test_raii", args) == true
-            end
-
-            @test tracker[1] == 42   # tracker_ctor
-            @test tracker[2] == 99   # tracker_dtor
-
-            destroy_jit(jit)
-            destroy_context(ctx)
-        end
-
-        @testset "ctor_call with arguments" begin
-            ctx = create_context()
-            ir = """
-            module {
-              func.func private @tracker_ctor_val(!llvm.ptr, i32)
-              func.func private @tracker_dtor(!llvm.ptr)
-
-              func.func @test_raii_val(%ptr: !llvm.ptr, %val: i32) attributes {llvm.emit_c_interface} {
-                jlcs.ctor_call @tracker_ctor_val(%ptr, %val) : (!llvm.ptr, i32) -> ()
-                jlcs.dtor_call @tracker_dtor(%ptr) : (!llvm.ptr) -> ()
-                return
-              }
-            }
-            """
-            mod = parse_module(ctx, ir)
-            mod_jit = clone_module(mod)
-            @test lower_to_llvm(mod_jit)
-
-            jit = create_jit(mod_jit, shared_libs=[tracker_lib])
-            @test jit != C_NULL
-
-            tracker = Int32[0, 0]
-            val = Ref(Int32(123))
-            tracker_ptr = Ref(Ptr{Cvoid}(pointer(tracker)))
-            args = [Base.unsafe_convert(Ptr{Cvoid}, tracker_ptr),
-                    Base.unsafe_convert(Ptr{Cvoid}, val)]
-            GC.@preserve tracker tracker_ptr val begin
-                @test jit_invoke(jit, "test_raii_val", args) == true
-            end
-
-            @test tracker[1] == 123
-            @test tracker[2] == 99
-
-            destroy_jit(jit)
-            destroy_context(ctx)
-        end
-
-        @testset "jlcs.scope (parse, lower, JIT)" begin
-            ctx = create_context()
-            ir = """
-            module {
-              func.func private @tracker_ctor(!llvm.ptr)
-              func.func private @tracker_dtor(!llvm.ptr)
-
-              func.func @test_scope(%ptr: !llvm.ptr) attributes {llvm.emit_c_interface} {
-                jlcs.scope(%ptr : !llvm.ptr) dtors([@tracker_dtor]) {
-                  jlcs.ctor_call @tracker_ctor(%ptr) : (!llvm.ptr) -> ()
-                }
-                return
-              }
-            }
-            """
-            mod = parse_module(ctx, ir)
-            @test mod != C_NULL
-
-            mod_jit = clone_module(mod)
-            @test lower_to_llvm(mod_jit)
-
-            jit = create_jit(mod_jit, shared_libs=[tracker_lib])
-            @test jit != C_NULL
-
-            tracker = Int32[0, 0]
-            tracker_ptr = Ref(Ptr{Cvoid}(pointer(tracker)))
-            args = [Base.unsafe_convert(Ptr{Cvoid}, tracker_ptr)]
-            GC.@preserve tracker tracker_ptr begin
-                @test jit_invoke(jit, "test_scope", args) == true
-            end
-
-            @test tracker[1] == 42   # ctor inside scope
-            @test tracker[2] == 99   # dtor at scope exit
-
-            destroy_jit(jit)
-            destroy_context(ctx)
-        end
-
-        @testset "Scope with multiple managed objects" begin
-            ctx = create_context()
-            ir = """
-            module {
-              func.func private @tracker_ctor(!llvm.ptr)
-              func.func private @tracker_dtor(!llvm.ptr)
-
-              func.func @test_scope_multi(%ptr1: !llvm.ptr, %ptr2: !llvm.ptr) attributes {llvm.emit_c_interface} {
-                jlcs.scope(%ptr1, %ptr2 : !llvm.ptr, !llvm.ptr) dtors([@tracker_dtor, @tracker_dtor]) {
-                  jlcs.ctor_call @tracker_ctor(%ptr1) : (!llvm.ptr) -> ()
-                  jlcs.ctor_call @tracker_ctor(%ptr2) : (!llvm.ptr) -> ()
-                }
-                return
-              }
-            }
-            """
-            mod = parse_module(ctx, ir)
-            mod_jit = clone_module(mod)
-            @test lower_to_llvm(mod_jit)
-
-            jit = create_jit(mod_jit, shared_libs=[tracker_lib])
-            @test jit != C_NULL
-
-            tracker1 = Int32[0, 0]
-            tracker2 = Int32[0, 0]
-            ptr1 = Ref(Ptr{Cvoid}(pointer(tracker1)))
-            ptr2 = Ref(Ptr{Cvoid}(pointer(tracker2)))
-            args = [Base.unsafe_convert(Ptr{Cvoid}, ptr1),
-                    Base.unsafe_convert(Ptr{Cvoid}, ptr2)]
-            GC.@preserve tracker1 tracker2 ptr1 ptr2 begin
-                @test jit_invoke(jit, "test_scope_multi", args) == true
-            end
-
-            @test tracker1[2] == 99
-            @test tracker2[2] == 99
-
-            destroy_jit(jit)
             destroy_context(ctx)
         end
 

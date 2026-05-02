@@ -30,7 +30,6 @@ use_clang_jl = true
 style = "clang"
 language = "cpp"
 enabled = true
-dag = true
 
 [llvm]
 toolchain = "auto"
@@ -38,7 +37,7 @@ toolchain = "auto"
 [project]
 name = "stress_test"
 root = "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test"
-uuid = "ff94914d-d4d1-4fb9-9230-a78f19a68818"
+uuid = "36753068-70e0-4f2b-8303-e439d301ad2c"
 
 [paths]
 build = "build"

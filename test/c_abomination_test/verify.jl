@@ -50,7 +50,7 @@ end
         @test state_obj.counter == 2
         
         # Free it
-        CAbominationTest.free_opaque(state, C_NULL)
+        CAbominationTest.free_opaque(state)
     end
     
     @testset "Function Pointers" begin

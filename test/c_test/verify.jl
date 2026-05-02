@@ -29,8 +29,7 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
 
     # ── 2b. enable LTO ────────────────────────────────────────────────
     # LTO enables Tier 1 (llvmcall) for safe functions.
-    # C+LTO auto-enables aot_thunks → Clang-compiled sret wrappers for
-    # packed struct / union returns (no MLIR, no version mismatch).
+    # Packed/union returns use explicit-sret ccall directly — no thunks.
     let cfg = read(toml, String)
         cfg = replace(cfg, "enable_lto = false" => "enable_lto = true")
         write(toml, cfg)
@@ -53,8 +52,7 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test occursin("add_i32", code)
         @test occursin("Point2D", code)
         @test occursin("Base.llvmcall", code)          # LTO Tier 1 dispatch
-        @test occursin("_c_sret_", code)               # C sret thunks for packed returns
-        println("  ✓ wrap → $wrapper (LTO + C thunks active)")
+        println("  ✓ wrap → $wrapper (LTO active)")
     end
 
     # ── 5. info ─────────────────────────────────────────────────────────
@@ -191,11 +189,11 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test M.get_b(sb) == UInt32(11)
         @test M.get_c(sb) == UInt32(1)
 
-        # Round-trip through setter
+        # Round-trip through setter (immutable: setters return new instance)
         sb2 = M.SingleByteBits()
-        M.set_a!(sb2, 7)
-        M.set_b!(sb2, 15)
-        M.set_c!(sb2, 1)
+        sb2 = M.set_a(sb2, 7)
+        sb2 = M.set_b(sb2, 15)
+        sb2 = M.set_c(sb2, 1)
         @test M.get_a(sb2) == UInt32(7)
         @test M.get_b(sb2) == UInt32(15)
         @test M.get_c(sb2) == UInt32(1)
@@ -214,11 +212,11 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test M.get_y(mb) == UInt32(3000)
         @test M.get_z(mb) == UInt32(100)
 
-        # Round-trip through setter
+        # Round-trip through setter (immutable: setters return new instance)
         mb2 = M.MultiByteBits()
-        M.set_x!(mb2, 31)
-        M.set_y!(mb2, 4095)
-        M.set_z!(mb2, 127)
+        mb2 = M.set_x(mb2, 31)
+        mb2 = M.set_y(mb2, 4095)
+        mb2 = M.set_z(mb2, 127)
         @test M.get_x(mb2) == UInt32(31)
         @test M.get_y(mb2) == UInt32(4095)
         @test M.get_z(mb2) == UInt32(127)
@@ -236,10 +234,11 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test M.get_data(wb) == UInt32(0xABCDEF)
         @test M.get_flag(wb) == UInt32(0xF)
 
+        # Immutable: setters return new instance
         wb2 = M.WideBits()
-        M.set_tag!(wb2, 0x5)
-        M.set_data!(wb2, 0x123456)
-        M.set_flag!(wb2, 0xC)
+        wb2 = M.set_tag(wb2, 0x5)
+        wb2 = M.set_data(wb2, 0x123456)
+        wb2 = M.set_flag(wb2, 0xC)
         @test M.get_tag(wb2) == UInt32(0x5)
         @test M.get_data(wb2) == UInt32(0x123456)
         @test M.get_flag(wb2) == UInt32(0xC)

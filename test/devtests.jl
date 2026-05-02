@@ -74,7 +74,13 @@ INTEGRATION_TESTS = [
     ("callback_test",      "Callbacks (Julia ↔ C++)"),
 ]
 
+const _SKIP = Set(split(get(ENV, "REPLIBUILD_SKIP_TESTS", ""), ',', keepempty=false))
+
 for (name, label) in INTEGRATION_TESTS
+    if name in _SKIP
+        @info "Skipping $name (REPLIBUILD_SKIP_TESTS)"
+        continue
+    end
     @testset "$label" begin
         dir = joinpath(TEST_DIR, name)
         @test isdir(dir)
