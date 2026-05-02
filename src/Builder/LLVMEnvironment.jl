@@ -796,6 +796,76 @@ function verify_toolchain()
     return all_ok
 end
 
+# =============================================================================
+# Per-language toolchain routing
+# =============================================================================
+#
+# RepliBuild splits LLVM tool invocations into two language-keyed buckets:
+#   * `:c`   — version-aligned with Julia's internal libLLVM (Tier 1 llvmcall
+#              path needs bitcode the JIT can consume natively).
+#   * `:cpp` — version-aligned with the MLIR system release (Tier 2 AOT thunks
+#              build against the JLCS dialect, which tracks current MLIR).
+#
+# Forcing both onto one LLVM version breaks one tier or the other. Source
+# language is the natural dispatch axis. See `project_per_language_toolchain_routing`.
+
+"""
+    c_toolchain_bin_dir() -> Union{String,Nothing}
+
+Locate the LLVM-bin directory whose `llvm-link`/`opt`/`llvm-dis` should be
+used for C source. Search order:
+
+1. `REPLIBUILD_LLVM_C_BIN` env var (explicit override)
+2. `/usr/lib/llvm20/bin/`        (Arch parallel install — `extra/llvm20`)
+3. `/usr/lib/llvm-20/bin/`       (Debian/Ubuntu naming)
+4. `nothing`                     (caller falls back to system PATH; warning)
+
+The match should track Julia's internal libLLVM major version. Currently
+LLVM 20 (Julia 1.13/1.14). Update when Julia bumps.
+"""
+function c_toolchain_bin_dir()
+    env_override = get(ENV, "REPLIBUILD_LLVM_C_BIN", "")
+    if !isempty(env_override) && isdir(env_override)
+        return env_override
+    end
+    for candidate in ("/usr/lib/llvm20/bin", "/usr/lib/llvm-20/bin")
+        if isfile(joinpath(candidate, "llvm-link"))
+            return candidate
+        end
+    end
+    return nothing
+end
+
+"""
+    resolve_tool(name::String, language::Symbol=:cpp) -> String
+
+Return the absolute path to an LLVM tool, routed by source language:
+- `language === :c` → C-bucket bin (see `c_toolchain_bin_dir`); falls back to
+  the bare name (system PATH) with a one-shot warning if the bucket is missing.
+- `language === :cpp` (or anything else) → bare name (system PATH/default
+  toolchain). Caller-side BuildBridge invocations resolve via PATH as before.
+
+This is the only place that knows about parallel LLVM installs. Callers pass
+`config.wrap.language` straight through.
+"""
+const _C_TOOLCHAIN_WARNED = Ref(false)
+
+function resolve_tool(name::String, language::Symbol=:cpp)::String
+    if language === :c
+        bin = c_toolchain_bin_dir()
+        if bin !== nothing
+            candidate = joinpath(bin, name)
+            isfile(candidate) && return candidate
+        elseif !_C_TOOLCHAIN_WARNED[]
+            _C_TOOLCHAIN_WARNED[] = true
+            @warn "LLVM C-bucket bin not found (looked for /usr/lib/llvm20/bin). " *
+                  "Falling back to system PATH; bitcode may be incompatible with " *
+                  "Julia's internal libLLVM. Install Arch `llvm20` or set REPLIBUILD_LLVM_C_BIN."
+        end
+    end
+    return name
+end
+
 # Module exports
 export LLVMToolchain,
     get_toolchain,
@@ -811,6 +881,8 @@ export LLVMToolchain,
     verify_toolchain,
     get_jll_llvm_root,
     get_llvm_root,
-    LLVM_JLL_AVAILABLE
+    LLVM_JLL_AVAILABLE,
+    c_toolchain_bin_dir,
+    resolve_tool
 
 end # module LLVMEnvironment

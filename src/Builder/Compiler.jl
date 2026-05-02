@@ -358,8 +358,10 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
     build_dir = get_build_path(config)
     linked_ir = joinpath(build_dir, output_name * "_linked.ll")
 
-    # Link using llvm-link
-    (output, exitcode) = BuildBridge.execute("llvm-link", vcat(["-S"], ir_files, ["-o", linked_ir]))
+    # Link using llvm-link — routed by language (C → LLVM 20 bucket to match
+    # Julia's internal libLLVM 20; C++ → system PATH to match MLIR major).
+    llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
+    (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
 
     if exitcode != 0 || !isfile(linked_ir)
         # llvm-link crashed or failed (common with very large IR modules).
@@ -377,13 +379,34 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
 
         push!(opt_args, linked_ir, "-o", optimized_ir)
 
-        (output, exitcode) = BuildBridge.execute("opt", opt_args)
+        opt_tool = LLVMEnvironment.resolve_tool("opt", config.wrap.language)
+        (output, exitcode) = BuildBridge.execute(opt_tool, opt_args)
 
         if exitcode != 0
             @warn "Optimization failed, using unoptimized IR"
         elseif isfile(optimized_ir)
             linked_ir = optimized_ir
         end
+    end
+
+    # If LTO is enabled, the .so must export every internal symbol the JIT-loaded
+    # bitcode references. Source-level `__attribute__((visibility("hidden")))`
+    # (e.g. Lua's LUAI_DDEC / LUAI_FUNC) keeps internal globals/functions out of
+    # the .so's dynamic symbol table — the JIT then can't resolve them when it
+    # processes external references, OR (worse) defines its own private copy
+    # that diverges from the .so's view, leading to runtime segfaults.
+    # Strip hidden/protected visibility from globals and functions in the linked
+    # IR before producing either the .so or the LTO bitcode. Single source of
+    # truth: the .so as authoritative data store; the bitcode as inlinable code.
+    if config.link.enable_lto
+        linked_text = read(linked_ir, String)
+        # Globals: `@name = hidden ...` → `@name = ...`
+        linked_text = replace(linked_text,
+            r"^(@[\w][\w.]*\s*=\s*)(?:hidden|protected)\s+"m => s"\1")
+        # Functions: `define hidden ...` / `declare protected ...` → strip token
+        linked_text = replace(linked_text,
+            r"^((?:define|declare)\s+)(?:hidden|protected)\s+"m => s"\1")
+        write(linked_ir, linked_text)
     end
 
     # If LTO is enabled, also emit a binary bitcode file (.bc)
@@ -462,6 +485,20 @@ function sanitize_ir_for_julia(ir_text::String)::String
                 m
             end
         end)
+
+    # ── Phase 1.5: lifetime intrinsic arity upgrade ───────────────────────
+    # System llvm-link (LLVM 22) drops the size argument from
+    # `llvm.lifetime.start/end` intrinsics during the link step, producing the
+    # 1-arg form that LLVM 22+ uses. Julia 1.12 ships LLVM 18, whose verifier
+    # rejects the 1-arg form (it expects `i64 immarg, ptr nocapture`). Restore
+    # the 2-arg form using `i64 -1` as the size — LLVM 18's documented sentinel
+    # for "unknown/whole-allocation" lifetime markers.
+    ir_text = replace(ir_text,
+        r"(call\s+void\s+@llvm\.lifetime\.(?:start|end)\.p0\()(ptr\b)" =>
+        s"\1i64 -1, \2")
+    ir_text = replace(ir_text,
+        r"(declare\s+void\s+@llvm\.lifetime\.(?:start|end)\.p0\()(ptr\s+(?:captures\(none\)|nocapture)?)" =>
+        s"\1i64 immarg, ptr nocapture")
 
     # ── Phase 2: Single-pass line processing ───────────────────────────────
     # All per-line transformations and filtering in one streaming pass.
