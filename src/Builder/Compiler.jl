@@ -441,17 +441,20 @@ function sanitize_ir_for_julia(ir_text::String)::String
             "$(m[1:hdr_end]) $inner }"
         end)
     # Remove varargs function bodies — va_start/va_end intrinsics can't be JIT-resolved.
-    # Convert to extern declarations so calls route through the shared library.
-    # EXCEPTION: hidden/protected visibility symbols are not exported by the .so
-    # (e.g. Lua's LUAI_FUNC marks helpers as visibility("internal")), so converting
-    # them to declarations would create unresolvable JIT references. Leave their
-    # bodies in place; the JIT keeps va_start lowering local to the module.
+    # Two strategies depending on linkage:
+    #  * Default-visibility symbols → convert to extern declarations; calls route
+    #    through the shared library at runtime.
+    #  * Hidden/protected (e.g. Lua's LUAI_FUNC = visibility("internal")) → cannot
+    #    become declarations because the .so doesn't export them. Replace the body
+    #    with `unreachable` so the symbol remains defined for internal references
+    #    but the va_start/va_end calls are gone. The wrapper only calls exported
+    #    APIs, so these internal helpers are never actually invoked from Julia.
     ir_text = replace(ir_text,
         r"^(define\s[^\n]*\.\.\.[^\n]*\{)\n(.*?)\n(\})"ms => function(m)
             sig_match = match(r"define\s+(.*?)\s+(@\w+)\s*\(([^)]*)\)", m)
             if sig_match !== nothing
                 if occursin(r"\b(?:hidden|protected)\b", sig_match[1])
-                    return m
+                    return "$(m[1:findfirst('{', m)])\nentry:\n  unreachable\n}"
                 end
                 linkage = replace(sig_match[1], r"\b(internal|private)\s*" => "")
                 "declare $(linkage) $(sig_match[2])($(sig_match[3]))"
