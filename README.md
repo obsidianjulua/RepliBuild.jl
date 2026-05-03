@@ -241,7 +241,7 @@ exclude = ["test", "fuzzing", "CMakeLists.txt"]
 ## Requirements
 
 - Julia 1.10+
-- LLVM 21+ and Clang (system install; auto-detected, JLL fallback for Tier 1)
+- System LLVM 21+ and Clang for the C/C++ pipeline (auto-detected). Tier 1 LTO bitcode is assembled by `Clang_unified_jll` to match Julia's internal LLVM (18–20 depending on Julia version) — the system and internal toolchains coexist by design.
 - CMake 3.20+ and `mlir-tblgen` (Tier 2 only)
 
 Run `RepliBuild.check_environment()` to verify which tiers are available.

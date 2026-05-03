@@ -3,7 +3,7 @@
 # Demonstrates all introspection capabilities on the stress_test binary
 
 using Pkg
-Pkg.activate("/home/john/Desktop/Projects/RepliBuild.jl")
+Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
 println("=" ^ 80)
 println("RepliBuild.Introspect - Comprehensive Test")

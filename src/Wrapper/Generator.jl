@@ -324,9 +324,6 @@ function wrap_with_clang(config::RepliBuildConfig, library_path::String, headers
         error("Binding generation failed")
     end
 
-    # TODO: Enhance generated file with our safety checks and metadata
-    # For now, ClangJLBridge handles the generation
-
     return output_file
 end
 

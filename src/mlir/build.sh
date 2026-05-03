@@ -17,7 +17,7 @@ echo -n "Checking for MLIR installation... "
 if ! command -v mlir-tblgen &> /dev/null; then
     echo "✗"
     echo "ERROR: mlir-tblgen not found"
-    echo "Install MLIR: yay -S mlir (Arch) or apt install mlir-18-dev (Ubuntu)"
+    echo "Install MLIR: yay -S mlir (Arch) or apt install mlir-21-dev (Ubuntu)"
     exit 1
 fi
 echo "✓"

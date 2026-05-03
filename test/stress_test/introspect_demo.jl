@@ -3,7 +3,7 @@
 # Demonstrates RepliBuild.Introspect capabilities on production code
 
 using Pkg
-Pkg.activate("/home/john/Desktop/Projects/RepliBuild.jl")
+Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
 using RepliBuild
 using Printf
