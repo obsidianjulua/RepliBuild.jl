@@ -2,6 +2,63 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.5.7
+
+Stabilization release on top of the v2.5.6 DAG diff work. Focus: cross-LLVM compatibility, sret correctness on the C path, dialect op fixes, and wiring of orphaned test suites into CI.
+
+### Per-Language LLVM Toolchain Routing
+
+`LLVMEnvironment` now resolves toolchain binaries through a per-language bucket rather than a single global PATH lookup. The `:c` bucket targets the LLVM version that matches Julia's internal libLLVM (Tier 1 `llvmcall` + LTO bitcode must be ABI-compatible with what Julia loads), while the `:cpp` bucket targets the system LLVM/MLIR (currently 22+) needed for the JLCS dialect.
+
+- `LLVMEnvironment.resolve_tool(name, language)` is the new entry point — replaces the unscoped form at every call site (Compiler.jl, ThunkBuilder.jl)
+- IR sanitize pass on link to strip attributes/metadata that the older internal LLVM rejects when consuming bitcode produced by a newer system clang
+- Documents the dual-bucket reality in README — system LLVM 21+ for the C/C++ pipeline, internal Julia LLVM (18–20) for `llvmcall` consumption, coexisting by design
+
+**Why:** A single global LLVM version cannot serve both Tier 1 (must match Julia internal) and the C++ MLIR dialect (must match system LLVM 22). Buckets make the constraint explicit and let the C and C++ paths evolve at independent cadences. Ground for the upcoming C-path internalization (Julia 1.12.6 + LLVM 18, no system fallback).
+
+### C sret Return Classification + Thunk Path Consolidation
+
+Fixed the C generator returning structs by-value through `ccall` when the platform ABI requires sret (caller-allocated return slot passed as a hidden first pointer arg). Previously: silent layout corruption on structs >16 bytes returned from C. Now: routes through the consolidated thunk path that allocates and passes the return slot explicitly.
+
+- `GeneratorC.jl` reduced ~170 lines, dispatch logic for sret unified with the existing C++ thunk emission
+- `Compiler.jl` thunk plumbing collapsed into one entry point — was duplicated across C/C++
+
+### dlsym/dlopen Returning `nothing` on Newer Julia
+
+`Libdl.dlsym` / `dlopen` started returning `nothing` instead of throwing on newer Julia versions when symbols/libraries cannot be resolved. The JIT path's symbol resolver assumed a thrown error and crashed downstream with a less informative message. Fixed across `JITManager.jl` — explicit `nothing` checks at all 7 call sites with the same `init_error` surfacing pattern introduced in v2.5.5.
+
+### MLIR Dialect Fixes
+
+- **MarshalArg / RetOp missing assemblyFormat** — both ops parsed but failed to print, breaking round-trip and `mlir-opt` debugging. Added `assemblyFormat` to JLCSOps.td.
+- **JIT selftest** added to verify the dialect loads and lowers cleanly on every build (catches missing op declarations before they hit a wrap call).
+- **JLCSCAPIWrappers.cpp** — new file exposing C wrappers for dialect APIs needed by Julia bindings.
+- **JLCSPasses.cpp** — internal cleanup, `getPackedSizeInBits` consolidation continued from v2.5.5.
+
+### DAG Diff Tuning
+
+~700 lines reworked in `DAGDiff.jl` based on stress-test feedback from v2.5.6:
+- Tighter propagation rules — pointer-to-mismatched no longer propagates (only by-value containment does)
+- DOT export polish, mismatch annotations more readable
+- Query API stabilized
+
+### Test Infrastructure
+
+- Wired three orphan test suites into `runtests.jl` / `devtests.jl`: DAGDiff (1336 lines), MLIR templates (736 lines), exception handling (101 lines)
+- `.gitignore` patches to exclude per-project `dag/` exports and build artifacts
+- `test/c_test/verify.jl` updated to match consolidated thunk path
+- `test/stress_test/verify.jl` removed (188 lines) — replaced by `test_introspect.jl` + `introspect_demo.jl` which cover the same ground via the public API
+
+### Misc
+
+- README dual-toolchain clarification
+- MLIR documentation pass
+- Stress-test introspect demos use `joinpath(@__DIR__, "..", "..")` so they activate the right project regardless of where they're invoked from
+- `src/mlir/build.sh` apt hint corrected to `mlir-21-dev`
+
+### Upgrade Notes
+
+No API breaks. If you were calling `LLVMEnvironment.resolve_tool(name)` directly (not part of the public API but possible in downstream tooling), you must now pass a language: `resolve_tool(name, :c)` or `resolve_tool(name, :cpp)`.
+
 ## v2.5.6
 
 ### New: DAG Diff — Structural Mismatch Detection Between C++ and Julia IR
