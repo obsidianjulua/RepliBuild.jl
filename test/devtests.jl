@@ -103,3 +103,10 @@ end
 # ── 3. Registry tests ────────────────────────────────────────────────────────
 
 include(joinpath(TEST_DIR, "test_registry.jl"))
+
+# ── 4. MLIR JLCS dialect template stress tests ───────────────────────────────
+# Self-skips if libJLCS isn't built; otherwise exercises nested CStructs,
+# packed template structs, packed sret returns, RAII ordering, virtual
+# dispatch on template containers, TypeInfoOp inheritance, etc.
+
+include(joinpath(TEST_DIR, "test_mlir_templates.jl"))

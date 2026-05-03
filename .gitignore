@@ -41,9 +41,9 @@ test/sqlite_test/include/
 # Massive real-world test libraries
 test/realworld_*/
 
-# Temporary root test scripts
-test_*.jl
-test_*_wrapper*.jl
+# Temporary root test scripts (repo-root only — not the test/ dir)
+/test_*.jl
+/test_*_wrapper*.jl
 
 # Generated TOML configs (contain machine-specific absolute paths)
 test/*/*.toml
