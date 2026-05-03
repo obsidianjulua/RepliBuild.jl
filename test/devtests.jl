@@ -110,3 +110,9 @@ include(joinpath(TEST_DIR, "test_registry.jl"))
 # dispatch on template containers, TypeInfoOp inheritance, etc.
 
 include(joinpath(TEST_DIR, "test_mlir_templates.jl"))
+
+# ── 5. C++ exception handling through JLCS try_call ──────────────────────────
+# Depends on callback_test/julia/CallbackTest.jl, which the integration tests
+# above already produce via build+wrap.
+
+include(joinpath(TEST_DIR, "callback_test", "test_exceptions.jl"))

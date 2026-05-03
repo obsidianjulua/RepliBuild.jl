@@ -109,3 +109,7 @@ end
 # ── Registry unit tests (no C++ toolchain required) ──────────────────────────
 
 include(joinpath(@__DIR__, "test_registry.jl"))
+
+# ── DAGDiff module tests (synthetic metadata, no C++ toolchain required) ─────
+
+include(joinpath(@__DIR__, "dag_test", "test_dag_diff.jl"))
