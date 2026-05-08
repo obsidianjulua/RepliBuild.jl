@@ -813,22 +813,25 @@ end
     c_toolchain_bin_dir() -> Union{String,Nothing}
 
 Locate the LLVM-bin directory whose `llvm-link`/`opt`/`llvm-dis` should be
-used for C source. Search order:
+used for C source. The match must track Julia's internal libLLVM major
+version (`Base.libllvm_version`); a mismatched llvm-link silently drops
+debug records it doesn't recognize, erasing DWARF in the linked IR and
+breaking wrapper generation.
+
+Search order:
 
 1. `REPLIBUILD_LLVM_C_BIN` env var (explicit override)
-2. `/usr/lib/llvm20/bin/`        (Arch parallel install — `extra/llvm20`)
-3. `/usr/lib/llvm-20/bin/`       (Debian/Ubuntu naming)
-4. `nothing`                     (caller falls back to system PATH; warning)
-
-The match should track Julia's internal libLLVM major version. Currently
-LLVM 20 (Julia 1.13/1.14). Update when Julia bumps.
+2. Version-matched parallel install for `Base.libllvm_version.major`,
+   tried in `llvmNN/bin` (Arch) then `llvm-NN/bin` (Debian/Ubuntu) form.
+3. `nothing` (caller falls back to system PATH; warning)
 """
 function c_toolchain_bin_dir()
     env_override = get(ENV, "REPLIBUILD_LLVM_C_BIN", "")
     if !isempty(env_override) && isdir(env_override)
         return env_override
     end
-    for candidate in ("/usr/lib/llvm20/bin", "/usr/lib/llvm-20/bin")
+    major = Base.libllvm_version.major
+    for candidate in ("/usr/lib/llvm$(major)/bin", "/usr/lib/llvm-$(major)/bin")
         if isfile(joinpath(candidate, "llvm-link"))
             return candidate
         end
@@ -858,9 +861,10 @@ function resolve_tool(name::String, language::Symbol=:cpp)::String
             isfile(candidate) && return candidate
         elseif !_C_TOOLCHAIN_WARNED[]
             _C_TOOLCHAIN_WARNED[] = true
-            @warn "LLVM C-bucket bin not found (looked for /usr/lib/llvm20/bin). " *
+            major = Base.libllvm_version.major
+            @warn "LLVM C-bucket bin not found (looked for /usr/lib/llvm$(major)/bin). " *
                   "Falling back to system PATH; bitcode may be incompatible with " *
-                  "Julia's internal libLLVM. Install Arch `llvm20` or set REPLIBUILD_LLVM_C_BIN."
+                  "Julia's internal libLLVM $(major). Install Arch `llvm$(major)` or set REPLIBUILD_LLVM_C_BIN."
         end
     end
     return name

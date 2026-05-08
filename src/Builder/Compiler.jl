@@ -8,6 +8,7 @@ module Compiler
 using Dates
 using JSON
 using Libdl
+using LLVM
 
 # Import from parent RepliBuild module
 import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_dirs,
@@ -358,16 +359,27 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
     build_dir = get_build_path(config)
     linked_ir = joinpath(build_dir, output_name * "_linked.ll")
 
-    # Link using llvm-link — routed by language (C → LLVM 20 bucket to match
-    # Julia's internal libLLVM 20; C++ → system PATH to match MLIR major).
-    llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
-    (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
+    # C path: try in-process libLLVM via LLVM.jl when Julia's libLLVM major
+    # matches the C-bucket clang's emit major. On a version skew (e.g. Julia
+    # 1.12's libLLVM 18 parsing LLVM 20 IR), libLLVM silently drops debug
+    # records it doesn't recognize, which propagates into the .so and erases
+    # DWARF — wrecking wrapper generation. Stay on external llvm-link until
+    # Julia ships libLLVM ≥ 20 and the C-bucket toolchain matches.
+    linked_ok = false
+    if config.wrap.language == :c && Base.libllvm_version >= v"20"
+        linked_ok = _link_ir_libllvm(ir_files, linked_ir)
+    end
 
-    if exitcode != 0 || !isfile(linked_ir)
-        # llvm-link crashed or failed (common with very large IR modules).
-        # Fall back: let clang handle linking at binary creation time.
-        @warn "llvm-link failed (exit $exitcode), falling back to clang-based linking"
-        return ir_files
+    if !linked_ok
+        llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
+        (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
+
+        if exitcode != 0 || !isfile(linked_ir)
+            # llvm-link crashed or failed (common with very large IR modules).
+            # Fall back: let clang handle linking at binary creation time.
+            @warn "llvm-link failed (exit $exitcode), falling back to clang-based linking"
+            return ir_files
+        end
     end
 
     # Optimize if requested
@@ -522,6 +534,14 @@ function sanitize_ir_for_julia(ir_text::String)::String
         end
         # noalias scope intrinsics — reference metadata we've already skipped
         if occursin(r"^\s*(tail\s+)?call void @llvm\.experimental\.noalias\.scope\.decl\(", line)
+            continue
+        end
+        # @llvm.dbg.{declare,value,label} calls — reference numbered metadata
+        # nodes we drop above; without the skip, llvm-as fails with
+        # "use of undefined metadata !N". Their declarations elsewhere are
+        # harmless (unused). Match both `call void @llvm.dbg.X(...)` and the
+        # tail-call form.
+        if occursin(r"^\s*(tail\s+)?call void @llvm\.dbg\.(?:declare|value|label|addr|assign)\(", line)
             continue
         end
         # va_start/va_end intrinsic declarations are kept: hidden vararg function
@@ -700,6 +720,43 @@ function _assemble_bitcode_libllvm(ll_path::String, bc_path::String)::Bool
         if ctx != C_NULL
             ccall(Libdl.dlsym(h, :LLVMContextDispose), Cvoid, (Ptr{Cvoid},), ctx)
         end
+    end
+end
+
+"""
+Link multiple `.ll` files in-process via LLVM.jl (`LLVM.link!` over Julia's
+resident libLLVM) and write the merged module as text IR to `output_ll`.
+Returns true on success, false on any failure (parse, link, write, exception)
+so the caller can fall back to external `llvm-link`.
+
+Each input is run through `sanitize_ir_for_julia` before parse, since system
+clang may emit attributes/instructions newer than Julia's libLLVM accepts.
+`LLVM.link!` consumes the source module — do not dispose it after linking.
+"""
+function _link_ir_libllvm(ir_files::Vector{String}, output_ll::String)::Bool
+    isempty(ir_files) && return false
+    try
+        LLVM.Context() do _
+            # Parse raw, debug-bearing IR. We deliberately do NOT call
+            # sanitize_ir_for_julia here: stripping debug metadata pre-link
+            # would propagate into the linked output and erase DWARF from the
+            # resulting .so, breaking the wrapper generator. If libLLVM rejects
+            # the IR (e.g. clang LLVM 22 features on Julia 1.12's libLLVM 18),
+            # the parse throws, this function returns false, and the caller
+            # falls back to external llvm-link which preserves debug info.
+            dst = parse(LLVM.Module, read(first(ir_files), String))
+            for path in ir_files[2:end]
+                src = parse(LLVM.Module, read(path, String))
+                LLVM.link!(dst, src)  # wraps LLVMLinkModules2 — src is consumed
+            end
+            open(output_ll, "w") do io
+                print(io, string(dst))
+            end
+        end
+        return isfile(output_ll)
+    catch e
+        @debug "LLVM.jl in-process link failed, falling back to external llvm-link" exception=(e, catch_backtrace())
+        return false
     end
 end
 

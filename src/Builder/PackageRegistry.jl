@@ -639,35 +639,27 @@ end
 function _load_wrapper(name::String, config_hash::String, config::RepliBuildConfig, verbose::Bool)::Module
     build_dir = _cached_build_dir(config_hash)
 
-    # Find the .jl wrapper file
-    wrapper_files = filter(f -> endswith(f, ".jl"), readdir(build_dir))
-    if isempty(wrapper_files)
-        # Fall back to project output dir
+    # Pick the wrapper by name, not first(): the cache dir is shared across
+    # builds from the same source tree, so multiple `<Title>.jl` files coexist
+    # there and `first()` picks alphabetically — wrong package every time.
+    expected = string(Symbol(replace(titlecase(replace(name, "_" => " ")), " " => ""))) * ".jl"
+    wrapper_path = joinpath(build_dir, expected)
+    if !isfile(wrapper_path)
+        # Fall back to project output dir for the same named file
         output_dir = ConfigurationManager.get_output_path(config)
-        wrapper_files = filter(f -> endswith(f, ".jl"), readdir(output_dir))
-        if isempty(wrapper_files)
-            error("No wrapper .jl file found for '$name'")
-        end
-        wrapper_path = joinpath(output_dir, first(wrapper_files))
-    else
-        wrapper_path = joinpath(build_dir, first(wrapper_files))
-    end
-
-    # Also ensure the shared library is loadable — symlink from cache to expected location
-    output_dir = ConfigurationManager.get_output_path(config)
-    mkpath(output_dir)
-    for f in readdir(build_dir)
-        if any(endswith(f, ext) for ext in [".so", ".dylib", ".dll", ".json"])
-            src = joinpath(build_dir, f)
-            dst = joinpath(output_dir, f)
-            if !isfile(dst)
-                cp(src, dst; force=true)
-            end
+        candidate = joinpath(output_dir, expected)
+        if isfile(candidate)
+            wrapper_path = candidate
+        else
+            avail = join(filter(f -> endswith(f, ".jl"), readdir(build_dir)), ", ")
+            error("Wrapper '$expected' not found for '$name' in $build_dir. Available: $avail")
         end
     end
 
-    # Load the wrapper as a module
-    mod_name = Symbol(replace(titlecase(replace(name, "_" => " ")), " " => ""))
+    # The wrapper's LIBRARY_PATH is an absolute path baked at build time
+    # (pointing into ~/.replibuild/registry/julia/). No copy needed — copying
+    # to a relative `./julia/` dir would dump .so files into the user's cwd.
+
     verbose && println("  loading: $wrapper_path")
 
     # Include the wrapper into an anonymous parent module to avoid name collisions.
