@@ -184,7 +184,7 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
         config.project, config.paths, config.discovery,
         new_compile, new_link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.config_file, config.loaded_at
+        config.ingest, config.config_file, config.loaded_at
     )
 end
 

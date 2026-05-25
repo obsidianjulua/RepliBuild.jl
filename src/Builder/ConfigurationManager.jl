@@ -108,6 +108,20 @@ struct DependenciesConfig
     items::Dict{String, DependencyItem}
 end
 
+"""
+Nested struct for [ingest] section.
+
+Presence of this section flips RepliBuild from source-build mode (compile via Clang/LLVM)
+to ingest mode: the user supplies a pre-built `.so` (built by upstream's own build system),
+and RepliBuild only runs DWARF metadata extraction + wrapping. Ingested libraries dispatch
+through Tier 3 (`ccall`) only — no LTO bitcode, no Tier 1 `llvmcall`.
+"""
+struct IngestConfig
+    library::String                  # path to pre-built .so (absolute or relative to project root)
+    headers::Vector{String}          # header search dirs for type extraction + noexcept scan
+    extra_link_libs::Vector{String}  # additional -l libs to thread into the wrapper at load time
+end
+
 """Nested struct for [types] section - Type validation settings"""
 struct TypesConfig
     strictness::Symbol              # :strict, :warn, :permissive
@@ -137,6 +151,9 @@ struct RepliBuildConfig
     cache::CacheConfig
     dependencies::DependenciesConfig
     types::TypesConfig
+
+    # Optional ingest mode (nothing = source-build mode)
+    ingest::Union{Nothing,IngestConfig}
 
     # Metadata
     config_file::String
@@ -172,19 +189,33 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     #   C projects:   LTO on by default, aot_thunks off by default
     #   C++ projects: LTO off by default, aot_thunks off by default
 
+    ingest_config = parse_ingest_config(data, toml_path)
+
+    # In ingest mode with no explicit binary.output_name, force the output name
+    # to match the ingested .so so wrap() finds the library at output_dir/<name>.
+    binary_config = parse_binary_config(data)
+    if ingest_config !== nothing && isempty(binary_config.output_name)
+        binary_config = BinaryConfig(
+            binary_config.type,
+            basename(ingest_config.library),
+            binary_config.strip_symbols,
+        )
+    end
+
     config = RepliBuildConfig(
         parse_project_config(data, toml_path),
         parse_paths_config(data),
         parse_discovery_config(data),
         compile_config,
         link_config,
-        parse_binary_config(data),
+        binary_config,
         wrap_config,
         parse_llvm_config(data),
         parse_workflow_config(data),
         parse_cache_config(data),
         parse_dependencies_config(data),
         parse_types_config(data),
+        ingest_config,
         toml_path,
         now()
     )
@@ -454,6 +485,32 @@ function parse_types_config(data::Dict)::TypesConfig
     )
 end
 
+"""
+Parse [ingest] section. Returns `nothing` when the section is absent (source-build mode).
+"""
+function parse_ingest_config(data::Dict, toml_path::String)::Union{Nothing,IngestConfig}
+    haskey(data, "ingest") || return nothing
+    ingest = data["ingest"]
+    isa(ingest, Dict) || return nothing
+
+    library = String(get(ingest, "library", ""))
+    if isempty(library)
+        @warn "[ingest] section in $toml_path is missing required field 'library'"
+        return nothing
+    end
+
+    # Resolve relative paths against the toml's directory so users can write
+    # library = "build/libfoo.so" and have it just work.
+    if !isabspath(library)
+        library = abspath(joinpath(dirname(abspath(toml_path)), library))
+    end
+
+    headers = String[String(h) for h in get(ingest, "headers", String[])]
+    extra_link_libs = String[String(l) for l in get(ingest, "extra_link_libs", String[])]
+
+    return IngestConfig(library, headers, extra_link_libs)
+end
+
 """Validate TOML data has minimum required fields"""
 function validate_toml_data(data::Dict, toml_path::String)
     # Project name is the only truly required field
@@ -461,6 +518,24 @@ function validate_toml_data(data::Dict, toml_path::String)
         @warn "Missing [project] section in $toml_path"
     elseif !haskey(data["project"], "name")
         @warn "Missing project.name in $toml_path"
+    end
+
+    # Ingest mode is mutually exclusive with source-build mode. A mixed config usually
+    # means the user copy-pasted from a source-build template; warn but proceed (ingest wins).
+    if haskey(data, "ingest")
+        compile = get(data, "compile", Dict())
+        if !isempty(get(compile, "source_files", []))
+            @warn "[ingest] is set but [compile].source_files is non-empty in $toml_path — source files will be ignored in ingest mode"
+        end
+        deps = get(data, "dependencies", Dict())
+        for (name, conf) in deps
+            if isa(conf, Dict)
+                t = get(conf, "type", "local")
+                if t == "git" || t == "local"
+                    @warn "[ingest] is set but [dependencies.$name] type=\"$t\" fetches sources — it will be inert in ingest mode"
+                end
+            end
+        end
     end
 end
 
@@ -488,6 +563,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CacheConfig(true, ".replibuild_cache"),
         DependenciesConfig(Dict{String, DependencyItem}()),
         TypesConfig(:warn, true, false, true, Dict{String,String}(), String[], String[]),
+        nothing,  # ingest: source-build mode by default
         toml_path,
         now()
     )
@@ -652,6 +728,18 @@ function save_config(config::RepliBuildConfig)
     end
     data["types"] = types_dict
 
+    # [ingest] — only emitted in ingest mode
+    if config.ingest !== nothing
+        ingest_dict = Dict{String,Any}("library" => config.ingest.library)
+        if !isempty(config.ingest.headers)
+            ingest_dict["headers"] = config.ingest.headers
+        end
+        if !isempty(config.ingest.extra_link_libs)
+            ingest_dict["extra_link_libs"] = config.ingest.extra_link_libs
+        end
+        data["ingest"] = ingest_dict
+    end
+
     # Write to file
     open(config.config_file, "w") do io
         TOML.print(io, data)
@@ -683,7 +771,7 @@ function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.config_file, config.loaded_at
+        config.ingest, config.config_file, config.loaded_at
     )
 end
 
@@ -706,7 +794,7 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.config_file, config.loaded_at
+        config.ingest, config.config_file, config.loaded_at
     )
 end
 
@@ -729,7 +817,7 @@ function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.config_file, config.loaded_at
+        config.ingest, config.config_file, config.loaded_at
     )
 end
 
@@ -754,7 +842,7 @@ function with_discovery_results(config::RepliBuildConfig;
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.config_file, config.loaded_at
+        config.ingest, config.config_file, config.loaded_at
     )
 end
 
@@ -935,6 +1023,7 @@ export RepliBuildConfig,
        ProjectConfig, PathsConfig, DiscoveryConfig, CompileConfig,
        LinkConfig, BinaryConfig, WrapConfig, LLVMConfig,
        WorkflowConfig, CacheConfig, DependenciesConfig, DependencyItem, TypesConfig,
+       IngestConfig,
        load_config, save_config, create_default_config,
        merge_compile_flags, with_source_files, with_include_dirs, with_discovery_results,
        get_output_path, get_build_path, get_cache_path,

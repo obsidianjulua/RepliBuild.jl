@@ -106,6 +106,10 @@ using RepliBuild
     end
 end
 
+# ── Ingest-mode unit tests (no C++ toolchain required) ───────────────────────
+
+include(joinpath(@__DIR__, "test_ingest.jl"))
+
 # ── Registry unit tests (no C++ toolchain required) ──────────────────────────
 
 include(joinpath(@__DIR__, "test_registry.jl"))

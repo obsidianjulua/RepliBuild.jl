@@ -11,14 +11,16 @@ using Libdl
 using LLVM
 
 # Import from parent RepliBuild module
+import ..ConfigurationManager
 import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_dirs,
                                 get_compile_flags, get_build_path, get_output_path,
                                 get_library_name, get_module_name, is_parallel_enabled,
-                                is_cache_enabled, get_cache_path
+                                is_cache_enabled, get_cache_path, with_include_dirs
 import ..BuildBridge
 import ..LLVMEnvironment
 
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
+       ingest_library,
        extract_compilation_metadata, save_compilation_metadata,
        compute_project_hash, is_project_cache_valid, save_project_hash,
        assemble_bitcode, sanitize_ir_for_julia,
@@ -1344,6 +1346,77 @@ function compile_project(config::RepliBuildConfig)
     println("  done: $(elapsed)s")
 
     return binary_path
+end
+
+"""
+    ingest_library(config) -> String
+
+BYOB ("bring your own build") path: skip the whole Clang/LLVM compile pipeline and
+ingest a pre-built `.so` produced by upstream's own build system. Runs DWARF metadata
+extraction on the binary and produces `compilation_metadata.json` next to a copy of
+the library inside the project's output dir, so `wrap()` finds it where it expects.
+
+Ingested libraries dispatch through Tier 3 (`ccall`) only — there's no LTO bitcode to
+enable Tier 1 `llvmcall`, and no per-file IR for Tier 2 thunks.
+
+Requires `config.ingest !== nothing` (set by a `[ingest]` section in replibuild.toml).
+"""
+function ingest_library(config::RepliBuildConfig)::String
+    ingest = config.ingest
+    ingest === nothing && error("ingest_library called without [ingest] section in config")
+
+    println("RepliBuild | $(config.project.name) [ingest]")
+    start_time = time()
+
+    src_lib = isabspath(ingest.library) ? ingest.library : abspath(joinpath(config.project.root, ingest.library))
+    if !isfile(src_lib)
+        error("Ingest library not found: $src_lib")
+    end
+
+    # Cheap DWARF presence check — mirror the tool order used by extract_dwarf_return_types
+    # so we don't reject a .so that the rest of the pipeline would happily ingest.
+    # extract_compilation_metadata would otherwise silently produce a wrapper full of
+    # untyped void* signatures on a stripped .so.
+    has_dwarf = try
+        (out, code) = BuildBridge.execute("readelf", ["-S", src_lib])
+        code == 0 && occursin(".debug_info", out)
+    catch
+        try
+            (out, code) = BuildBridge.execute("llvm-dwarfdump", ["--debug-info", src_lib])
+            code == 0 && occursin("DW_TAG_compile_unit", out)
+        catch
+            false
+        end
+    end
+    if !has_dwarf
+        error("No DWARF debug info found in $src_lib — rebuild upstream with -g (or pass a debug build)")
+    end
+
+    # Copy the .so into output_dir under the name wrap() expects, so the existing
+    # wrapper-generation pipeline (which looks at joinpath(output_dir, lib_name))
+    # finds it without modification.
+    output_dir = get_output_path(config)
+    mkpath(output_dir)
+    dst_lib = joinpath(output_dir, get_library_name(config))
+    if abspath(src_lib) != abspath(dst_lib)
+        cp(src_lib, dst_lib; force=true, follow_symlinks=true)
+    end
+
+    # Merge ingest.headers into compile.include_dirs so extract_compilation_metadata
+    # can find headers for noexcept scanning + downstream Clang.jl type extraction.
+    if !isempty(ingest.headers)
+        merged_includes = unique(vcat(config.compile.include_dirs, ingest.headers))
+        config = with_include_dirs(config, merged_includes)
+    end
+
+    # No source files in ingest mode — extract_compilation_metadata tolerates an empty
+    # vector (the C++ noexcept scan iterates include_dirs independently).
+    save_compilation_metadata(config, String[], dst_lib)
+
+    elapsed = round(time() - start_time, digits=2)
+    println("  done: $(elapsed)s")
+
+    return dst_lib
 end
 
 # =============================================================================

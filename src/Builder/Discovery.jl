@@ -106,6 +106,21 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
         return config_path
     end
 
+    # Ingest-mode configs describe a pre-built library, not a source tree. Source
+    # discovery is meaningless for them — even with force=true, re-scanning would
+    # overwrite the [ingest] section with garbage source lists.
+    if isfile(config_path)
+        try
+            existing = TOML.parsefile(config_path)
+            if haskey(existing, "ingest")
+                @info "Skipping discovery: $config_path is an ingest-mode config"
+                return config_path
+            end
+        catch
+            # Fall through to normal discovery if parsing fails
+        end
+    end
+
     println("RepliBuild | discover $(basename(abspath(target_dir)))")
 
     scan_results = scan_all_files(target_dir)
@@ -546,6 +561,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         cache_config,
         dependencies_config,
         types_config,
+        nothing,  # ingest: discovery is source-build mode by definition
         joinpath(root_dir, "replibuild.toml"),  # config_file
         now()                                    # loaded_at
     )

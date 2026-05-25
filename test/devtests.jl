@@ -100,6 +100,43 @@ for (name, label) in INTEGRATION_TESTS
     end
 end
 
+# ── Ingest mode (BYOB) end-to-end ────────────────────────────────────────────
+# Build a fixture, then point ingest at the resulting .so and confirm the wrapper
+# generates correctly without re-running the compile pipeline.
+
+@testset "Ingest mode (BYOB)" begin
+    src_dir = joinpath(TEST_DIR, "c_test")
+    @test isdir(src_dir)
+
+    # Source-build c_test to produce libc_test.so with DWARF
+    clean_test_dir(src_dir)
+    src_toml = joinpath(src_dir, "replibuild.toml")
+    @test isfile(src_toml)
+    src_lib = RepliBuild.build(src_toml)
+    @test isfile(src_lib)
+
+    # Now ingest that .so into a brand-new project that has no source whatsoever
+    mktempdir() do ingest_dir
+        toml = RepliBuild.ingest(
+            src_lib,
+            headers=[joinpath(src_dir, "include")],
+            name="c_ingest_e2e",
+            project_dir=ingest_dir,
+            language=:c,
+            register=false,
+        )
+        @test isfile(toml)
+
+        ingested_lib = RepliBuild.build(toml)
+        @test isfile(ingested_lib)
+        @test isfile(joinpath(ingest_dir, "julia", "compilation_metadata.json"))
+
+        wrapper = RepliBuild.wrap(toml)
+        @test isfile(wrapper)
+        @test endswith(wrapper, ".jl")
+    end
+end
+
 # ── 3. Registry tests ────────────────────────────────────────────────────────
 
 include(joinpath(TEST_DIR, "test_registry.jl"))
