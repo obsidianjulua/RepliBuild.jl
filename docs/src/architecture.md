@@ -7,44 +7,37 @@ This page documents the full system architecture. For the public API surface see
 ## System overview
 
 ```
-+------------------------------------------------------------------------+
-|                      User API (3 core functions)                       |
-|                                                                        |
-|  discover("path/")         build("replibuild.toml")                    |
-|  --- scan & configure ---  --- compile & link ---                      |
-|                                                                        |
-|                            wrap("replibuild.toml")                     |
-|                            --- introspect & emit Julia module ---      |
-+------------+--------------------------+--------------------------------+
-             |                          |
-             v                          v
-+------------------------+  +--------------------------------------------+
-|  Builder/ (config)     |  |         Builder/ (compile pipeline)        |
-|                        |  |                                            |
-|  Discovery.jl          |  |  Compiler.jl -> BuildBridge.jl -> Linker   |
-|  ConfigurationManager  |  |  DependencyResolver.jl                     |
-|  LLVMEnvironment.jl    |  |  ThunkBuilder.jl  (AOT thunks path)        |
-|  EnvironmentDoctor.jl  |  |  LLVMEnvironment.jl                        |
-+------------+-----------+  +---------------------+----------------------+
-             |                                    |
-             |    replibuild.toml                 |  .so + DWARF + .ll
-             v                                    v
-+------------------------------------------------------------------------+
-|                     Binding Generation                                  |
-|                                                                        |
-|  Builder/DWARFParser --> Wrapper/ --> Generated Julia Module           |
-|       |                     |              |                           |
-|       |              +------+------+    Tier 1: ccall / llvmcall       |
-|       |              | DispatchLogic |   Tier 2: JITManager.invoke()  |
-|       |              | (is_ccall_safe)|       or AOT thunk ccall      |
-|       |              +------+------+                                   |
-|       |                     |                                          |
-|       v                     v                                          |
-|  IRGen/JLCSIRGenerator --> IRGen/MLIRNative --> IRGen/JITManager       |
-|  (IRGen/ir_gen/ submodules) (libJLCS.so)       (lock-free cache)       |
-|       |                     ^                                          |
-|       +--> IRGen/DAGDiff (struct-graph diff for tier decisions)        |
-+------------------------------------------------------------------------+
+   discover("path/")          build("replibuild.toml")        wrap("replibuild.toml")
+           │                            │                              │
+           ▼                            ▼                              ▼
+┌──────────────────────┐   ┌──────────────────────┐   ┌──────────────────────────┐
+│ Builder/ config      │   │ Builder/ compile     │   │ Wrapper/ binding gen     │
+├──────────────────────┤   ├──────────────────────┤   ├──────────────────────────┤
+│ Discovery            │   │ Compiler             │   │ DWARFParser              │
+│ ConfigurationManager │   │ BuildBridge          │   │ DispatchLogic            │
+│ LLVMEnvironment      │   │ DependencyResolver   │   │ Generator (C / C++)      │
+│ EnvironmentDoctor    │   │ ThunkBuilder (AOT)   │   │ Symbols, FunctionPtrs    │
+└──────────────────────┘   └──────────────────────┘   └────────────┬─────────────┘
+        emits                    emits                              │
+   replibuild.toml          .so + DWARF + .ll                       ▼
+                                                       Generated Julia module
+                                                       with per-function tier:
+
+                                                       Tier 1 → ccall / llvmcall
+                                                       Tier 3 → ccall fallback
+                                                       Tier 2 ─────────┐
+                                                                       │
+                                                                       ▼
+                                              ┌──────────────────────────────────┐
+                                              │ IRGen/                           │
+                                              ├──────────────────────────────────┤
+                                              │ JLCSIRGenerator                  │
+                                              │   ↳ ir_gen/ submodules           │
+                                              │ MLIRNative → libJLCS.so          │
+                                              │ JITManager (lock-free cache)     │
+                                              │ DAGDiff (struct DAG → tier       │
+                                              │   decisions + lowering order)    │
+                                              └──────────────────────────────────┘
 ```
 
 ## Pipeline stages
@@ -179,35 +172,18 @@ Direct `ccall` with zero setup. Used when LTO bitcode is unavailable (e.g., `ena
 ### Tier selection flow
 
 ```
-                  +--------------+
-                  |  Function    |
-                  |  Signature   |
-                  +------+-------+
-                         |
-                  +------v-------+
-                  | is_ccall_    |
-                  | safe()?      |
-                  +--+-------+---+
-                  yes|       |no
-                     |       |
-            +--------v--+  +-v----------------+
-            |  Tier 1   |  | aot_thunks?      |
-            |  ccall    |  +--+------------+---+
-            +-----+-----+  yes|            |no
-                  |           |            |
-            +-----v--+  +----v-----+ +----v-----------+
-            | LTO?   |  | Tier 2   | | Tier 2         |
-            +--+--+--+  | ccall    | | JITManager     |
-            yes|  |no   | thunks   | | .invoke()      |
-               |  |     | .so      | | (runtime JIT)  |
-        +------v+ |     +----------+ +----------------+
-        |llvm   | |
-        |call   | |
-        +-------+ |
-            +------v--+
-            | ccall   |
-            | (std)   |
-            +---------+
+Function signature
+        │
+        ▼
+is_ccall_safe()?
+        │
+        ├── yes ─→  LTO bitcode available?
+        │             ├── yes ─→  Tier 1: Base.llvmcall (cross-language inlining)
+        │             └── no  ─→  Tier 3: ccall (POD fallback)
+        │
+        └── no  ─→  aot_thunks = true?
+                      ├── yes ─→  Tier 2 (AOT): ccall into <libname>_thunks.so
+                      └── no  ─→  Tier 2 (JIT): JITManager.invoke()
 ```
 
 The decision function `is_ccall_safe()` in `src/Wrapper/DispatchLogic.jl` inspects each function's DWARF metadata to determine ABI safety. It checks for STL container types, struct return sizes, packed struct layout mismatches (DWARF size vs Julia aligned size), union parameters, non-POD class types, and per-function `noexcept` to route may-throw functions through `jlcs.try_call`. For struct-graph cases where pairwise heuristics miss transitive layout mismatches, `src/IRGen/DAGDiff.jl` performs a structural type-graph diff to surface the bad cases and produce a topo-sorted lowering order for multi-type thunks.
@@ -234,22 +210,23 @@ Several properties of DWARF make it the right anchor for ABI-correct binding gen
 
 ```
 llvm-dwarfdump binary.so
-    |
-    +-- DW_TAG_class_type / DW_TAG_structure_type
-    |      +-- DW_AT_name, DW_AT_byte_size
-    |      +-- DW_TAG_member -> MemberInfo (name, type, DW_AT_data_member_location,
-    |      |                                 DW_AT_bit_offset, DW_AT_bit_size)
-    |      +-- DW_TAG_subprogram [DW_AT_virtuality] -> VirtualMethod
-    |      |                  (name, mangled, slot from DW_AT_vtable_elem_location)
-    |      +-- DW_TAG_inheritance -> base_classes (with DW_AT_data_member_location)
-    |
-    +-- DW_TAG_enumeration_type -> Enum definitions (with chosen underlying type)
-    +-- DW_TAG_union_type -> Union layout (DW_AT_byte_size)
-    +-- DW_TAG_variable -> Global variables (with DW_AT_location)
-    +-- DW_TAG_typedef -> Type aliases (resolved through DW_AT_type chains)
-    +-- DW_TAG_subprogram (free function) -> Function signatures
-              +-- DW_TAG_formal_parameter (in order) -> Parameter types
-              +-- DW_AT_type -> Return type
+   │
+   ├── DW_TAG_class_type / DW_TAG_structure_type
+   │      ├── DW_AT_name, DW_AT_byte_size
+   │      ├── DW_TAG_member            → MemberInfo (name, type,
+   │      │                              DW_AT_data_member_location,
+   │      │                              DW_AT_bit_offset, DW_AT_bit_size)
+   │      ├── DW_TAG_subprogram        → VirtualMethod (name, mangled,
+   │      │   [DW_AT_virtuality]         slot from DW_AT_vtable_elem_location)
+   │      └── DW_TAG_inheritance       → base_classes (with DW_AT_data_member_location)
+   │
+   ├── DW_TAG_enumeration_type         → Enum definitions (chosen underlying type)
+   ├── DW_TAG_union_type               → Union layout (DW_AT_byte_size)
+   ├── DW_TAG_variable                 → Global variables (with DW_AT_location)
+   ├── DW_TAG_typedef                  → Type aliases (resolved through DW_AT_type chains)
+   └── DW_TAG_subprogram (free fn)     → Function signatures
+              ├── DW_TAG_formal_parameter (in order) → Parameter types
+              └── DW_AT_type                         → Return type
 ```
 
 The parser walks the DIE (Debug Information Entry) tree from `llvm-dwarfdump --debug-info`, resolves type references across compilation units, and folds typedef chains. Where DWARF references a type by offset, the parser maintains an offset → entry map so the reference is resolved to the concrete type. Anonymous structs and unions are tracked through their parent context.
@@ -297,15 +274,15 @@ A hash of `replibuild.toml` + all source contents + all header contents + git HE
 
 ```
 <project>/
-+-- replibuild.toml                    # Configuration (generated by discover(), hand-editable)
-+-- build/                             # LLVM IR files (.ll), intermediate objects
-+-- julia/
-|   +-- <LibName>.so                   # Compiled shared library
-|   +-- <LibName>_lto.bc               # LTO bitcode (if enable_lto = true)
-|   +-- <LibName>_thunks.so            # AOT thunks (if aot_thunks = true)
-|   +-- compilation_metadata.json      # Symbol + DWARF metadata
-|   +-- <ModuleName>.jl                # Generated Julia wrapper module
-+-- .replibuild_cache/                 # Incremental compile cache
+├── replibuild.toml                    # Configuration (generated by discover(), hand-editable)
+├── build/                             # LLVM IR files (.ll), intermediate objects
+├── julia/
+│   ├── <LibName>.so                   # Compiled shared library
+│   ├── <LibName>_lto.bc               # LTO bitcode (if enable_lto = true)
+│   ├── <LibName>_thunks.so            # AOT thunks (if aot_thunks = true)
+│   ├── compilation_metadata.json      # Symbol + DWARF metadata
+│   └── <ModuleName>.jl                # Generated Julia wrapper module
+└── .replibuild_cache/                 # Incremental compile cache
 ```
 
 The generated Julia module contains:

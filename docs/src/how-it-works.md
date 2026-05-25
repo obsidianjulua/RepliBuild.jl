@@ -3,16 +3,16 @@
 Most people think of FFI as a wall between languages — you call a C function, pay some overhead, and get a result back. RepliBuild works differently. Instead of bridging two separate worlds, it makes both languages converge at the same level: **LLVM intermediate representation**. The FFI boundary is not a wall — it is two compilers meeting in the middle.
 
 ```
-Julia source                          C++ source
-     |                                     |
-     v                                     v
-Julia compiler                         Clang
-     |                                     |
-     v                                     v
-Julia LLVM IR  -------- merge ------>  C++ LLVM IR
-                          |
-                          v
-                    Machine code
+   Julia source                       C++ source
+        │                                  │
+        ▼                                  ▼
+   Julia compiler                       Clang
+        │                                  │
+        ▼                                  ▼
+   Julia LLVM IR  ──────── merge ────▶  C++ LLVM IR
+                            │
+                            ▼
+                       Machine code
 ```
 
 Both Julia and C++ compile to LLVM IR. When both IRs are visible to the same JIT compiler, the language boundary ceases to exist — the optimizer can inline, vectorize, and constant-fold across it as if everything were written in one language.
@@ -540,31 +540,33 @@ Both compilation pipelines produce LLVM IR. For simple functions (POD types, sca
 For complex cases (packed structs, unions, virtual dispatch), the MLIR JIT generates thunks in the JLCS dialect that translate between the two ABIs. These thunks are lowered through MLIR's standard pipeline to LLVM IR and compiled to native machine code:
 
 ```
-Julia source                                C++ source
-     |                                           |
-     v                                           v
-Julia compiler                               Clang
-     |                                           |
-     v                                           v
-Julia LLVM IR                              C++ LLVM IR
-     |                                           |
-     +--- Tier 1 (simple): ccall ─────────> symbol resolution
-     |                                           |
-     +--- Tier 1 (LTO): llvmcall ──> merge ─────+──> Machine code
-     |                                           |
-     +--- Tier 2: JITManager.invoke() ──────────>|
-                    |                             |
-                    v                             |
-              JLCS MLIR dialect                   |
-                    |                             |
-                    v                             |
-              func dialect                        |
-                    |                             |
-                    v                             |
-              LLVM dialect                        |
-                    |                             |
-                    v                             |
-              MLIR LLVM IR ──> Machine code ──> calls C++ symbols
+   Julia source                                C++ source
+        │                                           │
+        ▼                                           ▼
+   Julia compiler                                Clang
+        │                                           │
+        ▼                                           ▼
+   Julia LLVM IR                              C++ LLVM IR
+        │                                           │
+        ├── Tier 1 (POD)   : ccall      ─────▶  symbol resolution
+        │                                           │
+        ├── Tier 1 (LTO)   : llvmcall   ──merge──┐  │
+        │                                        ▼  ▼
+        │                                     Machine code
+        │
+        └── Tier 2         : JITManager.invoke()
+                                  │
+                                  ▼
+                            JLCS MLIR dialect
+                                  │
+                                  ▼  (lowering: JLCSPasses.cpp)
+                            func dialect
+                                  │
+                                  ▼
+                            llvm dialect
+                                  │
+                                  ▼
+                            LLVM IR  ────▶  Machine code  ──▶  calls C++ symbols
 ```
 
 The JLCS dialect is the **missing piece** — it handles the cases where Julia's LLVM IR and C++'s LLVM IR cannot merge directly because they disagree on data layout. The dialect encodes the ABI contract (field offsets, packing flags, vtable slots) as first-class IR operations that MLIR can verify and lower to correct code.

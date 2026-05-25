@@ -111,30 +111,30 @@ RepliBuild introspects DWARF debug metadata and symbol tables to generate bindin
 
 ```
 C/C++ Source + [dependencies]
-    |
-    v
-DependencyResolver   -- clone/update git deps, filter excludes, inject into compile graph
-    |
-    v
-Discovery            -- scan files, resolve #include graph, emit replibuild.toml
-    |
-    v
-Compiler             -- Clang/clang++ -> per-file LLVM IR; incremental mtime + project-hash cache
-    |
-    v
-Linker               -- llvm-link + llvm-opt -> .so/.dylib + _lto.bc (Tier 1) + _thunks.so (Tier 2)
-    |
-    v
-DWARFParser          -- llvm-dwarfdump + nm -> ClassInfo / VtableInfo / MemberInfo structs
-    |
-    v
-DispatchLogic        -- per-function tier routing: is_ccall_safe(), is_c_lto_safe()
-    |
-    v
-Wrapper              -- DWARF + symbols -> Julia module (C and C++ generators are independent)
-    |
-    v
-JITManager           -- on-demand: JLCSIRGenerator -> MLIR JLCS IR -> MLIRNative JIT -> thunk cache
+       │
+       ▼
+DependencyResolver   ── clone/update git deps, filter excludes, inject into compile graph
+       │
+       ▼
+Discovery            ── scan files, resolve #include graph, emit replibuild.toml
+       │
+       ▼
+Compiler             ── Clang/clang++ → per-file LLVM IR; incremental mtime + project-hash cache
+       │
+       ▼
+Linker               ── llvm-link + llvm-opt → .so/.dylib + _lto.bc (Tier 1) + _thunks.so (Tier 2)
+       │
+       ▼
+DWARFParser          ── llvm-dwarfdump + nm → ClassInfo / VtableInfo / MemberInfo structs
+       │
+       ▼
+DispatchLogic        ── per-function tier routing: is_ccall_safe(), is_c_lto_safe()
+       │
+       ▼
+Wrapper              ── DWARF + symbols → Julia module (C and C++ generators are independent)
+       │
+       ▼
+JITManager           ── on-demand: JLCSIRGenerator → MLIR JLCS IR → MLIRNative JIT → thunk cache
 ```
 
 ### Caching

@@ -431,28 +431,28 @@ The JIT manager provides the runtime execution path for Tier 2 functions. It is 
 ### Architecture
 
 ```
-+---------------------------------------------------+
-|              GLOBAL_JIT (singleton)                |
-|                                                    |
-|  mlir_ctx        -> Ptr{Cvoid}  (MLIR context)    |
-|  jit_engine      -> Ptr{Cvoid}  (execution engine) |
-|  compiled_symbols -> Dict{String, Ptr{Cvoid}}      |
-|  vtable_info     -> VtableInfo                     |
-|  lock            -> ReentrantLock                  |
-+---------------------------------------------------+
+GLOBAL_JIT  (singleton)
+───────────────────────
+mlir_ctx          :: Ptr{Cvoid}                  # MLIR context
+jit_engine        :: Ptr{Cvoid}                  # execution engine
+compiled_symbols  :: Dict{String, Ptr{Cvoid}}    # lock-free hot path
+vtable_info       :: VtableInfo                  # DWARF metadata
+lock              :: ReentrantLock               # cold-path serialization
 ```
 
 ### Lock-free lookup (double-check pattern)
 
 ```
 invoke("_mlir_ciface_foo_thunk", RetType, args...)
-    |
-    v
+       │
+       ▼
 _lookup_cached(func_name)
-    |
-    +-- FAST PATH: Dict read (no lock) --> cache hit -> return Ptr
-    |
-    +-- SLOW PATH: lock -> double-check -> MLIRNative.lookup() -> cache -> return Ptr
+       │
+       ├── Fast path:  atomic Dict snapshot read  →  cache hit  →  return Ptr
+       │
+       └── Slow path:  lock  →  double-check  →  MLIRNative.lookup()
+                              →  build new Dict (copy-on-write)
+                              →  publish atomically  →  return Ptr
 ```
 
 - **Hot path** (cached): Single `Dict` read with no synchronization. Julia's `Dict` is safe for concurrent reads under a single-writer pattern.
