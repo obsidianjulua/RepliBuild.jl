@@ -154,7 +154,7 @@ Build caching settings.
 
 ## `[dependencies]`
 
-RepliBuild can automatically fetch, filter, and compile external C/C++ libraries from git repositories, local paths, or system packages — no BinaryBuilder or JLL packages required.
+RepliBuild can fetch, filter, and compile external C/C++ libraries from git repositories, local paths, or system packages as part of the build pipeline. Sources are pulled in alongside the project's own files and compiled with the same toolchain, so the resulting DWARF metadata is consistent across the project and its dependencies.
 
 Each dependency is declared as a named sub-table:
 

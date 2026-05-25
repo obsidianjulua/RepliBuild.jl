@@ -207,15 +207,17 @@ end
 
 ## The MLIR thunk: translating between ABIs
 
-The MLIR JIT generates a thunk that bridges Julia's natural alignment and C++'s packed layout. Here is the **actual generated MLIR IR** for `pack_three`, produced by the `JLCSIRGenerator` from the DWARF metadata:
+The MLIR JIT generates a thunk that bridges Julia's natural alignment and C++'s packed layout. Here is the **actual generated MLIR IR** that `JLCSIRGenerator` emits for `pack_three` (before lowering — this is the source MLIR text the IR generator writes):
 
 ```mlir
-// Struct aliases — the dialect registers both packed and aligned layouts
-!Struct_PackedTriplet = !jlcs.c_struct<"PackedTriplet", [i8, i32, i8],
-    [[0 : i64, 1 : i64, 5 : i64]], packed = true>
+// Type info registered with the dialect — carries DWARF offsets [0, 1, 5]
+// and the packed = true flag, both read directly from the binary's DWARF.
+jlcs.type_info "PackedTriplet",
+    !jlcs.c_struct<"PackedTriplet", [i8, i32, i8],
+                   [0 : i64, 1 : i64, 5 : i64], packed = true>, "", ""
 
 module {
-  // External C++ function — returns packed struct
+  // External C++ function — returns the packed layout per DWARF
   func.func private @pack_three(i8, i32, i8) -> !llvm.struct<packed (i8, i32, i8)>
 
   // Thunk: bridges Julia's ciface calling convention to C++ packed sret
@@ -244,28 +246,40 @@ module {
     %ret_packed = jlcs.ffe_call %val_1, %val_2, %val_3
         { callee = @pack_three } : (i8, i32, i8) -> !llvm.struct<packed (i8, i32, i8)>
 
-    // Step 3: Convert packed result to aligned layout for Julia
-    //         Extract each field from packed, insert into aligned struct
-    %ret_aligned_undef = llvm.mlir.undef : !llvm.struct<(i8, i32, i8)>
-    %ret_field_1 = llvm.extractvalue %ret_packed[0] : !llvm.struct<packed (i8, i32, i8)>
-    %ret_aligned_1 = llvm.insertvalue %ret_field_1, %ret_aligned_undef[0] : !llvm.struct<(i8, i32, i8)>
-    %ret_field_2 = llvm.extractvalue %ret_packed[1] : !llvm.struct<packed (i8, i32, i8)>
-    %ret_aligned_2 = llvm.insertvalue %ret_field_2, %ret_aligned_1[1] : !llvm.struct<(i8, i32, i8)>
-    %ret_field_3 = llvm.extractvalue %ret_packed[2] : !llvm.struct<packed (i8, i32, i8)>
-    %ret_aligned_3 = llvm.insertvalue %ret_field_3, %ret_aligned_2[2] : !llvm.struct<(i8, i32, i8)>
+    // Step 3: Repack the packed return into Julia-aligned layout.
+    //         The IR generator emits a single declarative op; the MLIR
+    //         lowering pass expands it into the extractvalue/insertvalue
+    //         sequence shown further down.
+    %ret_aligned = jlcs.marshal_ret %ret_packed { numMembers = 3 : i64 }
+        : (!llvm.struct<packed (i8, i32, i8)>) -> !llvm.struct<(i8, i32, i8)>
 
-    return %ret_aligned_3 : !llvm.struct<(i8, i32, i8)>
+    return %ret_aligned : !llvm.struct<(i8, i32, i8)>
   }
 }
 ```
 
-The key operation is in three steps:
+The operation breaks down in three steps:
 
 1. **Load arguments** from Julia's pointer array (Julia passed `Ref`s, the thunk dereferences them)
-2. **Call C++** via `jlcs.ffe_call` which handles the packed sret convention
-3. **Convert the result** from `packed (i8, i32, i8)` (6 bytes, C++ layout) to `(i8, i32, i8)` (12 bytes, Julia-aligned layout) by extracting and reinserting each field
+2. **Call C++** via `jlcs.ffe_call`, which the lowering pass turns into an `llvm.call` with the correct packed-sret ABI
+3. **Repack the result** from `packed (i8, i32, i8)` (6 bytes, C++ layout) to `(i8, i32, i8)` (12 bytes, Julia-aligned layout) via a single `jlcs.marshal_ret` op carrying the member count
 
 The `llvm.emit_c_interface` attribute tells MLIR to generate the `_mlir_ciface_pack_three_thunk` entry point that Julia's `JITManager` calls.
+
+After the JLCS dialect lowers to the LLVM dialect, the `jlcs.marshal_ret` op expands into the field-by-field reconstruction:
+
+```mlir
+// jlcs.marshal_ret expanded by the JLCSPasses.cpp lowering
+%ret_aligned_undef = llvm.mlir.undef : !llvm.struct<(i8, i32, i8)>
+%ret_field_1 = llvm.extractvalue %ret_packed[0] : !llvm.struct<packed (i8, i32, i8)>
+%ret_aligned_1 = llvm.insertvalue %ret_field_1, %ret_aligned_undef[0] : !llvm.struct<(i8, i32, i8)>
+%ret_field_2 = llvm.extractvalue %ret_packed[1] : !llvm.struct<packed (i8, i32, i8)>
+%ret_aligned_2 = llvm.insertvalue %ret_field_2, %ret_aligned_1[1] : !llvm.struct<(i8, i32, i8)>
+%ret_field_3 = llvm.extractvalue %ret_packed[2] : !llvm.struct<packed (i8, i32, i8)>
+%ret_aligned_3 = llvm.insertvalue %ret_field_3, %ret_aligned_2[2] : !llvm.struct<(i8, i32, i8)>
+```
+
+This separation matters: the IR generator (Julia side) emits compact, declarative ops, and the lowering pass (C++ side) does the platform-specific expansion. ABI rules live in one place — the `ConversionPattern` for `jlcs.marshal_ret` in `JLCSPasses.cpp` — not scattered through string-substitution codegen.
 
 Meanwhile, Julia's JIT compiles the `pack_three` wrapper to this LLVM IR:
 

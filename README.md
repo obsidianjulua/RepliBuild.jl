@@ -260,7 +260,7 @@ Run `RepliBuild.check_environment()` to verify which tiers are available.
 
 ## Documentation
 
-- [Why RepliBuild](https://obsidianjulua.github.io/RepliBuild.jl/dev/why-replibuild/) — What it solves, comparison to alternatives
+- [Why RepliBuild](https://obsidianjulua.github.io/RepliBuild.jl/dev/why-replibuild/) — Design rationale: DWARF as source of truth, offset stability, the JLCS dialect
 - [User Guide](https://obsidianjulua.github.io/RepliBuild.jl/dev/guide/)
 - [Configuration Reference](https://obsidianjulua.github.io/RepliBuild.jl/dev/config/)
 - [Introspection Tools](https://obsidianjulua.github.io/RepliBuild.jl/dev/introspect/)
