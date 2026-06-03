@@ -267,6 +267,24 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
 
     ir = String(take!(io))
 
+    # Bodyless named-struct refs (`!llvm.struct<"X">`) leak in from the
+    # get_llvm_signature path (dispatch decls / vmethod bodies), which — unlike
+    # FunctionGen — doesn't resolve struct types to a bodied form. These appear in
+    # LLVM-dialect ops (`llvm.func`/`llvm.call`), so they must become a literal
+    # LLVM struct (`!llvm.struct<(…)>`) — NOT the `!Struct_X` jlcs alias, which is
+    # a `!jlcs.c_struct` and is rejected as an `llvm.func` result. Resolve known
+    # by-value structs to their LLVM-equivalent; degrade unknown/opaque to
+    # !llvm.ptr. Skip alias-definition lines (`!Struct_X = …`), whose recursive
+    # forward-refs are legitimately bodyless.
+    struct_defs = get(metadata, "struct_definitions", Dict())
+    llvm_struct_of(name::AbstractString) = haskey(struct_defs, String(name)) ?
+        StructGen.get_llvm_equivalent_type_string(String(name), struct_defs[String(name)]) : "!llvm.ptr"
+    ir = join(map(split(ir, '\n')) do ln
+        (startswith(lstrip(ln), "!Struct_") && occursin(" = ", ln)) && return ln
+        replace(ln, r"!llvm\.struct<\"([A-Za-z0-9_]+)\">" =>
+                    m -> llvm_struct_of(match(r"\"([A-Za-z0-9_]+)\"", m).captures[1]))
+    end, '\n')
+
     # Sanitize dangling struct-alias references. Member rewriting in
     # generate_type_info_ir emits `!Struct_<name>` for any named-struct field,
     # but opaque/incomplete structs (e.g. glibc's `__off_t` pulled in via FILE*)

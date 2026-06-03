@@ -11,19 +11,19 @@ function map_cpp_type(type_str::String)
     # Basic types
     if type_str == "void"
         return "" # Void return usually means no value
-    elseif type_str == "int" || type_str == "int32_t" || type_str == "Cint" || type_str == "unsigned int" || type_str == "uint32_t" || type_str == "Cuint"
+    elseif type_str == "int" || type_str == "int32_t" || type_str == "int32" || type_str == "Cint" || type_str == "unsigned int" || type_str == "uint32_t" || type_str == "uint32" || type_str == "Cuint"
         return "i32"
-    elseif type_str == "long" || type_str == "long long" || type_str == "int64_t" || type_str == "size_t" || type_str == "Csize_t" || type_str == "Clong" || type_str == "unsigned long" || type_str == "uint64_t" || type_str == "Culong" || type_str == "unsigned long long"
+    elseif type_str == "long" || type_str == "long long" || type_str == "int64_t" || type_str == "int64" || type_str == "size_t" || type_str == "Csize_t" || type_str == "Clong" || type_str == "unsigned long" || type_str == "uint64_t" || type_str == "uint64" || type_str == "Culong" || type_str == "unsigned long long"
         return "i64"
-    elseif type_str == "float" || type_str == "Cfloat"
+    elseif type_str == "float" || type_str == "float32" || type_str == "Cfloat"
         return "f32"
-    elseif type_str == "double" || type_str == "Cdouble"
+    elseif type_str == "double" || type_str == "float64" || type_str == "Cdouble"
         return "f64"
     elseif type_str == "bool" || type_str == "_Bool" || type_str == "Bool"
         return "i1"
-    elseif type_str == "char" || type_str == "int8_t" || type_str == "UInt8" || type_str == "Cchar"
+    elseif type_str == "char" || type_str == "int8_t" || type_str == "int8" || type_str == "uint8" || type_str == "UInt8" || type_str == "Cchar"
         return "i8"
-    elseif type_str == "short" || type_str == "int16_t" || type_str == "unsigned short" || type_str == "uint16_t"
+    elseif type_str == "short" || type_str == "int16_t" || type_str == "int16" || type_str == "unsigned short" || type_str == "uint16_t" || type_str == "uint16"
         return "i16"
     # C built-in types that DWARF may strip qualifiers from
     elseif type_str == "ptrdiff_t" || type_str == "ssize_t" || type_str == "intptr_t" || type_str == "uintptr_t"
@@ -31,7 +31,9 @@ function map_cpp_type(type_str::String)
     elseif type_str == "complex"
         # _Complex T — DWARF strips the element type; use opaque pointer since size is unknown
         return "!llvm.ptr"
-    elseif endswith(type_str, "*") || contains(type_str, "*") || type_str == "unknown" # simplified pointer check
+    elseif endswith(type_str, "*") || contains(type_str, "*") ||
+           endswith(type_str, "&") || contains(type_str, "&") || # references are pointers in the ABI
+           type_str == "unknown" # simplified pointer check
         return "!llvm.ptr"
     # Struct types?
     # If it matches a known struct name, we should return !llvm.struct<name> equivalent?
