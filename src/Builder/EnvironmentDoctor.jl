@@ -143,8 +143,7 @@ end
 function _check_libJLCS()::ToolStatus
     # Check for the compiled MLIR dialect library
     mlir_dir = joinpath(SRC_DIR, "mlir", "build")
-    so_name = Sys.isapple() ? "libJLCS.dylib" : "libJLCS.so"
-    lib_path = joinpath(mlir_dir, so_name)
+    lib_path = joinpath(mlir_dir, "libJLCS.so")
     
     if isfile(lib_path)
         return ToolStatus("libJLCS", false, true, lib_path, "", true,

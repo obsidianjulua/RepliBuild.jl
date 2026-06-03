@@ -177,7 +177,8 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
         config.link.optimization_level,
         config.link.enable_lto,
         unique(vcat(config.link.link_libraries, extra_link_libs)),
-        unique(vcat(config.link.link_dirs, extra_link_dirs))
+        unique(vcat(config.link.link_dirs, extra_link_dirs)),
+        config.link.fallback
     )
 
     return ConfigurationManager.RepliBuildConfig(

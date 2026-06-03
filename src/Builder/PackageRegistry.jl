@@ -761,14 +761,35 @@ end
 # SCAFFOLD TEMPLATES
 # =============================================================================
 
+"""Look up RepliBuild's own UUID from its loaded module identity, with a fallback
+to parsing the package's Project.toml. Returns the canonical UUID string."""
+function _replibuild_uuid()::String
+    parent = parentmodule(@__MODULE__)
+    pkgid = Base.PkgId(parent)
+    if pkgid.uuid !== nothing
+        return string(pkgid.uuid)
+    end
+    # Fallback: read Project.toml at the package root
+    try
+        proj = abspath(joinpath(@__DIR__, "..", "..", "Project.toml"))
+        if isfile(proj)
+            data = TOML.parsefile(proj)
+            return get(data, "uuid", "")
+        end
+    catch
+    end
+    return ""
+end
+
 function _project_toml(name::String, uuid::UUID)::String
+    rb_uuid = _replibuild_uuid()
     """
     name = "$name"
     uuid = "$uuid"
     version = "0.1.0"
 
     [deps]
-    RepliBuild = "$(Base.PkgId(Base.UUID("00000000-0000-0000-0000-000000000000"), "RepliBuild").uuid)"
+    RepliBuild = "$rb_uuid"
 
     [compat]
     julia = "1.10"

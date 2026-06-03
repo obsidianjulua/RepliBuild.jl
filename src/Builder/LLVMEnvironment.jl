@@ -63,15 +63,13 @@ const GLOBAL_LLVM_TOOLCHAIN = Ref{Union{LLVMToolchain,Nothing}}(nothing)
 Get the absolute path to RepliBuild's in-tree LLVM installation.
 """
 function get_replibuild_llvm_root()
-    # __DIR__ points to /home/john/.julia/julia/RepliBuild/src
-    # We need to go up one level to /home/john/.julia/julia/RepliBuild
-    # Then access LLVM subdirectory
-    replibuild_dir = PROJECT_ROOT
-    llvm_root = joinpath(replibuild_dir, "LLVM")
+    # In-tree LLVM lives in <package root>/LLVM. PROJECT_ROOT is derived from
+    # @__DIR__ so this resolves correctly wherever the package is installed.
+    llvm_root = joinpath(PROJECT_ROOT, "LLVM")
 
     if !isdir(llvm_root)
-        error("RepliBuild LLVM installation not found at: $llvm_root\n" *
-              "Expected location: /home/john/.julia/julia/RepliBuild/LLVM")
+        error("RepliBuild in-tree LLVM not found at: $llvm_root\n" *
+              "Install LLVM and use the system/JLL toolchain, or place an LLVM tree there.")
     end
 
     return abspath(llvm_root)
@@ -172,7 +170,6 @@ function find_system_llvm()
         "/usr",
         "/usr/local",
         "/opt/llvm",
-        "/opt/homebrew",  # macOS
         "/usr/lib/llvm-20",
         "/usr/lib/llvm-19",
         "/usr/lib/llvm-18",

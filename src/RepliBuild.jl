@@ -14,6 +14,17 @@ const VERSION = v"2.5.7"
 const PROJECT_ROOT = dirname(@__DIR__)
 const SRC_DIR = @__DIR__
 
+# RepliBuild targets Linux only. The toolchain assumes ELF shared objects (.so),
+# DWARF via llvm-dwarfdump, GNU nm, and the Linux LLVM layout. macOS (Mach-O,
+# .dylib) and Windows (PE, .dll) are explicitly unsupported. Enforce at load so
+# failures are a clear message, not a confusing tool error deep in the pipeline.
+function __init__()
+    if !Sys.islinux()
+        error("RepliBuild supports Linux only (detected $(Sys.KERNEL)). " *
+              "It relies on ELF/.so, DWARF, and the Linux LLVM toolchain layout.")
+    end
+end
+
 # ============================================================================
 # LOAD MODULES
 # ============================================================================

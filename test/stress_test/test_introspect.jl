@@ -12,8 +12,8 @@ println()
 
 using RepliBuild
 
-# Path to the test binary
-binary_path = "/home/john/Desktop/Projects/RepliBuild.jl/test/stress_test/julia/libproject.so"
+# Path to the test binary (resolved relative to this script)
+binary_path = joinpath(@__DIR__, "julia", "libproject.so")
 
 if !isfile(binary_path)
     error("Binary not found: $binary_path\nRun RepliBuild.build() first!")

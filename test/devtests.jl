@@ -86,13 +86,11 @@ for (name, label) in INTEGRATION_TESTS
         @test isdir(dir)
 
         clean_test_dir(dir)
-        toml = joinpath(dir, "replibuild.toml")
-        if !isfile(toml)
-            toml = RepliBuild.discover(dir, force=true, build=true, wrap=true)
-        else
-            RepliBuild.build(toml)
-            RepliBuild.wrap(toml)
-        end
+        # Always regenerate the toml via discover so the suite never depends on a
+        # committed config carrying machine-specific absolute paths. The fixture
+        # tomls are gitignored for this reason. (Hub packages are different — their
+        # tomls are hand-rolled and must NOT be discovered.)
+        toml = RepliBuild.discover(dir, force=true, build=true, wrap=true)
         @test isfile(toml)
         @test isdir(joinpath(dir, "julia"))
 
@@ -153,3 +151,18 @@ include(joinpath(TEST_DIR, "test_mlir_templates.jl"))
 # above already produce via build+wrap.
 
 include(joinpath(TEST_DIR, "callback_test", "test_exceptions.jl"))
+
+# ── 6. JLCS dialect invariant probes ─────────────────────────────────────────
+# Definitive-trace probes that push specific dialect concerns (op arity
+# invariants, dead-producer ops) through parse → lower → emit and record the
+# actual outcome. Self-skips without libJLCS. Two @test_broken entries mark
+# confirmed lowering crashes awaiting verifiers (jlcs.scope, jlcs.marshal_arg).
+
+include(joinpath(TEST_DIR, "test_jlcs_invariants.jl"))
+
+# ── 7. C-bucket in-process libLLVM pipeline ──────────────────────────────────
+# Traces the C link/opt path through Julia's resident libLLVM (default) and the
+# external escape hatch ([link] fallback = true), asserting DWARF survives each
+# stage — the property the in-process path must not silently break.
+
+include(joinpath(TEST_DIR, "test_c_inprocess.jl"))

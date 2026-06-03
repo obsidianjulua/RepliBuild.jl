@@ -125,6 +125,13 @@ function _parse_dwarf_size(s_info)::Int
     _parse_int_or_hex(get(s_info, "byte_size", "0"))
 end
 
+# Memoization cache for _is_struct_unsafe. Within a single wrap_introspective
+# call the same `s_info` Dict is queried many times (once per function param
+# and once per return). Keyed by object identity so we don't pay the cost of
+# hashing nested Dicts. Bounded by the number of structs in DWARF, dropped
+# when those Dicts go out of scope.
+const _STRUCT_UNSAFE_CACHE = IdDict{Any,Bool}()
+
 """
     _is_struct_unsafe(s_info, dwarf_structs) -> Bool
 
@@ -133,6 +140,21 @@ Uses all available DWARF metadata: size, alignment, packing, polymorphism,
 inheritance, and member types.
 """
 function _is_struct_unsafe(s_info, dwarf_structs)::Bool
+    # Only cache top-level queries (those that pass a non-empty dwarf_structs).
+    # The recursive nested check at the bottom of this function passes an empty
+    # dict to avoid cycles; caching those would produce wrong results when the
+    # same struct is queried at the top level later.
+    is_top_level = !isempty(dwarf_structs)
+    if is_top_level
+        cached = get(_STRUCT_UNSAFE_CACHE, s_info, nothing)
+        cached !== nothing && return cached
+    end
+    result = _is_struct_unsafe_impl(s_info, dwarf_structs)
+    is_top_level && (_STRUCT_UNSAFE_CACHE[s_info] = result)
+    return result
+end
+
+function _is_struct_unsafe_impl(s_info, dwarf_structs)::Bool
     # Packed struct: DWARF size != Julia calculated size (alignment mismatch)
     dwarf_size = _parse_dwarf_size(s_info)
     members = get(s_info, "members", [])

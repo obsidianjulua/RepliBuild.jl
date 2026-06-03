@@ -31,7 +31,7 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
         " " => "", "," => "_", "*" => "Ptr", "&" => "Ref"
     )
 
-    if !isempty(mlir_name) && !isletter(mlir_name[1]) && mlir_name[1] != "_"
+    if !isempty(mlir_name) && !isletter(mlir_name[1]) && mlir_name[1] != '_'
         mlir_name = "_" * mlir_name
     end
     

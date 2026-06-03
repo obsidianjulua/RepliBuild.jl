@@ -54,6 +54,14 @@ struct LinkConfig
     enable_lto::Bool
     link_libraries::Vector{String}
     link_dirs::Vector{String}
+    # When false (default) the C bucket links/optimizes IR in-process on Julia's
+    # resident libLLVM (version-matched to the JLL clang that emitted the IR);
+    # any in-process failure is a hard error so regressions surface. When true,
+    # fall back to the proven external llvm-link/opt pipeline. The in-process
+    # path is the faster, more aggressively optimized — but more volatile — of
+    # the two; this flag is the escape hatch to the stable path. C++ always uses
+    # the external pipeline regardless of this flag.
+    fallback::Bool
 end
 
 """Nested struct for [binary] section"""
@@ -306,7 +314,8 @@ function parse_link_config(data::Dict, wrap_language::Symbol=:cpp)::LinkConfig
         opt_level,
         get(link, "enable_lto", default_lto),
         get(link, "link_libraries", String[]),
-        get(link, "link_dirs", String[])
+        get(link, "link_dirs", String[]),
+        get(link, "fallback", false)
     )
 end
 
@@ -555,7 +564,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         PathsConfig("src", "include", "julia", "build", ".replibuild_cache"),
         DiscoveryConfig(true, true, 10, ["build", ".git", ".cache"], true),
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
-        LinkConfig("2", false, String[], String[]),
+        LinkConfig("2", false, String[], String[], false),
         BinaryConfig(:shared, "", false),
         WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[], false),
         LLVMConfig(:auto, ""),
@@ -633,6 +642,9 @@ function save_config(config::RepliBuildConfig)
         "optimization_level" => config.link.optimization_level,
         "enable_lto" => config.link.enable_lto
     )
+    if config.link.fallback
+        link_dict["fallback"] = config.link.fallback
+    end
     if !isempty(config.link.link_libraries)
         link_dict["link_libraries"] = config.link.link_libraries
     end
@@ -865,19 +877,9 @@ function get_library_name(c::RepliBuildConfig)::String
         return c.binary.output_name
     end
 
-    # Auto-generate: lib<project_name>.so
-    prefix = c.binary.type == :static ? "lib" : "lib"
-    suffix = if c.binary.type == :static
-        ".a"
-    elseif Sys.isapple()
-        ".dylib"
-    elseif Sys.iswindows()
-        ".dll"
-    else
-        ".so"
-    end
-
-    return prefix * c.project.name * suffix
+    # Auto-generate: lib<project_name>.so (Linux-only: ELF shared object / static archive)
+    suffix = c.binary.type == :static ? ".a" : ".so"
+    return "lib" * c.project.name * suffix
 end
 
 """Get wrapper module name (uses config or auto-generates)"""

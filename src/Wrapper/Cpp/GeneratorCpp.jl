@@ -2556,7 +2556,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                 # Check if this struct exists in our generated types
                 # DWARF stores structs under bare names (e.g. "MyStruct"), not "__struct__" prefixed
-                if haskey(dwarf_structs, struct_name) || struct_name in ["DenseMatrix", "SparseMatrix", "LUDecomposition", "QRDecomposition", "EigenResult", "ODESolution", "FFTResult", "Histogram", "OptimizationState", "OptimizationOptions", "PolynomialFit", "CubicSpline", "Vector3", "Matrix3x3"]
+                if haskey(dwarf_structs, struct_name)
                     has_struct_ptr_params = true
                     push!(struct_ptr_indices, i)
                     push!(convenience_param_types, struct_name)

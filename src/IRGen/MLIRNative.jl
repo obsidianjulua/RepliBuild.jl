@@ -320,7 +320,11 @@ end
 """
     invoke_safe(jit::MlirExecutionEngine, mod::MlirModule, name::String, args...)
 
-Safely invoke a JIT function by verifying argument types against the MLIR module signature.
+Safely invoke a JIT function by verifying argument types against the MLIR module
+signature. The last positional argument must be a `Ref` for the return value.
+
+Convention: `args = (arg_1, ..., arg_N, ret_buffer::Ref)` where N == number of
+formal inputs in the function type.
 """
 function invoke_safe(jit::MlirExecutionEngine, mod::MlirModule, name::String, args...)
     # 1. Lookup function operation
@@ -336,24 +340,26 @@ function invoke_safe(jit::MlirExecutionEngine, mod::MlirModule, name::String, ar
     end
 
     num_inputs = get_num_inputs(ftype)
-    
-    # Check argument count (excluding return value buffer for now)
+
+    # Strict invoke convention: N inputs + 1 return buffer
     if length(args) != num_inputs + 1
-         # We expect N inputs + 1 return buffer for typical JIT invoke usage
-         # If the function is void, currently we still might need to match signature carefully.
-         # For simplicity, we assume strict packed invoke convention: args... + ret
+        error("invoke_safe expected $(num_inputs) inputs + 1 return buffer, got $(length(args)) arguments")
     end
 
-    # 3. Verify arguments
-    # Note: args includes the return buffer at the end!
-    
-    ptr_args = Vector{Ptr{Cvoid}}()
-    
+    ret_buffer = args[end]
+    if !(ret_buffer isa Ref)
+        error("Last argument must be a Ref for the return value")
+    end
+
+    # 3. Verify input types and build the Ref vector in one pass.
+    # The Refs must remain rooted until the ccall in jit_invoke completes.
+    ref_args = Vector{Any}(undef, num_inputs)
+    ptr_args = Vector{Ptr{Cvoid}}(undef, num_inputs + 1)
+
     for i in 1:num_inputs
         arg_val = args[i]
         expected_type = get_input_type(ftype, i - 1)
-        
-        # Type Check
+
         valid = false
         if is_integer(expected_type)
             width = get_integer_width(expected_type)
@@ -367,42 +373,20 @@ function invoke_safe(jit::MlirExecutionEngine, mod::MlirModule, name::String, ar
         elseif is_f64(expected_type) && arg_val isa Float64
             valid = true
         end
-        
+
         if !valid
             error("Argument mismatch at index $i. Expected MLIR type compatible with provided value: $arg_val")
         end
-        
-        # Prepare pointer
-        # We need to keep the Ref alive. In this simple function scope, it should be fine.
-        # But `Ref(arg_val)` creates a new Ref each time.
-        # For a safer implementation, we should put Refs in a list to preserve them.
-    end
-    
-    # We need to create Refs for all arguments to pass their pointers
-    # and keep them alive during the call.
-    # The last argument is the return buffer (if non-void return).
-    
-    ref_args = Any[]
-    ptr_args = Ptr{Cvoid}[]
 
-    # Handle Inputs
-    for i in 1:num_inputs
-        r = Ref(args[i])
-        push!(ref_args, r)
-        push!(ptr_args, Base.unsafe_convert(Ptr{Cvoid}, r))
+        r = Ref(arg_val)
+        ref_args[i] = r
+        ptr_args[i] = Base.unsafe_convert(Ptr{Cvoid}, r)
     end
 
-    # Handle Return Buffer (Last argument)
-    # We assume the user passed a Ref for the return value
-    ret_buffer = args[end]
-    if !(ret_buffer isa Ref)
-         error("Last argument must be a Ref for the return value")
-    end
+    ptr_args[end] = Base.unsafe_convert(Ptr{Cvoid}, ret_buffer)
 
-    push!(ptr_args, Base.unsafe_convert(Ptr{Cvoid}, ret_buffer))
-
-    # GC.@preserve ref_args and ret_buffer: the Ref objects backing the pointers
-    # in ptr_args must stay alive through the ccall inside jit_invoke.
+    # ref_args holds the input Refs; ret_buffer is the caller's Ref. Both must
+    # outlive the ccall inside jit_invoke.
     return GC.@preserve ref_args ret_buffer jit_invoke(jit, name, ptr_args)
 end
 

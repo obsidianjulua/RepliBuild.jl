@@ -5,6 +5,7 @@ module Discovery
 
 using Dates
 using ProgressMeter
+using TOML
 using UUIDs
 
 # These modules are already loaded by RepliBuild.jl before Discovery.jl is included
@@ -498,7 +499,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         "0",                                     # optimization_level (O0 for safety and DWARF accuracy)
         false,                                   # enable_lto
         String[],                                # link_libraries
-        String[]                                 # link_dirs
+        String[],                                # link_dirs
+        false                                    # fallback (in-process libLLVM for C)
     )
 
     binary_config = ConfigurationManager.BinaryConfig(

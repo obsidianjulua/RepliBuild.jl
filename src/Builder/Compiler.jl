@@ -361,18 +361,25 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
     build_dir = get_build_path(config)
     linked_ir = joinpath(build_dir, output_name * "_linked.ll")
 
-    # C path: try in-process libLLVM via LLVM.jl when Julia's libLLVM major
-    # matches the C-bucket clang's emit major. On a version skew (e.g. Julia
-    # 1.12's libLLVM 18 parsing LLVM 20 IR), libLLVM silently drops debug
-    # records it doesn't recognize, which propagates into the .so and erases
-    # DWARF — wrecking wrapper generation. Stay on external llvm-link until
-    # Julia ships libLLVM ≥ 20 and the C-bucket toolchain matches.
-    linked_ok = false
-    if config.wrap.language == :c && Base.libllvm_version >= v"20"
-        linked_ok = _link_ir_libllvm(ir_files, linked_ir)
-    end
+    # In-process vs external pipeline selection.
+    #
+    # For C, the IR was emitted by the JLL clang, which ships pinned to the same
+    # LLVM version as Julia's resident libLLVM (both 18.1.7 on Julia 1.12). That
+    # invariant — JLL clang version == Base.libllvm_version — holds across Julia
+    # releases because they ship together, so there is no version skew and the
+    # in-process libLLVM link/opt path is safe (no silent DWARF-record dropping).
+    # It is therefore the default for C. A failure in the in-process path is a
+    # hard error, not a silent downgrade, so regressions surface; set
+    # `[link] fallback = true` in replibuild.toml to use the external
+    # llvm-link/opt pipeline instead. C++ always uses the external pipeline.
+    use_inprocess = config.wrap.language == :c && !config.link.fallback
 
-    if !linked_ok
+    if use_inprocess
+        if !_link_ir_libllvm(ir_files, linked_ir)
+            error("In-process libLLVM link failed for C source. " *
+                  "Set `[link] fallback = true` in replibuild.toml to use external llvm-link.")
+        end
+    else
         llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
         (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
 
@@ -389,17 +396,23 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
     if opt_level != "0"
 
         optimized_ir = joinpath(build_dir, output_name * "_opt.ll")
-        opt_args = ["-S", "-O$opt_level"]
 
-        push!(opt_args, linked_ir, "-o", optimized_ir)
-
-        opt_tool = LLVMEnvironment.resolve_tool("opt", config.wrap.language)
-        (output, exitcode) = BuildBridge.execute(opt_tool, opt_args)
-
-        if exitcode != 0
-            @warn "Optimization failed, using unoptimized IR"
-        elseif isfile(optimized_ir)
+        if use_inprocess
+            if !_optimize_ir_libllvm(linked_ir, optimized_ir, opt_level)
+                error("In-process libLLVM opt (default<O$opt_level>) failed for C source. " *
+                      "Set `[link] fallback = true` in replibuild.toml to use external opt.")
+            end
             linked_ir = optimized_ir
+        else
+            opt_args = ["-S", "-O$opt_level", linked_ir, "-o", optimized_ir]
+            opt_tool = LLVMEnvironment.resolve_tool("opt", config.wrap.language)
+            (output, exitcode) = BuildBridge.execute(opt_tool, opt_args)
+
+            if exitcode != 0
+                @warn "Optimization failed, using unoptimized IR"
+            elseif isfile(optimized_ir)
+                linked_ir = optimized_ir
+            end
         end
     end
 
@@ -758,6 +771,36 @@ function _link_ir_libllvm(ir_files::Vector{String}, output_ll::String)::Bool
         return isfile(output_ll)
     catch e
         @debug "LLVM.jl in-process link failed, falling back to external llvm-link" exception=(e, catch_backtrace())
+        return false
+    end
+end
+
+"""
+Optimize a `.ll` file in-process via Julia's resident libLLVM, running the new
+pass-manager `default<O\$opt_level>` pipeline, and write the optimized module to
+`out_ll`. Returns true on success, false on any failure so the caller can decide
+whether to hard-error (in-process mode) or fall back to external `opt`.
+
+`opt_level` is the bare level token already stripped of any leading `O`
+(`"1"`..`"3"`, `"s"`, `"z"`). Callers skip this for `"0"`. Debug info is
+preserved by the default pipeline, so the optimized IR still carries DWARF for
+the subsequent `.so` creation.
+"""
+function _optimize_ir_libllvm(in_ll::String, out_ll::String, opt_level::String)::Bool
+    try
+        LLVM.Context() do _
+            mod = parse(LLVM.Module, read(in_ll, String))
+            # Host TargetMachine supplies TTI so target-aware passes in the
+            # default pipeline (vectorization cost models, etc.) run correctly.
+            tm = LLVM.JITTargetMachine()
+            LLVM.run!("default<O$opt_level>", mod, tm)
+            open(out_ll, "w") do io
+                print(io, string(mod))
+            end
+        end
+        return isfile(out_ll)
+    catch e
+        @debug "LLVM.jl in-process opt failed" exception=(e, catch_backtrace())
         return false
     end
 end
@@ -1487,15 +1530,21 @@ function extract_symbols_from_binary(binary_path::String)
         return Dict{String,Any}[]
     end
 
-    # Build address → mangled mapping
+    # Build address → mangled mapping. Accept T (text/code) and W (weak)
+    # symbols. Weak symbols cover C++ template instantiations and inline
+    # functions whose definitions live in headers — these are wrappable just
+    # like normal text symbols. Lowercase t/w are local-linkage variants that
+    # nm reports for static functions; include them so static C functions
+    # exported via -fvisibility=default still surface.
     address_to_mangled = Dict{String,String}()
+    code_symbol_types = ("T", "W", "t", "w")
     for line in split(mangled_output, '\n')
         line = strip(line)
         if isempty(line)
             continue
         end
         parts = split(line)
-        if length(parts) >= 3 && parts[2] == "T"
+        if length(parts) >= 3 && parts[2] in code_symbol_types
             address = parts[1]
             mangled = parts[3]
             address_to_mangled[address] = mangled
@@ -1516,9 +1565,19 @@ function extract_symbols_from_binary(binary_path::String)
             symbol_type = parts[2]
             demangled_name = join(parts[3:end], " ")
 
-            # Only export T (text/code) symbols
-            if symbol_type == "T"
+            if symbol_type in code_symbol_types
                 mangled_name = get(address_to_mangled, address, demangled_name)
+
+                # Filter out libstdc++/libc++ internals that get inlined into the
+                # binary as weak symbols. These come from #include <vector> et al.
+                # — they're "defined-only" because the inliner emitted them, not
+                # because the user wrote them. Wrapping them produces signatures
+                # referencing types we never declared (e.g. `std::less<void>`).
+                # Deliberate STL container wrapping goes through extract_stl_method_symbols
+                # under [types].templates, not this general path.
+                if _is_stdlib_internal(mangled_name, demangled_name)
+                    continue
+                end
 
                 push!(symbols, Dict(
                     "mangled" => mangled_name,
@@ -1531,6 +1590,50 @@ function extract_symbols_from_binary(binary_path::String)
     end
 
     return symbols
+end
+
+"""
+    _is_stdlib_internal(mangled, demangled) -> Bool
+
+Return true for symbols that live in the C++ standard library's namespaces
+(`std`, `__gnu_cxx`, `__cxxabiv1`). These are inlined-into-the-binary as weak
+symbols but are not part of the user's API.
+
+The Itanium ABI mangled name is the precise signal: anything starting with
+`_ZSt`, `_ZNSt`, `_ZNKSt`, `_ZNVSt`, `_ZNKVSt` is in the std namespace;
+`_ZN9__gnu_cxx`/`_ZN10__cxxabiv1` cover libstdc++ extensions and the C++ ABI
+runtime. The demangled name is the fallback for symbols whose mangled name
+didn't survive (e.g. plain C exports, vtable/typeinfo strings).
+"""
+function _is_stdlib_internal(mangled::AbstractString, demangled::AbstractString)::Bool
+    # Itanium ABI prefix checks — these are structural, not heuristic
+    startswith(mangled, "_ZSt") && return true       # std::foo
+    startswith(mangled, "_ZNSt") && return true      # nested std::Bar::foo
+    startswith(mangled, "_ZNKSt") && return true     # const member in std
+    startswith(mangled, "_ZNVSt") && return true     # volatile member in std
+    startswith(mangled, "_ZNKVSt") && return true    # const volatile member in std
+    # `_ZZ` prefix marks symbols defined inside another function's body
+    # (e.g. nested helper types in libstdc++ inline templates). When the
+    # enclosing function lives in std, treat the inner symbol as stdlib too.
+    startswith(mangled, "_ZZSt") && return true
+    startswith(mangled, "_ZZNSt") && return true
+    startswith(mangled, "_ZZNKSt") && return true
+    startswith(mangled, "_ZZNVSt") && return true
+    startswith(mangled, "_ZN9__gnu_cxx") && return true
+    startswith(mangled, "_ZNK9__gnu_cxx") && return true
+    startswith(mangled, "_ZZN9__gnu_cxx") && return true
+    startswith(mangled, "_ZN10__cxxabiv1") && return true
+    startswith(mangled, "_ZNK10__cxxabiv1") && return true
+    startswith(mangled, "__cxa_") && return true     # Itanium ABI runtime helpers
+
+    # vtable / typeinfo entries appear in the demangled output without parens
+    startswith(demangled, "vtable for std::") && return true
+    startswith(demangled, "typeinfo for std::") && return true
+    startswith(demangled, "typeinfo name for std::") && return true
+    startswith(demangled, "vtable for __cxxabiv1::") && return true
+    startswith(demangled, "typeinfo for __cxxabiv1::") && return true
+
+    return false
 end
 
 """
@@ -1554,6 +1657,90 @@ end
 # DWARF DEBUG INFO PARSING - Type Extraction
 # =============================================================================
 
+# Comprehensive C/C++ → Julia type map. Hoisted to module scope so it is
+# allocated once at module load, not once per call to dwarf_type_to_julia.
+const _DWARF_TYPE_MAP = Dict{String,String}(
+    # Void
+    "void" => "Cvoid",
+
+    # Boolean
+    "bool" => "Bool",
+    "_Bool" => "Bool",
+
+    # Character types
+    "char" => "Cchar",
+    "signed char" => "Cchar",
+    "unsigned char" => "Cuchar",
+    "wchar_t" => "Cwchar_t",
+    "char16_t" => "UInt16",
+    "char32_t" => "UInt32",
+
+    # Standard integers (platform-dependent sizes)
+    "short" => "Cshort",
+    "short int" => "Cshort",
+    "signed short" => "Cshort",
+    "signed short int" => "Cshort",
+    "unsigned short" => "Cushort",
+    "unsigned short int" => "Cushort",
+
+    "int" => "Cint",
+    "signed int" => "Cint",
+    "signed" => "Cint",
+    "unsigned int" => "Cuint",
+    "unsigned" => "Cuint",
+
+    "long" => "Clong",
+    "long int" => "Clong",
+    "signed long" => "Clong",
+    "signed long int" => "Clong",
+    "unsigned long" => "Culong",
+    "unsigned long int" => "Culong",
+
+    "long long" => "Clonglong",
+    "long long int" => "Clonglong",
+    "signed long long" => "Clonglong",
+    "signed long long int" => "Clonglong",
+    "unsigned long long" => "Culonglong",
+    "unsigned long long int" => "Culonglong",
+
+    # Fixed-width integers (stdint.h)
+    "int8_t" => "Int8",
+    "int16_t" => "Int16",
+    "int32_t" => "Int32",
+    "int64_t" => "Int64",
+    "uint8_t" => "UInt8",
+    "uint16_t" => "UInt16",
+    "uint32_t" => "UInt32",
+    "uint64_t" => "UInt64",
+
+    # Floating point
+    "float" => "Cfloat",
+    "double" => "Cdouble",
+    "long double" => "NTuple{2, UInt64}",  # 80-bit extended precision in 16-byte slot
+
+    # Size types
+    "size_t" => "Csize_t",
+    "ssize_t" => "Cssize_t",
+    "ptrdiff_t" => "Cptrdiff_t",
+    "intptr_t" => "Cintptr_t",
+    "uintptr_t" => "Cuintptr_t",
+
+    # Time types
+    "time_t" => "Ctime_t",
+
+    # Special types
+    "__int128" => "Int128",
+    "__uint128_t" => "UInt128",
+
+    # C11 _Complex types
+    "_Complex float" => "ComplexF32",
+    "_Complex double" => "ComplexF64",
+    "complex float" => "ComplexF32",
+    "complex double" => "ComplexF64",
+    "float _Complex" => "ComplexF32",
+    "double _Complex" => "ComplexF64",
+)
+
 """
 Comprehensive C/C++ type to Julia type mapping.
 Handles all standard C/C++ types including sized integers, pointers, and qualifiers.
@@ -1562,93 +1749,9 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
     # Clean up type (remove extra spaces, trailing qualifiers)
     c_type = strip(c_type)
 
-    # Map based on comprehensive C/C++ type system
-    type_map = Dict(
-        # Void
-        "void" => "Cvoid",
-
-        # Boolean
-        "bool" => "Bool",
-        "_Bool" => "Bool",
-
-        # Character types
-        "char" => "Cchar",
-        "signed char" => "Cchar",
-        "unsigned char" => "Cuchar",
-        "wchar_t" => "Cwchar_t",
-        "char16_t" => "UInt16",
-        "char32_t" => "UInt32",
-
-        # Standard integers (platform-dependent sizes)
-        "short" => "Cshort",
-        "short int" => "Cshort",
-        "signed short" => "Cshort",
-        "signed short int" => "Cshort",
-        "unsigned short" => "Cushort",
-        "unsigned short int" => "Cushort",
-
-        "int" => "Cint",
-        "signed int" => "Cint",
-        "signed" => "Cint",
-        "unsigned int" => "Cuint",
-        "unsigned" => "Cuint",
-
-        "long" => "Clong",
-        "long int" => "Clong",
-        "signed long" => "Clong",
-        "signed long int" => "Clong",
-        "unsigned long" => "Culong",
-        "unsigned long int" => "Culong",
-
-        "long long" => "Clonglong",
-        "long long int" => "Clonglong",
-        "signed long long" => "Clonglong",
-        "signed long long int" => "Clonglong",
-        "unsigned long long" => "Culonglong",
-        "unsigned long long int" => "Culonglong",
-
-        # Fixed-width integers (stdint.h)
-        "int8_t" => "Int8",
-        "int16_t" => "Int16",
-        "int32_t" => "Int32",
-        "int64_t" => "Int64",
-        "uint8_t" => "UInt8",
-        "uint16_t" => "UInt16",
-        "uint32_t" => "UInt32",
-        "uint64_t" => "UInt64",
-
-        # Floating point
-        "float" => "Cfloat",
-        "double" => "Cdouble",
-        "long double" => "NTuple{2, UInt64}",  # 80-bit extended precision in 16-byte slot; Julia has no native equivalent
-
-        # Size types
-        "size_t" => "Csize_t",
-        "ssize_t" => "Cssize_t",
-        "ptrdiff_t" => "Cptrdiff_t",
-        "intptr_t" => "Cintptr_t",
-        "uintptr_t" => "Cuintptr_t",
-
-        # Time types
-        "time_t" => "Ctime_t",
-
-        # Special types
-        "__int128" => "Int128",
-        "__uint128_t" => "UInt128",
-
-        # C11 _Complex types
-        "_Complex float" => "ComplexF32",
-        "_Complex double" => "ComplexF64",
-        "complex float" => "ComplexF32",
-        "complex double" => "ComplexF64",
-        "float _Complex" => "ComplexF32",
-        "double _Complex" => "ComplexF64",
-
-    )
-
     # Direct match
-    if haskey(type_map, c_type)
-        return type_map[c_type]
+    if haskey(_DWARF_TYPE_MAP, c_type)
+        return _DWARF_TYPE_MAP[c_type]
     end
 
     # Handle pointer types (T*)
@@ -1710,6 +1813,29 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
     return "Any"
 end
 
+# C/C++ → byte size table on x86_64 Linux. Hoisted to module scope.
+const _C_TYPE_SIZE_MAP = Dict{String,Int}(
+    "void" => 0,
+    "bool" => 1, "_Bool" => 1,
+    "char" => 1, "signed char" => 1, "unsigned char" => 1,
+    "int8_t" => 1, "uint8_t" => 1,
+    "short" => 2, "unsigned short" => 2,
+    "int16_t" => 2, "uint16_t" => 2,
+    "int" => 4, "unsigned int" => 4,
+    "int32_t" => 4, "uint32_t" => 4,
+    "long" => 8, "unsigned long" => 8,
+    "long long" => 8, "unsigned long long" => 8,
+    "int64_t" => 8, "uint64_t" => 8,
+    "float" => 4,
+    "double" => 8,
+    "long double" => 16,
+    "size_t" => 8, "ssize_t" => 8,
+    "ptrdiff_t" => 8,
+    "intptr_t" => 8, "uintptr_t" => 8,
+    "wchar_t" => 4,
+    "__int128" => 16, "__uint128_t" => 16,
+)
+
 """
 Get type size in bytes from C/C++ type name.
 """
@@ -1717,34 +1843,13 @@ function get_type_size(c_type::AbstractString)::Int
     # Strip cv-qualifiers for lookup
     stripped = replace(strip(c_type), r"\b(const|volatile|mutable)\b\s*" => "")
     stripped = strip(stripped)
-    size_map = Dict(
-        "void" => 0,
-        "bool" => 1, "_Bool" => 1,
-        "char" => 1, "signed char" => 1, "unsigned char" => 1,
-        "int8_t" => 1, "uint8_t" => 1,
-        "short" => 2, "unsigned short" => 2,
-        "int16_t" => 2, "uint16_t" => 2,
-        "int" => 4, "unsigned int" => 4,
-        "int32_t" => 4, "uint32_t" => 4,
-        "long" => 8, "unsigned long" => 8,  # x86_64
-        "long long" => 8, "unsigned long long" => 8,
-        "int64_t" => 8, "uint64_t" => 8,
-        "float" => 4,
-        "double" => 8,
-        "long double" => 16,  # x86_64 extended precision
-        "size_t" => 8, "ssize_t" => 8,  # x86_64
-        "ptrdiff_t" => 8,
-        "intptr_t" => 8, "uintptr_t" => 8,
-        "wchar_t" => 4,
-        "__int128" => 16, "__uint128_t" => 16,
-    )
 
     # Check for pointers/references (always 8 bytes on x86_64)
     if endswith(stripped, "*") || endswith(stripped, "&")
         return 8
     end
 
-    return get(size_map, stripped, 0)
+    return get(_C_TYPE_SIZE_MAP, stripped, 0)
 end
 
 """
@@ -3557,25 +3662,73 @@ function infer_return_type(demangled::String)::Dict{String,Any}
 end
 
 """
+Find the matching `)` for the first top-level `(` in `s`, scanning at angle-bracket
+depth 0 so template parameters like `std::vector<int, std::allocator<int>>` don't
+cause a premature match. Returns (open_index, close_index) byte offsets, or
+(0, 0) if no balanced pair exists at the top level.
+"""
+function _find_toplevel_paren_pair(s::AbstractString)::Tuple{Int,Int}
+    open_idx = _find_toplevel_paren(String(s))
+    open_idx == 0 && return (0, 0)
+    angle = 0
+    paren = 0
+    for i in eachindex(s)
+        i < open_idx && continue
+        c = s[i]
+        if c == '<'
+            angle += 1
+        elseif c == '>'
+            angle -= 1
+        elseif angle == 0 && c == '('
+            paren += 1
+        elseif angle == 0 && c == ')'
+            paren -= 1
+            paren == 0 && return (open_idx, i)
+        end
+    end
+    return (0, 0)
+end
+
+"""
+Split a parameter list at commas that sit at angle-bracket depth 0, so
+`std::map<int, std::vector<int>>, int` splits into two parts, not four.
+"""
+function _split_toplevel_commas(s::AbstractString)::Vector{String}
+    parts = String[]
+    depth = 0
+    start = firstindex(s)
+    for i in eachindex(s)
+        c = s[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth -= 1
+        elseif c == ',' && depth == 0
+            push!(parts, String(s[start:prevind(s, i)]))
+            start = nextind(s, i)
+        end
+    end
+    if start <= lastindex(s)
+        push!(parts, String(s[start:lastindex(s)]))
+    end
+    return parts
+end
+
+"""
 Parse parameter types from demangled signature.
 Example: "add(int, int)" -> [{"type": "int", "julia_type": "Cint"}, ...]
+Template-aware: angle brackets in nested types do not confuse the splitter.
 """
 function parse_parameters(demangled::String,
                          struct_names::Set{String}=Set{String}(),
                          enum_names::Set{String}=Set{String}())::Vector{Dict{String,Any}}
     params = Dict{String,Any}[]
 
-    # Extract parameter list from signature
-    if !contains(demangled, '(')
-        return params
-    end
+    (open_idx, close_idx) = _find_toplevel_paren_pair(demangled)
+    open_idx == 0 && return params
 
-    param_str = match(r"\((.*?)\)", demangled)
-    if isnothing(param_str)
-        return params
-    end
-
-    param_types = split(param_str.captures[1], ',')
+    inner = demangled[nextind(demangled, open_idx):prevind(demangled, close_idx)]
+    param_types = _split_toplevel_commas(inner)
 
     for (i, ptype) in enumerate(param_types)
         ptype = strip(ptype)
@@ -3605,6 +3758,50 @@ Basic type mapping - can be enhanced with type registry.
 - `struct_names`: Set of known struct/class names from DWARF
 - `enum_names`: Set of known enum names from DWARF
 """
+const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
+    "int" => "Cint",
+    "unsigned int" => "Cuint",
+    "long" => "Clong",
+    "unsigned long" => "Culong",
+    "short" => "Cshort",
+    "unsigned short" => "Cushort",
+    "char" => "UInt8",
+    "unsigned char" => "UInt8",
+    "float" => "Cfloat",
+    "double" => "Cdouble",
+    "bool" => "Bool",
+    "_Bool" => "Bool",
+    "void" => "Cvoid",
+    "char*" => "Cstring",
+    "const char*" => "Cstring",
+    "size_t" => "Csize_t",
+    "ssize_t" => "Cssize_t",
+    "ptrdiff_t" => "Cptrdiff_t",
+    "intptr_t" => "Cintptr_t",
+    "uintptr_t" => "Cuintptr_t",
+    "int8_t" => "Int8",
+    "uint8_t" => "UInt8",
+    "int16_t" => "Int16",
+    "uint16_t" => "UInt16",
+    "int32_t" => "Int32",
+    "uint32_t" => "UInt32",
+    "int64_t" => "Int64",
+    "uint64_t" => "UInt64",
+    "long long" => "Clonglong",
+    "unsigned long long" => "Culonglong",
+    # C11 _Complex types
+    "_Complex float" => "ComplexF32",
+    "_Complex double" => "ComplexF64",
+    "complex float" => "ComplexF32",
+    "complex double" => "ComplexF64",
+    "float _Complex" => "ComplexF32",
+    "double _Complex" => "ComplexF64",
+)
+
+const _CPP_INTERNAL_TYPE_BLOCKLIST = Set{String}([
+    "__va_list_tag", "__mbstate_t", "_va_list_tag", "_mbstate_t", "max_align_t",
+])
+
 function cpp_to_julia_type(cpp_type::AbstractString,
                            struct_names::Set{String}=Set{String}(),
                            enum_names::Set{String}=Set{String}())::String
@@ -3615,49 +3812,11 @@ function cpp_to_julia_type(cpp_type::AbstractString,
 
     # Clean up internal compiler types to avoid leaking them
     base_type_for_check = strip(replace(cpp_type, r"[*&\[\]\s\d]+$" => ""))
-    if base_type_for_check in ["__va_list_tag", "__mbstate_t", "_va_list_tag", "_mbstate_t", "max_align_t"]
+    if base_type_for_check in _CPP_INTERNAL_TYPE_BLOCKLIST
         cpp_type = replace(cpp_type, base_type_for_check => "void")
     end
 
-    type_map = Dict(
-        "int" => "Cint",
-        "unsigned int" => "Cuint",
-        "long" => "Clong",
-        "unsigned long" => "Culong",
-        "short" => "Cshort",
-        "unsigned short" => "Cushort",
-        "char" => "UInt8",
-        "unsigned char" => "UInt8",
-        "float" => "Cfloat",
-        "double" => "Cdouble",
-        "bool" => "Bool",
-        "_Bool" => "Bool",
-        "void" => "Cvoid",
-        "char*" => "Cstring",
-        "const char*" => "Cstring",
-        "size_t" => "Csize_t",
-        "ssize_t" => "Cssize_t",
-        "ptrdiff_t" => "Cptrdiff_t",
-        "intptr_t" => "Cintptr_t",
-        "uintptr_t" => "Cuintptr_t",
-        "int8_t" => "Int8",
-        "uint8_t" => "UInt8",
-        "int16_t" => "Int16",
-        "uint16_t" => "UInt16",
-        "int32_t" => "Int32",
-        "uint32_t" => "UInt32",
-        "int64_t" => "Int64",
-        "uint64_t" => "UInt64",
-        "long long" => "Clonglong",
-        "unsigned long long" => "Culonglong",
-        # C11 _Complex types
-        "_Complex float" => "ComplexF32",
-        "_Complex double" => "ComplexF64",
-        "complex float" => "ComplexF32",
-        "complex double" => "ComplexF64",
-        "float _Complex" => "ComplexF32",
-        "double _Complex" => "ComplexF64"
-    )
+    type_map = _CPP_TO_JULIA_TYPE_MAP
 
     # Strip _Atomic qualifier — same ABI layout as the underlying type
     cpp_type = replace(cpp_type, r"\b_Atomic\b\s*" => "")
@@ -3812,7 +3971,10 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
     end
 
     nfuncs = length(get(metadata, "functions", []))
-    nstructs = length(get(metadata, "structs", Dict()))
+    # struct_definitions also stores enums under "__enum__<name>" keys — exclude them
+    # from the type count so the diagnostic matches what was actually wrapped.
+    nstructs = count(k -> !startswith(k, "__enum__"),
+                     keys(get(metadata, "struct_definitions", Dict())))
     println("  dwarf: $(nfuncs) functions, $(nstructs) types")
     return metadata_path
 end
