@@ -3420,20 +3420,36 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # Build type registry (basic types + inferred types)
     type_registry = build_type_registry(functions)
 
-    # Gather compiler info
-    llvm_version = try
-        (out, _) = BuildBridge.execute("llvm-config", ["--version"])
-        strip(out)
-    catch
-        "unknown"
+    # Gather compiler info. The C bucket emits IR with Julia's JLL clang and links
+    # via in-process libLLVM — both are Base.libllvm_version (the JLL-clang ==
+    # libllvm_version invariant), NOT the system llvm-config/clang. Only the
+    # C++/external-fallback path uses the system toolchain. Recording system
+    # llvm-config for an in-process C build is misleading — it falsely implies a
+    # version skew (and once sent a debugging session chasing one), so report the
+    # toolchain that actually produced the IR.
+    uses_julia_llvm = config.wrap.language == :c && !config.link.fallback
+
+    llvm_version = if uses_julia_llvm
+        string(Base.libllvm_version)
+    else
+        try
+            (out, _) = BuildBridge.execute("llvm-config", ["--version"])
+            strip(out)
+        catch
+            "unknown"
+        end
     end
 
-    clang_version = try
-        compiler_cmd = config.wrap.language == :c ? "clang" : "clang++"
-        (out, _) = BuildBridge.execute(compiler_cmd, ["--version"])
-        first(split(out, '\n'))
-    catch
-        "unknown"
+    clang_version = if uses_julia_llvm
+        "clang $(Base.libllvm_version) (Julia JLL)"
+    else
+        try
+            compiler_cmd = config.wrap.language == :c ? "clang" : "clang++"
+            (out, _) = BuildBridge.execute(compiler_cmd, ["--version"])
+            first(split(out, '\n'))
+        catch
+            "unknown"
+        end
     end
 
     # Extract STL method symbols if templates are configured
