@@ -1980,6 +1980,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         if has_struct_ptr_params || has_array_ptr_params
             convenience_sig = join(["$pname::$ptype" for (pname, ptype) in zip(convenience_param_names, convenience_param_types)], ", ")
 
+            # Resolve the return type the same way the base wrapper does. For a
+            # struct-valued return, julia_return_type is the "Any" sentinel — using
+            # it as the ccall return type makes Julia treat the returned struct as a
+            # boxed object pointer and segfault. Mirror the base wrapper's safe_c_ret.
+            convenience_ret_type = julia_return_type
+            if is_struct_return
+                convenience_ret_type = occursin(r"[<>]", c_return_type) ?
+                    _sanitize_c_type_name(c_return_type) : c_return_type
+            end
+
             # Build the ccall arguments
             convenience_ccall_args = String[]
             for (i, pname) in enumerate(param_names)
@@ -2004,9 +2014,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 preserve_vars = join(array_pnames, " ")
                 convenience_func = """
                 # Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-                function $julia_name($convenience_sig)::$julia_return_type
+                function $julia_name($convenience_sig)::$convenience_ret_type
                     return GC.@preserve $preserve_vars begin
-                        ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $convenience_ccall)
+                        ccall((:$mangled, LIBRARY_PATH), $convenience_ret_type, $ccall_types, $convenience_ccall)
                     end
                 end
 
@@ -2015,8 +2025,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 # No array parameters, just struct parameters
                 convenience_func = """
                 # Convenience wrapper - accepts structs directly instead of pointers
-                function $julia_name($convenience_sig)::$julia_return_type
-                    return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $convenience_ccall)
+                function $julia_name($convenience_sig)::$convenience_ret_type
+                    return ccall((:$mangled, LIBRARY_PATH), $convenience_ret_type, $ccall_types, $convenience_ccall)
                 end
 
                 """
