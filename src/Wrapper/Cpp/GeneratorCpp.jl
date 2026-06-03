@@ -316,7 +316,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         """)
 
         for enum_key in sort(collect(enum_types))
-            enum_name = replace(enum_key, "__enum__" => "")
+            # Sanitize so the emitted `@enum` name matches every field/param
+            # reference (those already route through _sanitize_cpp_type_name) and
+            # never collides with a Base binding like `Type`.
+            enum_name = _sanitize_cpp_type_name(replace(enum_key, "__enum__" => ""))
             enum_info = dwarf_structs[enum_key]
 
             # Get enum metadata
@@ -379,10 +382,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     if !isempty(header_enums)
         added_header_enums = 0
         for (enum_name, members) in header_enums
-            # Skip if already defined from DWARF
+            # Skip if already defined from DWARF (match on the raw name)
             if enum_name in enum_names
                 continue
             end
+            # Sanitized form used for emission so it can't shadow a Base binding.
+            enum_name_jl = _sanitize_cpp_type_name(string(enum_name))
 
             if !isempty(members)
                 if added_header_enums == 0
@@ -408,7 +413,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                 push!(enum_chunks, """
                 # C++ enum: $enum_name (from header - not in DWARF)
-                @enum $enum_name::$underlying begin
+                @enum $enum_name_jl::$underlying begin
                 """)
 
                 seen_values = Set{Any}()
@@ -424,7 +429,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     push!(seen_names, member_name)
 
                     if value in seen_values
-                        push!(duplicate_defs, "const $member_name = $enum_name($value)")
+                        push!(duplicate_defs, "const $member_name = $enum_name_jl($value)")
                     else
                         push!(seen_values, value)
                         push!(enum_chunks, "    $member_name = $value\n")
@@ -2819,9 +2824,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Include enum types, enum values, struct types, and functions
     all_exports = copy(exports)
 
-    # Add enum types
+    # Add enum types (sanitized to match the emitted `@enum` identifier)
     for enum_key in enum_types
-        enum_name = replace(enum_key, "__enum__" => "")
+        enum_name = _sanitize_cpp_type_name(replace(enum_key, "__enum__" => ""))
         push!(all_exports, enum_name)
 
         # Add enum constants

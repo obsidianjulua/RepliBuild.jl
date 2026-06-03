@@ -171,14 +171,41 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     end
 
     # 2. External Dispatch Declarations (Virtual Methods)
+    # Each callee must be declared exactly once, with the op type its caller
+    # needs. Two later passes declare callees:
+    #   • the vtable vmethod-IR pass emits `llvm.call @X`, needing `llvm.func @X`
+    #     (these symbols — `gen_pre` below — are the ones THIS loop must declare);
+    #   • the function-thunk pass emits `func.func private @X` + `jlcs.try_call`
+    #     (these — `fthunk_decls` — own their own declaration).
+    # The two sets are mutually exclusive. Declaring an `fthunk_decls` symbol here
+    # too produces a redefinition with a conflicting arity; so skip those. (The
+    # vmethod-IR pass and function-thunk filter below replicate this same gating.)
+    gen_pre = Set{String}()
+    for (class_name, class_info) in vtinfo.classes
+        (class_info.size == 0 || isempty(class_info.members)) && continue
+        for method in class_info.virtual_methods
+            get(vtinfo.method_addresses, method.mangled_name, UInt64(0)) != 0 &&
+                push!(gen_pre, method.mangled_name)
+        end
+    end
+    fthunk_decls = Set{String}()
+    for f in get(metadata, "functions", [])
+        m = get(f, "mangled", "")
+        isempty(m) && continue
+        m in gen_pre && continue
+        needed_symbols !== nothing && !(m in needed_symbols) && continue
+        get(f, "is_vararg", false) && continue
+        push!(fthunk_decls, m)
+    end
     println(io, "  // External Dispatch Declarations (Virtual Methods)")
     for (class_name, class_info) in vtinfo.classes
         for method in class_info.virtual_methods
              method_addr = get(vtinfo.method_addresses, method.mangled_name, UInt64(0))
              if method_addr != 0
                  dispatch_name = "$(method.mangled_name)"
+                 dispatch_name in fthunk_decls && continue
                  (ret_type, arg_types) = get_llvm_signature(method)
-                 
+
                  decl_ret = ret_type == "" ? "!llvm.void" : ret_type
                  println(io, "  llvm.func @$(dispatch_name)($(arg_types)) -> $(decl_ret)")
              end
@@ -239,6 +266,21 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     println(io, "}")
 
     ir = String(take!(io))
+
+    # Sanitize dangling struct-alias references. Member rewriting in
+    # generate_type_info_ir emits `!Struct_<name>` for any named-struct field,
+    # but opaque/incomplete structs (e.g. glibc's `__off_t` pulled in via FILE*)
+    # never get an alias definition (StructGen emits them as `opaque>` and skips
+    # the alias). A reference with no definition makes MLIR reject the whole
+    # module ("undefined symbol alias id"). Mirror StructGen's fallback: any
+    # `!Struct_*` that isn't actually defined here degrades to `!llvm.ptr`.
+    defined_aliases = Set{String}()
+    for m in eachmatch(r"(!Struct_[A-Za-z0-9_]+)\s*=", ir)
+        push!(defined_aliases, m.captures[1])
+    end
+    ir = replace(ir, r"!Struct_[A-Za-z0-9_]+" =>
+                     s -> s in defined_aliases ? s : "!llvm.ptr")
+
     # println("DEBUG: Generated IR:\n$ir")
     return ir
 end

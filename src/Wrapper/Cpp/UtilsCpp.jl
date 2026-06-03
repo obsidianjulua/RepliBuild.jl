@@ -23,6 +23,16 @@ function _sanitize_cpp_type_name(name::AbstractString)::String
     if s in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "true", "false", "abstract", "type", "mutable", "primitive")
         s = "c_" * s
     end
+    # Capitalized Base/Core bindings are not keywords, so they survive the check
+    # above, but a C++ type emitted under one of these bare names (e.g. a nested
+    # `enum Type`, a `Ref`/`Ptr`/`Vector` class) shadows the builtin and breaks
+    # every `::Type{…}`/`Ptr{…}` annotation in the generated module. Rename them
+    # the same way so the emitted identifier never collides with Base.
+    if s in ("Type", "Ref", "Ptr", "Vector", "Array", "Any", "Val", "Module",
+             "Function", "Tuple", "Union", "NTuple", "Nothing", "Some", "Pair",
+             "Dict", "Set", "Enum", "String", "Symbol", "Expr", "Base", "Core", "Main")
+        s = "c_" * s
+    end
     return s
 end
 
