@@ -2,6 +2,45 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v2.5.8
+
+ABI-correctness release for the C path. Headline: structs with struct-typed members now resolve to named Julia fields instead of opaque byte blobs, closing a silent by-value miscompile. Plus C-wrapper ergonomics, a library-free ABI trace test, and verified compatibility with system LLVM/MLIR 22.1.6.
+
+### Nested-Struct Member Resolution (C path)
+
+The C generator emitted an opaque `_data::NTuple{N,UInt8}` byte blob for **any** struct with a struct-typed member — even when every member was itself a resolved type. For a struct ≤16 bytes whose members are floats, that byte image misclassifies under the x86-64 SysV ABI: the real struct travels in SSE registers (XMM), the byte blob claims INTEGER registers. Consequence when such a struct crossed `ccall` **by value**: returns came back as garbage (register noise, e.g. `1e-13`), and arguments fed the callee garbage — which in practice aborted the process (e.g. Box2D's own `b2IsValidAABB` assert → SIGILL). On box2d3 this was 58 of 664 symbols (the geometry/query cluster: `b2Body_GetTransform`, `b2Body_ComputeAABB`, `b2Body_GetMassData`, `b2World_OverlapAABB`, the `b2Compute*`/`b2Collide*` families).
+
+`GeneratorC.jl` now runs an **exact-layout proof** before falling back to a blob:
+
+- Every member is typed with a Julia field of exactly known `(size, alignment)` — primitives, pointers, enums, `NTuple{N,·}`, and structs already emitted with verified named fields (topological emission order guarantees member-before-container).
+- The emitter then **proves** Julia's natural layout (explicit align-1 `_pad_N` fillers across DWARF offset gaps + natural field alignment) reproduces every DWARF member offset *and* the DWARF total `byte_size`.
+- Proof passes → named fields, and the struct is registered as eligible to be an inline member of later structs. Any doubt → keep the opaque blob.
+
+**Why:** the root cause was a member-resolution bailout, not the ABI classifier — `b2Vec2`/`b2Rot` resolved fine, the generator just refused to compose them. The proof is the safety boundary: **exact or opaque, never approximate**. Packed structs (unaligned members) and bitfield structs still blob correctly. On box2d3 the blast radius drops from 58 to **0**; all 99 previously-opaque structs resolve to named fields, including the 96-byte `b2WorldDef` with correct padding.
+
+### ABI Safety Trap for Residual Float Blobs
+
+A ≤16-byte float-bearing struct that *stays* opaque (genuinely unreproducible layout — packed floats, bitfields, unresolvable member types) and would cross `ccall` by value now generates a loud `error()` stub instead of a silently-corrupting call. MEMORY-class returns (>16 bytes, or unaligned) are unaffected — they still route through the explicit-sret branch, which is byte-exact even for a blob. Register-class float blobs are the only unfixable case, and they now fail closed.
+
+### C Wrapper Ergonomics
+
+- **`Cfloat`/`Cdouble` parameters loosened to `::Real`** (mirrors the existing `::Integer` widening), with a checked convert at the call site. `step(w, 1/60, 4)` and integer-literal float args now work instead of throwing `MethodError` on the strict `Cfloat` slot.
+- **`with(s; field=value, …)` helper** emitted in every generated C module — the idiomatic way to customize an immutable `*Def`-style struct (`with(DefaultWorldDef(); gravity = Vec2(0, -10))`). Not exported; call as `Mod.with(...)`.
+- **Blob accessor GC-preserve fix** — `getproperty` on byte-blob structs now roots the `Ref(getfield(x, :_data))` temporary that actually holds the storage, instead of preserving the immutable value `x` (a no-op). Closes a latent use-after-free under GC pressure.
+- **Docstrings** for struct-returning functions show the resolved struct name instead of the `Any` metadata sentinel.
+
+### Library-Free ABI Trace Test
+
+`test/test_abi_nested.jl` + `test/abi_nested_test/` — a self-contained C fixture (nested-float, nested-int, packed, and array-of-struct members) that traces compile → DWARF → wrap → live by-value crossings in a subprocess, so an ABI break can never take down the test session. Asserts named-field resolution, exact round-trips through registers, MEMORY-class controls, and that packed structs refuse by-value crossings loudly. Wired into `devtests.jl` as section 8. This is the structural-proof gate: the bug was reproduced library-free before any generator change.
+
+### LLVM / MLIR 22.1.6 Compatibility
+
+System LLVM/MLIR moved 22.1.5 → 22.1.6 (a patch release). The JLCS dialect (`src/mlir`) was clean-rebuilt against it with **zero source changes** — TableGen and all six translation units compile unchanged, and the binary links the same `libMLIR.so.22.1` SONAME. Verified functionally: `test_mlir_templates.jl` 50/50 (CStructs, sret, RAII ordering, virtual dispatch, TypeInfoOp), `test_jlcs_invariants.jl` 6 pass + 2 expected `@test_broken` (the known missing op verifiers). The C-bucket text-IR cleaning shims in `Compiler.jl` are keyed on the LLVM *major* version (e.g. `ptrtoaddr → ptrtoint`), so a patch bump introduces no new opcodes and needs no new shim.
+
+### Upgrade Notes
+
+No API breaks. Generated C wrappers change shape for libraries with nested-member structs: affected types now expose **named fields** instead of a single `_data::NTuple`, and their accessors move from `getproperty` byte-extraction to real struct fields. Code that reached into `x._data` directly (never the intended interface) must switch to the named fields; code using the documented field/accessor names is unaffected and gains correctness. If you updated system MLIR, rebuild the dialect: `cd src/mlir && ./build.sh`.
+
 ## v2.5.7
 
 Stabilization release on top of the v2.5.6 DAG diff work. Focus: cross-LLVM compatibility, sret correctness on the C path, dialect op fixes, and wiring of orphaned test suites into CI.

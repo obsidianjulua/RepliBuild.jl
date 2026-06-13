@@ -166,3 +166,10 @@ include(joinpath(TEST_DIR, "test_jlcs_invariants.jl"))
 # stage — the property the in-process path must not silently break.
 
 include(joinpath(TEST_DIR, "test_c_inprocess.jl"))
+
+# ── 8. Nested-struct ABI resolution (pure ccall path) ────────────────────────
+# Library-free trace: structs with struct-typed members must come out with
+# verified named fields (SysV register classes preserved by value), and
+# unreproducible layouts (packed floats) must refuse by-value crossings loudly.
+
+include(joinpath(TEST_DIR, "test_abi_nested.jl"))

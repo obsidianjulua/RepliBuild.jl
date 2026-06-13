@@ -1,3 +1,137 @@
+# Julia-side (size, alignment) of primitive field types, used to reproduce C
+# struct layouts exactly. Julia lays out isbits struct fields with natural
+# alignment — identical to the C rules for these types on x86_64 SysV.
+const _C_PRIM_FIELD_LAYOUT = Dict{String,Tuple{Int,Int}}(
+    "Cchar" => (1, 1), "Cuchar" => (1, 1), "Int8" => (1, 1), "UInt8" => (1, 1), "Bool" => (1, 1),
+    "Cshort" => (2, 2), "Cushort" => (2, 2), "Int16" => (2, 2), "UInt16" => (2, 2),
+    "Cint" => (4, 4), "Cuint" => (4, 4), "Int32" => (4, 4), "UInt32" => (4, 4),
+    "Cfloat" => (4, 4), "Float32" => (4, 4), "Cwchar_t" => (4, 4),
+    "Clong" => (8, 8), "Culong" => (8, 8), "Clonglong" => (8, 8), "Culonglong" => (8, 8),
+    "Int64" => (8, 8), "UInt64" => (8, 8), "Cdouble" => (8, 8), "Float64" => (8, 8),
+    "Csize_t" => (8, 8), "Cssize_t" => (8, 8), "Cptrdiff_t" => (8, 8),
+    "Cintptr_t" => (8, 8), "Cuintptr_t" => (8, 8), "Cstring" => (8, 8),
+)
+
+_align_up(x::Int, a::Int) = a <= 1 ? x : (x + a - 1) & ~(a - 1)
+
+# Julia field type + (size, align) for one struct member, or `nothing` when the
+# member cannot be typed with exactly known layout. Struct-typed members are
+# only accepted once the member's own struct has been emitted with verified
+# named fields (`resolved_layouts`, topological emission order guarantees the
+# member type is processed first).
+function _field_layout(jt::String, ct::String,
+                       resolved_layouts::Dict{String,Tuple{Int,Int}},
+                       enum_layouts::Dict{String,Tuple{Int,Int}})
+    # Pointers (incl. function pointers): 8/8 regardless of pointee
+    if endswith(ct, "*") || endswith(ct, "&")
+        return (startswith(jt, "Ptr{") || jt == "Cstring") ? (jt, 8, 8) : ("Ptr{Cvoid}", 8, 8)
+    end
+    startswith(jt, "Ptr{") && return (jt, 8, 8)
+    if haskey(_C_PRIM_FIELD_LAYOUT, jt)
+        sz, al = _C_PRIM_FIELD_LAYOUT[jt]
+        return (jt, sz, al)
+    end
+    nt = match(r"^NTuple\{(\d+),\s*(.+)\}$", jt)
+    if nt !== nothing
+        n = parse(Int, nt.captures[1])
+        elem = String(strip(nt.captures[2]))
+        if haskey(_C_PRIM_FIELD_LAYOUT, elem)
+            esz, eal = _C_PRIM_FIELD_LAYOUT[elem]
+            return (jt, n * esz, eal)
+        end
+        es = _sanitize_c_type_name(elem)
+        if haskey(resolved_layouts, es)
+            esz, eal = resolved_layouts[es]
+            return ("NTuple{$n, $es}", n * esz, eal)
+        end
+        return nothing
+    end
+    base = _sanitize_c_type_name(jt == "Any" ? ct : jt)
+    if haskey(enum_layouts, base)
+        esz, eal = enum_layouts[base]
+        return (base, esz, eal)
+    end
+    if haskey(resolved_layouts, base)
+        ssz, sal = resolved_layouts[base]
+        return (base, ssz, sal)
+    end
+    return nothing
+end
+
+"""
+    _resolve_exact_layout(members, byte_size, resolved_layouts, enum_layouts)
+
+Type every struct member with a Julia field type of exactly known size and
+alignment, then prove that the emitter's layout (explicit align-1 `_pad_N`
+fields filling DWARF offset gaps + Julia natural field alignment) reproduces
+every DWARF member offset and the DWARF total size. On success returns
+`(members′, max_align)` with `julia_type`/`size` rewritten; on any doubt
+returns `nothing` and the caller keeps the opaque byte blob — exact or
+opaque, never approximate.
+"""
+function _resolve_exact_layout(members::Vector, byte_size::Int,
+                               resolved_layouts::Dict{String,Tuple{Int,Int}},
+                               enum_layouts::Dict{String,Tuple{Int,Int}})
+    byte_size <= 0 && return nothing
+    isempty(members) && return nothing
+    plans = Tuple{Any,String,Int,Int,Int}[]   # (member, ftype, fsize, falign, offset)
+    for m in members
+        haskey(m, "bit_size") && return nothing   # bitfields use the accessor path
+        off_raw = get(m, "offset", nothing)
+        off_raw === nothing && return nothing
+        off = _parse_int_or_hex(off_raw)
+        jt = String(get(m, "julia_type", "Any"))
+        ct = String(strip(replace(String(get(m, "c_type", "")), r"\bconst\b" => "")))
+        lay = _field_layout(jt, ct, resolved_layouts, enum_layouts)
+        lay === nothing && return nothing
+        push!(plans, (m, lay[1], lay[2], lay[3], off))
+    end
+    sort!(plans, by = p -> p[5])
+    cur = 0
+    maxal = 1
+    for (_, _, fsize, falign, off) in plans
+        off < cur && return nothing               # overlapping members (union-like)
+        cur = max(cur, off)                       # explicit pad bytes (align 1)
+        _align_up(cur, falign) == off || return nothing
+        cur = off + fsize
+        maxal = max(maxal, falign)
+    end
+    cur > byte_size && return nothing
+    # Trailing pad bytes are align-1; Julia then rounds the struct size to maxal,
+    # which must land exactly on the DWARF size.
+    _align_up(byte_size, maxal) == byte_size || return nothing
+    members′ = Vector{Any}(undef, length(plans))
+    for (i, (m, ftype, fsize, _, _)) in enumerate(plans)
+        m2 = copy(m)
+        m2["julia_type"] = ftype
+        m2["size"] = fsize
+        members′[i] = m2
+    end
+    return (members′, maxal)
+end
+
+# Does this struct (transitively) contain float/double members? Used to judge
+# whether an opaque ≤16-byte blob is in the SysV SSE-class danger window.
+# Unknown types count as risky.
+function _struct_has_float_member(struct_name::String, dwarf_structs, seen::Set{String}=Set{String}())
+    struct_name in seen && return false
+    push!(seen, struct_name)
+    info = get(dwarf_structs, struct_name, nothing)
+    info === nothing && return true
+    for m in get(info, "members", [])
+        ct = String(strip(get(m, "c_type", "")))
+        endswith(ct, "*") && continue
+        endswith(ct, "&") && continue
+        occursin("float", ct) && return true
+        occursin("double", ct) && return true
+        base = String(strip(replace(replace(ct, r"\[\d*\]" => ""), r"\bconst\b" => "")))
+        if haskey(dwarf_structs, base) && _struct_has_float_member(base, dwarf_structs, seen)
+            return true
+        end
+    end
+    return false
+end
+
 function generate_introspective_module_c(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
@@ -33,6 +167,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
     # Flush C stdout so printf output appears immediately in the Julia REPL
     @inline _flush_cstdout() = ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
+
+    \"\"\"
+        with(s; field=value, ...) -> typeof(s)
+
+    Copy a generated immutable struct with selected fields replaced — the
+    idiomatic way to customize C `*Def`-style structs before passing them in:
+
+        def = with(DefaultDef(); gravity = Vec2(0, -10))
+
+    Padding fields are carried over untouched. Not exported; call as
+    `$module_name.with(...)`.
+    \"\"\"
+    function with(s::T; kw...) where {T}
+        isempty(kw) && return s
+        vals = Any[getfield(s, f) for f in fieldnames(T)]
+        for (k, v) in kw
+            i = findfirst(==(k), fieldnames(T))
+            i === nothing && throw(ArgumentError(string(T) * " has no field " * string(k)))
+            ft = fieldtype(T, i)
+            vals[i] = v isa ft ? v : convert(ft, v)
+        end
+        return T(vals...)
+    end
 
     """
 
@@ -88,6 +245,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     functions = metadata["functions"]
     dwarf_structs = get(metadata, "struct_definitions", Dict())
 
+    # Layout registries shared between struct emission and function emission:
+    # - resolved_layouts: julia struct name => (byte_size, alignment) for every
+    #   struct emitted with VERIFIED named fields (eligible as inline members
+    #   and ABI-exact for by-value crossings)
+    # - blob_struct_names/sizes/float_risk: structs that stayed opaque byte
+    #   blobs; ≤16B float-bearing blobs may not cross the ABI by value
+    resolved_layouts = Dict{String,Tuple{Int,Int}}()
+    blob_struct_names = Set{String}()
+    blob_struct_sizes = Dict{String,Int}()
+    blob_float_risk = Dict{String,Bool}()
+
     # Struct definitions
     # Collect all struct names from DWARF (excluding enums which have __enum__ prefix)
     struct_types = Set{String}()
@@ -111,6 +279,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     for enum_key in enum_types
         enum_name = replace(enum_key, "__enum__" => "")
         push!(enum_names, enum_name)
+    end
+
+    # Underlying-integer layout of each DWARF enum, for use as struct members
+    enum_layouts = Dict{String,Tuple{Int,Int}}()
+    for enum_key in enum_types
+        enum_name = replace(enum_key, "__enum__" => "")
+        ju = String(get(dwarf_structs[enum_key], "julia_type", "Int32"))
+        (ju == "Any" || ju == "unknown") && (ju = "Int32")
+        if haskey(_C_PRIM_FIELD_LAYOUT, ju)
+            enum_layouts[_sanitize_c_type_name(enum_name)] = _C_PRIM_FIELD_LAYOUT[ju]
+        end
     end
 
     if !isempty(enum_types)
@@ -596,7 +775,6 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 end
             end
         end
-        blob_struct_names = Set{String}()  # Track which structs became byte-blobs
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
@@ -743,6 +921,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                         byte_size = _parse_dwarf_size(struct_info)
                         if byte_size == 0; byte_size = 8; end
 
+                        push!(blob_struct_names, julia_struct_name)
+                        blob_struct_sizes[julia_struct_name] = byte_size
+                        blob_float_risk[julia_struct_name] = _struct_has_float_member(struct_name, dwarf_structs)
                         push!(struct_chunks, """
                         # C struct with bitfields: $struct_name (size $byte_size bytes)
                         struct $julia_struct_name
@@ -871,39 +1052,28 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                         continue
                     end
 
-                    # Check if any member has unresolvable size (template types with no DWARF size info).
-                    # When DWARF byte_size is known but member sizes aren't, use a byte blob to ensure
-                    # the Julia struct has the correct total size for ABI safety.
-                    _known_c_primitives = Set([
-                        "int", "unsigned int", "int32_t", "uint32_t",
-                        "long", "unsigned long", "long long", "unsigned long long", "int64_t", "uint64_t",
-                        "short", "unsigned short", "int16_t", "uint16_t",
-                        "char", "unsigned char", "signed char", "int8_t", "uint8_t",
-                        "float", "double", "long double", "bool", "_Bool",
-                        "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
-                        "wchar_t",
-                    ])
-                    has_unresolvable = false
-                    for m in members
-                        if get(m, "size", 0) == 0
-                            c_type_raw = strip(replace(get(m, "c_type", ""), r"\bconst\b" => ""))
-                            c_type_raw = strip(c_type_raw)
-                            if endswith(c_type_raw, "*") || endswith(c_type_raw, "&")
-                                continue
-                            end
-                            if c_type_raw in _known_c_primitives
-                                continue
-                            end
-                            has_unresolvable = true
-                            break
-                        end
+                    # Exact member-layout resolution: type every member with a
+                    # Julia field type of known size+alignment — primitives,
+                    # pointers, enums, NTuple{N,·}, and structs already emitted
+                    # with verified named fields — then prove Julia's natural
+                    # layout reproduces every DWARF offset and the total size.
+                    # Anything unprovable keeps the opaque byte blob: exact or
+                    # opaque, never approximate.
+                    byte_size = _parse_dwarf_size(struct_info)
+                    layout_verified = false
+                    struct_max_align = 1
+                    exact_layout = _resolve_exact_layout(members, byte_size, resolved_layouts, enum_layouts)
+                    if exact_layout !== nothing
+                        members = exact_layout[1]
+                        struct_max_align = exact_layout[2]
+                        layout_verified = true
                     end
 
-                    byte_size = _parse_dwarf_size(struct_info)
-
-                    if has_unresolvable && byte_size > 0
+                    if !layout_verified && byte_size > 0
                         member_count = length(members)
                         push!(blob_struct_names, julia_struct_name)
+                        blob_struct_sizes[julia_struct_name] = byte_size
+                        blob_float_risk[julia_struct_name] = _struct_has_float_member(struct_name, dwarf_structs)
                         push!(struct_chunks, """
                         # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
                         struct $julia_struct_name
@@ -959,17 +1129,22 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                             available_size = next_offset - m_offset
 
                             # Pointer types
+                            # (the Ref temporary is the GC root that must be
+                            # preserved — preserving `x`, an immutable value,
+                            # would not keep the box alive)
                             if endswith(m_c_type, "*")
                                 push!(_accessor_branches, """
                                     if s === :$m_name
-                                        return GC.@preserve x unsafe_load(Ptr{Ptr{Cvoid}}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{Ptr{Cvoid}}(pointer_from_objref(r) + $m_offset))
                                     end""")
                             # Primitive types we can unsafe_load directly
                             elseif haskey(_loadable_primitives, m_julia_type)
                                 jt, _ = _loadable_primitives[m_julia_type]
                                 push!(_accessor_branches, """
                                     if s === :$m_name
-                                        return GC.@preserve x unsafe_load(Ptr{$jt}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{$jt}(pointer_from_objref(r) + $m_offset))
                                     end""")
                             # Nested struct types — extract sub-blob
                             else
@@ -1002,13 +1177,15 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                                 if actual_size == nested_bs
                                                     push!(_accessor_branches, """
                                     if s === :$m_name
-                                        bytes = GC.@preserve x ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(Ref(x._data)) + $m_offset + i - 1)), $nested_bs)
+                                        r = Ref(getfield(x, :_data))
+                                        bytes = GC.@preserve r ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(r) + $m_offset + i - 1)), $nested_bs)
                                         return $(m_sanitized)(bytes)
                                     end""")
                                                 else
                                                     push!(_accessor_branches, """
                                     if s === :$m_name
-                                        raw = GC.@preserve x ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(Ref(x._data)) + $m_offset + i - 1)), $actual_size)
+                                        r = Ref(getfield(x, :_data))
+                                        raw = GC.@preserve r ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(r) + $m_offset + i - 1)), $actual_size)
                                         padded = ntuple(i -> i <= $actual_size ? raw[i] : 0x00, $nested_bs)
                                         return $(m_sanitized)(padded)
                                     end""")
@@ -1017,7 +1194,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                                 # Target is a normal typed struct — unsafe_load directly
                                                 push!(_accessor_branches, """
                                     if s === :$m_name
-                                        return GC.@preserve x unsafe_load(Ptr{$m_sanitized}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{$m_sanitized}(pointer_from_objref(r) + $m_offset))
                                     end""")
                                             end
                                         end
@@ -1043,9 +1221,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     # Packed struct detection: DWARF byte_size < Julia aligned size
                     # Julia structs always use natural alignment, so packed C structs
                     # must use a byte blob to maintain correct ABI layout.
-                    julia_aligned_size = get_julia_aligned_size(members)
-                    if byte_size > 0 && byte_size < julia_aligned_size
+                    # (Skipped when the exact-layout proof already succeeded — the
+                    # proof subsumes this size heuristic and its alignment guesses
+                    # mis-flag verified nested-struct members.)
+                    julia_aligned_size = layout_verified ? byte_size : get_julia_aligned_size(members)
+                    if !layout_verified && byte_size > 0 && byte_size < julia_aligned_size
                         push!(blob_struct_names, julia_struct_name)
+                        blob_struct_sizes[julia_struct_name] = byte_size
+                        blob_float_risk[julia_struct_name] = _struct_has_float_member(struct_name, dwarf_structs)
                         push!(struct_chunks, """
                         # C packed struct: $struct_name ($(length(members)) members, $byte_size bytes packed)
                         struct $julia_struct_name
@@ -1070,7 +1253,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                             m_julia_type = get(m, "julia_type", "")
                             push!(_packed_branches, """
                                     if s === :$(make_c_identifier(m_name))
-                                        return GC.@preserve x unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(Ref(x._data)) + $m_offset))
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(r) + $m_offset))
                                     end""")
                         end
                         if !isempty(_packed_branches)
@@ -1173,6 +1357,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     end
 
                     """)
+
+                    # Verified named-field structs become eligible as inline
+                    # members of later structs (topological emission order) and
+                    # are ABI-exact for by-value crossings.
+                    if layout_verified
+                        resolved_layouts[julia_struct_name] = (byte_size, struct_max_align)
+                    end
                 else
                     # Struct found but no members (empty struct or incomplete info)
                     # Use DWARF byte_size if available for correct ABI layout
@@ -1401,6 +1592,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             if actual_c_type in ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort", "Clonglong", "Culonglong", "Csize_t", "Cssize_t")
                 push!(julia_param_types, "Integer")
                 push!(needs_conversion, true)
+            elseif actual_c_type in ("Cfloat", "Cdouble")
+                # Same ergonomics as the integer path: accept any Real
+                # (1/60 is Float64, literals are often Int) and convert.
+                push!(julia_param_types, "Real")
+                push!(needs_conversion, true)
             elseif startswith(actual_c_type, "Ptr{")
                 # Relax pointer types to Any to allow Managed wrappers via Base.unsafe_convert
                 push!(julia_param_types, "Any")
@@ -1553,10 +1749,19 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 end
             end
 
-            # Build the docstring
+            # Build the docstring. Struct returns carry julia_type "Any" in the
+            # metadata even though codegen resolves the concrete struct — show
+            # the resolved name, not the sentinel.
+            doc_ret = String(return_type["julia_type"])
+            if doc_ret == "Any"
+                _doc_rct = String(strip(replace(String(get(return_type, "c_type", "")), r"\bconst\b" => "")))
+                if !isempty(_doc_rct) && (_doc_rct in struct_types || haskey(dwarf_structs, _doc_rct))
+                    doc_ret = _sanitize_c_type_name(_doc_rct)
+                end
+            end
             doc_parts = """
             \"\"\"
-                $julia_name($param_sig) -> $(return_type["julia_type"])
+                $julia_name($param_sig) -> $doc_ret
 
             Wrapper for `$demangled`
 
@@ -1564,7 +1769,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             $(join(arg_docs, "\n"))
 
             # Returns
-            - `$(return_type["julia_type"])`"""
+            - `$doc_ret`"""
 
             # Add callback documentation if any
             if !isempty(callback_docs)
@@ -1593,6 +1798,47 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # C path — Julia's internal LLVM handles the C ABI natively.
         c_safe = is_c_lto_safe(func, dwarf_structs)
 
+        # SysV register-class guard: an opaque byte-blob struct ≤16 bytes with
+        # float members has unknowable register classes from the byte image
+        # (the real struct travels in SSE eightbytes, NTuple{N,UInt8} claims
+        # INTEGER). A by-value crossing would silently read/write the wrong
+        # registers — refuse loudly instead. Pointer crossings and >16-byte
+        # blobs (MEMORY class on both views) remain fine.
+        blob_abi_offenders = String[]
+        let _rjt = String(get(return_type, "julia_type", "Any")),
+            _rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
+            _rname = _rjt == "Any" ? _sanitize_c_type_name(_rct) : _rjt
+            if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16 &&
+               get(blob_float_risk, _rname, true)
+                # A ≤16B struct with an unaligned member is MEMORY class — BRANCH 0
+                # returns it through an explicit sret buffer, which is exact even
+                # for a blob. Only register-class (aligned) returns are unfixable.
+                _runaligned = false
+                _rinfo = get(dwarf_structs, _rct, nothing)
+                if _rinfo !== nothing
+                    for _m in get(_rinfo, "members", [])
+                        haskey(_m, "bit_size") && continue
+                        _msz = get(_m, "size", 0)
+                        _msz <= 0 && continue
+                        _mal = _msz > 8 ? 8 : _msz
+                        if _parse_int_or_hex(get(_m, "offset", "0")) % _mal != 0
+                            _runaligned = true
+                            break
+                        end
+                    end
+                end
+                if !_runaligned
+                    push!(blob_abi_offenders, "returns `$_rname` by value")
+                end
+            end
+        end
+        for _pt in param_types
+            if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
+               get(blob_float_risk, _pt, true)
+                push!(blob_abi_offenders, "takes `$_pt` by value")
+            end
+        end
+
         # =========================================================
         # BRANCH 0: MEMORY-CLASS RETURN — explicit-sret ccall
         # =========================================================
@@ -1607,7 +1853,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # Bitfield-only structs and aligned aggregates ≤ 16 bytes are
         # INTEGER class (returned in registers) and fall through to
         # BRANCH 2's normal ccall.
-        if !c_safe
+        if !c_safe && isempty(blob_abi_offenders)
             sret_c_ret = get(return_type, "c_type", "void")
             cleaned_c_ret = String(strip(replace(sret_c_ret, r"\bconst\b" => "")))
             ret_struct_info = get(dwarf_structs, cleaned_c_ret, nothing)
@@ -1782,7 +2028,25 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
         is_unknown_return = julia_return_type == "_UnsafeUnknown"
 
-        if has_unknown_param || is_unknown_return
+        if !isempty(blob_abi_offenders)
+            offender_list = join(blob_abi_offenders, "; ")
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+                error(\"\"\"
+                ABI Safety Trap: cannot call '$julia_name' through ccall.
+                This function crosses an opaque byte-blob struct by value inside
+                the SysV register window (≤16 bytes, float-bearing): $offender_list.
+                A byte blob cannot reproduce the struct's SSE register classes, so
+                the call would silently corrupt data. The struct is opaque because
+                its layout could not be reproduced exactly (packed layout, bitfields,
+                or unresolvable member types). Use a pointer-taking variant of this
+                C function, or make the struct's members resolvable.
+                \"\"\")
+            end
+
+            """
+        elseif has_unknown_param || is_unknown_return
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
