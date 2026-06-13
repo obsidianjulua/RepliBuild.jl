@@ -173,3 +173,9 @@ include(joinpath(TEST_DIR, "test_c_inprocess.jl"))
 # unreproducible layouts (packed floats) must refuse by-value crossings loudly.
 
 include(joinpath(TEST_DIR, "test_abi_nested.jl"))
+
+# ── 9. Per-file IR cache invalidation on compile-config change ────────────────
+# A compile-flag change must invalidate the per-file IR cache without a manual
+# `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.
+
+include(joinpath(TEST_DIR, "test_cache_invalidation.jl"))

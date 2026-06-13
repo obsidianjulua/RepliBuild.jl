@@ -39,15 +39,79 @@ export compile_to_ir, link_optimize_ir, create_library, create_executable, compi
 # =============================================================================
 
 """
-Check if source file needs recompilation (based on mtime).
+Fingerprint of everything that affects a file's IR codegen EXCEPT its own source
+content (tracked per-file by mtime): compile flags, defines, include-dir paths,
+the in-process compiler identity, and the target triple. Threaded into
+`needs_recompile` so a change to any of these invalidates the per-file IR cache.
+
+Without it the cache key is mtime-only: editing `[compile].flags` (e.g. adding
+`-fvisibility=hidden`) leaves every source mtime untouched, so the stale IR —
+built with the *old* flags — is silently reused. That is a correctness bug, not
+just a staleness one: the resulting `.so` looks fine but was compiled wrong.
+
+Excludes individual source content on purpose, so editing one `.cpp` still
+recompiles only that file; a flag/define/include change busts the whole set
+(correct — they affect every translation unit).
 """
-function needs_recompile(source_file::String, ir_file::String, cache_enabled::Bool)::Bool
+function compute_compile_fingerprint(config::RepliBuildConfig)::String
+    h = hash("replibuild-compile-fingerprint-v1")
+    for f in get_compile_flags(config)
+        h = hash(f, h)
+    end
+    for (k, v) in sort(collect(config.compile.defines))
+        h = hash(k, h)
+        h = hash(v, h)
+    end
+    for d in get_include_dirs(config)
+        h = hash(d, h)   # -I path affects header resolution, independent of mtime
+    end
+    # Compiler identity: the C path emits via the JLL clang pinned to
+    # Base.libllvm_version, so a Julia/LLVM bump must invalidate. Target triple
+    # changes codegen too.
+    h = hash(string(Base.libllvm_version), h)
+    h = hash(_detect_target_triple(), h)
+    return string(h, base=16)
+end
+
+_compile_key_path(ir_file::String)::String = ir_file * ".key"
+
+"""Record the compile fingerprint that produced `ir_file` (sidecar next to it)."""
+function write_compile_key(ir_file::String, fingerprint::String)
+    isempty(fingerprint) && return
+    try
+        write(_compile_key_path(ir_file), fingerprint)
+    catch
+        # A failed key write just means the next build recompiles this file —
+        # safe (never serves stale IR), so don't fail the build over it.
+    end
+end
+
+"""
+Check if a source file needs recompilation.
+
+Cache hit requires BOTH the IR being newer than the source (mtime) AND the
+compile fingerprint matching the one that produced it (`<ir>.key` sidecar). A
+missing key (cache from before fingerprinting) forces a recompile so the key is
+established. Pass `compile_fingerprint=""` to skip the fingerprint check (legacy
+mtime-only behavior).
+"""
+function needs_recompile(source_file::String, ir_file::String, cache_enabled::Bool,
+                         compile_fingerprint::String="")::Bool
     if !cache_enabled
         return true  # Always recompile if cache disabled
     end
 
     if !isfile(ir_file)
         return true  # IR doesn't exist
+    end
+
+    # Compile-configuration gate: flags/defines/includes/compiler/target. A change
+    # here does not move the source mtime, so without this the stale IR is reused.
+    if !isempty(compile_fingerprint)
+        key_file = _compile_key_path(ir_file)
+        if !isfile(key_file) || strip(read(key_file, String)) != compile_fingerprint
+            return true
+        end
     end
 
     # Compare modification times
@@ -191,8 +255,15 @@ end
 """
 Compile a single C++ file to LLVM IR.
 Returns (ir_file_path, success, exitcode).
+
+`compile_fingerprint` is the compile-config hash gating the per-file cache; the
+batch path (`compile_to_ir`) computes it once and threads it in. When called
+standalone (empty default) it is computed here so the fingerprint check still
+applies — `_detect_target_triple` shells out, so the batch avoids paying that
+per file by passing it down.
 """
-function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
+function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
+                              compile_fingerprint::String="")
     # Generate IR file path
     build_dir = get_build_path(config)
     mkpath(build_dir)
@@ -200,8 +271,12 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
     base_name = splitext(basename(cpp_file))[1]
     ir_file = joinpath(build_dir, base_name * ".ll")
 
+    if isempty(compile_fingerprint) && is_cache_enabled(config)
+        compile_fingerprint = compute_compile_fingerprint(config)
+    end
+
     # Check if recompilation needed
-    if !needs_recompile(cpp_file, ir_file, is_cache_enabled(config))
+    if !needs_recompile(cpp_file, ir_file, is_cache_enabled(config), compile_fingerprint)
         return (ir_file, true, 0)  # Cache hit
     end
 
@@ -265,6 +340,11 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String)
     end
 
     success = isfile(ir_file)
+    if success
+        # Stamp the fingerprint that produced this IR so a later flag/define/
+        # include/compiler change invalidates it (not just a source-mtime change).
+        write_compile_key(ir_file, compile_fingerprint)
+    end
     return (ir_file, success, exitcode)
 end
 
@@ -284,6 +364,11 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
     build_dir = get_build_path(config)
     mkpath(build_dir)
 
+    # Compile-config fingerprint computed once for the whole batch (it shells out
+    # to detect the target triple), then threaded into both the cache pre-check
+    # below and each compile_single_to_ir call.
+    compile_fingerprint = is_cache_enabled(config) ? compute_compile_fingerprint(config) : ""
+
     files_to_compile = String[]
     ir_files = String[]
     cached_files = 0
@@ -292,7 +377,7 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
         base_name = splitext(basename(cpp_file))[1]
         ir_file = joinpath(build_dir, base_name * ".ll")
 
-        if needs_recompile(cpp_file, ir_file, is_cache_enabled(config))
+        if needs_recompile(cpp_file, ir_file, is_cache_enabled(config), compile_fingerprint)
             push!(files_to_compile, cpp_file)
         else
             cached_files += 1
@@ -316,7 +401,7 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
 
         results = Vector{Tuple{String,Bool,Int}}(undef, length(files_to_compile))
         Threads.@threads for i in 1:length(files_to_compile)
-            results[i] = compile_single_to_ir(config, files_to_compile[i])
+            results[i] = compile_single_to_ir(config, files_to_compile[i], compile_fingerprint)
         end
 
         println()
@@ -331,7 +416,7 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
     else
         # Sequential compilation
         for cpp_file in files_to_compile
-            (ir_file, success, exitcode) = compile_single_to_ir(config, cpp_file)
+            (ir_file, success, exitcode) = compile_single_to_ir(config, cpp_file, compile_fingerprint)
             if !success
                 println()
                 error("Compilation failed for $cpp_file (exit: $exitcode)")
