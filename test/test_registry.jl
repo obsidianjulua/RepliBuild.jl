@@ -379,6 +379,16 @@ end
         @test_throws ErrorException PR.hash_toml("/nonexistent.toml")
     end
 
+    @testset "generator fingerprint feeds the config hash" begin
+        # hash_config mixes this in so cached builds are invalidated when the
+        # codegen that produced them changes (2026-07-10 audit: use() served
+        # wrappers from months-old generators forever).
+        fp = PR._generator_fingerprint()
+        @test startswith(fp, "replibuild-")
+        @test occursin(string(pkgversion(RepliBuild)), fp)
+        @test fp == PR._generator_fingerprint()  # stable within a session
+    end
+
     @testset "build artifact cache round-trip" begin
         with_temp_registry() do home
             mktempdir() do output_dir

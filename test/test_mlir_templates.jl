@@ -523,9 +523,11 @@ end
         # vtable[0] = get_value, vtable[1] = set_value
         # vcall uses MLIR generic format (no custom assembly defined)
         #
-        # Note: vcall lowers to indirect llvm.call via OperationState which currently
-        # has operandSegmentSizes issues in LLVM 21 JIT translation. We test parse + lower
-        # here; the AOT path (emit_object) works correctly and is tested in stress_test.
+        # vcall lowers to an indirect llvm.call. It is built via the dedicated
+        # indirect-call builder (CallOp(LLVMFunctionType, ValueRange)); an earlier
+        # hand-rolled OperationState set a malformed 3-entry operandSegmentSizes for
+        # the 2-segment op and SIGSEGV'd in translateModuleToLLVMIR. The emit
+        # regression below locks that fix in.
 
         @testset "vcall parse + lower (get_value)" begin
             ir = """
@@ -561,6 +563,39 @@ end
             @test mod != C_NULL
             mod_jit = clone_module(mod)
             @test lower_to_llvm(mod_jit)
+        end
+
+        @testset "vcall lower + emit (operandSegmentSizes regression)" begin
+            # Regression: vcall must translate all the way to LLVM IR text, not just
+            # lower. The malformed operandSegmentSizes formerly crashed emit_llvmir
+            # (and emit_object, which calls it first). Cover value + void returns.
+            for (tag, ir) in (
+                ("value", """
+                module {
+                    func.func @vc_val(%obj: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface} {
+                        %n = "jlcs.vcall"(%obj) {class_name = @ContainerInt, vtable_offset = 0 : i64, slot = 0 : i64}
+                            : (!llvm.ptr) -> i32
+                        return %n : i32
+                    }
+                }"""),
+                ("void", """
+                module {
+                    func.func @vc_void(%obj: !llvm.ptr, %val: i32) attributes {llvm.emit_c_interface} {
+                        "jlcs.vcall"(%obj, %val) {class_name = @ContainerInt, vtable_offset = 0 : i64, slot = 1 : i64}
+                            : (!llvm.ptr, i32) -> ()
+                        return
+                    }
+                }"""),
+            )
+                mod = clone_module(parse_module(ctx, ir))
+                @test lower_to_llvm(mod)
+                llpath = tempname() * ".ll"
+                @test emit_llvmir(mod, llpath)          # formerly SIGSEGV
+                ll = read(llpath, String); rm(llpath, force=true)
+                # Indirect call through the loaded vtable slot (callee is an SSA value).
+                @test occursin(r"call[^\n]*%\d+\(ptr", ll)
+                println("  ✓ vcall ($tag) lowers + emits LLVM IR (no operandSegmentSizes crash)")
+            end
         end
 
         @testset "vcall JIT execution via manual vtable dispatch" begin

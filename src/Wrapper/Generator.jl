@@ -488,12 +488,18 @@ Generate typed overload wrappers for a variadic C function.
 Julia's `ccall` requires fixed signatures, so we generate:
 - A base wrapper with only the fixed (non-variadic) parameters
 - Typed overloads for each signature listed in `overloads`
-All varargs wrappers use direct ccall (Tier 1), never JIT.
+All varargs wrappers use the `@ccall` semicolon form (never JIT/thunks): the
+`;` marks where varargs begin, so the call lowers to a true variadic
+foreigncall. On x86-64 SysV that makes codegen set AL to the number of vector
+registers used before the call — the callee's `va_start` prologue gates its
+XMM spill on AL, so a non-variadic call site (flat type tuple) only reads
+float varargs correctly when leftover AL happens to be nonzero.
 """
 function generate_vararg_wrappers(func_name::String, mangled::String, julia_name::String,
                                   params::Vector, return_type,
                                   overloads::Vector{Vector{String}},
-                                  generate_docs::Bool, demangled::String, lang::Symbol)
+                                  generate_docs::Bool, demangled::String, lang::Symbol;
+                                  cstring_free::String="")
     code = ""
     export_names = String[]
 
@@ -504,10 +510,13 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
     fixed_needs_conversion = Bool[]
 
     for param in params
-        safe_name = lang == :c ? make_c_identifier(param["name"]) : make_cpp_identifier(param["name"])
-        if safe_name == "varargs..."
-            continue  # Skip the varargs placeholder
+        # Skip the varargs placeholder — compare the raw name: sanitization
+        # mangles it to "varargs_", so checking the safe name never matched
+        # and the placeholder leaked into signatures as `varargs_::`
+        if param["name"] == "varargs..."
+            continue
         end
+        safe_name = lang == :c ? make_c_identifier(param["name"]) : make_cpp_identifier(param["name"])
         push!(fixed_param_names, safe_name)
 
         julia_type = param["julia_type"]
@@ -528,6 +537,12 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
 
     julia_return_type = get(return_type, "julia_type", "Cvoid")
 
+    # Cstring returns get the shared policy (NULL → nothing, String copy,
+    # [wrap.cstring_owned] free) — printf-family varargs like sqlite3_mprintf
+    # return malloc'd buffers, so this is where the policy matters most.
+    is_cstring_ret = julia_return_type == "Cstring"
+    sig_return_type = is_cstring_ret ? "Union{String,Nothing}" : julia_return_type
+
     # Build fixed parameter signature
     fixed_sig_parts = ["$(n)::$(t)" for (n, t) in zip(fixed_param_names, fixed_julia_sig_types)]
     fixed_sig = join(fixed_sig_parts, ", ")
@@ -546,31 +561,41 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
     end
 
     # --- Base wrapper (fixed args only) ---
-    fixed_ccall_types = if isempty(fixed_param_types)
-        "()"
-    else
-        "($(join(fixed_param_types, ", ")),)"
-    end
-    fixed_ccall_args = join(fixed_ccall_names, ", ")
+    # The callee is still variadic even when no varargs are passed, so the call
+    # site must lower as a variadic foreigncall (trailing `;` in @ccall) — that
+    # is what makes codegen set AL on x86-64 SysV instead of leaving garbage in it.
+    # `var"…"` keeps the symbol position safe for any C identifier.
+    fixed_atccall = join(["$(n)::$(t)" for (n, t) in zip(fixed_ccall_names, fixed_param_types)], ", ")
 
     doc = ""
     if generate_docs
         doc = """
         \"\"\"
-            $julia_name($fixed_sig) -> $julia_return_type
+            $julia_name($fixed_sig) -> $sig_return_type
 
         Wrapper for variadic C function: `$demangled` (base call with fixed args only)
         \"\"\"
         """
     end
 
-    code *= """
-    $doc
-    function $julia_name($fixed_sig)::$julia_return_type
-    $fixed_conversion    return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $fixed_ccall_types, $fixed_ccall_args)
-    end
+    if is_cstring_ret
+        code *= """
+        $doc
+        function $julia_name($fixed_sig)::Union{String,Nothing}
+        $fixed_conversion    ptr = @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall;)::Cstring
+        $(_cstring_policy_lines(cstring_free))
+        end
 
-    """
+        """
+    else
+        code *= """
+        $doc
+        function $julia_name($fixed_sig)::$julia_return_type
+        $fixed_conversion    return @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall;)::$julia_return_type
+        end
+
+        """
+    end
     push!(export_names, julia_name)
 
     # --- Typed overloads ---
@@ -587,19 +612,15 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
         all_sig_parts = vcat(fixed_sig_parts, va_sig_parts)
         all_sig = join(all_sig_parts, ", ")
 
-        # ccall types = fixed + variadic (with Vararg marker for proper ABI)
-        all_ccall_types_list = vcat(fixed_param_types, va_types)
-        all_ccall_types = "($(join(all_ccall_types_list, ", ")),)"
-
-        # ccall args = fixed converted + variadic
-        all_ccall_names = vcat(fixed_ccall_names, va_param_names)
-        all_ccall_args = join(all_ccall_names, ", ")
+        # @ccall varargs: everything after `;` is variadic, each with its own
+        # declared type. Lowers to a variadic foreigncall, so AL is set correctly.
+        va_atccall = join(["$(n)::$(t)" for (n, t) in zip(va_param_names, va_types)], ", ")
 
         overload_doc = ""
         if generate_docs
             overload_doc = """
             \"\"\"
-                $overload_name($all_sig) -> $julia_return_type
+                $overload_name($all_sig) -> $sig_return_type
 
             Typed variadic overload for: `$demangled`
             Variadic types: $(join(va_types, ", "))
@@ -607,13 +628,24 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
             """
         end
 
-        code *= """
-        $overload_doc
-        function $overload_name($all_sig)::$julia_return_type
-        $fixed_conversion    return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $all_ccall_types, $all_ccall_args)
-        end
+        if is_cstring_ret
+            code *= """
+            $overload_doc
+            function $overload_name($all_sig)::Union{String,Nothing}
+            $fixed_conversion    ptr = @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall; $va_atccall)::Cstring
+            $(_cstring_policy_lines(cstring_free))
+            end
 
-        """
+            """
+        else
+            code *= """
+            $overload_doc
+            function $overload_name($all_sig)::$julia_return_type
+            $fixed_conversion    return @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall; $va_atccall)::$julia_return_type
+            end
+
+            """
+        end
         push!(export_names, overload_name)
     end
 

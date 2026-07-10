@@ -11,7 +11,7 @@ using RepliBuild
 @testset "RepliBuild.jl" begin
 
     @testset "Package loads" begin
-        @test RepliBuild.VERSION == v"2.5.7"
+        @test RepliBuild.VERSION == v"2.5.10"
         @test isdefined(RepliBuild, :discover)
         @test isdefined(RepliBuild, :build)
         @test isdefined(RepliBuild, :wrap)
@@ -113,6 +113,10 @@ include(joinpath(@__DIR__, "test_ingest.jl"))
 # ── Registry unit tests (no C++ toolchain required) ──────────────────────────
 
 include(joinpath(@__DIR__, "test_registry.jl"))
+
+# ── Varargs @ccall emission regression (no toolchain required) ───────────────
+
+include(joinpath(@__DIR__, "test_varargs_emission.jl"))
 
 # ── DAGDiff module tests (synthetic metadata, no C++ toolchain required) ─────
 

@@ -1124,7 +1124,12 @@ function generate_macro_shims(config::RepliBuildConfig, cpp_files::Vector{String
                 push!(arg_names, pname)
             end
             
-            sig = "$ret_type replibuild_shim_$macro_name($(join(param_strs, ", ")))"
+            # Shims must stay in the .so's export table: the wrapper's function
+            # list comes from `nm -g --defined-only`, and projects built with
+            # -fvisibility=hidden (e.g. box2d3) would otherwise turn every shim
+            # local — silently dropping all [wrap.macros]. `used` additionally
+            # survives LTO internalization.
+            sig = "__attribute__((used, visibility(\"default\"))) $ret_type replibuild_shim_$macro_name($(join(param_strs, ", ")))"
             println(io, "$sig {")
 
             # If "args" key is present → function-like macro, emit MACRO(args...)

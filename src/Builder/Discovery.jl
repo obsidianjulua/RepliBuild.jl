@@ -518,6 +518,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         Dict{String,Vector{Vector{String}}}(),   # varargs_overloads
         Dict{String,Dict{String,Any}}(),         # macros
         String[],                                # shim_headers
+        Dict{String,String}(),                   # cstring_owned
         false                                    # dag
     )
 

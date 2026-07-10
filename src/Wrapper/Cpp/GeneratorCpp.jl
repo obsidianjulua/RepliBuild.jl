@@ -24,12 +24,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     import RepliBuild
     import Base: unsafe_convert
 
-    const LIBRARY_PATH = \"$(abspath(lib_path))\"
-    const THUNKS_LIBRARY_PATH = \"$(thunks_lib_path)\"
+    # Resolve the library next to this file first: build artifacts travel as a
+    # unit (wrapper + .so side by side, e.g. in ~/.replibuild/builds/<hash>/),
+    # so the sibling copy is the one that belongs to this wrapper. The
+    # generation-time absolute path is only a fallback — shared dirs like
+    # ~/.replibuild/registry/julia/ get overwritten by later builds, stranding
+    # any wrapper that baked them in.
+    const LIBRARY_PATH = let baked = \"$(abspath(lib_path))\"
+        sibling = joinpath(@__DIR__, basename(baked))
+        isfile(sibling) ? sibling : baked
+    end
+    const THUNKS_LIBRARY_PATH = let baked = \"$(thunks_lib_path)\"
+        sibling = isempty(baked) ? \"\" : joinpath(@__DIR__, basename(baked))
+        !isempty(sibling) && isfile(sibling) ? sibling : baked
+    end
 
     # Verify library exists
     if !isfile(LIBRARY_PATH)
-        error("Library not found: \$LIBRARY_PATH")
+        error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
     end
 
     # Flush C stdout so printf output appears immediately in the Julia REPL
@@ -1841,7 +1853,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 params, return_type, overloads,
-                generate_docs, demangled, :cpp
+                generate_docs, demangled, :cpp,
+                cstring_free=get(config.wrap.cstring_owned, func_name, "")
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -2446,18 +2459,29 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 """
             end
         elseif julia_return_type == "Cstring"
-            # Cstring with NULL check and conversion to String
+            # Cstring return: NULL → nothing, else copy to String; owned buffers
+            # ([wrap.cstring_owned]) freed through the library's deallocator.
+            # Raw `_ptr` variant emitted alongside (same policy as the C generator).
+            cstring_free_sym = get(config.wrap.cstring_owned, func_name, "")
             func_def = """
             $doc_comment
-            function $julia_name($param_sig)::String
+            function $julia_name($param_sig)::Union{String,Nothing}
             $conversion_code    ptr = ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
-                if ptr == C_NULL
-                    error("$julia_name returned NULL pointer")
-                end
-                return unsafe_string(ptr)
+            $(_cstring_policy_lines(cstring_free_sym))
+            end
+
+            \"\"\"
+                $(julia_name)_ptr($param_sig) -> Cstring
+
+            Raw-pointer variant of `$julia_name`: returns the C `char*` unchanged
+            (no copy, no NULL check$(isempty(cstring_free_sym) ? "" : ", NOT freed — caller owns the buffer")).
+            \"\"\"
+            function $(julia_name)_ptr($param_sig)::Cstring
+            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
             end
 
             """
+            push!(exports, "$(julia_name)_ptr")
         elseif !isempty(conversion_code)
             # Has parameter conversions
             if lto_eligible
@@ -2542,34 +2566,29 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         end
 
         # Generate convenience wrappers for ergonomic APIs
-        # Two types:
-        # 1. Struct pointers -> accept structs directly
-        # 2. Const primitive array pointers -> accept Vector directly with GC.@preserve
+        # One type: const primitive array pointers -> accept Vector directly with GC.@preserve
+        #
+        # Deliberately NOT emitted: struct-by-value overloads for Ptr{Struct} params
+        # (f(x::MyStruct) passing Ref(local copy) to the ccall). A function taking
+        # T* may free, mutate-and-retain, or store that pointer; handing it a pointer
+        # into a temporary Julia-owned copy is undefined behavior for every such
+        # function (crash-proven on the C side: cJSON_Delete(::cJSON) → glibc
+        # double-free abort). Ownership is not recoverable from DWARF, so no name
+        # heuristic can gate this safely. The base wrapper's ::Any params already
+        # accept Ref(x)/pointers.
 
-        has_struct_ptr_params = false
-        struct_ptr_indices = Int[]
         has_array_ptr_params = false
         array_ptr_indices = Int[]
         convenience_param_types = String[]
         convenience_param_names = String[]
 
         for (i, (ptype, pname)) in enumerate(zip(param_types, param_names))
-            # Check if this is a Ptr{StructName} where StructName is a known struct
+            # Non-C-prefixed pointer types (struct pointers, Ptr{Int32}-style aliases)
+            # pass through unchanged (no by-value overload — see note above); this arm
+            # also keeps them out of the array-pointer heuristic below.
             if startswith(ptype, "Ptr{") && !startswith(ptype, "Ptr{C") && ptype != "Ptr{Cvoid}"
-                # Extract the struct name
-                struct_name = replace(ptype, r"^Ptr\{(.+)\}$" => s"\1")
-
-                # Check if this struct exists in our generated types
-                # DWARF stores structs under bare names (e.g. "MyStruct"), not "__struct__" prefixed
-                if haskey(dwarf_structs, struct_name)
-                    has_struct_ptr_params = true
-                    push!(struct_ptr_indices, i)
-                    push!(convenience_param_types, struct_name)
-                    push!(convenience_param_names, pname)
-                else
-                    push!(convenience_param_types, ptype)
-                    push!(convenience_param_names, pname)
-                end
+                push!(convenience_param_types, ptype)
+                push!(convenience_param_names, pname)
             # Check if this is Ptr{Cdouble}, Ptr{Cfloat}, Ptr{Cint}, etc. (array pointers)
             # These benefit from Vector{T} wrapper with automatic GC.@preserve
             elseif ptype in ["Ptr{Cdouble}", "Ptr{Cfloat}", "Ptr{Cint}", "Ptr{Cuint}",
@@ -2621,17 +2640,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
         end
 
-        # Generate convenience wrapper if we have struct pointer or array pointer parameters
-        if has_struct_ptr_params || has_array_ptr_params
+        # Generate convenience wrapper if we have array pointer parameters
+        if has_array_ptr_params
             convenience_sig = join(["$pname::$ptype" for (pname, ptype) in zip(convenience_param_names, convenience_param_types)], ", ")
+
+            # Resolve the return type the same way the base wrapper does. For a
+            # struct-valued return, julia_return_type is the "Any" sentinel — using
+            # it as the ccall return type makes Julia treat the returned struct as a
+            # boxed object pointer and segfault. Mirror the base wrapper's safe_c_ret.
+            convenience_ret_type = julia_return_type
+            if is_struct_return
+                convenience_ret_type = occursin(r"[<>]", c_return_type) ?
+                    _sanitize_cpp_type_name(c_return_type) : c_return_type
+            end
 
             # Build the ccall arguments
             convenience_ccall_args = String[]
             for (i, pname) in enumerate(param_names)
-                if i in struct_ptr_indices
-                    # Struct parameter: use Ref()
-                    push!(convenience_ccall_args, "Ref($pname)")
-                elseif i in array_ptr_indices
+                if i in array_ptr_indices
                     # Array parameter: use pointer()
                     push!(convenience_ccall_args, "pointer($pname)")
                 else
@@ -2641,27 +2667,29 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
             convenience_ccall = join(convenience_ccall_args, ", ")
 
-            # If we have array parameters, wrap the ccall in GC.@preserve
-            # Collect all array parameter names for preservation
-            array_pnames = [param_names[i] for i in array_ptr_indices]
+            # The vectors backing pointer() must stay rooted across the call
+            preserve_vars = join([param_names[i] for i in array_ptr_indices], " ")
 
-            if !isempty(array_pnames)
-                preserve_vars = join(array_pnames, " ")
+            if julia_return_type == "Cstring"
+                # Match the base wrapper's Cstring policy (NULL → nothing,
+                # String copy, [wrap.cstring_owned] free)
                 convenience_func = """
-                # Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-                function $julia_name($convenience_sig)::$julia_return_type
-                    return GC.@preserve $preserve_vars begin
-                        ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $convenience_ccall)
+                # Convenience wrapper - accepts arrays directly with automatic GC preservation
+                function $julia_name($convenience_sig)::Union{String,Nothing}
+                    ptr = GC.@preserve $preserve_vars begin
+                        ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $convenience_ccall)
                     end
+                $(_cstring_policy_lines(get(config.wrap.cstring_owned, func_name, "")))
                 end
 
                 """
             else
-                # No array parameters, just struct parameters
                 convenience_func = """
-                # Convenience wrapper - accepts structs directly instead of pointers
-                function $julia_name($convenience_sig)::$julia_return_type
-                    return ccall((:$mangled, LIBRARY_PATH), $julia_return_type, $ccall_types, $convenience_ccall)
+                # Convenience wrapper - accepts arrays directly with automatic GC preservation
+                function $julia_name($convenience_sig)::$convenience_ret_type
+                    return GC.@preserve $preserve_vars begin
+                        ccall((:$mangled, LIBRARY_PATH), $convenience_ret_type, $ccall_types, $convenience_ccall)
+                    end
                 end
 
                 """

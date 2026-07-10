@@ -81,6 +81,7 @@ struct WrapConfig
     varargs_overloads::Dict{String,Vector{Vector{String}}}
     macros::Dict{String,Dict{String,Any}}
     shim_headers::Vector{String}
+    cstring_owned::Dict{String,String}  # func => free symbol for malloc'd char* returns
     dag::Bool  # Export DAG diff graphs to <project>/dag/
 end
 
@@ -381,6 +382,19 @@ function parse_wrap_config(data::Dict)::WrapConfig
 
     shim_headers = get(wrap, "shim_headers", String[])
 
+    # Parse owned char* returns: [wrap.cstring_owned] func = "free_symbol".
+    # The wrapper copies the returned string then frees the C buffer through
+    # the named library symbol (ownership isn't visible in DWARF).
+    cstring_owned_raw = get(wrap, "cstring_owned", Dict())
+    cstring_owned = Dict{String,String}()
+    for (f_name, free_sym) in cstring_owned_raw
+        if free_sym isa AbstractString && !isempty(free_sym)
+            cstring_owned[String(f_name)] = String(free_sym)
+        else
+            @warn "[wrap.cstring_owned] $f_name: value must be the free function's symbol name (a string); ignoring"
+        end
+    end
+
     language_str = get(wrap, "language", "cpp")
     language_sym = Symbol(language_str)
 
@@ -393,6 +407,7 @@ function parse_wrap_config(data::Dict)::WrapConfig
         varargs_overloads,
         macros,
         shim_headers,
+        cstring_owned,
         get(wrap, "dag", false)
     )
 end
@@ -566,7 +581,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
         LinkConfig("2", false, String[], String[], false),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[], false),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[], Dict{String,String}(), false),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -681,6 +696,9 @@ function save_config(config::RepliBuildConfig)
     end
     if !isempty(config.wrap.shim_headers)
         wrap_dict["shim_headers"] = config.wrap.shim_headers
+    end
+    if !isempty(config.wrap.cstring_owned)
+        wrap_dict["cstring_owned"] = config.wrap.cstring_owned
     end
     if config.wrap.dag
         wrap_dict["dag"] = true

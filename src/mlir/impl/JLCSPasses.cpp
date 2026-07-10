@@ -134,39 +134,45 @@ struct VirtualCallOpLowering : public ConversionPattern {
 
         Value funcPtr = LLVM::LoadOp::create(rewriter, loc, ptrType, funcPtrAddr);
 
-        // Step 3: Call the function pointer with arguments (indirect call)
-        SmallVector<Value, 4> callArgs(args.begin(), args.end());
-
-        // Determine result types
-        SmallVector<Type, 1> resultTypeVec;
+        // Step 3: Indirect call through the function pointer.
+        //
+        // llvm.call carries the AttrSizedOperandSegments trait with TWO operand
+        // groups — callee_operands and op_bundle_operands. For an indirect call the
+        // callee pointer is the *first element of callee_operands*, so the correct
+        // operandSegmentSizes is {1 + nArgs, 0}. The previous hand-rolled
+        // OperationState set a 3-element {1, nArgs, 0} (mistaking args for their own
+        // segment) and omitted var_callee_type; during LLVM IR translation
+        // OperandRange::split read the malformed 3-entry array against a 2-segment op
+        // and walked off the end (SIGSEGV in translateModuleToLLVMIR). Use the
+        // dedicated indirect-call builder, which sets both correctly.
+        Type resultLLVMType;
         if (vcallOp.getResult()) {
-            Type converted = typeConverter->convertType(vcallOp.getResult().getType());
-            if (!converted) {
+            resultLLVMType = typeConverter->convertType(vcallOp.getResult().getType());
+            if (!resultLLVMType) {
                 return op->emitError("VirtualCallOp: Could not convert result type");
             }
-            resultTypeVec.push_back(converted);
+        } else {
+            resultLLVMType = LLVM::LLVMVoidType::get(rewriter.getContext());
         }
 
-        // LLVM 21 API: Build CallOp manually with OperationState for indirect calls
-        // First arg should be the function pointer
-        SmallVector<Value> allOperands;
-        allOperands.push_back(funcPtr);
-        allOperands.append(callArgs.begin(), callArgs.end());
+        // The callee's LLVM function type, derived from the (already-converted)
+        // argument values. args[0] is the object pointer (`this`).
+        SmallVector<Type, 4> paramTypes;
+        for (Value a : args)
+            paramTypes.push_back(a.getType());
+        auto calleeType = LLVM::LLVMFunctionType::get(resultLLVMType, paramTypes,
+                                                      /*isVarArg=*/false);
 
-        OperationState state(loc, LLVM::CallOp::getOperationName());
-        state.addOperands(allOperands);
-        state.addTypes(resultTypeVec);
-        
-        // Add attributes for segment sizes (indirect call: callee_operands=1, args=N, op_bundle=0)
-        int32_t nArgs = (int32_t)callArgs.size();
-        state.addAttribute("operandSegmentSizes", 
-            rewriter.getDenseI32ArrayAttr({1, nArgs, 0}));
+        // Indirect-call operand list: function pointer first, then the call args.
+        SmallVector<Value, 5> callOperands;
+        callOperands.push_back(funcPtr);
+        callOperands.append(args.begin(), args.end());
 
-        Operation *callOp = rewriter.create(state);
+        auto callOp = LLVM::CallOp::create(rewriter, loc, calleeType, callOperands);
 
-        // Replace the jlcs.vcall with the call result
-        if (!resultTypeVec.empty()) {
-            rewriter.replaceOp(op, callOp->getResult(0));
+        // Replace the jlcs.vcall with the call result (if the method returns a value).
+        if (vcallOp.getResult()) {
+            rewriter.replaceOp(op, callOp.getResult());
         } else {
             rewriter.eraseOp(op);
         }

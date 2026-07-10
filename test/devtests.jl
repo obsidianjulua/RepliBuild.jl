@@ -179,3 +179,12 @@ include(joinpath(TEST_DIR, "test_abi_nested.jl"))
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.
 
 include(joinpath(TEST_DIR, "test_cache_invalidation.jl"))
+
+# ── 10. Convenience-overload ownership guard ─────────────────────────────────
+# Library-free trace: no struct-by-value convenience overloads may be emitted
+# for Ptr{Struct} params (Ref(copy) handed to a function that frees/retains
+# the pointer is UB — crash-proven double-free on cJSON_Delete). The Vector
+# input-array path survives, with Cstring returns aligned to the base
+# wrapper's String policy.
+
+include(joinpath(TEST_DIR, "test_convenience_overloads.jl"))

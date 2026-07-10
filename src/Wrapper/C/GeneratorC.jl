@@ -157,12 +157,24 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     import RepliBuild
     import Base: unsafe_convert
 
-    const LIBRARY_PATH = \"$(abspath(lib_path))\"
-    const THUNKS_LIBRARY_PATH = \"$(thunks_lib_path)\"
+    # Resolve the library next to this file first: build artifacts travel as a
+    # unit (wrapper + .so side by side, e.g. in ~/.replibuild/builds/<hash>/),
+    # so the sibling copy is the one that belongs to this wrapper. The
+    # generation-time absolute path is only a fallback — shared dirs like
+    # ~/.replibuild/registry/julia/ get overwritten by later builds, stranding
+    # any wrapper that baked them in.
+    const LIBRARY_PATH = let baked = \"$(abspath(lib_path))\"
+        sibling = joinpath(@__DIR__, basename(baked))
+        isfile(sibling) ? sibling : baked
+    end
+    const THUNKS_LIBRARY_PATH = let baked = \"$(thunks_lib_path)\"
+        sibling = isempty(baked) ? \"\" : joinpath(@__DIR__, basename(baked))
+        !isempty(sibling) && isfile(sibling) ? sibling : baked
+    end
 
     # Verify library exists
     if !isfile(LIBRARY_PATH)
-        error("Library not found: \$LIBRARY_PATH")
+        error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
     end
 
     # Flush C stdout so printf output appears immediately in the Julia REPL
@@ -990,37 +1002,44 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
                                     """)
                                 else
-                                    # Multi-byte bitfield — pick the smallest unsigned
-                                    # integer type that covers all spanned bits
-                                    total_bits_needed = bit_within_byte + bit_size
-                                    container_type = if total_bits_needed <= 16
-                                        "UInt16"
-                                    elseif total_bits_needed <= 32
-                                        "UInt32"
-                                    else
-                                        "UInt64"
+                                    # Multi-byte bitfield — assemble exactly the spanned
+                                    # bytes instead of loading a power-of-2 container.
+                                    # A container that overhangs the spanned region can
+                                    # read (getter) or WRITE (setter) past the struct
+                                    # tail — an OOB heap write for fields near the end.
+                                    n_bytes_span = (bit_within_byte + bit_size + 7) >> 3
+                                    if byte_pos + n_bytes_span > byte_size
+                                        @warn "Bitfield $member_name in $struct_name spans past DWARF byte_size ($byte_size B); clamping accessor to the recorded size"
+                                        n_bytes_span = max(1, byte_size - byte_pos)
                                     end
-                                    cmask = container_type == "UInt64" ? "(UInt64(1) << $bit_size) - UInt64(1)" : "$container_type($(mask))"
+                                    acc_type = n_bytes_span <= 8 ? "UInt64" : "UInt128"
+                                    # Return the smallest unsigned type that fits the field
+                                    ret_type = bit_size <= 16 ? "UInt16" :
+                                               bit_size <= 32 ? "UInt32" : "UInt64"
+                                    # Wrapping mask expression: valid up to bit_size == 64
+                                    # ($acc_type(1) << 64 == 0, minus 1 wraps to all-ones)
+                                    amask = "(($acc_type(1) << $bit_size) - $acc_type(1))"
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::$container_type
-                                        data = collect(s._data)
-                                        GC.@preserve data begin
-                                            p = pointer(data) + $byte_pos
-                                            raw = unsafe_load(Ptr{$container_type}(p))
+                                    function get_$(safe_member)(s::$julia_struct_name)::$ret_type
+                                        data = s._data
+                                        acc = zero($acc_type)
+                                        @inbounds for i in 0:$(n_bytes_span - 1)
+                                            acc |= $acc_type(data[$(byte_pos + 1) + i]) << (8 * i)
                                         end
-                                        return (raw >> $bit_within_byte) & $cmask
+                                        return $ret_type((acc >> $bit_within_byte) & $amask)
                                     end
 
                                     \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name` (returns new instance).\"\"\"
                                     function set_$(safe_member)(s::$julia_struct_name, v::Integer)::$julia_struct_name
                                         data = collect(s._data)
-                                        GC.@preserve data begin
-                                            p = pointer(data) + $byte_pos
-                                            raw = unsafe_load(Ptr{$container_type}(p))
-                                            cleared = raw & ~($cmask << $bit_within_byte)
-                                            raw = cleared | (($container_type(v) & $cmask) << $bit_within_byte)
-                                            unsafe_store!(Ptr{$container_type}(p), raw)
+                                        acc = zero($acc_type)
+                                        @inbounds for i in 0:$(n_bytes_span - 1)
+                                            acc |= $acc_type(data[$(byte_pos + 1) + i]) << (8 * i)
+                                        end
+                                        acc = (acc & ~($amask << $bit_within_byte)) | (((v % $acc_type) & $amask) << $bit_within_byte)
+                                        @inbounds for i in 0:$(n_bytes_span - 1)
+                                            data[$(byte_pos + 1) + i] = UInt8((acc >> (8 * i)) & 0xff)
                                         end
                                         return $julia_struct_name(NTuple{$byte_size, UInt8}(data))
                                     end
@@ -1218,59 +1237,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                         continue
                     end
 
-                    # Packed struct detection: DWARF byte_size < Julia aligned size
-                    # Julia structs always use natural alignment, so packed C structs
-                    # must use a byte blob to maintain correct ABI layout.
-                    # (Skipped when the exact-layout proof already succeeded — the
-                    # proof subsumes this size heuristic and its alignment guesses
-                    # mis-flag verified nested-struct members.)
-                    julia_aligned_size = layout_verified ? byte_size : get_julia_aligned_size(members)
-                    if !layout_verified && byte_size > 0 && byte_size < julia_aligned_size
-                        push!(blob_struct_names, julia_struct_name)
-                        blob_struct_sizes[julia_struct_name] = byte_size
-                        blob_float_risk[julia_struct_name] = _struct_has_float_member(struct_name, dwarf_structs)
-                        push!(struct_chunks, """
-                        # C packed struct: $struct_name ($(length(members)) members, $byte_size bytes packed)
-                        struct $julia_struct_name
-                            _data::NTuple{$(byte_size), UInt8}
-                        end
-
-                        # Zero-initializer for $julia_struct_name
-                        function $julia_struct_name()
-                            return $julia_struct_name(ntuple(i -> 0x00, $byte_size))
-                        end
-
-                        """)
-
-                        # Generate Base.getproperty accessor for packed byte-blob structs
-                        _packed_branches = String[]
-                        for m in members
-                            m_name = get(m, "name", nothing)
-                            isnothing(m_name) && continue
-                            m_offset_raw = get(m, "offset", nothing)
-                            isnothing(m_offset_raw) && continue
-                            m_offset = _parse_int_or_hex(m_offset_raw)
-                            m_julia_type = get(m, "julia_type", "")
-                            push!(_packed_branches, """
-                                    if s === :$(make_c_identifier(m_name))
-                                        r = Ref(getfield(x, :_data))
-                                        return GC.@preserve r unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(r) + $m_offset))
-                                    end""")
-                        end
-                        if !isempty(_packed_branches)
-                            accessor_code = join(_packed_branches, "\n")
-                            push!(struct_chunks, """
-                            function Base.getproperty(x::$julia_struct_name, s::Symbol)
-                                s === :_data && return getfield(x, :_data)
-                            $accessor_code
-                                error("type $julia_struct_name has no field \$s")
-                            end
-
-                            """)
-                        end
-
-                        continue
-                    end
+                    # NOTE: packed structs (DWARF byte_size < natural aligned size)
+                    # need no dedicated branch here — every `!layout_verified`
+                    # struct with a positive byte_size already became an opaque
+                    # blob (with getproperty accessors) in the branch above, which
+                    # subsumes the old size-heuristic packed detection. Reaching
+                    # this point means layout_verified == true or byte_size <= 0.
 
                     member_count = length(members)
                     push!(struct_chunks, """
@@ -1412,29 +1384,51 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # Sanitize name
             safe_name = make_c_identifier(var_name)
 
-            push!(func_chunks, """
-            \"""
-                $safe_name()
+            # A global whose type didn't resolve cannot get a value getter:
+            # `cglobal(..., Any)` + unsafe_load reads the memory as a boxed
+            # Julia object pointer — garbage or a crash. Same for type names
+            # that aren't clean Julia type expressions. Emit only the raw
+            # pointer accessor for those.
+            _type_usable = julia_type != "Any" && julia_type != "_UnsafeUnknown" &&
+                           !occursin(r"[^A-Za-z0-9_{}, ]", julia_type)
 
-            Get value of global variable `$var_name`.
-            \"""
-            function $safe_name()::$julia_type
-                ptr = cglobal((:$var_name, LIBRARY_PATH), $julia_type)
-                return unsafe_load(ptr)
+            if _type_usable
+                push!(func_chunks, """
+                \"""
+                    $safe_name()
+
+                Get value of global variable `$var_name`.
+                \"""
+                function $safe_name()::$julia_type
+                    ptr = cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+                    return unsafe_load(ptr)
+                end
+
+                \"""
+                    $(safe_name)_ptr()
+
+                Get pointer to global variable `$var_name`.
+                \"""
+                function $(safe_name)_ptr()::Ptr{$julia_type}
+                    return cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+                end
+
+                """)
+                push!(exports, safe_name)
+            else
+                push!(func_chunks, """
+                \"""
+                    $(safe_name)_ptr()
+
+                Get pointer to global variable `$var_name` (type unresolved — raw pointer only).
+                \"""
+                function $(safe_name)_ptr()::Ptr{Cvoid}
+                    return cglobal((:$var_name, LIBRARY_PATH))
+                end
+
+                """)
             end
 
-            \"""
-                $(safe_name)_ptr()
-
-            Get pointer to global variable `$var_name`.
-            \"""
-            function $(safe_name)_ptr()::Ptr{$julia_type}
-                return cglobal((:$var_name, LIBRARY_PATH), $julia_type)
-            end
-
-            """)
-
-            push!(exports, safe_name)
             push!(exports, "$(safe_name)_ptr")
         end
 
@@ -1522,7 +1516,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 params, return_type, overloads,
-                generate_docs, demangled, :c
+                generate_docs, demangled, :c,
+                cstring_free=get(config.wrap.cstring_owned, func_name, "")
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -1698,24 +1693,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                             end
                         end
 
-                        # Use best match, or first typedef if no good match
+                        # Only a positive name-based match may override the DWARF
+                        # signature. The old "first typedef in the table" fallback
+                        # documented an arbitrary signature — a wrong @cfunction
+                        # example is worse than none (users build crashing callbacks
+                        # from it). No match → keep DWARF's fp_sig or say unknown.
                         if !isnothing(best_typedef)
                             typedef_name, typedef_info = best_typedef
                             ret_type = typedef_info["return_type"]
                             params_list = typedef_info["parameters"]
 
                             # Construct DWARF-style signature for parsing
-                            if isempty(params_list)
-                                fp_sig = "function_ptr($ret_type)"
-                            else
-                                fp_sig = "function_ptr($ret_type; $(join(params_list, ", ")))"
-                            end
-                        elseif !isempty(metadata["function_pointer_typedefs"])
-                            # Fallback: use first typedef
-                            typedef_name, typedef_info = first(metadata["function_pointer_typedefs"])
-                            ret_type = typedef_info["return_type"]
-                            params_list = typedef_info["parameters"]
-
                             if isempty(params_list)
                                 fp_sig = "function_ptr($ret_type)"
                             else
@@ -1753,6 +1741,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # metadata even though codegen resolves the concrete struct — show
             # the resolved name, not the sentinel.
             doc_ret = String(return_type["julia_type"])
+            # Cstring returns are copied to String (NULL → nothing) — document
+            # what the wrapper actually returns, not the C-level type.
+            doc_ret == "Cstring" && (doc_ret = "Union{String,Nothing}")
             if doc_ret == "Any"
                 _doc_rct = String(strip(replace(String(get(return_type, "c_type", "")), r"\bconst\b" => "")))
                 if !isempty(_doc_rct) && (_doc_rct in struct_types || haskey(dwarf_structs, _doc_rct))
@@ -1832,9 +1823,31 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 end
             end
         end
+        # A ≤16B blob param with a misaligned (packed) member is MEMORY class in
+        # the real SysV ABI — passed on the stack — while its NTuple byte image
+        # classifies INTEGER and travels in registers. That mismatch corrupts
+        # arguments silently even with no float member, so trap it alongside
+        # the SSE-class (float-risk) case. Aligned all-integer blobs classify
+        # INTEGER on both views and stay callable; >16B blobs are MEMORY on
+        # both views and stay callable.
+        _blob_param_misaligned = function(jname::String)
+            raw = get(best_dwarf_key, jname, jname)
+            info = get(dwarf_structs, raw, nothing)
+            info === nothing && return false
+            for _m in get(info, "members", [])
+                haskey(_m, "bit_size") && continue
+                _msz = get(_m, "size", 0)
+                _msz <= 0 && continue
+                _mal = _msz > 8 ? 8 : _msz
+                if _parse_int_or_hex(get(_m, "offset", "0")) % _mal != 0
+                    return true
+                end
+            end
+            return false
+        end
         for _pt in param_types
             if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
-               get(blob_float_risk, _pt, true)
+               (get(blob_float_risk, _pt, true) || _blob_param_misaligned(_pt))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
         end
@@ -2036,9 +2049,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 error(\"\"\"
                 ABI Safety Trap: cannot call '$julia_name' through ccall.
                 This function crosses an opaque byte-blob struct by value inside
-                the SysV register window (≤16 bytes, float-bearing): $offender_list.
-                A byte blob cannot reproduce the struct's SSE register classes, so
-                the call would silently corrupt data. The struct is opaque because
+                the SysV register window (≤16 bytes, float-bearing or packed): $offender_list.
+                A byte blob cannot reproduce the struct's real argument classes
+                (SSE eightbytes, or MEMORY-class stack passing for packed layouts),
+                so the call would silently corrupt data. The struct is opaque because
                 its layout could not be reproduced exactly (packed layout, bitfields,
                 or unresolvable member types). Use a pointer-taking variant of this
                 C function, or make the struct's members resolvable.
@@ -2095,18 +2109,31 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 """
             end
         elseif julia_return_type == "Cstring"
-            # Cstring with NULL check and conversion to String
+            # Cstring return: NULL → nothing, else copy to String; owned buffers
+            # ([wrap.cstring_owned]) are freed through the library's own
+            # deallocator after the copy. A raw `_ptr` variant is emitted
+            # alongside for callers that need the pointer itself (lifetime
+            # management, passing along, avoiding the copy).
+            cstring_free_sym = get(config.wrap.cstring_owned, func_name, "")
             func_def = """
             $doc_comment
-            function $julia_name($param_sig)::String
+            function $julia_name($param_sig)::Union{String,Nothing}
             $conversion_code    ptr = ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
-                if ptr == C_NULL
-                    error("$julia_name returned NULL pointer")
-                end
-                return unsafe_string(ptr)
+            $(_cstring_policy_lines(cstring_free_sym))
+            end
+
+            \"\"\"
+                $(julia_name)_ptr($param_sig) -> Cstring
+
+            Raw-pointer variant of `$julia_name`: returns the C `char*` unchanged
+            (no copy, no NULL check$(isempty(cstring_free_sym) ? "" : ", NOT freed — caller owns the buffer")).
+            \"\"\"
+            function $(julia_name)_ptr($param_sig)::Cstring
+            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
             end
 
             """
+            push!(exports, "$(julia_name)_ptr")
         elseif !isempty(conversion_code)
             # Has parameter conversions
             if lto_eligible
@@ -2161,34 +2188,28 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         push!(exports, julia_name)
 
         # Generate convenience wrappers for ergonomic APIs
-        # Two types:
-        # 1. Struct pointers -> accept structs directly
-        # 2. Const primitive array pointers -> accept Vector directly with GC.@preserve
+        # One type: const primitive array pointers -> accept Vector directly with GC.@preserve
+        #
+        # Deliberately NOT emitted: struct-by-value overloads for Ptr{Struct} params
+        # (f(x::MyStruct) passing Ref(local copy) to the ccall). A C function taking
+        # T* may free, mutate-and-retain, or store that pointer; handing it a pointer
+        # into a temporary Julia-owned copy is undefined behavior for every such
+        # function (crash-proven: cJSON_Delete(::cJSON) → glibc double-free abort).
+        # Ownership is not recoverable from DWARF, so no name heuristic can gate this
+        # safely. The base wrapper's ::Any params already accept Ref(x)/pointers.
 
-        has_struct_ptr_params = false
-        struct_ptr_indices = Int[]
         has_array_ptr_params = false
         array_ptr_indices = Int[]
         convenience_param_types = String[]
         convenience_param_names = String[]
 
         for (i, (ptype, pname)) in enumerate(zip(param_types, param_names))
-            # Check if this is a Ptr{StructName} where StructName is a known struct
+            # Non-C-prefixed pointer types (struct pointers, Ptr{Int32}-style aliases)
+            # pass through unchanged (no by-value overload — see note above); this arm
+            # also keeps them out of the array-pointer heuristic below.
             if startswith(ptype, "Ptr{") && !startswith(ptype, "Ptr{C") && ptype != "Ptr{Cvoid}"
-                # Extract the struct name
-                struct_name = replace(ptype, r"^Ptr\{(.+)\}$" => s"\1")
-
-                # Check if this struct exists in our generated types
-                # DWARF stores structs under bare names (e.g. "MyStruct"), not "__struct__" prefixed
-                if haskey(dwarf_structs, struct_name)
-                    has_struct_ptr_params = true
-                    push!(struct_ptr_indices, i)
-                    push!(convenience_param_types, struct_name)
-                    push!(convenience_param_names, pname)
-                else
-                    push!(convenience_param_types, ptype)
-                    push!(convenience_param_names, pname)
-                end
+                push!(convenience_param_types, ptype)
+                push!(convenience_param_names, pname)
             # Check if this is Ptr{Cdouble}, Ptr{Cfloat}, Ptr{Cint}, etc. (array pointers)
             # These benefit from Vector{T} wrapper with automatic GC.@preserve
             elseif ptype in ["Ptr{Cdouble}", "Ptr{Cfloat}", "Ptr{Cint}", "Ptr{Cuint}",
@@ -2240,8 +2261,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
         end
 
-        # Generate convenience wrapper if we have struct pointer or array pointer parameters
-        if has_struct_ptr_params || has_array_ptr_params
+        # Generate convenience wrapper if we have array pointer parameters
+        if has_array_ptr_params
             convenience_sig = join(["$pname::$ptype" for (pname, ptype) in zip(convenience_param_names, convenience_param_types)], ", ")
 
             # Resolve the return type the same way the base wrapper does. For a
@@ -2257,10 +2278,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # Build the ccall arguments
             convenience_ccall_args = String[]
             for (i, pname) in enumerate(param_names)
-                if i in struct_ptr_indices
-                    # Struct parameter: use Ref()
-                    push!(convenience_ccall_args, "Ref($pname)")
-                elseif i in array_ptr_indices
+                if i in array_ptr_indices
                     # Array parameter: use pointer()
                     push!(convenience_ccall_args, "pointer($pname)")
                 else
@@ -2270,27 +2288,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
             convenience_ccall = join(convenience_ccall_args, ", ")
 
-            # If we have array parameters, wrap the ccall in GC.@preserve
-            # Collect all array parameter names for preservation
-            array_pnames = [param_names[i] for i in array_ptr_indices]
+            # The vectors backing pointer() must stay rooted across the call
+            preserve_vars = join([param_names[i] for i in array_ptr_indices], " ")
 
-            if !isempty(array_pnames)
-                preserve_vars = join(array_pnames, " ")
+            if julia_return_type == "Cstring"
+                # Match the base wrapper's Cstring policy (NULL → nothing,
+                # String copy, [wrap.cstring_owned] free)
                 convenience_func = """
-                # Convenience wrapper - accepts arrays/structs directly with automatic GC preservation
-                function $julia_name($convenience_sig)::$convenience_ret_type
-                    return GC.@preserve $preserve_vars begin
-                        ccall((:$mangled, LIBRARY_PATH), $convenience_ret_type, $ccall_types, $convenience_ccall)
+                # Convenience wrapper - accepts arrays directly with automatic GC preservation
+                function $julia_name($convenience_sig)::Union{String,Nothing}
+                    ptr = GC.@preserve $preserve_vars begin
+                        ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $convenience_ccall)
                     end
+                $(_cstring_policy_lines(get(config.wrap.cstring_owned, func_name, "")))
                 end
 
                 """
             else
-                # No array parameters, just struct parameters
                 convenience_func = """
-                # Convenience wrapper - accepts structs directly instead of pointers
+                # Convenience wrapper - accepts arrays directly with automatic GC preservation
                 function $julia_name($convenience_sig)::$convenience_ret_type
-                    return ccall((:$mangled, LIBRARY_PATH), $convenience_ret_type, $ccall_types, $convenience_ccall)
+                    return GC.@preserve $preserve_vars begin
+                        ccall((:$mangled, LIBRARY_PATH), $convenience_ret_type, $ccall_types, $convenience_ccall)
+                    end
                 end
 
                 """

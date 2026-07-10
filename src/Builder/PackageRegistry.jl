@@ -126,7 +126,24 @@ function hash_config(config::RepliBuildConfig)::String
         SHA.update!(ctx, Vector{UInt8}(git_head))
     end
 
+    # Hash the generator itself: a cached build is only valid for the codegen
+    # that produced it, otherwise use() serves wrappers from old RepliBuild
+    # versions forever.
+    SHA.update!(ctx, Vector{UInt8}(_generator_fingerprint()))
+
     return bytes2hex(SHA.digest!(ctx))
+end
+
+"""
+Fingerprint of the RepliBuild generator itself: package version plus git HEAD
+when running from a dev checkout (the version alone doesn't move on every
+codegen change). Mixed into `hash_config` so stale wrappers miss the cache.
+"""
+function _generator_fingerprint()::String
+    version = something(pkgversion(@__MODULE__), "unknown")
+    root = pkgdir(@__MODULE__)
+    head = root === nothing ? "" : _get_git_head(root)
+    return "replibuild-$version@$head"
 end
 
 function _get_git_head(dir::String)::String
@@ -656,9 +673,11 @@ function _load_wrapper(name::String, config_hash::String, config::RepliBuildConf
         end
     end
 
-    # The wrapper's LIBRARY_PATH is an absolute path baked at build time
-    # (pointing into ~/.replibuild/registry/julia/). No copy needed — copying
-    # to a relative `./julia/` dir would dump .so files into the user's cwd.
+    # The wrapper resolves LIBRARY_PATH relative to its own file first (the
+    # .so copy _store_build placed beside it in this build dir), falling back
+    # to the absolute path baked at generation time. Loading from the per-hash
+    # dir therefore survives later builds overwriting the shared
+    # ~/.replibuild/registry/julia/ output dir.
 
     verbose && println("  loading: $wrapper_path")
 

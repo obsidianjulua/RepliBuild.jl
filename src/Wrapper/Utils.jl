@@ -264,3 +264,33 @@ end
 # is_ccall_safe() is defined in Wrapper/DispatchLogic.jl (included after TypesCpp.jl
 # to have access to is_stl_container_type)
 
+# =============================================================================
+# CSTRING RETURN POLICY
+# =============================================================================
+
+"""
+    _cstring_policy_lines(free_sym; indent="    ") -> String
+
+Shared body for every `Cstring`-returning wrapper, applied after the call
+result is bound to `ptr`:
+
+- `NULL` → `nothing` (a NULL `char*` is a value in C APIs, not an error)
+- otherwise copy to a Julia `String`
+- when `free_sym` is nonempty the C buffer is released through that library
+  symbol after the copy — declared per function in `[wrap.cstring_owned]`
+  (`funcname = "free_symbol"`), because ownership of a returned `char*` is
+  not recoverable from DWARF.
+
+Every emission site (base wrapper, array convenience, vararg base and typed
+overloads, C and C++ generators) splices these same lines so the policy
+cannot drift between sites again.
+"""
+function _cstring_policy_lines(free_sym::String; indent::String="    ")::String
+    free_line = isempty(free_sym) ? "" :
+        "$(indent)ccall((:$(free_sym), LIBRARY_PATH), Cvoid, (Cstring,), ptr)\n"
+    return "$(indent)ptr == C_NULL && return nothing\n" *
+           "$(indent)s = unsafe_string(ptr)\n" *
+           free_line *
+           "$(indent)return s"
+end
+
