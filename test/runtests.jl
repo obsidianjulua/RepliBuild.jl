@@ -11,7 +11,7 @@ using RepliBuild
 @testset "RepliBuild.jl" begin
 
     @testset "Package loads" begin
-        @test RepliBuild.VERSION == v"2.5.10"
+        @test RepliBuild.VERSION == v"3.0.0"
         @test isdefined(RepliBuild, :discover)
         @test isdefined(RepliBuild, :build)
         @test isdefined(RepliBuild, :wrap)
@@ -117,6 +117,11 @@ include(joinpath(@__DIR__, "test_registry.jl"))
 # ── Varargs @ccall emission regression (no toolchain required) ───────────────
 
 include(joinpath(@__DIR__, "test_varargs_emission.jl"))
+
+# ── C-generator policy regressions: cstring_owned, macro-shim visibility,
+#    blob param trap, bitfield byte-span (no toolchain required) ──────────────
+
+include(joinpath(@__DIR__, "test_c_generator_policies.jl"))
 
 # ── DAGDiff module tests (synthetic metadata, no C++ toolchain required) ─────
 
