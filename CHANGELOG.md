@@ -2,6 +2,45 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased (post-3.0.0)
+
+### Tier-2 C++ dispatch fixes (found live rebuilding tinyxml2)
+
+Clean-rebuilding the tinyxml2 Hub package end-to-end surfaced three real defects in the C++ JIT dispatch path — none had a covering test because no Tier-2 wrapper had been driven through a full construct→call→destruct cycle with these argument/return shapes:
+
+- **Enum-by-value returns crashed** (`XMLDocument::Parse → XMLError`). The C++ generator resolved an enum return (DWARF key `__enum__X`) to a single-member struct `!llvm.struct<"X",(i32)>`; MLIR's `emit_c_interface` then used the **sret** convention (`void ciface(T* sret, void** args)`), but the Julia side calls the `@enum` back as a scalar (`T ciface(void** args)`) — the args pointer landed in the sret slot and the call dereferenced garbage. `ir_gen/FunctionGen.jl` now lowers enum returns to their bare underlying integer (returns by value, ABI-identical to the `@enum`); `GeneratorCpp.jl`'s `Any`-return resolution checks `__enum__` before the struct branches so the concrete `@enum` type reaches `invoke`.
+- **`String` arguments to JIT thunks crashed.** `JITManager.invoke` packed `Ref(::String)`, handing the callee a pointer to the String *object* rather than its bytes — segfault on first dereference inside the C++ function. Now marshals `Ref(pointer(str))` with the String GC-preserved across the call, for both the value- and void-returning `invoke` variants.
+- **Unresolved `Any` return now fails loudly.** `_invoke_call(::Type{Any}, …)` used to take the struct-sret path with `Ref{Any}()` (an undefined reference the JIT scribbled into → `UndefRefError`/corruption). It now `error()`s with the actual cause (return type unmapped — stale wrapper or missing DWARF mapping).
+
+Live-verified: tinyxml2 rebuilt from cleared caches, then construct (placement `XMLDocument` ctor thunk) → `Parse` (`XML_SUCCESS`) → `FirstChildElement`/`GetText` (reads "42", "hello hub") → `SetText` → non-deleting dtor thunk, all through Tier-2 MLIR dispatch. Regression state unchanged: dialect templates 56/56, invariants 10/10, producers 26/26, CI 383.
+
+
+### DWARF-driven producers for the JLCS RAII and strided-array ops
+
+The two producer-less op families in the dialect ("Not Yet Built" ledger since 2026-05-29) now have production emitters, verified executing through the real MLIR JIT (`test/test_jlcs_producers.jl`, 26/26, devtests §11):
+
+**Scope-RAII producer** (`ir_gen/FunctionGen.jl` + `JLCSIRGenerator._collect_class_raii`). Per-class destructor (D1-preferred) and copy-constructor (C1-preferred, `(const T&)` signature) symbols are resolved from DWARF metadata once per wrap. Three effects:
+
+- `jlcs.type_info` now carries the resolved `destructorName` (was always `""`).
+- **By-value params of classes with an emitted destructor are non-trivial for the purposes of calls under the Itanium C++ ABI — the callee expects a POINTER to a caller-owned temporary.** The thunk generator previously passed such classes as raw bits per SysV classification, a silent miscompile. Thunks now alloca a temporary, copy-construct it inside a `jlcs.scope` (`jlcs.ctor_call` with the copy ctor when resolvable, byte-copy when the copy is trivial), pass its address, and destruct it at scope exit — reverse order for multiple params, arity co-generated with the managed-pointer list. `try_call`'s sentinel-continue EH model means the normal path is the only path, so scope-exit destructor coverage is total.
+- Symbol presence is the gate (a trivial destructor is never emitted as a symbol), so trivially-copyable classes keep their existing by-value path unchanged.
+
+**Array-view producer** (`ir_gen/ArrayViewGen.jl`, new). Every fixed-size primitive array struct member (`double vals[4]`, `int32_t ids[16]`, …) gets a zero-copy get/set thunk pair that materializes an `ArrayView` descriptor (data/dims/strides/rank) over the member in place and accesses elements through `jlcs.load_array_element`/`store_array_element`. Rank 1 today; the descriptor already carries what bounds-checking and rank ≥ 2 need. This is also the first time these ops have ever been *executed* (the invariants suite only proved parse+lower) — they run correctly.
+
+Remaining wiring (ledger): `GeneratorCpp.jl` does not yet emit user-facing Julia accessors calling the array thunks; multi-dimensional members are skipped.
+
+Also recorded: `StructGen.is_struct_packed` classifies any padding-free struct as "packed" (`sum(sizes) == byte_size`), sending aligned no-padding structs down the `marshal_arg` path unnecessarily — benign but wasteful; the scope-RAII gate deliberately takes precedence over it.
+
+### First JLCS op verifiers: `jlcs.scope` + `jlcs.marshal_arg`
+
+The dialect's two known lowering segfaults are now parse-time diagnostics. `ScopeOp::verify()` rejects managed_ptrs/destructors arity mismatches (the old crash: `emitDestructors` indexed `managedPtrs` by destructor position and walked off the end) and non-symbol destructor entries; `MarshalArgOp::verify()` rejects memberTypes/juliaOffsets arity mismatches (the field loop indexed offsets by member position) and wrong element kinds. Malformed IR that used to SIGSEGV inside `translateModuleToLLVMIR`-adjacent lowering now fails `parse_module` with a real diagnostic.
+
+`test/test_jlcs_invariants.jl` is fully green for the first time — **10/10, zero `@test_broken`** (both A2/B2 probes flipped from "expected crash" to asserting `:parse` rejection). The producer suite doubles as the positive control: production-emitted scope/marshal IR passes verification (26/26). Dialect rebuilt against system MLIR 22.1.6, templates 56/56.
+
+The remaining ops (`vcall`, `type_info`, `ffe_call`/`try_call`, field/array ops) stay verifier-less — no known crash paths — tracked in the ledger to grow verifiers as their producers mature.
+
+Regression state: dialect templates 56/56, invariants **10/10 (no test_broken)**, CI suite 383, producers 26/26.
+
 ## v3.0.0
 
 C-generator audit release (2026-07-10). Ownership and ABI edges of the ergonomic layer are closed: the struct-by-value convenience footgun is removed, variadic calls are formally correct on x86-64 SysV, `char*` returns get one ownership-aware policy (`[wrap.cstring_owned]`) plus raw `_ptr` variants, macro shims survive `-fvisibility=hidden`, two silent-corruption edges are trapped or fixed (misaligned ≤16B blob params, bitfield tail overrun), and the registry build cache stops serving wrappers generated by outdated codegen.

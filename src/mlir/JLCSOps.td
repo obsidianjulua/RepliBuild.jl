@@ -342,6 +342,12 @@ def ScopeOp : JLCS_Op<"scope", [SingleBlockImplicitTerminator<"YieldOp">]> {
   let results = (outs);
 
   let assemblyFormat = "`(` $managed_ptrs `:` type($managed_ptrs) `)` `dtors` `(` $destructors `)` $body attr-dict";
+
+  // Arity mismatch between managed_ptrs and destructors used to SIGSEGV
+  // inside ScopeOpLowering::emitDestructors (indexes managedPtrs by the
+  // destructor position). Producers co-generate the two lists; hand-written
+  // IR now gets a diagnostic instead of a crash.
+  let hasVerifier = 1;
 }
 
 // ====================================================================
@@ -388,6 +394,11 @@ def MarshalArgOp : JLCS_Op<"marshal_arg", [MemoryEffects<[MemRead]>]> {
   let extraClassDeclaration = [{
     MarshalArgOp(::mlir::Operation *op) : Op(op) {}
   }];
+
+  // memberTypes/juliaOffsets arity mismatch used to SIGSEGV during lowering
+  // (the field loop indexes juliaOffsets by memberTypes position). Diagnose
+  // instead; also pin the element kinds the lowering assumes.
+  let hasVerifier = 1;
 }
 
 // 14. Marshal Ret Op (C-packed struct value → Julia-aligned struct value)

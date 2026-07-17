@@ -188,3 +188,12 @@ include(joinpath(TEST_DIR, "test_cache_invalidation.jl"))
 # wrapper's String policy.
 
 include(joinpath(TEST_DIR, "test_convenience_overloads.jl"))
+
+# ── 11. JLCS producers: scope-RAII + array-view ──────────────────────────────
+# DWARF-driven producers for the previously producer-less op families:
+# type_info destructorName, jlcs.scope/ctor_call/dtor_call around by-value
+# non-trivial class params (Itanium caller-owned temporary — the old raw-bits
+# pass was a miscompile), and zero-copy strided accessors via
+# load/store_array_element. Executes through the real MLIR JIT.
+
+include(joinpath(TEST_DIR, "test_jlcs_producers.jl"))

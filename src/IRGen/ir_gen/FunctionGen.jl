@@ -43,7 +43,8 @@ function _parse_byte_size(s::AbstractString)
     startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
 end
 
-function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_throw::Bool=false)
+function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_throw::Bool=false,
+                                  class_raii::Dict{String,Dict{Symbol,String}}=Dict{String,Dict{Symbol,String}}())
     io = IOBuffer()
     println(io, "// Function Thunks")
 
@@ -75,8 +76,18 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
         end
 
+        # Per-param scope-RAII decision: a by-value class param whose class has
+        # an emitted destructor is non-trivial for the purposes of calls under
+        # the Itanium ABI — the callee expects a POINTER to a caller-owned
+        # temporary, not raw bits in registers. Passing the raw struct (the old
+        # behavior) miscompiled those calls. The producer builds the temporary
+        # (copy-ctor when resolvable, bit-copy when the copy is trivial), passes
+        # its address, and destructs it after the call via jlcs.scope.
+        # nothing = not an RAII param; NamedTuple = transform it.
+        raii_specs = Vector{Any}(nothing, length(params))
+
         arg_types = String[]
-        for p in params
+        for (pi, p) in enumerate(params)
             t = get(p, "c_type", "void*")
             mlir_t = map_cpp_type(t)
 
@@ -85,8 +96,21 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 s_name = mlir_t[15:end-2]
                 lookup_key = haskey(structs, s_name) ? s_name : (haskey(structs, "__enum__$(s_name)") ? "__enum__$(s_name)" : nothing)
                 if lookup_key !== nothing
-                    # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
-                    if StructGen.is_struct_packed(structs[lookup_key])
+                    # Scope-RAII takes precedence over both by-value marshalling
+                    # paths: a class with an emitted destructor is non-trivial
+                    # for the purposes of calls (Itanium), so the callee expects
+                    # a POINTER to a caller-owned temporary regardless of byte
+                    # layout. (is_struct_packed classifies any padding-free
+                    # struct as "packed", so it must not gate this decision.)
+                    cls_key = strip(replace(t, r"\bconst\b" => ""))
+                    bsz = try _parse_byte_size(get(structs[lookup_key], "byte_size", "0")) catch; 0 end
+                    if haskey(class_raii, cls_key) && bsz > 0
+                        raii_specs[pi] = (cls = cls_key, size = bsz,
+                                          dtor = class_raii[cls_key][:dtor],
+                                          copy_ctor = get(class_raii[cls_key], :copy_ctor, ""))
+                        mlir_t = "!llvm.ptr"   # Itanium: pass address of the temporary
+                    elseif StructGen.is_struct_packed(structs[lookup_key])
+                        # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
                         mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key])
                     else
                         # Use FULL definition string to avoid alias parser issues in function signatures
@@ -97,6 +121,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
 
             push!(arg_types, mlir_t)
         end
+        has_raii = any(!isnothing, raii_specs)
 
         ret_c_type = get(ret_info, "c_type", "void")
         ret_type = map_cpp_type(ret_c_type)
@@ -107,6 +132,22 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         ret_aligned_type = ""
         ret_struct_info = nothing
         ret_num_members = 0
+
+        # Enum return → bare underlying integer, NOT a single-member struct.
+        # A struct result (even `struct<(i32)>`) makes MLIR's emit_c_interface
+        # use the sret convention (void ciface(T* sret, void** args)), but the
+        # Julia side calls the @enum back as a scalar (T ciface(void** args)) —
+        # the args pointer lands in the sret slot and the call derefs garbage.
+        # Found live: tinyxml2 XMLDocument::Parse → XMLError. Bare int returns
+        # by value, matching the scalar ccall; @enum is ABI-identical to its base.
+        if startswith(ret_type, "!llvm.struct<\"") && endswith(ret_type, "\">")
+            _ename = ret_type[15:end-2]
+            if haskey(structs, "__enum__$(_ename)")
+                ju = String(get(structs["__enum__$(_ename)"], "julia_type", "Cint"))
+                ret_type = map_cpp_type(ju == "Any" ? "int" : ju)
+                ret_type == "" && (ret_type = "i32")
+            end
+        end
 
         # Resolve full struct type for return
         if startswith(ret_type, "!llvm.struct<\"") && endswith(ret_type, "\">")
@@ -178,6 +219,22 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # Add llvm.emit_c_interface to generate _mlir_ciface_ wrapper for invokePacked
         println(io, "func.func @$(mangled)_thunk(%args_ptr: !llvm.ptr) $(thunk_mlir_ret) attributes { llvm.emit_c_interface } {")
 
+        # Scope-RAII entry allocas: one caller-owned temporary per non-trivial
+        # by-value param, plus (for non-void calls) a slot the call result
+        # escapes through — jlcs.scope has no results, so values leave via memory.
+        raii_ret_slot_type = ""
+        if has_raii
+            println(io, "  %raii_one = llvm.mlir.constant(1 : i64) : i64")
+            for (pi, spec) in enumerate(raii_specs)
+                isnothing(spec) && continue
+                println(io, "  %raii_tmp_$(pi) = llvm.alloca %raii_one x !llvm.array<$(spec.size) x i8> : (i64) -> !llvm.ptr")
+            end
+            raii_ret_slot_type = is_packed_ret ? ret_packed_type : func_ret
+            if raii_ret_slot_type != ""
+                println(io, "  %raii_retslot = llvm.alloca %raii_one x $(raii_ret_slot_type) : (i64) -> !llvm.ptr")
+            end
+        end
+
         call_args = String[]
 
         for (i, p) in enumerate(params)
@@ -209,6 +266,14 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             println(io, "  %arg_ptr_$(i) = llvm.getelementptr %args_ptr[%idx_$(i)] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr")
             println(io, "  %val_ptr_$(i) = llvm.load %arg_ptr_$(i) : !llvm.ptr -> !llvm.ptr")
 
+            if !isnothing(raii_specs[i])
+                # Non-trivial by-value param: the temporary is copy-constructed
+                # inside the jlcs.scope (emitted at the call site below); here we
+                # only record the source pointer. The callee receives %raii_tmp_i.
+                push!(call_args, "%raii_tmp_$(i)")
+                continue
+            end
+
             if is_packed_struct
                 # Layout mismatch: Julia passes aligned struct pointer, C++ expects packed struct by value.
                 # Emit jlcs.marshal_arg op — the MLIR lowering pass handles the field-by-field reconstruction.
@@ -238,7 +303,49 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         call_op = use_try_call ? "jlcs.try_call" : "jlcs.ffe_call"
 
         # Call using jlcs.ffe_call or jlcs.try_call (via Dialect)
-        if func_ret == ""
+        if has_raii
+            # Scope-RAII: copy-construct temporaries, call inside the scope,
+            # destructors fire in reverse order at scope exit. try_call converts
+            # C++ exceptions to sentinel-return-and-continue, so the normal path
+            # (where the scope emits dtors) is the only path — coverage is total.
+            raii_idx = [i for i in 1:length(params) if !isnothing(raii_specs[i])]
+            tmp_list = join(["%raii_tmp_$(i)" for i in raii_idx], ", ")
+            tmp_types = join(fill("!llvm.ptr", length(raii_idx)), ", ")
+            # managed_ptrs and dtors are co-generated from the same index list —
+            # the arity invariant the (still unverified) op relies on
+            dtor_list = join(["@$(raii_specs[i].dtor)" for i in raii_idx], ", ")
+
+            println(io, "  jlcs.scope($(tmp_list) : $(tmp_types)) dtors([$(dtor_list)]) {")
+            for i in raii_idx
+                spec = raii_specs[i]
+                if !isempty(spec.copy_ctor)
+                    println(io, "    jlcs.ctor_call @$(spec.copy_ctor)(%raii_tmp_$(i), %val_ptr_$(i)) : (!llvm.ptr, !llvm.ptr) -> ()")
+                else
+                    # No copy-ctor symbol → copy is trivial; bit-copy the bytes
+                    println(io, "    %raii_blob_$(i) = llvm.load %val_ptr_$(i) : !llvm.ptr -> !llvm.array<$(spec.size) x i8>")
+                    println(io, "    llvm.store %raii_blob_$(i), %raii_tmp_$(i) : !llvm.array<$(spec.size) x i8>, !llvm.ptr")
+                end
+            end
+            if func_ret == ""
+                println(io, "    $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+            else
+                inner_ret = is_packed_ret ? ret_packed_type : func_ret
+                println(io, "    %raii_ret = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(inner_ret)")
+                println(io, "    llvm.store %raii_ret, %raii_retslot : $(inner_ret), !llvm.ptr")
+            end
+            println(io, "    jlcs.yield")
+            println(io, "  }")
+            if func_ret == ""
+                println(io, "  return")
+            elseif is_packed_ret
+                println(io, "  %ret_packed = llvm.load %raii_retslot : !llvm.ptr -> $(ret_packed_type)")
+                println(io, "  %ret_aligned = jlcs.marshal_ret %ret_packed { numMembers = $(ret_num_members) : i64 } : ($(ret_packed_type)) -> $(ret_aligned_type)")
+                println(io, "  return %ret_aligned : $(ret_aligned_type)")
+            else
+                println(io, "  %ret_val = llvm.load %raii_retslot : !llvm.ptr -> $(func_ret)")
+                println(io, "  return %ret_val : $(func_ret)")
+            end
+        elseif func_ret == ""
              # Void return
              println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
              println(io, "  return")

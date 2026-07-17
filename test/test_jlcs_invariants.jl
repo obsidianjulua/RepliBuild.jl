@@ -156,9 +156,10 @@ end
     outcome, code = probe_lowering(malformed)
     println("  → A2 malformed scope (1 ptr / 2 dtors): $outcome (code/signal=$code)")
     # Contract: malformed IR must be rejected gracefully (verifier/diagnostic),
-    # never segfault. CONFIRMED to crash today (SIGSEGV) — marked broken so it
-    # flips to "Unexpectedly passed" the moment a ScopeOp verifier lands.
-    @test_broken outcome != :crash
+    # never segfault. ScopeOp::verify() (2026-07-16) rejects the arity mismatch
+    # at parse time — outcome is :parse, not :crash.
+    @test outcome != :crash
+    @test outcome == :parse
     outcome == :crash && @warn "scope arity mismatch CRASHES lowering (signal $code) — verifier needed"
 end
 
@@ -197,7 +198,9 @@ end
     outcome, code = probe_lowering(malformed)
     println("  → B2 malformed marshal_arg (2 types / 1 offset): $outcome (code/signal=$code)")
     # Same contract as A2: must reject gracefully, never segfault.
-    @test_broken outcome != :crash
+    # MarshalArgOp::verify() (2026-07-16) rejects the arity mismatch at parse.
+    @test outcome != :crash
+    @test outcome == :parse
     outcome == :crash && @warn "marshal_arg offset/type mismatch CRASHES lowering (signal $code) — verifier needed"
 end
 
@@ -224,7 +227,7 @@ end
     println("  → C array ops parse+lower: $outcome (code/signal=$code)")
     @test outcome in (:lowered, :failed, :parse, :crash)
     if outcome == :lowered
-        println("    array ops are FUNCTIONAL but unused (dead producer, not dead op)")
+        println("    array ops are FUNCTIONAL (produced by ArrayViewGen since 2026-07-16; executed in test_jlcs_producers.jl)")
     elseif outcome in (:parse, :crash)
         @warn "array ops no longer survive the stack ($outcome) — bit-rotted, wire up or remove"
     end

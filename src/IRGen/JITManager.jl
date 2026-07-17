@@ -133,6 +133,15 @@ Call JIT function with correct ABI. Uses @generated to resolve ccall return type
 at compile time (ccall requires a concrete type, not a TypeVar).
 """
 @generated function _invoke_call(fptr::Ptr{Cvoid}, ::Type{T}, inner_ptrs::Vector{Ptr{Cvoid}}) where T
+    if T === Any
+        # An unresolved wrapper ret type would take the sret path below with
+        # Ref{Any}() — an undefined reference the JIT then scribbles raw bytes
+        # into. Refuse loudly with the actual cause instead.
+        return :(error("JIT invoke: the generated wrapper's return type is the " *
+                       "unresolved `Any` sentinel — its C type was not mapped " *
+                       "(enum/struct missing from DWARF metadata?). Re-wrap with " *
+                       "a current generator or add the type mapping."))
+    end
     if isprimitivetype(T)
         # Scalar return: T ciface(void** args_ptr) — direct return
         return :(ccall(fptr, $T, (Ptr{Ptr{Cvoid}},), inner_ptrs))
@@ -160,9 +169,18 @@ that the old generic fallback incurred on every call.
 @generated function invoke(func_name::String, ::Type{T}, args::Vararg{Any, N}) where {T, N}
     ref_syms = [Symbol("r$i") for i in 1:N]
 
-    setup = [:($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
+    # Strings marshal as pointers to their bytes (NUL-terminated in Julia).
+    # Packing Ref(::String) directly hands the callee a pointer into the
+    # String OBJECT, not its data — segfault on first dereference (found live
+    # on tinyxml2 XMLDocument::Parse). The String itself is GC-preserved via
+    # the args tuple held across the call.
+    str_syms = [Symbol("s$i") for i in 1:N]
+    setup = [args[i] <: AbstractString ?
+                 :($(str_syms[i]) = args[$i]; $(ref_syms[i]) = Ref(pointer($(str_syms[i])))) :
+                 :($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
     ptrs = [:(Base.unsafe_convert(Ptr{Cvoid}, $(ref_syms[i]))) for i in 1:N]
-    preserve_args = ref_syms
+    # Preserve the Refs AND the strings whose byte pointers were taken
+    preserve_args = vcat(ref_syms, [str_syms[i] for i in 1:N if args[i] <: AbstractString])
 
     quote
         (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
@@ -184,9 +202,14 @@ end
 @generated function invoke(func_name::String, args::Vararg{Any, N}) where N
     ref_syms = [Symbol("r$i") for i in 1:N]
 
-    setup = [:($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
+    # Same String marshalling as the value-returning variant above
+    str_syms = [Symbol("s$i") for i in 1:N]
+    setup = [args[i] <: AbstractString ?
+                 :($(str_syms[i]) = args[$i]; $(ref_syms[i]) = Ref(pointer($(str_syms[i])))) :
+                 :($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
     ptrs = [:(Base.unsafe_convert(Ptr{Cvoid}, $(ref_syms[i]))) for i in 1:N]
-    preserve_args = ref_syms
+    # Preserve the Refs AND the strings whose byte pointers were taken
+    preserve_args = vcat(ref_syms, [str_syms[i] for i in 1:N if args[i] <: AbstractString])
 
     quote
         (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()

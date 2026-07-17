@@ -2133,8 +2133,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # This is critical: invoke(name, Any, ...) creates Ref{Any}() which corrupts
             # memory when the JIT writes raw struct bytes into it.
             if jit_ret_type == "Any" && jit_c_ret != "void"
+                # Enum returns first: ABI integers keyed __enum__<name> in DWARF,
+                # so every struct branch below misses them and the Any sentinel
+                # survived into invoke() — whose Ref{Any}() sret path throws
+                # UndefRefError (found live: tinyxml2 XMLDocument::Parse → XMLError).
+                # The generated @enum type is a Julia primitive type, so
+                # _invoke_call takes the scalar ccall path with it.
+                _enum_ret = String(strip(replace(jit_c_ret, r"\bconst\b" => "")))
                 stl_size = _is_stl_internal_type(jit_c_ret) ? get_stl_container_size(jit_c_ret) : 0
-                if stl_size > 0
+                if haskey(dwarf_structs, "__enum__$(_enum_ret)")
+                    jit_ret_type = _sanitize_cpp_type_name(_enum_ret)
+                elseif stl_size > 0
                     jit_ret_type = "NTuple{$stl_size, UInt8}"
                 elseif _is_stl_internal_type(jit_c_ret)
                     info = get(dwarf_structs, jit_c_ret, nothing)

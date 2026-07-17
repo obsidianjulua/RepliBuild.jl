@@ -12,20 +12,76 @@ include("ir_gen/TypeUtils.jl")
 include("ir_gen/StructGen.jl")
 include("ir_gen/FunctionGen.jl")
 include("ir_gen/STLContainerGen.jl")
+include("ir_gen/ArrayViewGen.jl")
 
 using .TypeUtils
 using .StructGen
 using .FunctionGen
 using .STLContainerGen
+using .ArrayViewGen
 
 export generate_jlcs_ir, generate_mlir_module
 
 """
-    generate_type_info_ir(class_name::String, info::ClassInfo, vtable_addr::UInt64) -> String
+    _collect_class_raii(metadata) -> Dict{String,Dict{Symbol,String}}
 
-Generate JLCS type_info operation for a class.
+Resolve per-class RAII symbols from DWARF metadata: the complete-object
+destructor (`D1` preferred over `D2`/`D0`) and, when present, the copy
+constructor (`C1` preferred, signature `(const T&)`).
+
+Symbol presence is the gate (the repo's symbol-presence law): a truly trivial
+destructor is never emitted as a symbol, so a class appearing here is
+non-trivial for the purposes of calls under the Itanium ABI — by-value
+crossings must go through a caller-owned temporary that is destructed after
+the call, which is exactly what the scope-RAII producer emits.
 """
-function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, vtable_addr::UInt64)
+function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
+    raii = Dict{String,Dict{Symbol,String}}()
+    for f in get(metadata, "functions", [])
+        get(f, "is_method", false) || continue
+        cls = String(get(f, "class", ""))
+        isempty(cls) && continue
+        mangled = String(get(f, "mangled", ""))
+        isempty(mangled) && continue
+        demangled = String(get(f, "demangled", ""))
+
+        entry = get!(raii, cls, Dict{Symbol,String}())
+
+        if occursin("~", demangled)
+            # Destructor: prefer the complete-object destructor (D1)
+            if !haskey(entry, :dtor) || (occursin("D1E", mangled) && !occursin("D1E", entry[:dtor]))
+                entry[:dtor] = mangled
+            end
+        elseif occursin("$(cls)::$(cls)(", demangled)
+            # Constructor: a copy ctor takes exactly one param of `const cls&`
+            # (metadata params exclude the implicit `this`)
+            params = get(f, "parameters", [])
+            explicit = [p for p in params if get(p, "name", "") != "this"]
+            if length(explicit) == 1
+                pct = strip(String(get(explicit[1], "c_type", "")))
+                pct_clean = strip(replace(pct, r"\bconst\b" => ""))
+                if pct_clean == "$(cls)&" || pct_clean == "$(cls) &"
+                    if !haskey(entry, :copy_ctor) || (occursin("C1E", mangled) && !occursin("C1E", entry[:copy_ctor]))
+                        entry[:copy_ctor] = mangled
+                    end
+                end
+            end
+        end
+    end
+    # Only classes with a resolvable destructor participate
+    filter!(p -> haskey(p.second, :dtor), raii)
+    return raii
+end
+
+"""
+    generate_type_info_ir(class_name::String, info::ClassInfo, vtable_addr::UInt64;
+                          destructor::String="") -> String
+
+Generate JLCS type_info operation for a class. `destructor` is the
+DWARF-resolved complete-object destructor symbol (empty when none exists).
+"""
+function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, vtable_addr::UInt64;
+                               destructor::String="")
     mlir_name = replace(class_name, 
         "::" => "_", "<" => "_", ">" => "_", "(" => "_", ")" => "_",
         " " => "", "," => "_", "*" => "Ptr", "&" => "Ref"
@@ -86,7 +142,7 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
     struct_type_str = "!jlcs.c_struct<\"$(class_name)\", [$(field_types_str)], [$(field_offsets_attr)], packed = false>"
 
     ir = """
-  jlcs.type_info "$(mlir_name)", $(struct_type_str), "$(super_type)", "" """
+  jlcs.type_info "$(mlir_name)", $(struct_type_str), "$(super_type)", "$(destructor)" """
 
     return ir
 end
@@ -213,6 +269,10 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     end
     println(io, "")
 
+    # Per-class RAII symbols (destructor + copy ctor) resolved once from DWARF.
+    # Drives type_info's destructorName and the scope-RAII producer in FunctionGen.
+    class_raii = _collect_class_raii(metadata)
+
     # 3. Generate Type Info & VMethods
     generated_symbols = Set{String}()
 
@@ -225,7 +285,8 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         # We could add it as an attribute if needed.
         vtable_addr = get(vtinfo.vtable_addresses, class_name, UInt64(0))
 
-        println(io, generate_type_info_ir(class_name, class_info, vtable_addr))
+        class_dtor = get(get(class_raii, class_name, Dict{Symbol,String}()), :dtor, "")
+        println(io, generate_type_info_ir(class_name, class_info, vtable_addr; destructor=class_dtor))
         println(io, "")
 
         for method in class_info.virtual_methods
@@ -255,12 +316,19 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         is_cpp = lang in ("c++", "cpp", "cxx") ||
                  any(f -> get(f, "is_method", false) || startswith(get(f, "mangled", ""), "_Z"), filtered_functions)
 
-        println(io, generate_function_thunks(filtered_functions, structs_meta; may_throw=is_cpp))
+        println(io, generate_function_thunks(filtered_functions, structs_meta;
+                                             may_throw=is_cpp, class_raii=class_raii))
     end
 
     # 5. Generate STL Container Accessor Thunks
     if haskey(metadata, "stl_methods") && !isempty(metadata["stl_methods"])
         println(io, generate_stl_thunks(metadata["stl_methods"], metadata))
+    end
+
+    # 6. Generate strided array-view accessor thunks for fixed-size array members
+    if haskey(metadata, "struct_definitions")
+        av_ir = generate_array_view_thunks(metadata["struct_definitions"])
+        isempty(av_ir) || println(io, av_ir)
     end
 
     println(io, "}")
