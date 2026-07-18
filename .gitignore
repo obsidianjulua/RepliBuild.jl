@@ -67,6 +67,7 @@ docs/build/
 *.code-workspace
 .vscode/
 .idea/
+TODO.md
 
 # Claude Code
 .claude/
