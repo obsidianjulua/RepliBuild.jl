@@ -68,6 +68,7 @@ end
 
 INTEGRATION_TESTS = [
     ("stress_test",        "Stress Test (numerics, vtable, RAII, MLIR)"),
+    ("mi_test",            "Multiple Inheritance (two-base layout, upcasts)"),
     ("stl_test",           "STL Templates (vector, string, map)"),
     ("c_test",             "C Fundamentals (structs, enums, LTO, packed, unions)"),
     ("c_abomination_test", "C Edge Cases (opaque structs, nested callbacks)"),

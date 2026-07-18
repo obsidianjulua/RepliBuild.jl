@@ -655,6 +655,220 @@ end
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 8b. Multiple Inheritance vcall — this_offset adjustment
+# ══════════════════════════════════════════════════════════════════════════════
+
+@testset "8b. Multiple Inheritance vcall (this_offset)" begin
+    ctx = create_context()
+    try
+        # DerivedMI layout: Base1 @0 {vptr1@0, a@8}, Base2 @16 {vptr2@16, b@24}.
+        # Base2's methods are compiled base-relative (see templates.cpp) —
+        # dispatching through Base2 needs BOTH the vtable read at +16 AND
+        # `this` adjusted by +16 before the call. this_offset supplies the
+        # latter; without it the callee reads Base1's data through Base2's
+        # method (the documented MI bug, pinned below).
+        ir = """
+        module {
+            func.func @mi_get_a(%obj: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface} {
+                %r = "jlcs.vcall"(%obj) {class_name = @DerivedMI, vtable_offset = 0 : i64, slot = 0 : i64}
+                    : (!llvm.ptr) -> i32
+                return %r : i32
+            }
+            func.func @mi_get_b_adjusted(%obj: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface} {
+                %r = "jlcs.vcall"(%obj) {class_name = @DerivedMI, vtable_offset = 16 : i64, this_offset = 16 : i64, slot = 0 : i64}
+                    : (!llvm.ptr) -> i32
+                return %r : i32
+            }
+            func.func @mi_get_b_unadjusted(%obj: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface} {
+                %r = "jlcs.vcall"(%obj) {class_name = @DerivedMI, vtable_offset = 16 : i64, slot = 0 : i64}
+                    : (!llvm.ptr) -> i32
+                return %r : i32
+            }
+            func.func @mi_set_b(%obj: !llvm.ptr, %v: i32) attributes {llvm.emit_c_interface} {
+                "jlcs.vcall"(%obj, %v) {class_name = @DerivedMI, vtable_offset = 16 : i64, this_offset = 16 : i64, slot = 1 : i64}
+                    : (!llvm.ptr, i32) -> ()
+                return
+            }
+        }
+        """
+        mod = parse_module(ctx, ir)
+        @test mod != C_NULL
+        mod_jit = clone_module(mod)
+        @test lower_to_llvm(mod_jit)
+
+        jit = create_jit(mod_jit, shared_libs=[LIB_PATH])
+        @test jit != C_NULL
+
+        buf = zeros(UInt8, 32)
+        GC.@preserve buf begin
+            p = pointer(buf)
+            lib = Libdl.dlopen(LIB_PATH)
+            ccall(Libdl.dlsym(lib, :derived_mi_init),
+                  Cvoid, (Ptr{Cvoid}, Int32, Int32), p, Int32(111), Int32(222))
+
+            obj_ref = Ref(Ptr{Cvoid}(p))
+            result = Ref(Int32(0))
+            ptrs = Ptr{Cvoid}[
+                Base.unsafe_convert(Ptr{Cvoid}, obj_ref),
+                Base.unsafe_convert(Ptr{Cvoid}, result),
+            ]
+            GC.@preserve obj_ref result begin
+                # Primary base: the unchanged single-inheritance path
+                @test jit_invoke(jit, "mi_get_a", ptrs)
+                @test result[] == 111
+
+                # THE MI canary: Base2::get_b with `this` adjusted reads b
+                result[] = Int32(0)
+                @test jit_invoke(jit, "mi_get_b_adjusted", ptrs)
+                @test result[] == 222
+
+                # Pin the pre-fix failure mode: same vtable/slot, `this`
+                # unadjusted — Base2's method reads Base1's member. This is
+                # what every secondary-base vcall silently did before
+                # this_offset existed; keep it pinned so the semantics of
+                # the default (0) stay observable.
+                result[] = Int32(0)
+                @test jit_invoke(jit, "mi_get_b_unadjusted", ptrs)
+                @test result[] == 111
+            end
+
+            # Mutation through the secondary base (void return, extra arg),
+            # then verify raw memory: b @24 changed, a @8 untouched.
+            val_ref = Ref(Int32(999))
+            set_ptrs = Ptr{Cvoid}[
+                Base.unsafe_convert(Ptr{Cvoid}, obj_ref),
+                Base.unsafe_convert(Ptr{Cvoid}, val_ref),
+            ]
+            GC.@preserve obj_ref val_ref begin
+                @test jit_invoke(jit, "mi_set_b", set_ptrs)
+            end
+            @test unsafe_load(Ptr{Int32}(p + 24)) == 999
+            @test unsafe_load(Ptr{Int32}(p + 8)) == 111
+
+            Libdl.dlclose(lib)
+        end
+
+        destroy_jit(jit)
+        println("  ✓ MI vcall: this_offset adjusts `this` for secondary-base dispatch")
+
+        # type_info carrying the MI base table (attr-dict) parses + lowers
+        ti_ir = """
+        module {
+            jlcs.type_info "DerivedMI",
+                !jlcs.c_struct<"DerivedMI", [!llvm.ptr, i32, !llvm.ptr, i32],
+                    [[0 : i64, 8 : i64, 16 : i64, 24 : i64]], packed = false>,
+                "Base1", ""
+                {baseNames = ["Base1", "Base2"], baseOffsets = [0 : i64, 16 : i64]}
+        }
+        """
+        ti_mod = parse_module(ctx, ti_ir)
+        @test ti_mod != C_NULL
+        ti_jit = clone_module(ti_mod)
+        @test lower_to_llvm(ti_jit)
+        println("  ✓ type_info with MI base table parses + lowers")
+
+        # Verifier: mismatched base-table arity must be rejected at parse
+        bad_ir = """
+        module {
+            jlcs.type_info "BadMI",
+                !jlcs.c_struct<"BadMI", [i32], [[0 : i64]], packed = false>,
+                "", ""
+                {baseNames = ["Base1", "Base2"], baseOffsets = [0 : i64]}
+        }
+        """
+        @test_throws ErrorException parse_module(ctx, bad_ir)
+        println("  ✓ type_info base-table arity mismatch diagnosed at parse")
+    finally
+        destroy_context(ctx)
+    end
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8c. vcall may_throw — invoke + landing pad EH path
+# ══════════════════════════════════════════════════════════════════════════════
+
+@testset "8c. vcall may_throw (EH invoke path)" begin
+    ctx = create_context()
+    try
+        # Same MI dispatch as 8b but through the may_throw lowering: indirect
+        # invoke + landing pad + sentinel-continue instead of a plain call.
+        # Nothing throws here — the assertion is that the EH plumbing doesn't
+        # perturb dispatch or the this-adjustment.
+        ir = """
+        module {
+            func.func @mi_get_b_eh(%obj: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface} {
+                %r = "jlcs.vcall"(%obj) {class_name = @DerivedMI, vtable_offset = 16 : i64, this_offset = 16 : i64, slot = 0 : i64, may_throw}
+                    : (!llvm.ptr) -> i32
+                return %r : i32
+            }
+            func.func @mi_set_b_eh(%obj: !llvm.ptr, %v: i32) attributes {llvm.emit_c_interface} {
+                "jlcs.vcall"(%obj, %v) {class_name = @DerivedMI, vtable_offset = 16 : i64, this_offset = 16 : i64, slot = 1 : i64, may_throw}
+                    : (!llvm.ptr, i32) -> ()
+                return
+            }
+        }
+        """
+        mod = parse_module(ctx, ir)
+        @test mod != C_NULL
+        mod_jit = clone_module(mod)
+        @test lower_to_llvm(mod_jit)
+
+        # Emitted LLVM must carry the EH scaffolding: an indirect invoke
+        # (callee is an SSA value), a landing pad, and the personality.
+        mod_emit = clone_module(mod)
+        @test lower_to_llvm(mod_emit)
+        llpath = tempname() * ".ll"
+        @test emit_llvmir(mod_emit, llpath)
+        ll = read(llpath, String); rm(llpath, force=true)
+        @test occursin(r"invoke[^\n]*%\d+\(ptr", ll)
+        @test occursin("landingpad", ll)
+        @test occursin("__gxx_personality_v0", ll)
+        @test occursin("jlcs_catch_current_exception", ll)
+
+        # JIT-execute against the fixture (libJLCS supplies the EH runtime
+        # hooks; libstdc++ personality resolves from the loaded process).
+        jit = create_jit(mod_jit, shared_libs=[LIB_PATH, RepliBuild.MLIRNative.libJLCS])
+        @test jit != C_NULL
+
+        buf = zeros(UInt8, 32)
+        GC.@preserve buf begin
+            p = pointer(buf)
+            lib = Libdl.dlopen(LIB_PATH)
+            ccall(Libdl.dlsym(lib, :derived_mi_init),
+                  Cvoid, (Ptr{Cvoid}, Int32, Int32), p, Int32(111), Int32(222))
+
+            obj_ref = Ref(Ptr{Cvoid}(p))
+            result = Ref(Int32(0))
+            ptrs = Ptr{Cvoid}[
+                Base.unsafe_convert(Ptr{Cvoid}, obj_ref),
+                Base.unsafe_convert(Ptr{Cvoid}, result),
+            ]
+            GC.@preserve obj_ref result begin
+                @test jit_invoke(jit, "mi_get_b_eh", ptrs)
+                @test result[] == 222
+            end
+
+            val_ref = Ref(Int32(555))
+            set_ptrs = Ptr{Cvoid}[
+                Base.unsafe_convert(Ptr{Cvoid}, obj_ref),
+                Base.unsafe_convert(Ptr{Cvoid}, val_ref),
+            ]
+            GC.@preserve obj_ref val_ref begin
+                @test jit_invoke(jit, "mi_set_b_eh", set_ptrs)
+            end
+            @test unsafe_load(Ptr{Int32}(p + 24)) == 555
+
+            Libdl.dlclose(lib)
+        end
+
+        destroy_jit(jit)
+        println("  ✓ vcall may_throw: EH invoke path dispatches + adjusts correctly")
+    finally
+        destroy_context(ctx)
+    end
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 9. TypeInfoOp with Template Inheritance
 # ══════════════════════════════════════════════════════════════════════════════
 

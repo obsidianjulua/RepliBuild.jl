@@ -40,6 +40,33 @@ LogicalResult ScopeOp::verify() {
     return success();
 }
 
+LogicalResult VirtualCallOp::verify() {
+    if (getArgs().empty())
+        return emitOpError() << "requires at least the object pointer as "
+                             << "args[0]; vtable_offset/this_offset are read "
+                             << "relative to it";
+    return success();
+}
+
+LogicalResult TypeInfoOp::verify() {
+    size_t nNames = getBaseNames().size();
+    size_t nOffs = getBaseOffsets().size();
+    if (nNames != nOffs)
+        return emitOpError() << "baseNames has " << nNames
+                             << " entrie(s) but baseOffsets has " << nOffs
+                             << "; each base class needs exactly one "
+                             << "subobject offset";
+    for (Attribute attr : getBaseNames())
+        if (!isa<StringAttr>(attr))
+            return emitOpError() << "baseNames entries must be string "
+                                 << "attributes, got " << attr;
+    for (Attribute attr : getBaseOffsets())
+        if (!isa<IntegerAttr>(attr))
+            return emitOpError() << "baseOffsets entries must be integer "
+                                 << "attributes, got " << attr;
+    return success();
+}
+
 LogicalResult MarshalArgOp::verify() {
     size_t nTypes = getMemberTypes().size();
     size_t nOffs = getJuliaOffsets().size();

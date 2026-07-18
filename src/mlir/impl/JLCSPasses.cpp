@@ -93,6 +93,20 @@ struct SetFieldOpLowering : public ConversionPattern {
 // VirtualCallOp Lowering
 //===----------------------------------------------------------------------===//
 
+/// Get or declare an external llvm.func in the module (shared by the vcall
+/// EH path; TryCallOpLowering carries its own identical member helper).
+static LLVM::LLVMFuncOp getOrInsertLLVMFn(ModuleOp module,
+                                          ConversionPatternRewriter& rewriter,
+                                          StringRef name,
+                                          LLVM::LLVMFunctionType fnType)
+{
+    if (auto fn = module.lookupSymbol<LLVM::LLVMFuncOp>(name))
+        return fn;
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    return LLVM::LLVMFuncOp::create(rewriter, module.getLoc(), name, fnType);
+}
+
 struct VirtualCallOpLowering : public ConversionPattern {
     VirtualCallOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
         : ConversionPattern(typeConverter, VirtualCallOp::getOperationName(), 1,
@@ -109,6 +123,7 @@ struct VirtualCallOpLowering : public ConversionPattern {
 
         // Get attributes
         int64_t vtableOffset = vcallOp.getVtableOffset();
+        int64_t thisOffset = vcallOp.getThisOffset();
         int64_t slot = vcallOp.getSlot();
         VirtualCallOp::Adaptor adaptor(operands);
         ValueRange args = adaptor.getArgs();
@@ -123,7 +138,23 @@ struct VirtualCallOpLowering : public ConversionPattern {
 
         // Step 1: Load vtable pointer from object
         // vtable_ptr = *(objPtr + vtableOffset)
+        // vtableOffset is relative to the ORIGINAL pointer — for a secondary
+        // base it already points at that base's vptr, so no pre-adjustment.
         Value vtablePtr = getStructField(loc, rewriter, objPtr, vtableOffset, ptrType);
+
+        // Step 1b: `this` adjustment. A method dispatched through a
+        // non-primary base expects `this` to point at that base's subobject,
+        // not the derived object's start; entries in a secondary vtable are
+        // compiled against the base-relative `this`. Adjust args[0] by
+        // this_offset bytes (i8 GEP) before the call. this_offset == 0 (the
+        // default, and every single-inheritance case) emits nothing.
+        Value adjustedThis = objPtr;
+        if (thisOffset != 0) {
+            Value thisOffVal = arith::ConstantIntOp::create(rewriter, loc, thisOffset, 64);
+            adjustedThis = LLVM::GEPOp::create(rewriter,
+                loc, ptrType, rewriter.getI8Type(), objPtr,
+                ArrayRef<LLVM::GEPArg>({ thisOffVal }));
+        }
 
         // Step 2: Index into vtable to get function pointer
         // func_ptr = vtable[slot]
@@ -163,16 +194,119 @@ struct VirtualCallOpLowering : public ConversionPattern {
         auto calleeType = LLVM::LLVMFunctionType::get(resultLLVMType, paramTypes,
                                                       /*isVarArg=*/false);
 
-        // Indirect-call operand list: function pointer first, then the call args.
+        // Indirect-call operand list: function pointer first, then the call
+        // args with the (possibly) adjusted `this` in place of args[0].
         SmallVector<Value, 5> callOperands;
         callOperands.push_back(funcPtr);
-        callOperands.append(args.begin(), args.end());
+        callOperands.push_back(adjustedThis);
+        callOperands.append(args.begin() + 1, args.end());
 
-        auto callOp = LLVM::CallOp::create(rewriter, loc, calleeType, callOperands);
+        if (!vcallOp.getMayThrow()) {
+            // Plain indirect call — the pre-existing lowering, unchanged.
+            auto callOp = LLVM::CallOp::create(rewriter, loc, calleeType, callOperands);
 
-        // Replace the jlcs.vcall with the call result (if the method returns a value).
-        if (vcallOp.getResult()) {
-            rewriter.replaceOp(op, callOp.getResult());
+            if (vcallOp.getResult()) {
+                rewriter.replaceOp(op, callOp.getResult());
+            } else {
+                rewriter.eraseOp(op);
+            }
+            return success();
+        }
+
+        // --- may_throw: indirect invoke + landing pad -------------------
+        // Same sentinel-continue EH model as TryCallOpLowering: a thrown C++
+        // exception is caught, recorded via jlcs_catch_current_exception(),
+        // and the call yields a zero sentinel. No sret/packed coercion here
+        // (see op description) — producers only set may_throw on
+        // scalar/pointer signatures.
+        auto moduleOp = op->getParentOfType<ModuleOp>();
+        auto voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
+        auto i32Type = rewriter.getI32Type();
+
+        auto personalityFnType = LLVM::LLVMFunctionType::get(i32Type, {}, true);
+        getOrInsertLLVMFn(moduleOp, rewriter, "__gxx_personality_v0", personalityFnType);
+        getOrInsertLLVMFn(moduleOp, rewriter, "__cxa_begin_catch",
+            LLVM::LLVMFunctionType::get(ptrType, {ptrType}, false));
+        getOrInsertLLVMFn(moduleOp, rewriter, "__cxa_end_catch",
+            LLVM::LLVMFunctionType::get(voidType, {}, false));
+        getOrInsertLLVMFn(moduleOp, rewriter, "jlcs_catch_current_exception",
+            LLVM::LLVMFunctionType::get(ptrType, {}, false));
+
+        if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
+            llvmFunc.setPersonalityAttr(
+                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+        } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
+            funcOp->setAttr("llvm.personality",
+                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+        }
+
+        // Result slot, zero-initialized for the exception path. Created
+        // before the block split so it dominates both branches.
+        SmallVector<Type, 1> callResultTypes;
+        bool hasResult = static_cast<bool>(vcallOp.getResult());
+        Value resultSlot;
+        if (hasResult) {
+            callResultTypes.push_back(resultLLVMType);
+            Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+            resultSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, resultLLVMType, one);
+            Value zero = LLVM::ZeroOp::create(rewriter, loc, resultLLVMType);
+            LLVM::StoreOp::create(rewriter, loc, zero, resultSlot);
+        }
+
+        Block *currentBlock = rewriter.getInsertionBlock();
+        auto *parentRegion = currentBlock->getParent();
+        Block *mergeBlock = rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+
+        Block *invokeOkBlock = new Block();
+        parentRegion->getBlocks().insertAfter(currentBlock->getIterator(), invokeOkBlock);
+        Block *catchBlock = new Block();
+        parentRegion->getBlocks().insertAfter(invokeOkBlock->getIterator(), catchBlock);
+
+        // Indirect invoke: null callee symbol + var_callee_type, function
+        // pointer as the first callee operand. Built via the ODS builder so
+        // operandSegmentSizes is computed correctly (the hand-rolled
+        // OperationState variant of this once SIGSEGV'd for plain calls).
+        rewriter.setInsertionPointToEnd(currentBlock);
+        auto invokeOp = LLVM::InvokeOp::create(rewriter, loc,
+            TypeRange(callResultTypes),
+            /*var_callee_type=*/TypeAttr::get(calleeType),
+            /*callee=*/FlatSymbolRefAttr{},
+            /*callee_operands=*/ValueRange(callOperands),
+            /*arg_attrs=*/ArrayAttr{}, /*res_attrs=*/ArrayAttr{},
+            /*normalDestOperands=*/ValueRange{},
+            /*unwindDestOperands=*/ValueRange{},
+            /*branch_weights=*/DenseI32ArrayAttr{},
+            LLVM::CConvAttr::get(rewriter.getContext(), LLVM::CConv::C),
+            /*op_bundle_operands=*/ArrayRef<ValueRange>{},
+            /*op_bundle_tags=*/ArrayAttr{},
+            invokeOkBlock, catchBlock);
+
+        rewriter.setInsertionPointToEnd(invokeOkBlock);
+        if (hasResult) {
+            LLVM::StoreOp::create(rewriter, loc, invokeOp->getResult(0), resultSlot);
+        }
+        LLVM::BrOp::create(rewriter, loc, ValueRange{}, mergeBlock);
+
+        rewriter.setInsertionPointToEnd(catchBlock);
+        auto lpStructType = LLVM::LLVMStructType::getLiteral(
+            rewriter.getContext(), {ptrType, i32Type}, false);
+        Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+        auto landingPad = LLVM::LandingpadOp::create(rewriter,
+            loc, lpStructType, /*cleanup=*/false, ValueRange{nullPtr});
+        Value exnPtr = LLVM::ExtractValueOp::create(rewriter, loc, ptrType,
+            landingPad, ArrayRef<int64_t>{0});
+        LLVM::CallOp::create(rewriter, loc, TypeRange{ptrType},
+            "__cxa_begin_catch", ValueRange{exnPtr});
+        LLVM::CallOp::create(rewriter, loc, TypeRange{ptrType},
+            "jlcs_catch_current_exception", ValueRange{});
+        LLVM::CallOp::create(rewriter, loc, TypeRange{},
+            "__cxa_end_catch", ValueRange{});
+        LLVM::BrOp::create(rewriter, loc, ValueRange{}, mergeBlock);
+
+        rewriter.setInsertionPointToStart(mergeBlock);
+        if (hasResult) {
+            Value result = LLVM::LoadOp::create(rewriter, loc, resultLLVMType, resultSlot);
+            rewriter.replaceOp(op, result);
         } else {
             rewriter.eraseOp(op);
         }

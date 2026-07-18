@@ -151,6 +151,56 @@ void container_int_init(ContainerInt* c, int32_t initial) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 4b. DerivedMI — Hand-rolled multiple-inheritance object (Itanium layout)
+//    Object layout (two polymorphic bases, each with its own vptr):
+//      Base1 subobject @0:   void** vptr1 @0,  int32_t a @8
+//      Base2 subobject @16:  void** vptr2 @16, int32_t b @24
+//    Total: 32 bytes.
+//
+//    The Base2 methods are written BASE-RELATIVE, exactly as a C++ compiler
+//    emits them: they read/write *(int32_t*)((char*)this + 8) assuming `this`
+//    points at the Base2 SUBOBJECT. Called with an unadjusted derived pointer
+//    they hit offset 8 of the derived object — Base1's `a` — which is the MI
+//    bug jlcs.vcall's this_offset exists to fix. mi_get_a and mi_get_b have
+//    identical bodies on purpose: only the `this` they receive differs.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct DerivedMI {
+    void** vptr1;     // offset 0  (Base1 vtable)
+    int32_t a;        // offset 8
+    void** vptr2;     // offset 16 (Base2 vtable)
+    int32_t b;        // offset 24
+};
+
+int32_t mi_get_a(void* self) {           // Base1::get_a — this = Base1* (== derived start)
+    return *(int32_t*)((char*)self + 8);
+}
+
+int32_t mi_get_b(void* self) {           // Base2::get_b — this = Base2* (subobject start)
+    return *(int32_t*)((char*)self + 8);
+}
+
+void mi_set_b(void* self, int32_t val) { // Base2::set_b — this = Base2*
+    *(int32_t*)((char*)self + 8) = val;
+}
+
+static void* mi_vtable1[] = {
+    (void*)mi_get_a                       // slot 0
+};
+
+static void* mi_vtable2[] = {
+    (void*)mi_get_b,                      // slot 0
+    (void*)mi_set_b                       // slot 1
+};
+
+void derived_mi_init(DerivedMI* d, int32_t a, int32_t b) {
+    d->vptr1 = mi_vtable1;
+    d->a = a;
+    d->vptr2 = mi_vtable2;
+    d->b = b;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 5. FixedArray4 — FixedArray<double, 4> simulation
 //    Layout: { double data[4]; }
 //    Offsets: [0, 8, 16, 24]

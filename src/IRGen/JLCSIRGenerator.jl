@@ -74,6 +74,26 @@ function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
 end
 
 """
+    _sanitize_mlir_symbol(name) -> String
+
+C++ type name → valid MLIR symbol identifier (shared by type_info emission
+and the vcall producer's class_name attr).
+"""
+function _sanitize_mlir_symbol(name::String)
+    mlir_name = replace(name,
+        "::" => "_", "<" => "_", ">" => "_", "(" => "_", ")" => "_",
+        " " => "", "," => "_", "*" => "Ptr", "&" => "Ref"
+    )
+    if !isempty(mlir_name) && !isletter(mlir_name[1]) && mlir_name[1] != '_'
+        mlir_name = "_" * mlir_name
+    end
+    if isempty(mlir_name)
+        mlir_name = "anonymous_type_$(hash(name))"
+    end
+    return mlir_name
+end
+
+"""
     generate_type_info_ir(class_name::String, info::ClassInfo, vtable_addr::UInt64;
                           destructor::String="") -> String
 
@@ -82,18 +102,7 @@ DWARF-resolved complete-object destructor symbol (empty when none exists).
 """
 function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, vtable_addr::UInt64;
                                destructor::String="")
-    mlir_name = replace(class_name, 
-        "::" => "_", "<" => "_", ">" => "_", "(" => "_", ")" => "_",
-        " " => "", "," => "_", "*" => "Ptr", "&" => "Ref"
-    )
-
-    if !isempty(mlir_name) && !isletter(mlir_name[1]) && mlir_name[1] != '_'
-        mlir_name = "_" * mlir_name
-    end
-    
-    if isempty(mlir_name)
-        mlir_name = "anonymous_type_$(hash(class_name))"
-    end
+    mlir_name = _sanitize_mlir_symbol(class_name)
 
     # Build field types and offsets lists
     field_types = String[]
@@ -134,15 +143,31 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
     # the outer '[', so it needs a full MLIR attribute: [N : i64, ...] inside the outer brackets.
     field_offsets_attr = "[" * join(["$(o) : i64" for o in field_offsets], ", ") * "]"
 
-    # Supertype
+    # Supertype (primary base) — kept for single-inheritance consumers
     super_type = isempty(info.base_classes) ? "" : info.base_classes[1]
 
     # Construct the CStruct type string
     # !jlcs.c_struct<"Name", [T1, T2], [[O1 : i64, O2 : i64]], packed = false>
     struct_type_str = "!jlcs.c_struct<\"$(class_name)\", [$(field_types_str)], [$(field_offsets_attr)], packed = false>"
 
+    # Multiple-inheritance base table: baseNames/baseOffsets attr-dict pairs
+    # (subobject byte offsets from DW_AT_data_member_location). Virtual bases
+    # have no static offset — their layout lives in the vtable, which
+    # type_info cannot represent; emit without the table and warn loudly
+    # rather than record offsets that are lies.
+    base_table = ""
+    if !isempty(info.base_classes)
+        if any(info.virtual_bases)
+            @warn "Class $(class_name) uses virtual inheritance — base table omitted from type_info (virtual base offsets are dynamic; not modeled)"
+        else
+            names_attr = join(["\"$(b)\"" for b in info.base_classes], ", ")
+            offs_attr = join(["$(o) : i64" for o in info.base_offsets], ", ")
+            base_table = " {baseNames = [$(names_attr)], baseOffsets = [$(offs_attr)]}"
+        end
+    end
+
     ir = """
-  jlcs.type_info "$(mlir_name)", $(struct_type_str), "$(super_type)", "$(destructor)" """
+  jlcs.type_info "$(mlir_name)", $(struct_type_str), "$(super_type)", "$(destructor)"$(base_table) """
 
     return ir
 end
@@ -236,12 +261,22 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     # The two sets are mutually exclusive. Declaring an `fthunk_decls` symbol here
     # too produces a redefinition with a conflicting arity; so skip those. (The
     # vmethod-IR pass and function-thunk filter below replicate this same gating.)
+    # Virtual methods the WRAPPER needs must go through the function-thunk
+    # pass: the generated wrapper dispatches Tier 2 via
+    # JITManager.invoke("_mlir_ciface_<mangled>_thunk", ...), and only
+    # FunctionGen emits that ciface convention. The legacy vmethod-IR pass
+    # emits `thunk_<mangled>` direct-call wrappers no wrapper ever looks up —
+    # every virtual instance method was silently uncallable through invoke()
+    # until the MI fixture drove one (2026-07-17). Note the resulting call is
+    # the statically-named class's implementation (`p->Base2::get_b()`
+    # semantics); override-honoring dispatch is the future vcall producer.
     gen_pre = Set{String}()
     for (class_name, class_info) in vtinfo.classes
         (class_info.size == 0 || isempty(class_info.members)) && continue
         for method in class_info.virtual_methods
-            get(vtinfo.method_addresses, method.mangled_name, UInt64(0)) != 0 &&
-                push!(gen_pre, method.mangled_name)
+            get(vtinfo.method_addresses, method.mangled_name, UInt64(0)) == 0 && continue
+            needed_symbols !== nothing && method.mangled_name in needed_symbols && continue
+            push!(gen_pre, method.mangled_name)
         end
     end
     fthunk_decls = Set{String}()
@@ -292,6 +327,10 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         for method in class_info.virtual_methods
             method_addr = get(vtinfo.method_addresses, method.mangled_name, UInt64(0))
             if method_addr != 0
+                # Wrapper-needed methods are FunctionGen's (ciface thunks) —
+                # emitting the legacy thunk here would llvm.call a symbol whose
+                # declaration now belongs to the function-thunk pass.
+                method.mangled_name in fthunk_decls && continue
                 println(io, generate_virtual_method_ir(method, method_addr))
                 println(io, "")
                 push!(generated_symbols, method.mangled_name)
@@ -316,8 +355,35 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         is_cpp = lang in ("c++", "cpp", "cxx") ||
                  any(f -> get(f, "is_method", false) || startswith(get(f, "mangled", ""), "_Z"), filtered_functions)
 
+        # Virtual-dispatch table for the vcall producer: mangled symbol →
+        # class-LOCAL dispatch coordinates. DWARF's DW_AT_vtable_elem_location
+        # is the slot in the DECLARING class's own primary vtable (Itanium
+        # even re-homes overrides of non-primary-base methods into the
+        # derived class's primary vtable — verified against dwarfdump
+        # 2026-07-17), and every ClassName_method wrapper takes a
+        # ClassName-relative `this` — so vtable_offset = the class's vptr
+        # offset (0 under Itanium) and this_offset = 0, always. MI callers
+        # upcast first (as_Base2), and the vtable entries' own thunks handle
+        # any further adjustment. Destructors are EXCLUDED: Managed
+        # finalizers and the RAII producer require exact-class direct calls,
+        # not dynamic dispatch.
+        vcall_info = Dict{String, NamedTuple{(:class, :slot, :vtable_offset), Tuple{String,Int,Int}}}()
+        for (class_name, class_info) in vtinfo.classes
+            (class_info.size == 0 || isempty(class_info.members)) && continue
+            cls_sym = _sanitize_mlir_symbol(class_name)
+            for method in class_info.virtual_methods
+                method.slot < 0 && continue
+                startswith(method.name, "~") && continue
+                isempty(method.mangled_name) && continue
+                vcall_info[method.mangled_name] =
+                    (class = cls_sym, slot = method.slot,
+                     vtable_offset = class_info.vtable_ptr_offset)
+            end
+        end
+
         println(io, generate_function_thunks(filtered_functions, structs_meta;
-                                             may_throw=is_cpp, class_raii=class_raii))
+                                             may_throw=is_cpp, class_raii=class_raii,
+                                             vcall_info=vcall_info))
     end
 
     # 5. Generate STL Container Accessor Thunks

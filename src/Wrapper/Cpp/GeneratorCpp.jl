@@ -758,31 +758,86 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
         end
 
-        # Helper to recursively flatten struct members from base classes
-        function flatten_struct_members(s_name, visited=Set{String}())
+        # Helper to recursively flatten struct members from base classes.
+        # `base_off` is the byte offset of the current subobject in the
+        # OUTERMOST derived object: base members' DWARF offsets are relative
+        # to their own class, so under multiple inheritance a secondary base's
+        # members must be rebased by the base subobject offset (from
+        # DW_AT_data_member_location on the inheritance edge) or they collide
+        # with the primary base's layout. Single inheritance rebases by 0 —
+        # byte-identical to the old behavior.
+        function flatten_struct_members(s_name, visited=Set{String}(); base_off::Int=0)
             if s_name in visited
                 return []
             end
             push!(visited, s_name)
-            
+
             all_members = []
+            seen_names = Set{String}()
+            # Two bases may declare same-named members (or a derived member
+            # may shadow a base's). Both exist in the layout, but a Julia
+            # struct can't have duplicate field names — rename later
+            # duplicates with the class they came from.
+            function push_dedup!(m, origin_tag)
+                nm = string(get(m, "name", "unknown"))
+                if nm in seen_names
+                    m = copy(m)
+                    renamed = "$(origin_tag)_$(nm)"
+                    while renamed in seen_names
+                        renamed *= "_"
+                    end
+                    m["name"] = renamed
+                    nm = renamed
+                end
+                push!(seen_names, nm)
+                push!(all_members, m)
+            end
+
             if haskey(dwarf_structs, s_name)
                 info = dwarf_structs[s_name]
-                
-                # First, add members from base classes
+
+                # First, add members from base classes (layout order — the
+                # extractor sorts bases by subobject offset)
                 bases = get(info, "base_classes", [])
                 for base in bases
                     base_type = get(base, "type", "")
                     # Strip "class " or "struct " prefix if present
                     base_type = replace(base_type, r"^(class|struct)\s+" => "")
-                    if !isempty(base_type)
-                        append!(all_members, flatten_struct_members(base_type, visited))
+                    isempty(base_type) && continue
+
+                    # Virtual base: its offset is stored in the vtable, not
+                    # the static layout — flattening it at a guessed offset
+                    # would corrupt every access. Skip loudly.
+                    if get(base, "virtual", false) == true
+                        @warn "$(s_name): virtual base $(base_type) skipped in layout flattening (virtual inheritance not modeled — offsets are dynamic)"
+                        continue
+                    end
+
+                    sub_off = get(base, "offset", 0)
+                    sub_off = sub_off isa Integer ? Int(sub_off) : 0
+                    base_tag = replace(base_type, r"[^A-Za-z0-9_]" => "_")
+                    for m in flatten_struct_members(base_type, visited; base_off = base_off + sub_off)
+                        push_dedup!(m, base_tag)
                     end
                 end
-                
-                # Then add own members
+
+                # Then add own members, rebased into the outermost object
                 own_members = get(info, "members", [])
-                append!(all_members, own_members)
+                own_tag = replace(s_name, r"[^A-Za-z0-9_]" => "_")
+                for m in own_members
+                    if base_off != 0
+                        m = copy(m)
+                        off_str = get(m, "offset", "0x0")
+                        off_val = isnothing(off_str) ? 0 : parse(Int, off_str)
+                        m["offset"] = "0x" * string(off_val + base_off, base=16)
+                        # DWARF4+ bitfields carry an absolute bit offset from
+                        # the struct start — rebase it too
+                        if haskey(m, "data_bit_offset")
+                            m["data_bit_offset"] = m["data_bit_offset"] + base_off * 8
+                        end
+                    end
+                    push_dedup!(m, own_tag)
+                end
             end
             return all_members
         end
@@ -1466,6 +1521,68 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
     # 2. Generate Managed Types
     managed_chunks = String[]
+    # =============================================================================
+    # MI UPCAST HELPERS (base-subobject pointer adjustment)
+    # =============================================================================
+    # A method inherited from a non-primary base (multiple inheritance) expects
+    # `this` to point at the base SUBOBJECT, not the derived object's start.
+    # Emit <Derived>_as_<Base>(obj) helpers applying the static Itanium offset
+    # for every class that has a base at a non-zero offset (all bases of such a
+    # class get a helper, including the offset-0 primary, for a uniform API).
+    # Virtual bases are excluded — their offsets are dynamic (vtable-resident).
+    let upcast_seen = Set{String}(), upcast_chunks = String[]
+        for (s_name, s_info) in sort(collect(dwarf_structs), by = first)
+            bases = get(s_info, "base_classes", [])
+            (bases isa Vector && !isempty(bases)) || continue
+            has_mi_base = any(bases) do b
+                b isa Dict || return false
+                off = get(b, "offset", 0)
+                off isa Integer && off != 0 && get(b, "virtual", false) != true
+            end
+            has_mi_base || continue
+
+            d_name = replace(_sanitize_cpp_type_name(s_name), r"[^a-zA-Z0-9_]" => "_")
+            for base in bases
+                base isa Dict || continue
+                get(base, "virtual", false) == true && continue
+                base_type = replace(get(base, "type", ""), r"^(class|struct)\s+" => "")
+                isempty(base_type) && continue
+                off = get(base, "offset", 0)
+                off = off isa Integer ? Int(off) : 0
+                b_name = replace(_sanitize_cpp_type_name(base_type), r"[^a-zA-Z0-9_]" => "_")
+                fn = "$(d_name)_as_$(b_name)"
+                fn in upcast_seen && continue
+                push!(upcast_seen, fn)
+
+                push!(upcast_chunks, """
+                \"\"\"
+                    $(fn)(obj) -> Ptr{Cvoid}
+
+                Upcast a `$(s_name)` to its `$(base_type)` base subobject
+                (+$(off) bytes, static Itanium layout). Accepts a raw `Ptr` or
+                any wrapper with a `.handle` field. Pass the result as `this`
+                when calling `$(base_type)` methods on a `$(s_name)` object.
+                \"\"\"
+                function $(fn)(obj)::Ptr{Cvoid}
+                    p = obj isa Ptr ? Ptr{Cvoid}(obj) : Ptr{Cvoid}(obj.handle)
+                    return p + $(off)
+                end
+                export $(fn)
+
+                """)
+            end
+        end
+        if !isempty(upcast_chunks)
+            push!(struct_chunks, """
+            # =============================================================================
+            # MI Upcast Helpers (base-subobject pointer adjustment)
+            # =============================================================================
+
+            """)
+            append!(struct_chunks, upcast_chunks)
+        end
+    end
+
     if !isempty(deleters)
         push!(managed_chunks, """
         # =============================================================================

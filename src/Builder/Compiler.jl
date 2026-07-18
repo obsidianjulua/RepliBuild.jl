@@ -2405,6 +2405,36 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
+        # Inheritance attributes beyond the base type ref: the base subobject's
+        # byte offset in the derived object (DW_AT_data_member_location — the
+        # whole point of multiple inheritance; non-zero for every non-primary
+        # base) and virtual-base marking (DW_AT_virtuality). Without the offset
+        # every base was silently recorded at 0.
+        if haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :inheritance &&
+               haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
+                inh_info = type_refs[tag_offset]
+
+                if contains(line, "DW_AT_data_member_location")
+                    loc_match = match(r"DW_AT_data_member_location\s*:\s*(0x[0-9a-fA-F]+|\d+)", line)
+                    if !isnothing(loc_match)
+                        val_str = loc_match.captures[1]
+                        inh_info["offset"] = startswith(val_str, "0x") ?
+                            parse(Int, val_str[3:end], base=16) :
+                            parse(Int, val_str)
+                    end
+                end
+
+                # Virtual base: offset is not a static layout fact (it lives in
+                # the vtable) — consumers must reject, not trust "offset".
+                if contains(line, "DW_AT_virtuality") &&
+                   (contains(line, "virtual") || match(r"DW_AT_virtuality\s*:\s*(0x0?[12]|[12])\b", line) !== nothing)
+                    inh_info["virtual"] = true
+                end
+            end
+        end
+
         # Extract DW_AT_byte_size for enums, structs, classes, and unions
         if contains(line, "DW_AT_byte_size") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
@@ -3305,12 +3335,20 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                                 base_type = resolve_type(base_type_ref, type_refs)
                                 push!(base_classes, Dict(
                                     "type" => base_type,
-                                    "accessibility" => get(inh_info, "accessibility", "public")
+                                    "accessibility" => get(inh_info, "accessibility", "public"),
+                                    # Byte offset of this base's subobject in the
+                                    # derived object (0 for the primary base)
+                                    "offset" => get(inh_info, "offset", 0),
+                                    "virtual" => get(inh_info, "virtual", false)
                                 ))
                             end
                         end
                     end
                     if !isempty(base_classes)
+                        # type_refs is a Dict — iteration order is arbitrary.
+                        # Sort by subobject offset (primary base first) so
+                        # consumers see a deterministic, layout-ordered list.
+                        sort!(base_classes, by = b -> (get(b, "offset", 0), get(b, "type", "")))
                         struct_def["base_classes"] = base_classes
                     end
 

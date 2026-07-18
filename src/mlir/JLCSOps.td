@@ -16,6 +16,16 @@ class JLCS_Op<string mnemonic, list<Trait> traits = []> :
 // This Op is placed in the module's top region and holds the C++ inheritance mapping.
 def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
   let summary = "Declares a CStruct type and its C++ base class mapping.";
+  let description = [{
+    Metadata op (erased at lowering). `superType` names the primary base
+    for single-inheritance consumers. Under multiple inheritance the full
+    picture lives in the paired `baseNames`/`baseOffsets` arrays: entry i
+    says base class baseNames[i]'s subobject starts baseOffsets[i] bytes
+    into the object (Itanium static layout). The arrays default to empty,
+    so single-inheritance IR is unchanged; when present, baseNames[0] is
+    the primary base (offset 0) and `superType` matches it. Virtual bases
+    are not representable here — producers must reject them upstream.
+  }];
 
   let arguments = (ins
     // The Julia name of the type
@@ -25,10 +35,17 @@ def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
     // The C++ class name of the *supertype* (for inheritance)
     DefaultValuedStrAttr<StrAttr, "\"\"">:$superType,
     // Mangled name of the C++ destructor (e.g., "_ZN4BaseD1Ev")
-    DefaultValuedStrAttr<StrAttr, "\"\"">:$destructorName
+    DefaultValuedStrAttr<StrAttr, "\"\"">:$destructorName,
+    // Multiple-inheritance base table: names paired 1:1 with byte offsets
+    // of each base subobject in the derived object. Ride in attr-dict.
+    // NB: ArrayAttr's constBuilderCall already wraps the default in
+    // $_builder.getArrayAttr(...) — the default here is the *contents*.
+    DefaultValuedAttr<ArrayAttr, "{}">:$baseNames,
+    DefaultValuedAttr<ArrayAttr, "{}">:$baseOffsets
   );
 
   // Custom assembly: jlcs.type_info "TypeName", !jlcs.c_struct<...>, "SuperType", "DtorName"
+  // (baseNames/baseOffsets print in the trailing attr-dict when non-empty)
   let assemblyFormat = "$typeName `,` $structType `,` $superType `,` $destructorName attr-dict";
 
   let skipDefaultBuilders = 1;
@@ -39,6 +56,10 @@ def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
   let extraClassDeclaration = [{
     TypeInfoOp(::mlir::Operation *op) : Op(op) {}
   }];
+
+  // baseNames/baseOffsets must pair 1:1 (same idiom as marshal_arg's
+  // memberTypes/juliaOffsets — consumers index one by the other's position).
+  let hasVerifier = 1;
 }
 
 // 2. Generic Field Access Op (Universal Getter)
@@ -96,12 +117,22 @@ def VirtualCallOp : JLCS_Op<"vcall", [MemoryEffects<[MemRead, MemWrite]>]> {
     Calls a C++ virtual method by:
     1. Reading the vtable pointer from the object (at vtable_offset)
     2. Loading the function pointer from vtable[slot]
-    3. Calling the function with the object pointer + arguments
+    3. Calling the function with the (possibly adjusted) object pointer
+       + remaining arguments
 
-    Example:
+    Both offsets are byte offsets relative to the ORIGINAL object pointer
+    in args[0]. `vtable_offset` locates the vptr to read; `this_offset`
+    is added to args[0] before the call so the callee receives a pointer
+    to the correct base subobject. For a method inherited from a
+    non-primary base under multiple inheritance (Itanium ABI), both equal
+    the base subobject's offset in the derived object; for single
+    inheritance / primary base both are 0. Virtual bases are NOT modeled
+    (their offsets live in the vtable, not the static layout).
+
+    Example (secondary base at byte 16):
     ```mlir
-    %result = jlcs.vcall @Base::foo(%obj)
-      { vtable_offset = 0 : i64, slot = 0 : i64 }
+    %result = jlcs.vcall @Derived::via_Base2(%obj)
+      { vtable_offset = 16 : i64, this_offset = 16 : i64, slot = 0 : i64 }
       : (!llvm.ptr) -> i32
     ```
   }];
@@ -109,8 +140,18 @@ def VirtualCallOp : JLCS_Op<"vcall", [MemoryEffects<[MemRead, MemWrite]>]> {
   let arguments = (ins
     SymbolRefAttr:$class_name,    // Class name (e.g., @Base)
     Variadic<AnyType>:$args,      // Arguments (first is always object pointer)
-    I64Attr:$vtable_offset,       // Offset of vptr in object
-    I64Attr:$slot                 // Vtable slot index
+    I64Attr:$vtable_offset,       // Offset of vptr in object (from args[0])
+    I64Attr:$slot,                // Vtable slot index
+    // Byte adjustment applied to args[0] before the call (`this` fixup for
+    // methods dispatched through a non-primary base). Defaults to 0 so all
+    // pre-MI IR keeps its exact semantics.
+    DefaultValuedAttr<I64Attr, "0">:$this_offset,
+    // When present, lower as invoke + landing pad (same sentinel-continue EH
+    // model as jlcs.try_call: exception → jlcs_set_pending_exception, zero
+    // result). Absent = plain indirect call, the pre-existing lowering.
+    // NOTE: the EH path (like the plain path) does no sret/packed ABI
+    // coercion — producers must only set this on scalar/pointer signatures.
+    UnitAttr:$may_throw
   );
 
   let results = (outs Optional<AnyType>:$result);
@@ -128,6 +169,10 @@ def VirtualCallOp : JLCS_Op<"vcall", [MemoryEffects<[MemRead, MemWrite]>]> {
     // Helper to get the object pointer (first argument)
     Value getObject() { return getArgs()[0]; }
   }];
+
+  // The lowering unconditionally reads args[0] as the object pointer;
+  // zero-arg IR previously only failed inside the conversion pattern.
+  let hasVerifier = 1;
 }
 
 // ====================================================================

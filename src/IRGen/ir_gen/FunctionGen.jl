@@ -44,7 +44,8 @@ function _parse_byte_size(s::AbstractString)
 end
 
 function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_throw::Bool=false,
-                                  class_raii::Dict{String,Dict{Symbol,String}}=Dict{String,Dict{Symbol,String}}())
+                                  class_raii::Dict{String,Dict{Symbol,String}}=Dict{String,Dict{Symbol,String}}(),
+                                  vcall_info::AbstractDict=Dict{String,Any}())
     io = IOBuffer()
     println(io, "// Function Thunks")
 
@@ -302,6 +303,25 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         use_try_call = may_throw && !func_is_noexcept
         call_op = use_try_call ? "jlcs.try_call" : "jlcs.ffe_call"
 
+        # Virtual dispatch: methods with vtable coordinates get a jlcs.vcall
+        # (read vptr → index slot → indirect call) so OVERRIDES are honored —
+        # a direct symbol call is `p->Class::method()` static semantics. The
+        # vcall lowering does no sret/packed ABI coercion, so only
+        # scalar/pointer signatures are eligible; struct-shaped ones keep the
+        # direct-call path (rare for virtual methods). may_throw on the op
+        # picks the invoke+landing-pad lowering (same sentinel-continue EH
+        # model as try_call).
+        vc = get(vcall_info, mangled, nothing)
+        use_vcall = vc !== nothing && is_method && !has_raii && !is_packed_ret &&
+                    !isempty(call_args) &&
+                    !occursin("struct", func_ret) &&
+                    !any(t -> occursin("struct", t) || occursin("array", t), arg_types)
+        if use_vcall
+            vcall_attrs = "class_name = @$(vc.class), vtable_offset = $(vc.vtable_offset) : i64, " *
+                          "slot = $(vc.slot) : i64, this_offset = 0 : i64"
+            use_try_call && (vcall_attrs *= ", may_throw")
+        end
+
         # Call using jlcs.ffe_call or jlcs.try_call (via Dialect)
         if has_raii
             # Scope-RAII: copy-construct temporaries, call inside the scope,
@@ -347,7 +367,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
         elseif func_ret == ""
              # Void return
-             println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+             if use_vcall
+                 println(io, "  \"jlcs.vcall\"($(join(call_args, ", "))) { $(vcall_attrs) } : ($(join(arg_types, ", "))) -> ()")
+             else
+                 println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+             end
              println(io, "  return")
         elseif is_packed_ret
              # Packed struct return: call returns packed type, marshal to aligned for Julia
@@ -356,7 +380,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
              println(io, "  return %ret_aligned : $(ret_aligned_type)")
         else
              # Value return
-             println(io, "  %ret_val = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(func_ret)")
+             if use_vcall
+                 println(io, "  %ret_val = \"jlcs.vcall\"($(join(call_args, ", "))) { $(vcall_attrs) } : ($(join(arg_types, ", "))) -> $(func_ret)")
+             else
+                 println(io, "  %ret_val = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(func_ret)")
+             end
              println(io, "  return %ret_val : $(func_ret)")
         end
 

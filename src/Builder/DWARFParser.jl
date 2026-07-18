@@ -38,11 +38,22 @@ Information about a C++ class with virtual methods
 struct ClassInfo
     name::String                      # Class name
     vtable_ptr_offset::Int           # Offset of vptr in object (usually 0)
-    base_classes::Vector{String}     # Immediate base classes
+    base_classes::Vector{String}     # Immediate base classes (layout order)
     virtual_methods::Vector{VirtualMethod}
     members::Vector{MemberInfo}      # Data members
     size::Int                        # Class size in bytes
+    # Parallel to base_classes: byte offset of each base subobject in this
+    # object (DW_AT_data_member_location on the inheritance edge; 0 for the
+    # primary base, non-zero for MI secondary bases) and whether the edge is
+    # virtual inheritance (offset then lives in the vtable, NOT here).
+    base_offsets::Vector{Int}
+    virtual_bases::Vector{Bool}
 end
+
+# Backward-compatible constructor (pre-MI callers): bases at offset 0, non-virtual.
+ClassInfo(name, vptr_off, bases, vmethods, members, size) =
+    ClassInfo(name, vptr_off, bases, vmethods, members, size,
+              zeros(Int, length(bases)), fill(false, length(bases)))
 
 """
 Complete vtable information from binary
@@ -69,6 +80,8 @@ function parse_dwarf_output_robust(dwarf_text::String)
     current_vptr_offset = 0
     current_size = 0
     base_classes = String[]
+    base_offsets = Int[]
+    virtual_bases = Bool[]
     virtual_methods = VirtualMethod[]
     members = MemberInfo[]
     
@@ -99,13 +112,17 @@ function parse_dwarf_output_robust(dwarf_text::String)
                 copy(base_classes),
                 copy(virtual_methods),
                 copy(members),
-                current_size
+                current_size,
+                copy(base_offsets),
+                copy(virtual_bases)
             )
         end
         current_class_name = ""
         current_vptr_offset = 0
         current_size = 0
         empty!(base_classes)
+        empty!(base_offsets)
+        empty!(virtual_bases)
         empty!(virtual_methods)
         empty!(members)
         in_class = false
@@ -213,6 +230,11 @@ function parse_dwarf_output_robust(dwarf_text::String)
                      pending_member_type = type_name
                  elseif context == :inheritance
                      push!(base_classes, type_name)
+                     # Parallel entries; DW_AT_data_member_location and
+                     # DW_AT_virtuality (if present) follow on later lines
+                     # of the same DIE and overwrite these defaults.
+                     push!(base_offsets, 0)
+                     push!(virtual_bases, false)
                  elseif context == :method
                      pending_method_return_type = type_name
                  elseif context == :parameter
@@ -238,6 +260,29 @@ function parse_dwarf_output_robust(dwarf_text::String)
                 pending_member_offset = startswith(val_str, "0x") ?
                     parse(Int, val_str[3:end], base=16) :
                     parse(Int, val_str)
+            end
+        end
+
+        # 3b. Inheritance edge attributes: base subobject offset + virtuality.
+        # base_offsets/virtual_bases got their defaults when DW_AT_type pushed
+        # the base name; the length check pins the update to that entry (if the
+        # type line failed to parse, nothing was pushed and we must not touch
+        # the previous base's slot).
+        if context == :inheritance && length(base_offsets) == length(base_classes) && !isempty(base_offsets)
+            if contains(line, "DW_AT_data_member_location")
+                m = match(r"DW_AT_data_member_location\s+\((0x[0-9a-fA-F]+|\d+)\)", line)
+                if !isnothing(m)
+                    val_str = m.captures[1]
+                    base_offsets[end] = startswith(val_str, "0x") ?
+                        parse(Int, val_str[3:end], base=16) :
+                        parse(Int, val_str)
+                end
+            end
+            # Virtual base: the subobject offset is dynamic (stored in the
+            # vtable) — record the flag so consumers can reject loudly.
+            if contains(line, "DW_AT_virtuality") &&
+               (contains(line, "virtual") || contains(line, "(0x01)") || contains(line, "(0x02)"))
+                virtual_bases[end] = true
             end
         end
         
@@ -393,6 +438,8 @@ function export_vtable_json(vtinfo::VtableInfo, output_path::String)
                 "size" => info.size,
                 "vtable_ptr_offset" => info.vtable_ptr_offset,
                 "base_classes" => info.base_classes,
+                "base_offsets" => info.base_offsets,
+                "virtual_bases" => info.virtual_bases,
                 "members" => [
                     Dict(
                         "name" => m.name,
