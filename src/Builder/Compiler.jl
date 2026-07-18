@@ -2005,6 +2005,29 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     current_struct_context = nothing  # Track parent struct for members
     current_subroutine_offset = nothing  # Track current subroutine type for parameters
 
+    # Depth-indexed context: readelf DIE headers carry the tree depth
+    # (`<2><2331>: ...`). A member/enumerator/inheritance DIE at depth d
+    # belongs to the type DIE last seen at depth d-1. The flat
+    # current_struct_context alone mis-attributes members that FOLLOW a
+    # nested type definition (e.g. `Type m_type; enum Type {...}; float
+    # m_radius;` — clang emits the nested enum DIE between the two members,
+    # the context flipped to the enum and never restored, and m_radius
+    # silently vanished from the class; found via box2d b2Shape).
+    context_by_depth = Dict{Int,String}()
+    function set_ctx_at_depth!(depth::Int, off::String)
+        context_by_depth[depth] = off
+        for k in collect(keys(context_by_depth))
+            k > depth && delete!(context_by_depth, k)
+        end
+    end
+    parent_ctx(depth::Union{Int,Nothing}) =
+        depth === nothing ? current_struct_context :
+        get(context_by_depth, depth - 1, current_struct_context)
+    function die_depth(line)
+        m = match(r"<(\d+)><[^>]+>", line)
+        m === nothing ? nothing : parse(Int, m.captures[1])
+    end
+
     # Flush a completed member into its parent struct's members array.
     # Called on each new DW_TAG_* to ensure all attributes (name, type, offset)
     # are collected before the member dict is copied to the parent.
@@ -2108,6 +2131,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
                 current_struct_context = current_type_offset  # Set context for members
+                set_ctx_at_depth!(something(die_depth(line), 1), current_type_offset)
                 # Store struct info as a dict with members array
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "struct",
@@ -2124,6 +2148,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
                 current_struct_context = current_type_offset  # Set context for members
+                set_ctx_at_depth!(something(die_depth(line), 1), current_type_offset)
                 # Store union info as a dict with members array
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "union",
@@ -2141,6 +2166,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
                 current_struct_context = current_type_offset  # Set context for members
+                set_ctx_at_depth!(something(die_depth(line), 1), current_type_offset)
                 # Store class info as a dict with members array
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "class",
@@ -2161,6 +2187,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
                 current_struct_context = current_type_offset  # Use for enumerators
+                set_ctx_at_depth!(something(die_depth(line), 1), current_type_offset)
                 # Store enum info as a dict with enumerators array
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "enum",
@@ -2219,7 +2246,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     "kind" => "enumerator",
                     "name" => nothing,
                     "value" => nothing,
-                    "parent" => current_struct_context  # Track which enum this belongs to
+                    "parent" => parent_ctx(die_depth(line))  # Track which enum this belongs to
                 )
                 offset_to_kind[enumerator_offset] = :enumerator
             end
@@ -2275,7 +2302,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     "base_type" => nothing,
                     "offset" => 0,
                     "accessibility" => "public",  # default
-                    "parent" => current_struct_context
+                    "parent" => parent_ctx(die_depth(line))
                 )
                 offset_to_kind[inheritance_offset] = :inheritance
             end
@@ -2293,7 +2320,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     "kind" => "template_type",
                     "name" => nothing,
                     "type" => nothing,
-                    "parent" => current_struct_context
+                    "parent" => parent_ctx(die_depth(line))
                 )
                 offset_to_kind[template_offset] = :template_type
             end
@@ -2313,7 +2340,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     "name" => nothing,
                     "type" => nothing,
                     "value" => nothing,
-                    "parent" => current_struct_context
+                    "parent" => parent_ctx(die_depth(line))
                 )
                 offset_to_kind[template_offset] = :template_value
             end
@@ -2558,7 +2585,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     "name" => nothing,
                     "type" => nothing,
                     "offset" => nothing,
-                    "parent" => current_struct_context  # Track which struct/class this belongs to
+                    "parent" => parent_ctx(die_depth(line))  # Track which struct/class this belongs to
                 )
                 offset_to_kind[member_offset] = :member
                 type_refs["_pending_member_offset"] = member_offset

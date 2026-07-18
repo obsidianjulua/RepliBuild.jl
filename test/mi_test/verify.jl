@@ -34,6 +34,21 @@ using .MiTest
         meta = JSON.parsefile(meta_path)
         structs = get(meta, "struct_definitions", Dict())
         @test haskey(structs, "Derived")
+        # Nested-type member attribution: members FOLLOWING a nested enum
+        # definition must stay attributed to the enclosing class (the parser
+        # used to re-point at the enum and drop them — found via box2d
+        # b2Shape::m_radius, which follows the nested Shape::Type enum)
+        @test haskey(structs, "NestedEnumHolder")
+        neh_members = Dict(m["name"] => m["offset"] for m in get(structs["NestedEnumHolder"], "members", []))
+        @test haskey(neh_members, "before")
+        @test haskey(neh_members, "after")
+        @test haskey(neh_members, "kind")
+        if haskey(neh_members, "after")
+            @test parse(Int, neh_members["kind"]) == 0
+            @test parse(Int, neh_members["after"]) == 4
+            @test parse(Int, neh_members["before"]) == 8
+        end
+
         bases = get(structs["Derived"], "base_classes", [])
         @test length(bases) == 2
         # Extractor sorts by subobject offset: primary base first

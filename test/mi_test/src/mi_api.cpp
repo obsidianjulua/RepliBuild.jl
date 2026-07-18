@@ -64,7 +64,34 @@ Base2* make_derived_as_base2() { return new Derived(); }
 void free_base2(Base2* b) { delete b; }
 }
 
+// Nested-type member attribution fixture: a class whose members are split by
+// a NESTED enum definition. DWARF emits the enum as a child DIE between the
+// member DIEs; the line-oriented metadata parser used to re-point its member
+// attribution at the enum and never restore the class, silently dropping
+// every member after the nested type (found via box2d's b2Shape::m_radius,
+// which follows the nested Shape::Type enum). `after` and `kind` are the
+// canaries.
+class NestedEnumHolder {
+public:
+    NestedEnumHolder();
+    ~NestedEnumHolder();
+    enum Kind { K_A = 1, K_B = 2 };
+    // The enum-typed member comes FIRST: clang emits the nested enum's DIE
+    // (with enumerator children + null terminator) right after the member
+    // that references it — placing it BETWEEN this member and the next two,
+    // exactly b2Shape's {m_type; nested Type enum; m_radius} shape.
+    Kind kind;
+    float after;                    // used to vanish from metadata
+    int32_t before;                 // this one too
+};
+
+NestedEnumHolder::NestedEnumHolder() : kind(K_B), after(2.0f), before(1) {}
+NestedEnumHolder::~NestedEnumHolder() {}
+
 extern "C" {
+
+NestedEnumHolder* make_nested_enum_holder() { return new NestedEnumHolder(); }
+void free_nested_enum_holder(NestedEnumHolder* p) { delete p; }
 
 Derived* make_derived() { return new Derived(); }
 void free_derived(Derived* d) { delete d; }

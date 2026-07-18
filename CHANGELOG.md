@@ -4,6 +4,13 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased (post-3.0.0)
 
+### Nested-type member attribution fix (found wrapping box2d for the Hub)
+
+Members declared AFTER a nested type definition inside a class silently vanished from extracted metadata: clang emits a nested enum/struct DIE between the member DIEs (at first reference — `Type m_type; float m_radius;` puts the `Type` enum's DIE, enumerators, and null terminator between the two members), and `Compiler.jl`'s flat `current_struct_context` flipped to the nested type for its children and never restored the enclosing class. Every subsequent member attributed to the enum and was dropped — box2d's `b2Shape::m_radius` was the live casualty.
+
+Fix: **depth-aware parent attribution**. readelf DIE headers carry the tree depth (`<2><2331>:`), previously discarded; the parser now maintains a depth-indexed context map (`context_by_depth`), and member/enumerator/inheritance/template DIEs at depth d attribute to the type last seen at depth d−1, with `current_struct_context` as fallback. Reproduced library-free per the hub-wrap guard (`NestedEnumHolder` in the mi_test fixture — the enum-typed member must come FIRST or clang hoists the nested DIE past all members and the bug doesn't trigger), fixed, and pinned by mi_test verify (38/38). Generalization confirmed: c_test 70/70, vi_test 33/33, box2d re-wrap recovers `m_radius`.
+
+
 ### Virtual inheritance: dynamic vbase upcasts, diamond-proven
 
 The last unbuilt piece of the inheritance ABI. A virtual base's offset is **not static** — a standalone `Left` and a `Left`-inside-`Diamond` place the shared `VBase` at different offsets, and only the object's vtable knows which (the vbase-offset entry below the vtable address point). The MI-era policy of detect-and-reject-loudly is replaced with actual support:
