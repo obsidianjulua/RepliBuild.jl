@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"3.0.0"
+const VERSION = v"3.0.1"
 
 # Stable path constants — modules use these instead of @__DIR__ so file moves don't break paths
 const PROJECT_ROOT = dirname(@__DIR__)

@@ -2,7 +2,12 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## Unreleased (post-3.0.0)
+## v3.0.1 (2026-07-17)
+
+The inheritance-ABI release. One day's arc, shipped whole: non-virtual multiple inheritance, the vcall producer (overrides dispatch through the vtable), and virtual inheritance (dynamic vbase upcasts) — closing ledger entries open since 2026-05-29. Around it: the Tier-2 virtual-method thunk-routing fix (virtual instance methods were never callable through `invoke()`), the discover(force) user-intent TOML preservation fix (root cause of six weeks of silent stl_test red), the nested-type member-attribution parser fix (found wrapping box2d), and the tinyxml2-era Tier-2 dispatch fixes. First C++ Hub package exercising all of it: box2d 2.4.1.
+
+Verification state at release: CI 404, producers 26/26, invariants 10/10, templates 87/87, mi_test 38/38, vi_test 33/33, stl_test 28/28, stress+c_test green, box2d 15/15.
+
 
 ### Nested-type member attribution fix (found wrapping box2d for the Hub)
 
