@@ -6,6 +6,7 @@
 # Usage:  julia --project=. test/devtests.jl
 
 using Test
+using TOML
 using RepliBuild
 
 const TEST_DIR = @__DIR__
@@ -75,6 +76,32 @@ INTEGRATION_TESTS = [
     ("callback_test",      "Callbacks (Julia ↔ C++)"),
 ]
 
+# Curated fixture config that discovery cannot derive from source (see
+# docs/updates/2026-07-17-stl-test-regression.md). Applied after every
+# regeneration: discover's user-intent preservation keeps these alive on
+# subsequent runs, but the tomls are gitignored — a fresh clone has nothing
+# to preserve, so the suite seeds them explicitly. Machine-independent
+# values only (no absolute paths).
+const CURATED_FIXTURE_CONFIG = Dict(
+    "stl_test" => Dict(
+        "types" => Dict(
+            "templates"        => ["std::vector<int>", "std::string", "std::map<int, int>"],
+            "template_headers" => ["<vector>", "<string>", "<map>"],
+        ),
+    ),
+)
+
+function apply_curated_config(toml_path::String, name::String)
+    haskey(CURATED_FIXTURE_CONFIG, name) || return
+    doc = TOML.parsefile(toml_path)
+    for (sec, kv) in CURATED_FIXTURE_CONFIG[name], (k, v) in kv
+        get!(doc, sec, Dict{String,Any}())[k] = v
+    end
+    open(toml_path, "w") do io
+        TOML.print(io, doc)
+    end
+end
+
 const _SKIP = Set(split(get(ENV, "REPLIBUILD_SKIP_TESTS", ""), ',', keepempty=false))
 
 for (name, label) in INTEGRATION_TESTS
@@ -90,9 +117,15 @@ for (name, label) in INTEGRATION_TESTS
         # Always regenerate the toml via discover so the suite never depends on a
         # committed config carrying machine-specific absolute paths. The fixture
         # tomls are gitignored for this reason. (Hub packages are different — their
-        # tomls are hand-rolled and must NOT be discovered.)
-        toml = RepliBuild.discover(dir, force=true, build=true, wrap=true)
+        # tomls are hand-rolled and must NOT be discovered.) Curated, source-
+        # underivable sections are seeded AFTER discovery, BEFORE build — this is
+        # what regressed stl_test for six weeks when discover(force) silently
+        # destroyed [types].templates (2026-07-17).
+        toml = RepliBuild.discover(dir, force=true)
         @test isfile(toml)
+        apply_curated_config(toml, name)
+        RepliBuild.build(toml)
+        RepliBuild.wrap(toml)
         @test isdir(joinpath(dir, "julia"))
 
         @test run_verify(dir; label=label)

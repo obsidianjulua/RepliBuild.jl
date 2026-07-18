@@ -4,6 +4,14 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased (post-3.0.0)
 
+### stl_test regression fixed: discover(force) no longer destroys user-intent TOML config
+
+The KNOWN RED flagged below is closed, and the wrapper generator was never broken. Root cause: `discover(force=true)` regenerates `replibuild.toml` from scratch and `generate_config` emits the user-intent keys empty — so forced re-discovery silently destroyed `[types].templates`, killing the instantiation stub → DWARF → STL wrapper chain. Broken since `4117a8e` (2026-06-02) made devtests always force-rediscover fixtures. Full narrative: `docs/updates/2026-07-17-stl-test-regression.md`.
+
+- **`discover` now preserves user-intent TOML keys across forced re-discovery** (`Discovery.PRESERVED_TOML_KEYS`: `[types].templates`/`template_headers`, `[wrap].varargs`/`macros`/`shim_headers`/`cstring_owned`). Regenerated non-empty values win; empty/absent slots get the preserved value; a `preserved: …` line reports what carried over. This was a systemic footgun for any user project with hand-curated wrap config, not just fixtures.
+- **devtests seeds curated fixture config** (`CURATED_FIXTURE_CONFIG`, applied between discover and build) so fresh clones — where the gitignored TOML doesn't exist yet — are deterministic.
+- New CI guard `test/test_toml_preservation.jl` (21 tests). Live proof both ways: fresh-clone seeding path and preservation-only re-discovery path each yield all 7 `create_std_*` factories and stl_test verify **28/28**. CI total now **404**.
+
 ### vcall producer: virtual methods dispatch through the vtable (overrides honored)
 
 `jlcs.vcall` moves from "exercised only by hand-written test IR" to **emitted by the codegen pipeline** — the first production consumer of the op, built directly on the MI groundwork below. Wrapper Tier-2 calls to virtual instance methods previously direct-called the mangled symbol (`p->Base2::get_b()` static semantics — overrides ignored); their thunks now read the vptr, index the slot, and call indirectly, so **a base-class wrapper invoked on a derived object reaches the override**.
@@ -13,7 +21,7 @@ All notable changes to RepliBuild.jl are documented in this file.
 - **Producer gating**: `generate_jlcs_ir` builds a mangled-symbol → (class, slot, vptr-offset) table from DWARF vtable info; FunctionGen swaps the direct call for `jlcs.vcall` only for instance methods with scalar/pointer signatures (the vcall lowering does no sret/packed coercion — struct-shaped signatures keep the direct-call path). **Destructors are excluded by design**: `Managed` finalizers and the scope-RAII producer require exact-class destructor calls, not dynamic dispatch.
 - Proven live in `test/mi_test/` (31/31): `Base2_get_b` on an upcast `Derived` returns the override's value (1222, not the base's 222) through the secondary vtable's adjusting thunk; a C++-side `Base2*`-that-is-really-`Derived` (caller has zero derived-type knowledge) dispatches the override; mutation through a non-overridden virtual composes with override reads; non-virtual methods keep static semantics (the wrong-`this` canary pins unchanged); polymorphic deletion through the base pointer works. Dialect-level EH path JIT-proven in templates §8c (84/84): emitted LLVM carries `invoke`/`landingpad`/personality and dispatch+`this`-adjustment behave identically under it.
 
-**Known issue (pre-existing, unrelated — bisected to before this work):** `test/stl_test` wrapper generation silently omits the STL factory section (`create_std_vector_int` etc. missing; verify errors 6/8). Reproduces on a pristine tree at the previous commit; tracked separately.
+**Known issue (pre-existing, unrelated — bisected to before this work):** `test/stl_test` wrapper generation silently omits the STL factory section (`create_std_vector_int` etc. missing; verify errors 6/8). Reproduces on a pristine tree at the previous commit. **Resolved the same day — see the stl_test section above** (config destruction in discover, not codegen).
 
 Regression state: CI 383, producers 26/26, invariants 10/10, templates **84/84**, mi_test **31/31**, stress_test + c_test green (stl_test red for the pre-existing reason above).
 

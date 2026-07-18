@@ -51,6 +51,76 @@ struct BinaryInfo
     size::Int
 end
 
+# TOML keys that carry user intent discovery cannot derive from source.
+# Force-rediscovery regenerates the file, and generate_config emits these
+# empty — without carry-over, every `discover(force=true)` destroys them.
+# (Per-library facts belong in the TOML; this is what keeps them there.)
+const PRESERVED_TOML_KEYS = [
+    ("types", "templates"),
+    ("types", "template_headers"),
+    ("wrap", "varargs"),
+    ("wrap", "macros"),
+    ("wrap", "shim_headers"),
+    ("wrap", "cstring_owned"),
+]
+
+"""
+    _collect_preserved_sections(config_path) -> Union{Dict, Nothing}
+
+Read the user-intent keys (`PRESERVED_TOML_KEYS`) out of an existing
+replibuild.toml before re-discovery overwrites it. Returns `nothing` when
+there is no existing file / nothing to preserve.
+"""
+function _collect_preserved_sections(config_path::String)
+    isfile(config_path) || return nothing
+    existing = try
+        TOML.parsefile(config_path)
+    catch
+        return nothing
+    end
+    kept = Dict{Tuple{String,String},Any}()
+    for (sec, key) in PRESERVED_TOML_KEYS
+        haskey(existing, sec) || continue
+        section = existing[sec]
+        section isa AbstractDict && haskey(section, key) || continue
+        v = section[key]
+        isempty(v) && continue
+        kept[(sec, key)] = v
+    end
+    return isempty(kept) ? nothing : kept
+end
+
+"""
+    _restore_preserved_sections(config_path, kept)
+
+Merge preserved user-intent keys back into the freshly regenerated toml.
+A key regenerated NON-empty wins over the preserved value (future discovery
+may learn to derive some of these); today generate_config emits them empty,
+so preservation is what keeps them alive across re-discovery.
+"""
+function _restore_preserved_sections(config_path::String, kept)
+    kept === nothing && return
+    doc = try
+        TOML.parsefile(config_path)
+    catch
+        return
+    end
+    restored = String[]
+    for ((sec, key), v) in kept
+        section = get!(doc, sec, Dict{String,Any}())
+        cur = get(section, key, nothing)
+        if cur === nothing || isempty(cur)
+            section[key] = v
+            push!(restored, "$(sec).$(key)")
+        end
+    end
+    isempty(restored) && return
+    open(config_path, "w") do io
+        TOML.print(io, doc)
+    end
+    println("  preserved: $(join(sort(restored), ", ")) (user config, not derivable from source)")
+end
+
 """
     discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=false, build::Bool=false, wrap::Bool=false) -> String
 
@@ -122,6 +192,13 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
         end
     end
 
+    # User-intent sections of an existing toml must survive re-discovery:
+    # generate_config always emits them empty (they are not derivable from
+    # source), so regeneration used to silently destroy them. That broke
+    # stl_test for six weeks — [types].templates vanished on every devtests
+    # run, taking the whole STL wrapper section with it (found 2026-07-17).
+    preserved = _collect_preserved_sections(config_path)
+
     println("RepliBuild | discover $(basename(abspath(target_dir)))")
 
     scan_results = scan_all_files(target_dir)
@@ -136,6 +213,7 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     println("  found: $(length(source_files)) sources, $(length(include_dirs)) include dirs")
 
     ConfigurationManager.save_config(config)
+    _restore_preserved_sections(config_path, preserved)
 
     # Auto-register in global package registry
     try

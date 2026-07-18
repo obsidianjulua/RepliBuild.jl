@@ -118,6 +118,10 @@ include(joinpath(@__DIR__, "test_registry.jl"))
 
 include(joinpath(@__DIR__, "test_varargs_emission.jl"))
 
+# ── User-intent TOML preservation across re-discovery (no toolchain required) ─
+
+include(joinpath(@__DIR__, "test_toml_preservation.jl"))
+
 # ── C-generator policy regressions: cstring_owned, macro-shim visibility,
 #    blob param trap, bitfield byte-span (no toolchain required) ──────────────
 

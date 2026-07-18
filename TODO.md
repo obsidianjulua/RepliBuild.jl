@@ -11,25 +11,20 @@ are unbuilt pieces unless explicitly marked REGRESSION.
 
 ---
 
-## 🔴 Known red (regression, not roadmap)
+## ✅ Recently closed
 
-### stl_test wrapper generation silently omits the STL factory section
-- **Status:** REGRESSION, pre-existing — bisect-proven NOT from the 2026-07-17
-  MI/vcall work (reproduces on a pristine tree at `df97231` with zero
-  working-tree changes).
-- **Symptom:** generated `StlTest.jl` ends after `make_ints`; zero
-  `create_std_vector_int` / `create_std_basic_string_char` definitions;
-  `test/stl_test/verify.jl` errors 6 of 8 testsets with `UndefVarError`.
-  Generation does not crash — the template-instantiation factory section is
-  silently skipped.
-- **Repro:**
-  ```
-  julia --project=. -e 'import RepliBuild; RepliBuild.discover("test/stl_test", force=true, build=true, wrap=true)'
-  julia --project=. test/stl_test/verify.jl
-  ```
-- **Next:** bisect between the last known-green run and `df97231`; suspects are
-  the Tier-2 GeneratorCpp changes in that commit or earlier. Likely a
-  swallowed exception or a filter misclassifying the STL structs.
+### stl_test STL factory regression — FIXED 2026-07-17
+Root cause was **not** codegen: `discover(force=true)` regenerated
+`replibuild.toml` from scratch and destroyed the user-intent
+`[types].templates` section (broken since `4117a8e`, 2026-06-02, when
+devtests adopted always-regenerate). No templates → no instantiation stub →
+no DWARF → no STL wrapper section, silently. Fixed two ways: `discover`
+now **preserves user-intent TOML keys** across forced re-discovery
+(`Discovery.PRESERVED_TOML_KEYS`: templates, template_headers, varargs,
+macros, shim_headers, cstring_owned; pinned by
+`test/test_toml_preservation.jl`), and devtests **seeds curated fixture
+config** after each regeneration so fresh clones are deterministic. Narrative:
+[docs/updates/2026-07-17-stl-test-regression.md](docs/updates/2026-07-17-stl-test-regression.md).
 
 ---
 
