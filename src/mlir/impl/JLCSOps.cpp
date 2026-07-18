@@ -64,6 +64,22 @@ LogicalResult TypeInfoOp::verify() {
         if (!isa<IntegerAttr>(attr))
             return emitOpError() << "baseOffsets entries must be integer "
                                  << "attributes, got " << attr;
+
+    size_t nVNames = getVbaseNames().size();
+    size_t nVOffs = getVbaseVtableOffsets().size();
+    if (nVNames != nVOffs)
+        return emitOpError() << "vbaseNames has " << nVNames
+                             << " entrie(s) but vbaseVtableOffsets has "
+                             << nVOffs << "; each virtual base needs exactly "
+                             << "one vtable-relative offset position";
+    for (Attribute attr : getVbaseNames())
+        if (!isa<StringAttr>(attr))
+            return emitOpError() << "vbaseNames entries must be string "
+                                 << "attributes, got " << attr;
+    for (Attribute attr : getVbaseVtableOffsets())
+        if (!isa<IntegerAttr>(attr))
+            return emitOpError() << "vbaseVtableOffsets entries must be "
+                                 << "integer attributes, got " << attr;
     return success();
 }
 

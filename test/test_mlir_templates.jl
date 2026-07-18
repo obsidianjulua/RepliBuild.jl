@@ -869,6 +869,51 @@ end
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 8d. TypeInfoOp virtual-base table
+# ══════════════════════════════════════════════════════════════════════════════
+
+@testset "8d. type_info virtual-base table" begin
+    ctx = create_context()
+    try
+        # Diamond shape: Left/Right carry VBase in the VIRTUAL table (vtable-
+        # relative coordinate, -24 = vbase-offset entry below the address
+        # point); Diamond carries Left/Right in the static table. Virtual
+        # bases never appear in baseNames/baseOffsets.
+        ir = """
+        module {
+            jlcs.type_info "Left",
+                !jlcs.c_struct<"Left", [!llvm.ptr, i32], [[0 : i64, 8 : i64]], packed = false>,
+                "", ""
+                {vbaseNames = ["VBase"], vbaseVtableOffsets = [-24 : i64]}
+            jlcs.type_info "Diamond",
+                !jlcs.c_struct<"Diamond", [!llvm.ptr, i32, !llvm.ptr, i32, i32], [[0 : i64, 8 : i64, 16 : i64, 24 : i64, 32 : i64]], packed = false>,
+                "Left", ""
+                {baseNames = ["Left", "Right"], baseOffsets = [0 : i64, 16 : i64]}
+        }
+        """
+        mod = parse_module(ctx, ir)
+        @test mod != C_NULL
+        mod_jit = clone_module(mod)
+        @test lower_to_llvm(mod_jit)
+        println("  ✓ type_info vbase table parses + lowers")
+
+        # Verifier: mismatched vbase-table arity rejected at parse
+        bad_ir = """
+        module {
+            jlcs.type_info "BadVI",
+                !jlcs.c_struct<"BadVI", [i32], [[0 : i64]], packed = false>,
+                "", ""
+                {vbaseNames = ["A", "B"], vbaseVtableOffsets = [-24 : i64]}
+        }
+        """
+        @test_throws ErrorException parse_module(ctx, bad_ir)
+        println("  ✓ vbase-table arity mismatch diagnosed at parse")
+    finally
+        destroy_context(ctx)
+    end
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 9. TypeInfoOp with Template Inheritance
 # ══════════════════════════════════════════════════════════════════════════════
 

@@ -48,13 +48,15 @@ the pattern). A wrapper-level story (vcall through the deleting-dtor slot for
 handles whose static type is a base) is designable now but interacts with
 finalizer semantics — think before building.
 
-### Virtual inheritance
-Still NOT modeled, now **rejected loudly** everywhere instead of silently
-mis-handled (`DW_AT_virtuality` on the inheritance edge is captured by both
-parsers; type_info emission warns and omits the base table; layout flattening
-skips vbases with a warning). vbase offsets live in the vtable (VTT), not the
-static layout — building this means vtable-resident offset reads in the
-dialect lowering. Substantial; separate project.
+### Virtual inheritance — BUILT 2026-07-17 (residuals only)
+Dynamic `<Derived>_as_<VBase>` upcasts (vptr-indirect, correct for every
+dynamic type), `vbase_vtable_offset` extraction in both parsers, `type_info`
+vbase table; diamond-proven in `test/vi_test/` 33/33 with the vcall producer
+needing zero changes. Residuals: a dialect-level vbase upcast op (no producer
+needs one — build when IR must adjust inside a thunk) and vbase member
+flattening (deliberately never — offsets are dynamic; access = upcast + the
+base's own accessors). Narrative:
+[docs/updates/2026-07-17-virtual-inheritance.md](docs/updates/2026-07-17-virtual-inheritance.md).
 
 ---
 

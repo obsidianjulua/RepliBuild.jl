@@ -150,20 +150,37 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
     # !jlcs.c_struct<"Name", [T1, T2], [[O1 : i64, O2 : i64]], packed = false>
     struct_type_str = "!jlcs.c_struct<\"$(class_name)\", [$(field_types_str)], [$(field_offsets_attr)], packed = false>"
 
-    # Multiple-inheritance base table: baseNames/baseOffsets attr-dict pairs
-    # (subobject byte offsets from DW_AT_data_member_location). Virtual bases
-    # have no static offset — their layout lives in the vtable, which
-    # type_info cannot represent; emit without the table and warn loudly
-    # rather than record offsets that are lies.
+    # Base tables: non-virtual bases carry static subobject offsets in
+    # baseNames/baseOffsets; virtual bases have NO static offset (it is
+    # vtable-resident) and go in vbaseNames/vbaseVtableOffsets, recording the
+    # negative byte position of the vbase-offset entry relative to the vtable
+    # address point — the coordinate a dynamic upcast reads through the vptr.
     base_table = ""
     if !isempty(info.base_classes)
-        if any(info.virtual_bases)
-            @warn "Class $(class_name) uses virtual inheritance — base table omitted from type_info (virtual base offsets are dynamic; not modeled)"
-        else
-            names_attr = join(["\"$(b)\"" for b in info.base_classes], ", ")
-            offs_attr = join(["$(o) : i64" for o in info.base_offsets], ", ")
-            base_table = " {baseNames = [$(names_attr)], baseOffsets = [$(offs_attr)]}"
+        nv_names = String[]; nv_offs = Int[]
+        vb_names = String[]; vb_offs = Int[]
+        for (i, b) in enumerate(info.base_classes)
+            if info.virtual_bases[i]
+                # Only representable with a parsed vtable coordinate
+                if info.vbase_vtable_offsets[i] != 0
+                    push!(vb_names, b); push!(vb_offs, info.vbase_vtable_offsets[i])
+                else
+                    @warn "Class $(class_name): virtual base $(b) has no resolvable vbase vtable offset — omitted from type_info"
+                end
+            else
+                push!(nv_names, b); push!(nv_offs, info.base_offsets[i])
+            end
         end
+        parts = String[]
+        if !isempty(nv_names)
+            push!(parts, "baseNames = [$(join(["\"$(n)\"" for n in nv_names], ", "))]")
+            push!(parts, "baseOffsets = [$(join(["$(o) : i64" for o in nv_offs], ", "))]")
+        end
+        if !isempty(vb_names)
+            push!(parts, "vbaseNames = [$(join(["\"$(n)\"" for n in vb_names], ", "))]")
+            push!(parts, "vbaseVtableOffsets = [$(join(["$(o) : i64" for o in vb_offs], ", "))]")
+        end
+        isempty(parts) || (base_table = " {$(join(parts, ", "))}")
     end
 
     ir = """

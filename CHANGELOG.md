@@ -4,6 +4,20 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased (post-3.0.0)
 
+### Virtual inheritance: dynamic vbase upcasts, diamond-proven
+
+The last unbuilt piece of the inheritance ABI. A virtual base's offset is **not static** — a standalone `Left` and a `Left`-inside-`Diamond` place the shared `VBase` at different offsets, and only the object's vtable knows which (the vbase-offset entry below the vtable address point). The MI-era policy of detect-and-reject-loudly is replaced with actual support:
+
+- **Extraction (both parsers):** the `DW_AT_data_member_location` on a virtual inheritance edge is a DWARF *expression* (`DW_OP_dup, deref, constu N, minus, deref, plus` = "this + \*(vptr − N)"), not a constant. Both parsers now parse it into `vbase_vtable_offset = −N` (readelf and llvm-dwarfdump renderings pinned empirically). Fixed in passing: the readelf constant-regex previously matched the "7" of "`7 byte block:`" on virtual edges — a bogus static offset 7, latent because consumers gated on `virtual=true`.
+- **Wrapper: dynamic `<Derived>_as_<VBase>` upcasts.** The helper reads the object's vptr and the vbase-offset entry at runtime: `p + *(vptr + vboff)`. The *same* helper is correct for every dynamic type — the vi_test canary shows `Left_as_VBase` resolving +16 on a standalone `Left` and +32 on a Diamond-backed one. Transitive virtual bases compose (Diamond has no direct `VBase` edge in DWARF; `Diamond_as_VBase` static-adjusts to `Left` then goes dynamic). Non-virtual MI upcasts unchanged.
+- **`jlcs.type_info` gained a virtual-base table**: `vbaseNames`/`vbaseVtableOffsets` paired ArrayAttrs carrying the vtable-relative coordinate (virtual bases never appear in the static `baseNames`/`baseOffsets` table); verifier extended for the new pair. The old omit-everything-and-warn policy is gone.
+- **No dialect lowering changes needed** — the ledger predicted "vtable-resident offset reads in the dialect lowering", but the class-local-coordinates + caller-side-upcast architecture means the dynamic read lives in the Julia wrapper and everything else composes: the vcall producer needed **zero changes** for vbase-declared methods, overrides of vbase methods re-home into the derived primary vtable exactly like regular MI (empirically: `Diamond::tag` slot 3), and complete-object ctors/dtors (C1/D1, already preferred by the RAII resolver) handle vbase construction.
+- Layout flattening still (correctly, by design) skips vbase members — their offsets are dynamic; access goes through the upcast + the base's own accessors.
+
+Proven live in `test/vi_test/` (diamond fixture, wired into devtests, **33/33**): the 16-vs-32 same-helper canary; all three views of a Diamond (`Diamond_as_VBase`, `Left_as_VBase`, `Right_as_VBase∘Diamond_as_Right`) resolve the ONE shared `VBase` (single-copy proof, including tail-padding reuse `d@28` extracted faithfully); `VBase_tag` through the vbase vtable dispatches `Diamond`'s override (1007) from a pointer whose caller has zero derived-type knowledge, while the standalone `Left` gets `VBase::tag` (7) from the identical call; polymorphic delete through `Left*` destroys the Diamond. Dialect-level vbase table parse/verify in templates §8d (**87/87**).
+
+Regression state: CI 404, producers 26/26, invariants 10/10, templates 87/87, mi_test 31/31, vi_test 33/33, stl_test 28/28.
+
 ### stl_test regression fixed: discover(force) no longer destroys user-intent TOML config
 
 The KNOWN RED flagged below is closed, and the wrapper generator was never broken. Root cause: `discover(force=true)` regenerates `replibuild.toml` from scratch and `generate_config` emits the user-intent keys empty — so forced re-discovery silently destroyed `[types].templates`, killing the instantiation stub → DWARF → STL wrapper chain. Broken since `4117a8e` (2026-06-02) made devtests always force-rediscover fixtures. Full narrative: `docs/updates/2026-07-17-stl-test-regression.md`.

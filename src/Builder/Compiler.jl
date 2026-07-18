@@ -2417,12 +2417,33 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                 inh_info = type_refs[tag_offset]
 
                 if contains(line, "DW_AT_data_member_location")
-                    loc_match = match(r"DW_AT_data_member_location\s*:\s*(0x[0-9a-fA-F]+|\d+)", line)
-                    if !isnothing(loc_match)
-                        val_str = loc_match.captures[1]
-                        inh_info["offset"] = startswith(val_str, "0x") ?
-                            parse(Int, val_str[3:end], base=16) :
-                            parse(Int, val_str)
+                    if contains(line, "byte block")
+                        # Virtual base: the location is a DWARF EXPRESSION, not a
+                        # constant — readelf renders it like
+                        #   7 byte block: ... (DW_OP_dup; DW_OP_deref;
+                        #     DW_OP_constu: 24; DW_OP_minus; DW_OP_deref; DW_OP_plus)
+                        # i.e. "read the vptr, read the vbase-offset entry N bytes
+                        # BELOW the vtable address point, add it to this". Record
+                        # the vtable-relative position (negative); the static
+                        # "offset" field stays 0 — there IS no static offset.
+                        # (Without the byte-block guard the constant regex below
+                        # matched the "7" of "7 byte block" — a bogus offset 7.)
+                        expr_match = match(r"DW_OP_dup[;,].*DW_OP_deref[;,].*DW_OP_constu:?\s*(0x[0-9a-fA-F]+|\d+)\s*[;,].*DW_OP_minus[;,].*DW_OP_deref[;,].*DW_OP_plus", line)
+                        if !isnothing(expr_match)
+                            val_str = expr_match.captures[1]
+                            n = startswith(val_str, "0x") ?
+                                parse(Int, val_str[3:end], base=16) :
+                                parse(Int, val_str)
+                            inh_info["vbase_vtable_offset"] = -n
+                        end
+                    else
+                        loc_match = match(r"DW_AT_data_member_location\s*:\s*(0x[0-9a-fA-F]+|\d+)", line)
+                        if !isnothing(loc_match)
+                            val_str = loc_match.captures[1]
+                            inh_info["offset"] = startswith(val_str, "0x") ?
+                                parse(Int, val_str[3:end], base=16) :
+                                parse(Int, val_str)
+                        end
                     end
                 end
 
@@ -3333,14 +3354,21 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                             base_type_ref = get(inh_info, "base_type", nothing)
                             if !isnothing(base_type_ref)
                                 base_type = resolve_type(base_type_ref, type_refs)
-                                push!(base_classes, Dict(
+                                base_entry = Dict{String,Any}(
                                     "type" => base_type,
                                     "accessibility" => get(inh_info, "accessibility", "public"),
                                     # Byte offset of this base's subobject in the
                                     # derived object (0 for the primary base)
                                     "offset" => get(inh_info, "offset", 0),
                                     "virtual" => get(inh_info, "virtual", false)
-                                ))
+                                )
+                                # Virtual base: static offset is meaningless; the
+                                # object's vtable holds the real offset at this
+                                # (negative) byte position from the address point.
+                                if haskey(inh_info, "vbase_vtable_offset")
+                                    base_entry["vbase_vtable_offset"] = inh_info["vbase_vtable_offset"]
+                                end
+                                push!(base_classes, base_entry)
                             end
                         end
                     end

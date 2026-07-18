@@ -805,11 +805,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     base_type = replace(base_type, r"^(class|struct)\s+" => "")
                     isempty(base_type) && continue
 
-                    # Virtual base: its offset is stored in the vtable, not
-                    # the static layout — flattening it at a guessed offset
-                    # would corrupt every access. Skip loudly.
+                    # Virtual base: its offset is vtable-resident, not static —
+                    # flattening it at a guessed offset would corrupt every
+                    # access. By design its members are reached through the
+                    # dynamic `<Derived>_as_<Base>` upcast helper instead.
                     if get(base, "virtual", false) == true
-                        @warn "$(s_name): virtual base $(base_type) skipped in layout flattening (virtual inheritance not modeled — offsets are dynamic)"
+                        @debug "$(s_name): virtual base $(base_type) not flattened (offset is dynamic; use the $(s_name)_as_* upcast helper)"
                         continue
                     end
 
@@ -1522,60 +1523,113 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # 2. Generate Managed Types
     managed_chunks = String[]
     # =============================================================================
-    # MI UPCAST HELPERS (base-subobject pointer adjustment)
+    # MI / VIRTUAL-INHERITANCE UPCAST HELPERS (base-subobject pointer adjustment)
     # =============================================================================
-    # A method inherited from a non-primary base (multiple inheritance) expects
-    # `this` to point at the base SUBOBJECT, not the derived object's start.
-    # Emit <Derived>_as_<Base>(obj) helpers applying the static Itanium offset
-    # for every class that has a base at a non-zero offset (all bases of such a
-    # class get a helper, including the offset-0 primary, for a uniform API).
-    # Virtual bases are excluded — their offsets are dynamic (vtable-resident).
+    # A method inherited from a non-primary base expects `this` to point at the
+    # base SUBOBJECT, not the derived object's start. Emit <Derived>_as_<Base>
+    # helpers for every class where an upcast is non-trivial:
+    #   - static Itanium offsets for non-virtual bases (MI), and
+    #   - DYNAMIC adjustment for virtual bases: the vbase offset is
+    #     vtable-resident (a standalone Left and a Left-inside-Diamond place
+    #     VBase at different offsets), so the helper reads the object's vptr
+    #     and the vbase-offset entry below the vtable address point at
+    #     runtime. The same helper is correct for every dynamic type.
+    # Transitive virtual bases (Diamond -> Left -> virtual VBase) compose:
+    # static-adjust to the intermediate base, dynamic from there.
     let upcast_seen = Set{String}(), upcast_chunks = String[]
+        # Walk a class's base DAG collecting every reachable upcast target:
+        # (base_type, :static, accumulated_offset, 0) for non-virtual chains,
+        # (base_type, :virtual, static_prefix, vbase_vtable_offset) at virtual
+        # edges (no recursion past those — positions beyond are dynamic too).
+        function _collect_upcasts!(acc, s_name, static_off, visited)
+            haskey(dwarf_structs, s_name) || return
+            s_name in visited && return
+            push!(visited, s_name)
+            for base in get(dwarf_structs[s_name], "base_classes", [])
+                base isa Dict || continue
+                bt = replace(get(base, "type", ""), r"^(class|struct)\s+" => "")
+                isempty(bt) && continue
+                if get(base, "virtual", false) == true
+                    vboff = get(base, "vbase_vtable_offset", nothing)
+                    if vboff isa Integer
+                        push!(acc, (bt, :virtual, static_off, Int(vboff)))
+                    else
+                        @debug "$(s_name): virtual base $(bt) has no resolvable vtable offset — upcast not emitted"
+                    end
+                else
+                    off = get(base, "offset", 0)
+                    off = off isa Integer ? Int(off) : 0
+                    push!(acc, (bt, :static, static_off + off, 0))
+                    _collect_upcasts!(acc, bt, static_off + off, visited)
+                end
+            end
+        end
+
         for (s_name, s_info) in sort(collect(dwarf_structs), by = first)
             bases = get(s_info, "base_classes", [])
             (bases isa Vector && !isempty(bases)) || continue
-            has_mi_base = any(bases) do b
-                b isa Dict || return false
-                off = get(b, "offset", 0)
-                off isa Integer && off != 0 && get(b, "virtual", false) != true
-            end
-            has_mi_base || continue
+
+            acc = Tuple{String,Symbol,Int,Int}[]
+            _collect_upcasts!(acc, s_name, 0, Set{String}())
+            # Only emit when an upcast is non-trivial: a static base at a
+            # non-zero offset (MI) or any virtual base. Plain offset-0 SI
+            # chains need no helper.
+            any(t -> (t[2] == :static && t[3] != 0) || t[2] == :virtual, acc) || continue
 
             d_name = replace(_sanitize_cpp_type_name(s_name), r"[^a-zA-Z0-9_]" => "_")
-            for base in bases
-                base isa Dict || continue
-                get(base, "virtual", false) == true && continue
-                base_type = replace(get(base, "type", ""), r"^(class|struct)\s+" => "")
-                isempty(base_type) && continue
-                off = get(base, "offset", 0)
-                off = off isa Integer ? Int(off) : 0
+            for (base_type, kind, static_off, vboff) in acc
                 b_name = replace(_sanitize_cpp_type_name(base_type), r"[^a-zA-Z0-9_]" => "_")
                 fn = "$(d_name)_as_$(b_name)"
                 fn in upcast_seen && continue
                 push!(upcast_seen, fn)
 
-                push!(upcast_chunks, """
-                \"\"\"
-                    $(fn)(obj) -> Ptr{Cvoid}
+                if kind == :static
+                    push!(upcast_chunks, """
+                    \"\"\"
+                        $(fn)(obj) -> Ptr{Cvoid}
 
-                Upcast a `$(s_name)` to its `$(base_type)` base subobject
-                (+$(off) bytes, static Itanium layout). Accepts a raw `Ptr` or
-                any wrapper with a `.handle` field. Pass the result as `this`
-                when calling `$(base_type)` methods on a `$(s_name)` object.
-                \"\"\"
-                function $(fn)(obj)::Ptr{Cvoid}
-                    p = obj isa Ptr ? Ptr{Cvoid}(obj) : Ptr{Cvoid}(obj.handle)
-                    return p + $(off)
+                    Upcast a `$(s_name)` to its `$(base_type)` base subobject
+                    (+$(static_off) bytes, static Itanium layout). Accepts a raw `Ptr` or
+                    any wrapper with a `.handle` field. Pass the result as `this`
+                    when calling `$(base_type)` methods on a `$(s_name)` object.
+                    \"\"\"
+                    function $(fn)(obj)::Ptr{Cvoid}
+                        p = obj isa Ptr ? Ptr{Cvoid}(obj) : Ptr{Cvoid}(obj.handle)
+                        return p + $(static_off)
+                    end
+                    export $(fn)
+
+                    """)
+                else
+                    prefix = static_off == 0 ? "" : " + $(static_off)"
+                    push!(upcast_chunks, """
+                    \"\"\"
+                        $(fn)(obj) -> Ptr{Cvoid}
+
+                    Upcast a `$(s_name)` to its VIRTUAL base `$(base_type)`. The
+                    subobject's offset is dynamic (it depends on the most-derived
+                    type), so this reads the object's vtable at runtime: the
+                    vbase-offset entry lives $(vboff) bytes from the vtable
+                    address point. Correct for every dynamic type — a standalone
+                    `$(s_name)` and one embedded in a more-derived object resolve
+                    different offsets through the same code. Accepts a raw `Ptr`
+                    or any wrapper with a `.handle` field.
+                    \"\"\"
+                    function $(fn)(obj)::Ptr{Cvoid}
+                        p = (obj isa Ptr ? Ptr{Cvoid}(obj) : Ptr{Cvoid}(obj.handle))$(prefix)
+                        vptr = unsafe_load(Ptr{Ptr{Int64}}(p))
+                        return p + unsafe_load(vptr + $(vboff))
+                    end
+                    export $(fn)
+
+                    """)
                 end
-                export $(fn)
-
-                """)
             end
         end
         if !isempty(upcast_chunks)
             push!(struct_chunks, """
             # =============================================================================
-            # MI Upcast Helpers (base-subobject pointer adjustment)
+            # MI / Virtual-Inheritance Upcast Helpers (base-subobject adjustment)
             # =============================================================================
 
             """)

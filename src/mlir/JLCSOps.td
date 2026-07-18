@@ -41,7 +41,14 @@ def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
     // NB: ArrayAttr's constBuilderCall already wraps the default in
     // $_builder.getArrayAttr(...) — the default here is the *contents*.
     DefaultValuedAttr<ArrayAttr, "{}">:$baseNames,
-    DefaultValuedAttr<ArrayAttr, "{}">:$baseOffsets
+    DefaultValuedAttr<ArrayAttr, "{}">:$baseOffsets,
+    // Virtual-base table: names paired 1:1 with the NEGATIVE byte position
+    // (relative to the vtable address point) of each vbase-offset entry.
+    // A virtual base has NO static subobject offset — the real offset is
+    // read through the object's vptr at that position (Itanium). Virtual
+    // bases appear here and NOT in baseNames/baseOffsets.
+    DefaultValuedAttr<ArrayAttr, "{}">:$vbaseNames,
+    DefaultValuedAttr<ArrayAttr, "{}">:$vbaseVtableOffsets
   );
 
   // Custom assembly: jlcs.type_info "TypeName", !jlcs.c_struct<...>, "SuperType", "DtorName"

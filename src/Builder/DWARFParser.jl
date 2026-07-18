@@ -48,12 +48,21 @@ struct ClassInfo
     # virtual inheritance (offset then lives in the vtable, NOT here).
     base_offsets::Vector{Int}
     virtual_bases::Vector{Bool}
+    # Parallel: for virtual bases, the NEGATIVE byte position (relative to the
+    # vtable address point) of the vbase-offset entry — parsed from the
+    # DW_OP_dup/deref/constu N/minus/deref/plus location expression. 0 for
+    # non-virtual edges (meaningless there).
+    vbase_vtable_offsets::Vector{Int}
 end
 
-# Backward-compatible constructor (pre-MI callers): bases at offset 0, non-virtual.
+# Backward-compatible constructors (pre-MI / pre-VI callers).
 ClassInfo(name, vptr_off, bases, vmethods, members, size) =
     ClassInfo(name, vptr_off, bases, vmethods, members, size,
-              zeros(Int, length(bases)), fill(false, length(bases)))
+              zeros(Int, length(bases)), fill(false, length(bases)),
+              zeros(Int, length(bases)))
+ClassInfo(name, vptr_off, bases, vmethods, members, size, base_offs, virt) =
+    ClassInfo(name, vptr_off, bases, vmethods, members, size,
+              base_offs, virt, zeros(Int, length(bases)))
 
 """
 Complete vtable information from binary
@@ -82,6 +91,7 @@ function parse_dwarf_output_robust(dwarf_text::String)
     base_classes = String[]
     base_offsets = Int[]
     virtual_bases = Bool[]
+    vbase_vtable_offsets = Int[]
     virtual_methods = VirtualMethod[]
     members = MemberInfo[]
     
@@ -114,7 +124,8 @@ function parse_dwarf_output_robust(dwarf_text::String)
                 copy(members),
                 current_size,
                 copy(base_offsets),
-                copy(virtual_bases)
+                copy(virtual_bases),
+                copy(vbase_vtable_offsets)
             )
         end
         current_class_name = ""
@@ -123,6 +134,7 @@ function parse_dwarf_output_robust(dwarf_text::String)
         empty!(base_classes)
         empty!(base_offsets)
         empty!(virtual_bases)
+        empty!(vbase_vtable_offsets)
         empty!(virtual_methods)
         empty!(members)
         in_class = false
@@ -235,6 +247,7 @@ function parse_dwarf_output_robust(dwarf_text::String)
                      # of the same DIE and overwrite these defaults.
                      push!(base_offsets, 0)
                      push!(virtual_bases, false)
+                     push!(vbase_vtable_offsets, 0)
                  elseif context == :method
                      pending_method_return_type = type_name
                  elseif context == :parameter
@@ -276,6 +289,20 @@ function parse_dwarf_output_robust(dwarf_text::String)
                     base_offsets[end] = startswith(val_str, "0x") ?
                         parse(Int, val_str[3:end], base=16) :
                         parse(Int, val_str)
+                else
+                    # Virtual base: location is the DWARF expression
+                    #   (DW_OP_dup, DW_OP_deref, DW_OP_constu 0x18, DW_OP_minus,
+                    #    DW_OP_deref, DW_OP_plus)
+                    # = "this + *(vptr - N)". Record -N: the vbase-offset entry's
+                    # byte position relative to the vtable address point.
+                    vb = match(r"DW_OP_dup[;,].*DW_OP_deref[;,].*DW_OP_constu:?\s*(0x[0-9a-fA-F]+|\d+)\s*[;,].*DW_OP_minus[;,].*DW_OP_deref[;,].*DW_OP_plus", line)
+                    if !isnothing(vb)
+                        val_str = vb.captures[1]
+                        n = startswith(val_str, "0x") ?
+                            parse(Int, val_str[3:end], base=16) :
+                            parse(Int, val_str)
+                        vbase_vtable_offsets[end] = -n
+                    end
                 end
             end
             # Virtual base: the subobject offset is dynamic (stored in the
@@ -440,6 +467,7 @@ function export_vtable_json(vtinfo::VtableInfo, output_path::String)
                 "base_classes" => info.base_classes,
                 "base_offsets" => info.base_offsets,
                 "virtual_bases" => info.virtual_bases,
+                "vbase_vtable_offsets" => info.vbase_vtable_offsets,
                 "members" => [
                     Dict(
                         "name" => m.name,
