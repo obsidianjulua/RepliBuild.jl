@@ -489,6 +489,139 @@ static uint64_t getPackedSizeInBits(Type type) {
     return 0; // Unknown
 }
 
+// --- x86-64 SysV struct classification -------------------------------------
+//
+// A struct is MEMORY class (hidden sret pointer for returns) only when it is
+// larger than 16 bytes or contains a misaligned field. Small structs with
+// naturally aligned fields travel in registers, one per eightbyte: INTEGER
+// eightbytes in GPRs, SSE (all-float) eightbytes in XMMs. "Packed" in the
+// generator's sense merely means padding-free, NOT MEMORY class — an 8-byte
+// {ptr} handle (pugixml xml_node) is returned in RAX by native code, and
+// forcing sret shifted every argument by one register (the callee read the
+// sret slot as `this`; found live 2026-07-18).
+//
+// LLVM's own return lowering for a literal struct assigns one register PER
+// ELEMENT, which diverges from SysV's one-per-eightbyte whenever two fields
+// share an eightbyte ({i32,i32} → SysV packs both in RAX). So register-class
+// structs are coerced through memory to one scalar per eightbyte (i64 / f64),
+// exactly clang's coercion, and reconstructed by a typed load on the way out.
+
+struct SysVStructABI {
+    bool memoryClass = true;              // true → sret / byval-pointer path
+    SmallVector<Type, 2> eightbytes;      // coerced scalar per eightbyte
+};
+
+static uint64_t abiAlign(Type t) {
+    if (auto st = dyn_cast<LLVM::LLVMStructType>(t)) {
+        if (st.isPacked())
+            return 1;
+        uint64_t a = 1;
+        if (!st.isOpaque())
+            for (Type e : st.getBody())
+                a = std::max(a, abiAlign(e));
+        return a;
+    }
+    if (auto ar = dyn_cast<LLVM::LLVMArrayType>(t))
+        return abiAlign(ar.getElementType());
+    if (isa<LLVM::LLVMPointerType>(t))
+        return 8;
+    if (t.isIntOrFloat()) {
+        uint64_t b = (t.getIntOrFloatBitWidth() + 7) / 8;
+        return std::min<uint64_t>(std::max<uint64_t>(b, 1), 8);
+    }
+    return 8;
+}
+
+static uint64_t abiSize(Type t, unsigned depth = 0) {
+    if (depth > 32)
+        return 1 << 20; // malformed recursive type: force MEMORY class
+    if (auto st = dyn_cast<LLVM::LLVMStructType>(t)) {
+        if (st.isOpaque())
+            return 0;
+        uint64_t cur = 0;
+        for (Type e : st.getBody()) {
+            if (!st.isPacked())
+                cur = llvm::alignTo(cur, abiAlign(e));
+            cur += abiSize(e, depth + 1);
+        }
+        if (!st.isPacked())
+            cur = llvm::alignTo(cur, abiAlign(st));
+        return cur;
+    }
+    if (auto ar = dyn_cast<LLVM::LLVMArrayType>(t))
+        return ar.getNumElements() * abiSize(ar.getElementType(), depth + 1);
+    if (isa<LLVM::LLVMPointerType>(t))
+        return 8;
+    if (t.isIntOrFloat())
+        return (t.getIntOrFloatBitWidth() + 7) / 8;
+    return 0;
+}
+
+struct AbiLeaf {
+    uint64_t offset;
+    uint64_t size;
+    bool isFP;
+};
+
+static void collectAbiLeaves(Type t, uint64_t base, SmallVectorImpl<AbiLeaf>& out) {
+    if (auto st = dyn_cast<LLVM::LLVMStructType>(t)) {
+        uint64_t cur = 0;
+        for (Type e : st.getBody()) {
+            if (!st.isPacked())
+                cur = llvm::alignTo(cur, abiAlign(e));
+            collectAbiLeaves(e, base + cur, out);
+            cur += abiSize(e);
+        }
+        return;
+    }
+    if (auto ar = dyn_cast<LLVM::LLVMArrayType>(t)) {
+        uint64_t esz = abiSize(ar.getElementType());
+        for (uint64_t i = 0; i < ar.getNumElements(); ++i)
+            collectAbiLeaves(ar.getElementType(), base + i * esz, out);
+        return;
+    }
+    uint64_t sz = abiSize(t);
+    if (sz)
+        out.push_back({base, sz, isa<FloatType>(t)});
+}
+
+static SysVStructABI classifySysVStruct(LLVM::LLVMStructType s, MLIRContext* ctx) {
+    SysVStructABI r;
+    uint64_t size = abiSize(s);
+    if (size == 0 || size > 16)
+        return r;
+    SmallVector<AbiLeaf, 8> leaves;
+    collectAbiLeaves(s, 0, leaves);
+    bool anyInt[2] = {false, false}, anyFP[2] = {false, false};
+    for (const AbiLeaf& lf : leaves) {
+        uint64_t natural = std::min<uint64_t>(std::max<uint64_t>(lf.size, 1), 8);
+        if (lf.offset % natural != 0)
+            return r; // genuinely misaligned (attribute-packed) field → MEMORY
+        uint64_t first = lf.offset / 8;
+        uint64_t last = (lf.offset + lf.size - 1) / 8;
+        for (uint64_t eb = first; eb <= last && eb < 2; ++eb)
+            (lf.isFP ? anyFP : anyInt)[eb] = true;
+    }
+    r.memoryClass = false;
+    unsigned nEB = (size + 7) / 8;
+    for (unsigned i = 0; i < nEB; ++i) {
+        bool sse = anyFP[i] && !anyInt[i];
+        r.eightbytes.push_back(sse ? (Type)Float64Type::get(ctx)
+                                   : (Type)IntegerType::get(ctx, 64));
+    }
+    return r;
+}
+
+// Alloca element type sized/aligned for coercion: the coerced eightbyte
+// scalars round the slot up to a multiple of 8 with 8-byte alignment, so
+// storing the struct and loading eightbytes (or vice versa) never reads or
+// writes past the slot.
+static Type coercionSlotType(const SysVStructABI& abi, MLIRContext* ctx) {
+    if (abi.eightbytes.size() == 1)
+        return abi.eightbytes[0];
+    return LLVM::LLVMStructType::getLiteral(ctx, abi.eightbytes);
+}
+
 //===----------------------------------------------------------------------===//
 // FFECallOp Lowering
 //===----------------------------------------------------------------------===//
@@ -533,24 +666,23 @@ struct FFECallOpLowering : public ConversionPattern {
         Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
         Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
 
-        // Check if return type needs sret (packed struct, or large struct > 16 bytes)
+        // Return classification: MEMORY class (>16B or misaligned fields) uses
+        // sret; register-class structs are coerced to one scalar per eightbyte.
         bool needsSret = false;
         Type sretStructType;
         Value sretSlot;
+        Type origRetStructType;   // non-null → register-class struct return
+        Type coercedRetType;
         if (!resultTypeVec.empty()) {
             if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
-                if (retStructType.isPacked()) {
+                auto abi = classifySysVStruct(retStructType, rewriter.getContext());
+                if (abi.memoryClass) {
                     needsSret = true;
                     sretStructType = retStructType;
                     sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
                 } else {
-                    // x86_64 SysV ABI: non-packed structs > 16 bytes use sret
-                    uint64_t sizeBits = getPackedSizeInBits(retStructType);
-                    if (sizeBits > 128) {
-                        needsSret = true;
-                        sretStructType = retStructType;
-                        sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
-                    }
+                    origRetStructType = retStructType;
+                    coercedRetType = coercionSlotType(abi, rewriter.getContext());
                 }
             }
         }
@@ -568,10 +700,29 @@ struct FFECallOpLowering : public ConversionPattern {
         for (Value arg : args) {
             Type argType = arg.getType();
 
-            // Packed struct args: pass by pointer (byval semantics)
             if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
+                auto abi = classifySysVStruct(structType, rewriter.getContext());
+                if (!abi.memoryClass) {
+                    // Register-class by-value struct: pass one scalar per
+                    // eightbyte (through memory, matching clang's coercion).
+                    Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType,
+                        coercionSlotType(abi, rewriter.getContext()), one);
+                    LLVM::StoreOp::create(rewriter, loc, arg, slot);
+                    for (unsigned i = 0; i < abi.eightbytes.size(); ++i) {
+                        Value p = slot;
+                        if (i > 0) {
+                            p = LLVM::GEPOp::create(rewriter, loc, ptrType,
+                                rewriter.getI8Type(), slot,
+                                ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(8 * i)});
+                        }
+                        Value v = LLVM::LoadOp::create(rewriter, loc, abi.eightbytes[i], p);
+                        coercedArgs.push_back(v);
+                        coercedArgTypes.push_back(abi.eightbytes[i]);
+                    }
+                    continue;
+                }
                 if (structType.isPacked()) {
-                    // Alloca + store, then pass pointer
+                    // MEMORY-class packed struct arg: pass by pointer
                     Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType, one);
                     LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
                     coercedArgs.push_back(stackSlot);
@@ -588,6 +739,8 @@ struct FFECallOpLowering : public ConversionPattern {
         SmallVector<Type, 1> callResultTypes;
         if (!needsSret) {
             callResultTypes = resultTypeVec;
+            if (coercedRetType)
+                callResultTypes[0] = coercedRetType;
         }
         // If sret, the call returns void; result is loaded from sret pointer
 
@@ -618,7 +771,16 @@ struct FFECallOpLowering : public ConversionPattern {
             Value result = LLVM::LoadOp::create(rewriter, loc, sretStructType, sretSlot);
             rewriter.replaceOp(op, result);
         } else if (!resultTypeVec.empty()) {
-            rewriter.replaceOp(op, callOp.getResults());
+            if (coercedRetType) {
+                // Reconstruct the struct from the coerced eightbyte scalars
+                // through memory.
+                Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, coercedRetType, one);
+                LLVM::StoreOp::create(rewriter, loc, callOp.getResult(), slot);
+                Value result = LLVM::LoadOp::create(rewriter, loc, origRetStructType, slot);
+                rewriter.replaceOp(op, result);
+            } else {
+                rewriter.replaceOp(op, callOp.getResults());
+            }
         } else {
             rewriter.eraseOp(op);
         }
@@ -684,19 +846,18 @@ struct TryCallOpLowering : public ConversionPattern {
         bool needsSret = false;
         Type sretStructType;
         Value sretSlot;
+        Type origRetStructType;   // non-null → register-class struct return
+        Type coercedRetType;
         if (!resultTypeVec.empty()) {
             if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
-                if (retStructType.isPacked()) {
+                auto abi = classifySysVStruct(retStructType, rewriter.getContext());
+                if (abi.memoryClass) {
                     needsSret = true;
                     sretStructType = retStructType;
                     sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
                 } else {
-                    uint64_t sizeBits = getPackedSizeInBits(retStructType);
-                    if (sizeBits > 128) {
-                        needsSret = true;
-                        sretStructType = retStructType;
-                        sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
-                    }
+                    origRetStructType = retStructType;
+                    coercedRetType = coercionSlotType(abi, rewriter.getContext());
                 }
             }
         }
@@ -712,6 +873,26 @@ struct TryCallOpLowering : public ConversionPattern {
         for (Value arg : args) {
             Type argType = arg.getType();
             if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
+                auto abi = classifySysVStruct(structType, rewriter.getContext());
+                if (!abi.memoryClass) {
+                    // Register-class by-value struct: one scalar per eightbyte
+                    // (see FFECallOpLowering for rationale).
+                    Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType,
+                        coercionSlotType(abi, rewriter.getContext()), one);
+                    LLVM::StoreOp::create(rewriter, loc, arg, slot);
+                    for (unsigned i = 0; i < abi.eightbytes.size(); ++i) {
+                        Value p = slot;
+                        if (i > 0) {
+                            p = LLVM::GEPOp::create(rewriter, loc, ptrType,
+                                rewriter.getI8Type(), slot,
+                                ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(8 * i)});
+                        }
+                        Value v = LLVM::LoadOp::create(rewriter, loc, abi.eightbytes[i], p);
+                        coercedArgs.push_back(v);
+                        coercedArgTypes.push_back(abi.eightbytes[i]);
+                    }
+                    continue;
+                }
                 if (structType.isPacked()) {
                     Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType, one);
                     LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
@@ -727,6 +908,8 @@ struct TryCallOpLowering : public ConversionPattern {
         SmallVector<Type, 1> callResultTypes;
         if (!needsSret) {
             callResultTypes = resultTypeVec;
+            if (coercedRetType)
+                callResultTypes[0] = coercedRetType;
         }
 
         // Update external function declaration signature
@@ -858,7 +1041,10 @@ struct TryCallOpLowering : public ConversionPattern {
             Value result = LLVM::LoadOp::create(rewriter, loc, sretStructType, sretSlot);
             rewriter.replaceOp(op, result);
         } else if (!resultTypeVec.empty()) {
-            Value result = LLVM::LoadOp::create(rewriter, loc, resultType, resultSlot);
+            // For a register-class struct return, resultSlot holds the coerced
+            // eightbyte scalars; reload it as the original struct type.
+            Type loadType = coercedRetType ? origRetStructType : resultType;
+            Value result = LLVM::LoadOp::create(rewriter, loc, loadType, resultSlot);
             rewriter.replaceOp(op, result);
         } else {
             rewriter.eraseOp(op);

@@ -232,3 +232,11 @@ include(joinpath(TEST_DIR, "test_convenience_overloads.jl"))
 # load/store_array_element. Executes through the real MLIR JIT.
 
 include(joinpath(TEST_DIR, "test_jlcs_producers.jl"))
+
+# ── 12. Struct ABI traces: nested c_struct + SysV small-struct returns ───────
+# Pins the pugixml JIT-init segfault fixes (2026-07-18): packed structs nested
+# in llvm.struct bodies inline as LLVM literals; create_jit refuses foreign
+# types catchably; register-class (≤16B aligned) struct returns/args coerce
+# one scalar per eightbyte — verified against a real clang++-compiled callee.
+
+include(joinpath(TEST_DIR, "test_struct_abi.jl"))

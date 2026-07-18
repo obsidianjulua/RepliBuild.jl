@@ -112,10 +112,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                         mlir_t = "!llvm.ptr"   # Itanium: pass address of the temporary
                     elseif StructGen.is_struct_packed(structs[lookup_key])
                         # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
-                        mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key])
+                        mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
                     else
                         # Use FULL definition string to avoid alias parser issues in function signatures
-                        mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key])
+                        mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
                     end
                 end
             end
@@ -157,10 +157,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             if lookup_key !== nothing
                 # For packed structs, use LLVM packed type for external decl/ffe_call
                 if StructGen.is_struct_packed(structs[lookup_key])
-                    ret_type = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key])
+                    ret_type = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
                     is_packed_ret = true
                     ret_packed_type = ret_type
-                    ret_aligned_type = StructGen.get_llvm_aligned_type_string(s_name, structs[lookup_key])
+                    ret_aligned_type = StructGen.get_llvm_aligned_type_string(s_name, structs[lookup_key], structs)
                     ret_struct_info = structs[lookup_key]
                     ret_num_members = length(get(ret_struct_info, "members", []))
                 else
@@ -178,7 +178,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     if has_unsizable && byte_size > 0
                         ret_type = _byte_blob_type(byte_size)
                     else
-                        ret_type = StructGen.get_struct_definition_string(s_name, structs[lookup_key])
+                        ret_type = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
                     end
                 end
             end
@@ -255,9 +255,9 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     is_packed_struct = StructGen.is_struct_packed(struct_info)
                     # Use the same type as arg_types for consistency
                     if is_packed_struct
-                        mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, struct_info)
+                        mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, struct_info, structs)
                     else
-                        mlir_t = StructGen.get_struct_definition_string(s_name, struct_info)
+                        mlir_t = StructGen.get_struct_definition_string(s_name, struct_info, structs)
                     end
                 end
             end

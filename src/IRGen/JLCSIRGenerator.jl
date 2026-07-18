@@ -429,7 +429,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     # forward-refs are legitimately bodyless.
     struct_defs = get(metadata, "struct_definitions", Dict())
     llvm_struct_of(name::AbstractString) = haskey(struct_defs, String(name)) ?
-        StructGen.get_llvm_equivalent_type_string(String(name), struct_defs[String(name)]) : "!llvm.ptr"
+        StructGen.get_llvm_equivalent_type_string(String(name), struct_defs[String(name)], struct_defs) : "!llvm.ptr"
     ir = join(map(split(ir, '\n')) do ln
         (startswith(lstrip(ln), "!Struct_") && occursin(" = ", ln)) && return ln
         replace(ln, r"!llvm\.struct<\"([A-Za-z0-9_]+)\">" =>

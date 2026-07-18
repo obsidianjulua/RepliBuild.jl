@@ -81,11 +81,90 @@ function get_julia_offsets(info::Any, is_packed::Bool=false)
 end
 
 """
-    get_struct_definition_string(name::String, info::Any) -> String
+    _lookup_struct(all_structs, s_name) -> struct info or nothing
 
-Get the MLIR type definition string for a struct.
+Find a struct's metadata by member-type name, trying the raw name and the
+`__enum__`-prefixed key (enum definitions are stored under the prefixed key).
 """
-function get_struct_definition_string(name::String, info::Any)
+function _lookup_struct(all_structs, s_name::AbstractString)
+    all_structs === nothing && return nothing
+    haskey(all_structs, s_name) && return all_structs[s_name]
+    haskey(all_structs, "__enum__$(s_name)") && return all_structs["__enum__$(s_name)"]
+    return nothing
+end
+
+"""
+    _resolve_struct_member_type(mlir_t, all_structs, seen; alias_form) -> String
+
+Resolve a struct-typed member reference for use inside another struct's body.
+
+A member whose target struct is emitted as `!jlcs.c_struct` (packed) must NOT
+be referenced via its alias or bare name from inside an `!llvm.struct` body:
+the JLCS→LLVM type converter treats `!llvm.struct` as already legal and never
+rewrites types nested in its body, so the JLCS type survives lowering and
+SIGSEGVs `translateModuleToLLVMIR` (PtrLikeTypeInterface::getMemorySpace on a
+non-LLVM type). Such members are inlined as their byte-identical LLVM packed
+literal instead.
+
+Non-packed targets keep the caller's convention: `alias_form=true` yields the
+`!Struct_<name>` alias (definition-string context), `alias_form=false` leaves
+the bare named ref untouched (equivalent/aligned-string context).
+"""
+function _resolve_struct_member_type(mlir_t::String, all_structs, seen::Set{String}; alias_form::Bool)
+    m = match(r"^!llvm\.struct<\"(.+)\">$", mlir_t)
+    m === nothing && return mlir_t
+    s_name = String(m.captures[1])
+    info = _lookup_struct(all_structs, s_name)
+    if info !== nothing && is_struct_packed(info)
+        return _packed_literal_string(s_name, info, all_structs, seen)
+    end
+    if alias_form
+        safe_name = replace(s_name, r"[^a-zA-Z0-9_]" => "_")
+        return "!Struct_$(safe_name)"
+    end
+    return mlir_t
+end
+
+"""
+    _packed_literal_string(name, info, all_structs, seen) -> String
+
+LLVM literal packed struct for a `!jlcs.c_struct`-classified struct — the
+byte-identical, pure-LLVM spelling used when the struct is nested by value
+inside another struct's body. Members that are themselves packed structs are
+inlined recursively.
+"""
+function _packed_literal_string(name::String, info::Any, all_structs, seen::Set{String})
+    if name in seen
+        # A by-value cycle only comes from malformed metadata; degrade to a
+        # correctly-sized byte blob rather than recursing forever.
+        sz = try
+            s = get(info, "byte_size", "0")
+            startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
+        catch
+            0
+        end
+        return "!llvm.array<$(max(sz, 1)) x i8>"
+    end
+    push!(seen, name)
+    member_types = String[]
+    for m in get(info, "members", [])
+        t = get(m, "c_type", "void*")
+        push!(member_types,
+              _resolve_struct_member_type(map_cpp_type(t), all_structs, seen; alias_form=false))
+    end
+    delete!(seen, name)
+    return "!llvm.struct<packed ($(join(member_types, ", ")))>"
+end
+
+"""
+    get_struct_definition_string(name::String, info::Any, all_structs=nothing) -> String
+
+Get the MLIR type definition string for a struct. Pass the full
+`struct_definitions` map as `all_structs` so struct-typed members that are
+themselves packed (`!jlcs.c_struct`) can be inlined as LLVM literals instead
+of alias references (see `_resolve_struct_member_type`).
+"""
+function get_struct_definition_string(name::String, info::Any, all_structs=nothing)
     dwarf_size_str = get(info, "byte_size", "0")
     dwarf_size = try
         startswith(dwarf_size_str, "0x") ? parse(Int, dwarf_size_str[3:end], base=16) : parse(Int, dwarf_size_str)
@@ -121,14 +200,12 @@ function get_struct_definition_string(name::String, info::Any)
         end
         sum_size += m_size
         
-        mlir_t = map_cpp_type(t)
-        # Convert bare named struct references (!llvm.struct<"Name">) to aliases (!Struct_Name)
-        # because bare named struct refs are only valid in recursive struct contexts in MLIR
-        if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
-            s_name = mlir_t[15:end-2]
-            safe_name = replace(s_name, r"[^a-zA-Z0-9_]" => "_")
-            mlir_t = "!Struct_$(safe_name)"
-        end
+        # Struct-typed members become !Struct_<name> aliases (bare named refs are
+        # only valid in recursive struct contexts in MLIR), except packed targets,
+        # which are inlined as LLVM literals — their alias is a !jlcs.c_struct and
+        # must not be nested inside an !llvm.struct body.
+        mlir_t = _resolve_struct_member_type(map_cpp_type(t), all_structs,
+                                             Set{String}([name]); alias_form=true)
         push!(member_types, mlir_t)
     end
     
@@ -175,16 +252,18 @@ function get_struct_type_string(name::String, info::Any)
 end
 
 """
-    get_llvm_equivalent_type_string(name::String, info::Any) -> String
+    get_llvm_equivalent_type_string(name::String, info::Any, all_structs=nothing) -> String
 
 Get the LLVM literal struct type string corresponding to the struct.
-Used for constructing values of packed structs.
+Used for constructing values of packed structs. Pass `all_structs` so packed
+struct-typed members get inlined as LLVM literals (their bare named ref would
+otherwise be an opaque/JLCS type — see `_resolve_struct_member_type`).
 """
-function get_llvm_equivalent_type_string(name::String, info::Any)
+function get_llvm_equivalent_type_string(name::String, info::Any, all_structs=nothing)
     members = get(info, "members", [])
     member_types = String[]
     sum_size = 0
-    
+
     for m in members
         t = get(m, "c_type", "void*")
         m_size = try
@@ -194,7 +273,8 @@ function get_llvm_equivalent_type_string(name::String, info::Any)
             0
         end
         sum_size += m_size
-        mlir_t = map_cpp_type(t)
+        mlir_t = _resolve_struct_member_type(map_cpp_type(t), all_structs,
+                                             Set{String}([name]); alias_form=false)
         push!(member_types, mlir_t)
     end
     
@@ -221,12 +301,13 @@ function get_llvm_equivalent_type_string(name::String, info::Any)
 end
 
 """
-    get_llvm_aligned_type_string(name::String, info::Any) -> String
+    get_llvm_aligned_type_string(name::String, info::Any, all_structs=nothing) -> String
 
 Get an LLVM literal struct type string WITHOUT packed attribute.
 Used for thunk return types so Julia can read the struct with natural alignment.
+Pass `all_structs` so packed struct-typed members get inlined as LLVM literals.
 """
-function get_llvm_aligned_type_string(name::String, info::Any)
+function get_llvm_aligned_type_string(name::String, info::Any, all_structs=nothing)
     members = get(info, "members", [])
     member_types = String[]
     sum_size = 0
@@ -240,7 +321,8 @@ function get_llvm_aligned_type_string(name::String, info::Any)
             0
         end
         sum_size += m_size
-        mlir_t = map_cpp_type(t)
+        mlir_t = _resolve_struct_member_type(map_cpp_type(t), all_structs,
+                                             Set{String}([name]); alias_form=false)
         push!(member_types, mlir_t)
     end
     
@@ -357,7 +439,7 @@ function generate_struct_definitions(structs::Any)
     defined_aliases = Set{String}()
     for name in sorted_nodes
         info = node_map[name]
-        def_str = get_struct_definition_string(name, info)
+        def_str = get_struct_definition_string(name, info, node_map)
         if !endswith(def_str, "opaque>")
             safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
             push!(defined_aliases, "!Struct_$(safe_name)")
@@ -366,7 +448,7 @@ function generate_struct_definitions(structs::Any)
 
     for name in sorted_nodes
         info = node_map[name]
-        def_str = get_struct_definition_string(name, info)
+        def_str = get_struct_definition_string(name, info, node_map)
         
         if endswith(def_str, "opaque>")
             continue

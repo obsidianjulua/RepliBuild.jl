@@ -2,7 +2,60 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## Unreleased
+## v3.0.1 (2026-07-18)
+
+The inheritance-ABI + Tier-2-correctness release. The full C++ inheritance arc, shipped whole: non-virtual multiple inheritance, the vcall producer (overrides dispatch through the vtable), and virtual inheritance (dynamic vbase upcasts) — closing ledger entries open since 2026-05-29. On top of it, the Tier-2 ABI-correctness pass driven by pugixml: SysV small-struct register classification for `try_call`/`ffe_call` (≤16-byte struct returns/args no longer force sret), nested-packed-struct type inlining (the pugixml load segfault), and a JIT pre-flight type guard so an incompatible type degrades to "Tier 2 disabled" instead of killing the host process. Around those: the Tier-2 virtual-method thunk-routing fix (virtual instance methods were never callable through `invoke()`), the discover(force) user-intent TOML preservation fix (root cause of six weeks of silent stl_test red), the nested-type member-attribution parser fix (found wrapping box2d), the ingest honesty pass from the first outside-user report (issue #4), and the tinyxml2-era Tier-2 dispatch fixes. First C++ Hub package exercising all of it: box2d 2.4.1.
+
+Verification state at release: CI 404, producers 26/26, invariants 10/10, templates 87/87, struct-ABI traces 15/15, mi_test 38/38, vi_test 33/33, stl_test 28/28, stress+c_test green, Hub tinyxml2 11/11, pugixml 13/13, box2d 15/15.
+
+Sections below are ordered latest-first within the release.
+
+
+### pugixml load segfault: nested packed structs, JIT pre-flight guard, SysV small-struct ABI (2026-07-18)
+
+The pugixml wrapper SIGSEGV'd at module load inside `translateModuleToLLVMIR`
+(`PtrLikeTypeInterface::getMemorySpace`) — uncatchable, killing the whole
+process (docs/pugixml-jit-init-segfault.md). Root-caused via library-free
+fixture (two hand-written structs + one thunk) and fixed three ways:
+
+- **Nested packed structs (the crash).** A padding-free struct nested by value
+  in a padded struct put its `!jlcs.c_struct` alias inside an `!llvm.struct`
+  body; the type converter never rewrites inside already-legal LLVM struct
+  bodies, so the foreign type survived lowering into LLVM-IR translation.
+  `StructGen` now inlines the byte-identical `!llvm.struct<packed (…)>` literal
+  instead of the alias (recursively) whenever a member's target is
+  c_struct-classified. Not any of the suspected categories (function pointers,
+  std:: members, system structs) — pure struct nesting, and tinyxml2 only
+  dodged it by never nesting a padding-free struct by value.
+- **JIT pre-flight guard.** `jlcs_create_jit_with_libs` walks all op, block-arg,
+  and `llvm.func` signature types and refuses (null → catchable Julia error →
+  "Tier 2 disabled" degradation) any module with a type failing
+  `mlir::LLVM::isCompatibleType` — naming the type and op. A bad type can
+  never again take down the host process at `ExecutionEngine::create`.
+- **SysV small-struct return/arg ABI (found by the now-runnable pugixml
+  verifier).** `try_call`/`ffe_call` lowering forced sret for EVERY packed
+  struct return, but ≤16-byte aligned structs are register-class on x86-64 —
+  native `pugi::xml_node::first_child()` returns `{void*}` in RAX, so the sret
+  call shifted `this` into the sret slot and the thunk returned stack garbage
+  (JIT code addresses as node handles). New `classifySysVStruct` classifies
+  MEMORY (>16B or genuinely misaligned fields → sret/pointer, unchanged) vs
+  register class (coerce one scalar per eightbyte: INTEGER→i64, SSE→f64,
+  clang-style), applied to returns AND by-value args in both lowerings. This
+  also fixes latent per-element splitting mismatches (`{int,int}` shares RAX;
+  `{float,float}` shares XMM0) that LLVM's naive struct lowering gets wrong.
+
+Pinned by `test/test_struct_abi.jl` (devtests §12): nesting fixture lowers+JITs,
+guard throws catchably on the exact pre-fix crash IR, and the ABI matrix runs
+against a REAL clang++-compiled callee (self-JIT'd callees share the JIT's own
+convention and can't catch a mismatch). Verification: pugixml loads, its Hub
+test passes 13/13 (first wrapper exercising 8-byte by-value handle returns);
+regression sweep green — tinyxml2 11/11, templates 87/87, invariants 10/10,
+producers 26/26, mi 38/38, vi 33/33, CI runtests full pass.
+
+Still unbuilt (ledger): MEMORY-class by-value args keep their pre-existing
+conventions (packed → raw pointer, non-packed → direct struct), neither of
+which matches native stack-copy passing for trivially-copyable >16B structs —
+no wrapper exercises that path yet.
 
 ### Ingest honesty pass (issue #4)
 
@@ -14,12 +67,6 @@ First outside-user report ([#4](https://github.com/obsidianjulua/RepliBuild.jl/i
 - Fixed a latent v3.0.1 miss: `runtests.jl` hardcoded `VERSION == v"3.0.0"`; it now compares against `pkgversion(RepliBuild)` so version bumps can't desync it.
 
 Remaining from #4 (not this pass): the C++ generator can still emit invalid identifiers for reference-carrying template type names (`&` survives `_sanitize_cpp_type_name`), and generation has no parse-gate — a generated wrapper should never fail `include` without a generation-time warning. Tracked for a generator-hardening pass.
-
-## v3.0.1 (2026-07-17)
-
-The inheritance-ABI release. One day's arc, shipped whole: non-virtual multiple inheritance, the vcall producer (overrides dispatch through the vtable), and virtual inheritance (dynamic vbase upcasts) — closing ledger entries open since 2026-05-29. Around it: the Tier-2 virtual-method thunk-routing fix (virtual instance methods were never callable through `invoke()`), the discover(force) user-intent TOML preservation fix (root cause of six weeks of silent stl_test red), the nested-type member-attribution parser fix (found wrapping box2d), and the tinyxml2-era Tier-2 dispatch fixes. First C++ Hub package exercising all of it: box2d 2.4.1.
-
-Verification state at release: CI 404, producers 26/26, invariants 10/10, templates 87/87, mi_test 38/38, vi_test 33/33, stl_test 28/28, stress+c_test green, box2d 15/15.
 
 
 ### Nested-type member attribution fix (found wrapping box2d for the Hub)

@@ -71,6 +71,41 @@ static void attachHostDataLayout(mlir::ModuleOp module) {
                     mlir::StringAttr::get(module.getContext(), dl.getStringRepresentation()));
 }
 
+// Pre-flight: refuse modules containing types that cannot be translated to
+// LLVM IR. translateModuleToLLVMIR does not diagnose foreign types — a stray
+// non-LLVM type (e.g. a !jlcs.* type that survived lowering inside an
+// !llvm.struct body) sends it through a garbage interface pointer, an
+// uncatchable SIGSEGV that kills the whole host process (observed live:
+// PtrLikeTypeInterface::getMemorySpace during pugixml wrapper load,
+// 2026-07-18). Failing here instead returns null to Julia, which raises a
+// catchable error and degrades to Tier-2-disabled.
+static bool moduleTypesAreLLVMCompatible(mlir::ModuleOp modOp) {
+    bool ok = true;
+    modOp->walk([&](mlir::Operation *op) {
+        if (op == modOp.getOperation())
+            return;
+        auto check = [&](mlir::Type t) {
+            if (!t)
+                return;
+            if (!mlir::LLVM::isCompatibleType(t)) {
+                op->emitError("type is not translatable to LLVM IR: ") << t;
+                ok = false;
+            }
+        };
+        for (mlir::Type t : op->getOperandTypes())
+            check(t);
+        for (mlir::Type t : op->getResultTypes())
+            check(t);
+        for (mlir::Region &r : op->getRegions())
+            for (mlir::Block &b : r)
+                for (mlir::Type t : b.getArgumentTypes())
+                    check(t);
+        if (auto fn = llvm::dyn_cast<mlir::LLVM::LLVMFuncOp>(op))
+            check(fn.getFunctionType());
+    });
+    return ok;
+}
+
 extern "C" {
 
     // --- Dialect & Context Management ---
@@ -238,6 +273,15 @@ extern "C" {
 
         // Unwrap directly to ModuleOp
         mlir::ModuleOp modOp = unwrap(module);
+
+        // 1b. Pre-flight type check — see moduleTypesAreLLVMCompatible. A bad
+        // type must fail here (null return, catchable in Julia), not SIGSEGV
+        // inside translateModuleToLLVMIR.
+        if (!moduleTypesAreLLVMCompatible(modOp)) {
+            llvm::errs() << "jlcs_create_jit_with_libs: module contains types that "
+                            "cannot be translated to LLVM IR; refusing to JIT\n";
+            return {nullptr};
+        }
 
         // 2. Attach Data Layout
         attachHostDataLayout(modOp);
