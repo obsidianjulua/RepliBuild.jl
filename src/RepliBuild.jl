@@ -387,11 +387,26 @@ end
     ingest(library_path; headers=String[], extra_link_libs=String[],
                          name="", project_dir=".", language=:c, build=false, wrap=false) -> String
 
-Scaffold a `replibuild.toml` for **ingest mode**: wrap a pre-built `.so` (built by
-upstream's own build system) without recompiling. RepliBuild only runs DWARF metadata
-extraction + wrapper generation; the library must be built with `-g`.
+**EXPERIMENTAL.** Scaffold a `replibuild.toml` for **ingest mode**: wrap a pre-built
+`.so` (built by upstream's own build system) without recompiling. RepliBuild only runs
+DWARF metadata extraction + wrapper generation; the library must be built with `-g`.
 
-This is the entry point for libraries with elaborate build systems (autotools, CMake
+Support matrix — the maintained, flagship path is the **source-build pipeline**
+(`discover`/`build`/`wrap`), where RepliBuild's own version-matched compilation
+guarantees the DWARF it consumes:
+
+- `language = :c` — works for plain-C ABIs (Tier-3 `ccall` only, no bitcode/thunks),
+  but is best-effort: upstream's compiler and debug-info settings are outside
+  RepliBuild's control, so extraction quality varies. Prefer the source build when
+  the sources compile under one flag set.
+- `language = :cpp` — **NOT supported.** The C++ ABI surface (classes, methods,
+  templates, virtual dispatch) requires the MLIR dialect to marshal calls and
+  generate thunks, which only the source-build pipeline produces. Ingesting a C++
+  library can at best expose its `extern "C"` surface; the generated wrapper for
+  the C++ API proper is unusable. If the library ships a C API variant, ingest
+  that with `language = :c` instead.
+
+This is the fallback for C libraries with elaborate build systems (autotools, CMake
 with code generators, configure scripts) that RepliBuild's source-build pipeline can't
 reproduce.
 
@@ -425,6 +440,24 @@ function ingest(library_path::String;
                 build::Bool=false,
                 wrap::Bool=false,
                 register::Bool=true)
+
+    language in (:c, :cpp) ||
+        error("ingest: language must be :c or :cpp, got :$(language)")
+
+    # Ingest is experimental and C-focused; the C++ ABI surface needs the
+    # source-build pipeline (dialect marshalling + thunks). Warn loudly here
+    # AND in ingest_library (hand-written [ingest] TOMLs bypass this function).
+    if language == :cpp
+        @warn """
+        ingest(language=:cpp): the C++ API surface of an ingested binary is NOT supported.
+        Classes, methods, templates, and virtual dispatch need the MLIR dialect thunks that
+        only the source-build pipeline (discover/build/wrap) generates. At best the library's
+        extern \"C\" surface will be usable; wrappers for the C++ API proper will not be.
+        If the library ships a C API variant, ingest that with language=:c instead — or build
+        from source. (See the Ingest section of the docs; tracking: issue #4.)"""
+    else
+        @info "ingest is experimental: best-effort C wrapping of a binary RepliBuild didn't build (Tier-3 ccall only). The maintained path is the source-build pipeline (discover/build/wrap)."
+    end
 
     isfile(library_path) || error("Library not found: $library_path")
     library_abs = abspath(library_path)

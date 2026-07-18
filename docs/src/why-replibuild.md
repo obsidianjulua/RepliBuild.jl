@@ -110,7 +110,7 @@ It fits well when:
 - Your library uses packed structs, bitfields, unions, varargs, or complex calling conventions
 - Your library evolves and you want regenerated wrappers to track ABI changes without manual intervention
 
-**Pre-compiled binaries work too.** If you have a `.so`/`.dylib` compiled with debug info (`-g`), RepliBuild can wrap it directly through `ingest()` — point `replibuild.toml` at the binary, supply the matching headers, and run `wrap()`. No source code needed, as long as DWARF metadata is present in the binary. Ingested libraries dispatch through Tier 3 (`ccall`) only, since LTO and Tier 2 thunks both require source-stage bitcode.
+**Pre-compiled C binaries can be ingested (experimental).** If you have a **C** `.so`/`.dylib` compiled with debug info (`-g`), `ingest()` can wrap it without recompiling — DWARF extraction and wrapper generation still run, dispatching through Tier 3 (`ccall`) only, since LTO and Tier 2 thunks both require source-stage compilation. This is a best-effort fallback, not the flagship path: the binary was produced by a compiler and debug-info configuration RepliBuild doesn't control, so extraction quality varies. **C++ API surfaces are not supported in ingest mode** — classes, methods, templates, and virtual dispatch need the MLIR dialect thunks only the source build generates. For C++ libraries, build from source with RepliBuild (or ingest their C API variant).
 
 ## How the pieces fit together
 

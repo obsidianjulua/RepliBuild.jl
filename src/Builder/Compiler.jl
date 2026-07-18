@@ -1499,6 +1499,20 @@ function ingest_library(config::RepliBuildConfig)::String
     ingest === nothing && error("ingest_library called without [ingest] section in config")
 
     println("RepliBuild | $(config.project.name) [ingest]")
+
+    # Guard both entry paths: RepliBuild.ingest() warns at scaffold time, but a
+    # hand-written [ingest] TOML lands here directly. The C++ API surface of an
+    # ingested binary is not supported — dialect marshalling/thunks only exist
+    # in the source-build pipeline (issue #4: the generated C++ wrappers were
+    # unusable and the user had no signal why).
+    if config.wrap.language == :cpp
+        @warn """
+        Ingest mode with language=\"cpp\": the C++ API surface (classes, methods, templates,
+        virtual dispatch) of an ingested binary is NOT supported — at best the extern \"C\"
+        surface will be usable. Build from source (discover/build/wrap) for C++ libraries,
+        or ingest a C API variant with language=\"c\"."""
+    end
+
     start_time = time()
 
     src_lib = isabspath(ingest.library) ? ingest.library : abspath(joinpath(config.project.root, ingest.library))

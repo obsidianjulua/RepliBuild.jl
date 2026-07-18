@@ -2,6 +2,19 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### Ingest honesty pass (issue #4)
+
+First outside-user report ([#4](https://github.com/obsidianjulua/RepliBuild.jl/issues/4)): ingesting a CMake-built C++ `.so` produced wrappers that don't parse, with no signal that C++ ingest was never supported. Ingest is a fallback, not a flagship feature — the docs oversold it and nothing guarded it. Now:
+
+- **Guards at both entry paths**: `ingest(language=:cpp)` and `ingest_library` on a `language="cpp"` config warn loudly that the C++ API surface of an ingested binary is unsupported (dialect thunks require the source build; at best the `extern "C"` surface works) and point at the C-variant / source-build alternatives. `ingest` also validates `language ∈ (:c, :cpp)` and notes experimental status for `:c`.
+- **README/docs de-oversell**: the pitch no longer claims "point it at a `.so`" as co-equal with the source build; the ingest section is labeled **EXPERIMENTAL, C only** with the real constraints (Tier-3 only, best-effort extraction, C++ unsupported); `why-replibuild.md`/`architecture.md` aligned; CLAUDE.md carries the status doctrine so docs edits don't re-inflate the claims.
+- **New README section: "Using the generated wrapper"** — the `include` + `using .Module` pattern the issue explicitly asked for (docs described building wrappers but not using them).
+- Fixed a latent v3.0.1 miss: `runtests.jl` hardcoded `VERSION == v"3.0.0"`; it now compares against `pkgversion(RepliBuild)` so version bumps can't desync it.
+
+Remaining from #4 (not this pass): the C++ generator can still emit invalid identifiers for reference-carrying template type names (`&` survives `_sanitize_cpp_type_name`), and generation has no parse-gate — a generated wrapper should never fail `include` without a generation-time warning. Tracked for a generator-hardening pass.
+
 ## v3.0.1 (2026-07-17)
 
 The inheritance-ABI release. One day's arc, shipped whole: non-virtual multiple inheritance, the vcall producer (overrides dispatch through the vtable), and virtual inheritance (dynamic vbase upcasts) — closing ledger entries open since 2026-05-29. Around it: the Tier-2 virtual-method thunk-routing fix (virtual instance methods were never callable through `invoke()`), the discover(force) user-intent TOML preservation fix (root cause of six weeks of silent stl_test red), the nested-type member-attribution parser fix (found wrapping box2d), and the tinyxml2-era Tier-2 dispatch fixes. First C++ Hub package exercising all of it: box2d 2.4.1.

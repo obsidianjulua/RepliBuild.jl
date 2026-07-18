@@ -4,9 +4,9 @@
 [![Julia 1.10+](https://img.shields.io/badge/julia-1.10+-9558B2?logo=julia)](https://julialang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-RepliBuild is an ABI-aware C/C++ bridge for Julia. It compiles (or ingests) a library, reads the **DWARF debug metadata out of the compiled binary**, and generates a Julia module in which every function, struct, enum, union, and bitfield is callable with the calling convention and memory layout the compiler *actually emitted* — no hand-written bindings, no header annotations, no generated files to maintain.
+RepliBuild is an ABI-aware C/C++ bridge for Julia. It **compiles a library from source**, reads the **DWARF debug metadata out of the compiled binary**, and generates a Julia module in which every function, struct, enum, union, and bitfield is callable with the calling convention and memory layout the compiler *actually emitted* — no hand-written bindings, no header annotations, no generated files to maintain.
 
-The learning curve is one sentence: **do the opposite of every other wrapper tool.** You never write or edit bindings. You drive RepliBuild like a CLI tool with its own toolkit — point it at source or a `.so`, describe the library's quirks in a TOML, and load the result.
+The learning curve is one sentence: **do the opposite of every other wrapper tool.** You drive RepliBuild like a CLI tool with its own toolkit — point it at source, describe the library's quirks in a TOML, and load the result. (There is also an experimental `ingest` mode for prebuilt C binaries — see below — but the source build is the tool: RepliBuild's own compilation is what guarantees the DWARF it consumes.)
 
 ## The inversion
 
@@ -47,19 +47,32 @@ RepliBuild.wrap(toml)                           # DWARF → Julia module
 RepliBuild.discover("path/to/project", build=true, wrap=true)   # or all at once
 ```
 
-**Prebuilt library** (autotools, CMake soup, vendor `.so`) — skip the build, ingest the artifact:
+**Using the generated wrapper** — `wrap()` writes a self-contained module next to the `.so` (they travel as a unit); load it like any Julia file:
+
+```julia
+include("path/to/project/julia/MyProject.jl")   # module name = CamelCased project name
+using .MyProject
+
+MyProject.some_function(...)                     # everything exported; docs on each symbol
+```
+
+Hub packages skip this — `RepliBuild.use("name")` returns the loaded module directly.
+
+**Prebuilt library — `ingest` mode (EXPERIMENTAL, C only).** For **C** libraries whose build systems the source pipeline can't reproduce (autotools, CMake with code generators), you can skip the build and wrap an existing binary:
 
 ```julia
 RepliBuild.ingest("/path/to/libfoo.so", headers=["/path/to/include"],
-                  build=true, wrap=true)        # requires the .so built with -g
+                  language=:c, build=true, wrap=true)   # .so must be built with -g
 ```
+
+Know what you're getting: ingest is a fallback, not the flagship. It dispatches through plain `ccall` only (no bitcode, no MLIR thunks), and extraction is best-effort — the binary was built by a compiler and debug-info configuration RepliBuild doesn't control. **C++ API surfaces are not supported in ingest mode**: classes, methods, templates, and virtual dispatch need the MLIR dialect marshalling that only the source-build pipeline generates. For a C++ library, build it from source with RepliBuild, or ingest its C API variant if it ships one.
 
 The toolkit verbs: `discover`, `build`, `wrap`, `use`, `ingest`, `register`, `search`, `scaffold_package`, `check_environment`, `clean`, `info`.
 
 ## How it works
 
 ```
-C/C++ source + [dependencies]                    or: existing .so (ingest mode)
+C/C++ source + [dependencies]        or: existing C .so (ingest mode, experimental)
        │
 DependencyResolver ── clone pinned git deps, filter excludes
        │

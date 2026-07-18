@@ -11,7 +11,9 @@ using RepliBuild
 @testset "RepliBuild.jl" begin
 
     @testset "Package loads" begin
-        @test RepliBuild.VERSION == v"3.0.0"
+        # VERSION const must track Project.toml — the pre-3.0.0 three-way
+        # version drift started exactly here (hardcoded literals go stale)
+        @test RepliBuild.VERSION == pkgversion(RepliBuild)
         @test isdefined(RepliBuild, :discover)
         @test isdefined(RepliBuild, :build)
         @test isdefined(RepliBuild, :wrap)
