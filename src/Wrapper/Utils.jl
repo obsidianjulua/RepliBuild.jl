@@ -294,3 +294,75 @@ function _cstring_policy_lines(free_sym::String; indent::String="    ")::String
            "$(indent)return s"
 end
 
+
+# =============================================================================
+# DUPLICATE-METHOD DEDUPLICATION (package-precompilation safety)
+# -----------------------------------------------------------------------------
+# Distinct C++ symbols can collapse to the SAME Julia function name and
+# argument signature: destructor D1/D2 pairs both become `X_destroy_X(this)`,
+# and overloads whose parameter types all map to `::Any` (e.g. a const char*
+# and a std::string_view overload) become textually identical methods. At
+# script include() that is a benign last-definition-wins warning — but under
+# PACKAGE PRECOMPILATION method overwriting is a hard ERROR, so a generated
+# wrapper vendored into a package would refuse to precompile (found live
+# vendoring the box2d wrapper, 2026-07-19).
+#
+# The fix preserves include()'s observable semantics exactly: keep the LAST
+# definition of each colliding signature and drop the earlier ones (with
+# their docstrings, since a chunk is docstring + definition).
+# =============================================================================
+
+const _FUNC_SIG_RE = r"^function\s+([A-Za-z_][A-Za-z0-9_!.]*)\((.*?)\)(?:::\S.*)?\s*$"m
+
+"""
+    _method_sig_keys(chunk) -> Vector{String}
+
+Dispatch-significant signature keys (`name(argtype,argtype,…)`) for every
+top-level `function` definition in an emitted code chunk. Keyword arguments
+and default values are ignored — they don't participate in dispatch.
+"""
+function _method_sig_keys(chunk::AbstractString)
+    keys = String[]
+    for m in eachmatch(_FUNC_SIG_RE, chunk)
+        name = m.captures[1]
+        args = first(split(m.captures[2], ';'; limit=2))   # drop kwargs
+        argtypes = String[]
+        if !isempty(strip(args))
+            for a in split(args, ',')
+                a = strip(first(split(a, '='; limit=2)))   # drop default value
+                isempty(a) && continue
+                push!(argtypes, occursin("::", a) ?
+                      strip(last(split(a, "::"; limit=2))) : "Any")
+            end
+        end
+        push!(keys, string(name, "(", join(argtypes, ","), ")"))
+    end
+    return keys
+end
+
+"""
+    _dedup_method_chunks(chunks) -> Vector{String}
+
+Drop emitted chunks whose every `function` signature is redefined by a LATER
+chunk, so the generated module contains exactly one definition per dispatch
+signature. Required for the wrapper to precompile inside a package.
+"""
+function _dedup_method_chunks(chunks::Vector{String})
+    seen = Set{String}()
+    keep = trues(length(chunks))
+    ndropped = 0
+    for i in length(chunks):-1:1
+        ks = _method_sig_keys(chunks[i])
+        isempty(ks) && continue
+        if all(k -> k in seen, ks)
+            keep[i] = false
+            ndropped += 1
+        else
+            union!(seen, ks)
+        end
+    end
+    if ndropped > 0
+        @info "wrap: dropped $ndropped duplicate method definition(s) — identical Julia name+signature from distinct C++ symbols; last definition kept (precompilation-safe)"
+    end
+    return chunks[keep]
+end

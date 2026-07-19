@@ -2,6 +2,55 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### Wrappers are now application-grade: per-library JIT engines, precompilable wrappers (2026-07-19)
+
+Dogfood pass: built a real Julia package (`RepliBuild-Hub/examples/BoxWorld`, a
+physics sandbox on the box2d wrapper — Project.toml, ergonomic layer, 15-test
+suite) instead of another verify script. Two production blockers surfaced
+immediately; both fixed engine-side:
+
+- **Per-library JIT engines.** `GLOBAL_JIT` was a single-engine singleton: the
+  first wrapper's `__init__` won, every later `initialize_global_jit` silently
+  no-opped, and the second library's ENTIRE Tier 2 died with a misleading
+  "Symbol not found / complex C++ type" error (found live composing box2d +
+  pugixml). JITManager now keeps one `LibraryEngine` per binary behind the
+  existing lock-free symbol cache (thunk names are mangled-derived, unique
+  across libraries; lookups search all engines). One library's init failure
+  disables Tier 2 for that library only, and the missing-symbol error now
+  names every engine searched plus any per-library init failures. Legacy
+  single-engine fields mirror the first engine for compatibility. Pinned by
+  `test/test_multilib_jit.jl` (devtests §13, 14/14) on the mi_test + vi_test
+  wrappers.
+- **Generated wrappers precompile inside packages.** Distinct C++ symbols can
+  collapse to the same Julia name+signature (destructor D1/D2 pairs; overloads
+  whose params all map to `::Any`). At script include() that's a last-wins
+  warning — under package precompilation method overwriting is a hard ERROR,
+  so no C++ wrapper could be vendored into a precompiled package. Both
+  generators now deduplicate emitted definitions by dispatch signature,
+  keeping the LAST (include()-identical semantics): box2d dropped 16
+  duplicates, tinyxml2 59, pugixml 108 — all suites still green (13/13,
+  11/11, 15/15). Also moved the C++ generator's stdout-unbuffering from
+  module top level into `__init__` (top-level side effects run at PRECOMPILE
+  time and never re-run at load in a precompiled package; the C generator
+  already did this correctly).
+
+New documentation page **"Using a Wrapper in Your Package"** (docs/src/
+using-wrappers.md, wired into the manual) covering the vendoring layout, the
+two-layer discipline (ABI layer vs ergonomic layer), precompilation rules,
+the JIT lifecycle from a consumer's perspective, multi-library composition,
+by-value handle conventions, finalizer-warming discipline, and the C++-isms
+an app layer must encapsulate (ctor-only classes, header-inline defaults,
+abstract-shape vtables) — all demonstrated live by BoxWorld.
+
+Recorded findings for the ledger (not fixed here): ctor thunks are not
+emitted for arg-taking constructors of factory-less classes (`b2World` needs
+the raw-ccall pattern); header-inline ctors/accessors are unreachable by any
+binding (defaults must be replicated at DWARF offsets — inherent, now
+documented); planting compiler vtables for abstract-shape instances is
+expert-level and could grow a generated helper.
+
 ## v3.0.1 (2026-07-18)
 
 The inheritance-ABI + Tier-2-correctness release. The full C++ inheritance arc, shipped whole: non-virtual multiple inheritance, the vcall producer (overrides dispatch through the vtable), and virtual inheritance (dynamic vbase upcasts) — closing ledger entries open since 2026-05-29. On top of it, the Tier-2 ABI-correctness pass driven by pugixml: SysV small-struct register classification for `try_call`/`ffe_call` (≤16-byte struct returns/args no longer force sret), nested-packed-struct type inlining (the pugixml load segfault), and a JIT pre-flight type guard so an incompatible type degrades to "Tier 2 disabled" instead of killing the host process. Around those: the Tier-2 virtual-method thunk-routing fix (virtual instance methods were never callable through `invoke()`), the discover(force) user-intent TOML preservation fix (root cause of six weeks of silent stl_test red), the nested-type member-attribution parser fix (found wrapping box2d), the ingest honesty pass from the first outside-user report (issue #4), and the tinyxml2-era Tier-2 dispatch fixes. First C++ Hub package exercising all of it: box2d 2.4.1.

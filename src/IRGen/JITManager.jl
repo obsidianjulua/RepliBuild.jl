@@ -12,8 +12,27 @@ import JSON
 
 export get_jit_thunk, ensure_jit_initialized, JITContext, invoke, CxxException
 
+"""
+    LibraryEngine
+
+One MLIR execution engine per wrapped binary. Multiple generated wrappers can
+coexist in a session — each `initialize_global_jit(binary_path)` call creates
+(or reuses) the engine for ITS binary instead of no-opping after the first
+library wins. Thunk symbol names are derived from mangled C++ names, so they
+are unique across libraries and can share one global symbol cache.
+"""
+mutable struct LibraryEngine
+    binary_path::String
+    mlir_ctx::Ptr{Cvoid}
+    jit_engine::Union{Ptr{Cvoid}, Nothing}
+    vtable_info::Union{VtableInfo, Nothing}
+    init_error::Union{Exception, Nothing}
+end
+
 # Global singleton to manage JIT state
 mutable struct JITContext
+    # Legacy single-engine fields — mirror the FIRST successfully initialized
+    # engine for backward compatibility. New code reads `engines`.
     mlir_ctx::Ptr{Cvoid}
     jit_engine::Union{Ptr{Cvoid}, Nothing}
     @atomic compiled_symbols::Dict{String, Ptr{Cvoid}}
@@ -21,9 +40,11 @@ mutable struct JITContext
     @atomic initialized::Bool
     init_error::Union{Exception, Nothing}
     lock::ReentrantLock
+    engines::Vector{LibraryEngine}
 
     function JITContext()
-        new(C_NULL, nothing, Dict{String, Ptr{Cvoid}}(), nothing, false, nothing, ReentrantLock())
+        new(C_NULL, nothing, Dict{String, Ptr{Cvoid}}(), nothing, false, nothing,
+            ReentrantLock(), LibraryEngine[])
     end
 end
 
@@ -92,12 +113,25 @@ Slow path: JIT engine lookup + copy-on-write Dict swap under lock.
             return ptr
         end
 
-        ptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, func_name)
-        if ptr == C_NULL
-            ptr = MLIRNative.lookup(GLOBAL_JIT.jit_engine, "_" * func_name)
+        # Search every library engine — thunk names are mangled-derived and
+        # unique across libraries, so the first hit is the right one.
+        for eng in GLOBAL_JIT.engines
+            eng.jit_engine === nothing && continue
+            ptr = MLIRNative.lookup(eng.jit_engine, func_name)
+            if ptr == C_NULL
+                ptr = MLIRNative.lookup(eng.jit_engine, "_" * func_name)
+            end
+            ptr != C_NULL && break
         end
         if ptr == C_NULL
-            throw(ErrorException("JIT Error: Symbol not found: $func_name. This may indicate a missing library or complex C++ type that failed to compile through the MLIR backend."))
+            searched = isempty(GLOBAL_JIT.engines) ? "none" :
+                join((basename(e.binary_path) *
+                      (e.init_error === nothing ? "" : " [init failed: $(sprint(showerror, e.init_error))]")
+                      for e in GLOBAL_JIT.engines), ", ")
+            throw(ErrorException("JIT Error: Symbol not found: $func_name. " *
+                "Engines searched: $searched. This may indicate the owning library's " *
+                "JIT failed to initialize, a missing library, or a complex C++ type " *
+                "that failed to compile through the MLIR backend."))
         end
 
         # Copy-on-write: create a new Dict so readers on the fast path
@@ -111,7 +145,11 @@ end
 
 @noinline function _jit_not_initialized_error()
     msg = "JIT not initialized."
-    if GLOBAL_JIT.init_error !== nothing
+    failed = [e for e in GLOBAL_JIT.engines if e.init_error !== nothing]
+    if !isempty(failed)
+        msg *= " Root cause: " * join(
+            ("$(basename(e.binary_path)): $(sprint(showerror, e.init_error))" for e in failed), "; ")
+    elseif GLOBAL_JIT.init_error !== nothing
         msg *= " Root cause: $(GLOBAL_JIT.init_error)"
     end
     error(msg)
@@ -231,24 +269,31 @@ end
 """
     initialize_global_jit(binary_path::String)
 
-Initialize the global JIT context with vtable info from the binary.
-This is called once when the wrapper module is loaded.
+Initialize a JIT engine for `binary_path`. Called once per wrapped library,
+from the generated module's `__init__`. Each library gets its own engine
+(`LibraryEngine`); repeated calls for the same binary are no-ops, and one
+library's initialization failure never disables another's Tier 2.
 """
 function initialize_global_jit(binary_path::String)
+    rp = try realpath(binary_path) catch; abspath(binary_path) end
     lock(GLOBAL_JIT.lock) do
-        if @atomic GLOBAL_JIT.initialized
-            return
+        # Engine (or recorded failure) already exists for this binary → no-op.
+        for eng in GLOBAL_JIT.engines
+            eng.binary_path == rp && return
         end
+
+        eng = LibraryEngine(rp, C_NULL, nothing, nothing, nothing)
+        push!(GLOBAL_JIT.engines, eng)
 
         try
             # 1. Create MLIR Context
-            GLOBAL_JIT.mlir_ctx = create_context()
+            eng.mlir_ctx = create_context()
 
             # 2. Parse VTable Info
-            GLOBAL_JIT.vtable_info = DWARFParser.parse_vtables(binary_path)
+            eng.vtable_info = DWARFParser.parse_vtables(rp)
 
             # Load metadata
-            metadata_path = joinpath(dirname(binary_path), "compilation_metadata.json")
+            metadata_path = joinpath(dirname(rp), "compilation_metadata.json")
             metadata = if isfile(metadata_path)
                 JSON.parsefile(metadata_path)
             else
@@ -256,8 +301,8 @@ function initialize_global_jit(binary_path::String)
             end
 
             # Register dispatch_ symbols for virtual methods
-            lib_handle = Libdl.dlopen(binary_path)
-            for (class_name, class_info) in GLOBAL_JIT.vtable_info.classes
+            lib_handle = Libdl.dlopen(rp)
+            for (class_name, class_info) in eng.vtable_info.classes
                 for method in class_info.virtual_methods
                     dispatch_name = "dispatch_$(replace(method.mangled_name, "::" => "_", "(" => "_", ")" => "_"))"
                     ptr = something(Libdl.dlsym(lib_handle, method.mangled_name, throw_error=false), C_NULL)
@@ -303,7 +348,7 @@ function initialize_global_jit(binary_path::String)
             # 3. Load thunk manifest (dead-thunk elimination)
             # If the wrapper wrote a manifest of which function thunks it actually
             # needs, only generate those. Otherwise generate everything (backward compat).
-            manifest_path = joinpath(dirname(binary_path), "thunk_manifest.json")
+            manifest_path = joinpath(dirname(rp), "thunk_manifest.json")
             needed_symbols = if isfile(manifest_path)
                 try
                     manifest = JSON.parsefile(manifest_path)
@@ -316,11 +361,11 @@ function initialize_global_jit(binary_path::String)
             end
 
             # 4. Generate MLIR Module for vtables + needed function thunks
-            ir_source = JLCSIRGenerator.generate_jlcs_ir(GLOBAL_JIT.vtable_info, metadata;
+            ir_source = JLCSIRGenerator.generate_jlcs_ir(eng.vtable_info, metadata;
                                                           needed_symbols=needed_symbols)
 
             # 4. Parse and Lower Module
-            mod = parse_module(GLOBAL_JIT.mlir_ctx, ir_source)
+            mod = parse_module(eng.mlir_ctx, ir_source)
 
             # Lower JLCS -> LLVM
             if !lower_to_llvm(mod)
@@ -329,14 +374,23 @@ function initialize_global_jit(binary_path::String)
 
             # 5. Create JIT Engine with the C++ library and libJLCS for EH symbol resolution
             jlcs_lib_path = MLIRNative.libJLCS
-            GLOBAL_JIT.jit_engine = create_jit(mod, opt_level=1, shared_libs=[binary_path, jlcs_lib_path])
+            eng.jit_engine = create_jit(mod, opt_level=1, shared_libs=[rp, jlcs_lib_path])
 
+            # Mirror the first successful engine into the legacy single-engine
+            # fields for backward compatibility.
+            if GLOBAL_JIT.jit_engine === nothing
+                GLOBAL_JIT.mlir_ctx = eng.mlir_ctx
+                GLOBAL_JIT.jit_engine = eng.jit_engine
+                GLOBAL_JIT.vtable_info = eng.vtable_info
+            end
             @atomic GLOBAL_JIT.initialized = true
-            # println("JIT Initialized for $binary_path")
         catch e
-            GLOBAL_JIT.init_error = e isa Exception ? e : ErrorException(string(e))
-            @error "Failed to initialize JIT" exception=e
-            @warn "JIT initialization failed. Functions using JIT dispatch (Tier 2) will not work, but ccall-based wrappers (Tier 1) will still function."
+            eng.init_error = e isa Exception ? e : ErrorException(string(e))
+            if GLOBAL_JIT.init_error === nothing
+                GLOBAL_JIT.init_error = eng.init_error
+            end
+            @error "Failed to initialize JIT for $(basename(rp))" exception=e
+            @warn "JIT initialization failed for $(basename(rp)). Tier 2 dispatch for this library will not work, but its ccall-based wrappers still function. Other libraries' engines are unaffected."
         end
     end
 end
@@ -366,15 +420,23 @@ Destroy the JIT context and resources.
 """
 function cleanup()
     lock(GLOBAL_JIT.lock) do
-        if GLOBAL_JIT.jit_engine !== nothing
-            destroy_jit(GLOBAL_JIT.jit_engine)
-            GLOBAL_JIT.jit_engine = nothing
+        for eng in GLOBAL_JIT.engines
+            if eng.jit_engine !== nothing
+                destroy_jit(eng.jit_engine)
+                eng.jit_engine = nothing
+            end
+            if eng.mlir_ctx != C_NULL
+                destroy_context(eng.mlir_ctx)
+                eng.mlir_ctx = C_NULL
+            end
         end
+        empty!(GLOBAL_JIT.engines)
 
-        if GLOBAL_JIT.mlir_ctx != C_NULL
-            destroy_context(GLOBAL_JIT.mlir_ctx)
-            GLOBAL_JIT.mlir_ctx = C_NULL
-        end
+        # Legacy mirrors reference the first engine's handles, destroyed above.
+        GLOBAL_JIT.jit_engine = nothing
+        GLOBAL_JIT.mlir_ctx = C_NULL
+        GLOBAL_JIT.vtable_info = nothing
+        GLOBAL_JIT.init_error = nothing
 
         @atomic GLOBAL_JIT.initialized = false
         @atomic GLOBAL_JIT.compiled_symbols = Dict{String, Ptr{Cvoid}}()

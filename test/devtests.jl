@@ -240,3 +240,11 @@ include(joinpath(TEST_DIR, "test_jlcs_producers.jl"))
 # one scalar per eightbyte — verified against a real clang++-compiled callee.
 
 include(joinpath(TEST_DIR, "test_struct_abi.jl"))
+
+# ── 13. Multi-library JIT: one engine per wrapped binary ─────────────────────
+# Two generated wrappers in one session. The old single-engine singleton let
+# the first library win and silently killed the second's Tier 2 (found live
+# composing box2d + pugixml). Runs AFTER mi_test/vi_test so their wrappers
+# exist; loads both and dispatches Tier-2 thunks through each engine.
+
+include(joinpath(TEST_DIR, "test_multilib_jit.jl"))

@@ -2420,6 +2420,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         end
     end
 
+    # Same precompilation-safety dedup as the C++ generator: exactly one
+    # definition per dispatch signature (last one wins, as include() would).
+    func_chunks = _dedup_method_chunks(func_chunks)
+
     return join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), join(union_accessor_chunks), export_statement, join(func_chunks), footer])
 end
 

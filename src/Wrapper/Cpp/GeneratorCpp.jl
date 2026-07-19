@@ -47,11 +47,6 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Flush C stdout so printf output appears immediately in the Julia REPL
     @inline _flush_cstdout() = ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
 
-    # Unbuffer C stdout on module load so printf output is visible in the REPL
-    let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
-        ccall(:setvbuf, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Csize_t), c_stdout, C_NULL, 2, 0)
-    end
-
     """
 
     # Track if JIT is required (for virtual methods or complex ABI)
@@ -3081,6 +3076,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     end # module $module_name
     """
 
+    # Unbuffer C stdout so printf output is visible in the REPL. Must run in
+    # __init__, not the module body: top-level side effects execute during
+    # PRECOMPILATION and never re-run at load time in a precompiled package.
+    _setvbuf_snippet = """
+            # Unbuffer C stdout so printf output appears immediately in the REPL
+            let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
+                ccall(:setvbuf, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Csize_t), c_stdout, C_NULL, 2, 0)
+            end"""
+
     # Generate initialization block
     init_block = if config.compile.aot_thunks
         """
@@ -3091,21 +3095,23 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         function __init__()
             # Load main library explicitly to ensure symbols are available
             LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-            
+
             # Load AOT thunks library if it was successfully generated
             if !isempty(THUNKS_LIBRARY_PATH) && isfile(THUNKS_LIBRARY_PATH)
                 THUNKS_HANDLE[] = Libdl.dlopen(THUNKS_LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
             elseif $requires_jit
                 @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
             end
+        $_setvbuf_snippet
         end
         """
     else
         if requires_jit
             """
             function __init__()
-                # Initialize the global JIT context with this library's vtables
+                # Initialize this library's JIT engine (one engine per binary)
                 RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
+            $_setvbuf_snippet
             end
             """
         else
@@ -3116,10 +3122,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             function __init__()
                 # Load library explicitly to ensure symbols are available
                 LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+            $_setvbuf_snippet
             end
             """
         end
     end
+
+    # Colliding definitions (dtor D1/D2 pairs, overloads collapsing to the
+    # same ::Any signature) must not survive into the module — method
+    # overwriting is a hard error under package precompilation. Keep the
+    # last definition per dispatch signature (include()-identical semantics).
+    func_chunks = _dedup_method_chunks(func_chunks)
 
     wrapper_content = join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), union_accessor_defs, export_statement, join(func_chunks), footer])
     return (wrapper_content, needed_function_thunks)

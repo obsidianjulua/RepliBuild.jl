@@ -58,6 +58,8 @@ MyProject.some_function(...)                     # everything exported; docs on 
 
 Hub packages skip this — `RepliBuild.use("name")` returns the loaded module directly.
 
+Building a real package on top of a wrapper (vendoring layout, precompilation, JIT lifecycle, C++ object lifetimes, multiple wrapped libraries) is covered in the manual page **"Using a Wrapper in Your Package"**, with a working reference app at `RepliBuild-Hub/examples/BoxWorld`.
+
 **Prebuilt library — `ingest` mode (EXPERIMENTAL, C only).** For **C** libraries whose build systems the source pipeline can't reproduce (autotools, CMake with code generators), you can skip the build and wrap an existing binary:
 
 ```julia

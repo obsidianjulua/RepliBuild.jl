@@ -20,6 +20,7 @@ makedocs(;
         "Architecture" => "architecture.md",
         "User Guide" => [
             "Workflow" => "guide.md",
+            "Using a Wrapper in Your Package" => "using-wrappers.md",
             "Configuration" => "config.md",
         ],
         "Release Notes" => "release-notes.md",
