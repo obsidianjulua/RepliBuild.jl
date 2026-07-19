@@ -91,11 +91,11 @@ Every function gets automatically routed to the right calling mechanism based on
 
 | Tier | Mechanism | When | Cost |
 |------|-----------|------|------|
-| **1** | `Base.llvmcall` with LTO bitcode | POD args, scalar/pointer return, bitcode available | Zero — C/C++ inlines into Julia's JIT, cross-language optimization |
-| **2** | MLIR thunks (`libJLCS.so`) | Packed structs, unions, large struct return, virtual dispatch | ~40 ns per call; first call ~500 µs for JIT (or zero with AOT) |
-| **3** | `ccall` | Fallback when bitcode unavailable | ~40 ns per call |
+| **1** | `Base.llvmcall` with LTO bitcode | POD args, scalar/pointer return, `enable_lto = true` | Zero — C/C++ inlines into Julia's JIT, cross-language optimization. Currently scale-limited (see the User Guide); production configs dispatch these through Tier 3 |
+| **2** | MLIR thunks (`libJLCS.so`) | Packed structs, unions, large struct return, C++ classes, virtual dispatch, exceptions | ~40 ns per call; thunks compile at module load (or build time with AOT) |
+| **3** | `ccall` | POD-safe signatures; the unconditional fallback | ~40 ns per call |
 
-Tier selection is fully automatic. RepliBuild analyses each function's DWARF metadata, checks if `ccall` is safe (alignment, size, type complexity), and emits the appropriate wrapper. If the struct layout doesn't match what Julia would expect, it goes to MLIR. If LTO bitcode is available and the types are simple, it goes straight through `llvmcall` with zero FFI overhead. The user never annotates anything; the decision falls out of the metadata.
+Tier selection is fully automatic. RepliBuild analyses each function's DWARF metadata, checks if `ccall` is safe (alignment, size, type complexity), and emits the appropriate wrapper. If the struct layout doesn't match what Julia would expect, it goes to MLIR. The user never annotates anything; the decision falls out of the metadata.
 
 ## When to use RepliBuild
 
@@ -105,9 +105,9 @@ It fits well when:
 
 - You have C/C++ **source code** or a debug-compiled binary with DWARF metadata
 - You want ABI-correct bindings without writing struct definitions by hand
-- You need C++ virtual method dispatch from Julia, including dynamic dispatch through base-class pointers
-- You want LTO — C/C++ code inlined into Julia loops, optimization across the FFI boundary
+- You need C++ classes from Julia: methods, constructors/destructors with GC-managed lifetimes, multiple and virtual inheritance with correct upcasts, and virtual dispatch that honors overrides through base-class pointers
 - Your library uses packed structs, bitfields, unions, varargs, or complex calling conventions
+- You want C++ exceptions surfaced as catchable Julia exceptions rather than process aborts
 - Your library evolves and you want regenerated wrappers to track ABI changes without manual intervention
 
 **Pre-compiled C binaries can be ingested (experimental).** If you have a **C** `.so`/`.dylib` compiled with debug info (`-g`), `ingest()` can wrap it without recompiling — DWARF extraction and wrapper generation still run, dispatching through Tier 3 (`ccall`) only, since LTO and Tier 2 thunks both require source-stage compilation. This is a best-effort fallback, not the flagship path: the binary was produced by a compiler and debug-info configuration RepliBuild doesn't control, so extraction quality varies. **C++ API surfaces are not supported in ingest mode** — classes, methods, templates, and virtual dispatch need the MLIR dialect thunks only the source build generates. For C++ libraries, build from source with RepliBuild (or ingest their C API variant).
@@ -120,8 +120,8 @@ RepliBuild compiles your C/C++ source with Clang (`-g` for debug info), then run
 source → Compile → Link → DWARF extract → Tier dispatch → Wrap
 ```
 
-1. **Compile** — Each source file is compiled to LLVM IR (`.ll`) via `clang` or `clang++`. Per-file `mtime` cache, parallel dispatch, IR sanitization to match Julia's internal LLVM version. Template instantiations and macro shims are auto-generated so they appear in DWARF.
-2. **Link** — Sanitized per-file IR is merged via `llvm-link`, optimized by `llvm-opt`, and linked into a shared library. Optional artifacts include the LTO bitcode (`_lto.bc` for Tier 1 `llvmcall`) and pre-compiled MLIR thunks (`_thunks.so` for Tier 2 AOT).
+1. **Compile** — Each source file is compiled to LLVM IR (`.ll`) via `clang` or `clang++`. Per-file cache keyed on `mtime` plus a compile fingerprint, parallel dispatch, IR sanitization to match Julia's internal LLVM version. Template instantiations and macro shims are auto-generated so they appear in DWARF.
+2. **Link** — Sanitized per-file IR is merged, optimized, and linked into a shared library. For C projects this runs in-process on Julia's own libLLVM (version-matched by construction); C++ uses the external LLVM pipeline. Optional artifacts include the LTO bitcode (`_lto.bc` for Tier 1 `llvmcall`) and pre-compiled MLIR thunks (`_thunks.so` for Tier 2 AOT).
 3. **DWARF extract** — `llvm-dwarfdump` output is parsed into structured Julia types: `ClassInfo` (with virtual methods and inheritance), `VtableInfo`, `MemberInfo` (with byte offsets), and others. `nm` provides the mangled symbol table for linking identity.
 4. **Tier dispatch** — `is_ccall_safe()` and `is_c_lto_safe()` inspect each function's DWARF signature to decide which tier handles it. Packed-struct detection, STL container detection, union detection, and return-by-value size analysis all feed this decision.
 5. **Wrap** — The wrapper generator emits a complete Julia module: struct definitions with correct field order and padding, `@enum` declarations, function wrappers dispatched to the appropriate tier, bitfield accessors, `mutable struct` idiomatic wrappers with GC finalizers for factory/destructor pairs, and `cglobal` accessors for globals.
@@ -159,4 +159,4 @@ Each declaration causes RepliBuild to emit code that materializes the construct 
 
 RepliBuild does not parse C/C++ source. It compiles it and reads what the compiler produced. The compiler has already resolved every `#ifdef`, every alignment rule, every platform-specific calling convention, and recorded it in DWARF as concrete byte offsets, type sizes, and vtable slots. RepliBuild reads those values and emits Julia code that matches them exactly. When DWARF is incomplete, configuration directs additional symbols into the compiled artifact so they appear in subsequent DWARF passes. When the ABI is too complex for `ccall`, a small MLIR dialect bridges the gap through verified IR lowering.
 
-The result is a binding generator whose correctness depends on the same toolchain that produced the binary, rather than on the wrapper author's knowledge of platform alignment rules. You need source code or a debug-compiled binary, and an LLVM 21+ toolchain. With source you get the full pipeline (LTO, AOT thunks, incremental builds). With a debug binary you get DWARF-correct wrappers and MLIR thunks. Either way, the entire class of layout-mismatch FFI bugs disappears.
+The result is a binding generator whose correctness depends on the same toolchain that produced the binary, rather than on the wrapper author's knowledge of platform alignment rules. For C projects, no external toolchain is required at all — compilation uses the bundled Clang JLL and Julia's own libLLVM. For C++ projects and Tier 2 thunks, a system LLVM/MLIR 21+ install is required. With source you get the full pipeline (tier dispatch, AOT thunks, incremental builds). With a debug-built C binary you get DWARF-correct `ccall` wrappers via ingest. Either way, the entire class of layout-mismatch FFI bugs disappears.

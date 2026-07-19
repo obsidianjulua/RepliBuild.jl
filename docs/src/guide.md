@@ -8,31 +8,28 @@ The standard workflow involves three steps: discovery, building, and wrapping.
 
 ### 1. Discovery
 
-The `discover` function scans your directory for C++ files and generates a `replibuild.toml` configuration file.
+The `discover` function scans your directory for C/C++ files and generates a `replibuild.toml` configuration file.
 
 ```julia
-RepliBuild.discover()
-```
-
-You can also specify a directory:
-
-```julia
+RepliBuild.discover()               # current directory
 RepliBuild.discover("path/to/project")
 ```
 
+Re-running discovery with `force=true` regenerates the config but **preserves hand-curated keys** that cannot be derived from source: `[types].templates`/`template_headers` and `[wrap].varargs`/`macros`/`shim_headers`/`cstring_owned`. A `preserved: …` line in the output reports what carried over.
+
 ### 2. Building
 
-Once configured, the `build` function compiles your C++ code into a shared library.
+Once configured, the `build` function compiles your code into a shared library.
 
 ```julia
 RepliBuild.build()
 ```
 
 This step performs:
-- Compilation of C++ to LLVM IR (`.c` files use `clang`, `.cpp` files use `clang++`).
-- Linking and optimization.
+- Compilation to LLVM IR (`.c` files use the bundled JLL `clang`; `.cpp` files use system `clang++`).
+- Linking and optimization — for C projects this runs in-process on Julia's own libLLVM (version-matched by construction); C++ uses the external LLVM pipeline.
 - Generation of the shared library.
-- Extraction of metadata for wrapping.
+- Extraction of DWARF metadata for wrapping.
 
 ### 3. Wrapping
 
@@ -42,7 +39,12 @@ Finally, generate the Julia wrapper module.
 RepliBuild.wrap()
 ```
 
-This will create a Julia file in the `julia/` directory that you can `include` and `use`.
+This creates a Julia module in the `julia/` directory. Load it with the standard pattern:
+
+```julia
+include("julia/MyProject.jl")
+using .MyProject
+```
 
 ## Automated Workflow
 
@@ -53,92 +55,80 @@ You can chain these steps together using the flags in `discover`:
 RepliBuild.discover(build=true, wrap=true)
 ```
 
-## Package Registry
+## Package Registry and the Hub
 
-RepliBuild includes a global package registry (`~/.replibuild/registry/`) that caches build artifacts so repeated loads are instant.
+RepliBuild includes a local package registry (`~/.replibuild/registry/`) that caches build artifacts so repeated loads are instant, and a community registry — [RepliBuild-Hub](https://github.com/obsidianjulua/RepliBuild-Hub) — holding ready-made `replibuild.toml` configs for popular C/C++ libraries.
 
 ```julia
-# Register a project (discover() does this automatically)
+# Register a project locally (discover() does this automatically)
 RepliBuild.register("replibuild.toml")
 
-# Load a registered package — builds on first call, cached thereafter
-Lua = RepliBuild.use("lua_wrapper")
+# Load a registered package — builds on first call, cached thereafter.
+# On a local-registry miss, the config is fetched from the Hub.
+Lua = RepliBuild.use("lua")
+Lua.luaL_newstate()
 
-# List all registered packages with hash, source, and build status
+# Search the Hub by name, description, tags, or language
+RepliBuild.search()          # list all Hub packages
+RepliBuild.search("xml")
+
+# List / remove local registrations
 RepliBuild.list_registry()
-
-# Remove a package from the registry and clean cached builds
-RepliBuild.unregister("lua_wrapper")
+RepliBuild.unregister("lua")
 
 # Scaffold a distributable Julia package from a registered project
 RepliBuild.scaffold_package("LuaWrapper")
 ```
 
-The `use()` function handles the full lifecycle: resolve dependencies, build (or load from cache), wrap, and return a loaded Julia module. The `REPLIBUILD_HOME` environment variable can override the default registry location.
-
-## Configuration
-
-The `replibuild.toml` file controls the build process. You can edit this file to customize:
-- Compiler flags
-- Include directories
-- Output names
-- Optimization levels
-
-See the **[Configuration Reference](config.md)** for a complete list of available options and sections.
+The `use()` function handles the full lifecycle: resolve dependencies, build (or load from cache), wrap, and return a loaded Julia module. Cached builds live in `~/.replibuild/builds/<hash>/`; the cache key includes RepliBuild's own version and git revision, so upgrading RepliBuild rebuilds each package once with current codegen instead of serving stale wrappers. The `REPLIBUILD_HOME` environment variable overrides the registry location; `REPLIBUILD_HUB_URL` points `search()`/`use()` at a private Hub mirror.
 
 ## C vs C++ Projects
 
-RepliBuild uses `wrap.language` as an extensible dispatch key to select the generator, compiler toolchain, and build defaults for a project. `"c"` and `"cpp"` are the first two targets:
+RepliBuild uses `wrap.language` as an extensible dispatch key to select the generator, compiler toolchain, and build defaults for a project:
 
 ```toml
 [wrap]
-language = "c"   # pure-C project: uses clang, LTO on by default
-language = "cpp" # C++ project (default): uses clang++
+language = "c"   # pure-C project: JLL clang, in-process libLLVM link/opt
+language = "cpp" # C++ project: system clang++, external LLVM pipeline
 ```
 
-`discover()` sets this automatically from the scanned source file extensions. For C projects the `enable_lto` default is `true`, so you get zero-cost `llvmcall` dispatch out of the box without any extra configuration.
+`discover()` sets this automatically from the scanned source file extensions.
 
-Additional language targets are planned — the `language` field is the hook that will route each new language to its own generator and toolchain.
+The toolchain requirements differ by bucket: **C projects need no external LLVM at all**, while **C++ projects need a system LLVM/MLIR 21+ install** for the JLCS dialect and Tier 2 thunks. An experimental Rust generator (`language = "rust"`) exists for `extern "C"` + `#[repr(C)]` surfaces.
 
-## Git & External Dependencies
+For C projects `enable_lto` defaults to `true`, which emits the LTO bitcode artifact alongside the library — see [Zero-cost LTO dispatch](@ref "Zero-Cost LTO Dispatch (current status)") below for why production configurations currently disable it anyway.
 
-RepliBuild can automatically pull external C/C++ libraries from git, local paths, or your system into the compilation pipeline. Declare them in `replibuild.toml` under `[dependencies]`:
+## Ingest Mode (pre-built binaries) — experimental, C only
 
-```toml
-[dependencies.cjson]
-type    = "git"
-url     = "https://github.com/DaveGamble/cJSON"
-tag     = "v1.7.18"
-exclude = ["test", "fuzzing"]
-```
-
-Run the normal pipeline — the dependency is cloned, filtered, and compiled transparently:
+For **C** libraries with elaborate build systems (autotools, CMake with code generators) that RepliBuild's source pipeline cannot reproduce, build upstream yourself with `-g` and ingest the resulting binary. RepliBuild skips compilation — only DWARF extraction and wrapper generation run.
 
 ```julia
-RepliBuild.build("replibuild.toml")
-RepliBuild.wrap("replibuild.toml")
+# Scaffold an ingest config
+toml = RepliBuild.ingest("/path/to/libfoo.so",
+                         headers=["/path/to/include"],
+                         name="foo",
+                         language=:c)
+
+# Or run the whole pipeline immediately
+toml = RepliBuild.ingest("/path/to/libfoo.so",
+                         headers=["/path/to/include"],
+                         build=true, wrap=true)
 ```
 
-The first build clones into `.replibuild_cache/deps/cjson/`. Subsequent builds are cached and only re-clone when the `tag` changes.
-
-For a local library:
+The generated `replibuild.toml` carries an `[ingest]` section whose presence flips RepliBuild into ingest mode:
 
 ```toml
-[dependencies.mylib]
-type    = "local"
-path    = "../vendor/mylib"
-exclude = ["docs", "examples"]
+[ingest]
+library = "/path/to/libfoo.so"
+headers = ["/path/to/include"]
+extra_link_libs = ["m", "pthread"]   # optional — additional -l libs at load time
 ```
 
-For a system library (uses `pkg-config`):
+**Constraints to understand before reaching for ingest:**
 
-```toml
-[dependencies.zlib]
-type       = "system"
-pkg_config = "zlib"
-```
-
-See the **[Configuration Reference](config.md#dependencies)** for all fields.
+- Ingest is a **fallback, not the flagship path**. Extraction quality depends on upstream's compiler and debug-info settings, which RepliBuild does not control.
+- Ingested libraries dispatch through **Tier 3 (`ccall`) only** — no LTO bitcode, no Tier 2 thunks (both require the source build).
+- **C++ API surfaces are unsupported.** Classes, methods, templates, and virtual dispatch need the MLIR dialect thunks only the source build generates; at best the `extern "C"` surface of a C++ binary works. Both entry points warn accordingly.
 
 ## Idiomatic Julia Class Wrappers
 
@@ -175,21 +165,31 @@ end
 get_area(c::Circle) = get_area(c.handle)
 ```
 
-User code needs no manual memory management:
+For C++ classes without factory functions, the generator emits in-place constructor/destructor thunks and `Managed` handle types whose GC finalizers call the DWARF-resolved destructor directly. Classes with multiple inheritance additionally get `<Derived>_as_<Base>` upcast helpers (static offset adjustment), and virtual bases get dynamic `<Derived>_as_<VBase>` helpers that read the correct offset through the object's vtable at runtime — the same helper is correct for every dynamic type.
 
-```julia
-c = Circle(5.0)      # allocates C++ object, registers GC finalizer
-get_area(c)          # dispatch on Circle type, no .handle needed
-# c goes out of scope → GC calls delete_shape automatically
-```
+## `char*` Returns: Ownership Policy
+
+C APIs use `char*` returns three different ways, and the wrapper handles each explicitly:
+
+- **Default:** the wrapper returns `Union{String,Nothing}` — NULL becomes `nothing` (a NULL `char*` is a value in C APIs, not an exception), anything else is copied into a Julia `String`.
+- **Owned returns:** for functions returning malloc'd buffers, declare the deallocator in the TOML and the wrapper frees the C buffer after copying:
+
+  ```toml
+  [wrap.cstring_owned]
+  cJSON_Print = "cJSON_free"
+  ```
+
+- **Raw access:** every `Cstring`-returning function also gets an exported `<name>_ptr` variant that returns the pointer unchanged — no copy, no NULL check, never freed — for lifetime-sensitive callers.
+
+Ownership of a returned `char*` is not recoverable from DWARF, so it is declared per-library in the TOML rather than guessed from function names.
 
 ## Replacing Manual Shims
 
-When wrapping C/C++ libraries, developers often have to write manual C wrappers ("shims") for things that aren't native functions: templates, varargs, and preprocessor macros. RepliBuild handles all of these automatically via `replibuild.toml` without you having to write a single line of C/C++ code.
+When wrapping C/C++ libraries, developers often have to write manual C wrappers ("shims") for things that aren't native functions: templates, varargs, and preprocessor macros. RepliBuild handles all of these declaratively via `replibuild.toml`.
 
 ### Template Instantiation
 
-C++ templates are only emitted into DWARF if the compiler actually instantiates them. To force instantiation for types you want to wrap, add them to `[types]` in your config:
+C++ templates are only emitted into DWARF if the compiler actually instantiates them. To force instantiation for types you want to wrap, add them to `[types]`:
 
 ```toml
 [types]
@@ -197,11 +197,11 @@ templates        = ["std::vector<int>", "std::vector<double>", "std::pair<int,fl
 template_headers = ["<vector>", "<utility>"]
 ```
 
-RepliBuild auto-generates a stub `.cpp` file that explicitly instantiates each requested type, ensuring it appears in the DWARF metadata and is available in the generated Julia module.
+RepliBuild auto-generates a stub `.cpp` file that explicitly instantiates each requested type, ensuring it appears in the DWARF metadata and the generated Julia module.
 
-### Varargs Interception
+### Varargs
 
-Julia's `ccall` cannot call C `...` (varargs) functions natively without knowing the exact types at the call site. Instead of writing a manual C wrapper for each type combination, you can configure overloads in `[wrap.varargs]`:
+Vararg wrappers lower as **true variadic calls** (the `@ccall` semicolon form), so the callee is declared variadic in LLVM IR and the x86-64 SysV register-count protocol (the `AL` setup that gates the callee's `va_start`) is emitted correctly — including for float varargs. Declare typed overloads in `[wrap.varargs]`:
 
 ```toml
 [wrap.varargs]
@@ -211,11 +211,11 @@ printf = [
 ]
 ```
 
-RepliBuild generates concrete Julia bindings for `printf` for each of these signatures, completely bypassing the varargs limitation.
+RepliBuild generates a concrete Julia binding for each signature.
 
 ### Macro Expansion
 
-C/C++ preprocessor macros don't exist in compiled binaries or DWARF metadata. To expose them to Julia, you can configure `[wrap.macros]`:
+C/C++ preprocessor macros don't exist in compiled binaries or DWARF metadata. To expose them to Julia, configure `[wrap.macros]`:
 
 ```toml
 [wrap]
@@ -226,74 +226,57 @@ ret = "int"
 args = ["int", "float"]
 ```
 
-RepliBuild automatically generates a C/C++ source file that wraps `MY_MATH_MACRO` inside a typed function and compiles it alongside your project. The resulting wrapper gives you a native Julia function.
+RepliBuild generates a C/C++ source file that wraps `MY_MATH_MACRO` inside a typed function and compiles it alongside your project. Shims are emitted with default symbol visibility (they survive `-fvisibility=hidden` builds), and a header-collision guard verifies each shim `#include` resolves inside your project/dependency tree rather than to a system-installed copy of the same header at a different version.
 
-## Zero-Cost LTO Dispatch
+## Zero-Cost LTO Dispatch (current status)
 
-When `enable_lto = true` (or for C projects, where it is the default), the linker emits both the shared library **and** LLVM bitcode (`<name>_lto.bc`) in the `julia/` output directory.
-
-```toml
-[link]
-enable_lto = true
-optimization_level = "3"
-```
-
-The generated Julia wrapper loads the bitcode at module parse time:
-
-```julia
-const LTO_IR_PATH = joinpath(@__DIR__, "mylib_lto.bc")
-const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH) : UInt8[]
-```
-
-For every eligible function (primitive/pointer types, no `Cstring`, no virtual dispatch, no struct-by-value return), the wrapper emits a dual-dispatch body:
+When `enable_lto = true` (the default for C projects), the linker emits LLVM bitcode (`<name>_lto.bc`) alongside the shared library, and eligible functions get a dual-dispatch body:
 
 ```julia
 function vector_dot(a::Ptr{Cvoid}, b::Ptr{Cvoid}, n::Cint)::Cdouble
     if !isempty(LTO_IR)
-        return Base.llvmcall((LTO_IR, "_Z10vector_dotPdPdi"),
-                             Cdouble, Tuple{Ptr{Cvoid}, Ptr{Cvoid}, Cint},
-                             a, b, n)
+        return Base.llvmcall((LTO_IR, "vector_dot"),
+                             Cdouble, Tuple{Ptr{Cvoid}, Ptr{Cvoid}, Cint}, a, b, n)
     else
-        return ccall((:_Z10vector_dotPdPdi, LIBRARY_PATH),
-                     Cdouble, (Ptr{Cvoid}, Ptr{Cvoid}, Cint),
-                     a, b, n)
+        return ccall((:vector_dot, LIBRARY_PATH),
+                     Cdouble, (Ptr{Cvoid}, Ptr{Cvoid}, Cint), a, b, n)
     end
 end
 ```
 
-When the bitcode is present, Julia's LLVM JIT merges the C++ IR directly into the calling Julia function's IR, enabling full cross-language inlining and vectorization. The `ccall` fallback fires automatically if the `.bc` file is missing (e.g., an LTO-disabled build was deployed).
+When the bitcode is present, Julia's LLVM JIT merges the C IR directly into the calling Julia function, enabling full cross-language inlining and vectorization. On small modules this demonstrably matches pure-Julia performance.
 
-## AOT Thunks for Virtual Dispatch
+!!! warning "Why production configs currently set `enable_lto = false`"
+    `Base.llvmcall` embeds the **whole linked module** at each call site, which has two verified consequences at real-library scale:
 
-Virtual method dispatch normally requires the MLIR JIT to compile thunks at runtime. Setting `aot_thunks = true` pre-compiles those thunks at build time:
+    1. **JIT scale limit** — embedding a whole library's IR (hundreds of functions) per call can crash Julia's JIT. Small benchmark modules work; whole libraries do not reliably.
+    2. **Duplicated internal state** — file-local `static` definitions stay private to the embedded bitcode, so Tier-1 calls and Tier-3 calls can observe *different copies* of the library's internal state (observed live on a JSON parser's error-reporting path).
+
+    Until per-function bitcode slicing replaces whole-module embedding, treat LTO dispatch as an experimentation feature: excellent for small, stateless compute kernels; disabled (`[link] enable_lto = false`) for production wrappers. The `ccall` fallback in the generated code means an LTO-disabled rebuild changes nothing else about the wrapper's API.
+
+## AOT Thunks
+
+Tier 2 functions normally compile their MLIR thunks through the in-process JIT at module load. Setting `aot_thunks = true` pre-compiles them at build time instead:
 
 ```toml
 [compile]
 aot_thunks = true
 ```
 
-During `RepliBuild.build()`, the JLCS MLIR dialect generates and compiles all virtual dispatch thunks into a companion `<name>_thunks.so` placed alongside the main library. The generated wrapper emits purely static `ccall` bindings that load from `THUNKS_LIBRARY_PATH` — no `JITManager` startup, no lock, no on-demand compilation:
-
-```julia
-function Circle_area(this::Ptr{Cvoid})::Cdouble
-    return ccall((:thunk_Circle_area, THUNKS_LIBRARY_PATH), Cdouble, (Ptr{Cvoid},), this)
-end
-```
-
-This is the recommended setting for production deployments where predictable latency matters. Requires `src/mlir/build/libJLCS.so` to be built first (`cd src/mlir && ./build.sh`).
+During `RepliBuild.build()`, the JLCS dialect thunks are generated and compiled into a companion `<name>_thunks.so` placed alongside the main library. The generated wrapper emits static `ccall` bindings against `THUNKS_LIBRARY_PATH` — no JIT startup, no MLIR runtime dependency after build. Requires `src/mlir/build/libJLCS.so` (`cd src/mlir && ./build.sh`).
 
 ## Running Tests
 
-The CI suite (stress test + MLIR unit tests + registry tests):
+The CI suite (no C++ toolchain required):
 
 ```bash
 julia --project=. test/runtests.jl
 ```
 
-The full developer integration suite (Lua, SQLite, cJSON, Duktape, vtable, JIT edge cases):
+The full developer integration suite (requires the C++ bucket: system LLVM/MLIR + Clang + CMake):
 
 ```bash
 julia --project=. test/devtests.jl
 ```
 
-External sources are downloaded on first run via `setup.jl` scripts.
+Sections cover the real-world fixtures (Lua, SQLite, cJSON, Duktape, pugixml), the dialect suites (`test_mlir_templates.jl`, `test_jlcs_invariants.jl`, `test_jlcs_producers.jl`, `test_struct_abi.jl`), inheritance verification (`test/mi_test/`, `test/vi_test/`), and the ABI trace fixtures. External sources are downloaded on first run.

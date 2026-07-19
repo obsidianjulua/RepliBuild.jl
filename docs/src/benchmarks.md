@@ -2,6 +2,9 @@
 
 RepliBuild's MLIR `jlcs` dialect allows direct translation of Julia's contiguous memory regions into zero-copy C-struct representations that operate entirely inside JIT boundaries.
 
+!!! note
+    The LTO figures on this page are measured on small benchmark modules, where `Base.llvmcall` embedding works exactly as designed. Whole-library builds currently keep LTO disabled — see the [Tier 1 status note](guide.md#Zero-Cost-LTO-Dispatch-(current-status)) in the User Guide for the scale and static-state caveats.
+
 To demonstrate the lack of wrapper overhead, we export strict `Introspect.benchmark` data comparing Native Julia Matrix Multiplication (`A * B`) against a naive triple-loop C++ function executing through RepliBuild's zero-copy MLIR dialect.
 
 *(Note: The C++ function is a naive loop, meaning its performance will fall apart at massive sizes due to lacking BLAS vectorization, but it perfectly highlights the function call and wrapper boundary overhead at tiny sizes).*

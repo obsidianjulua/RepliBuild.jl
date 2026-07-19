@@ -28,7 +28,7 @@ The JLCS dialect expresses these operations as **typed, verifiable IR** that the
 
 ## JLCS dialect specification
 
-**JLCS** (Julia C-Struct) is a custom MLIR dialect that models C-ABI-compatible struct layout and foreign function execution. It is the core of [Tier 2 dispatch](@ref "Three-tier dispatch").
+**JLCS** (Julia C-Struct) is a custom MLIR dialect that models C-ABI-compatible struct layout and foreign function execution. It is the core of [Tier 2 dispatch](architecture.md#Three-tier-dispatch).
 
 **Source files:**
 
@@ -118,11 +118,11 @@ This layout is compatible with Julia's `Array` (column-major strides), NumPy's `
 
 ### Operations
 
-The JLCS dialect defines fourteen operations, all specified in `src/mlir/JLCSOps.td`. They fall into five groups: metadata, field access, function calls, array access, RAII, and ABI marshalling.
+The JLCS dialect defines fourteen operations, all specified in `src/mlir/JLCSOps.td`. They fall into six groups: metadata, field access, function calls, array access, RAII, and ABI marshalling.
 
 #### `jlcs.type_info` — register struct type and layout
 
-Declares a `CStruct` type, its C++ base class mapping, and its destructor symbol. Placed in the module's top-level region as a module-scope declaration.
+Declares a `CStruct` type, its C++ inheritance structure, and its destructor symbol. Placed in the module's top-level region as a module-scope declaration.
 
 ```mlir
 jlcs.type_info "Base",
@@ -134,10 +134,12 @@ jlcs.type_info "Base",
 |----------|------|-------------|
 | `typeName` | `StrAttr` | Julia-side type name |
 | `structType` | `TypeAttr` | Must be a `CStructType` |
-| `superType` | `StrAttr` | Base class name (empty string if none) |
-| `destructorName` | `StrAttr` | Mangled C++ destructor symbol (empty if none) |
+| `superType` | `StrAttr` | Primary base class name (empty string if none) |
+| `destructorName` | `StrAttr` | Mangled C++ destructor symbol, resolved from DWARF (empty if none) |
+| `baseNames` / `baseOffsets` | paired `ArrayAttr` | Static base table for multiple inheritance: each non-virtual base with its subobject byte offset |
+| `vbaseNames` / `vbaseVtableOffsets` | paired `ArrayAttr` | Virtual-base table: each virtual base with the (negative) byte position of its vbase-offset entry relative to the vtable address point |
 
-The `superType` field enables the MLIR lowering to handle C++ inheritance chains — base class members are flattened into the derived struct at their correct offsets. The `destructorName` is used by `jlcs.scope` to look up the destructor to invoke at scope exit.
+`superType` remains the primary base for single-inheritance consumers; the base table carries the full non-virtual inheritance layout. Virtual bases never appear in the static table — their subobject offset is vtable-resident and dynamic, which is why the vbase table records a *vtable-relative coordinate* instead of an offset. The op has a verifier that rejects arity mismatches between the paired arrays.
 
 #### `jlcs.get_field` — read a struct field
 
@@ -161,7 +163,7 @@ Lowers to a `getelementptr` + `store` sequence.
 
 #### `jlcs.vcall` — virtual method dispatch
 
-Call a C++ virtual method via vtable lookup. This is the operation that makes Tier 2 dispatch possible for polymorphic C++ classes.
+Call a C++ virtual method via vtable lookup, so overrides are honored: a base-class wrapper invoked on a derived object reaches the derived implementation. Production-emitted for virtual instance methods with scalar/pointer signatures (struct-shaped virtual signatures keep the direct-call path; destructors deliberately stay direct calls because `Managed` finalizers and RAII require exact-class semantics).
 
 ```mlir
 %result = jlcs.vcall @Base::foo(%obj) {vtable_offset = 0 : i64, slot = 0 : i64}
@@ -172,14 +174,19 @@ Call a C++ virtual method via vtable lookup. This is the operation that makes Ti
 |----------|------|-------------|
 | `class_name` | `SymbolRefAttr` | Class name for the vtable |
 | `args` | `Variadic<AnyType>` | Arguments (first is always the object pointer) |
-| `vtable_offset` | `I64Attr` | Byte offset of the vptr within the object (usually 0) |
+| `vtable_offset` | `I64Attr` | Byte offset (relative to the original pointer) at which to read the vptr |
 | `slot` | `I64Attr` | Index into the vtable function pointer array |
+| `this_offset` | `I64Attr` (default 0) | Byte adjustment applied to `args[0]` before the call — a method dispatched through a non-primary base receives a pointer to *its* base subobject, matching Itanium secondary-vtable entries |
+| `may_throw` | `UnitAttr` (optional) | When present, lowers as an indirect `llvm.invoke` + landing pad with the same exception model as `jlcs.try_call` |
 
 **Lowering semantics:**
 
-1. Load vtable pointer from object at `vtable_offset`
+1. Load vtable pointer from the object at `vtable_offset`
 2. Load function pointer from `vtable[slot]`
-3. Call the function pointer with the object pointer + remaining arguments
+3. Adjust `args[0]` by `this_offset` bytes
+4. Call (or invoke, under `may_throw`) the function pointer with the adjusted object pointer + remaining arguments
+
+Dispatch coordinates are **class-local**: DWARF's `DW_AT_vtable_elem_location` is the slot in the declaring class's own primary vtable, and Itanium re-homes overrides into the derived primary vtable, so a wrapper taking a class-relative `this` always uses the method's own slot with zero offsets. Multiple-inheritance correctness comes from the caller-side `as_<Base>` upcast plus the this-adjusting thunks the C++ compiler already planted in secondary vtables. The op has a verifier requiring the object-pointer operand.
 
 #### `jlcs.load_array_element` — strided array read
 
@@ -191,6 +198,8 @@ Read an element from a multi-dimensional strided array.
 
 **Index computation:** `linear_offset = sum(index_i * stride_i)` for each dimension. This supports both row-major and column-major layouts depending on the stride values.
 
+**Production status:** `ir_gen/ArrayViewGen.jl` emits zero-copy get/set thunk pairs through these ops for every fixed-size primitive array struct member (`double vals[4]`, `int32_t ids[16]`, …), materializing the `ArrayView` descriptor over the member in place. Rank 1 today; the descriptor already carries what bounds checking and higher ranks need.
+
 #### `jlcs.store_array_element` — strided array write
 
 Write an element to a multi-dimensional strided array.
@@ -201,7 +210,12 @@ jlcs.store_array_element %value, %view[%i, %j] : f64, !jlcs.array_view<f64, 2>
 
 #### `jlcs.ffe_call` — foreign function execution
 
-Call an external C/C++ function. The operation carries a `callee` symbol reference and a variadic argument list; the lowering pass (`JLCSPasses.cpp`) turns it into an `llvm.call` with platform-correct ABI coercion: `sret` for return-by-value structs above the platform's small-return threshold (16 bytes on x86_64 SysV), `byval` for large struct arguments, and packed struct passing for structs marked packed at the type level. Argument coercion is driven by the MLIR types — the IR generator does not encode ABI rules.
+Call an external C/C++ function. The operation carries a `callee` symbol reference and a variadic argument list; the lowering pass (`JLCSPasses.cpp`) turns it into an `llvm.call` with **full x86-64 SysV struct classification**:
+
+- **MEMORY class** (structs over 16 bytes, or with genuinely misaligned fields, e.g. attribute-packed): returned via a hidden `sret` pointer; packed by-value arguments pass by pointer.
+- **Register class** (≤16-byte structs with naturally aligned fields — including padding-free structs the generator marks packed): coerced to **one scalar per eightbyte** (INTEGER eightbytes → `i64` in GPRs, all-float eightbytes → `f64` in XMM), exactly as clang coerces. This matters because LLVM's naive per-element struct lowering diverges from SysV whenever two fields share an eightbyte — `{int, int}` travels packed in one register natively, and an 8-byte `{void*}` handle returns in RAX, not through sret.
+
+Argument coercion is driven entirely by the MLIR types — the IR generator does not encode ABI rules.
 
 ```mlir
 %result = jlcs.ffe_call %arg0, %arg1 { callee = @_Z3fooid } : (i32, f64) -> i32
@@ -217,7 +231,7 @@ Like `jlcs.ffe_call` but lowered to `llvm.invoke` with a landing pad. When a C++
 %result = jlcs.try_call %arg0 { callee = @_Z11might_throwi } : (i32) -> i32
 ```
 
-The decision between `jlcs.ffe_call` and `jlcs.try_call` is made per function during IR emission, based on the per-function `is_noexcept` flag plus the module-level `may_throw` setting (see [`FunctionGen.jl`](#stage-2-metadata-to-mlir-ir-text)). Functions explicitly marked `noexcept` in C++ skip the landing-pad path entirely, since they cannot throw.
+The decision between `jlcs.ffe_call` and `jlcs.try_call` is made per function during IR emission, based on the per-function `is_noexcept` flag plus the module-level `may_throw` setting (see [`FunctionGen.jl`](#stage-2-metadata-to-mlir-ir-text)). Functions explicitly marked `noexcept` in C++ skip the landing-pad path entirely, since they cannot throw. `try_call` shares the SysV struct classification described under `jlcs.ffe_call`.
 
 ## ABI marshalling operations
 
@@ -251,7 +265,9 @@ The actual byte-level field reconstruction happens during MLIR lowering. From th
 
 ## RAII operations
 
-These four operations exist for cases where Julia binds a C++ class whose objects must be constructed in place and destructed in reverse-construction order at scope exit. They're emitted by the wrapper generator when a class has explicit constructors and a destructor, and lowered into matched ctor/dtor symbol calls bracketing the scope body.
+These four operations exist for cases where Julia binds a C++ class whose objects must be constructed in place and destructed in reverse-construction order at scope exit.
+
+Their primary production consumer is the **scope-RAII producer** in `FunctionGen.jl`: under the Itanium C++ ABI, a by-value parameter of a class with a non-trivial destructor is passed as a *pointer to a caller-owned temporary*, not as raw bytes. Thunks for such parameters alloca a temporary, copy-construct it inside a `jlcs.scope` (via the DWARF-resolved copy constructor, or a byte copy when the copy is trivial), pass its address, and destruct it at scope exit — reverse order for multiple parameters. Destructor and copy-constructor symbols are resolved once per wrap from DWARF metadata; symbol presence is the gate, so trivially copyable classes keep the plain by-value path.
 
 #### `jlcs.ctor_call` — constructor invocation
 
@@ -287,6 +303,12 @@ jlcs.scope(%alloca : !llvm.ptr) dtors([@_ZN4BaseD1Ev]) {
 
 Terminator for `jlcs.scope` regions. Carries no values; serves only to close the region.
 
+## Operation verifiers
+
+`jlcs.scope`, `jlcs.marshal_arg`, `jlcs.vcall`, and `jlcs.type_info` carry verifiers (arity and element-kind checks on their paired attribute arrays; the object-pointer requirement on `vcall`), so malformed IR fails at `parse_module` with a real diagnostic instead of crashing inside lowering. The remaining ops are verifier-less with no known crash paths; verifiers grow as their producers mature.
+
+As a second line of defense, `create_jit` runs a **pre-flight type check** over the lowered module: any type that cannot be translated to LLVM IR (for example, a `!jlcs.*` type that survived lowering inside an `!llvm.struct` body) is rejected with a diagnostic naming the type and op, and the JIT creation fails as a catchable Julia error — never a native crash of the host process.
+
 ## IR generation pipeline
 
 The path from compiled C++ binary to executable MLIR thunks involves three stages.
@@ -306,8 +328,9 @@ The IR generator walks the structured DWARF metadata and emits MLIR source text 
 | Submodule | Input | Output |
 |-----------|-------|--------|
 | `ir_gen/TypeUtils.jl` | C++ type string | MLIR type string |
-| `ir_gen/StructGen.jl` | `ClassInfo` + members | `jlcs.type_info` op, plus aligned/packed type strings for use as call signatures |
-| `ir_gen/FunctionGen.jl` | function or virtual method metadata | external `func.func private @mangled` decl + public `func.func @mangled_thunk` wrapper |
+| `ir_gen/StructGen.jl` | struct metadata | Struct type aliases + registration IR, aligned/packed type strings for call signatures. Packed structs nested by value inside other struct bodies are inlined as byte-identical LLVM literals (a `!jlcs.c_struct` must never appear inside an `!llvm.struct` body — the type converter does not rewrite already-legal LLVM struct bodies) |
+| `ir_gen/FunctionGen.jl` | function or virtual method metadata | external `func.func private @mangled` decl + public `func.func @mangled_thunk` wrapper; `jlcs.vcall` substitution for virtual methods; scope-RAII temporaries for non-trivial by-value class parameters |
+| `ir_gen/ArrayViewGen.jl` | fixed-size array members | Zero-copy get/set thunks through the strided array ops |
 | `ir_gen/STLContainerGen.jl` | STL method metadata | Accessor thunks for `size()`, `data()`, etc. |
 
 **Type mapping** (`src/IRGen/ir_gen/TypeUtils.jl`):
@@ -403,7 +426,7 @@ The generated MLIR text is parsed and lowered through a pipeline driven entirely
 
 1. **Parsed** into an MLIR module via `MLIRNative.parse_module()`
 2. **Lowered** through the JLCS pass pipeline (defined in `JLCSPasses.cpp`): `jlcs` dialect → `func` dialect → `llvm` dialect → LLVM IR. Each `jlcs.*` op has a corresponding `ConversionPattern` that emits the LLVM-dialect equivalent. The patterns are responsible for ABI coercion: `jlcs.ffe_call` becomes an `llvm.call` with `sret`/`byval` argument coercion when needed; `jlcs.try_call` becomes an `llvm.invoke` with a landing pad; `jlcs.marshal_arg`/`marshal_ret` expand into field-by-field GEP/load/store sequences using the offsets carried in the op attributes; `jlcs.vcall` becomes a vtable load + slot index + indirect call.
-3. **JIT-compiled** to native machine code by `MLIRExecutionEngine`
+3. **Pre-flight checked and JIT-compiled**: `create_jit()` first walks every operation, block-argument, and function-signature type in the lowered module and refuses (as a catchable error) any module containing a type that cannot be translated to LLVM IR; the module is then compiled to native machine code by `MLIRExecutionEngine`
 4. **Symbol-resolved**: External `func.func private @mangled` declarations are resolved against the shared libraries passed to `create_jit()` — the user's compiled `.so` for C++ symbols, plus `libJLCS.so` for exception helpers (`jlcs_set_pending_exception`, `jlcs_has_pending_exception`, `jlcs_get_pending_exception`) and C++ runtime helpers (`__gxx_personality_v0`, `__cxa_begin_catch`, `__cxa_end_catch`).
 
 The `lower_to_llvm()` function in `MLIRNative` drives the full lowering pass pipeline. MLIR dependencies used:
@@ -427,6 +450,16 @@ The AOT path reuses `JLCSIRGenerator.generate_jlcs_ir()` verbatim — there is n
 **Module:** `src/IRGen/JITManager.jl`
 
 The JIT manager provides the runtime execution path for Tier 2 functions. It is a singleton (`GLOBAL_JIT`) that manages the MLIR context, JIT execution engine, and compiled symbol cache.
+
+### Initialization
+
+`initialize_global_jit(binary_path)` runs once, from the generated module's `__init__`:
+
+1. Parse vtable metadata from the binary's DWARF and load `compilation_metadata.json`
+2. Read `thunk_manifest.json` — the set of thunk symbols the wrapper actually dispatches to — and generate IR only for those (**dead-thunk elimination**; without a manifest, everything is generated)
+3. Generate, parse, and lower the JLCS IR; create the execution engine against the library and `libJLCS.so`
+
+Any failure — including the pre-flight rejection of untranslatable types — is caught and degrades the module to "Tier 2 disabled": `ccall`-based wrappers keep working, and Tier 2 calls raise a clear initialization error instead of crashing.
 
 ### Architecture
 
@@ -476,7 +509,7 @@ inner_ptrs = [ptr_to_arg1, ptr_to_arg2, ..., ptr_to_argN]
 
 ### Arity specialization
 
-To avoid heap-allocating `Any[]` for common small argument counts, the JIT manager provides hand-specialized `invoke` methods for 0 through 4 arguments. Each creates stack-allocated `Ref`s and a fixed-size `Ptr{Cvoid}[]`, avoiding all boxing:
+`invoke` is a `@generated` function that emits arity-specialized code for **any** argument count — stack-allocated `Ref`s and a fixed-size `Ptr{Cvoid}[]`, no `Any[]` boxing at any arity. The generated body for two arguments is equivalent to:
 
 ```julia
 function invoke(func_name::String, ::Type{T}, a1, a2) where T
@@ -492,11 +525,12 @@ function invoke(func_name::String, ::Type{T}, a1, a2) where T
 end
 ```
 
-A variadic fallback handles 5+ arguments with dynamic allocation.
+`String` arguments marshal as pointers to their bytes (with the `String` GC-preserved across the call) — the callee receives the character data, not a pointer to the Julia `String` object.
 
 Return type dispatch is resolved at compile time via `@generated`:
 - `isprimitivetype(T)` → direct `ccall` return
-- Otherwise → `sret` buffer allocation, `ccall` with out-pointer, dereference
+- Struct types → `sret` buffer allocation, `ccall` with out-pointer, dereference
+- An unresolved `Any` return type fails loudly with the actual cause (unmapped C type / stale wrapper) instead of scribbling into an undefined reference
 
 ## Why MLIR for thunk generation
 
@@ -528,7 +562,7 @@ These five properties don't add up to a "novel thunk generator." They add up to 
 
 The JLCS MLIR dialect is built as a shared library (`libJLCS.so`) via CMake with TableGen code generation.
 
-**Prerequisites:** LLVM 21+ development headers, CMake 3.20+, `mlir-tblgen`
+**Prerequisites:** system LLVM/MLIR 21+ development headers, CMake 3.20+, `mlir-tblgen`
 
 ```bash
 cd src/mlir
@@ -538,6 +572,8 @@ cd src/mlir
 
 The build configuration (`src/mlir/CMakeLists.txt`) processes the `.td` TableGen definitions to generate C++ header and source files, then links the dialect implementation with whole-archive semantics so the JIT execution engine can discover and register the dialect at runtime.
 
+The artifact is pinned to the installed MLIR's minor version (shared-library SONAME): rebuild it after any system MLIR minor upgrade. Patch bumps within a minor need no source change.
+
 **Build dependencies:**
 
 | MLIR Library | Role |
@@ -546,7 +582,7 @@ The build configuration (`src/mlir/CMakeLists.txt`) processes the `.td` TableGen
 | `MLIRTargetLLVMIRExport` | MLIR to LLVM IR export |
 | `MLIRLLVMToLLVMIRTranslation` | LLVM dialect to native IR |
 
-`libJLCS.so` is only required for Tier 2 dispatch. If it is not built, Tier 1 (`ccall` / `llvmcall`) still works for all POD-safe functions. Run `RepliBuild.check_environment()` to verify which tiers are available on your system.
+`libJLCS.so` is only required for Tier 2 dispatch. If it is not built, Tier 3 `ccall` (and Tier 1 `llvmcall`, where enabled) still works for all POD-safe functions. Run `RepliBuild.check_environment()` to verify which tiers are available on your system.
 
 ## `MLIRNative` API reference
 

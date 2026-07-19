@@ -5,7 +5,7 @@ using RepliBuild
 makedocs(;
     modules=[RepliBuild],
     authors="John <archjulialua@gmail.com>",
-    repo="https://github.com/obsidianjulua/RepliBuild.jl/blob/{commit}{path}#{line}",
+    repo=Documenter.Remotes.GitHub("obsidianjulua", "RepliBuild.jl"),
     sitename="RepliBuild.jl",
     format=Documenter.HTML(;
         prettyurls=get(ENV, "CI", "false") == "true",
@@ -22,6 +22,7 @@ makedocs(;
             "Workflow" => "guide.md",
             "Configuration" => "config.md",
         ],
+        "Release Notes" => "release-notes.md",
         "API Reference" => "api.md",
         "Advanced" => [
             "MLIR / JLCS Dialect" => "mlir.md",

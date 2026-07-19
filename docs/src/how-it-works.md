@@ -44,7 +44,7 @@ define i32 @scalar_add(i32 noundef %0, i32 noundef %1) {
 }
 ```
 
-The operation is a single `add nsw i32` instruction. RepliBuild's wrapper generator sees that both arguments and the return type are primitives, so `is_ccall_safe()` returns `true` and the function is routed to Tier 1:
+The operation is a single `add nsw i32` instruction. RepliBuild's wrapper generator sees that both arguments and the return type are primitives, so `is_ccall_safe()` returns `true` and the function is routed to a direct `ccall` (Tier 3 — or Tier 1 `llvmcall` when LTO bitcode is available):
 
 ```julia
 # test/jit_edge_test/julia/JitEdgeTest.jl (generated)
@@ -140,6 +140,9 @@ The performance confirms it:
 | Wrapper `ccall` | 2.026 |
 
 The LTO path matches pure Julia exactly because the optimizer sees identical IR.
+
+!!! warning "LTO at library scale"
+    These measurements come from small benchmark modules, where the mechanism works exactly as shown. `Base.llvmcall` embeds the *whole linked module* per call site, which does not currently survive whole-library scale (hundreds of functions can crash Julia's JIT) and duplicates file-local `static` state between the embedded bitcode and the `.so`. Production configurations therefore set `[link] enable_lto = false` and take the `ccall` path; per-function bitcode slicing is the planned fix. See the [User Guide](guide.md#Zero-Cost-LTO-Dispatch-(current-status)).
 
 ## When alignment breaks: packed structs
 
@@ -347,7 +350,7 @@ C++ and Julia both solve the same fundamental problem: given a value, select the
 ### C++ approach: vtables
 
 ```cpp
-// test/vtable_test/include/shapes.h
+// shapes.h (illustrative fixture)
 class Shape {
 public:
     virtual double area() const { return 0.0; }
@@ -390,7 +393,7 @@ This lowers through MLIR's pass pipeline to the same LLVM IR that a C++ compiler
 RepliBuild generates idiomatic Julia wrappers that use Julia's own dispatch mechanism:
 
 ```julia
-# test/vtable_test/julia/VtableTest.jl (generated)
+# Generated wrapper (abbreviated)
 
 # Idiomatic types wrapping C++ objects
 mutable struct Circle
@@ -463,6 +466,8 @@ julia_area:
 
 Three real instructions: load the pointer, call the C++ function, return. Julia's multiple dispatch resolved `area(::Circle)` to `Circle_area` at compile time, and the JIT compiled it down to a direct call to the mangled C++ symbol. No vtable indirection, no runtime type check — Julia already knows the concrete type.
 
+When the concrete type is *not* known — a base-class wrapper invoked on a pointer that may really be a derived object — the Tier 2 thunk dispatches through `jlcs.vcall`: it reads the object's vptr, indexes the slot, and calls indirectly, so **C++ overrides are honored** exactly as they would be for a C++ caller. Static dispatch where the type is exact, vtable dispatch where it is polymorphic — each side uses the semantics the situation requires.
+
 ### The parallel
 
 Both languages solve the same problem — **select the right implementation based on the runtime type** — using different mechanisms that compile to the same kind of machine code:
@@ -477,7 +482,7 @@ The JLCS dialect does not invent a new dispatch mechanism. It encodes the **exis
 
 ## Both JITs produce IR for the same function
 
-To see the two JITs operating side by side, consider that the MLIR JIT generates thunks for **every** function in the library — even scalar ones that Tier 1 handles via `ccall`. Here is the MLIR thunk for `scalar_add` alongside Julia's compiled IR for the same function:
+To see the two JITs operating side by side, here is the MLIR thunk for `scalar_add` alongside Julia's compiled IR for the same function. (In a real wrapper the thunk would only be generated if the wrapper dispatches to it — the `thunk_manifest.json` written at wrap time drives dead-thunk elimination — but the comparison is instructive.)
 
 **Julia's JIT** produces this LLVM IR for `scalar_add` (via `@code_llvm`):
 
@@ -518,7 +523,7 @@ MLIR reasons: dereference the pointer array to get `i32` values, call the C++ sy
 
 Both JITs are reasoning about the **same operation** — "call `scalar_add` with two `i32` arguments" — using their own IR and their own type system. Julia uses `trunc` to convert from its native `Int64`. MLIR uses `llvm.getelementptr` + `llvm.load` to unpack the ciface pointer array. Both arrive at the same `call @scalar_add(i32, i32) -> i32` in the final machine code.
 
-For `scalar_add`, Tier 1 (`ccall`) wins because it skips the pointer array overhead. But for `pack_three`, only the MLIR thunk can correctly marshal the packed struct layout. The tier selection in `is_ccall_safe()` picks the right path automatically.
+For `scalar_add`, the direct `ccall` wins because it skips the pointer array overhead. But for `pack_three`, only the MLIR thunk can correctly marshal the packed struct layout. The tier selection in `is_ccall_safe()` picks the right path automatically.
 
 **Clang** produced this LLVM IR for the C++ side — the target both JITs ultimately call:
 
@@ -548,7 +553,7 @@ For complex cases (packed structs, unions, virtual dispatch), the MLIR JIT gener
         ▼                                           ▼
    Julia LLVM IR                              C++ LLVM IR
         │                                           │
-        ├── Tier 1 (POD)   : ccall      ─────▶  symbol resolution
+        ├── Tier 3 (POD)   : ccall      ─────▶  symbol resolution
         │                                           │
         ├── Tier 1 (LTO)   : llvmcall   ──merge──┐  │
         │                                        ▼  ▼
@@ -573,4 +578,4 @@ The JLCS dialect is the **missing piece** — it handles the cases where Julia's
 
 After the first call to any Tier 2 function, the compiled machine code is cached in the `JITManager`'s lock-free symbol dictionary. Subsequent calls are a single `Dict` read (no lock, no JIT overhead) followed by a `ccall` to the cached function pointer — the same cost as a regular `ccall`.
 
-The result: whether a function goes through Tier 1 (`ccall`/`llvmcall`) or Tier 2 (MLIR thunks), the generated machine code is equivalent. The dispatch tier is chosen automatically based on ABI complexity, and the user never needs to know which path a given function takes.
+The result: whether a function goes through Tier 1 (`llvmcall`), Tier 2 (MLIR thunks), or Tier 3 (`ccall`), the generated machine code is equivalent. The dispatch tier is chosen automatically based on ABI complexity, and the user never needs to know which path a given function takes.
