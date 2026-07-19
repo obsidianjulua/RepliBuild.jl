@@ -1085,6 +1085,124 @@ function generate_template_instantiations(config::RepliBuildConfig, cpp_files::V
     return vcat(cpp_files, [dummy_file])
 end
 
+# =============================================================================
+# MACRO-SHIM HEADER-COLLISION GUARD
+# -----------------------------------------------------------------------------
+# The generated macro-shim TU (replibuild_shims.c) is emitted under the build
+# cache, NOT inside the vendored source tree, so a bare `#include "foo.h"` cannot
+# resolve foo.h as a sibling the way the library's own TUs do — it rides the -I
+# search path and can fall through to a system-installed copy of foo.h at a
+# DIFFERENT version, silently baking wrong [wrap.macros] values with no other
+# symptom. (BLAKE3 hit exactly this: /usr/include/blake3.h from libblake3-1.8.4
+# shadowed the vendored 1.8.5 header, so BLAKE3_VERSION_STRING came out "1.8.4".)
+# These verify each direct shim include resolves inside the project/dep tree.
+# =============================================================================
+
+"The compiler the shim TU is really built with — JLL clang for C (version-locked to
+Julia's libLLVM), system clang++ for C++ — so the probe's include resolution matches."
+function _probe_compiler(language::Symbol)::Cmd
+    if language == :c
+        try
+            Clang_mod = Base.require(Base.PkgId(
+                Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
+            if isdefined(Clang_mod, :Clang_unified_jll)
+                return Clang_mod.Clang_unified_jll.clang()
+            end
+        catch
+        end
+        return `clang`
+    else
+        return `clang++`
+    end
+end
+
+"""
+Return the resolved absolute paths of `shim_file`'s DIRECT includes that fall
+OUTSIDE `allowed_roots`. Empty ⇒ every shim header came from the project/dep tree.
+A shim header that does not resolve at all (missing) is a compile error, not a
+collision, and is deliberately NOT reported here.
+"""
+function _shim_headers_out_of_tree(shim_file::String, probe::Cmd,
+                                   extra_flags::Vector{String},
+                                   allowed_roots::Vector{String})::Vector{String}
+    norm_roots = String[]
+    for r in allowed_roots
+        try
+            push!(norm_roots, realpath(abspath(r)))
+        catch
+        end
+    end
+
+    errbuf = IOBuffer()
+    try
+        run(pipeline(ignorestatus(`$probe -fsyntax-only -H $extra_flags $shim_file`),
+                     stdout = devnull, stderr = errbuf))
+    catch
+        return String[]   # probe compiler unavailable → never block the build on the guard
+    end
+
+    offenders = String[]
+    for line in split(String(take!(errbuf)), '\n')
+        # `-H` prints the include tree; a SINGLE leading dot marks a direct include
+        # of the TU (one of the shim headers). `..`/deeper are transitive includes.
+        m = match(r"^\.[ \t]+(.+)$", line)
+        m === nothing && continue
+        inc = strip(String(m.captures[1]))
+        rp = try realpath(inc) catch; abspath(inc) end
+        if !any(root -> rp == root || startswith(rp, root * "/"), norm_roots)
+            push!(offenders, rp)
+        end
+    end
+    return offenders
+end
+
+"""
+    verify_shim_headers(config, shim_file)
+
+Hard-error if the generated macro shim resolved any [wrap] shim_header to a path
+outside the project/dependency tree (see the section comment above). No-op when the
+package declares no macros / shim headers, or when the shim file is absent.
+"""
+function verify_shim_headers(config::RepliBuildConfig, shim_file::String)
+    (isempty(config.wrap.macros) || isempty(config.wrap.shim_headers)) && return
+    isfile(shim_file) || return
+
+    probe    = _probe_compiler(config.wrap.language)
+    incflags = ["-I$dir" for dir in get_include_dirs(config)]
+    # -I/-D carried in [compile].flags steer which header wins and which #if branch
+    # of it the shim sees; the [compile].defines table feeds the same resolution.
+    userID   = filter(f -> startswith(f, "-I") || startswith(f, "-D"),
+                      get_compile_flags(config))
+    defflags = ["-D$(k)=$(v)" for (k, v) in config.compile.defines]
+    extra    = vcat(userID, incflags, defflags)
+
+    # In-bounds = the project root and the build cache (git clones live under the
+    # cache, so both are covered by these two roots). Anything else is foreign.
+    allowed = [config.project.root, get_cache_path(config)]
+
+    offenders = _shim_headers_out_of_tree(shim_file, probe, extra, allowed)
+    isempty(offenders) && return
+
+    error("""
+    RepliBuild: macro-shim header collision detected.
+
+    The generated macro shim resolved a [wrap] shim_header to a path OUTSIDE the
+    project/dependency tree:
+
+    $(join(["    → " * o for o in unique(offenders)], "\n"))
+
+    This compiles the shim against a foreign copy of the header (typically a
+    system-installed -dev package at a different version) and bakes wrong values
+    into every [wrap.macros] entry — with no other symptom.
+
+    Fix in the package replibuild.toml:
+      • reference the header by its in-clone subpath in [wrap] shim_headers
+        (e.g. "c/blake3.h" instead of "blake3.h"), or
+      • add the directory holding the vendored header to [compile] flags as
+        -I<dir> so it precedes the system include path.
+    """)
+end
+
 """
 Generate a C/C++ shim file to instantiate requested macros as typed functions
 so they appear in the DWARF metadata and can be wrapped.
@@ -1445,6 +1563,11 @@ function compile_project(config::RepliBuildConfig)
 
     # Generate macro shims
     cpp_files = generate_macro_shims(config, cpp_files)
+
+    # Guard: the shim TU must not have resolved any shim_header to a system copy
+    # (a different-version collision would silently corrupt every [wrap.macros]).
+    verify_shim_headers(config, joinpath(get_cache_path(config),
+        "replibuild_shims.$(config.wrap.language == :c ? "c" : "cpp")"))
 
     if isempty(cpp_files)
         @warn "No source files found in config"
