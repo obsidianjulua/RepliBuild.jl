@@ -405,14 +405,11 @@ For detailed documentation of each internal module, see [Internals](@ref "RepliB
 
 ### Introspection toolkit
 
-| Module | Source | Responsibility |
-|--------|--------|----------------|
-| `Introspect` | `src/Introspect.jl` | Umbrella module for binary analysis and diagnostics. |
-| `Introspect.Binary` | `src/Introspect/Binary.jl` | `symbols()`, `dwarf_info()`, `disassemble()` — binary artifact analysis. |
-| `Introspect.Julia` | `src/Introspect/Julia.jl` | Julia IR introspection (`code_lowered`, `code_typed`, `code_llvm`, `code_native`). |
-| `Introspect.LLVM` | `src/Introspect/LLVM.jl` | LLVM pass tooling, IR optimization, pass comparison. |
-| `Introspect.Benchmarking` | `src/Introspect/Benchmarking.jl` | `benchmark()` with configurable samples, suite execution. |
-| `Introspect.DataExport` | `src/Introspect/DataExport.jl` | Export results to JSON and CSV. |
+Binary/DWARF analysis, Julia IR inspection, LLVM pass tooling, benchmarking, and
+dataset export live in the companion package
+[RepliBuildTooling.jl](https://github.com/obsidianjulua/RepliBuildTooling.jl) — an
+opt-in extra that depends on the core (never the reverse), keeping heavy analysis
+dependencies (DataFrames, CSV, …) out of the backend's precompile path.
 
 ### JLCS MLIR dialect (C++)
 

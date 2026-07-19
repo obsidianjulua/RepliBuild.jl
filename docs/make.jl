@@ -27,7 +27,6 @@ makedocs(;
         "API Reference" => "api.md",
         "Advanced" => [
             "MLIR / JLCS Dialect" => "mlir.md",
-            "Introspection Tools" => "introspect.md",
             "Benchmarks" => "benchmarks.md",
         ],
         "Internals" => "internals.md",

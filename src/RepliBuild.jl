@@ -8,7 +8,7 @@ using TOML
 using JSON
 
 # Version
-const VERSION = v"3.0.1"
+const VERSION = v"3.1.0"
 
 # Stable path constants — modules use these instead of @__DIR__ so file moves don't break paths
 const PROJECT_ROOT = dirname(@__DIR__)
@@ -42,9 +42,6 @@ include("Wrapper/Cpp/STLWrappers.jl")
 # ThunkBuilder: bridge between Builder and IRGen (needs Wrapper.is_c_lto_safe)
 include("Builder/ThunkBuilder.jl")
 
-# Introspect: analysis tooling
-include("Introspect.jl")
-
 # Import submodules for internal use
 using .LLVMEnvironment
 using .ConfigurationManager
@@ -62,7 +59,6 @@ using .JITManager
 using .Wrapper
 using .STLWrappers
 using .ThunkBuilder
-using .Introspect
 using .EnvironmentDoctor
 using .PackageRegistry
 
@@ -79,7 +75,7 @@ export use, register, unregister, list_registry, search, scaffold_package
 
 # --- Submodules (direct access) ---
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser,
-       JLCSIRGenerator, DAGDiff, MLIRNative, STLWrappers, Introspect,
+       JLCSIRGenerator, DAGDiff, MLIRNative, STLWrappers,
        LLVMEnvironment, BuildBridge, ASTWalker, JITManager, ClangJLBridge,
        DependencyResolver, EnvironmentDoctor, PackageRegistry
 
@@ -178,34 +174,6 @@ export generate_bindings_clangjl, extract_header_types,
 
 # --- STL Wrappers ---
 export CppVector, CppString, CppMap, CppUnorderedMap
-
-# --- Introspection: Project ---
-export project_artifacts, lto_ir, aot_ir, aot_symbols
-
-# --- Introspection: Binary ---
-export symbols, dwarf_info, disassemble, headers, dwarf_dump
-
-# --- Introspection: Julia Code Analysis ---
-export code_lowered, code_typed, code_llvm, code_native, code_warntype,
-       analyze_type_stability, analyze_simd, analyze_allocations, analyze_inlining,
-       compilation_pipeline
-
-# --- Introspection: LLVM IR Tooling ---
-export llvm_ir, optimize_ir, compare_optimization, run_passes, compile_to_asm,
-       analyze_ir_structure, extract_function_names, compare_ir_files
-
-# --- Introspection: Benchmarking ---
-export benchmark, benchmark_suite, track_allocations,
-       compare_benchmarks, fastest, slowest, is_significant, speedup
-
-# --- Introspection: Data Export ---
-export export_json, export_csv, export_dataset, to_json_dict, to_dataframe
-
-# --- Introspection Types ---
-export BenchmarkResult, TypeStabilityAnalysis, SIMDAnalysis, AllocationAnalysis,
-       CompilationPipelineResult, OptimizationResult,
-       CodeLoweredInfo, CodeTypedInfo, LLVMIRInfo, AssemblyInfo,
-       DWARFInfo, HeaderInfo, FunctionInfo, StructInfo
 
 # --- IR Gen (struct/function/STL thunk generation) ---
 export generate_function_thunks, generate_stl_thunks,

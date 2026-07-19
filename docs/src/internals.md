@@ -307,15 +307,9 @@ Generates a distributable Julia package from a registered RepliBuild project. Th
 
 ## Introspect
 
-**Source:** `src/Introspect.jl`, `src/Introspect/`
-
-Umbrella module for binary analysis, Julia IR inspection, LLVM pass tooling, benchmarking, and data export. See [Introspection Tools](@ref) for the full API reference.
-
-| Submodule | Source | Role |
-|-----------|--------|------|
-| `Binary` | `src/Introspect/Binary.jl` | `symbols()`, `dwarf_info()`, `dwarf_dump()`, `disassemble()`, `headers()` |
-| `Julia` | `src/Introspect/Julia.jl` | `code_lowered()`, `code_typed()`, `code_llvm()`, `code_native()`, `code_warntype()`, analysis functions |
-| `LLVM` | `src/Introspect/LLVM.jl` | `llvm_ir()`, `optimize_ir()`, `compare_optimization()`, `run_passes()`, `compile_to_asm()` |
-| `Benchmarking` | `src/Introspect/Benchmarking.jl` | `benchmark()`, `benchmark_suite()`, `track_allocations()` |
-| `DataExport` | `src/Introspect/DataExport.jl` | `export_json()`, `export_csv()`, `export_dataset()` |
-| `Types` | `src/Introspect/Types.jl` | Shared type definitions for the introspection subsystem |
+The introspection & analysis toolkit — binary/DWARF analysis, Julia IR
+inspection, LLVM pass tooling, benchmarking, and dataset export — was split out
+of the core into the companion package
+[RepliBuildTooling.jl](https://github.com/obsidianjulua/RepliBuildTooling.jl). It
+depends on RepliBuild (never the reverse) and consumes the core's public API plus
+build artifacts. See that package's docs for the full API reference.
