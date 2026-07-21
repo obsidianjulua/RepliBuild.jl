@@ -26,6 +26,7 @@ makedocs(;
         "Release Notes" => "release-notes.md",
         "API Reference" => "api.md",
         "Advanced" => [
+            "Inheritance ABI" => "inheritance-abi.md",
             "MLIR / JLCS Dialect" => "mlir.md",
             "Benchmarks" => "benchmarks.md",
         ],
