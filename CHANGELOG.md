@@ -4,6 +4,32 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v3.1.0 (2026-07-19)
+
+### Introspection toolkit split into RepliBuildTooling.jl — breaking export change (2026-07-19)
+
+The introspection & analysis subsystem (`Introspect`) moved out of the core into a
+new companion package, [RepliBuildTooling.jl](https://github.com/obsidianjulua/RepliBuildTooling.jl),
+the opt-in "extra" to the backend. It depends on RepliBuild (never the reverse) and
+imports the five backend primitives it needs by name — `extract_symbols_from_binary`,
+`extract_dwarf_return_types`, `execute`, `get_tool`, `with_llvm_env` (all already
+public). The DAG engine and its renderer stay in core.
+
+- **Core sheds five dependencies**, all Introspect-only: `BenchmarkTools` (a *dead*
+  dep — declared, referenced nowhere), `CSV`, `DataFrames`, `Statistics`,
+  `InteractiveUtils`. The backend's precompile path no longer pulls DataFrames/CSV.
+- **Breaking — exports removed.** RepliBuild no longer exports the `Introspect`
+  submodule or its API: `symbols`, `dwarf_info`, `disassemble`, `headers`, the Julia
+  `code_*`/`analyze_*` functions, `llvm_ir`/`optimize_ir`/`run_passes`/…,
+  `benchmark`/`benchmark_suite`/`track_allocations`, `export_json`/`export_csv`/
+  `export_dataset`/`to_dataframe`, and the introspection result types. Migrate
+  `RepliBuild.Introspect.foo(...)` → `using RepliBuildTooling; foo(...)`.
+- **Docs:** the *Introspection Tools* page moved to the Tooling package; the core
+  `architecture`/`internals`/`index` pages now point to it. `benchmarks.md` stays in
+  core (it documents the core's zero-copy dialect) with its tool reference updated.
+- `VERSION` const realigned to Project.toml (was drifting at `3.0.1` vs `3.0.2`);
+  full CI suite green (409 tests) after the split.
+
 ### Wrappers are now application-grade: per-library JIT engines, precompilable wrappers (2026-07-19)
 
 Dogfood pass: built a real Julia package (`RepliBuild-Hub/examples/BoxWorld`, a

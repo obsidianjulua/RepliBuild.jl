@@ -159,6 +159,6 @@ See the [Configuration Reference](config.md) for all available options.
 - **[Release Notes](release-notes.md)** — What changed in v2.5.8 through v3.0.1
 - **[API Reference](api.md)** — Public API documentation
 - **[MLIR / JLCS Dialect](mlir.md)** — Custom MLIR dialect, type system, operations, JIT manager
-- **[Introspection Tools](introspect.md)** — Binary analysis, IR inspection, benchmarking
 - **[Benchmarks](benchmarks.md)** — Zero-copy benchmark data
+- **[RepliBuildTooling.jl](https://github.com/obsidianjulua/RepliBuildTooling.jl)** — Companion package: binary analysis, IR inspection, benchmarking, dataset export
 - **[Internals](internals.md)** — Module architecture for contributors
