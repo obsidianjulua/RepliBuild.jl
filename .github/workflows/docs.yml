@@ -5,7 +5,24 @@ on:
     branches:
       - main
     tags: '*'
+    # Only rebuild + redeploy docs when something that can change the rendered
+    # docs actually changes: the doc sources, or the docstrings they pull from.
+    # Chore/test/UI/README commits no longer spawn a gh-pages "build based on X".
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - '.github/workflows/docs.yml'
   pull_request:
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - '.github/workflows/docs.yml'
+
+# One docs build per ref; a newer push cancels an in-flight build so rapid
+# successive commits collapse into a single deploy instead of a queue of them.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   docs:
