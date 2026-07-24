@@ -68,6 +68,7 @@ docs/build/
 .vscode/
 .idea/
 TODO.md
+/spike
 
 # Claude Code
 .claude/

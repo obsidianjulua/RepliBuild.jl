@@ -1,6 +1,37 @@
-# RepliBuild Internals
+# Internals & Dispatch
 
-This section documents the internal modules that power RepliBuild. These are generally not needed for standard usage but are valuable for contributors, advanced integration, or understanding the system's behavior. For the high-level architecture see [Architecture](architecture.md).
+RepliBuild compiles C/C++ with Clang, reads the DWARF debug metadata the compiler emits about its own output, and generates Julia bindings that are correct by construction — struct offsets, enum underlying types, vtable slots, base-subobject offsets, and calling conventions all come from the compiler's own record rather than being guessed. Where DWARF is incomplete (enums the optimizer folded away, macro definitions, function-pointer typedefs) the Clang.jl AST fills the gap; where Julia's computed struct alignment disagrees with the DWARF size, the struct is treated as packed and routed away from `ccall`.
+
+This page is the technical reference for how that pipeline is assembled — the stages, the three dispatch tiers, and the modules behind each. It is aimed at contributors and advanced integrators, not everyday use.
+
+## The pipeline
+
+Source becomes a loadable Julia module in seven stages, each owned by one module:
+
+1. **DependencyResolver** — resolve the `[dependencies]` table (git / local / system) and merge the external sources into the build graph.
+2. **Discovery** — scan files and the `#include` graph; write or refresh `replibuild.toml`.
+3. **Compiler** — Clang compiles each translation unit to LLVM IR, cached on source `mtime` plus a compile fingerprint (flags, defines, include dirs, LLVM version, target triple).
+4. **Linker** — link, optimize, and assemble the IR into the `.so` (plus LTO bitcode when `enable_lto` is on).
+5. **DWARFParser** — `llvm-dwarfdump` + `nm` produce `ClassInfo` / `VtableInfo` and the `compilation_metadata.json` layout facts.
+6. **Wrapper generator** — DWARF + symbols drive the C or C++ generator to emit the Julia module.
+7. **JITManager** — at module load, stand up a per-library MLIR thunk engine for any Tier-2 calls.
+
+For **C** projects the link/optimize/assemble steps run **in-process on Julia's resident libLLVM**, version-matched to the JLL clang that emitted the IR (no external LLVM, no DWARF-dropping version skew); a failure is a hard error unless `[link] fallback = true` selects the external `llvm-link`/`opt` pipeline. **C++** always uses the external pipeline plus the system MLIR dialect. Only the final `.ll → .so` codegen shells to clang in both buckets.
+
+## Three dispatch tiers
+
+Each wrapped function is routed to exactly one calling tier, chosen from its DWARF signature:
+
+| Tier | Mechanism | Selected when |
+|------|-----------|---------------|
+| 1 | `Base.llvmcall` against LTO bitcode | POD args, scalar/pointer return, LTO bitcode available |
+| 2 | MLIR thunk via `libJLCS.so` (JIT at load, or AOT `_thunks.so`) | packed structs, unions, large by-value struct returns, C++ classes, virtual dispatch, exceptions |
+| 3 | `ccall` into the `.so` | the unconditional fallback |
+
+The routing decision lives in `Wrapper/DispatchLogic.jl` (`is_ccall_safe`, `is_c_lto_safe`); the [Tier selection logic](#Tier-selection-logic) section below lists the exact checks.
+
+!!! note "Tier 1 is currently parked"
+    `Base.llvmcall` embeds the **whole linked module** at each call site, which at whole-library scale can crash Julia's JIT and duplicates file-local `static` state between the embedded bitcode and the `.so`. Production configurations therefore set `[link] enable_lto = false` and dispatch through Tier 3; C++ defaults to LTO off. The replacement — per-function bitcode slicing (declarations-only slices bound to the `.so`) — is in progress; until it lands, treat Tier 1 as an experimentation path for small stateless kernels. See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch-(current-status)).
 
 ## Wrapper
 
@@ -205,9 +236,7 @@ The Julia wrapper then `ccall`s into the AOT thunks rather than calling `JITMana
 
 **Source:** `src/IRGen/MLIRNative.jl`
 
-Low-level `ccall` bindings to `libJLCS.so`, the compiled JLCS MLIR dialect shared library. Provides context management, module parsing, JIT engine creation, LLVM lowering, and symbol lookup.
-
-See the [MLIR / JLCS Dialect](@ref "MLIR & JLCS Dialect") page for the full API reference.
+Low-level `ccall` bindings to `libJLCS.so`, the compiled JLCS MLIR dialect shared library. Provides context management, module parsing, JIT engine creation, LLVM lowering, and symbol lookup. The JLCS dialect is the Tier-2 marshalling layer: TableGen-defined ops (`jlcs.ffe_call`/`try_call` for calls and exception routing, `jlcs.vcall` for virtual dispatch, `jlcs.marshal_arg`/`marshal_ret` and the `!jlcs.c_struct` type for packed-struct ABI, `jlcs.scope` for by-value class RAII) that lower to LLVM IR via `src/mlir/impl/JLCSPasses.cpp`. Building it (`cd src/mlir && ./build.sh`) is required only for the C++/Tier-2 bucket.
 
 ## JITManager
 
@@ -304,12 +333,3 @@ Integration module for Clang.jl header parsing. Used by the wrapper generator wh
 **Source:** `src/Builder/PackageRegistry.jl` (`scaffold_package` function)
 
 Generates a distributable Julia package from a registered RepliBuild project. The scaffolded package includes the compiled shared library, generated wrapper module, and a standard Julia `Project.toml` — ready for `Pkg.add()`.
-
-## Introspect
-
-The introspection & analysis toolkit — binary/DWARF analysis, Julia IR
-inspection, LLVM pass tooling, benchmarking, and dataset export — was split out
-of the core into the companion package
-[RepliBuildTooling.jl](https://github.com/obsidianjulua/RepliBuildTooling.jl). It
-depends on RepliBuild (never the reverse) and consumes the core's public API plus
-build artifacts. See that package's docs for the full API reference.

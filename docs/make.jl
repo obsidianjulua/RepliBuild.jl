@@ -15,22 +15,17 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
-        "Why RepliBuild" => "why-replibuild.md",
-        "How It Works" => "how-it-works.md",
-        "Architecture" => "architecture.md",
-        "User Guide" => [
+        "Guide" => [
             "Workflow" => "guide.md",
-            "Using a Wrapper in Your Package" => "using-wrappers.md",
-            "Configuration" => "config.md",
+            "Configuration (replibuild.toml)" => "config.md",
+            "Using a Wrapper" => "using-wrappers.md",
         ],
-        "Release Notes" => "release-notes.md",
         "API Reference" => "api.md",
         "Advanced" => [
-            "Inheritance ABI" => "inheritance-abi.md",
-            "MLIR / JLCS Dialect" => "mlir.md",
-            "Benchmarks" => "benchmarks.md",
+            "The Inheritance ABI" => "inheritance-abi.md",
+            "Internals & Dispatch" => "internals.md",
         ],
-        "Internals" => "internals.md",
+        "Release Notes" => "release-notes.md",
     ],
     warnonly=true,
 )

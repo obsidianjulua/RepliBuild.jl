@@ -37,17 +37,13 @@ pointer. No helper is emitted; you pass the handle straight through.
 
 ## 2. Multiple inheritance — add a constant
 
-```text
-Derived : Base1, Base2
+For `Derived : Base1, Base2`, the object is three consecutive regions:
 
- offset:   0                16                32
-          ┌────────────────┬────────────────┬─────────────────────┐
-          │ Base1 subobject│ Base2 subobject│ Derived's own data  │
-          │ (vptr1, data)  │ (vptr2, data)  │                     │
-          └────────────────┴────────────────┴─────────────────────┘
-          ▲                ▲
-          p (== Base1*)    Derived_as_Base2(p) = p + 16
-```
+| Offset | Region | Upcast from a `Derived*` `p` |
+|-------:|--------|------------------------------|
+| 0  | `Base1` subobject (`vptr1`, data) | none — `p` already *is* a `Base1*` |
+| 16 | `Base2` subobject (`vptr2`, data) | `Derived_as_Base2(p) = p + 16` |
+| 32 | `Derived`'s own data | — |
 
 The `+16` is not guessed — it is `DW_AT_data_member_location` on the
 `DW_TAG_inheritance` edge in DWARF, captured at extraction time. The generated
@@ -72,27 +68,23 @@ offset is a property of the most-derived object, not of the class**. A standalon
 `Left*` cannot know statically which world it is in — only the object's vtable
 does.
 
-```text
-Diamond : Left, Right          (Left, Right : virtual VBase)
+For `Diamond : Left, Right` where both `Left` and `Right` derive **virtually** from `VBase`, there is exactly one shared copy of `VBase`, and a `Diamond*` `p` lays out as:
 
- offset:   0             16          28    32
-          ┌─────────────┬───────────┬─────┬──────────────┐
-          │ Left        │ Right     │  d  │ shared VBase │  ← one copy, shared
-          │ (vptr_L)    │ (vptr_R)  │     │ (vptr_V)     │
-          └─────────────┴───────────┴─────┴──────────────┘
-          ▲
-          p
+| Offset | Region |
+|-------:|--------|
+| 0  | `Left` subobject (`vptr_L`) — `p` points here |
+| 16 | `Right` subobject (`vptr_R`) |
+| 28 | `Diamond`'s own data (`d`) |
+| 32 | shared `VBase` (`vptr_V`) — one copy, reached by both `Left` and `Right` |
 
-                    Left's vtable (what vptr_L points into)
-                    ┌────────────────────────────┐
-      vptr_L − 24   │  vbase-offset = 32         │  ← the entry we read
-                    ├────────────────────────────┤
-      vptr_L  ────▶ │  (address point)           │
-                    │  RTTI, &tag(), …           │
-                    └────────────────────────────┘
+The offset to that shared `VBase` isn't a class constant — it lives in the vtable. `Left`'s vtable (what `vptr_L` points into) carries the vbase-offset entry just below its address point:
 
-  Left_as_VBase(p) = p + *(vptr_L − 24) = p + 32
-```
+| Vtable position | Contents |
+|-----------------|----------|
+| `vptr_L − 24` | vbase-offset = `32` — the entry the upcast reads |
+| `vptr_L` (address point) | RTTI, `&tag()`, the virtual method slots |
+
+so `Left_as_VBase(p) = p + *(vptr_L − 24) = p + 32`.
 
 The DWARF location on a virtual edge is an *expression*, not a constant
 (`this + *(vptr − 24)`); the parser distills it into `vbase_vtable_offset = −24`.

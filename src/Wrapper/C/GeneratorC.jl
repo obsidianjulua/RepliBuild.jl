@@ -132,6 +132,75 @@ function _struct_has_float_member(struct_name::String, dwarf_structs, seen::Set{
     return false
 end
 
+"""
+    _tier1_slice_prepass(config, functions, dwarf_structs) -> Union{Nothing,Set{String}}
+
+Run the Slicer over every Tier-1 candidate function (non-varargs, not
+excluded, `is_c_lto_safe`), apply the hazard/size policy, and write accepted
+slices to `julia/slices/<mangled>.ll`. Returns the accepted mangled-name set,
+or `nothing` when the promoted module is missing (promotion off / fallback
+build) — Tier 1 then disables loudly for this wrap.
+
+Hazard policy: `:varargs_callee` (calling printf via declare is fine) and
+`:noinline` (correct, just not spliced) are allowed; `:setjmp_family` is gated
+unless `[wrap.tier1] allow_setjmp = true`; everything else (`:weak`,
+`:inline_asm`, `:module_asm`) demotes to Tier 3.
+"""
+function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs)
+    build_dir = get_build_path(config)
+    abi_ll = joinpath(build_dir, "$(config.project.name)_abi.ll")
+    if !isfile(abi_ll)
+        @warn "Tier 1 enabled but promoted module not found ($abi_ll) — " *
+              "promotion is off or this is a fallback/ingest build. Tier 1 " *
+              "disabled for this wrap; all functions dispatch via ccall."
+        return nothing
+    end
+
+    tier1 = config.wrap.tier1
+    candidates = String[]
+    for func in functions
+        get(func, "is_vararg", false) && continue
+        mangled = String(get(func, "mangled", get(func, "name", "")))
+        isempty(mangled) && continue
+        (mangled in tier1.exclude || String(get(func, "name", "")) in tier1.exclude) && continue
+        is_c_lto_safe(func, dwarf_structs) || continue
+        push!(candidates, mangled)
+    end
+
+    slices_dir = joinpath(get_output_path(config), "slices")
+    # A policy change must not leave stale slices behind
+    isdir(slices_dir) && rm(slices_dir, recursive=true, force=true)
+    mkpath(slices_dir)
+    isempty(candidates) && return Set{String}()
+
+    results = Slicer.slice_library(abi_ll; targets=unique(candidates),
+                                   cache_dir=get_cache_path(config))
+
+    allowed_hazards = Set{Symbol}([:varargs_callee, :noinline])
+    tier1.allow_setjmp && push!(allowed_hazards, :setjmp_family)
+    max_bytes = tier1.max_slice_kb * 1024
+
+    accepted = Set{String}()
+    n_refused = 0; n_hazard = 0; n_oversize = 0
+    for (name, r) in results
+        if !Slicer.sliced(r)
+            n_refused += 1
+        elseif !all(h -> h in allowed_hazards, r.hazards)
+            n_hazard += 1
+        elseif length(r.ir) > max_bytes
+            n_oversize += 1
+        else
+            write(joinpath(slices_dir, name * ".ll"), r.ir)
+            push!(accepted, name)
+        end
+    end
+    demoted = n_refused + n_hazard + n_oversize
+    println("  tier1: $(length(accepted)) slices" *
+            (demoted == 0 ? "" :
+             " ($n_refused refused, $n_hazard hazard-gated, $n_oversize oversize → ccall)"))
+    return accepted
+end
+
 function generate_introspective_module_c(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
@@ -256,6 +325,18 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Extract metadata
     functions = metadata["functions"]
     dwarf_structs = get(metadata, "struct_definitions", Dict())
+
+    # =========================================================================
+    # TIER 1 SLICE PRE-PASS (per-function llvmcall over bitcode slices)
+    # =========================================================================
+    # Produces julia/slices/<mangled>.ll for every accepted function and
+    # returns the accepted set; the emission loop routes those through
+    # Base.llvmcall on the slice instead of ccall. nothing ⇒ tier off.
+    tier1_slices = nothing
+    tier1_emitted = String[]
+    if config.wrap.tier1.enable && config.wrap.language == :c
+        tier1_slices = _tier1_slice_prepass(config, functions, dwarf_structs)
+    end
 
     # Layout registries shared between struct emission and function emission:
     # - resolved_layouts: julia struct name => (byte_size, alignment) for every
@@ -2012,8 +2093,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # Build the llvmcall expression with proper Ref{T} → Ptr{T} handling.
         # ccall handles Ref{T} → C pointer automatically, but llvmcall sees Ref{T}
         # as ptr addrspace(10) while C++ IR uses plain ptr (addrspace 0).
-        function _build_llvmcall_expr(ret_type_str, indent="        ")
-            call_expr = "Base.llvmcall((LTO_IR, \"$mangled\"), $ret_type_str, Tuple{$llvmcall_types}, $llvmcall_args)"
+        function _build_llvmcall_expr(ret_type_str, indent="        "; ir_src::String="LTO_IR")
+            call_expr = "Base.llvmcall(($ir_src, \"$mangled\"), $ret_type_str, Tuple{$llvmcall_types}, $llvmcall_args)"
             if !has_ref_params
                 return "$(indent)return $call_expr"
             end
@@ -2028,14 +2109,22 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             return join(lines, "\n")
         end
 
-        # LTO eligibility: safe for primitive/pointer args only.
+        # llvmcall shape gate: safe for primitive/pointer args only.
         # Struct-by-value params are excluded because Base.llvmcall doesn't
         # reliably map Julia struct layouts to LLVM aggregate types.
-        lto_eligible = config.link.enable_lto &&
-            !returns_known_struct &&
+        lto_shape_ok = !returns_known_struct &&
             julia_return_type != "Cstring" &&
             !any(t -> t == "Cstring", param_types) &&
             !any(t -> t in struct_types, param_types)
+
+        # Whole-module LTO path (legacy, scale-limited — see CLAUDE.md caveats)
+        lto_eligible = config.link.enable_lto && lto_shape_ok
+
+        # Tier 1 sliced llvmcall: the pre-pass produced a verified slice AND
+        # the ABI shape gates pass AND the C safety gate passes. Takes
+        # precedence over the whole-module path.
+        tier1_this = tier1_slices !== nothing && (mangled in tier1_slices) &&
+            lto_shape_ok && c_safe
 
         # Check for _UnsafeUnknown trap to prevent segfaults
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
@@ -2136,7 +2225,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             push!(exports, "$(julia_name)_ptr")
         elseif !isempty(conversion_code)
             # Has parameter conversions
-            if lto_eligible
+            if tier1_this
+                slice_const = "_SLICE_$julia_name"
+                llvmcall_body = _build_llvmcall_expr(julia_return_type, "    "; ir_src=slice_const)
+                push!(tier1_emitted, julia_name)
+                func_def = """
+                const $slice_const = read(joinpath(@__DIR__, "slices", "$mangled.ll"), String)
+
+                $doc_comment
+                function $julia_name($param_sig)::$julia_return_type
+                $conversion_code$llvmcall_body
+                end
+
+                """
+            elseif lto_eligible
                 llvmcall_body = _build_llvmcall_expr(julia_return_type)
                 func_def = """
                 $doc_comment
@@ -2160,7 +2262,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
         else
             # Standard wrapper - no conversions needed
-            if lto_eligible
+            if tier1_this
+                slice_const = "_SLICE_$julia_name"
+                llvmcall_body = _build_llvmcall_expr(julia_return_type, "    "; ir_src=slice_const)
+                push!(tier1_emitted, julia_name)
+                func_def = """
+                const $slice_const = read(joinpath(@__DIR__, "slices", "$mangled.ll"), String)
+
+                $doc_comment
+                function $julia_name($param_sig)::$julia_return_type
+                $llvmcall_body
+                end
+
+                """
+            elseif lto_eligible
                 llvmcall_body = _build_llvmcall_expr(julia_return_type)
                 func_def = """
                 $doc_comment
@@ -2424,6 +2539,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # definition per dispatch signature (last one wins, as include() would).
     func_chunks = _dedup_method_chunks(func_chunks)
 
-    return join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), join(union_accessor_chunks), export_statement, join(func_chunks), footer])
+    tier1_registry = """
+    # Functions dispatched through Tier 1 (sliced llvmcall); empty ⇒ all ccall/thunk
+    const TIER1_FUNCTIONS = Set{String}($(isempty(tier1_emitted) ? "String[]" : repr(sort(unique(tier1_emitted)))))
+
+    """
+
+    return join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), join(union_accessor_chunks), tier1_registry, export_statement, join(func_chunks), footer])
 end
 

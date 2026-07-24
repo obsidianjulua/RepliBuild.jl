@@ -8,7 +8,9 @@ using Dates
 using JSON
 
 # Import from parent RepliBuild module
-import ..ConfigurationManager: RepliBuildConfig, get_output_path, get_module_name
+import ..ConfigurationManager: RepliBuildConfig, get_output_path, get_module_name,
+                                get_build_path, get_cache_path
+import ..Slicer
 import ..ClangJLBridge
 import ..BuildBridge
 import ..MLIRNative

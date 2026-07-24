@@ -6,8 +6,6 @@ CurrentModule = RepliBuild
 
 ABI-aware C/C++ compiler bridge for Julia. Point it at source code, get type-safe Julia bindings — correct struct layouts, enum definitions, calling conventions, inheritance, and virtual dispatch — without writing a single `ccall` by hand.
 
-**New to RepliBuild?** Read [Why RepliBuild](why-replibuild.md) for the design rationale, the DWARF-as-source-of-truth approach, and how offsets, vtable slots, and packing flags flow from the compiler into Julia bindings.
-
 ## Overview
 
 RepliBuild compiles your C/C++ source with Clang, then combines multiple information sources to generate bindings that are correct by construction:
@@ -151,14 +149,10 @@ See the [Configuration Reference](config.md) for all available options.
 
 ## Documentation
 
-- **[Why RepliBuild](why-replibuild.md)** — Design rationale: DWARF as source of truth, offset stability, how DWARF + symbols + AST combine, and what the JLCS dialect adds
-- **[How It Works](how-it-works.md)** — Two JITs, one IR: how Julia and C++ converge at the LLVM level
-- **[Architecture](architecture.md)** — Full system architecture, pipeline stages, tier dispatch, design decisions
-- **[User Guide](guide.md)** — Workflows, dependencies, LTO, AOT thunks, templates, registry, ingest
-- **[Configuration Reference](config.md)** — Complete `replibuild.toml` option reference
-- **[Release Notes](release-notes.md)** — What changed in v2.5.8 through v3.0.1
-- **[API Reference](api.md)** — Public API documentation
-- **[MLIR / JLCS Dialect](mlir.md)** — Custom MLIR dialect, type system, operations, JIT manager
-- **[Benchmarks](benchmarks.md)** — Zero-copy benchmark data
-- **[RepliBuildTooling.jl](https://github.com/obsidianjulua/RepliBuildTooling.jl)** — Companion package: binary analysis, IR inspection, benchmarking, dataset export
-- **[Internals](internals.md)** — Module architecture for contributors
+- **[Workflow](guide.md)** — `discover → build → wrap → use`, dependencies, LTO, AOT thunks, templates, the registry and Hub, ingest
+- **[Configuration](config.md)** — Complete `replibuild.toml` reference: every section, the wrapper quirks (`shim_headers`, `varargs`, `macros`, `cstring_owned`), and dependency handling
+- **[Using a Wrapper](using-wrappers.md)** — Building a precompiled Julia package on a generated wrapper: vendoring, the JIT lifecycle, C++ object lifetimes, and the C++-isms your layer encapsulates
+- **[API Reference](api.md)** — The public entry points
+- **[The Inheritance ABI](inheritance-abi.md)** — How MI and virtual inheritance become callable: upcast helpers, class-local vcall dispatch
+- **[Internals & Dispatch](internals.md)** — Pipeline, the three dispatch tiers, DWARF extraction, the JLCS dialect, caching
+- **[Release Notes](release-notes.md)** — Version history

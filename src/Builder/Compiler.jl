@@ -501,6 +501,31 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         end
     end
 
+    # Static promotion (llvmcall slicing contract): rename internal statics —
+    # functions + mutable globals — to exported `__rb_<lib>_*` symbols, so
+    # per-function slices can `declare` and bind to the .so's single copy of
+    # every mutable datum. Must run BEFORE the LTO bitcode emission below so
+    # the .so and the slice source are the same promoted module. In-process C
+    # only; a failure is a hard error (no silent downgrade), matching the
+    # link/opt steps. Always clear a stale map first so a knob flip or a
+    # fallback build can't serve a previous build's map.
+    promoted_map_path = joinpath(build_dir, "promoted_symbols.json")
+    rm(promoted_map_path, force=true)
+    if use_inprocess && config.link.promote_statics
+        lib_token = replace(output_name, r"[^A-Za-z0-9]" => "_")
+        abi_ir = joinpath(build_dir, output_name * "_abi.ll")
+        promoted = _promote_statics_libllvm(linked_ir, abi_ir, lib_token)
+        if promoted === nothing
+            error("In-process static promotion failed for C source. " *
+                  "Set `[link] promote_statics = false` to skip promotion, or " *
+                  "`[link] fallback = true` for the external pipeline.")
+        end
+        linked_ir = abi_ir
+        open(promoted_map_path, "w") do io
+            JSON.print(io, promoted, 2)
+        end
+    end
+
     # If LTO is enabled, the .so must export every internal symbol the JIT-loaded
     # bitcode references. Source-level `__attribute__((visibility("hidden")))`
     # (e.g. Lua's LUAI_DDEC / LUAI_FUNC) keeps internal globals/functions out of
@@ -887,6 +912,65 @@ function _optimize_ir_libllvm(in_ll::String, out_ll::String, opt_level::String):
     catch e
         @debug "LLVM.jl in-process opt failed" exception=(e, catch_backtrace())
         return false
+    end
+end
+
+"""
+    _promote_statics_libllvm(in_ll, out_ll, lib_token) -> Union{Nothing,Dict{String,String}}
+
+Static-promotion pass for the llvmcall slicing contract: rename every
+internal/private-linkage global value that is a **function or a mutable global**
+to an exported `__rb_<lib_token>_<name>` symbol (external linkage, default
+visibility). The `.so` built from the promoted module then carries exactly one
+copy of every mutable datum and every static function body, which per-function
+bitcode slices bind to by `declare` — instead of embedding duplicate
+definitions (the cJSON `static global_error` divergence class).
+
+Internal **constant** globals (string literals, lookup tables) are deliberately
+left internal: slices may embed constants safely, and promoting them would
+bloat the dynamic symbol table for nothing.
+
+Runs post-optimization so internal linkage still fed IPO, on the exact module
+that becomes both the `.so` and the slice source — one truth, bit-identical
+code on both sides. Returns the old→new name map (possibly empty), or
+`nothing` on failure so the caller can hard-error (in-process doctrine).
+"""
+function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::String)
+    local_linkages = (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage)
+    try
+        promoted = Dict{String,String}()
+        LLVM.Context() do _
+            mod = parse(LLVM.Module, read(in_ll, String))
+
+            promote!(gv, old_name) = begin
+                LLVM.linkage!(gv, LLVM.API.LLVMExternalLinkage)
+                LLVM.name!(gv, "__rb_$(lib_token)_$(old_name)")
+                # Read back: LLVM uniquifies on collision, the map must hold truth.
+                promoted[old_name] = LLVM.name(gv)
+            end
+
+            for f in LLVM.functions(mod)
+                LLVM.linkage(f) in local_linkages || continue
+                old = LLVM.name(f)
+                (isempty(old) || startswith(old, "llvm.") || startswith(old, "__rb_")) && continue
+                promote!(f, old)
+            end
+            for gv in LLVM.globals(mod)
+                LLVM.linkage(gv) in local_linkages || continue
+                LLVM.isconstant(gv) && continue
+                old = LLVM.name(gv)
+                (isempty(old) || startswith(old, "llvm.") || startswith(old, "__rb_")) && continue
+                promote!(gv, old)
+            end
+
+            open(out_ll, "w") do io
+                print(io, string(mod))
+            end
+        end
+        return isfile(out_ll) ? promoted : nothing
+    catch e
+        @debug "LLVM.jl in-process static promotion failed" exception=(e, catch_backtrace())
+        return nothing
     end
 end
 
@@ -1803,6 +1887,15 @@ function extract_symbols_from_binary(binary_path::String)
                 # Deliberate STL container wrapping goes through extract_stl_method_symbols
                 # under [types].templates, not this general path.
                 if _is_stdlib_internal(mangled_name, demangled_name)
+                    continue
+                end
+
+                # Promoted statics (`__rb_<lib>_*`, static-promotion pass) are
+                # slice-binding surface, not API: they carry no matching DWARF
+                # entry under the promoted name, so wrapping them would emit
+                # zero-arg garbage. The wrapper never sees them; slices bind by
+                # symbol at JIT time.
+                if startswith(mangled_name, "__rb_") || startswith(demangled_name, "__rb_")
                     continue
                 end
 
@@ -4297,6 +4390,14 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
                                    binary_path::String)::String
     # Extract metadata
     metadata = extract_compilation_metadata(config, source_files, binary_path)
+
+    # Static-promotion map (old static name → exported __rb_* symbol), written
+    # by link_optimize_ir when the promotion pass ran. Slices resolve their
+    # declarations through this map; tooling uses it to de-mystify nm output.
+    promoted_map_path = joinpath(get_build_path(config), "promoted_symbols.json")
+    if isfile(promoted_map_path)
+        metadata["promoted_symbols"] = JSON.parsefile(promoted_map_path)
+    end
 
     # Save to JSON file next to binary
     output_dir = get_output_path(config)

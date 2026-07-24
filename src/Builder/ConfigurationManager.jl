@@ -62,6 +62,13 @@ struct LinkConfig
     # the two; this flag is the escape hatch to the stable path. C++ always uses
     # the external pipeline regardless of this flag.
     fallback::Bool
+    # Promote internal-linkage statics (functions + mutable globals) to exported
+    # `__rb_<lib>_*` symbols post-optimization, so per-function bitcode slices
+    # can bind to the .so's single copy of every mutable datum instead of
+    # embedding duplicates (the cJSON global_error divergence class). Runs only
+    # on the in-process C path; the old→new map lands in compilation_metadata.json
+    # under "promoted_symbols". Default true.
+    promote_statics::Bool
 end
 
 """Nested struct for [binary] section"""
@@ -69,6 +76,21 @@ struct BinaryConfig
     type::Symbol  # :shared, :static, :executable
     output_name::String  # Empty = auto from project.name
     strip_symbols::Bool
+end
+
+"""
+Nested struct for [wrap.tier1] — per-function llvmcall dispatch over bitcode
+slices (Slicer.jl). `enable` turns the tier on for C wrappers (default off —
+opt in per package); `exclude` names functions that must stay Tier 3;
+`max_slice_kb` refuses oversized slices (declarations-only slices are KBs, so
+this is a tripwire, not a tuning knob); `allow_setjmp` lifts the conservative
+gate on functions whose closure touches the setjmp/longjmp family.
+"""
+struct Tier1Config
+    enable::Bool
+    exclude::Vector{String}
+    max_slice_kb::Int
+    allow_setjmp::Bool
 end
 
 """Nested struct for [wrap] section"""
@@ -83,6 +105,7 @@ struct WrapConfig
     shim_headers::Vector{String}
     cstring_owned::Dict{String,String}  # func => free symbol for malloc'd char* returns
     dag::Bool  # Export DAG diff graphs to <project>/dag/
+    tier1::Tier1Config
 end
 
 """Nested struct for [llvm] section"""
@@ -316,7 +339,8 @@ function parse_link_config(data::Dict, wrap_language::Symbol=:cpp)::LinkConfig
         get(link, "enable_lto", default_lto),
         get(link, "link_libraries", String[]),
         get(link, "link_dirs", String[]),
-        get(link, "fallback", false)
+        get(link, "fallback", false),
+        get(link, "promote_statics", true)
     )
 end
 
@@ -398,6 +422,14 @@ function parse_wrap_config(data::Dict)::WrapConfig
     language_str = get(wrap, "language", "cpp")
     language_sym = Symbol(language_str)
 
+    tier1_raw = get(wrap, "tier1", Dict())
+    tier1 = Tier1Config(
+        get(tier1_raw, "enable", false),
+        String[string(x) for x in get(tier1_raw, "exclude", String[])],
+        Int(get(tier1_raw, "max_slice_kb", 64)),
+        get(tier1_raw, "allow_setjmp", false),
+    )
+
     return WrapConfig(
         get(wrap, "enabled", true),
         wrap_style,
@@ -408,7 +440,8 @@ function parse_wrap_config(data::Dict)::WrapConfig
         macros,
         shim_headers,
         cstring_owned,
-        get(wrap, "dag", false)
+        get(wrap, "dag", false),
+        tier1
     )
 end
 
@@ -579,9 +612,9 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         PathsConfig("src", "include", "julia", "build", ".replibuild_cache"),
         DiscoveryConfig(true, true, 10, ["build", ".git", ".cache"], true),
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
-        LinkConfig("2", false, String[], String[], false),
+        LinkConfig("2", false, String[], String[], false, true),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[], Dict{String,String}(), false),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[], Dict{String,String}(), false, Tier1Config(false, String[], 64, false)),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -660,6 +693,9 @@ function save_config(config::RepliBuildConfig)
     if config.link.fallback
         link_dict["fallback"] = config.link.fallback
     end
+    if !config.link.promote_statics
+        link_dict["promote_statics"] = false
+    end
     if !isempty(config.link.link_libraries)
         link_dict["link_libraries"] = config.link.link_libraries
     end
@@ -702,6 +738,13 @@ function save_config(config::RepliBuildConfig)
     end
     if config.wrap.dag
         wrap_dict["dag"] = true
+    end
+    if config.wrap.tier1.enable
+        tier1_dict = Dict{String,Any}("enable" => true)
+        isempty(config.wrap.tier1.exclude) || (tier1_dict["exclude"] = config.wrap.tier1.exclude)
+        config.wrap.tier1.max_slice_kb == 64 || (tier1_dict["max_slice_kb"] = config.wrap.tier1.max_slice_kb)
+        config.wrap.tier1.allow_setjmp && (tier1_dict["allow_setjmp"] = true)
+        wrap_dict["tier1"] = tier1_dict
     end
     data["wrap"] = wrap_dict
 

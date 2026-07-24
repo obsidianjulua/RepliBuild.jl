@@ -133,6 +133,10 @@ include(joinpath(@__DIR__, "test_c_generator_policies.jl"))
 
 include(joinpath(@__DIR__, "test_shim_header_guard.jl"))
 
+# ── Git dependency cache is version-aware (local git upstream; needs git) ────
+
+include(joinpath(@__DIR__, "test_dep_cache.jl"))
+
 # ── DAGDiff module tests (synthetic metadata, no C++ toolchain required) ─────
 
 include(joinpath(@__DIR__, "dag_test", "test_dag_diff.jl"))

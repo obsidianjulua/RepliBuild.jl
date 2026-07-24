@@ -202,6 +202,20 @@ include(joinpath(TEST_DIR, "test_jlcs_invariants.jl"))
 
 include(joinpath(TEST_DIR, "test_c_inprocess.jl"))
 
+# ── 7b. Static promotion (llvmcall slicing contract, M1) ─────────────────────
+# Fixture-gated: internal statics (functions + mutable globals) become exported
+# __rb_<lib>_* symbols post-opt so per-function slices bind to the .so's single
+# copy of state; const statics stay internal; the wrapper never wraps __rb_*.
+
+include(joinpath(TEST_DIR, "test_static_promotion.jl"))
+
+# ── 7c. Per-function bitcode slicing (llvmcall slicing M2) ───────────────────
+# Slicer.jl over the promoted slice_test module: declarations-only slices
+# (single definition, mutable statics declared via __rb_*), hazard/refusal
+# policy, both state-coherence directions through live Base.llvmcall, cache.
+
+include(joinpath(TEST_DIR, "test_slicer.jl"))
+
 # ── 8. Nested-struct ABI resolution (pure ccall path) ────────────────────────
 # Library-free trace: structs with struct-typed members must come out with
 # verified named fields (SysV register classes preserved by value), and

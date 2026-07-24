@@ -62,6 +62,8 @@ const PRESERVED_TOML_KEYS = [
     ("wrap", "macros"),
     ("wrap", "shim_headers"),
     ("wrap", "cstring_owned"),
+    ("wrap", "tier1"),
+    ("link", "promote_statics"),
 ]
 
 """
@@ -578,7 +580,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         false,                                   # enable_lto
         String[],                                # link_libraries
         String[],                                # link_dirs
-        false                                    # fallback (in-process libLLVM for C)
+        false,                                   # fallback (in-process libLLVM for C)
+        true                                     # promote_statics (slice-ready .so)
     )
 
     binary_config = ConfigurationManager.BinaryConfig(
@@ -597,7 +600,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         Dict{String,Dict{String,Any}}(),         # macros
         String[],                                # shim_headers
         Dict{String,String}(),                   # cstring_owned
-        false                                    # dag
+        false,                                   # dag
+        ConfigurationManager.Tier1Config(false, String[], 64, false)  # tier1 (opt-in)
     )
 
     llvm_config = ConfigurationManager.LLVMConfig(
