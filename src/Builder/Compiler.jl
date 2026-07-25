@@ -931,7 +931,9 @@ definitions (the cJSON `static global_error` divergence class) or leaving a slic
 
 Internal **constant** globals (string literals, lookup tables) are deliberately
 left internal: slices may embed constants safely, and promoting them would
-bloat the dynamic symbol table for nothing.
+bloat the dynamic symbol table for nothing. Constants that are external-but-
+hidden are promoted anyway — the Slicer binds those by `declare`, not by
+embedding, so they have to be dlsym-able.
 
 Runs post-optimization so internal linkage still fed IPO, on the exact module
 that becomes both the `.so` and the slice source — one truth, bit-identical
@@ -976,8 +978,16 @@ function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::Stri
             end
             for gv in LLVM.globals(mod)
                 LLVM.isdeclaration(gv) && continue       # only defined globals
-                LLVM.isconstant(gv) && continue          # constants stay internal (slices embed them)
                 needs_promotion(gv) || continue
+                # INTERNAL constants stay internal: no symbol exists, so the Slicer
+                # embeds them, and read-only data has no divergence class. A constant
+                # that is external-but-HIDDEN is the opposite case — the Slicer's
+                # boundary policy reads "not local linkage" as "a symbol exists" and
+                # binds it by `declare`, but hidden keeps it out of the dynsym. Lua's
+                # LUAI_DDEF tables (`luaT_typenames_`) are exactly this, and left
+                # unpromoted they cost lua_typename/luaL_checktype/luaL_tolstring/
+                # luaL_typeerror their Tier-1 slices.
+                (LLVM.isconstant(gv) && LLVM.linkage(gv) in local_linkages) && continue
                 old = LLVM.name(gv)
                 (isempty(old) || startswith(old, "llvm.") || startswith(old, "__rb_")) && continue
                 promote!(gv, old)

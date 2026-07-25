@@ -30,6 +30,11 @@ long st_call_op(long x)       { return current_op(x); }
  * in the dynsym and deadlocks the JIT. */
 long st_scaled(long x) { return st_hidden_scale(x); }
 
+/* Reads a hidden-visibility CONST table defined in the other TU. The index is
+ * opaque to the optimizer, so the load survives and the slice must bind the
+ * table by symbol. */
+long st_table_at(int i) { return ST_HIDDEN_TABLE[i & 3]; }
+
 long st_sum(int n, ...) {
     va_list ap;
     long s = 0;

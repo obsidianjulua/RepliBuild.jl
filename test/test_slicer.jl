@@ -36,7 +36,7 @@ const ABI_LL = joinpath(FIXTURE, "build", "slicetest_abi.ll")
 Libdl.dlopen(LIB, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
 
 const TARGETS = ["st_get_count", "st_bump", "st_apply", "st_call_op",
-                 "st_guarded_div", "st_sum", "st_scaled"]
+                 "st_guarded_div", "st_sum", "st_scaled", "st_table_at"]
 const CACHE_DIR = joinpath(FIXTURE, ".replibuild_cache")
 
 const R = Slicer.slice_library(ABI_LL; targets=TARGETS, cache_dir=CACHE_DIR)
@@ -52,6 +52,8 @@ const R = Slicer.slice_library(ABI_LL; targets=TARGETS, cache_dir=CACHE_DIR)
     Base.llvmcall(($(R["st_guarded_div"].ir), "st_guarded_div"), Clong, Tuple{Clong,Clong}, a, b)
 @eval t1_scaled(x::Clong) =
     Base.llvmcall(($(R["st_scaled"].ir), "st_scaled"), Clong, Tuple{Clong}, x)
+@eval t1_table_at(i::Cint) =
+    Base.llvmcall(($(R["st_table_at"].ir), "st_table_at"), Clong, Tuple{Cint}, i)
 
 @testset "Slicer (slicing M2)" begin
 
@@ -119,6 +121,14 @@ end
     @test occursin("declare", rs.ir)
     @test !occursin(Regex("^define .*@st_hidden_scale\\b", "m"), rs.ir)
 
+    # Same for the hidden CONST table: bound by declare (not local linkage, so
+    # the Slicer will not embed it), therefore it had to be promoted.
+    rt = R["st_table_at"]
+    @test Slicer.sliced(rt)
+    @test "__rb_slicetest_ST_HIDDEN_TABLE" in rt.declares
+    @test occursin("@__rb_slicetest_ST_HIDDEN_TABLE = external", rt.ir)
+    @test !occursin("[4 x i64] [i64 2", rt.ir)   # declared, never embedded
+
     # Every declared symbol of every produced slice resolves through the same
     # lookup ORC uses — i.e. the pre-flight passes for this fixture.
     for name in TARGETS
@@ -169,6 +179,11 @@ end
     @test t1_scaled(Clong(7)) == 22
     @test t1_scaled(Clong(0)) == 1
     @test ccall((:st_scaled, LIB), Clong, (Clong,), 7) == 22
+
+    # Load from a de-hidden const table through the JIT — same table the .so
+    # reads, bound by symbol rather than duplicated into the slice.
+    @test [t1_table_at(Cint(i)) for i in 0:3] == [2, 3, 5, 7]
+    @test ccall((:st_table_at, LIB), Clong, (Cint,), 2) == 5
 end
 
 @testset "Slice cache round-trip" begin

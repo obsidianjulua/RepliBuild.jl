@@ -13,3 +13,7 @@ long st_b_get(void)        { return hidden_counter; }
  * cannot be internalized before the link, and noinline keeps the call edge in
  * st_scaled's body after O2. */
 ST_INTERNAL long st_hidden_scale(long x) { return 3 * x + 1; }
+
+/* LUAI_DDEF analogue — external linkage (no `static`), hidden visibility,
+ * const. Defined here, read from slice_a.c. */
+const long ST_HIDDEN_TABLE[4] = { 2, 3, 5, 7 };

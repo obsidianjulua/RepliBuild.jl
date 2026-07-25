@@ -29,4 +29,12 @@ long st_b_get(void);            /* exercises the post-link rename             */
 ST_INTERNAL long st_hidden_scale(long x);  /* defined in slice_b.c           */
 long st_scaled(long x);                    /* public API; calls it (slice_a) */
 
+/* Lua's LUAI_DDEF class: a CONST global that is external-linkage + hidden.
+ * Internal constants are exempt from promotion because the Slicer embeds them,
+ * but this one is not local linkage — the Slicer reads it as "external
+ * constant → declare" and binds it by symbol, so it must reach the dynsym.
+ * (lua's `luaT_typenames_` is precisely this.) */
+__attribute__((visibility("hidden"))) extern const long ST_HIDDEN_TABLE[4];
+long st_table_at(int i);                   /* indexes it (slice_a)           */
+
 #endif

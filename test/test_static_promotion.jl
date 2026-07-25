@@ -62,10 +62,15 @@ const metadata = JSON.parsefile(joinpath(FIXTURE, "julia", "compilation_metadata
     @test haskey(promoted, "st_hidden_scale")
     @test promoted["st_hidden_scale"] == "__rb_slicetest_st_hidden_scale"
 
+    # LUAI_DDEF class: const + external + hidden. Const alone does NOT exempt a
+    # global from promotion — only *internal* const does (those get embedded).
+    @test haskey(promoted, "ST_HIDDEN_TABLE")
+    @test promoted["ST_HIDDEN_TABLE"] == "__rb_slicetest_ST_HIDDEN_TABLE"
+
     # Const static table NOT promoted; public API NOT renamed
     @test !haskey(promoted, "OP_TABLE")
     for api in ("st_bump", "st_get_count", "st_apply", "st_sum", "st_guarded_div",
-                "st_scaled")
+                "st_scaled", "st_table_at")
         @test !haskey(promoted, api)
     end
 end
@@ -85,6 +90,10 @@ end
     @test occursin(r" T __rb_slicetest_st_hidden_scale\b", dynsyms)
     # (`_` is a word char, so \b cannot match inside the __rb_ name)
     @test !occursin(r"\bst_hidden_scale\b", dynsyms)
+
+    # De-hidden LUAI_DDEF table: read-only data, exported under __rb_ only
+    @test occursin(r" R __rb_slicetest_ST_HIDDEN_TABLE\b", dynsyms)
+    @test !occursin(r"\bST_HIDDEN_TABLE\b", dynsyms)
 end
 
 @testset "Single copy of state (dlsym ↔ API coherence)" begin
@@ -118,6 +127,11 @@ end
     @test scale_ptr != C_NULL
     @test ccall(scale_ptr, Clong, (Clong,), 7) == 22
 
+    # De-hidden const table: the exported symbol IS the datum the API reads
+    @test ccall((:st_table_at, LIB), Clong, (Cint,), 2) == 5
+    table_ptr = Ptr{Clong}(Libdl.dlsym(h, "__rb_slicetest_ST_HIDDEN_TABLE"))
+    @test unsafe_load(table_ptr, 3) == 5
+
     # Behavior sanity on the survivors
     @test ccall((:st_apply, LIB), Clong, (Cint, Clong), 1, 21) == -21
     @test ccall((:st_guarded_div, LIB), Clong, (Clong, Clong), 84, 2) == 42
@@ -142,6 +156,7 @@ end
     @test isdefined(M, :st_scaled)
     @test !isdefined(M, :st_hidden_scale)   # nor do de-hidden LUAI_FUNCs
     @test M.st_scaled(7) == 22
+    @test M.st_table_at(2) == 5
 
     # Wrapper API drives the same single copy dlsym sees
     before = ccall((:st_get_count, LIB), Clong, ())
