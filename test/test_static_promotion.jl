@@ -12,6 +12,11 @@
 #   4. The promoted map lands in compilation_metadata.json.
 #   5. The generated wrapper dlopens RTLD_GLOBAL, never wraps __rb_* symbols,
 #      and its API still behaves.
+#   6. The LUAI_FUNC class — external linkage + hidden visibility — is promoted
+#      too. Linkage alone doesn't identify it, and `default<O2>` never
+#      internalizes it, so before this it survived as a `define hidden`: absent
+#      from the dynsym, invisible to dlsym, and a JIT deadlock for any slice
+#      that declared it. Regression lock for that fix.
 #
 # Usage: julia --project=. test/test_static_promotion.jl
 
@@ -51,9 +56,16 @@ const metadata = JSON.parsefile(joinpath(FIXTURE, "julia", "compilation_metadata
         @test startswith(promoted[fn], "__rb_slicetest_")
     end
 
+    # LUAI_FUNC class: external linkage + hidden visibility. Not internal, so
+    # the linkage-only rule missed it; not in the dynsym either, so a slice
+    # declaring it deadlocks the JIT. Promotion must cover it.
+    @test haskey(promoted, "st_hidden_scale")
+    @test promoted["st_hidden_scale"] == "__rb_slicetest_st_hidden_scale"
+
     # Const static table NOT promoted; public API NOT renamed
     @test !haskey(promoted, "OP_TABLE")
-    for api in ("st_bump", "st_get_count", "st_apply", "st_sum", "st_guarded_div")
+    for api in ("st_bump", "st_get_count", "st_apply", "st_sum", "st_guarded_div",
+                "st_scaled")
         @test !haskey(promoted, api)
     end
 end
@@ -67,6 +79,12 @@ end
     @test !occursin(r"\bOP_TABLE\b", dynsyms)
     # Promoted DATA symbols are data, not text
     @test occursin(r" [BD] __rb_slicetest_hidden_counter\b", dynsyms)
+
+    # The de-hidden LUAI_FUNC lands in the dynsym as TEXT under its promoted
+    # name only — dlsym-able (so slices bind), bare name gone (so it is not API)
+    @test occursin(r" T __rb_slicetest_st_hidden_scale\b", dynsyms)
+    # (`_` is a word char, so \b cannot match inside the __rb_ name)
+    @test !occursin(r"\bst_hidden_scale\b", dynsyms)
 end
 
 @testset "Single copy of state (dlsym ↔ API coherence)" begin
@@ -93,6 +111,13 @@ end
     slot = Ptr{Ptr{Cvoid}}(Libdl.dlsym(h, "__rb_slicetest_current_op"))
     @test unsafe_load(slot) == Libdl.dlsym(h, "__rb_slicetest_op_square")
 
+    # De-hidden helper still callable through its public entry, and the
+    # promoted symbol is the same code dlsym hands back
+    @test ccall((:st_scaled, LIB), Clong, (Clong,), 7) == 22
+    scale_ptr = Libdl.dlsym(h, "__rb_slicetest_st_hidden_scale")
+    @test scale_ptr != C_NULL
+    @test ccall(scale_ptr, Clong, (Clong,), 7) == 22
+
     # Behavior sanity on the survivors
     @test ccall((:st_apply, LIB), Clong, (Cint, Clong), 1, 21) == -21
     @test ccall((:st_guarded_div, LIB), Clong, (Clong, Clong), 84, 2) == 42
@@ -113,7 +138,10 @@ end
     M = Slicetest
     @test isdefined(M, :st_bump)
     @test isdefined(M, :st_apply)
-    @test !isdefined(M, :op_double)  # statics don't become API
+    @test !isdefined(M, :op_double)         # statics don't become API
+    @test isdefined(M, :st_scaled)
+    @test !isdefined(M, :st_hidden_scale)   # nor do de-hidden LUAI_FUNCs
+    @test M.st_scaled(7) == 22
 
     # Wrapper API drives the same single copy dlsym sees
     before = ccall((:st_get_count, LIB), Clong, ())

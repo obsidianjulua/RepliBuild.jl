@@ -25,6 +25,11 @@ long st_apply(int op, long x) { return OP_TABLE[op % 3](x); }
 void st_set_op(int op)        { current_op = OP_TABLE[op % 3]; }
 long st_call_op(long x)       { return current_op(x); }
 
+/* Public entry over a hidden-visibility helper from the other TU. Its slice
+ * must `declare` the PROMOTED name — an un-promoted `st_hidden_scale` is not
+ * in the dynsym and deadlocks the JIT. */
+long st_scaled(long x) { return st_hidden_scale(x); }
+
 long st_sum(int n, ...) {
     va_list ap;
     long s = 0;

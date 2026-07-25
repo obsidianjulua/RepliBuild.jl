@@ -31,7 +31,7 @@ using JSON
 export SliceResult, slice_library, slice_function, sliced
 
 "Bump to invalidate every cached slice (policy/algorithm change)."
-const SLICER_VERSION = "1"
+const SLICER_VERSION = "2"
 
 struct SliceResult
     name::String
@@ -41,13 +41,14 @@ struct SliceResult
     n_declared_fns::Int
     n_declared_globals::Int
     n_embedded_constants::Int
+    declares::Vector{String}           # symbols the JIT must resolve (M3 pre-flight)
 end
 
 "Whether a usable slice was produced."
 sliced(r::SliceResult) = r.ir !== nothing
 
 _refuse(name, why::String, hazards=Symbol[]) =
-    SliceResult(name, nothing, hazards, why, 0, 0, 0)
+    SliceResult(name, nothing, hazards, why, 0, 0, 0, String[])
 
 # ── attribute / classification helpers ───────────────────────────────────────
 
@@ -259,11 +260,19 @@ function _extract!(mod, target_name::String)
 
     LLVM.verify(mod)
 
-    # Post-DCE stats from what actually survived
-    n_decl_fns = count(f -> LLVM.isdeclaration(f) && LLVM.name(f) != target_name,
-                       collect(LLVM.functions(mod)))
-    n_decl_gvs = count(g -> LLVM.isdeclaration(g), collect(LLVM.globals(mod)))
+    # Post-DCE inventory of what actually survived. The declaration names are
+    # the slice's binding contract: at llvmcall time ORC resolves each one
+    # against the process (the RTLD_GLOBAL-loaded `.so` plus its dependencies),
+    # and a single miss deadlocks the JIT rather than erroring. M3 pre-flights
+    # this list with dlsym so a miss demotes the function to ccall instead.
+    # `llvm.*` intrinsics are lowered by the backend and never looked up.
+    decl_fns = [LLVM.name(f) for f in LLVM.functions(mod)
+                if LLVM.isdeclaration(f) && LLVM.name(f) != target_name]
+    decl_gvs = [LLVM.name(g) for g in LLVM.globals(mod) if LLVM.isdeclaration(g)]
+    n_decl_fns = length(decl_fns)
+    n_decl_gvs = length(decl_gvs)
     n_embed = count(g -> !LLVM.isdeclaration(g), collect(LLVM.globals(mod)))
+    declares = sort!(filter(n -> !startswith(n, "llvm."), vcat(decl_fns, decl_gvs)))
 
     ir = string(mod)
     # Module flags carry nothing for a slice (no debug info) but conflict with
@@ -271,7 +280,8 @@ function _extract!(mod, target_name::String)
     # metadata nodes that remain are legal and ignored.
     ir = replace(ir, r"^!llvm\.(module\.flags|ident)[^\n]*\n"m => "")
 
-    return SliceResult(target_name, ir, hazards, nothing, n_decl_fns, n_decl_gvs, n_embed)
+    return SliceResult(target_name, ir, hazards, nothing,
+                       n_decl_fns, n_decl_gvs, n_embed, declares)
 end
 
 # ── public API ───────────────────────────────────────────────────────────────
@@ -367,7 +377,8 @@ function _cache_load(key_dir::String, target::String)
                            get(meta, "refusal", nothing),
                            get(meta, "n_declared_fns", 0),
                            get(meta, "n_declared_globals", 0),
-                           get(meta, "n_embedded_constants", 0))
+                           get(meta, "n_embedded_constants", 0),
+                           String[String(s) for s in get(meta, "declares", String[])])
     catch
         return nothing  # corrupt entry → recompute
     end
@@ -385,6 +396,7 @@ function _cache_store(key_dir::String, r::SliceResult)
             "n_declared_fns" => r.n_declared_fns,
             "n_declared_globals" => r.n_declared_globals,
             "n_embedded_constants" => r.n_embedded_constants,
+            "declares" => r.declares,
         ), 2)
     end
 end

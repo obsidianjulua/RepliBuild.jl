@@ -919,12 +919,15 @@ end
     _promote_statics_libllvm(in_ll, out_ll, lib_token) -> Union{Nothing,Dict{String,String}}
 
 Static-promotion pass for the llvmcall slicing contract: rename every
-internal/private-linkage global value that is a **function or a mutable global**
+**function or mutable global** that is not already exportable from the `.so`'s
+dynamic symbol table — internal/private linkage, OR external linkage with
+hidden/protected visibility (e.g. Lua's `LUAI_FUNC` functions like `luaF_close`) —
 to an exported `__rb_<lib_token>_<name>` symbol (external linkage, default
 visibility). The `.so` built from the promoted module then carries exactly one
-copy of every mutable datum and every static function body, which per-function
-bitcode slices bind to by `declare` — instead of embedding duplicate
-definitions (the cJSON `static global_error` divergence class).
+copy of every mutable datum and every non-exported function body, which
+per-function bitcode slices bind to by `declare` — instead of embedding duplicate
+definitions (the cJSON `static global_error` divergence class) or leaving a slice
+`declare` unresolvable (the hidden-visibility JIT-deadlock class).
 
 Internal **constant** globals (string literals, lookup tables) are deliberately
 left internal: slices may embed constants safely, and promoting them would
@@ -937,6 +940,20 @@ code on both sides. Returns the old→new name map (possibly empty), or
 """
 function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::String)
     local_linkages = (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage)
+    hidden_viz     = (LLVM.API.LLVMHiddenVisibility, LLVM.API.LLVMProtectedVisibility)
+    # A symbol is dlsym-bindable from a slice only if it reaches the .so's dynamic
+    # symbol table: external linkage AND default visibility. So anything a slice may
+    # `declare` that is NOT already exportable must be promoted:
+    #   * internal/private linkage — static fns, file-local mutable state; OR
+    #   * external linkage but hidden/protected visibility — e.g. Lua's LUAI_FUNC
+    #     functions (luaF_close &c.), which the optimizer leaves as `define hidden`.
+    # That second class is why gating de-hiding on `enable_lto` was wrong: the slicing
+    # path runs with enable_lto=false, so those symbols stayed out of the dynsym and a
+    # Tier-1 `llvmcall` referencing one deadlocked the JIT (`Symbols not found`).
+    # Renaming (not just de-hiding in place) also keeps these internals OUT of the wrap
+    # surface: DWARF still names the original, so the `__rb_*` symbol has no DWARF match
+    # and `extract_symbols_from_binary` filters it.
+    needs_promotion(gv) = LLVM.linkage(gv) in local_linkages || LLVM.visibility(gv) in hidden_viz
     try
         promoted = Dict{String,String}()
         LLVM.Context() do _
@@ -944,20 +961,23 @@ function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::Stri
 
             promote!(gv, old_name) = begin
                 LLVM.linkage!(gv, LLVM.API.LLVMExternalLinkage)
+                LLVM.visibility!(gv, LLVM.API.LLVMDefaultVisibility)  # into the .so's dynsym
                 LLVM.name!(gv, "__rb_$(lib_token)_$(old_name)")
                 # Read back: LLVM uniquifies on collision, the map must hold truth.
                 promoted[old_name] = LLVM.name(gv)
             end
 
             for f in LLVM.functions(mod)
-                LLVM.linkage(f) in local_linkages || continue
+                LLVM.isdeclaration(f) && continue        # only definitions (never `declare` externs)
+                needs_promotion(f) || continue
                 old = LLVM.name(f)
                 (isempty(old) || startswith(old, "llvm.") || startswith(old, "__rb_")) && continue
                 promote!(f, old)
             end
             for gv in LLVM.globals(mod)
-                LLVM.linkage(gv) in local_linkages || continue
-                LLVM.isconstant(gv) && continue
+                LLVM.isdeclaration(gv) && continue       # only defined globals
+                LLVM.isconstant(gv) && continue          # constants stay internal (slices embed them)
+                needs_promotion(gv) || continue
                 old = LLVM.name(gv)
                 (isempty(old) || startswith(old, "llvm.") || startswith(old, "__rb_")) && continue
                 promote!(gv, old)

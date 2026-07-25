@@ -12,6 +12,10 @@
 #      Tier-3 writes / Tier-1 reads AND Tier-1 writes / Tier-3 reads.
 #   4. Hazard reporting (setjmp family) and refusals (varargs target).
 #   5. The slice cache round-trips.
+#   6. The declared-symbol contract: `declares` names exactly what ORC must
+#      resolve, including the promoted name of a hidden-visibility callee, and
+#      the M3 pre-flight demotes a slice with an unresolvable declare instead of
+#      letting it deadlock the JIT.
 #
 # Usage: julia --project=. test/test_slicer.jl
 
@@ -32,7 +36,7 @@ const ABI_LL = joinpath(FIXTURE, "build", "slicetest_abi.ll")
 Libdl.dlopen(LIB, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
 
 const TARGETS = ["st_get_count", "st_bump", "st_apply", "st_call_op",
-                 "st_guarded_div", "st_sum"]
+                 "st_guarded_div", "st_sum", "st_scaled"]
 const CACHE_DIR = joinpath(FIXTURE, ".replibuild_cache")
 
 const R = Slicer.slice_library(ABI_LL; targets=TARGETS, cache_dir=CACHE_DIR)
@@ -46,6 +50,8 @@ const R = Slicer.slice_library(ABI_LL; targets=TARGETS, cache_dir=CACHE_DIR)
     Base.llvmcall(($(R["st_call_op"].ir), "st_call_op"), Clong, Tuple{Clong}, x)
 @eval t1_guarded_div(a::Clong, b::Clong) =
     Base.llvmcall(($(R["st_guarded_div"].ir), "st_guarded_div"), Clong, Tuple{Clong,Clong}, a, b)
+@eval t1_scaled(x::Clong) =
+    Base.llvmcall(($(R["st_scaled"].ir), "st_scaled"), Clong, Tuple{Clong}, x)
 
 @testset "Slicer (slicing M2)" begin
 
@@ -97,6 +103,32 @@ end
     @test :setjmp_family in R["st_guarded_div"].hazards
 end
 
+@testset "Declared-symbol contract (M3 pre-flight input)" begin
+    # `declares` is what the pre-flight dlsym-checks: exactly the names ORC
+    # must resolve, intrinsics excluded (the backend lowers those).
+    rg = R["st_get_count"]
+    @test rg.declares == ["__rb_slicetest_hidden_counter"]
+    @test !any(s -> startswith(s, "llvm."), R["st_apply"].declares)
+
+    # Hidden-visibility callee: the slice binds the PROMOTED name, and the
+    # bare `st_hidden_scale` — which is not in the dynsym — appears nowhere.
+    rs = R["st_scaled"]
+    @test Slicer.sliced(rs)
+    @test "__rb_slicetest_st_hidden_scale" in rs.declares
+    @test !("st_hidden_scale" in rs.declares)
+    @test occursin("declare", rs.ir)
+    @test !occursin(Regex("^define .*@st_hidden_scale\\b", "m"), rs.ir)
+
+    # Every declared symbol of every produced slice resolves through the same
+    # lookup ORC uses — i.e. the pre-flight passes for this fixture.
+    for name in TARGETS
+        Slicer.sliced(R[name]) || continue
+        for sym in R[name].declares
+            @test ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, sym) != C_NULL
+        end
+    end
+end
+
 @testset "Behavior + state coherence through llvmcall" begin
     # Fresh process state: counter starts at 0
     @test t1_get_count() == 0
@@ -130,6 +162,13 @@ end
     # setjmp/longjmp across the JIT boundary
     @test t1_guarded_div(Clong(84), Clong(2)) == 42
     @test t1_guarded_div(Clong(1), Clong(0)) == -1
+
+    # Call into a de-hidden LUAI_FUNC through the JIT. Un-promoted, this call
+    # does not fail — it hangs (ORC waits on a symbol that never arrives), so
+    # reaching this assertion at all is the regression signal.
+    @test t1_scaled(Clong(7)) == 22
+    @test t1_scaled(Clong(0)) == 1
+    @test ccall((:st_scaled, LIB), Clong, (Clong,), 7) == 22
 end
 
 @testset "Slice cache round-trip" begin
@@ -147,7 +186,35 @@ end
         @test Slicer.sliced(R2[name]) == Slicer.sliced(R[name])
         Slicer.sliced(R[name]) && @test R2[name].ir == R[name].ir
         @test R2[name].refusal == R[name].refusal
+        @test R2[name].declares == R[name].declares   # pre-flight input survives
     end
+end
+
+@testset "M3 symbol pre-flight" begin
+    preflight! = RepliBuild.Wrapper._tier1_preflight!
+
+    # A slice whose declare list contains a symbol the process cannot resolve
+    # must be dropped from the accepted set — not shipped to deadlock later.
+    good = R["st_get_count"]
+    bogus = Slicer.SliceResult("st_bogus", good.ir, Symbol[], nothing, 1, 0, 0,
+                               ["__rb_slicetest_hidden_counter",
+                                "__rb_slicetest_no_such_symbol"])
+    results = Dict("st_get_count" => good, "st_bogus" => bogus)
+    accepted = Set(["st_get_count", "st_bogus"])
+
+    unresolved = @test_logs (:warn,) match_mode = :any preflight!(accepted, results, LIB)
+    @test accepted == Set(["st_get_count"])
+    @test unresolved["st_bogus"] == ["__rb_slicetest_no_such_symbol"]
+
+    # An all-resolvable set passes untouched and logs nothing
+    clean_accept = Set(["st_get_count"])
+    @test isempty(@test_logs preflight!(clean_accept, results, LIB))
+    @test clean_accept == Set(["st_get_count"])
+
+    # An unloadable .so leaves every slice unverified → Tier 1 off wholesale
+    dead = Set(["st_get_count"])
+    @test_logs (:warn,) match_mode = :any preflight!(dead, results, "/nonexistent/libnope.so")
+    @test isempty(dead)
 end
 
 end  # top-level testset

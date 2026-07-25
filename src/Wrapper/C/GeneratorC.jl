@@ -133,11 +133,77 @@ function _struct_has_float_member(struct_name::String, dwarf_structs, seen::Set{
 end
 
 """
-    _tier1_slice_prepass(config, functions, dwarf_structs) -> Union{Nothing,Set{String}}
+    _symbol_resolves_in_process(sym) -> Bool
+
+Whether `sym` is findable through the process' global symbol namespace —
+`dlsym(RTLD_DEFAULT, sym)`, the exact lookup ORC performs when it links a
+slice at `llvmcall` time.
+"""
+_symbol_resolves_in_process(sym::AbstractString) =
+    ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, sym) != C_NULL
+
+"""
+    _tier1_preflight!(accepted, results, lib_path) -> Dict{String,Vector{String}}
+
+Pre-flight every accepted slice's binding contract: each name the slice binds
+by `declare` must already resolve in the process after the `.so` is loaded
+`RTLD_GLOBAL`. Functions with a miss are deleted from `accepted` and returned
+in the `function => missing symbols` map.
+
+This exists because an unresolved slice declaration does NOT surface as a
+catchable error: ORC blocks on the pending symbol and the JIT deadlocks on the
+first call ("Symbols not found"), with no stack to read. Checking the same
+lookup up-front converts that whole class into a clean Tier-3 fallback plus a
+warning naming the symbol — the discipline the macro-shim collision guard uses.
+
+A `.so` that cannot be loaded at all leaves every slice unverified, so Tier 1
+is disabled wholesale rather than shipped on faith.
+"""
+function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
+    unresolved = Dict{String,Vector{String}}()
+    try
+        # RTLD_GLOBAL: puts the library's dynamic symbols (including the
+        # promoted `__rb_*` statics) into the namespace dlsym(NULL) searches —
+        # the same state the generated wrapper's __init__ establishes.
+        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
+    catch e
+        @warn "Tier 1: cannot dlopen '$(basename(lib_path))' to pre-flight slice " *
+              "symbols, so no slice can be verified — Tier 1 disabled for this " *
+              "wrap (all functions dispatch via ccall)." exception=(e, catch_backtrace())
+        empty!(accepted)
+        return unresolved
+    end
+
+    for name in sort!(collect(accepted))
+        missing_syms = filter(!_symbol_resolves_in_process, results[name].declares)
+        isempty(missing_syms) && continue
+        delete!(accepted, name)
+        unresolved[name] = missing_syms
+    end
+
+    if !isempty(unresolved)
+        detail = join(("$fn → " * join(syms, ", ") for (fn, syms) in sort!(collect(unresolved))),
+                      "\n    ")
+        @warn """
+        Tier 1: $(length(unresolved)) function(s) demoted to ccall — their slices
+        `declare` symbols that do not resolve in the process after loading
+        '$(basename(lib_path))' RTLD_GLOBAL. Each would have deadlocked the JIT on
+        first call instead of erroring. A miss here means static promotion did not
+        export something the slice reached: check `promoted_symbols` in
+        compilation_metadata.json and `[link] promote_statics`.
+            $detail
+        """
+    end
+    return unresolved
+end
+
+"""
+    _tier1_slice_prepass(config, functions, dwarf_structs, lib_path) -> Union{Nothing,Set{String}}
 
 Run the Slicer over every Tier-1 candidate function (non-varargs, not
-excluded, `is_c_lto_safe`), apply the hazard/size policy, and write accepted
-slices to `julia/slices/<mangled>.ll`. Returns the accepted mangled-name set,
+excluded, `is_c_lto_safe`), apply the hazard/size policy, pre-flight the
+surviving slices' declarations against the real `.so`, and write the accepted
+ones to `julia/slices/<mangled>.ll`. Returns the accepted mangled-name set,
 or `nothing` when the promoted module is missing (promotion off / fallback
 build) — Tier 1 then disables loudly for this wrap.
 
@@ -146,7 +212,8 @@ Hazard policy: `:varargs_callee` (calling printf via declare is fine) and
 unless `[wrap.tier1] allow_setjmp = true`; everything else (`:weak`,
 `:inline_asm`, `:module_asm`) demotes to Tier 3.
 """
-function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs)
+function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs,
+                              lib_path::String)
     build_dir = get_build_path(config)
     abi_ll = joinpath(build_dir, "$(config.project.name)_abi.ll")
     if !isfile(abi_ll)
@@ -190,14 +257,22 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
         elseif length(r.ir) > max_bytes
             n_oversize += 1
         else
-            write(joinpath(slices_dir, name * ".ll"), r.ir)
             push!(accepted, name)
         end
     end
-    demoted = n_refused + n_hazard + n_oversize
+
+    # Symbol pre-flight runs BEFORE the slices hit disk — a demoted function
+    # must not leave a slice behind for the emission loop to pick up.
+    n_unresolved = length(_tier1_preflight!(accepted, results, lib_path))
+    for name in accepted
+        write(joinpath(slices_dir, name * ".ll"), results[name].ir)
+    end
+
+    demoted = n_refused + n_hazard + n_oversize + n_unresolved
     println("  tier1: $(length(accepted)) slices" *
             (demoted == 0 ? "" :
-             " ($n_refused refused, $n_hazard hazard-gated, $n_oversize oversize → ccall)"))
+             " ($n_refused refused, $n_hazard hazard-gated, $n_oversize oversize, " *
+             "$n_unresolved unresolved-symbol → ccall)"))
     return accepted
 end
 
@@ -335,7 +410,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     tier1_slices = nothing
     tier1_emitted = String[]
     if config.wrap.tier1.enable && config.wrap.language == :c
-        tier1_slices = _tier1_slice_prepass(config, functions, dwarf_structs)
+        tier1_slices = _tier1_slice_prepass(config, functions, dwarf_structs, lib_path)
     end
 
     # Layout registries shared between struct emission and function emission:
