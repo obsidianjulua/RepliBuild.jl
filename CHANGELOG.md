@@ -4,6 +4,88 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 1 un-parked: per-function `llvmcall` bitcode slicing (2026-07-22 → 07-25)
+
+Tier 1 (`Base.llvmcall`) has been real but effectively parked: LTO embeds the
+whole linked module *per call site*, which works for toy 1–2 function modules
+and segfaults at library scale on Julia 1.12.6 (box2d3's 730 fns), so production
+Hub configs set `[link] enable_lto = false` and everything fell back to `ccall`.
+The fix is not a smaller module — it's a *different* module. A slice is
+declarations-only: one function body, and every callee and global it reaches
+left as a bare `declare`, resolved at JIT time against the `.so` the wrapper
+already dlopen'd `RTLD_GLOBAL`. Size stops tracking library size and starts
+tracking function size — `lua_gettop` goes 15.8 MB → 2.8 KB, and even
+`lua_pcallk`/`luaL_openlibs` come out kilobyte-sized. Three pieces:
+
+- **M1 — static promotion** (`_promote_statics_libllvm`, Builder/Compiler.jl).
+  A slice can only bind a symbol that reaches the `.so`'s dynamic symbol table.
+  Post-optimization, pre-codegen, every function or global that a slice may bind
+  by `declare` but that cannot be dlsym'd is renamed to an exported
+  `__rb_<lib>_<name>` with external linkage and default visibility, on the exact
+  module that becomes both the `.so` and the slice source — one truth,
+  bit-identical. Old→new map lands in `compilation_metadata.json` under
+  `promoted_symbols`; `extract_symbols_from_binary` filters `__rb_*` so promoted
+  statics never surface as wrappable API. This also kills the cJSON
+  static-state divergence class by construction: there is exactly one copy of
+  file-local mutable state, and Tier 1 and Tier 3 provably see it (the fixture
+  writes through `dlsym` and reads back through the API, and inverse). Default
+  on for the in-process C bucket; `[link] promote_statics = false` opts out.
+- **M2 — the Slicer** (`src/IRGen/Slicer.jl`). `slice_library(abi_ll; targets,
+  cache_dir)` parses the promoted module once and clones per target
+  (`LLVMCloneModule`), then strips to declarations (`LLVMFunctionDeleteBody`,
+  `LLVMSetInitializer2(gv, NULL)`), embedding internal constants — they have no
+  symbol to bind and read-only data has no divergence class. Every slice is
+  verified before it's returned. Anything it cannot slice *correctly* comes back
+  as a refusal with a reason, never as silently-wrong IR: variadic target,
+  `blockaddress` into a body being deleted, alias/ifunc, or an unpromoted
+  module. Softer shapes surface as hazard flags for M3's gate
+  (`:setjmp_family`, `:varargs_callee`, `:noinline`, `:weak`, `:inline_asm`,
+  `:module_asm`). Content-hash cache under `<cache>/slices/`.
+- **M3 — emission + dispatch gate** (`_tier1_slice_prepass`, Wrapper/C/
+  GeneratorC.jl). New `[wrap.tier1] enable` (default off) runs the Slicer over
+  every `is_c_lto_safe` non-varargs candidate, applies the policy
+  (`max_slice_kb` = 64 as a tripwire rather than a tuning knob, `allow_setjmp`,
+  `exclude`), writes `julia/slices/<mangled>.ll`, and routes accepted functions
+  through `Base.llvmcall` on their slice. Non-accepted functions emit `ccall`
+  exactly as before, and the wrapper carries a `TIER1_FUNCTIONS` registry of
+  what actually got Tier 1.
+
+**Slice symbol pre-flight** (`_tier1_preflight!`). An unresolved slice `declare`
+does not raise: ORC prints `JIT session error: Symbols not found: [...]` and
+then **blocks forever** on the first call — verified by killing a 180 s run at
+the wall. So before any slice reaches disk, the pre-pass dlopens the `.so`
+`RTLD_GLOBAL` and `dlsym(RTLD_DEFAULT, …)`-checks every name in
+`SliceResult.declares` — the exact lookup ORC will perform. A miss demotes that
+one function to `ccall` with a warning naming the symbol; a `.so` that won't
+dlopen disables Tier 1 for the whole wrap rather than shipping unverified
+slices. `declares` is recorded post-DCE (intrinsics excluded) and round-trips
+through the slice cache. Converts "unresolved symbol → JIT deadlock" into a
+clean fallback, same discipline as the macro-shim collision guard.
+
+**Promotion covers hidden visibility, not just internal linkage.** The rule that
+matters is "cannot reach the dynsym", and `default<O2>` runs no internalize
+pass, so an external-linkage symbol marked hidden survives as `define hidden` /
+`hidden constant`: invisible to `dlsym`, but read by the Slicer's boundary
+policy as "a symbol exists" and bound by `declare`. Both halves of Lua's macro
+vocabulary are this shape — `LUAI_FUNC` functions and `LUAI_DDEF` tables — and
+the constant case additionally needed the const exemption narrowed to
+*internal* constants only (`luaT_typenames_` cost four lua functions their
+slices; `luaL_checktype` and `luaL_typeerror` regain Tier 1, while
+`lua_typename`/`luaL_tolstring` stay out under the unrelated `Cstring` gate).
+The hidden-const class was found by the new pre-flight, at lua scale, doing
+exactly its job.
+
+Gated by `test/test_static_promotion.jl` (69) and `test/test_slicer.jl` (127 +
+22 at lua scale) over `test/slice_test/`, which now carries both hidden classes
+(`st_hidden_scale` fn, `ST_HIDDEN_TABLE` const) as regression locks — reverting
+either fix fails them, and reverting the promotion fix without the pre-flight
+reproduces the deadlock. Live at scale on Hub lua: 227 slices accepted, 208
+functions emitted Tier 1, zero demotions, wrapper exercised clean.
+
+Remaining: M4 (perf characterization at scale — the M0 spike measured 0.4 ns vs
+1.13 ns/call clobbered, and 0 ns in a pure loop via LICM through the FFI
+boundary, but that is one function, not a library).
+
 ## v3.1.0 (2026-07-19)
 
 ### Introspection toolkit split into RepliBuildTooling.jl — breaking export change (2026-07-19)
