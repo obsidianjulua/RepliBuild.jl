@@ -140,3 +140,39 @@ include(joinpath(@__DIR__, "test_dep_cache.jl"))
 # ── DAGDiff module tests (synthetic metadata, no C++ toolchain required) ─────
 
 include(joinpath(@__DIR__, "dag_test", "test_dag_diff.jl"))
+
+# ── Suite wiring guard (no toolchain required) ───────────────────────────────
+# A test file that no suite includes is a test that silently never runs. That
+# is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3
+# slicing commit wired into neither suite and went unnoticed until an audit
+# ran it by hand (2026-07-25, 42/42 on first execution). Nothing structural
+# prevented it, so: every test_*.jl in test/ must be included by runtests.jl
+# or devtests.jl. Adding a file and forgetting to wire it now fails here,
+# naming the file.
+
+@testset "Every test file is wired into a suite" begin
+    # Collect what the suites actually `include`, NOT every mention of a
+    # filename — a comment naming a file (this block names one) must not count
+    # as wiring it, or the guard silently passes on the case it exists for.
+    function included_basenames(path)
+        names = Set{String}()
+        for line in eachline(path)
+            stripped = lstrip(line)
+            (startswith(stripped, '#') || !occursin("include(", stripped)) && continue
+            for m in eachmatch(r"\"([^\"]+\.jl)\"", stripped)
+                push!(names, basename(m.captures[1]))
+            end
+        end
+        return names
+    end
+
+    wired = union(included_basenames(joinpath(@__DIR__, "runtests.jl")),
+                  included_basenames(joinpath(@__DIR__, "devtests.jl")))
+    test_files = sort!(filter(f -> startswith(f, "test_") && endswith(f, ".jl"),
+                              readdir(@__DIR__)))
+    @test length(test_files) > 10        # readdir sanity — the scan found the suite
+
+    unwired = filter(f -> !(f in wired), test_files)
+    isempty(unwired) || @warn "Test files included by no suite — they never run" unwired
+    @test isempty(unwired)
+end

@@ -216,6 +216,14 @@ include(joinpath(TEST_DIR, "test_static_promotion.jl"))
 
 include(joinpath(TEST_DIR, "test_slicer.jl"))
 
+# ── 7d. Sliced-llvmcall dispatch (llvmcall slicing M3) ───────────────────────
+# The generated wrapper in mixed-tier mode: [wrap.tier1] enable routes eligible
+# functions through Base.llvmcall on their slice while varargs/setjmp stay
+# ccall, TIER1_FUNCTIONS records the Tier-1 surface, and both directions of the
+# cJSON state-divergence class stay coherent across the tier boundary.
+
+include(joinpath(TEST_DIR, "test_tier1_dispatch.jl"))
+
 # ── 8. Nested-struct ABI resolution (pure ccall path) ────────────────────────
 # Library-free trace: structs with struct-typed members must come out with
 # verified named fields (SysV register classes preserved by value), and
