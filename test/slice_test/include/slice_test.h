@@ -11,6 +11,16 @@ long st_apply(int op, long x);  /* dispatch through static CONST fn-ptr table */
 void st_set_op(int op);         /* writes static MUTABLE fn-ptr slot          */
 long st_call_op(long x);        /* calls through the mutable slot             */
 long st_sum(int n, ...);        /* varargs — must survive promotion/build     */
+
+/* Distinct symbols, one Julia name after sanitisation (`_+` collapse +
+ * trailing-`_` rstrip): the slice-const collision class. Different arity, so
+ * both survive the dedup and both must get their own `_SLICE_` constant. */
+long st_collide_(long x);
+long st__collide(long x, long y);
+
+/* Sliceable (pointer return) but NOT emittable (Cstring fails lto_shape_ok):
+ * the acceptance-vs-emission gap that leaves orphan slices on disk. */
+const char *st_name(int i);
 long st_guarded_div(long a, long b); /* setjmp/longjmp over a static jmp_buf  */
 
 long st_b_bump(long delta);     /* slice_b.c: same-named static counter —     */

@@ -143,6 +143,47 @@ _symbol_resolves_in_process(sym::AbstractString) =
     ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, sym) != C_NULL
 
 """
+    _slice_path_expr(mangled) -> String
+
+The Julia source expression a generated wrapper uses to locate `mangled`'s slice.
+Emitted twice per Tier-1 function — once for the `read` that feeds `llvmcall`,
+once for the `include_dependency` that makes the file a precompile dependency —
+so both must be built from here rather than written out twice.
+"""
+_slice_path_expr(mangled::AbstractString) =
+    "joinpath(@__DIR__, \"slices\", \"$mangled.ll\")"
+
+"""
+    _slice_const_name!(taken, mangled) -> String
+
+Name the wrapper constant that holds `mangled`'s slice IR.
+
+Keyed on the MANGLED symbol, never on the Julia name. `julia_name` is not
+injective over `mangled` — the `replibuild_shim_` strip, the `_+` collapse and
+the trailing-`_` rstrip each merge distinct symbols — so a Julia-keyed const
+silently rebinds one function to another function's slice module. `Base.llvmcall`
+resolves the const at codegen, i.e. on the FIRST CALL, so the loser fails long
+after wrap time: `luaL_checkversion_` and `replibuild_shim_luaL_checkversion`
+both produced `_SLICE_luaL_checkversion`, and the three-argument method died
+with "Module IR does not contain specified entry function".
+
+`taken` maps each issued constant to the symbol that owns it, so the sanitizer
+(a mangled name may carry characters that are not legal in an identifier)
+cannot reintroduce the very collision this exists to remove.
+"""
+function _slice_const_name!(taken::Dict{String,String}, mangled::AbstractString)
+    base = "_SLICE_" * replace(mangled, r"[^A-Za-z0-9_]" => "_")
+    name = base
+    n = 1
+    while get(taken, name, mangled) != mangled
+        n += 1
+        name = "$(base)_$n"
+    end
+    taken[name] = mangled
+    return name
+end
+
+"""
     _tier1_preflight!(accepted, results, lib_path) -> Dict{String,Vector{String}}
 
 Pre-flight every accepted slice's binding contract: each name the slice binds
@@ -198,14 +239,18 @@ function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
 end
 
 """
-    _tier1_slice_prepass(config, functions, dwarf_structs, lib_path) -> Union{Nothing,Set{String}}
+    _tier1_slice_prepass(config, functions, dwarf_structs, lib_path) -> Union{Nothing,Dict{String,String}}
 
 Run the Slicer over every Tier-1 candidate function (non-varargs, not
-excluded, `is_c_lto_safe`), apply the hazard/size policy, pre-flight the
-surviving slices' declarations against the real `.so`, and write the accepted
-ones to `julia/slices/<mangled>.ll`. Returns the accepted mangled-name set,
-or `nothing` when the promoted module is missing (promotion off / fallback
-build) — Tier 1 then disables loudly for this wrap.
+excluded, `is_c_lto_safe`), apply the hazard/size policy, and pre-flight the
+surviving slices' declarations against the real `.so`. Returns `mangled => IR`
+for every accepted slice, or `nothing` when the promoted module is missing
+(promotion off / fallback build) — Tier 1 then disables loudly for this wrap.
+
+Nothing is written here. Acceptance only makes a function *eligible*; whether a
+call site actually materialises is decided later by `lto_shape_ok` and by the
+signature dedup, so `_tier1_emit_slices!` writes the files once the final
+wrapper text is known.
 
 Hazard policy: `:varargs_callee` (calling printf via declare is fine) and
 `:noinline` (correct, just not spliced) are allowed; `:setjmp_family` is gated
@@ -238,7 +283,7 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
     # A policy change must not leave stale slices behind
     isdir(slices_dir) && rm(slices_dir, recursive=true, force=true)
     mkpath(slices_dir)
-    isempty(candidates) && return Set{String}()
+    isempty(candidates) && return Dict{String,String}()
 
     results = Slicer.slice_library(abi_ll; targets=unique(candidates),
                                    cache_dir=get_cache_path(config))
@@ -261,19 +306,68 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
         end
     end
 
-    # Symbol pre-flight runs BEFORE the slices hit disk — a demoted function
-    # must not leave a slice behind for the emission loop to pick up.
+    # Symbol pre-flight runs BEFORE anything is handed to the emission loop —
+    # a demoted function must not leave a slice for a call site to pick up.
     n_unresolved = length(_tier1_preflight!(accepted, results, lib_path))
-    for name in accepted
-        write(joinpath(slices_dir, name * ".ll"), results[name].ir)
-    end
 
     demoted = n_refused + n_hazard + n_oversize + n_unresolved
-    println("  tier1: $(length(accepted)) slices" *
+    println("  tier1: $(length(accepted)) slices accepted" *
             (demoted == 0 ? "" :
              " ($n_refused refused, $n_hazard hazard-gated, $n_oversize oversize, " *
              "$n_unresolved unresolved-symbol → ccall)"))
-    return accepted
+    return Dict{String,String}(name => results[name].ir for name in accepted)
+end
+
+"""
+    _tier1_emit_slices!(config, func_chunks, slice_ir, const_owner) -> Vector{String}
+
+Write exactly the slices the FINAL wrapper text reads, and return the Julia
+names of the call sites that read them (the `TIER1_FUNCTIONS` surface).
+
+The write set is derived from the post-dedup chunks rather than from the
+pre-pass's accepted set, because acceptance is a strictly weaker condition than
+emission and nothing else reconciles the two: the pre-pass gates on
+`is_c_lto_safe`, while a call site additionally needs `lto_shape_ok` (no
+Cstring/struct crossing) and must survive `_dedup_method_chunks`. Writing on
+acceptance left slices on disk that no call site could reach — 19 of them in
+the Hub lua wrapper, every one a `Cstring` return — sliced, pre-flighted,
+shipped inside the package, and dead.
+
+Deriving both the files and the registry from the emitted text is what keeps
+them in step: a future emission branch cannot add a `_SLICE_` const without
+also getting its slice written and its name registered.
+"""
+function _tier1_emit_slices!(config::RepliBuildConfig, func_chunks::Vector{String},
+                             slice_ir::Dict{String,String},
+                             const_owner::Dict{String,String})
+    slices_dir = joinpath(get_output_path(config), "slices")
+    mkpath(slices_dir)
+    emitted = String[]
+    written = Set{String}()
+    for chunk in func_chunks
+        occursin("Base.llvmcall((_SLICE_", chunk) || continue
+
+        for m in eachmatch(r"^const (_SLICE_\w+) = read\("m, chunk)
+            const_name = m.captures[1]
+            mangled = get(const_owner, const_name, nothing)
+            mangled === nothing &&
+                error("Tier 1: emitted constant $const_name has no owning symbol — " *
+                      "every slice const must come from _slice_const_name!")
+            haskey(slice_ir, mangled) ||
+                error("Tier 1: emitted constant $const_name reads a slice for " *
+                      "'$mangled', which the pre-pass never accepted")
+            mangled in written && continue
+            write(joinpath(slices_dir, mangled * ".ll"), slice_ir[mangled])
+            push!(written, mangled)
+        end
+
+        fm = match(r"^function ([A-Za-z_][A-Za-z0-9_!]*)\("m, chunk)
+        fm === nothing || push!(emitted, fm.captures[1])
+    end
+    isempty(written) ||
+        println("  tier1: $(length(written)) slices emitted " *
+                "($(length(unique(emitted))) functions)")
+    return emitted
 end
 
 function generate_introspective_module_c(config::RepliBuildConfig, lib_path::String,
@@ -404,11 +498,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # =========================================================================
     # TIER 1 SLICE PRE-PASS (per-function llvmcall over bitcode slices)
     # =========================================================================
-    # Produces julia/slices/<mangled>.ll for every accepted function and
-    # returns the accepted set; the emission loop routes those through
-    # Base.llvmcall on the slice instead of ccall. nothing ⇒ tier off.
+    # Slices every eligible function and returns `mangled => IR`; the emission
+    # loop routes accepted functions through Base.llvmcall on the slice instead
+    # of ccall. nothing ⇒ tier off. The `.ll` files are written afterwards by
+    # _tier1_emit_slices!, from the post-dedup chunks, so only slices a call
+    # site actually reads reach disk.
     tier1_slices = nothing
-    tier1_emitted = String[]
+    tier1_const_owner = Dict{String,String}()   # _SLICE_* const => mangled symbol
     if config.wrap.tier1.enable && config.wrap.language == :c
         tier1_slices = _tier1_slice_prepass(config, functions, dwarf_structs, lib_path)
     end
@@ -2198,7 +2294,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # Tier 1 sliced llvmcall: the pre-pass produced a verified slice AND
         # the ABI shape gates pass AND the C safety gate passes. Takes
         # precedence over the whole-module path.
-        tier1_this = tier1_slices !== nothing && (mangled in tier1_slices) &&
+        tier1_this = tier1_slices !== nothing && haskey(tier1_slices, mangled) &&
             lto_shape_ok && c_safe
 
         # Check for _UnsafeUnknown trap to prevent segfaults
@@ -2301,11 +2397,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         elseif !isempty(conversion_code)
             # Has parameter conversions
             if tier1_this
-                slice_const = "_SLICE_$julia_name"
+                slice_const = _slice_const_name!(tier1_const_owner, mangled)
+                slice_path = _slice_path_expr(mangled)
                 llvmcall_body = _build_llvmcall_expr(julia_return_type, "    "; ir_src=slice_const)
-                push!(tier1_emitted, julia_name)
                 func_def = """
-                const $slice_const = read(joinpath(@__DIR__, "slices", "$mangled.ll"), String)
+                const $slice_const = read($slice_path, String)
+                include_dependency($slice_path)
 
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
@@ -2338,11 +2435,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         else
             # Standard wrapper - no conversions needed
             if tier1_this
-                slice_const = "_SLICE_$julia_name"
+                slice_const = _slice_const_name!(tier1_const_owner, mangled)
+                slice_path = _slice_path_expr(mangled)
                 llvmcall_body = _build_llvmcall_expr(julia_return_type, "    "; ir_src=slice_const)
-                push!(tier1_emitted, julia_name)
                 func_def = """
-                const $slice_const = read(joinpath(@__DIR__, "slices", "$mangled.ll"), String)
+                const $slice_const = read($slice_path, String)
+                include_dependency($slice_path)
 
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
@@ -2613,6 +2711,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Same precompilation-safety dedup as the C++ generator: exactly one
     # definition per dispatch signature (last one wins, as include() would).
     func_chunks = _dedup_method_chunks(func_chunks)
+
+    # Slices are written from the FINAL chunks, after dedup — see the docstring.
+    tier1_emitted = tier1_slices === nothing ? String[] :
+        _tier1_emit_slices!(config, func_chunks, tier1_slices, tier1_const_owner)
 
     tier1_registry = """
     # Functions dispatched through Tier 1 (sliced llvmcall); empty ⇒ all ccall/thunk

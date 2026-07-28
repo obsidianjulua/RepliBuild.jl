@@ -35,6 +35,30 @@ long st_scaled(long x) { return st_hidden_scale(x); }
  * table by symbol. */
 long st_table_at(int i) { return ST_HIDDEN_TABLE[i & 3]; }
 
+/* Two DISTINCT C symbols that sanitise to the SAME Julia name: the wrapper
+ * collapses `_+` and rstrips a trailing `_`, so both become `st_collide`.
+ * They differ in arity, so both survive the signature dedup and both need a
+ * Tier-1 slice — which only works if the slice CONSTANT is keyed on the
+ * mangled symbol. Keyed on the Julia name they share one const and whichever
+ * loses gets bound to the other's slice module; `Base.llvmcall` resolves the
+ * const at codegen, so the loser fails on its FIRST CALL, long after wrap.
+ * (Live instance: lua's `luaL_checkversion_` vs the `luaL_checkversion` macro
+ * shim.) Different return shapes so a mis-bind shows up as a wrong VALUE, not
+ * only as a missing-entry error. */
+long st_collide_(long x)         { return x + 1000; }
+long st__collide(long x, long y) { return x * 100 + y; }
+
+/* A pointer return is `is_c_lto_safe`, so the pre-pass accepts and slices this
+ * — but the emitter maps `const char *` to Cstring, which `lto_shape_ok`
+ * refuses, so the call site stays a ccall. Acceptance is therefore strictly
+ * weaker than emission, and a writer keyed on acceptance strands this slice on
+ * disk: reachable by nothing, shipped inside the package. That is the shape of
+ * all 19 orphans in the Hub lua wrapper. */
+const char *st_name(int i) {
+    static const char *const NAMES[3] = { "double", "negate", "square" };
+    return NAMES[i % 3];
+}
+
 long st_sum(int n, ...) {
     va_list ap;
     long s = 0;
