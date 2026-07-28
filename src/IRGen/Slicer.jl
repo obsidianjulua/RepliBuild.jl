@@ -10,12 +10,19 @@
 # instead of the whole linked module (the box2d3-scale segfault class).
 #
 # Boundary policy per reached GlobalValue:
-#   function            → declare (promotion guarantees a symbol exists)
-#   mutable global      → declare (never embed — cJSON divergence class)
-#   internal constant   → embed   (no symbol exists; duplication is harmless)
-#   external constant   → declare (a symbol exists; bind, don't duplicate)
-#   alias / ifunc       → refuse the slice (unbuilt, ledger class)
-#   blockaddress ≠ self → refuse (jump table into a body we'd be deleting)
+#   function                        → declare (promotion guarantees a symbol)
+#   mutable global                  → declare (never embed — cJSON class)
+#   internal constant, unnamed_addr → embed   (no symbol exists, and only the
+#                                     contents are observable, so a second copy
+#                                     cannot be told apart from the first)
+#   internal constant, addr-signif. → refuse  (embedding would put the slice's
+#                                     copy at a DIFFERENT address than the
+#                                     .so's; that is the cJSON divergence class
+#                                     rotated from value identity onto address
+#                                     identity, and just as silent)
+#   external constant               → declare (a symbol exists; bind it)
+#   alias / ifunc                   → refuse the slice (unbuilt, ledger class)
+#   blockaddress ≠ self             → refuse (jump table into a deleted body)
 #
 # Everything runs on Julia's resident libLLVM via LLVM.jl — same in-process,
 # version-locked philosophy as the C build bucket. Every produced slice is
@@ -31,7 +38,7 @@ using JSON
 export SliceResult, slice_library, slice_function, sliced
 
 "Bump to invalidate every cached slice (policy/algorithm change)."
-const SLICER_VERSION = "2"
+const SLICER_VERSION = "3"
 
 struct SliceResult
     name::String
@@ -70,6 +77,22 @@ _is_vararg(f) = LLVM.API.LLVMIsFunctionVarArg(LLVM.API.LLVMGlobalGetValueType(f)
 
 _is_local_linkage(gv) =
     LLVM.linkage(gv) in (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage)
+
+"""
+Whether duplicating `gv` is unobservable — LLVM's own marker for "only the
+contents matter, not where they live". This is the exact precondition for
+embedding a constant into a slice, because the `.so` keeps its copy and the
+JIT gets a second one at a different address.
+
+`local_unnamed_addr` suffices for the globals this gates: they have INTERNAL
+linkage, so nothing outside the library can name them, and "not
+address-significant within the module" therefore already covers every observer
+that exists. Without either marker the address is live — the pointer may be
+compared, stored and compared later, or used as a sentinel — and two copies
+answer that question differently depending on which tier ran.
+"""
+_addr_insignificant(gv) =
+    LLVM.unnamed_addr(gv) || LLVM.local_unnamed_addr(gv)
 
 _is_weak_linkage(gv) =
     LLVM.linkage(gv) in (LLVM.API.LLVMWeakAnyLinkage, LLVM.API.LLVMWeakODRLinkage,
@@ -127,10 +150,18 @@ function _closure(mod, target)
             push!(reached_gvs, name)
             _is_weak_linkage(v) && push!(hazards, :weak)
             is_const = LLVM.isconstant(v)
-            if is_const && _is_local_linkage(v)
-                # no symbol exists → embed; its initializer contributes edges
+            if is_const && _is_local_linkage(v) && _addr_insignificant(v)
+                # no symbol exists and the address is dead → embed; its
+                # initializer contributes edges
                 push!(embedded_gvs, name)
                 push!(gv_queue, v)
+            elseif is_const && _is_local_linkage(v)
+                refusal[] = "reached address-significant internal constant " *
+                            "'$name' — it carries no `unnamed_addr`, so its " *
+                            "address is observable, and embedding would give " *
+                            "the slice a second copy at a different address " *
+                            "than the .so's. Promote it (a declared symbol " *
+                            "keeps one copy) or exclude this function."
             elseif !is_const && _is_local_linkage(v)
                 refusal[] = "reached internal-linkage mutable global '$name' — module " *
                             "is not static-promoted (slice from <name>_abi.ll)"

@@ -36,7 +36,8 @@ const ABI_LL = joinpath(FIXTURE, "build", "slicetest_abi.ll")
 Libdl.dlopen(LIB, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
 
 const TARGETS = ["st_get_count", "st_bump", "st_apply", "st_call_op",
-                 "st_guarded_div", "st_sum", "st_scaled", "st_table_at"]
+                 "st_guarded_div", "st_sum", "st_scaled", "st_table_at",
+                 "st_sentinel", "st_is_sentinel"]
 const CACHE_DIR = joinpath(FIXTURE, ".replibuild_cache")
 
 const R = Slicer.slice_library(ABI_LL; targets=TARGETS, cache_dir=CACHE_DIR)
@@ -60,9 +61,13 @@ const R = Slicer.slice_library(ABI_LL; targets=TARGETS, cache_dir=CACHE_DIR)
 @test isfile(ABI_LL)
 
 @testset "Structural invariants" begin
+    # st_sum: variadic target. st_sentinel/st_is_sentinel: reach an
+    # address-significant internal constant. Both classes refuse by design —
+    # asserted in their own testsets below.
+    REFUSED = ("st_sum", "st_sentinel", "st_is_sentinel")
     for name in TARGETS
         r = R[name]
-        if name == "st_sum"
+        if name in REFUSED
             @test !Slicer.sliced(r)
         else
             @test Slicer.sliced(r)
@@ -103,6 +108,29 @@ end
     # setjmp family is a hazard, not a refusal
     @test Slicer.sliced(R["st_guarded_div"])
     @test :setjmp_family in R["st_guarded_div"].hazards
+end
+
+@testset "Address-significant internal constants are refused, not embedded" begin
+    # Embedding is only sound when duplication is unobservable, which is
+    # exactly what `unnamed_addr` asserts. ST_SENTINEL has its address
+    # compared, so LLVM does NOT mark it — a second copy in the slice would
+    # sit at a different address than the .so's and `st_is_sentinel` would
+    # answer differently per tier. Same silent-divergence class as the cJSON
+    # static, rotated from value identity onto address identity.
+    ir = read(ABI_LL, String)
+    @test occursin(r"^@ST_SENTINEL = internal constant"m, ir)          # no unnamed_addr
+    @test occursin(r"^@OP_TABLE = internal unnamed_addr constant"m, ir) # the sound contrast
+
+    for fn in ("st_sentinel", "st_is_sentinel")
+        @test !Slicer.sliced(R[fn])
+        @test occursin("ST_SENTINEL", R[fn].refusal)
+        @test occursin("unnamed_addr", R[fn].refusal)
+    end
+
+    # The contrast still slices: OP_TABLE is address-insignificant, so
+    # embedding it is sound and st_apply keeps its Tier-1 route.
+    @test Slicer.sliced(R["st_apply"])
+    @test occursin(r"^@OP_TABLE = internal unnamed_addr constant"m, R["st_apply"].ir)
 end
 
 @testset "Declared-symbol contract (M3 pre-flight input)" begin
@@ -230,6 +258,39 @@ end
     dead = Set(["st_get_count"])
     @test_logs (:warn,) match_mode = :any preflight!(dead, results, "/nonexistent/libnope.so")
     @test isempty(dead)
+
+    # The check is scoped to the library and its DT_NEEDED chain, NOT to
+    # `dlsym(RTLD_DEFAULT, …)`. Resolving process-wide would verify a slice
+    # against every library loaded in the wrap session — an earlier wrap, or
+    # the previous `.so` after an edit — and those symbols do not exist in the
+    # consumer's process, so the slice ships and deadlocks the JIT there.
+    #
+    # `jl_gc_collect` is a real, resolvable symbol in THIS process (libjulia)
+    # that libslicetest.so does not supply. Process-wide it passes; scoped it
+    # must not, and it must be reported as a stray rather than as missing.
+    @test RepliBuild.Wrapper._symbol_resolves_via(C_NULL, "jl_gc_collect")
+    stray = Slicer.SliceResult("st_stray", good.ir, Symbol[], nothing, 1, 0, 0,
+                               ["__rb_slicetest_hidden_counter", "jl_gc_collect"])
+    sr = Dict("st_stray" => stray)
+    acc = Set(["st_stray"])
+    u = @test_logs (:warn,) (:warn,) match_mode = :any preflight!(acc, sr, LIB)
+    @test isempty(acc)
+    @test u["st_stray"] == ["jl_gc_collect"]
+
+    # And the pre-flight must not leave the library loaded: it opens
+    # RTLD_LOCAL, so the symbols never enter the namespace
+    # `dlsym(RTLD_DEFAULT, …)` searches, and it closes the handle when done.
+    # An RTLD_GLOBAL load that is never closed is what contaminated later
+    # wraps in the same session. Probe with a private COPY at a unique path —
+    # this file's own top-level dlopen of LIB is RTLD_GLOBAL and would mask
+    # the difference.
+    lib2 = joinpath(mktempdir(), "libslicetest_preflight_probe.so")
+    cp(LIB, lib2)
+    @test !any(==(lib2), Libdl.dllist())
+    acc2 = Set(["st_get_count"])
+    @test isempty(@test_logs preflight!(acc2, Dict("st_get_count" => good), lib2))
+    @test acc2 == Set(["st_get_count"])      # resolved through the handle …
+    @test !any(==(lib2), Libdl.dllist())     # … and not left behind
 end
 
 end  # top-level testset

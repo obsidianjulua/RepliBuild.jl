@@ -21,6 +21,11 @@ long st__collide(long x, long y);
 /* Sliceable (pointer return) but NOT emittable (Cstring fails lto_shape_ok):
  * the acceptance-vs-emission gap that leaves orphan slices on disk. */
 const char *st_name(int i);
+
+/* Reach an internal constant whose ADDRESS is observable (no `unnamed_addr`).
+ * Embedding duplicates it at a new address; the Slicer must refuse instead. */
+const long *st_sentinel(void);
+long st_is_sentinel(const long *p);
 long st_guarded_div(long a, long b); /* setjmp/longjmp over a static jmp_buf  */
 
 long st_b_bump(long delta);     /* slice_b.c: same-named static counter —     */

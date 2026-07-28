@@ -133,14 +133,15 @@ function _struct_has_float_member(struct_name::String, dwarf_structs, seen::Set{
 end
 
 """
-    _symbol_resolves_in_process(sym) -> Bool
+    _symbol_resolves_via(handle, sym) -> Bool
 
-Whether `sym` is findable through the process' global symbol namespace —
-`dlsym(RTLD_DEFAULT, sym)`, the exact lookup ORC performs when it links a
-slice at `llvmcall` time.
+Whether `dlsym` finds `sym` through `handle`. A `C_NULL` handle is
+`RTLD_DEFAULT` — the whole process — which is what ORC searches when it links
+a slice at `llvmcall` time. A real handle scopes the lookup to that library
+and its `DT_NEEDED` chain.
 """
-_symbol_resolves_in_process(sym::AbstractString) =
-    ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, sym) != C_NULL
+_symbol_resolves_via(handle::Ptr{Cvoid}, sym::AbstractString) =
+    ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), handle, sym) != C_NULL
 
 """
     _slice_path_expr(mangled) -> String
@@ -187,9 +188,9 @@ end
     _tier1_preflight!(accepted, results, lib_path) -> Dict{String,Vector{String}}
 
 Pre-flight every accepted slice's binding contract: each name the slice binds
-by `declare` must already resolve in the process after the `.so` is loaded
-`RTLD_GLOBAL`. Functions with a miss are deleted from `accepted` and returned
-in the `function => missing symbols` map.
+by `declare` must be supplied by the `.so` itself or its `DT_NEEDED` chain.
+Functions with a miss are deleted from `accepted` and returned in the
+`function => missing symbols` map.
 
 This exists because an unresolved slice declaration does NOT surface as a
 catchable error: ORC blocks on the pending symbol and the JIT deadlocks on the
@@ -202,11 +203,19 @@ is disabled wholesale rather than shipped on faith.
 """
 function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
     unresolved = Dict{String,Vector{String}}()
-    try
-        # RTLD_GLOBAL: puts the library's dynamic symbols (including the
-        # promoted `__rb_*` statics) into the namespace dlsym(NULL) searches —
-        # the same state the generated wrapper's __init__ establishes.
-        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
+    strays = Dict{String,Vector{String}}()
+
+    # RTLD_LOCAL, and closed again below. The check resolves through the
+    # HANDLE, so the library never needs to enter the global namespace — and
+    # must not. `dlsym(RTLD_DEFAULT, …)` searches every globally-loaded
+    # library in THIS process, so an RTLD_GLOBAL load that is never closed
+    # leaks its symbols into every later wrap in the same session: wrapping B
+    # after A verified B's slices against A's exports too, and re-wrapping
+    # after an edit verified against the previous `.so`. Those symbols do not
+    # exist in the consumer's process, so the slice shipped and deadlocked the
+    # JIT there — precisely the class this pre-flight exists to prevent.
+    handle = try
+        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
     catch e
         @warn "Tier 1: cannot dlopen '$(basename(lib_path))' to pre-flight slice " *
               "symbols, so no slice can be verified — Tier 1 disabled for this " *
@@ -215,11 +224,29 @@ function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
         return unresolved
     end
 
-    for name in sort!(collect(accepted))
-        missing_syms = filter(!_symbol_resolves_in_process, results[name].declares)
-        isempty(missing_syms) && continue
-        delete!(accepted, name)
-        unresolved[name] = missing_syms
+    try
+        for name in sort!(collect(accepted))
+            # Scoped to the library and its DT_NEEDED chain — what a consumer
+            # gets when the wrapper's __init__ dlopens the `.so` RTLD_GLOBAL.
+            # Strictly narrower than ORC's process-wide lookup, so a miss can
+            # only over-demote (safe), never wrongly accept.
+            missing_syms = filter(s -> !_symbol_resolves_via(handle, s),
+                                  results[name].declares)
+            isempty(missing_syms) && continue
+            delete!(accepted, name)
+            unresolved[name] = missing_syms
+            # A symbol the library cannot supply but this process can is the
+            # contamination signature — worth naming, because "missing" and
+            # "only here because something else is loaded" have very different
+            # fixes.
+            stray = filter(s -> _symbol_resolves_via(C_NULL, s), missing_syms)
+            isempty(stray) || (strays[name] = stray)
+        end
+    finally
+        try
+            Libdl.dlclose(handle)
+        catch
+        end
     end
 
     if !isempty(unresolved)
@@ -227,11 +254,22 @@ function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
                       "\n    ")
         @warn """
         Tier 1: $(length(unresolved)) function(s) demoted to ccall — their slices
-        `declare` symbols that do not resolve in the process after loading
-        '$(basename(lib_path))' RTLD_GLOBAL. Each would have deadlocked the JIT on
-        first call instead of erroring. A miss here means static promotion did not
-        export something the slice reached: check `promoted_symbols` in
-        compilation_metadata.json and `[link] promote_statics`.
+        `declare` symbols that '$(basename(lib_path))' and its dependencies do not
+        supply. Each would have deadlocked the JIT on first call instead of
+        erroring. A miss here means static promotion did not export something the
+        slice reached: check `promoted_symbols` in compilation_metadata.json and
+        `[link] promote_statics`.
+            $detail
+        """
+    end
+    if !isempty(strays)
+        detail = join(("$fn → " * join(syms, ", ") for (fn, syms) in sort!(collect(strays))),
+                      "\n    ")
+        @warn """
+        Tier 1: some of those symbols DO resolve in this build process but are not
+        supplied by the library — they come from something else loaded here (an
+        earlier wrap in this session, or the host). A consumer loading only
+        '$(basename(lib_path))' would not find them, so they are treated as missing.
             $detail
         """
     end

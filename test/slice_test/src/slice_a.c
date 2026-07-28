@@ -48,6 +48,19 @@ long st_table_at(int i) { return ST_HIDDEN_TABLE[i & 3]; }
 long st_collide_(long x)         { return x + 1000; }
 long st__collide(long x, long y) { return x * 100 + y; }
 
+/* Address-significant internal constant: no `unnamed_addr`, because the code
+ * below compares its ADDRESS rather than its contents. Embedding it into a
+ * slice would hand the JIT a second copy at a different address, and
+ * `st_is_sentinel` would then answer differently depending on which tier ran
+ * — the cJSON divergence class rotated from value identity onto address
+ * identity, and just as silent. The Slicer must refuse both functions.
+ * (OP_TABLE above is the contrast: address never taken, so LLVM marks it
+ * `unnamed_addr` and embedding it is sound.) */
+static const long ST_SENTINEL = -1;
+
+const long *st_sentinel(void)          { return &ST_SENTINEL; }
+long st_is_sentinel(const long *p)     { return p == &ST_SENTINEL; }
+
 /* A pointer return is `is_c_lto_safe`, so the pre-pass accepts and slices this
  * — but the emitter maps `const char *` to Cstring, which `lto_shape_ok`
  * refuses, so the call site stays a ccall. Acceptance is therefore strictly
