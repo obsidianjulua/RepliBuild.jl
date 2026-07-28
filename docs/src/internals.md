@@ -24,14 +24,20 @@ Each wrapped function is routed to exactly one calling tier, chosen from its DWA
 
 | Tier | Mechanism | Selected when |
 |------|-----------|---------------|
-| 1 | `Base.llvmcall` against LTO bitcode | POD args, scalar/pointer return, LTO bitcode available |
+| 1 | `Base.llvmcall` against a per-function bitcode slice | POD args, scalar/pointer return, `[wrap.tier1] enable = true` (C only) |
 | 2 | MLIR thunk via `libJLCS.so` (JIT at load, or AOT `_thunks.so`) | packed structs, unions, large by-value struct returns, C++ classes, virtual dispatch, exceptions |
 | 3 | `ccall` into the `.so` | the unconditional fallback |
 
 The routing decision lives in `Wrapper/DispatchLogic.jl` (`is_ccall_safe`, `is_c_lto_safe`); the [Tier selection logic](#Tier-selection-logic) section below lists the exact checks.
 
-!!! note "Tier 1 is currently parked"
-    `Base.llvmcall` embeds the **whole linked module** at each call site, which at whole-library scale can crash Julia's JIT and duplicates file-local `static` state between the embedded bitcode and the `.so`. Production configurations therefore set `[link] enable_lto = false` and dispatch through Tier 3; C++ defaults to LTO off. The replacement — per-function bitcode slicing (declarations-only slices bound to the `.so`) — is in progress; until it lands, treat Tier 1 as an experimentation path for small stateless kernels. See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch-(current-status)).
+!!! note "Two Tier-1 payloads, one supported"
+    Tier 1 can carry its IR two ways, and the knobs are independent.
+
+    **Per-function slices — `[wrap.tier1] enable`** (C only, default off) is the supported path. `_tier1_slice_prepass` (`Wrapper/C/GeneratorC.jl`) runs `IRGen/Slicer.jl` over every `is_c_lto_safe` non-varargs candidate, applies the hazard/size policy, and `dlsym`-pre-flights each slice's declarations against the real `.so`. Acceptance only makes a function *eligible*: a call site additionally needs `lto_shape_ok` (no Cstring or struct crossing) and must survive the signature dedup, so `_tier1_emit_slices!` writes `julia/slices/<mangled>.ll` from the final wrapper text — only slices a call site actually reads reach disk, and `TIER1_FUNCTIONS` is derived in the same pass. Rests on static promotion (`_promote_statics_libllvm`) to guarantee every declared symbol reaches the dynamic symbol table. Decided at generation time — non-accepted functions emit plain `ccall`, and the wrapper exports `TIER1_FUNCTIONS`.
+
+    **Whole-module bitcode — `[link] enable_lto`** embeds the entire linked module at each call site: scale-limited (can crash Julia's JIT on large libraries) and it duplicates file-local `static` state between the embedded bitcode and the `.so`. Production configurations set `enable_lto = false`; C++ defaults to LTO off. Treat it as an experimentation path for small stateless kernels.
+
+    See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch).
 
 ## Wrapper
 
@@ -74,7 +80,9 @@ language = "cpp" # selects C++ generator + clang++ toolchain (default)
 
 ### Tier selection logic
 
-The function `is_ccall_safe()` in `src/Wrapper/DispatchLogic.jl` is the core dispatch decision. It inspects each function's DWARF metadata and returns `true` (Tier 1 / `ccall`) or `false` (Tier 2 / MLIR).
+The function `is_ccall_safe()` in `src/Wrapper/DispatchLogic.jl` is the core dispatch decision. It inspects each function's DWARF metadata and returns `false` when the signature needs an MLIR thunk (Tier 2), `true` when it can be called directly (Tier 1 or Tier 3).
+
+Choosing *between* the two direct tiers is a second, C-only step. `is_c_lto_safe()` marks a function Tier-1-eligible unless its **return type** is a packed struct or a by-value union — C has no templates, vtables, STL, or inheritance, so those are the only ABI hazards, and by-value parameters are fine either way. Eligibility is necessary but not sufficient: with `[wrap.tier1] enable = true` the function must also survive slicing, the hazard/size policy, and the `dlsym` pre-flight. Anything that does not, and everything when Tier 1 is off, emits `ccall`.
 
 **Checks performed:**
 
@@ -122,7 +130,14 @@ The `Compiler` module handles the translation of C/C++ source code into LLVM IR 
 3. **Compilation to LLVM IR:** Translates source code into `.ll` text format — `.c` via the JLL `clang`, `.cpp` via system `clang++`. The per-file cache is keyed on source `mtime` **plus a compile fingerprint** (flags, defines, include dirs, LLVM version, target triple); config changes can never silently reuse stale IR.
 4. **IR transformation and sanitization:** Strips attributes incompatible with Julia's internal LLVM JIT, removes `va_start`/`va_end` intrinsics from varargs function bodies (varargs are routed through true-variadic `@ccall` wrapper generation), and cleans mismatched debug metadata.
 5. **Link / optimize / assemble:** For **C**, these steps run **in-process on Julia's resident libLLVM** — `LLVM.link!` for linking, the new pass manager (`default<O…>`) for optimization, and in-process bitcode assembly — version-matched to the JLL clang that emitted the IR. A failure is a hard error; `[link] fallback = true` selects the external `llvm-link`/`opt` pipeline instead. **C++ always uses the external pipeline.**
-6. **Codegen:** The final `.ll → .so` step shells to clang/clang++.
+6. **Static promotion** (`_promote_statics_libllvm`, C in-process bucket, `[link] promote_statics`): see below.
+7. **Codegen:** The final `.ll → .so` step shells to clang/clang++.
+
+### Static promotion
+
+Post-optimization and pre-codegen, every function or global that a Tier-1 bitcode slice may bind by `declare` **but that cannot reach the `.so`'s dynamic symbol table** is renamed to an exported `__rb_<lib>_<name>` with external linkage and default visibility. The test is *"not exportable"*, not *"internal linkage"*: `default<O…>` runs no internalize pass, so it covers both internal/private linkage (file-local statics) **and** external-linkage-but-`hidden`/`protected` symbols — Lua's `LUAI_FUNC` functions and `LUAI_DDEF` tables are exactly the latter shape. Only *internal* constants stay internal: no symbol exists for a slice to bind, and read-only data has no divergence class.
+
+The rename happens on the one module (`<name>_abi.ll`) that becomes both the `.so` and the slice source, so the two are bit-identical by construction — which is what removes the whole-module path's duplicated-`static` failure class rather than papering over it. The old→new map lands in `compilation_metadata.json` under `promoted_symbols`, and `extract_symbols_from_binary` filters `__rb_*` so promoted statics never surface as wrappable API.
 
 ### Metadata extraction
 
@@ -223,6 +238,18 @@ Transforms parsed DWARF metadata (`VtableInfo`) into MLIR source text in the JLC
 **Source:** `src/IRGen/DAGDiff.jl`
 
 Structural type-graph diff used by tier selection and IR generation when a struct may contain other structs whose layouts disagree between Julia and C++. The pairwise check in `is_ccall_safe()` catches direct packed-vs-aligned mismatches; `DAGDiff` catches the transitive cases — a non-packed struct that contains a packed struct as a field, a struct chain through a typedef alias, etc. It outputs a topo-sorted lowering order so that the MLIR thunks for dependent types are emitted in the right sequence.
+
+## Slicer
+
+**Source:** `src/IRGen/Slicer.jl`
+
+Per-function bitcode slicing for Tier 1, on Julia's resident libLLVM. `slice_library(abi_ll; targets, cache_dir)` parses the promoted module once and clones it per target (`LLVMCloneModule`), then strips the clone to declarations: `LLVMFunctionDeleteBody` for every reached function, `LLVMSetInitializer2(gv, NULL)` for reached mutable and external constant globals, internalize + `globaldce` for everything unreached. Internal constants are embedded rather than declared. Every slice is verified before it is returned, and results are cached content-addressed under `<cache>/slices/`.
+
+The closure is **one level deep by construction** — a declared function contributes no edges of its own — so slice size tracks the target function, not the library. `lua_gettop` cuts 15.8 MB down to 2.8 KB; `luaL_openlibs` lands at 6 KB. This is why `max_slice_kb` is a tripwire rather than a tuning knob.
+
+Anything the Slicer cannot slice *correctly* comes back as a **refusal** with a reason, never as silently-wrong IR: a variadic target, a `blockaddress` into a body being deleted, alias/ifunc, or an unpromoted module (the fail-loud guard against slicing `_opt.ll` by mistake). Softer shapes come back as hazard flags for the generator's gate — `:setjmp_family`, `:varargs_callee`, `:noinline`, `:weak`, `:inline_asm`, `:module_asm`.
+
+Each `SliceResult` also records the symbols the slice `declare`s, post-DCE and excluding intrinsics. `_tier1_preflight!` in the C generator `dlopen`s the `.so` `RTLD_GLOBAL` and `dlsym`s each one — the exact lookup ORC will perform at first call — because an unresolved `declare` does not raise: ORC prints `Symbols not found: [...]` and then blocks forever. A miss demotes that function to `ccall`; a `.so` that will not `dlopen` disables Tier 1 for the whole wrap.
 
 ## ThunkBuilder
 

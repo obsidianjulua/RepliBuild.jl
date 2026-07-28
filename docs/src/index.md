@@ -21,14 +21,14 @@ Functions are automatically routed to one of three calling tiers — `Base.llvmc
 
 | Tier | Mechanism | When selected |
 |------|-----------|---------------|
-| 1 | `Base.llvmcall` | POD args, scalar/pointer return, LTO bitcode available |
+| 1 | `Base.llvmcall` on a per-function bitcode slice | POD args, scalar/pointer return, `[wrap.tier1] enable = true` |
 | 2 | MLIR thunks (`libJLCS.so`) | Packed structs, unions, large struct returns, C++ classes, virtual dispatch, exceptions |
 | 3 | `ccall` | Direct call into the `.so`; the unconditional fallback |
 
 Tier selection is automatic — the wrapper generator analyses each function signature against DWARF metadata and emits the appropriate calling convention.
 
 !!! note "Current Tier 1 status"
-    Tier 1 embeds the library's linked LLVM bitcode into the wrapper for `Base.llvmcall`. The mechanism is real and verified, but whole-module embedding is **scale-limited**: at whole-library scale (hundreds of functions) it can crash Julia's JIT, and it duplicates file-local `static` state between the embedded IR and the `.so` (calls through Tier 1 and Tier 3 can then observe different internal state). Production configurations therefore set `[link] enable_lto = false` and dispatch through Tier 3; C++ projects default to LTO off. The planned fix is per-function bitcode slicing rather than whole-module embedding. See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch-(current-status)) for details.
+    Tier 1 runs on **per-function bitcode slices** — declarations-only modules holding one function body, with everything it reaches left as a `declare` bound to the `.so` at JIT time. Opt in per project with `[wrap.tier1] enable = true` (C only, default off); it is live at library scale (Lua: 208 functions on slices, zero fallbacks). The older `[link] enable_lto` payload embeds the **whole linked module** per call site and remains scale-limited — it can crash Julia's JIT on large libraries and duplicates file-local `static` state — so production configs keep `enable_lto = false`; C++ defaults to LTO off. The two knobs are independent. See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch) for details.
 
 ## Quick start
 
@@ -118,12 +118,15 @@ parallel   = true
 aot_thunks = false           # true → pre-compile MLIR thunks into <name>_thunks.so
 
 [link]
-enable_lto         = false   # true → emit _lto.bc for Base.llvmcall (Tier 1; see status note above)
+enable_lto         = false   # true → emit _lto.bc and llvmcall the whole module (scale-limited; see note above)
 optimization_level = "3"
 
 [wrap]
 language     = "cpp"         # "c" | "cpp" (auto-detected by discover())
 use_clang_jl = true
+
+[wrap.tier1]                 # C only — per-function bitcode slices for Base.llvmcall
+enable = false
 
 [types]
 strictness = "warn"

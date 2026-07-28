@@ -60,13 +60,16 @@ Settings for linking and optimizing the LLVM IR.
 | Key | Type | Description | Default |
 |:--- |:---- |:----------- |:------- |
 | `optimization_level` | String | Optimization level (`"0"`, `"1"`, `"2"`, `"3"`, `"s"`, `"z"`). | `"2"` |
-| `enable_lto` | Bool | Emit `<name>_lto.bc` (LLVM bitcode) alongside the shared library and route eligible functions through `Base.llvmcall` (Tier 1). See the note below. | `true` for C projects, `false` for C++ |
+| `enable_lto` | Bool | Emit `<name>_lto.bc` (LLVM bitcode) and route eligible functions through `Base.llvmcall` on the **whole linked module**. Scale-limited — see the note below. Independent of `[wrap.tier1]`. | `true` for C projects, `false` for C++ |
 | `link_libraries` | Vector{String} | External libraries to link against (e.g., `["stdc++fs"]`). | `[]` |
 | `link_dirs` | Vector{String} | Additional library search directories for the link step. | `[]` |
 | `fallback` | Bool | **C projects only.** When `false`, the link → optimize → assemble steps run in-process on Julia's resident libLLVM (version-matched to the JLL clang that emitted the IR); a failure is a hard error. When `true`, use the external `llvm-link`/`opt` pipeline instead. C++ always uses the external pipeline. | `false` |
+| `promote_statics` | Bool | **C in-process bucket only.** Post-optimization, rename every function or global that a bitcode slice may bind by `declare` but that cannot reach the `.so`'s dynamic symbol table to an exported `__rb_<lib>_<name>`. Required by `[wrap.tier1]`; harmless otherwise. | `true` |
 
-!!! warning "`enable_lto` and production wrappers"
-    Tier 1 currently embeds the **whole linked module** per `llvmcall` site. At whole-library scale this can crash Julia's JIT, and it duplicates file-local `static` state between the embedded bitcode and the `.so`. Production configurations set `enable_lto = false` and dispatch through `ccall` (Tier 3). See [Zero-cost LTO dispatch](@ref "Zero-Cost LTO Dispatch (current status)") in the User Guide.
+!!! warning "`enable_lto` embeds the whole module — prefer `[wrap.tier1]`"
+    `enable_lto` embeds the **whole linked module** per `llvmcall` site. At whole-library scale this can crash Julia's JIT, and it duplicates file-local `static` state between the embedded bitcode and the `.so`. Production configurations set `enable_lto = false`.
+
+    This is *not* a statement about Tier 1 as such — the per-function slicing path configured under `[wrap.tier1]` below is immune to both problems and is the supported way to get Tier 1. The two knobs are independent; leaving `enable_lto = false` while setting `[wrap.tier1] enable = true` is the intended combination. See [Zero-cost LTO dispatch](@ref "Zero-Cost LTO Dispatch") in the User Guide.
 
 ## `[binary]`
 
@@ -131,6 +134,38 @@ sqlite3_mprintf = "sqlite3_free"
 ```
 
 Every `Cstring`-returning function — declared here or not — also gets a raw `<name>_ptr` variant that returns the pointer unchanged.
+
+### `[wrap.tier1]`
+
+**C projects only.** Routes eligible functions through `Base.llvmcall` on a
+per-function *bitcode slice* instead of `ccall` — the supported Tier 1 path
+(see [Zero-cost LTO dispatch](@ref "Zero-Cost LTO Dispatch") for what a slice is
+and why it replaces `[link] enable_lto`).
+
+```toml
+[wrap.tier1]
+enable       = true
+max_slice_kb = 64
+allow_setjmp = false
+exclude      = ["lua_error"]
+```
+
+| Key | Type | Description | Default |
+|:--- |:---- |:----------- |:------- |
+| `enable` | Bool | Run the slicer over every Tier-1 candidate and emit `Base.llvmcall` for the accepted ones. | `false` |
+| `max_slice_kb` | Int | Reject slices larger than this. A tripwire, not a tuning knob — declarations-only slices are kilobyte-sized regardless of function size, so a hit means something unexpected got embedded. | `64` |
+| `allow_setjmp` | Bool | Allow slices whose closure touches the `setjmp`/`longjmp` family. Verified to work through the JIT, gated off by default. | `false` |
+| `exclude` | Vector{String} | Function names (mangled or plain) to keep on `ccall` unconditionally. | `[]` |
+
+Requires `[link] promote_statics = true` (the default) and the in-process C
+pipeline — on a fallback or ingest build there is no promoted module, so Tier 1
+disables itself for the whole wrap with a warning rather than emitting
+unverified slices. Every function that is not accepted emits exactly the `ccall`
+it would have emitted with Tier 1 off; the generated module exports a
+`TIER1_FUNCTIONS::Set{String}` naming the ones that dispatch through a slice.
+The wrap prints both counts — `N slices accepted` then `N slices emitted
+(M functions)` — and a gap between them is the ABI shape gate refusing a
+Cstring or struct crossing, not a failure.
 
 ## `[types]`
 

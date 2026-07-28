@@ -97,7 +97,7 @@ Every function is routed to one of three call mechanisms:
 |------|-----------|-------|
 | **3** | `ccall` into the `.so` | The production default — what Hub configs use |
 | **2** | MLIR thunks via the JLCS dialect | C++ ABI cases `ccall` can't express: virtual dispatch, packed/large struct returns, exception-safe calls |
-| **1** | `Base.llvmcall` with LTO bitcode | C IR merged into Julia's JIT (cross-language inlining). Real, but currently scale-limited and opt-in — see caveats below |
+| **1** | `Base.llvmcall` on a per-function bitcode slice | C IR merged into Julia's JIT (cross-language inlining). C only, opt-in via `[wrap.tier1] enable` — see below |
 
 Struct emission follows one rule — **exact or opaque, never approximate**. The generator types every member and *proves* that Julia's layout reproduces each DWARF offset and the total size; on success you get named fields, on any doubt an opaque byte blob with accessors. Blobs that could silently misclassify under the x86-64 SysV ABI (float-bearing or packed, ≤16 bytes, crossing by value) generate a loud `error()` stub instead of a corrupting call.
 
@@ -132,11 +132,14 @@ flags      = ["-O2", "-fPIC"]
 aot_thunks = false                  # true → pre-compile Tier-2 thunks to _thunks.so
 
 [link]
-enable_lto = false                  # false → Tier 3 ccall (production default)
+enable_lto = false                  # whole-module llvmcall payload — leave off (see below)
 
 [wrap]
 language     = "c"                  # "c" | "cpp" (auto-detected)
 shim_headers = ["cJSON.h"]          # headers the macro shims #include
+
+[wrap.tier1]
+enable = true                       # C only → Base.llvmcall on per-function bitcode slices
 
 [wrap.macros.CJSON_VERSION_MAJOR]   # value macro → CJSON_VERSION_MAJOR()
 ret = "int"
@@ -177,7 +180,7 @@ Ops lower to LLVM IR and execute via MLIR JIT or ahead-of-time `_thunks.so`. Ful
 ## Scope and honest limits
 
 - **Single-target today:** ABI classification is x86-64 SysV (Linux). Win64/AAPCS are not modeled yet.
-- **Tier 1 is parked:** `Base.llvmcall` embeds the whole linked module per call site — fine at toy scale, unusable at whole-library scale, and mixed Tier-1/Tier-3 dispatch can diverge on file-local `static` state. Hub configs pin Tier 3 (`enable_lto = false`); the eventual fix is per-function bitcode slicing.
+- **Tier 1 runs on slices, and only for C.** `[wrap.tier1] enable` cuts a declarations-only module per function — one body, everything it reaches left as a `declare` bound to the `.so` at JIT time — so slice size tracks the function, not the library (`lua_gettop`: 15.8 MB → 2.8 KB). Live at scale on Lua: 208 functions on `llvmcall`, zero fallbacks. Default off, and C++ has no slicing path. The **older whole-module payload (`[link] enable_lto`) stays parked**: it embeds the entire linked module per call site, which is unusable at library scale and diverges on file-local `static` state between the embedded copy and the `.so`. Hub configs keep `enable_lto = false`. Perf at library scale is not yet characterized — the 3.3×/call figure is one spiked function, not a suite.
 - **C++ multiple inheritance** is not modeled (single inheritance is); virtual dispatch through secondary bases would need `this`-pointer adjustment.
 - The full ledger of known-unbuilt pieces lives in the repo and stays honest — see the changelog and docs.
 

@@ -96,7 +96,7 @@ language = "cpp" # C++ project: system clang++, external LLVM pipeline
 
 The toolchain requirements differ by bucket: **C projects need no external LLVM at all**, while **C++ projects need a system LLVM/MLIR 21+ install** for the JLCS dialect and Tier 2 thunks. An experimental Rust generator (`language = "rust"`) exists for `extern "C"` + `#[repr(C)]` surfaces.
 
-For C projects `enable_lto` defaults to `true`, which emits the LTO bitcode artifact alongside the library — see [Zero-cost LTO dispatch](@ref "Zero-Cost LTO Dispatch (current status)") below for why production configurations currently disable it anyway.
+For C projects `enable_lto` defaults to `true`, which emits the LTO bitcode artifact alongside the library — see [Zero-cost LTO dispatch](@ref "Zero-Cost LTO Dispatch") below for why production configurations disable it anyway, and use `[wrap.tier1]` instead.
 
 ## Ingest Mode (pre-built binaries) — experimental, C only
 
@@ -228,31 +228,105 @@ args = ["int", "float"]
 
 RepliBuild generates a C/C++ source file that wraps `MY_MATH_MACRO` inside a typed function and compiles it alongside your project. Shims are emitted with default symbol visibility (they survive `-fvisibility=hidden` builds), and a header-collision guard verifies each shim `#include` resolves inside your project/dependency tree rather than to a system-installed copy of the same header at a different version.
 
-## Zero-Cost LTO Dispatch (current status)
+## Zero-Cost LTO Dispatch
 
-When `enable_lto = true` (the default for C projects), the linker emits LLVM bitcode (`<name>_lto.bc`) alongside the shared library, and eligible functions get a dual-dispatch body:
+Tier 1 hands the C function's LLVM IR to `Base.llvmcall`, so Julia's JIT merges
+the C body directly into the calling Julia function — full cross-language
+inlining, no call instruction. There are two payloads that can carry that IR,
+and they are configured independently.
+
+### Per-function slices (`[wrap.tier1]`) — the supported path
+
+A **slice** is a declarations-only module: one function's body, and every callee
+and global it reaches left as a bare `declare`, resolved at JIT time against the
+`.so` the wrapper already `dlopen`'d `RTLD_GLOBAL`. Size stops tracking library
+size and starts tracking *function* size — in Lua, `lua_gettop` is a 2.8 KB
+slice cut from a 15.8 MB module, and even `luaL_openlibs` comes out at 6 KB.
+
+```toml
+[link]
+promote_statics = true    # default
+
+[wrap.tier1]
+enable = true
+```
+
+Each accepted function reads its slice into a top-level `const` and calls it:
 
 ```julia
-function vector_dot(a::Ptr{Cvoid}, b::Ptr{Cvoid}, n::Cint)::Cdouble
-    if !isempty(LTO_IR)
-        return Base.llvmcall((LTO_IR, "vector_dot"),
-                             Cdouble, Tuple{Ptr{Cvoid}, Ptr{Cvoid}, Cint}, a, b, n)
-    else
-        return ccall((:vector_dot, LIBRARY_PATH),
-                     Cdouble, (Ptr{Cvoid}, Ptr{Cvoid}, Cint), a, b, n)
+const _SLICE_lua_gettop = read(joinpath(@__DIR__, "slices", "lua_gettop.ll"), String)
+
+function lua_gettop(L::Any)::Cint
+    __cc_L = Base.cconvert(Ptr{lua_State}, L)
+    __ptr_L = Base.unsafe_convert(Ptr{lua_State}, __cc_L)
+    GC.@preserve __cc_L begin
+        return Base.llvmcall((_SLICE_lua_gettop, "lua_gettop"), Cint, Tuple{Ptr{lua_State}}, __ptr_L)
     end
 end
 ```
 
-When the bitcode is present, Julia's LLVM JIT merges the C IR directly into the calling Julia function, enabling full cross-language inlining and vectorization. On small modules this demonstrably matches pure-Julia performance.
+The `read` runs at load/precompile time and freezes an immutable `String` into
+the `const`, which is what `Base.llvmcall` requires — its IR argument must be
+statically evaluable. (A runtime value, e.g. dereferencing a `Ref`, fails with
+`error statically evaluating llvm IR argument`.)
 
-!!! warning "Why production configs currently set `enable_lto = false`"
-    `Base.llvmcall` embeds the **whole linked module** at each call site, which has two verified consequences at real-library scale:
+There is no `if !isempty(...)` branch: a function is decided at *generation*
+time, not call time. Anything not accepted emits the same `ccall` it always did,
+and the module exports `TIER1_FUNCTIONS::Set{String}` naming the functions that
+dispatch through a slice. Slicing a function successfully is necessary but not
+sufficient — the ABI shape gate still refuses Cstring and struct crossings — so
+that set can be smaller than the number of slices the wrap accepted.
+
+Three guarantees make this safe where whole-module embedding was not:
+
+1. **One copy of internal state.** Static promotion (`[link] promote_statics`)
+   renames anything a slice might bind by `declare` but that cannot reach the
+   `.so`'s dynamic symbol table — file-local statics, and external-linkage
+   symbols marked `hidden` — to an exported `__rb_<lib>_<name>`, on the exact
+   module that becomes both the `.so` and the slice source. Tier-1 and Tier-3
+   calls provably see the same state. Promoted names are filtered out of the
+   wrappable API.
+2. **Slices are refused, never guessed.** Variadic targets, `blockaddress`,
+   alias/ifunc, and an unpromoted module come back as refusals; `:weak`,
+   `:inline_asm` and `:module_asm` demote through the hazard gate. Every slice
+   is verified before it is written.
+3. **Symbol pre-flight.** An unresolved `declare` does not raise — ORC prints
+   `Symbols not found: [...]` and then blocks forever on the first call. So
+   before any slice reaches disk, the generator `dlopen`s the `.so` and
+   `dlsym`-checks every name the slice declares, which is the exact lookup ORC
+   will perform. A miss demotes that one function to `ccall` with a warning
+   naming the symbol; a `.so` that will not `dlopen` disables Tier 1 for the
+   whole wrap.
+
+Each slice const is paired with an `include_dependency` on the same path, so the
+`.ll` files are real precompilation dependencies: a wrapper vendored into a
+package recompiles when its slices change. On Julia 1.11+ that tracking is by
+**content**, so restoring a slice with a different mtime but identical bytes
+correctly does not force a rebuild.
+
+### Whole-module bitcode (`[link] enable_lto`) — scale-limited
+
+The older payload emits `<name>_lto.bc` and embeds the **whole linked module**
+at each call site, behind a runtime branch:
+
+```julia
+if !isempty(LTO_IR)
+    return Base.llvmcall((LTO_IR, "vector_dot"), Cdouble, Tuple{Ptr{Cvoid}, Ptr{Cvoid}, Cint}, a, b, n)
+else
+    return ccall((:vector_dot, LIBRARY_PATH), Cdouble, (Ptr{Cvoid}, Ptr{Cvoid}, Cint), a, b, n)
+end
+```
+
+!!! warning "Why production configs set `enable_lto = false`"
+    Whole-module embedding has two verified consequences at real-library scale:
 
     1. **JIT scale limit** — embedding a whole library's IR (hundreds of functions) per call can crash Julia's JIT. Small benchmark modules work; whole libraries do not reliably.
-    2. **Duplicated internal state** — file-local `static` definitions stay private to the embedded bitcode, so Tier-1 calls and Tier-3 calls can observe *different copies* of the library's internal state (observed live on a JSON parser's error-reporting path).
+    2. **Duplicated internal state** — file-local `static` definitions stay private to the embedded bitcode, so Tier-1 and Tier-3 calls can observe *different copies* of the library's internal state (observed live on a JSON parser's error-reporting path).
 
-    Until per-function bitcode slicing replaces whole-module embedding, treat LTO dispatch as an experimentation feature: excellent for small, stateless compute kernels; disabled (`[link] enable_lto = false`) for production wrappers. The `ccall` fallback in the generated code means an LTO-disabled rebuild changes nothing else about the wrapper's API.
+    Both are properties of the *whole-module payload*, not of Tier 1. Slices fix
+    the first by construction and the second through static promotion. Treat
+    `enable_lto` as an experimentation feature for small stateless kernels, and
+    use `[wrap.tier1]` for real libraries. The two are independent knobs.
 
 ## AOT Thunks
 
