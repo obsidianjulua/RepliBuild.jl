@@ -55,3 +55,53 @@ void free_opaque(OpaqueState* state) {
         free(state);
     }
 }
+
+// Tagged union with a named member of anonymous union type (see header §6).
+TaggedValue make_tagged_int(int64_t v) {
+    TaggedValue t;
+    memset(&t, 0, sizeof(t));
+    t.tag = TAG_INT;
+    t.flags = 0xABCD1234u;
+    t.u.i = v;
+    return t;
+}
+
+TaggedValue make_tagged_double(double v) {
+    TaggedValue t;
+    memset(&t, 0, sizeof(t));
+    t.tag = TAG_DBL;
+    t.flags = 0u;
+    t.u.d = v;
+    return t;
+}
+
+TaggedValue make_tagged_str(const char* s, int len) {
+    TaggedValue t;
+    memset(&t, 0, sizeof(t));
+    t.tag = TAG_STR;
+    t.flags = 1u;
+    t.u.str.ptr = s;
+    t.u.str.len = len;
+    return t;
+}
+
+int tagged_is(const TaggedValue* t, ValueTag k) {
+    return (t && t->tag == k) ? 1 : 0;
+}
+
+// All-float anonymous union by value (see header §7).
+FloatBox floatbox_make(double d, int kind) {
+    FloatBox b;
+    memset(&b, 0, sizeof(b));
+    b.v.d = d;
+    b.kind = kind;
+    return b;
+}
+
+double floatbox_get(FloatBox b) {
+    return b.v.d;
+}
+
+int floatbox_kind(FloatBox b) {
+    return b.kind;
+}

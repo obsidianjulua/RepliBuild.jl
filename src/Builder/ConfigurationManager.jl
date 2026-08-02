@@ -83,8 +83,14 @@ Nested struct for [wrap.tier1] — per-function llvmcall dispatch over bitcode
 slices (Slicer.jl). `enable` turns the tier on for C wrappers (default off —
 opt in per package); `exclude` names functions that must stay Tier 3;
 `max_slice_kb` refuses oversized slices (declarations-only slices are KBs, so
-this is a tripwire, not a tuning knob); `allow_setjmp` lifts the conservative
-gate on functions whose closure touches the setjmp/longjmp family.
+this is a tripwire, not a tuning knob); `allow_setjmp` lifts the gate on
+functions whose OWN slice body calls setjmp/longjmp or a `returns_twice`
+callee. The gate is direct-reach only: a library whose setjmp lives inside a
+`.so`-side callee (lua's `luaD_rawrunprotected`) never trips it, because a
+declarations-only slice never sees callee bodies. That narrowness is sound —
+the tier-sensitive hazard is setjmp executing *inside* JIT-spliced code;
+longjmp passing *across* the calling Julia frame is identical for ccall and
+llvmcall, so demotion would buy nothing there (verified live, Hub lua 2026-07-31).
 """
 struct Tier1Config
     enable::Bool
@@ -379,18 +385,26 @@ function parse_wrap_config(data::Dict)::WrapConfig
         wrap_style = :clang
     end
 
-    # Parse varargs overloads
+    # Parse varargs overloads. Shape errors are LOUD: the old parser silently
+    # dropped anything that wasn't a list-of-lists, so `f = ["Cint"]` (a very
+    # easy way to write `f = [["Cint"]]`) quietly became zero overloads and
+    # the user only saw a "no overloads configured" warning at wrap time.
     varargs = get(wrap, "varargs", Dict())
     varargs_overloads = Dict{String,Vector{Vector{String}}}()
-    
+
     for (func, sigs) in varargs
+        isa(sigs, Vector) || error("""
+            RepliBuild: [wrap.varargs.$func] must be a list of type lists, e.g.
+                $func = [["Cstring"], ["Cint", "Cdouble"]]
+            got: $(repr(sigs))""")
         sig_list = Vector{Vector{String}}()
-        if isa(sigs, Vector)
-            for s in sigs
-                if isa(s, Vector)
-                    push!(sig_list, String[string(x) for x in s])
-                end
-            end
+        for s in sigs
+            isa(s, Vector) || error("""
+                RepliBuild: [wrap.varargs.$func] entries must each be a LIST of
+                variadic type names — one list per overload:
+                    $func = [["Cstring"], ["Cint", "Cdouble"]]
+                got entry: $(repr(s)) (did you write ["Cint"] instead of [["Cint"]]?)""")
+            push!(sig_list, String[string(x) for x in s])
         end
         varargs_overloads[String(func)] = sig_list
     end

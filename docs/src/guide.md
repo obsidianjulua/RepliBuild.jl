@@ -251,24 +251,43 @@ promote_statics = true    # default
 enable = true
 ```
 
-Each accepted function reads its slice into a top-level `const` and calls it:
+Each accepted function gets a `@generated` kernel that decides ccall vs
+llvmcall once, at generation time, plus a public wrapper that routes through
+it:
 
 ```julia
-const _SLICE_lua_gettop = read(joinpath(@__DIR__, "slices", "lua_gettop.ll"), String)
+const _SLICE_lua_gettop = joinpath(@__DIR__, "slices", "lua_gettop.ll")
+isfile(_SLICE_lua_gettop) && include_dependency(_SLICE_lua_gettop)
+
+@generated function _TIER1_lua_gettop(__ptr_L::Ptr{lua_State})
+    # llvmcall is opportunistic: any doubt resolves to the ccall body.
+    if ccall(:jl_generating_output, Cint, ()) == 1 || !isfile(_SLICE_lua_gettop)
+        return :(ccall((:lua_gettop, LIBRARY_PATH), Cint, (Ptr{lua_State},), __ptr_L))
+    end
+    ir = read(_SLICE_lua_gettop, String)
+    return :(Base.llvmcall(($ir, "lua_gettop"), Cint, Tuple{Ptr{lua_State}}, __ptr_L))
+end
 
 function lua_gettop(L::Any)::Cint
     __cc_L = Base.cconvert(Ptr{lua_State}, L)
     __ptr_L = Base.unsafe_convert(Ptr{lua_State}, __cc_L)
     GC.@preserve __cc_L begin
-        return Base.llvmcall((_SLICE_lua_gettop, "lua_gettop"), Cint, Tuple{Ptr{lua_State}}, __ptr_L)
+        return _TIER1_lua_gettop(__ptr_L)
     end
 end
 ```
 
-The `read` runs at load/precompile time and freezes an immutable `String` into
-the `const`, which is what `Base.llvmcall` requires — its IR argument must be
-statically evaluable. (A runtime value, e.g. dereferencing a `Ref`, fails with
-`error statically evaluating llvm IR argument`.)
+The slice is read at generation time — the first call — and spliced into the
+returned expression as a literal, which satisfies `Base.llvmcall`'s
+statically-evaluable IR requirement while keeping module load free of slice
+I/O. The generation-time `jl_generating_output` check exists because emitting
+a sliced llvmcall inside a precompile worker deadlocks the JIT engine lock
+whenever a `declare` binds a dlopened library's symbol (and an untaken
+top-level branch reaches emission through inference alone): inside a
+precompile worker the kernel splices the plain ccall body instead, and a
+runtime first call regenerates to the slice. The `isfile` guard means a
+wrapper shipped or relocated without its `slices/` directory demotes to a
+plain ccall wrapper instead of failing.
 
 There is no `if !isempty(...)` branch: a function is decided at *generation*
 time, not call time. Anything not accepted emits the same `ccall` it always did,

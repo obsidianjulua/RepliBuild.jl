@@ -50,6 +50,47 @@ struct SelfReferential {
 // 5. Array of pointers to arrays
 typedef int (*ArrayPtr)[10];
 
+// 6. Tagged union: a NAMED member whose TYPE is an anonymous union.
+// Distinct from the C11 anonymous members above (which have no member name and
+// inject their fields into the enclosing scope) — here the member is `u`, and
+// only the union TYPE is unnamed. This is the shape that made tomlc17's
+// toml_datum_t a 40-byte blob with zero named fields: DWARF carried the whole
+// member tree, but an unnamed aggregate DIE was dropped on export, so the
+// member typed as `Any` and dragged the entire enclosing struct into a blob.
+typedef enum { TAG_NONE = 0, TAG_INT = 1, TAG_DBL = 2, TAG_STR = 3 } ValueTag;
+
+typedef struct {
+    ValueTag tag;          // offset 0  (enum, 4 bytes)
+    uint32_t flags;        // offset 4
+    union {                // offset 8, 16 bytes, align 8
+        int64_t i;
+        double d;
+        const char* s;
+        struct { const char* ptr; int len; } str;
+    } u;
+} TaggedValue;             // 24 bytes total
+
+TaggedValue make_tagged_int(int64_t v);
+TaggedValue make_tagged_double(double v);
+TaggedValue make_tagged_str(const char* s, int len);
+int tagged_is(const TaggedValue* t, ValueTag k);
+
+// 7. ALL-FLOAT anonymous union, passed and returned BY VALUE.
+// SysV classifies an eightbyte as SSE only when every field overlapping it is
+// float/double, so this union travels in XMM. An opaque region standing in for
+// it must therefore use a FLOAT element type — an integer one would claim
+// INTEGER class and the value would be read out of the wrong register file.
+// FloatBox is 16 bytes: eightbyte 0 = SSE (the union), eightbyte 1 = INTEGER
+// (kind), so a wrong region type is a wrong VALUE, not just a wrong type.
+typedef struct {
+    union { float f; double d; } v;   // offset 0, 8 bytes, align 8
+    int kind;                         // offset 8
+} FloatBox;                           // 16 bytes
+
+FloatBox floatbox_make(double d, int kind);
+double floatbox_get(FloatBox b);
+int floatbox_kind(FloatBox b);
+
 // API Functions to test
 
 // Pass by value of a massive struct

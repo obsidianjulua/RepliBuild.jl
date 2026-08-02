@@ -415,11 +415,21 @@ function _cache_load(key_dir::String, target::String)
     end
 end
 
+# Writes go through a temp file + rename so a concurrent build of the same
+# project can never read a torn entry: _cache_load validates nothing about
+# the .ll body, so a partial write would be served as slice IR and fail at
+# llvmcall time. rename(2) within a directory is atomic on POSIX.
+function _atomic_write(path::String, contents::AbstractString)
+    tmp = path * ".tmp-" * string(getpid())
+    write(tmp, contents)
+    mv(tmp, path; force=true)
+end
+
 function _cache_store(key_dir::String, r::SliceResult)
     if sliced(r)
-        write(joinpath(key_dir, r.name * ".ll"), r.ir)
+        _atomic_write(joinpath(key_dir, r.name * ".ll"), r.ir)
     end
-    open(joinpath(key_dir, r.name * ".json"), "w") do io
+    meta = sprint() do io
         JSON.print(io, Dict(
             "sliced" => sliced(r),
             "hazards" => String.(r.hazards),
@@ -430,6 +440,7 @@ function _cache_store(key_dir::String, r::SliceResult)
             "declares" => r.declares,
         ), 2)
     end
+    _atomic_write(joinpath(key_dir, r.name * ".json"), meta)
 end
 
 end # module Slicer

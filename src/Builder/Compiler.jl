@@ -2249,6 +2249,67 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         return (Dict{String,Dict{String,Any}}(), Dict{String,Dict{String,Any}}(), Dict{String,Any}(), Dict{String,String}())
     end
 
+    return parse_dwarf_dump(output)
+end
+
+"""
+    check_param_arity!(return_types, die_param_counts)
+
+Fail loudly when an extracted signature disagrees with the DIE tree it came from.
+
+The parameter list drives the emitted `ccall` argument tuple, so a count that
+does not match the subprogram DIE's own `DW_TAG_formal_parameter` children is a
+wrong-ABI call the caller cannot see — it type-checks, links, and corrupts the
+stack at runtime. `die_param_counts` is the independent witness: a plain count
+off the readelf tree depth, not derived from the name/type extraction path.
+
+Over-count (a phantom parameter, as in the `free_opaque` leak) always aborts.
+Under-count is reported as a warning: a declaration-only DIE legitimately
+carries unnamed parameters that nothing can be extracted from, and the
+definition DIE elsewhere in the dump is what supplies the real list.
+"""
+function check_param_arity!(return_types::Dict{String,Dict{String,Any}}, die_param_counts::Dict{String,Int})
+    phantom = String[]
+    dropped = String[]
+
+    for (key, info) in return_types
+        haskey(die_param_counts, key) || continue  # never opened as a subprogram DIE
+        extracted = length(get(info, "parameters", []))
+        in_die = die_param_counts[key]
+        extracted == in_die && continue
+        msg = "$key: extracted $extracted, DIE tree has $in_die"
+        extracted > in_die ? push!(phantom, msg) : push!(dropped, msg)
+    end
+
+    if !isempty(dropped)
+        @warn """
+        DWARF parameter extraction dropped parameters present in the DIE tree.
+        Wrappers for these functions will be called with too few arguments:
+          $(join(sort(dropped), "\n  "))"""
+    end
+
+    if !isempty(phantom)
+        error("""
+        DWARF parameter extraction produced phantom parameters not in the DIE tree.
+        This emits a ccall with the wrong argument tuple — refusing to continue:
+          $(join(sort(phantom), "\n  "))
+        The DIE tree is authoritative; the extraction walk mis-attributed \
+        parameters from a neighbouring DIE.""")
+    end
+
+    return nothing
+end
+
+"""
+    parse_dwarf_dump(output) -> (return_types, struct_defs, global_vars, typedef_table)
+
+Parse a GNU `readelf --debug-dump=info` dump into the type/signature tables.
+
+Split out from [`extract_dwarf_return_types`](@ref) so DIE-tree attribution can
+be pinned with synthetic dumps — no compiler, binary, or fixture build needed.
+See `test/test_dwarf_attribution.jl`.
+"""
+function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
     return_types = Dict{String,Dict{String,Any}}()
 
     # Parse DWARF output to extract type information
@@ -2301,9 +2362,16 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             parent_off = get(mi, "parent", nothing)
             if !isnothing(parent_off) && haskey(type_refs, parent_off) &&
                isa(type_refs[parent_off], Dict) && haskey(type_refs[parent_off], "members")
-                if !isnothing(mi["name"]) && !isnothing(mi["type"])
+                # A NAMELESS member is kept here rather than dropped: a C11
+                # anonymous `union {...};` / `struct {...};` member has no
+                # DW_AT_name, and dropping it lost the entire embedded tree.
+                # It gets a synthetic field name later (the anonymous-aggregate
+                # pass, which runs once the whole dump is parsed and the member's
+                # type DIE — emitted AFTER the member that references it — can
+                # finally be inspected); anything still nameless there is purged.
+                if !isnothing(mi["type"])
                     existing_names = [m["name"] for m in type_refs[parent_off]["members"]]
-                    if !(mi["name"] in existing_names)
+                    if isnothing(mi["name"]) || !(mi["name"] in existing_names)
                         member_dict = Dict{String, Any}(
                             "name" => mi["name"],
                             "type" => mi["type"],
@@ -2987,6 +3055,124 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
     end
 
+    # Name anonymous aggregates after the member that embeds them.
+    #
+    # Both `union { ... } u;` and a C11 anonymous `union { ... };` produce an
+    # aggregate DIE with no DW_AT_name. Such a DIE was dropped outright (the
+    # struct_defs export filters `unknown_union`/`unknown_struct`) and the
+    # member embedding it resolved to "unknown"/Any, so the WHOLE enclosing
+    # struct degraded to an opaque byte blob even though DWARF carries the
+    # complete member tree — toml_datum_t came out as 40 bytes with zero named
+    # fields (2026-08-01). Naming them `<parent>_<member>` turns them into
+    # ordinary named types the rest of the pipeline already knows how to carry.
+    #
+    # A nameless C11 member also gets a synthetic FIELD name (`_anonN`) so it
+    # survives `flush_pending_member`, and is flagged `anonymous_member` — its
+    # members are injected into the parent's namespace by C, which is what lets
+    # the generator forward `parent.x` to the embedded aggregate.
+    #
+    # Parent-first and iterated to a fixed point, so a nested anonymous
+    # aggregate inherits its parent's already-synthesized name.
+    _anon_agg_names = Set(["", "unknown", "unknown_struct", "unknown_class", "unknown_union"])
+    _named_ok(n) = isa(n, String) && !(n in _anon_agg_names)
+    _is_anon_agg(ti) = isa(ti, Dict) &&
+        get(ti, "kind", "") in ["struct", "class", "union"] &&
+        !_named_ok(get(ti, "name", ""))
+
+    taken_type_names = Set{String}()
+    for (_, ti) in type_refs
+        if isa(ti, Dict) && get(ti, "kind", "") in ["struct", "class", "union", "enum"]
+            n = get(ti, "name", "")
+            _named_ok(n) && push!(taken_type_names, n)
+        end
+    end
+    # Synthetic names must already be in the form the C generator's
+    # `_sanitize_c_type_name` would produce — it collapses `_+` to `_`, so a
+    # raw `Parent` + `_` + `_anon1` would be REWRITTEN to `Parent_anon1` at
+    # emission while the dependency graph still keyed on the unsanitized
+    # spelling. The edge then missed, the topological sort emitted the parent
+    # BEFORE the type it embeds, and the parent fell back to a byte blob.
+    function synth_type_name(parent::AbstractString, suffix::AbstractString)
+        s = replace(string(parent) * "_" * string(suffix), r"[^A-Za-z0-9_]" => "_")
+        s = replace(s, r"_+" => "_")
+        return String(rstrip(s, '_'))
+    end
+    function claim_type_name!(base::String)
+        cand = base
+        i = 2
+        while cand in taken_type_names
+            cand = "$(base)_$(i)"
+            i += 1
+        end
+        push!(taken_type_names, cand)
+        return cand
+    end
+
+    # Every CU that includes the header declares the same anonymous aggregate
+    # again, and each gets its own DIE — mpack_tag_t's union appeared in six,
+    # which without this minted mpack_tag_t_v through _v_6, five of them dead
+    # types in the wrapper. Structurally identical aggregates under the same
+    # parent name are the same C type, so they share one name.
+    function agg_signature(ti)
+        parts = String[string(get(ti, "kind", ""), "|", get(ti, "byte_size", "?"))]
+        for m in get(ti, "members", [])
+            push!(parts, string(get(m, "name", "?"), "@", get(m, "offset", "?"),
+                                ":", get(m, "bit_size", "")))
+        end
+        return join(parts, ",")
+    end
+    claimed_by_sig = Dict{String,String}()
+
+    for _round in 1:16
+        progressed = false
+        # Deterministic order: type_refs is a Dict, and the synthetic names
+        # (plus their collision suffixes) must not depend on hash order.
+        for parent_off in sort(collect(keys(type_refs)))
+            ti = type_refs[parent_off]
+            (isa(ti, Dict) && haskey(ti, "members")) || continue
+            pname = get(ti, "name", "")
+            _named_ok(pname) || continue          # parent still anonymous — wait a round
+            anon_idx = 0
+            for m in ti["members"]
+                mname = get(m, "name", nothing)
+                isnothing(mname) && (anon_idx += 1)
+                tref = get(m, "type", nothing)
+                isnothing(tref) && continue
+                child = get(type_refs, tref, nothing)
+                _is_anon_agg(child) || continue
+                # Field name vs TYPE name suffix: a C11 anonymous member gets the
+                # field `_anonN` but the type `Parent_anonN` — one leading
+                # underscore, because the sanitizer would collapse two anyway.
+                suffix = if isnothing(mname)
+                    mname = "_anon$(anon_idx)"
+                    m["name"] = mname
+                    m["anonymous_member"] = true
+                    "anon$(anon_idx)"
+                else
+                    string(mname)
+                end
+                base = synth_type_name(pname, suffix)
+                sigkey = base * "\0" * agg_signature(child)
+                child["name"] = get!(claimed_by_sig, sigkey) do
+                    claim_type_name!(base)
+                end
+                child["anonymous"] = true
+                progressed = true
+            end
+        end
+        progressed || break
+    end
+
+    # Members that stayed nameless are not anonymous aggregates (unnamed
+    # bitfield padding, `int : 3;`). They were dropped before this pass existed
+    # and are dropped here — a member with no name and no embedded type has
+    # nothing to expose.
+    for (_, ti) in type_refs
+        if isa(ti, Dict) && haskey(ti, "members")
+            filter!(m -> !isnothing(get(m, "name", nothing)), ti["members"])
+        end
+    end
+
     # Types collected from DWARF
 
     # Collect all struct/class/enum names for type resolution
@@ -2998,7 +3184,10 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             kind = get(type_info, "kind", "")
             name = get(type_info, "name", "")
 
-            if kind in ["struct", "class"] && !isempty(name) && name != "unknown" && name != "unknown_struct" && name != "unknown_class"
+            # Unions belong here too: a union-typed member used to resolve to
+            # "unknown" and land in the wrapper as `Any`, dropping it from the
+            # enclosing struct entirely.
+            if kind in ["struct", "class", "union"] && _named_ok(name)
                 push!(struct_names, name)
             elseif kind == "enum" && !isempty(name) && name != "unknown" && name != "unknown_enum"
                 push!(enum_names, name)
@@ -3030,8 +3219,10 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         if isa(type_info, Dict)
             kind = get(type_info, "kind", nothing)
 
-            # Struct or class - return the name
-            if kind in ["struct", "class"]
+            # Struct, class or union - return the name. Unions were missing
+            # here, so EVERY union-typed member (named or anonymous) resolved
+            # to "unknown" and was typed `Any` by the caller.
+            if kind in ["struct", "class", "union"]
                 return get(type_info, "name", "unknown")
             end
 
@@ -3160,20 +3351,73 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     current_function_linkage = nothing
     current_function_level = nothing
     function_processed = false  # State flag: true once we leave function's own level
-    params_for_this_function = []  # Collect parameters for current function, NEW name and usage
-
-    params_for_this_function = [] # NEW: Temporary storage for parameters of the current function being parsed
+    params_for_this_function = []  # Collect parameters for current function
 
     # Track formal parameters (similar to struct members)
     current_param_offset = nothing
-    
+    current_param_level = nothing  # depth of the open DW_TAG_formal_parameter DIE
+
+    # DIE-tree arity witness: how many DW_TAG_formal_parameter children the
+    # subprogram DIE actually has, counted straight off the readelf tree depth
+    # and independent of whether name/type extraction succeeded for each one.
+    # Compared against the extracted list by check_param_arity! below — a
+    # disagreement means the emitted ccall signature does not match the DIE
+    # tree, which is a silent wrong-call bug, so it fails loudly.
+    formal_params_in_die = 0
+    die_param_counts = Dict{String,Int}()  # function key => DIE-tree arity
+
     # NEW: Track global variables
     current_variable_offset = nothing
-    
-    # NEW: Track unspecified parameters (varargs)
-    current_unspecified_offset = nothing
 
     last_seen_level = nothing  # Track last level for attribute lines
+
+    # Attach collected parameters to the function entry and close the function
+    # context. Runs when the subprogram DIE closes (a sibling or shallower DIE
+    # arrives, or the dump ends) rather than whenever the next subprogram
+    # happens to appear, so a parameter list can never be mutated after it has
+    # been recorded.
+    function finalize_current_function!()
+        isnothing(current_function_offset) && return
+        function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
+
+        if !isnothing(function_key)
+            # Snapshot: `params_for_this_function` is rebound per function, but
+            # storing the live array made every later push retro-mutate an
+            # already-finished function (that is how a struct member landed on
+            # free_opaque as a phantom second parameter).
+            params = copy(params_for_this_function)
+
+            die_param_counts[function_key] = max(get(die_param_counts, function_key, 0), formal_params_in_die)
+
+            if !haskey(return_types, function_key)
+                # No DW_AT_type at the function's own level = void return
+                prev_noexcept = false
+                if haskey(type_refs, current_function_offset) && isa(type_refs[current_function_offset], Dict)
+                    prev_noexcept = get(type_refs[current_function_offset], "is_noexcept", false)
+                end
+                return_types[function_key] = Dict(
+                    "c_type" => "void",
+                    "julia_type" => "Cvoid",
+                    "size" => 0,
+                    "is_noexcept" => prev_noexcept,
+                    "parameters" => params
+                )
+            elseif !isempty(params) || isempty(get(return_types[function_key], "parameters", []))
+                # A declaration-only DIE (unnamed parameters, nothing extracted)
+                # must not clobber parameters already recovered from the
+                # definition DIE.
+                return_types[function_key]["parameters"] = params
+            end
+        end
+
+        current_function_offset = nothing
+        current_function_name = nothing
+        current_function_linkage = nothing
+        current_function_level = nothing
+        function_processed = false
+        params_for_this_function = []
+        formal_params_in_die = 0
+    end
 
     for line in split(output, '\n')
         line = strip(line)
@@ -3187,7 +3431,33 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         end
         # Use last seen level for attributes (which don't have level prefix)
         current_level = last_seen_level
-        
+
+        # Close DIE contexts this line has left behind.
+        #
+        # readelf prints a depth on every DIE header, including the
+        # `Abbrev Number: 0` sibling-list terminators, so a header at depth L
+        # ends every DIE at depth >= L. Without this the flat context scalars
+        # stayed live long after their DIE closed: `current_param_offset`
+        # survived the end of its DW_TAG_formal_parameter and vacuumed up the
+        # DW_AT_name/DW_AT_type of an unrelated DIE later in the CU. In
+        # c_abomination the unnamed parameter of the `InnerFunc`
+        # DW_TAG_subroutine_type stayed open across the struct that follows
+        # it, swallowed `SelfReferential`'s first member, and pushed
+        # ("next", SelfReferential*) onto the still-aliased parameter array of
+        # the last subprogram — free_opaque got a phantom second argument and
+        # a two-argument ccall. Same shape as the nested-type member
+        # mis-attribution fixed in pass 1 (context_by_depth above).
+        if !isnothing(level_match)
+            die_level = last_seen_level
+            if !isnothing(current_param_level) && die_level <= current_param_level
+                current_param_offset = nothing
+                current_param_level = nothing
+            end
+            if !isnothing(current_function_level) && die_level <= current_function_level
+                finalize_current_function!()
+            end
+        end
+
         # Generic context reset for major tags to prevent leakage
         if contains(line, "DW_TAG_") && !contains(line, "DW_TAG_variable") && 
            !contains(line, "DW_TAG_subprogram") && !contains(line, "DW_TAG_formal_parameter") &&
@@ -3198,26 +3468,19 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             current_variable_offset = nothing
         end
 
-        # Detect when we've left the function's own level (entered child tags)
+        # Detect when we've left the function's own level (entered child tags).
+        # The function's own attributes are done, so a missing DW_AT_type means
+        # a void return. Parameters are attached by finalize_current_function!
+        # when the DIE closes, not here.
         if !isnothing(current_function_offset) && !isnothing(current_level) && !isnothing(current_function_level)
             if current_level > current_function_level && !function_processed
-                # If a function was just processed and its parameters haven't been associated
-                # (e.g., if it was a void function without DW_AT_type), associate them now.
-                function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
-                if !isnothing(function_key_prev) && haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
-                     return_types[function_key_prev]["parameters"] = params_for_this_function
-                end
-
-                # We've entered a child tag (like DW_TAG_formal_parameter)
-                # This means we've finished processing the function's own attributes
-                # If no return type was found, it's void
                 function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
                 if !isnothing(function_key) && !haskey(return_types, function_key)
                     return_types[function_key] = Dict(
                         "c_type" => "void",
                         "julia_type" => "Cvoid",
                         "size" => 0,
-                        "parameters" => params_for_this_function # Ensure parameters are passed here too
+                        "parameters" => []
                     )
                 end
                 function_processed = true
@@ -3228,43 +3491,20 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         if contains(line, "DW_TAG_subprogram")
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
-                # Before resetting for new function, check if the previous function was processed
-                # This handles void functions (no DW_AT_type) and ensures parameters are attached
-                if !isnothing(current_function_offset)
-                    function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
-                    
-                    if !isnothing(function_key_prev)
-                        # Case 1: Function exists but missing parameters (already had return type)
-                        if haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
-                            return_types[function_key_prev]["parameters"] = params_for_this_function
-                        
-                        # Case 2: Function not registered yet (void return type implied by missing DW_AT_type)
-                        elseif !haskey(return_types, function_key_prev)
-                            # Check for noexcept on the previous function
-                            prev_noexcept = false
-                            if !isnothing(current_function_offset) && haskey(type_refs, current_function_offset) &&
-                               isa(type_refs[current_function_offset], Dict)
-                                prev_noexcept = get(type_refs[current_function_offset], "is_noexcept", false)
-                            end
-                            return_types[function_key_prev] = Dict(
-                                "c_type" => "void",
-                                "julia_type" => "Cvoid",
-                                "size" => 0,
-                                "is_noexcept" => prev_noexcept,
-                                "parameters" => params_for_this_function
-                            )
-                        end
-                    end
-                end
+                # A subprogram nested inside another subprogram (local class,
+                # lambda body) does not trip the depth-close above, so flush the
+                # enclosing function here rather than dropping its parameters.
+                finalize_current_function!()
 
                 current_function_offset = "0x" * offset_match.captures[1]
                 current_function_level = current_level
                 current_function_name = nothing
                 current_function_linkage = nothing
                 function_processed = false  # Reset flag for new function
-                params_for_this_function = []  # NEW: Reset for the new function
+                params_for_this_function = []  # Reset for the new function
+                formal_params_in_die = 0
                 current_subroutine_offset = nothing  # Reset subroutine context when entering function
-                
+
                 # RESET VARIABLE CONTEXT to prevent leakage
                 current_variable_offset = nothing
             end
@@ -3284,9 +3524,10 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     "declaration" => false
                 )
                 offset_to_kind[current_variable_offset] = :variable
-                
+
                 # Ensure we don't leak param context
                 current_param_offset = nothing
+                current_param_level = nothing
             end
         end
         
@@ -3321,7 +3562,16 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_param_offset = "0x" * offset_match.captures[1]
-                
+                current_param_level = current_level
+
+                # Witness the DIE-tree arity. Only direct children of the
+                # subprogram DIE are its parameters — a DW_TAG_subroutine_type's
+                # own parameters live outside the function subtree entirely.
+                if !isnothing(current_function_level) && !isnothing(current_level) &&
+                   current_level == current_function_level + 1
+                    formal_params_in_die += 1
+                end
+
                 # RESET VARIABLE CONTEXT
                 current_variable_offset = nothing
 
@@ -3489,16 +3739,25 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
         end
 
-        # Extract parameter attributes (name and type)
-        # Parameters are child tags (level > function_level)
+        # Extract parameter attributes (name and type).
+        #
+        # A parameter belongs to the function only if its DIE is a DIRECT child
+        # of the subprogram. The old `level > function_level` test admitted any
+        # deeper DIE anywhere later in the CU, which is what let a
+        # DW_TAG_subroutine_type's parameter — and through it a struct member —
+        # be attributed to a function it has nothing to do with.
+        param_is_direct_child = !isnothing(current_param_level) &&
+                                !isnothing(current_function_level) &&
+                                current_param_level == current_function_level + 1
+
         if !isnothing(current_param_offset) && haskey(type_refs, current_param_offset) &&
-           haskey(offset_to_kind, current_param_offset) && offset_to_kind[current_param_offset] == :parameter
+           haskey(offset_to_kind, current_param_offset) && offset_to_kind[current_param_offset] == :parameter &&
+           param_is_direct_child
 
             param_info = type_refs[current_param_offset]
 
             # Extract parameter name
-            if contains(line, "DW_AT_name") && !isnothing(current_level) &&
-               !isnothing(current_function_level) && current_level > current_function_level
+            if contains(line, "DW_AT_name")
                 name_match_quotes = match(r"DW_AT_name\s*\(\"([^\"]+)\"\)", line)
                 if !isnothing(name_match_quotes)
                     param_info["name"] = String(name_match_quotes.captures[1])
@@ -3511,8 +3770,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
             end
 
             # Extract parameter type
-            if contains(line, "DW_AT_type") && !isnothing(current_level) &&
-               !isnothing(current_function_level) && current_level > current_function_level
+            if contains(line, "DW_AT_type")
                 type_match = match(r"<(0x[^>]+)>", line)
                 if !isnothing(type_match)
                     param_info["type"] = String(type_match.captures[1])
@@ -3526,6 +3784,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         # Store just the type reference for now, will resolve later
                         push!(type_refs[parent_subroutine]["parameters"], type_ref)
                         current_param_offset = nothing
+                        current_param_level = nothing
                     elseif !isnothing(param_info["name"]) && !isnothing(param_info["type"])
                         # Add to function's parameter list (needs both name and type)
                         # Resolve type
@@ -3549,52 +3808,23 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
 
                         # Reset param offset to avoid re-processing
                         current_param_offset = nothing
+                        current_param_level = nothing
                     end
                 end
             end
         end
     end
 
-    # Handle last function in file (might be void)
-    if !isnothing(current_function_offset)
-        function_key = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
-        if !isnothing(function_key)
-            if !haskey(return_types, function_key)
-                # No DW_AT_type found = void return
-                return_types[function_key] = Dict(
-                    "c_type" => "void",
-                    "julia_type" => "Cvoid",
-                    "size" => 0,
-                    "parameters" => params_for_this_function # NEW: Use params_for_this_function
-                )
-            elseif !haskey(return_types[function_key], "parameters")
-                # Function already has return type, but may need parameters added
-                return_types[function_key]["parameters"] = params_for_this_function # NEW: Use params_for_this_function
-            end
-        end
-    end
-
-    # Handle the very last function (if it was void and loop finished)
-    if !isnothing(current_function_offset)
-        function_key_prev = !isnothing(current_function_linkage) ? current_function_linkage : current_function_name
-        
-        if !isnothing(function_key_prev)
-            if haskey(return_types, function_key_prev) && !haskey(return_types[function_key_prev], "parameters")
-                return_types[function_key_prev]["parameters"] = params_for_this_function
-            elseif !haskey(return_types, function_key_prev)
-                return_types[function_key_prev] = Dict(
-                    "c_type" => "void",
-                    "julia_type" => "Cvoid",
-                    "size" => 0,
-                    "parameters" => params_for_this_function
-                )
-            end
-        end
-    end
+    # Close the last function — a dump that ends without a terminator at the
+    # subprogram's depth leaves it open.
+    finalize_current_function!()
 
     if isempty(return_types)
         @warn "No DWARF return type info found (compile with -g flag)"
     end
+
+    # Every extracted signature must match the DIE tree it came from.
+    check_param_arity!(return_types, die_param_counts)
 
     # Extract struct definitions with member information
     struct_defs = Dict{String,Dict{String,Any}}()
@@ -3609,11 +3839,30 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                     if !isnothing(member_type_ref)
                         c_type = resolve_type(member_type_ref, type_refs)
                         julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+                        # `get_type_size` only knows primitives; an aggregate
+                        # member's size comes from its own DIE. Without this an
+                        # embedded struct/union member reports size 0 and the
+                        # emitter's running offset silently stops tracking.
+                        m_size = get_type_size(c_type)
+                        if m_size == 0
+                            mt = get(type_refs, member_type_ref, nothing)
+                            if isa(mt, Dict) && get(mt, "kind", "") in ["struct", "class", "union"]
+                                bs = get(mt, "byte_size", nothing)
+                                if !isnothing(bs)
+                                    m_size = try
+                                        s = string(bs)
+                                        startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
+                                    catch
+                                        0
+                                    end
+                                end
+                            end
+                        end
                         member_resolved = Dict(
                             "name" => get(member, "name", "unknown"),
                             "c_type" => c_type,
                             "julia_type" => julia_type,
-                            "size" => get_type_size(c_type),
+                            "size" => m_size,
                             "offset" => let v = get(member, "offset", nothing); isnothing(v) ? nothing : v end
                         )
                         # Propagate bitfield attributes if present
@@ -3621,6 +3870,11 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                             if haskey(member, bf_key)
                                 member_resolved[bf_key] = member[bf_key]
                             end
+                        end
+                        # C11 anonymous member: C injects its members into the
+                        # enclosing scope, so the generator forwards them.
+                        if get(member, "anonymous_member", false) == true
+                            member_resolved["anonymous_member"] = true
                         end
                         push!(resolved_members, member_resolved)
                     end
@@ -3632,6 +3886,12 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
                         "byte_size" => get(type_info, "byte_size", "0x0"),
                         "members" => resolved_members
                     )
+                    # Synthesized name (see the anonymous-aggregate pass) — the
+                    # generator emits these as ABI-exact embeddable types rather
+                    # than as user-facing API surface.
+                    if get(type_info, "anonymous", false) == true
+                        struct_def["anonymous"] = true
+                    end
 
                     # Add inheritance information if available
                     base_classes = []

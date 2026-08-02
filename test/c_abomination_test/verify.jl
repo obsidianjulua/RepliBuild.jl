@@ -52,6 +52,30 @@ end
         # Free it
         CAbominationTest.free_opaque(state)
     end
+
+    @testset "Wrapper arity matches the C declaration" begin
+        # free_opaque takes exactly ONE parameter (c_abomination.h:69). It came
+        # out with a phantom second parameter `next::Ptr{SelfReferential}` —
+        # the first MEMBER of a struct declared after it — because the DWARF
+        # parser's parameter context outlived its DIE and the recorded
+        # parameter array was still live. The wrapper then emitted a
+        # two-argument ccall against a one-argument function.
+        #
+        # Assert on the method table, not on a call: a call that happens to
+        # survive a wrong ccall signature proves nothing.
+        for m in methods(CAbominationTest.free_opaque)
+            @test m.nargs - 1 == 1   # nargs counts the function object itself
+        end
+
+        # Neighbours in the same header, to catch a mis-attribution that shifts
+        # rather than duplicates.
+        for m in methods(CAbominationTest.process_opaque)
+            @test m.nargs - 1 == 2
+        end
+        for m in methods(CAbominationTest.init_opaque)
+            @test m.nargs - 1 == 0
+        end
+    end
     
     @testset "Function Pointers" begin
         outer_cfunc = @cfunction(my_outer, Ptr{Cvoid}, (Cint,))

@@ -495,6 +495,38 @@ registers used before the call — the callee's `va_start` prologue gates its
 XMM spill on AL, so a non-variadic call site (flat type tuple) only reads
 float varargs correctly when leftover AL happens to be nonzero.
 """
+# Types a [wrap.varargs] overload entry may name. These strings are written
+# verbatim into generated signatures and @ccall annotations, so an unchecked
+# typo ("Cnit") surfaces as an UndefVarError when the WRAPPER loads — naming
+# neither the TOML entry nor the function. Validate here, at wrap time, with
+# an error that names both.
+const _VARARG_ALLOWED_TYPES = Set([
+    "Any", "Bool", "Cstring", "Cwstring",
+    "Cchar", "Cuchar", "Cshort", "Cushort", "Cint", "Cuint",
+    "Clong", "Culong", "Clonglong", "Culonglong",
+    "Cintmax_t", "Cuintmax_t", "Csize_t", "Cssize_t", "Cptrdiff_t", "Cwchar_t",
+    "Cfloat", "Cdouble", "Cintptr_t", "Cuintptr_t",
+    "Int8", "Int16", "Int32", "Int64", "Int128", "Int",
+    "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt",
+    "Float16", "Float32", "Float64",
+])
+
+function _validate_vararg_type(func_name::String, t::String)
+    t in _VARARG_ALLOWED_TYPES && return
+    m = match(r"^Ptr\{([A-Za-z_][A-Za-z0-9_]*)\}$", t)
+    m !== nothing && return   # Ptr{AnyIdentifier} — struct pointers included
+    error("""
+        RepliBuild: invalid type '$t' in [wrap.varargs.$func_name].
+        Each overload entry lists the VARIADIC argument types as strings, e.g.
+            $func_name = [["Cstring"], ["Cint", "Cdouble"]]
+        Allowed: $(join(sort!(collect(_VARARG_ALLOWED_TYPES)), ", ")), or Ptr{...}.
+        """)
+end
+
+# Overload names are derived from the type list; Ptr{Cvoid} would otherwise
+# produce `f_Ptr{Cvoid}` — a syntax error in the generated wrapper.
+_vararg_name_part(t::String) = replace(t, r"[{}]" => "")
+
 function generate_vararg_wrappers(func_name::String, mangled::String, julia_name::String,
                                   params::Vector, return_type,
                                   overloads::Vector{Vector{String}},
@@ -502,6 +534,14 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
                                   cstring_free::String="")
     code = ""
     export_names = String[]
+
+    for va_types in overloads, t in va_types
+        _validate_vararg_type(func_name, t)
+    end
+    if length(unique(overloads)) != length(overloads)
+        error("RepliBuild: duplicate overload signature in [wrap.varargs.$func_name] — " *
+              "each entry must list a distinct variadic type tuple.")
+    end
 
     # Build fixed parameter info
     fixed_param_names = String[]
@@ -600,8 +640,8 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
 
     # --- Typed overloads ---
     for va_types in overloads
-        # Build overload function name: fname_Type1_Type2
-        type_suffix = join(va_types, "_")
+        # Build overload function name: fname_Type1_Type2 (Ptr{X} → PtrX)
+        type_suffix = join(map(_vararg_name_part, va_types), "_")
         overload_name = "$(julia_name)_$(type_suffix)"
 
         # Build variadic parameter names and types

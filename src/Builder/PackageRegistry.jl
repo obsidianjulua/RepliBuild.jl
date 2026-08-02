@@ -137,13 +137,34 @@ end
 """
 Fingerprint of the RepliBuild generator itself: package version plus git HEAD
 when running from a dev checkout (the version alone doesn't move on every
-codegen change). Mixed into `hash_config` so stale wrappers miss the cache.
+codegen change), plus a digest of any UNCOMMITTED changes — HEAD alone means a
+dev editing the generator gets served wrappers from the pre-edit code until
+they commit, which is exactly the local-dev workflow this cache serves.
+Mixed into `hash_config` so stale wrappers miss the cache.
 """
 function _generator_fingerprint()::String
     version = something(pkgversion(@__MODULE__), "unknown")
     root = pkgdir(@__MODULE__)
     head = root === nothing ? "" : _get_git_head(root)
-    return "replibuild-$version@$head"
+    dirty = root === nothing ? "" : _get_git_dirty_digest(root)
+    return "replibuild-$version@$head$dirty"
+end
+
+"""
+Content digest of the checkout's uncommitted state: tracked-file diffs plus
+the status listing (which names untracked files). Empty string for a clean
+tree or when git is unavailable — degrading to the HEAD-only fingerprint
+rather than disabling caching outright.
+"""
+function _get_git_dirty_digest(root::String)::String
+    try
+        status = read(`git -C $root status --porcelain`, String)
+        isempty(strip(status)) && return ""
+        diff = read(`git -C $root diff HEAD --no-color`, String)
+        return "+dirty-" * bytes2hex(SHA.sha256(status * diff))[1:12]
+    catch
+        return ""
+    end
 end
 
 function _get_git_head(dir::String)::String
@@ -479,8 +500,13 @@ function _store_build(config_hash::String, output_dir::String)
     mkpath(build_dir)
 
     for f in readdir(output_dir; join=true)
+        dest = joinpath(build_dir, basename(f))
         if isfile(f)
-            dest = joinpath(build_dir, basename(f))
+            cp(f, dest; force=true)
+        elseif isdir(f)
+            # Directories travel too — a Tier-1 wrapper resolves its slices
+            # via joinpath(@__DIR__, "slices", …), so a cache dir without
+            # slices/ silently demotes every kernel to ccall.
             cp(f, dest; force=true)
         end
     end

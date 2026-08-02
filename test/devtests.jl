@@ -270,3 +270,23 @@ include(joinpath(TEST_DIR, "test_struct_abi.jl"))
 # exist; loads both and dispatches Tier-2 thunks through each engine.
 
 include(joinpath(TEST_DIR, "test_multilib_jit.jl"))
+
+# ── 14. DWARF DIE attribution: parameter/context boundaries ──────────────────
+# Pins the free_opaque phantom-parameter leak (2026-07-26): a struct member
+# defined after the last subprogram was attributed to it as a second parameter,
+# emitting a two-argument ccall against a one-argument C function. Drives the
+# parser with synthetic readelf dumps — no build required — and covers the
+# arity guard that now aborts on any signature the DIE tree does not support.
+
+include(joinpath(TEST_DIR, "test_dwarf_attribution.jl"))
+
+# ── 15. Anonymous struct/union support in the C generator ────────────────────
+# Pins the toml_datum_t blob (2026-08-01): an unnamed aggregate DIE was dropped
+# on DWARF export and the member referencing it typed as `Any`, which failed
+# exact-layout resolution and collapsed the ENTIRE enclosing struct to an
+# opaque byte blob — 40 bytes, zero named fields, no way to read a parsed
+# value. Covers both shapes (`union {...} u;` and C11 `union {...};`), the
+# alignment-carrying opaque region, C11 name injection, and the SysV
+# SSE-vs-INTEGER region element-type rule under a live by-value crossing.
+
+include(joinpath(TEST_DIR, "test_anonymous_unions.jl"))

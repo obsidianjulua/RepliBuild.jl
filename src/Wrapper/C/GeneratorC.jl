@@ -110,6 +110,188 @@ function _resolve_exact_layout(members::Vector, byte_size::Int,
     return (members′, maxal)
 end
 
+"""
+    _dwarf_member_align(jt, ct, dwarf_structs, best_dwarf_key, enum_layouts, seen) -> Int | nothing
+    _dwarf_aggregate_align(jname, dwarf_structs, best_dwarf_key, enum_layouts, seen) -> Int | nothing
+
+Alignment of a DWARF-described type, derived structurally from its members.
+
+`_field_layout` can only answer for types whose Julia field type already exists
+— primitives, pointers, enums, and aggregates emitted with verified layout. An
+anonymous union needs its alignment BEFORE any of that: the alignment is what
+picks the storage type of the opaque region that stands in for it, and its
+members may themselves be unemitted anonymous aggregates or bitfields.
+
+Aggregates take the max over their members; a bitfield contributes the
+alignment of its declared base type. `nothing` on any unknown leaf or on a
+by-value cycle — an alignment that cannot be proven is never guessed.
+"""
+function _dwarf_member_align(jt::String, ct::String, dwarf_structs,
+                             best_dwarf_key::Dict{String,String},
+                             enum_layouts::Dict{String,Tuple{Int,Int}},
+                             seen::Set{String}=Set{String}())
+    ctc = String(strip(replace(ct, r"\bconst\b" => "")))
+    (endswith(ctc, "*") || endswith(ctc, "&") || startswith(jt, "Ptr{") || jt == "Cstring") && return 8
+    haskey(_C_PRIM_FIELD_LAYOUT, jt) && return _C_PRIM_FIELD_LAYOUT[jt][2]
+    nt = match(r"^NTuple\{(\d+),\s*(.+)\}$", jt)
+    if nt !== nothing
+        elem = String(strip(nt.captures[2]))
+        haskey(_C_PRIM_FIELD_LAYOUT, elem) && return _C_PRIM_FIELD_LAYOUT[elem][2]
+        return _dwarf_aggregate_align(_sanitize_c_type_name(elem), dwarf_structs,
+                                      best_dwarf_key, enum_layouts, seen)
+    end
+    base = _sanitize_c_type_name(jt == "Any" ? ctc : jt)
+    haskey(enum_layouts, base) && return enum_layouts[base][2]
+    return _dwarf_aggregate_align(base, dwarf_structs, best_dwarf_key, enum_layouts, seen)
+end
+
+# DWARF entry for an aggregate addressed by its sanitized Julia name.
+function _lookup_dwarf_agg(jname::String, dwarf_structs, best_dwarf_key::Dict{String,String})
+    isempty(jname) && return nothing
+    key = get(best_dwarf_key, jname, nothing)
+    if key !== nothing && haskey(dwarf_structs, key)
+        return dwarf_structs[key]
+    elseif haskey(dwarf_structs, jname)
+        return dwarf_structs[jname]
+    end
+    for (sk, sv) in dwarf_structs
+        if _sanitize_c_type_name(String(sk)) == jname
+            return sv
+        end
+    end
+    return nothing
+end
+
+"""
+    _exposed_member_names(jname, dwarf_structs, best_dwarf_key, seen) -> Vector{String}
+
+Names an aggregate exposes through `getproperty`: its own members, plus — for
+each C11 anonymous member — the names that member's own type exposes, because C
+injects an anonymous member's names into the enclosing scope (`n.x`, not
+`n._anon1.x`). Recursion terminates on the by-value cycle set; each level only
+needs its immediate injections, since the level below emits its own.
+"""
+function _exposed_member_names(jname::String, dwarf_structs,
+                               best_dwarf_key::Dict{String,String},
+                               seen::Set{String}=Set{String}())
+    out = String[]
+    (isempty(jname) || jname in seen) && return out
+    info = _lookup_dwarf_agg(jname, dwarf_structs, best_dwarf_key)
+    info === nothing && return out
+    push!(seen, jname)
+    for m in get(info, "members", [])
+        nm = get(m, "name", nothing)
+        nm === nothing && continue
+        # Bitfields are reached through the generated `get_<name>(s)` accessors,
+        # not through `getproperty` — injecting them would emit a branch that
+        # delegates to a property the target type does not have.
+        haskey(m, "bit_size") && continue
+        if get(m, "anonymous_member", false) == true
+            # `_anonN` is a name WE invented to give the region a field; C never
+            # exposes it, and injecting it upward would shadow the enclosing
+            # struct's own `_anonN` field. Only what it contains travels up.
+            inner = _sanitize_c_type_name(String(get(m, "julia_type", "")))
+            isempty(inner) && (inner = _sanitize_c_type_name(String(get(m, "c_type", ""))))
+            append!(out, _exposed_member_names(inner, dwarf_structs, best_dwarf_key, seen))
+        else
+            push!(out, String(nm))
+        end
+    end
+    delete!(seen, jname)
+    return out
+end
+
+function _dwarf_aggregate_align(jname::String, dwarf_structs,
+                                best_dwarf_key::Dict{String,String},
+                                enum_layouts::Dict{String,Tuple{Int,Int}},
+                                seen::Set{String}=Set{String}())
+    isempty(jname) && return nothing
+    jname in seen && return nothing          # a type cannot contain itself by value
+    info = _lookup_dwarf_agg(jname, dwarf_structs, best_dwarf_key)
+    info === nothing && return nothing
+    ms = get(info, "members", [])
+    isempty(ms) && return nothing
+    push!(seen, jname)
+    al = 1
+    for m in ms
+        a = _dwarf_member_align(String(get(m, "julia_type", "Any")),
+                                String(get(m, "c_type", "")),
+                                dwarf_structs, best_dwarf_key, enum_layouts, seen)
+        if a === nothing
+            delete!(seen, jname)
+            return nothing
+        end
+        al = max(al, a)
+    end
+    delete!(seen, jname)
+    return al
+end
+
+"""
+    _aligned_region_storage(byte_size, align; all_float=false) -> (elem_type, count) | nothing
+
+Julia storage for a `byte_size`-byte opaque region that must carry a C
+alignment of `align`.
+
+`NTuple{N, UInt8}` is align 1 — embedding one where C wants align 8 silently
+UNDER-ALIGNS the enclosing struct, and Julia then lays the following fields out
+at the wrong offsets. So the element type is chosen to CARRY the alignment and
+the count follows from the size. Refuses (rather than under-aligning) when the
+size is not a whole number of elements, or when the alignment exceeds what a
+Julia primitive can express.
+
+`all_float` picks a floating-point element instead. SysV classifies an eightbyte
+as SSE only when EVERY field overlapping it is float/double, so an integer
+element is the correct class for any aggregate with a non-float member — but for
+an all-float one (`union { float f; double d; }`) it would claim INTEGER where
+the value travels in XMM.
+"""
+function _aligned_region_storage(byte_size::Int, align::Int; all_float::Bool=false)
+    (byte_size <= 0 || align <= 0 || align > 8) && return nothing
+    elem, esz = if all_float && align >= 8
+        ("Float64", 8)
+    elseif all_float && align >= 4
+        ("Float32", 4)
+    elseif align >= 8
+        ("UInt64", 8)
+    elseif align >= 4
+        ("UInt32", 4)
+    elseif align >= 2
+        ("UInt16", 2)
+    else
+        ("UInt8", 1)
+    end
+    byte_size % esz == 0 || return nothing
+    return (elem, byte_size ÷ esz)
+end
+
+# Is EVERY (transitive) member of this struct a float/double? The dual of
+# `_struct_has_float_member`: that one asks "could this be SSE-class", this one
+# asks "must it be". Unknown types answer false — an unprovable claim of
+# uniform float class is worse than falling back to integer storage.
+function _struct_all_float_members(struct_name::String, dwarf_structs, seen::Set{String}=Set{String}())
+    struct_name in seen && return false
+    push!(seen, struct_name)
+    info = get(dwarf_structs, struct_name, nothing)
+    info === nothing && return false
+    ms = get(info, "members", [])
+    isempty(ms) && return false
+    for m in ms
+        haskey(m, "bit_size") && return false
+        ct = String(strip(get(m, "c_type", "")))
+        (endswith(ct, "*") || endswith(ct, "&")) && return false
+        base = String(strip(replace(replace(ct, r"\[\d*\]" => ""), r"\bconst\b" => "")))
+        if base == "float" || base == "double"
+            continue
+        elseif haskey(dwarf_structs, base)
+            _struct_all_float_members(base, dwarf_structs, seen) || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
 # Does this struct (transitively) contain float/double members? Used to judge
 # whether an opaque ≤16-byte blob is in the SysV SSE-class danger window.
 # Unknown types count as risky.
@@ -157,7 +339,7 @@ _slice_path_expr(mangled::AbstractString) =
 """
     _slice_const_name!(taken, mangled) -> String
 
-Name the wrapper constant that holds `mangled`'s slice IR.
+Name the wrapper constant that holds the path to `mangled`'s slice.
 
 Keyed on the MANGLED symbol, never on the Julia name. `julia_name` is not
 injective over `mangled` — the `replibuild_shim_` strip, the `_+` collapse and
@@ -182,6 +364,62 @@ function _slice_const_name!(taken::Dict{String,String}, mangled::AbstractString)
     end
     taken[name] = mangled
     return name
+end
+
+"""
+    _tier1_kernel_name(slice_const) -> String
+
+Kernel function name for a Tier-1 call site, derived from the slice-path
+constant so it inherits `_slice_const_name!`'s mangled-symbol keying and
+collision suffixes — two symbols can no more share a kernel than a const.
+"""
+_tier1_kernel_name(slice_const::AbstractString) =
+    replace(slice_const, r"^_SLICE_" => "_TIER1_")
+
+"""
+    _tier1_kernel_chunk(slice_const, kernel, mangled, ret_type, param_types, arg_names) -> String
+
+Emit the per-function Tier-1 kernel: a `@generated` function that decides
+ccall vs llvmcall ONCE, at generation time. llvmcall is opportunistic — a
+passenger tier, never the driver — so every doubt resolves to the ccall body:
+
+  - **output mode** (`jl_generating_output`): emitting a sliced llvmcall inside
+    a precompile worker deadlocks the JIT engine lock whenever a `declare`
+    binds a dlopened library's symbol (2026-07-31; an untaken top-level branch
+    reaches it through inference alone). The ccall body precompiles clean, and
+    a runtime first call regenerates to the slice.
+  - **missing slice file**: a wrapper vendored or relocated without `slices/`
+    stays a working ccall wrapper instead of failing at load or call time.
+
+The slice is read at GENERATION time (first call), so module load does no
+slice I/O, uncalled functions keep nothing resident, and the `.ji` no longer
+stores a second copy of IR that already ships as `.ll` files. The
+`include_dependency` (content-tracked on 1.11+) still invalidates the cache
+when a present slice changes; it is skipped when the file is absent so a
+slice-less wrapper can still precompile.
+"""
+function _tier1_kernel_chunk(slice_const::String, kernel::String, mangled::String,
+                             ret_type::String, param_types::Vector{String},
+                             arg_names::Vector{String})
+    sig = join(("$n::$t" for (n, t) in zip(arg_names, param_types)), ", ")
+    tuple_types = join(param_types, ", ")
+    ccall_types = isempty(param_types) ? "()" : "(" * tuple_types * ",)"
+    arg_tail = isempty(arg_names) ? "" : ", " * join(arg_names, ", ")
+    return """
+    const $slice_const = $(_slice_path_expr(mangled))
+    isfile($slice_const) && include_dependency($slice_const)
+
+    @generated function $kernel($sig)
+        # llvmcall is opportunistic: any doubt resolves to the ccall body.
+        # Output mode deadlocks the JIT engine lock on dlopened-lib declares;
+        # a missing slice file must not stop the wrapper from working.
+        if ccall(:jl_generating_output, Cint, ()) == 1 || !isfile($slice_const)
+            return :(ccall((:$mangled, LIBRARY_PATH), $ret_type, $ccall_types$arg_tail))
+        end
+        ir = read($slice_const, String)
+        return :(Base.llvmcall((\$ir, "$mangled"), $ret_type, Tuple{$tuple_types}$arg_tail))
+    end
+    """
 end
 
 """
@@ -374,6 +612,11 @@ shipped inside the package, and dead.
 Deriving both the files and the registry from the emitted text is what keeps
 them in step: a future emission branch cannot add a `_SLICE_` const without
 also getting its slice written and its name registered.
+
+A Tier-1 chunk is recognized by its `@generated function _TIER1_*` kernel; the
+write set comes from the `const _SLICE_* = joinpath(...)` path constants the
+kernel reads (the `read` itself now lives inside the kernel's generator, so
+the const line — not a `read(` line — is the scan anchor).
 """
 function _tier1_emit_slices!(config::RepliBuildConfig, func_chunks::Vector{String},
                              slice_ir::Dict{String,String},
@@ -383,14 +626,18 @@ function _tier1_emit_slices!(config::RepliBuildConfig, func_chunks::Vector{Strin
     emitted = String[]
     written = Set{String}()
     for chunk in func_chunks
-        occursin("Base.llvmcall((_SLICE_", chunk) || continue
+        occursin("@generated function _TIER1_", chunk) || continue
 
-        for m in eachmatch(r"^const (_SLICE_\w+) = read\("m, chunk)
-            const_name = m.captures[1]
+        for m in eachmatch(r"^const (_SLICE_\w+) = joinpath\(@__DIR__, \"slices\", \"([^\"]+)\.ll\"\)"m, chunk)
+            const_name, path_mangled = m.captures
             mangled = get(const_owner, const_name, nothing)
             mangled === nothing &&
                 error("Tier 1: emitted constant $const_name has no owning symbol — " *
                       "every slice const must come from _slice_const_name!")
+            mangled == path_mangled ||
+                error("Tier 1: emitted constant $const_name points at " *
+                      "'$path_mangled.ll' but is owned by '$mangled' — the const " *
+                      "and its path have drifted apart")
             haskey(slice_ir, mangled) ||
                 error("Tier 1: emitted constant $const_name reads a slice for " *
                       "'$mangled', which the pre-pass never accepted")
@@ -545,6 +792,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     tier1_const_owner = Dict{String,String}()   # _SLICE_* const => mangled symbol
     if config.wrap.tier1.enable && config.wrap.language == :c
         tier1_slices = _tier1_slice_prepass(config, functions, dwarf_structs, lib_path)
+    else
+        # Tier 1 off: clear any slices a previous Tier-1 wrap left behind.
+        # The prepass owns the wipe when enabled; without this branch a config
+        # flip from on to off ships orphan .ll files no call site reads
+        # (found live on cjson, 84 orphans, 2026-07-31).
+        rm(joinpath(get_output_path(config), "slices"), recursive=true, force=true)
     end
 
     # Layout registries shared between struct emission and function emission:
@@ -556,6 +809,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     resolved_layouts = Dict{String,Tuple{Int,Int}}()
     blob_struct_names = Set{String}()
     blob_struct_sizes = Dict{String,Int}()
+    # Named-field types whose Julia fields do NOT reproduce the SysV register
+    # class — an opaque region standing in for a mixed float/integer aggregate,
+    # and (transitively) anything that embeds one. Emission is topological, so
+    # a member's risk is always known before its container is emitted.
+    abi_class_risk = Set{String}()
     blob_float_risk = Dict{String,Bool}()
 
     # Struct definitions
@@ -1114,7 +1372,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 kind = get(struct_info, "kind", "struct")
                 
                 # SPECIAL HANDLING FOR UNIONS
-                if kind == "union"
+                #
+                # ANONYMOUS unions are deliberately excluded: this path emits a
+                # `mutable struct` (its accessors need `pointer_from_objref`),
+                # and a mutable type is a REFERENCE when used as a field, so it
+                # can never be embedded in the parent that declared it — which is
+                # the only thing an anonymous union is for. Those fall through to
+                # the struct path, where overlapping members fail exact layout and
+                # the opaque-region branch gives them an immutable, correctly
+                # aligned, embeddable representation with `getproperty` accessors.
+                if kind == "union" && get(struct_info, "anonymous", false) != true
                     byte_size = _parse_dwarf_size(struct_info)
                     members = get(struct_info, "members", [])
 
@@ -1380,21 +1647,81 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
                     if !layout_verified && byte_size > 0
                         member_count = length(members)
-                        push!(blob_struct_names, julia_struct_name)
-                        blob_struct_sizes[julia_struct_name] = byte_size
-                        blob_float_risk[julia_struct_name] = _struct_has_float_member(struct_name, dwarf_structs)
-                        push!(struct_chunks, """
-                        # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
-                        struct $julia_struct_name
-                            _data::NTuple{$(byte_size), UInt8}
+                        _is_anon_agg = get(struct_info, "anonymous", false) == true
+                        _float_risk = _struct_has_float_member(struct_name, dwarf_structs)
+
+                        # An ANONYMOUS aggregate (a C11 `union {...};` member, or
+                        # the type of a `union {...} u;` member) exists only to be
+                        # EMBEDDED in its parent, so an align-1 `NTuple{N,UInt8}`
+                        # is not good enough: it would under-align the parent and
+                        # shift every field after it. When the alignment can be
+                        # proven from DWARF, the region carries it in its element
+                        # type and the aggregate becomes an ABI-exact embeddable
+                        # member — which is what lets the parent keep its own named
+                        # fields instead of collapsing to a blob (toml_datum_t).
+                        #
+                        # Withheld at ≤16 bytes with float risk: there the SysV
+                        # register class depends on the real member types, and an
+                        # integer-typed region would claim INTEGER where the struct
+                        # travels in SSE. Those stay blobs so the existing
+                        # by-value crossing guard still sees them.
+                        _region = nothing
+                        _region_align = 0
+                        _all_float = _struct_all_float_members(struct_name, dwarf_structs)
+                        if _is_anon_agg
+                            _al = _dwarf_aggregate_align(julia_struct_name, dwarf_structs,
+                                                         best_dwarf_key, enum_layouts)
+                            if _al !== nothing
+                                _region = _aligned_region_storage(byte_size, _al;
+                                                                  all_float=_all_float)
+                                _region !== nothing && (_region_align = _al)
+                            end
                         end
 
-                        # Zero-initializer for $julia_struct_name
-                        function $julia_struct_name()
-                            return $julia_struct_name(ntuple(i -> 0x00, $byte_size))
-                        end
+                        if _region !== nothing
+                            _elem, _count = _region
+                            resolved_layouts[julia_struct_name] = (byte_size, _region_align)
+                            # MIXED float/non-float members: the region's single
+                            # element type can only claim one SysV class for every
+                            # eightbyte, and the real aggregate may split them
+                            # (`union { double d; struct { int a; double b; } s; }`
+                            # is INTEGER,SSE). Above 16 bytes it is MEMORY class on
+                            # both views and none of this matters; at or below, the
+                            # type is flagged so the by-value crossing guard still
+                            # refuses loudly instead of miscompiling silently.
+                            if byte_size <= 16 && _float_risk && !_all_float
+                                push!(abi_class_risk, julia_struct_name)
+                            end
+                            push!(struct_chunks, """
+                            # Anonymous C $kind: $struct_name ($member_count members,
+                            # $byte_size-byte opaque region, alignment $_region_align)
+                            struct $julia_struct_name
+                                _data::NTuple{$_count, $_elem}
+                            end
 
-                        """)
+                            # Zero-initializer for $julia_struct_name
+                            function $julia_struct_name()
+                                return $julia_struct_name(ntuple(i -> $(_elem)(0), $_count))
+                            end
+
+                            """)
+                        else
+                            push!(blob_struct_names, julia_struct_name)
+                            blob_struct_sizes[julia_struct_name] = byte_size
+                            blob_float_risk[julia_struct_name] = _float_risk
+                            push!(struct_chunks, """
+                            # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
+                            struct $julia_struct_name
+                                _data::NTuple{$(byte_size), UInt8}
+                            end
+
+                            # Zero-initializer for $julia_struct_name
+                            function $julia_struct_name()
+                                return $julia_struct_name(ntuple(i -> 0x00, $byte_size))
+                            end
+
+                            """)
+                        end
 
                         # Generate Base.getproperty accessor for named member access on byte-blob structs
                         _accessor_branches = String[]
@@ -1427,15 +1754,21 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                             m_julia_type = get(m, "julia_type", "")
                             m_c_type = strip(get(m, "c_type", ""))
 
-                            # Compute available space for this member from offset gaps
-                            next_offset = byte_size
-                            for j in (mi+1):length(_member_offsets)
-                                if _member_offsets[j] >= 0
-                                    next_offset = _member_offsets[j]
-                                    break
+                            # Compute available space for this member from offset gaps.
+                            # Union members all sit at offset 0, so the gap to the
+                            # "next" member is 0 — every one of them owns the whole
+                            # aggregate instead.
+                            available_size = byte_size - m_offset
+                            if kind != "union"
+                                next_offset = byte_size
+                                for j in (mi+1):length(_member_offsets)
+                                    if _member_offsets[j] >= 0
+                                        next_offset = _member_offsets[j]
+                                        break
+                                    end
                                 end
+                                available_size = next_offset - m_offset
                             end
-                            available_size = next_offset - m_offset
 
                             # Pointer types
                             # (the Ref temporary is the GC root that must be
@@ -1455,10 +1788,45 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         r = Ref(getfield(x, :_data))
                                         return GC.@preserve r unsafe_load(Ptr{$jt}(pointer_from_objref(r) + $m_offset))
                                     end""")
-                            # Nested struct types — extract sub-blob
+                            # Enum members. `@enum T::U` is a primitive type of the
+                            # underlying integer's size, so it loads like one — but it
+                            # is not in _loadable_primitives, so every enum member of a
+                            # blob struct used to be silently dropped (toml_datum_t
+                            # lost `type`, which is the tag that says which union arm
+                            # is live — the single most important field on the struct).
+                            elseif haskey(enum_layouts, _sanitize_c_type_name(m_julia_type))
+                                _ejt = _sanitize_c_type_name(m_julia_type)
+                                push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{$_ejt}(pointer_from_objref(r) + $m_offset))
+                                    end""")
+                            # Fixed-size arrays (`char tag[16]`, `double raw[3]`) —
+                            # NTuple loads directly and is exactly the member's size.
+                            elseif startswith(m_julia_type, "NTuple{") &&
+                                   match(r"^NTuple\{\d+,\s*(.+)\}$", m_julia_type) !== nothing &&
+                                   haskey(_C_PRIM_FIELD_LAYOUT,
+                                          String(strip(match(r"^NTuple\{\d+,\s*(.+)\}$", m_julia_type).captures[1])))
+                                push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(r) + $m_offset))
+                                    end""")
+                            # Nested struct/union types — extract sub-blob
                             else
-                                m_sanitized = _sanitize_c_type_name(m_c_type)
-                                if !isempty(m_sanitized) && m_sanitized != m_c_type
+                                # Prefer the Julia type name: an anonymous aggregate
+                                # is carried under a synthesized name that needs no
+                                # sanitizing, and so is every plain C struct name.
+                                m_sanitized = _sanitize_c_type_name(
+                                    isempty(String(m_julia_type)) || m_julia_type == "Any" ?
+                                    String(m_c_type) : String(m_julia_type))
+                                # NOTE: this used to also require `m_sanitized !=
+                                # m_c_type`, i.e. it only fired for names that HAD to
+                                # be sanitized (C++ template spellings). Every plainly
+                                # named nested struct — `toml_datum_t toptab;` — was
+                                # therefore dropped from its parent's accessors. The
+                                # dwarf_structs lookup below is the real guard.
+                                if !isempty(m_sanitized)
                                     # Find the nested struct's byte_size using best_dwarf_key map
                                     nested_info = nothing
                                     best_key = get(best_dwarf_key, m_sanitized, nothing)
@@ -1512,6 +1880,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                 end
                             end
                         end
+                        # C11 anonymous members inject their names into the
+                        # enclosing scope — `n.x`, not `n._anon1.x`. A real member
+                        # of THIS aggregate always wins (an injected name may never
+                        # shadow a declared one), and each injected name is emitted
+                        # once.
+                        _real_names = Set{String}(String(get(m, "name", ""))
+                                                  for m in members if !isnothing(get(m, "name", nothing)))
+                        _injected = Set{String}()
+                        for m in members
+                            get(m, "anonymous_member", false) == true || continue
+                            _fname = get(m, "name", nothing)
+                            isnothing(_fname) && continue
+                            _inner = _sanitize_c_type_name(String(get(m, "julia_type", "")))
+                            for _nm in _exposed_member_names(_inner, dwarf_structs, best_dwarf_key)
+                                (_nm in _real_names || _nm in _injected) && continue
+                                push!(_injected, _nm)
+                                push!(_accessor_branches, """
+                                    if s === :$_nm
+                                        return getproperty(getproperty(x, :$_fname), :$_nm)
+                                    end""")
+                            end
+                        end
+
                         if !isempty(_accessor_branches)
                             accessor_code = join(_accessor_branches, "\n")
                             push!(struct_chunks, """
@@ -1619,6 +2010,53 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     end
 
                     """)
+
+                    # A struct with real named fields still has to honour C11
+                    # name injection: `union { ... };` with no member name puts
+                    # its members in THIS scope. The synthetic `_anonN` field is
+                    # the storage; these branches are the C-visible spelling.
+                    # `getfield` fallthrough keeps every real field working, so
+                    # this getproperty is purely additive.
+                    _inject_branches = String[]
+                    _real_names = Set{String}(
+                        make_c_identifier(replace(String(get(m, "name", "")), '$' => '_'))
+                        for m in members if !isnothing(get(m, "name", nothing)))
+                    _injected = Set{String}()
+                    for member in members
+                        get(member, "anonymous_member", false) == true || continue
+                        _fname = get(member, "name", nothing)
+                        isnothing(_fname) && continue
+                        _fname = make_c_identifier(replace(String(_fname), '$' => '_'))
+                        _inner = _sanitize_c_type_name(String(get(member, "julia_type", "")))
+                        for _nm in _exposed_member_names(_inner, dwarf_structs, best_dwarf_key)
+                            # A declared field of this struct always wins.
+                            (_nm in _real_names || _nm in _injected) && continue
+                            push!(_injected, _nm)
+                            push!(_inject_branches, """
+                                s === :$_nm && return getproperty(getfield(x, :$_fname), :$_nm)""")
+                        end
+                    end
+                    if !isempty(_inject_branches)
+                        push!(struct_chunks, """
+                        # C11 anonymous-member name injection for $julia_struct_name
+                        function Base.getproperty(x::$julia_struct_name, s::Symbol)
+                        $(join(_inject_branches, "\n"))
+                            return getfield(x, s)
+                        end
+
+                        """)
+                    end
+
+                    # Embedding a type whose region misstates its SysV class makes
+                    # THIS struct misstate it too. Members are emitted first, so
+                    # one hop per struct closes over the whole chain.
+                    for member in members
+                        _mt = _sanitize_c_type_name(String(get(member, "julia_type", "")))
+                        if _mt in abi_class_risk
+                            push!(abi_class_risk, julia_struct_name)
+                            break
+                        end
+                    end
 
                     # Verified named-field structs become eligible as inline
                     # members of later structs (topological emission order) and
@@ -2112,6 +2550,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     push!(blob_abi_offenders, "returns `$_rname` by value")
                 end
             end
+            # Same refusal for a named-field struct that carries an opaque region
+            # of mixed SysV class (see `abi_class_risk`): it has real fields, so
+            # the blob test above never sees it, but its register class is just
+            # as unknowable from the Julia side.
+            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16
+                push!(blob_abi_offenders, "returns `$_rname` by value")
+            end
         end
         # A ≤16B blob param with a misaligned (packed) member is MEMORY class in
         # the real SysV ABI — passed on the stack — while its NTuple byte image
@@ -2138,6 +2583,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         for _pt in param_types
             if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
                (get(blob_float_risk, _pt, true) || _blob_param_misaligned(_pt))
+                push!(blob_abi_offenders, "takes `$_pt` by value")
+            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
         end
@@ -2302,8 +2749,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # Build the llvmcall expression with proper Ref{T} → Ptr{T} handling.
         # ccall handles Ref{T} → C pointer automatically, but llvmcall sees Ref{T}
         # as ptr addrspace(10) while C++ IR uses plain ptr (addrspace 0).
-        function _build_llvmcall_expr(ret_type_str, indent="        "; ir_src::String="LTO_IR")
-            call_expr = "Base.llvmcall(($ir_src, \"$mangled\"), $ret_type_str, Tuple{$llvmcall_types}, $llvmcall_args)"
+        function _wrap_ffi_callsite(call_expr, indent)
             if !has_ref_params
                 return "$(indent)return $call_expr"
             end
@@ -2317,13 +2763,38 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             push!(lines, "$(indent)end")
             return join(lines, "\n")
         end
+        function _build_llvmcall_expr(ret_type_str, indent="        "; ir_src::String="LTO_IR")
+            call_expr = "Base.llvmcall(($ir_src, \"$mangled\"), $ret_type_str, Tuple{$llvmcall_types}, $llvmcall_args)"
+            return _wrap_ffi_callsite(call_expr, indent)
+        end
+        # Tier-1 call sites route through the per-function @generated kernel
+        # (ccall-vs-llvmcall decided at generation time); same conversion and
+        # GC.@preserve discipline as a direct llvmcall.
+        _build_kernel_call(kernel, indent="        ") =
+            _wrap_ffi_callsite("$kernel($llvmcall_args)", indent)
 
         # llvmcall shape gate: safe for primitive/pointer args only.
         # Struct-by-value params are excluded because Base.llvmcall doesn't
         # reliably map Julia struct layouts to LLVM aggregate types.
+        #
+        # `Bool` is excluded for a narrower but just as fatal reason: Julia
+        # passes a Bool across the llvmcall boundary as **i8**, while clang
+        # emits a C `_Bool` parameter as **i1 zeroext**. The slice therefore
+        # declares `i1` and llvmcall refuses the call with
+        #     Malformed llvmcall: argument N type i1 does not match
+        #     expected argument type i8
+        # `Base.llvmcall` resolves at CODEGEN — i.e. on the FIRST CALL — so this
+        # never surfaces at wrap time or module load, only when a user calls the
+        # function. ccall converts Bool→i1 correctly, so Tier 3 is right here;
+        # per the standing doctrine (llvmcall is a passenger tier, any doubt
+        # resolves to ccall) these demote rather than getting a conversion shim.
+        # Found 2026-08-01 via mpack_write_bool; latent in blake3
+        # (blake3_hash_many) and box2d3 too.
         lto_shape_ok = !returns_known_struct &&
             julia_return_type != "Cstring" &&
+            julia_return_type != "Bool" &&
             !any(t -> t == "Cstring", param_types) &&
+            !any(t -> t == "Bool", param_types) &&
             !any(t -> t in struct_types, param_types)
 
         # Whole-module LTO path (legacy, scale-limited — see CLAUDE.md caveats)
@@ -2436,15 +2907,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # Has parameter conversions
             if tier1_this
                 slice_const = _slice_const_name!(tier1_const_owner, mangled)
-                slice_path = _slice_path_expr(mangled)
-                llvmcall_body = _build_llvmcall_expr(julia_return_type, "    "; ir_src=slice_const)
+                kernel = _tier1_kernel_name(slice_const)
+                kernel_chunk = _tier1_kernel_chunk(slice_const, kernel, mangled,
+                                                   julia_return_type,
+                                                   llvmcall_param_types, llvmcall_arg_names)
+                call_body = _build_kernel_call(kernel, "    ")
                 func_def = """
-                const $slice_const = read($slice_path, String)
-                include_dependency($slice_path)
-
+                $kernel_chunk
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
-                $conversion_code$llvmcall_body
+                $conversion_code$call_body
                 end
 
                 """
@@ -2474,15 +2946,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # Standard wrapper - no conversions needed
             if tier1_this
                 slice_const = _slice_const_name!(tier1_const_owner, mangled)
-                slice_path = _slice_path_expr(mangled)
-                llvmcall_body = _build_llvmcall_expr(julia_return_type, "    "; ir_src=slice_const)
+                kernel = _tier1_kernel_name(slice_const)
+                kernel_chunk = _tier1_kernel_chunk(slice_const, kernel, mangled,
+                                                   julia_return_type,
+                                                   llvmcall_param_types, llvmcall_arg_names)
+                call_body = _build_kernel_call(kernel, "    ")
                 func_def = """
-                const $slice_const = read($slice_path, String)
-                include_dependency($slice_path)
-
+                $kernel_chunk
                 $doc_comment
                 function $julia_name($param_sig)::$julia_return_type
-                $llvmcall_body
+                $call_body
                 end
 
                 """
