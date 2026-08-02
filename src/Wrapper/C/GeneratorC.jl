@@ -410,9 +410,6 @@ function _tier1_kernel_chunk(slice_const::String, kernel::String, mangled::Strin
     isfile($slice_const) && include_dependency($slice_const)
 
     @generated function $kernel($sig)
-        # llvmcall is opportunistic: any doubt resolves to the ccall body.
-        # Output mode deadlocks the JIT engine lock on dlopened-lib declares;
-        # a missing slice file must not stop the wrapper from working.
         if ccall(:jl_generating_output, Cint, ()) == 1 || !isfile($slice_const)
             return :(ccall((:$mangled, LIBRARY_PATH), $ret_type, $ccall_types$arg_tail))
         end
@@ -877,7 +874,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
             if !isempty(enumerators)
                 push!(enum_chunks, """
-                # C++ enum: $enum_name (underlying type: $underlying_type)
+                # C enum: $enum_name (underlying type: $underlying_type)
                 @enum $enum_name::$julia_underlying begin
                 """)
 
@@ -952,7 +949,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 end
 
                 push!(enum_chunks, """
-                # C++ enum: $enum_name (from header - not in DWARF)
+                # C enum: $enum_name (from header - not in DWARF)
                 @enum $enum_name::$underlying begin
                 """)
 
@@ -996,7 +993,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # STRUCT GENERATION (from DWARF)
     # =============================================================================
 
-    # Create a mapping from sanitized Julia name back to raw C++ name for resolving dependencies
+    # Create a mapping from sanitized Julia name back to raw C name for resolving dependencies
     julia_to_cpp_struct = Dict{String, String}()
     for struct_name in struct_types
         julia_to_cpp_struct[_sanitize_c_type_name(struct_name)] = struct_name
@@ -1158,7 +1155,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 continue
             end
 
-            # Skip duplicates (different C++ names can sanitize to the same Julia identifier)
+            # Skip duplicates (different C names can sanitize to the same Julia identifier)
             s_name in seen_forward_decls && continue
             push!(seen_forward_decls, s_name)
 
@@ -1166,7 +1163,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             s_name in dwarf_defined_names && continue
 
             # Both opaque types and pointer-referenced types should be immutable structs
-            # to preserve inline C++ ABI layout (0-byte empty structs) if they are used by value.
+            # to preserve inline ABI layout (0-byte empty structs) if they are used by value.
             push!(struct_chunks, "struct $s_name end\n")
         end
         push!(struct_chunks, "\n")
@@ -1608,7 +1605,19 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                             else
                                 # Non-bitfield member in a bitfield struct — byte-offset accessor
                                 byte_off = _parse_int_or_hex(get(member, "offset", "0"))
-                                if julia_type != "Any" && !startswith(julia_type, "NTuple{")
+                                # The member type must be one the module will
+                                # actually bind. `Any`/`NTuple` were the only
+                                # exclusions, so a member whose struct type never
+                                # gets defined (miniaudio: `memoryStream` typed
+                                # ma_dr_flac__memory_stream) emitted an accessor
+                                # naming an undeclared type — UndefVarError at
+                                # include, whole module dead. dwarf_defined_names
+                                # is computed BEFORE emission, so gating on it has
+                                # no ordering hazard.
+                                _acc_type_ok = julia_type in _JULIA_BUILTIN_TYPES ||
+                                               julia_type in dwarf_defined_names ||
+                                               !isnothing(match(r"^Ptr\{", julia_type))
+                                if julia_type != "Any" && !startswith(julia_type, "NTuple{") && _acc_type_ok
                                     push!(struct_chunks, """
                                     \"\"\"Get non-bitfield member `$member_name` from `$julia_struct_name`.\"\"\"
                                     function get_$(safe_member)(s::$julia_struct_name)::$julia_type
@@ -1710,7 +1719,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                             blob_struct_sizes[julia_struct_name] = byte_size
                             blob_float_risk[julia_struct_name] = _float_risk
                             push!(struct_chunks, """
-                            # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
+                            # C struct: $struct_name ($member_count members, byte blob for ABI safety)
                             struct $julia_struct_name
                                 _data::NTuple{$(byte_size), UInt8}
                             end
@@ -1927,7 +1936,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
                     member_count = length(members)
                     push!(struct_chunks, """
-                    # C++ struct: $struct_name ($member_count members)
+                    # C struct: $struct_name ($member_count members)
                     struct $julia_struct_name
                     """)
 
@@ -2168,6 +2177,36 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Track exported function names
     # exports already initialized at top
 
+    # Every type name the module will actually BIND, read back off the chunks
+    # already emitted (enums + structs + forward declarations). Signature types
+    # are resolved against this below: a `Ptr{X}` whose X is never declared is
+    # an UndefVarError at module include, which kills the ENTIRE wrapper, not
+    # just the one function.
+    #
+    # This is not hypothetical bookkeeping — `_INTERNAL_TYPE_BLOCKLIST`
+    # deliberately suppresses the DECLARATION of system types that leak through
+    # DWARF (`_IO_FILE` et al.), while nothing suppressed their USES, so any
+    # library with a `FILE*` in its API generated an unloadable module
+    # (miniaudio's ma_fopen/ma_wfopen, 2026-08-02). Degrading the pointer to
+    # `Ptr{Cvoid}` is ABI-identical and keeps the function callable.
+    emitted_type_names = _defined_type_names(join(enum_chunks) * join(struct_chunks))
+
+    # Union accessors were built during struct emission and screened against the
+    # INTENDED struct set (`known_struct_names`). A type that was planned but
+    # then skipped — dedup, blocklist, a DWARF-key collision — leaves an
+    # accessor naming something the module never binds. Same class as the
+    # signature fix, different path: miniaudio's `get_..._memoryStream` returned
+    # `ma_dr_flac__memory_stream`, which no chunk defines. Drop those; the
+    # member stays reachable through the parent struct's bytes.
+    filter!(union_accessor_chunks) do chunk
+        used = String[]
+        for re in (r"::([A-Za-z_][A-Za-z0-9_]*)", r"Ptr\{([A-Za-z_][A-Za-z0-9_]*)\}")
+            for m in eachmatch(re, chunk)
+                push!(used, m.captures[1])
+            end
+        end
+        all(t -> t in emitted_type_names || t in _JULIA_BUILTIN_TYPES, used)
+    end
 
     for func in functions
         func_name = func["name"]
@@ -2308,6 +2347,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             else
                 julia_type
             end
+
+            # Degrade Ptr{X} to Ptr{Cvoid} when X is never declared in this
+            # module (blocklisted system type, or any name that reached a
+            # signature without reaching the struct emitters). Same ABI.
+            actual_c_type = _resolve_forward_ptr(actual_c_type, emitted_type_names)
 
             push!(param_types, actual_c_type)
 
@@ -2692,7 +2736,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         end
 
         # llvmcall needs Tuple{Type1, Type2} — built from raw param_types (no trailing comma)
-        # CRITICAL: Ref{T} in Julia maps to ptr addrspace(10) in LLVM, but C++ IR uses
+        # CRITICAL: Ref{T} in Julia maps to ptr addrspace(10) in LLVM, but C IR uses
         # plain ptr (addrspace 0). For llvmcall we must use Ptr{T} and convert explicitly.
         llvmcall_param_types = String[]
         llvmcall_arg_names = String[]
@@ -2736,6 +2780,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         julia_return_type = return_type["julia_type"]
         c_return_type = return_type["c_type"]
 
+        # A returned pointer to an undeclared type is the same load-blocking
+        # class as a parameter one (see emitted_type_names above).
+        julia_return_type = _resolve_forward_ptr(julia_return_type, emitted_type_names)
+
         # Check if return type is a struct (not primitive, not pointer)
         is_struct_return = julia_return_type == "Any" && !contains(c_return_type, "*") && !contains(c_return_type, "void") && c_return_type != "unknown"
         
@@ -2748,7 +2796,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
         # Build the llvmcall expression with proper Ref{T} → Ptr{T} handling.
         # ccall handles Ref{T} → C pointer automatically, but llvmcall sees Ref{T}
-        # as ptr addrspace(10) while C++ IR uses plain ptr (addrspace 0).
+        # as ptr addrspace(10) while C IR uses plain ptr (addrspace 0).
         function _wrap_ffi_callsite(call_expr, indent)
             if !has_ref_params
                 return "$(indent)return $call_expr"
@@ -2836,7 +2884,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 error(\"\"\"
                 FFI Safety Trap: Cannot call function '$julia_name'.
                 One or more types could not be mapped to Julia safely:
-                Return type: $julia_return_type (C++: $c_return_type)
+                Return type: $julia_return_type (C: $c_return_type)
                 Parameter types: $(join(param_types, ", "))
                 
                 To fix this, add the missing type mapping to your replibuild.toml.
@@ -3228,7 +3276,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         _tier1_emit_slices!(config, func_chunks, tier1_slices, tier1_const_owner)
 
     tier1_registry = """
-    # Functions dispatched through Tier 1 (sliced llvmcall); empty ⇒ all ccall/thunk
+    # ── Tier 1: sliced llvmcall ───────────────────────────────────────────────
+    # Each function named below carries a `_SLICE_*` path const and a
+    # `@generated` kernel that picks ccall vs llvmcall ONCE, at generation time.
+    # llvmcall is opportunistic — a passenger tier, never the driver — so both
+    # doubts resolve to the ccall body, which is why the kernels below look
+    # like they distrust their own slice:
+    #   * output mode (`jl_generating_output`) — a sliced llvmcall inside a
+    #     precompile worker deadlocks the JIT engine lock whenever a `declare`
+    #     binds a dlopened library's symbol, so precompilation takes ccall and
+    #     the first runtime call regenerates to the slice;
+    #   * missing slice file — a wrapper vendored or relocated without its
+    #     `slices/` directory stays a working ccall wrapper rather than failing
+    #     at load or call time.
+    # Empty set ⇒ every function dispatches through ccall/thunk.
     const TIER1_FUNCTIONS = Set{String}($(isempty(tier1_emitted) ? "String[]" : repr(sort(unique(tier1_emitted)))))
 
     """

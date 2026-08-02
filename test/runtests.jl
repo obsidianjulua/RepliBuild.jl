@@ -141,6 +141,13 @@ include(joinpath(@__DIR__, "test_dep_cache.jl"))
 
 include(joinpath(@__DIR__, "dag_test", "test_dag_diff.jl"))
 
+# ── Wrapper type-binding guard (no toolchain required) ───────────────────────
+# A type used in a foreign-call signature but never declared by the module is
+# an UndefVarError at include time — the whole wrapper dies, not one function.
+# Library-free traces over the checker plus its refusal-to-write behaviour.
+
+include(joinpath(@__DIR__, "test_wrapper_type_bindings.jl"))
+
 # ── Suite wiring guard (no toolchain required) ───────────────────────────────
 # A test file that no suite includes is a test that silently never runs. That
 # is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3

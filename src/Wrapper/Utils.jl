@@ -42,6 +42,95 @@ const _JULIA_BUILTIN_TYPES = Set([
     "Cstring", "Float32", "Float64", "Any", "Nothing", "Cintptr_t", "Cuintptr_t",
 ])
 
+# Type constructors that legitimately appear in a ccall type position but are
+# never *defined* by a generated wrapper.
+const _JULIA_TYPE_CTORS = Set([
+    "Ptr", "Ref", "NTuple", "Tuple", "Union", "Vararg", "String", "Symbol",
+])
+
+"""
+    _defined_type_names(source) -> Set{String}
+
+Every type name a generated module BINDS: struct/mutable struct, `@enum`,
+`abstract`/`primitive type`, and `const` aliases.
+
+Derived from the emitted text rather than from generator bookkeeping, so the
+forward-reference resolver and the pre-write guard cannot drift apart — they
+call this on the same source and agree by construction.
+"""
+function _defined_type_names(source::AbstractString)::Set{String}
+    names = Set{String}()
+    for re in (r"^\s*(?:mutable\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)"m,
+               r"^\s*@enum\s+([A-Za-z_][A-Za-z0-9_]*)"m,
+               r"^\s*abstract\s+type\s+([A-Za-z_][A-Za-z0-9_]*)"m,
+               r"^\s*primitive\s+type\s+([A-Za-z_][A-Za-z0-9_]*)"m,
+               r"^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s*="m)
+        for m in eachmatch(re, source)
+            push!(names, m.captures[1])
+        end
+    end
+    return names
+end
+
+# Docstrings quote the same types they document, so an undefined name shows up
+# there too — harmlessly, since it is inside a string. Strip them before
+# scanning for real uses.
+_strip_docstrings(source::AbstractString) = replace(source, r"\"\"\".*?\"\"\""s => "")
+
+"""
+    _undefined_ccall_types(source) -> Vector{Tuple{String,String}}
+
+Type names used in a foreign-call type position that the module never binds,
+as `(type, enclosing function)` pairs.
+
+This is the load-blocking class: `ccall(..., (Ptr{Ptr{_IO_FILE}}, ...), ...)`
+where `_IO_FILE` is never declared raises `UndefVarError` at module include —
+so nothing in the wrapper works, not merely the one function. Checking the
+artifact (rather than trusting the generator's own name bookkeeping) is the
+point: it catches any path that emits a type, including ones added later.
+"""
+function _undefined_ccall_types(source::AbstractString)::Vector{Tuple{String,String}}
+    code = _strip_docstrings(source)
+    known = union(_defined_type_names(code), _JULIA_BUILTIN_TYPES, _JULIA_TYPE_CTORS)
+
+    # Offsets of `function <name>(` so a hit can name where it lives.
+    fn_at = [(m.offset, m.captures[1])
+             for m in eachmatch(r"^\s*function\s+([A-Za-z_][A-Za-z0-9_!]*)"m, code)]
+    enclosing(off) = begin
+        i = searchsortedlast([f[1] for f in fn_at], off)
+        i == 0 ? "<module scope>" : fn_at[i][2]
+    end
+
+    bad = Tuple{String,String}[]
+    seen = Set{Tuple{String,String}}()
+
+    # ONLY ccall type positions. `ccall` resolves its return type and argument
+    # type tuple eagerly, when the method is defined — that is why an undefined
+    # name there kills the module at include. Everywhere else a type name is
+    # lazy: a `::T` return annotation, a `cglobal(…, T)` argument, and a
+    # function body all resolve on first CALL, so an undeclared type there
+    # costs one function and loads fine. stl_test proves the distinction — its
+    # wrapper references an undeclared `piecewise_construct_t` in exactly those
+    # lazy positions and has always loaded (verified by including it).
+    # Scanning more broadly turns working wrappers into refused ones.
+    for m in eachmatch(r"ccall\(\([^)]*\)\s*,\s*([^,]+),\s*\(([^)]*)\)", code)
+        pos = m.offset
+        for entry in vcat(String(m.captures[1]), split(m.captures[2], ','))
+            t = strip(String(entry))
+            isempty(t) && continue
+            # Unwrap Ptr{…}/Ref{…} down to the leaf name.
+            while (inner = match(r"^(?:Ptr|Ref)\{(.+)\}$", t)) !== nothing
+                t = strip(String(inner.captures[1]))
+            end
+            occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", t) || continue
+            t in known && continue
+            key = (t, enclosing(pos))
+            key in seen || (push!(seen, key); push!(bad, key))
+        end
+    end
+    return bad
+end
+
 """
     _resolve_forward_ptr(julia_type, defined_names) -> String
 

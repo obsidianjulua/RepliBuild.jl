@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>   /* FILE — see §8 at the bottom */
 
 // 1. Deeply nested anonymous structs and unions
 typedef struct {
@@ -108,5 +109,20 @@ typedef struct OpaqueState OpaqueState;
 OpaqueState* init_opaque(void);
 void process_opaque(OpaqueState* state, struct SelfReferential* self_ref);
 void free_opaque(OpaqueState* state);
+
+// 8. A libc type in the API surface: `FILE` resolves through DWARF to
+// `struct _IO_FILE`, which is on _INTERNAL_TYPE_BLOCKLIST and is therefore
+// never declared by the generator. Before 2026-08-02 the blocklist suppressed
+// the DECLARATION but not the USES, so `Ptr{_IO_FILE}` landed in the ccall
+// signature and the whole module raised UndefVarError at include — every
+// function dead, not just this one. Found live on miniaudio's ma_fopen.
+// The reproduction needs FILE** specifically, which is why miniaudio's
+// ma_fopen(FILE** ppFile, …) found it: a single FILE* is already degraded to
+// Ptr{Cvoid} by the type mapper, but the DOUBLE pointer survives as
+// Ptr{Ptr{_IO_FILE}} and reaches the ccall signature intact. Verified by
+// disabling the fix and watching only the ** form trip the guard.
+long stream_open(FILE** out, const char* path);
+long stream_write_tag(FILE* out, const char* tag);
+FILE* stream_null(void);
 
 #endif // C_ABOMINATION_H

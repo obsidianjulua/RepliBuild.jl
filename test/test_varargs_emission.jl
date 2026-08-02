@@ -7,6 +7,13 @@
 # through that form only worked when leftover AL happened to be nonzero).
 #
 # String-level + macro-expansion checks only; no toolchain required.
+#
+# Imports are declared here rather than inherited from runtests.jl so the file
+# also runs standalone (`julia --project=. test/test_varargs_emission.jl`) —
+# it previously errored with `UndefVarError: @testset` down that path.
+
+using Test
+using RepliBuild
 
 @testset "Varargs @ccall emission" begin
     W = RepliBuild.Wrapper

@@ -79,12 +79,36 @@ end
     
     @testset "Function Pointers" begin
         outer_cfunc = @cfunction(my_outer, Ptr{Cvoid}, (Cint,))
-        
+
         # Execute it
         res = CAbominationTest.execute_outer(outer_cfunc, Int32(10), 5.0f0)
-        
+
         # It should call my_outer(10), which returns my_inner, which is called with 5.0 -> 10.0
         @test res == 10.0
+    end
+
+    @testset "libc types in the API surface (§8)" begin
+        # The load-blocking class: FILE resolves to `struct _IO_FILE`, which is
+        # on _INTERNAL_TYPE_BLOCKLIST and never declared. Before the fix the
+        # blocklist suppressed the declaration but not the USES, so
+        # Ptr{Ptr{_IO_FILE}} reached the ccall tuple and the module raised
+        # UndefVarError at include — killing every function in it, which is why
+        # simply reaching this line is most of the assertion.
+        @test isdefined(CAbominationTest, :stream_open)
+        @test isdefined(CAbominationTest, :stream_write_tag)
+
+        # FILE** degrades to Ptr{Ptr{Cvoid}}: undeclared leaf swapped, pointer
+        # depth preserved, ABI unchanged.
+        src = read(joinpath(@__DIR__, "julia", "CAbominationTest.jl"), String)
+        code = replace(src, r"\"\"\".*?\"\"\""s => "")     # docstrings may name the C type
+        @test !occursin("_IO_FILE", code)
+        @test occursin("(Ptr{Ptr{Cvoid}}, Ptr{UInt8},)", code)
+
+        # Still callable, and the pointer round-trips.
+        out = Ref(Ptr{Cvoid}(C_NULL))
+        @test CAbominationTest.stream_open(out, "/nonexistent") == 0
+        @test CAbominationTest.stream_open(C_NULL, "/nonexistent") == -1
+        @test CAbominationTest.stream_null() == Ptr{Cvoid}(C_NULL)
     end
 end
 

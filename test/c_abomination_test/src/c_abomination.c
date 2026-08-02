@@ -105,3 +105,21 @@ double floatbox_get(FloatBox b) {
 int floatbox_kind(FloatBox b) {
     return b.kind;
 }
+
+/* §8 — libc FILE in the API surface. The DECLARATION is what reproduces the
+ * blocklisted-type class; these bodies just make the symbols real so the
+ * wrapper can be loaded and called. */
+long stream_open(FILE** out, const char* path) {
+    if (out == NULL) return -1;
+    *out = NULL;              /* never actually opens; the SIGNATURE is the test */
+    return path == NULL ? -1 : 0;
+}
+
+long stream_write_tag(FILE* out, const char* tag) {
+    if (out == NULL || tag == NULL) return -1;
+    return (long)fprintf(out, "[%s]", tag);
+}
+
+FILE* stream_null(void) {
+    return NULL;
+}

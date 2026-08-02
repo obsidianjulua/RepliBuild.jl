@@ -46,6 +46,44 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
     return wrap_introspective(config, library_path, headers, generate_docs=generate_docs)
 end
 
+"""
+    _assert_wrapper_loadable(wrapper_content, module_name)
+
+Refuse to write a wrapper that would raise `UndefVarError` at include time.
+
+This is the worst failure the pipeline can produce: not a degraded function or
+a wrong value, but every function in the module gone at once, reported as an
+error naming a type the user never mentioned. miniaudio hit it live on
+2026-08-02 — `ma_fopen(FILE**, …)` put `Ptr{Ptr{_IO_FILE}}` in a ccall
+signature while `_IO_FILE`, being on `_INTERNAL_TYPE_BLOCKLIST`, was never
+declared; all 1178 functions were dead on one missing declaration.
+
+Deliberately checks the generated TEXT rather than the generator's own record
+of what it defined. The bug was precisely that those two disagreed, so a guard
+built on the same bookkeeping would have agreed with the bug.
+"""
+function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::AbstractString)
+    undefined_types = _undefined_ccall_types(wrapper_content)
+    isempty(undefined_types) && return nothing
+
+    detail = join(("  $t  — used by $fn" for (t, fn) in undefined_types), "\n")
+    error("""
+    Refusing to write wrapper '$module_name': $(length(undefined_types)) type(s) \
+    appear in foreign-call signatures but are never declared by the module. \
+    Writing it would produce a file that raises UndefVarError at include time, \
+    disabling every function in it.
+
+    $detail
+
+    A type reaches this state when a signature uses it but the struct emitters \
+    skip it — typically a system type on _INTERNAL_TYPE_BLOCKLIST (e.g. _IO_FILE \
+    behind a `FILE*` parameter). Fix by degrading the use to Ptr{Cvoid}, which is \
+    ABI-identical, via _resolve_forward_ptr — not by widening the blocklist, \
+    which suppresses declarations without suppressing uses and is what caused \
+    this in the first place.
+    """)
+end
+
 # =============================================================================
 # TIER 1: BASIC WRAPPER (Symbol-Only)
 # =============================================================================
@@ -89,6 +127,7 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
     mkpath(output_dir)
     output_file = joinpath(output_dir, "$(module_name).jl")
 
+    _assert_wrapper_loadable(wrapper_content, module_name)
     write(output_file, wrapper_content)
 
     return output_file
@@ -459,6 +498,7 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     mkpath(output_dir)
     output_file = joinpath(output_dir, "$(module_name).jl")
 
+    _assert_wrapper_loadable(wrapper_content, module_name)
     write(output_file, wrapper_content)
 
     # Write thunk manifest for dead-thunk elimination.
