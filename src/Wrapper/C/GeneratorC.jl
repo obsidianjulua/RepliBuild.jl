@@ -410,7 +410,8 @@ function _tier1_kernel_chunk(slice_const::String, kernel::String, mangled::Strin
     isfile($slice_const) && include_dependency($slice_const)
 
     @generated function $kernel($sig)
-        if ccall(:jl_generating_output, Cint, ()) == 1 || !isfile($slice_const)
+        if ccall(:jl_generating_output, Cint, ()) == 1 || !isfile($slice_const) ||
+           !_slice_symbols_resolve(get(TIER1_DECLARES, "$mangled", String[]))
             return :(ccall((:$mangled, LIBRARY_PATH), $ret_type, $ccall_types$arg_tail))
         end
         ir = read($slice_const, String)
@@ -592,6 +593,24 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
 end
 
 """
+    _render_declares_literal(declares) -> String
+
+Render the per-slice symbol table as a Julia `Dict` literal. Emitted rather
+than loaded from a side file so a vendored wrapper carries its own contract:
+one file to copy, and no way to ship the table without the kernels that read it.
+"""
+function _render_declares_literal(declares::Dict{String,Vector{String}})::String
+    isempty(declares) && return "Dict{String,Vector{String}}()"
+    io = IOBuffer()
+    println(io, "Dict{String,Vector{String}}(")
+    for k in sort!(collect(keys(declares)))
+        println(io, "        ", repr(k), " => ", repr(declares[k]), ",")
+    end
+    print(io, "    )")
+    return String(take!(io))
+end
+
+"""
     _tier1_emit_slices!(config, func_chunks, slice_ir, const_owner) -> Vector{String}
 
 Write exactly the slices the FINAL wrapper text reads, and return the Julia
@@ -622,6 +641,7 @@ function _tier1_emit_slices!(config::RepliBuildConfig, func_chunks::Vector{Strin
     mkpath(slices_dir)
     emitted = String[]
     written = Set{String}()
+    declares = Dict{String,Vector{String}}()
     for chunk in func_chunks
         occursin("@generated function _TIER1_", chunk) || continue
 
@@ -641,6 +661,9 @@ function _tier1_emit_slices!(config::RepliBuildConfig, func_chunks::Vector{Strin
             mangled in written && continue
             write(joinpath(slices_dir, mangled * ".ll"), slice_ir[mangled])
             push!(written, mangled)
+            # Recorded off the IR being written, so the runtime check and the
+            # file it guards cannot disagree (see _slice_declared_symbols).
+            declares[mangled] = _slice_declared_symbols(slice_ir[mangled])
         end
 
         fm = match(r"^function ([A-Za-z_][A-Za-z0-9_!]*)\("m, chunk)
@@ -649,7 +672,7 @@ function _tier1_emit_slices!(config::RepliBuildConfig, func_chunks::Vector{Strin
     isempty(written) ||
         println("  tier1: $(length(written)) slices emitted " *
                 "($(length(unique(emitted))) functions)")
-    return emitted
+    return emitted, declares
 end
 
 function generate_introspective_module_c(config::RepliBuildConfig, lib_path::String,
@@ -695,6 +718,71 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Verify library exists
     if !isfile(LIBRARY_PATH)
         error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
+    end
+
+    # ── Build identity ────────────────────────────────────────────────────────
+    # This wrapper is portable SOURCE, but its contents are a snapshot of ONE
+    # compilation: struct field offsets, blob byte sizes, enum values and the
+    # sliced IR all come from the library named below. Point it at a different
+    # build — a JLL, a distro package, a rebuild with different flags — and
+    # nothing fails loudly; it just reads the wrong offsets. So the identity of
+    # the library it was generated against travels with it.
+    const BUILD_ID = \"$(_elf_build_id(lib_path) === nothing ? "" : _elf_build_id(lib_path))\"
+    const BUILD_TARGET = \"$(Sys.MACHINE)\"
+    const BUILD_GENERATOR = \"RepliBuild v$(pkgversion(@__MODULE__) === nothing ? "?" : pkgversion(@__MODULE__))\"
+
+    \"\"\"GNU build ID of the ELF at `path`, or \"\" — read from PT_NOTE, so it survives stripping.\"\"\"
+    function _read_build_id(path::AbstractString)
+        try
+            open(path, \"r\") do io
+                read(io, 4) == UInt8[0x7f, 0x45, 0x4c, 0x46] || return \"\"
+                seek(io, 4); read(io, UInt8) == 2 || return \"\"
+                seek(io, 0x20); phoff = read(io, UInt64)
+                seek(io, 0x36); phentsize = read(io, UInt16); phnum = read(io, UInt16)
+                for i in 0:(phnum - 1)
+                    seek(io, phoff + i * phentsize)
+                    read(io, UInt32) == 4 || continue
+                    skip(io, 4); off = read(io, UInt64); skip(io, 16); sz = read(io, UInt64)
+                    pos, stop = off, off + sz
+                    while pos + 12 <= stop
+                        seek(io, pos)
+                        namesz = read(io, UInt32); descsz = read(io, UInt32); ntype = read(io, UInt32)
+                        name = String(read(io, namesz))
+                        pad(n) = (n + 3) & ~UInt32(3)
+                        desc_at = pos + 12 + pad(namesz)
+                        if ntype == 3 && startswith(name, \"GNU\")
+                            seek(io, desc_at); return bytes2hex(read(io, descsz))
+                        end
+                        pos = desc_at + pad(descsz)
+                    end
+                end
+                return \"\"
+            end
+        catch
+            return \"\"
+        end
+    end
+
+    \"\"\"
+    Warn if the library beside this wrapper is not the one it was generated from.
+
+    Only a warning: a rebuild of the same source is usually fine, and refusing
+    to load would break legitimate workflows. But layout drift is silent and
+    unrecoverable at the call site, so the user gets told once. Tier 1 protects
+    itself separately and automatically — see `_slice_symbols_resolve`.
+    \"\"\"
+    function _check_build_identity()
+        isempty(BUILD_ID) && return nothing          # no build ID to compare
+        actual = _read_build_id(LIBRARY_PATH)
+        (isempty(actual) || actual == BUILD_ID) && return nothing
+        @warn \"\"\"
+        $(module_name): the library loaded is NOT the build this wrapper was generated from.
+        Struct layouts, enum values, blob sizes and any sliced IR in this wrapper are a
+        snapshot of the original build; a mismatch can read wrong offsets with no error.
+        Regenerate the wrapper against this library if the two are not known-compatible.\"\"\" *
+        \"\\n  expected build id: \$BUILD_ID\\n  actual build id:   \$actual\\n  library:           \$LIBRARY_PATH\" *
+        \"\\n  generated for:     \$BUILD_TARGET by \$BUILD_GENERATOR\"
+        return nothing
     end
 
     # Flush C stdout so printf output appears immediately in the Julia REPL
@@ -3218,6 +3306,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
     # Unbuffer C stdout so printf output is visible in the Julia REPL.
     # Must be in __init__ (not module body) for precompilation safety.
+    # Build-identity check, shared by every __init__ variant below.
+    _identity_snippet = """
+            _check_build_identity()
+    """
+
     _setvbuf_snippet = """
             # Unbuffer C stdout so printf output appears immediately in the REPL
             let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
@@ -3241,7 +3334,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             elseif $requires_jit
                 @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
             end
-        $_setvbuf_snippet
+        $_identity_snippet$_setvbuf_snippet
         end
         """
     else
@@ -3250,7 +3343,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             function __init__()
                 # Initialize the global JIT context with this library's vtables
                 RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
-            $_setvbuf_snippet
+            $_identity_snippet$_setvbuf_snippet
             end
             """
         else
@@ -3261,7 +3354,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             function __init__()
                 # Load library explicitly to ensure symbols are available
                 LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-            $_setvbuf_snippet
+            $_identity_snippet$_setvbuf_snippet
             end
             """
         end
@@ -3272,7 +3365,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     func_chunks = _dedup_method_chunks(func_chunks)
 
     # Slices are written from the FINAL chunks, after dedup — see the docstring.
-    tier1_emitted = tier1_slices === nothing ? String[] :
+    tier1_emitted, tier1_declares = tier1_slices === nothing ?
+        (String[], Dict{String,Vector{String}}()) :
         _tier1_emit_slices!(config, func_chunks, tier1_slices, tier1_const_owner)
 
     tier1_registry = """
@@ -3288,9 +3382,32 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     #     the first runtime call regenerates to the slice;
     #   * missing slice file — a wrapper vendored or relocated without its
     #     `slices/` directory stays a working ccall wrapper rather than failing
-    #     at load or call time.
+    #     at load or call time;
+    #   * unresolvable declare — see _slice_symbols_resolve below.
     # Empty set ⇒ every function dispatches through ccall/thunk.
     const TIER1_FUNCTIONS = Set{String}($(isempty(tier1_emitted) ? "String[]" : repr(sort(unique(tier1_emitted)))))
+
+    # Symbols each slice binds by `declare`, recorded off the shipped .ll files.
+    const TIER1_DECLARES = $(_render_declares_literal(tier1_declares))
+
+    \"\"\"
+    Whether every symbol a slice declares can be resolved in this process.
+
+    The wrap-time pre-flight already checked this against the library it was
+    generated from — but a wrapper is portable source, and the library beside it
+    at RUNTIME may not be that library. A JLL or distro build has none of the
+    `__rb_*` promoted statics RepliBuild's own build exports, and an unresolved
+    slice declare does not raise: ORC prints `Symbols not found` and then blocks
+    FOREVER on the first call. So the check is repeated here, against the
+    library actually loaded, before any slice is trusted. A miss silently uses
+    the ccall body, which is always correct.
+    \"\"\"
+    function _slice_symbols_resolve(syms)
+        for s in syms
+            ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, s) == C_NULL && return false
+        end
+        return true
+    end
 
     """
 

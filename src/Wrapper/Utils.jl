@@ -49,6 +49,77 @@ const _JULIA_TYPE_CTORS = Set([
 ])
 
 """
+    _elf_build_id(path) -> Union{Nothing,String}
+
+The GNU build ID of an ELF file as lowercase hex, or `nothing` if absent.
+
+Identifies a BUILD, not a version: two compilations of identical source differ
+here. That is exactly the question a generated wrapper needs answered, because
+its struct layouts, enum values and blob sizes are a snapshot of one
+compilation — point it at a different build and nothing complains, it just
+reads the wrong offsets.
+
+Read from the PT_NOTE segment rather than a section header: `strip` drops
+sections but keeps segments, so this still works on a stripped library.
+"""
+function _elf_build_id(path::AbstractString)::Union{Nothing,String}
+    isfile(path) || return nothing
+    try
+        open(path, "r") do io
+            read(io, 4) == UInt8[0x7f, 0x45, 0x4c, 0x46] || return nothing  # \x7fELF
+            seek(io, 4); read(io, UInt8) == 2 || return nothing             # ELFCLASS64
+            seek(io, 0x20); e_phoff = read(io, UInt64)
+            seek(io, 0x36); e_phentsize = read(io, UInt16); e_phnum = read(io, UInt16)
+            for i in 0:(e_phnum - 1)
+                seek(io, e_phoff + i * e_phentsize)
+                p_type = read(io, UInt32)
+                p_type == 4 || continue                                     # PT_NOTE
+                skip(io, 4)                                                 # p_flags
+                p_offset = read(io, UInt64); skip(io, 16)                   # vaddr, paddr
+                p_filesz = read(io, UInt64)
+                pos = p_offset
+                stop = p_offset + p_filesz
+                while pos + 12 <= stop
+                    seek(io, pos)
+                    namesz = read(io, UInt32); descsz = read(io, UInt32); ntype = read(io, UInt32)
+                    name = String(read(io, namesz))
+                    pad(n) = (n + 3) & ~UInt32(3)
+                    desc_at = pos + 12 + pad(namesz)
+                    if ntype == 3 && startswith(name, "GNU")               # NT_GNU_BUILD_ID
+                        seek(io, desc_at)
+                        return bytes2hex(read(io, descsz))
+                    end
+                    pos = desc_at + pad(descsz)
+                end
+            end
+            return nothing
+        end
+    catch
+        return nothing    # unreadable/odd ELF is not worth failing a build over
+    end
+end
+
+"""
+    _slice_declared_symbols(ir) -> Vector{String}
+
+Symbols a slice module binds by `declare` — the exact set the JIT must resolve.
+
+Re-derived from the slice IR that will SHIP rather than carried over from the
+Slicer's bookkeeping, so the runtime check can never disagree with the file it
+guards. Intrinsics are excluded: LLVM supplies those, they are never dlsym'd.
+"""
+function _slice_declared_symbols(ir::AbstractString)::Vector{String}
+    syms = String[]
+    for m in eachmatch(r"^declare[^@\n]*@\"?([A-Za-z0-9_.$]+)\"?\("m, ir)
+        push!(syms, m.captures[1])
+    end
+    for m in eachmatch(r"^@\"?([A-Za-z0-9_.$]+)\"?\s*=\s*external\b"m, ir)
+        push!(syms, m.captures[1])
+    end
+    return sort!(unique!(filter(s -> !startswith(s, "llvm."), syms)))
+end
+
+"""
     _defined_type_names(source) -> Set{String}
 
 Every type name a generated module BINDS: struct/mutable struct, `@enum`,

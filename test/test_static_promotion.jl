@@ -145,8 +145,28 @@ end
 
     # __init__ loads the .so RTLD_GLOBAL (slice declarations resolve via ORC)
     @test occursin("RTLD_GLOBAL", wrapper_text)
-    # Promoted symbols are slice surface, never API surface
-    @test !occursin("__rb_", wrapper_text)
+    # Promoted symbols are slice surface, never API surface.
+    #
+    # Since 2026-08-02 they DO appear in one place: the TIER1_DECLARES table,
+    # which records what each slice binds so the load-time check can verify it
+    # against whatever library is actually present. That is the opposite of
+    # leaking them into the API — it is what lets a wrapper detect a library
+    # that lacks them. So the assertion is now about the surfaces that matter
+    # rather than the raw string.
+    # Scan CODE only: docstrings and comments discuss `__rb_*` by design (the
+    # generated explanation of the load-time check names it), and prose cannot
+    # leak a symbol into the API.
+    wrapper_code = replace(wrapper_text, r"\"\"\".*?\"\"\""s => "")
+    wrapper_code = join((first(split(l, '#')) for l in split(wrapper_code, '\n')), "\n")
+    stray = [strip(l) for l in split(wrapper_code, '\n')
+             if occursin("__rb_", l) && !occursin(r"^\s*\"[A-Za-z0-9_.]+\" => ", l)]
+    @test isempty(stray)
+    @test !occursin(r"^export .*__rb_"m, wrapper_text)          # never exported
+    @test !occursin(r"ccall\(\(:__rb_", wrapper_text)           # never called directly
+    @test !occursin(r"^function __rb_"m, wrapper_text)          # never defined as API
+    # ...and it IS present as slice-binding data, which the guard depends on.
+    @test occursin("TIER1_DECLARES", wrapper_text)
+    @test occursin("__rb_slicetest_hidden_counter", wrapper_text)
 
     include(wrapper)
     M = Slicetest

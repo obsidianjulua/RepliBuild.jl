@@ -261,4 +261,78 @@ end
     @test cfg2.wrap.tier1.allow_setjmp
 end
 
+@testset "Portability guards: wrapper on a foreign build" begin
+    # A generated wrapper is portable SOURCE, so the library sitting beside it
+    # at runtime need not be the one it was generated from — someone pointing it
+    # at a JLL, a distro package, or any independent rebuild. Two things then go
+    # wrong, and each has its own guard:
+    #
+    #   1. Sliced Tier 1 binds `__rb_*` promoted statics that ONLY exist in a
+    #      library RepliBuild built. Against a foreign build those declares are
+    #      unresolvable, and an unresolved declare does not raise — ORC prints
+    #      "Symbols not found" and BLOCKS FOREVER on the first call. The
+    #      wrap-time pre-flight cannot help: it ran against a different file.
+    #   2. Struct offsets, blob sizes and enum values are a snapshot of one
+    #      compilation, and reading them wrong is silent.
+    #
+    # The stand-in for a foreign build is a plain clang build of the same
+    # sources with no promotion pass — which is exactly what every non-RepliBuild
+    # build of this library looks like.
+    foreign_dir = mktempdir()
+    foreign_so = joinpath(foreign_dir, "libslicetest.so")
+    srcs = readdir(joinpath(FIXTURE, "src"), join=true)
+    filter!(f -> endswith(f, ".c"), srcs)
+    run(pipeline(`clang -O2 -fPIC -g -shared -I$(joinpath(FIXTURE, "include")) $srcs -o $foreign_so`,
+                 stdout=devnull, stderr=devnull))
+
+    @test isfile(foreign_so)
+    # The premise: no promoted symbols here, unlike RepliBuild's own build.
+    @test !occursin("__rb_", read(`nm -D $foreign_so`, String))
+
+    # Some slice really does bind a promoted static — otherwise this proves nothing.
+    promoted_users = [f for (f, syms) in Slicetest.TIER1_DECLARES
+                      if any(s -> startswith(s, "__rb_"), syms)]
+    @test !isempty(promoted_users)
+
+    # Guard 1: those declares are correctly seen as unresolvable against a
+    # process where the foreign library is the only slicetest loaded... but this
+    # process already has the REAL library open, so check the mechanism directly
+    # on a symbol that cannot exist anywhere.
+    @test !Slicetest._slice_symbols_resolve(["__rb_slicetest_definitely_not_a_symbol"])
+    @test Slicetest._slice_symbols_resolve(String[])          # vacuous case is true
+    @test Slicetest._slice_symbols_resolve(["st_bump"])        # a real exported symbol
+
+    # Guard 2: build identity is recorded and actually distinguishes builds.
+    @test !isempty(Slicetest.BUILD_ID)
+    @test Slicetest.BUILD_TARGET == string(Sys.MACHINE)
+    @test Slicetest._read_build_id(LIB) == Slicetest.BUILD_ID
+    foreign_id = Slicetest._read_build_id(foreign_so)
+    @test !isempty(foreign_id)
+    @test foreign_id != Slicetest.BUILD_ID     # independent builds differ
+
+    # The end-to-end behaviour (wrapper staged next to the foreign .so warns,
+    # demotes every promoted-static slice, and still computes correctly) is
+    # exercised out-of-process, since it needs a fresh module load.
+    driver = joinpath(foreign_dir, "drive.jl")
+    stage = joinpath(foreign_dir, "stage")
+    mkpath(stage)
+    cp(joinpath(FIXTURE, "julia", "slices"), joinpath(stage, "slices"))
+    cp(foreign_so, joinpath(stage, "libslicetest.so"), force=true)
+    cp(WRAPPER, joinpath(stage, "Slicetest.jl"))
+    write(driver, """
+        include(joinpath(raw"$stage", "Slicetest.jl"))
+        using .Slicetest
+        # Would hang here before the runtime symbol check.
+        @assert Slicetest.st_bump(5) == 5
+        @assert Slicetest.st_get_count() == 5
+        @assert Slicetest.st_apply(1, 21) == -21
+        print("FOREIGN_OK")
+    """)
+    out = IOBuffer()
+    ok = success(pipeline(`$(Base.julia_cmd()) --project=$(dirname(Base.active_project())) $driver`,
+                          stdout=out, stderr=devnull))
+    @test ok
+    @test occursin("FOREIGN_OK", String(take!(out)))
+end
+
 end  # testset
