@@ -622,6 +622,166 @@ static Type coercionSlotType(const SysVStructABI& abi, MLIRContext* ctx) {
     return LLVM::LLVMStructType::getLiteral(ctx, abi.eightbytes);
 }
 
+// Stack slots that stand in for a SysV MEMORY-class argument or return value
+// are addressed by native code, so they must carry the alignment that code
+// assumes. Clang never emits an sret/byval slot below 8 on x86-64, and a
+// struct we failed to model field-by-field degrades to `!llvm.array<N x i8>`,
+// whose natural alignment is 1 — leaving the slot alignment implicit would
+// hand the callee an underaligned buffer for exactly the types we understand
+// least.
+static unsigned memorySlotAlign(Type t) {
+    return static_cast<unsigned>(std::max<uint64_t>(8, abiAlign(t)));
+}
+
+// --- Shared SysV call shape ------------------------------------------------
+//
+// ffe_call and try_call marshal their operands identically; only the
+// terminator differs (llvm.call vs llvm.invoke). The two used to carry
+// independent copies of this logic, which is how a fix to one could silently
+// miss the other. One derivation.
+
+struct SysVCallShape {
+    bool needsSret = false;
+    Type sretStructType;
+    Value sretSlot;
+    Type origRetStructType;   // non-null → register-class struct return
+    Type coercedRetType;
+    SmallVector<Value, 4> args;
+    SmallVector<Type, 4> argTypes;
+    // (argument index, pointee type) for every MEMORY-class by-value struct.
+    SmallVector<std::pair<unsigned, Type>, 2> byval;
+};
+
+static SysVCallShape buildSysVCallShape(ConversionPatternRewriter& rewriter, Location loc,
+    ArrayRef<Type> resultTypeVec, ValueRange args)
+{
+    SysVCallShape s;
+    MLIRContext* ctx = rewriter.getContext();
+    Type ptrType = LLVM::LLVMPointerType::get(ctx);
+    Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+
+    // Return classification: MEMORY class (>16B or misaligned fields) uses
+    // sret; register-class structs are coerced to one scalar per eightbyte.
+    if (!resultTypeVec.empty()) {
+        if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
+            auto abi = classifySysVStruct(retStructType, ctx);
+            if (abi.memoryClass) {
+                s.needsSret = true;
+                s.sretStructType = retStructType;
+                s.sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, retStructType,
+                    one, memorySlotAlign(retStructType));
+            } else {
+                s.origRetStructType = retStructType;
+                s.coercedRetType = coercionSlotType(abi, ctx);
+            }
+        }
+    }
+
+    // If sret, the return pointer is the first argument.
+    if (s.needsSret) {
+        s.args.push_back(s.sretSlot);
+        s.argTypes.push_back(ptrType);
+    }
+
+    for (Value arg : args) {
+        Type argType = arg.getType();
+
+        if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
+            auto abi = classifySysVStruct(structType, ctx);
+            if (!abi.memoryClass) {
+                // Register-class by-value struct: pass one scalar per
+                // eightbyte (through memory, matching clang's coercion).
+                Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType,
+                    coercionSlotType(abi, ctx), one);
+                LLVM::StoreOp::create(rewriter, loc, arg, slot);
+                for (unsigned i = 0; i < abi.eightbytes.size(); ++i) {
+                    Value p = slot;
+                    if (i > 0) {
+                        p = LLVM::GEPOp::create(rewriter, loc, ptrType,
+                            rewriter.getI8Type(), slot,
+                            ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(8 * i)});
+                    }
+                    Value v = LLVM::LoadOp::create(rewriter, loc, abi.eightbytes[i], p);
+                    s.args.push_back(v);
+                    s.argTypes.push_back(abi.eightbytes[i]);
+                }
+                continue;
+            }
+
+            // MEMORY-class by-value struct: SysV wants a CALLER-OWNED STACK
+            // COPY in the outgoing argument area, not a reference to one.
+            // `llvm.byval` on a pointer parameter is precisely that, and
+            // precisely what clang emits. Both of the shapes this replaces
+            // were wrong:
+            //   • packed structs were passed as a BARE pointer — by reference,
+            //     so the callee read an address where it expected bytes;
+            //   • non-packed ones were passed as a first-class LLVM struct
+            //     value, which the backend splits per ELEMENT across registers
+            //     and stack. That is LLVM's own aggregate convention, not
+            //     SysV's, so every subsequent argument shifted too.
+            // llama.cpp's `llama_model_load_from_file(path, llama_model_params)`
+            // — 72 bytes, MEMORY class — segfaulted on the second (2026-08-05).
+            Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType,
+                one, memorySlotAlign(argType));
+            LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
+            s.byval.push_back({static_cast<unsigned>(s.args.size()), argType});
+            s.args.push_back(stackSlot);
+            s.argTypes.push_back(ptrType);
+            continue;
+        }
+
+        s.args.push_back(arg);
+        s.argTypes.push_back(arg.getType());
+    }
+
+    return s;
+}
+
+// `llvm.byval` has to travel on the call site AND on the declaration: the
+// call site is what the backend lowers, and the declaration is what the
+// verifier checks the call site against.
+static ArrayAttr byValArgAttrs(ConversionPatternRewriter& rewriter, const SysVCallShape& s) {
+    if (s.byval.empty())
+        return nullptr;
+    SmallVector<Attribute> attrs(s.args.size(), rewriter.getDictionaryAttr({}));
+    for (auto& [idx, pointee] : s.byval) {
+        attrs[idx] = rewriter.getDictionaryAttr({
+            rewriter.getNamedAttr(LLVM::LLVMDialect::getByValAttrName(),
+                                  TypeAttr::get(pointee)),
+            rewriter.getNamedAttr(LLVM::LLVMDialect::getAlignAttrName(),
+                                  rewriter.getI64IntegerAttr(memorySlotAlign(pointee)))});
+    }
+    return rewriter.getArrayAttr(attrs);
+}
+
+// Rewrite the external declaration to the coerced signature and stamp byval
+// onto its pointer parameters.
+static void retargetCallee(ConversionPatternRewriter& rewriter, ModuleOp moduleOp,
+    StringRef callee, const SysVCallShape& s, ArrayRef<Type> callResultTypes)
+{
+    if (auto calleeFn = moduleOp.lookupSymbol<func::FuncOp>(callee)) {
+        calleeFn.setFunctionType(
+            FunctionType::get(rewriter.getContext(), s.argTypes, callResultTypes));
+        for (auto& [idx, pointee] : s.byval) {
+            calleeFn.setArgAttr(idx, LLVM::LLVMDialect::getByValAttrName(),
+                                TypeAttr::get(pointee));
+            calleeFn.setArgAttr(idx, LLVM::LLVMDialect::getAlignAttrName(),
+                                rewriter.getI64IntegerAttr(memorySlotAlign(pointee)));
+        }
+    } else if (auto llvmCalleeFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(callee)) {
+        llvmCalleeFn.setFunctionType(LLVM::LLVMFunctionType::get(
+            callResultTypes.empty() ? (Type)LLVM::LLVMVoidType::get(rewriter.getContext())
+                                    : callResultTypes[0],
+            s.argTypes, /*isVarArg=*/false));
+        for (auto& [idx, pointee] : s.byval) {
+            llvmCalleeFn.setArgAttr(idx, LLVM::LLVMDialect::getByValAttrName(),
+                                    TypeAttr::get(pointee));
+            llvmCalleeFn.setArgAttr(idx, LLVM::LLVMDialect::getAlignAttrName(),
+                                    rewriter.getI64IntegerAttr(memorySlotAlign(pointee)));
+        }
+    }
+}
+
 //===----------------------------------------------------------------------===//
 // FFECallOp Lowering
 //===----------------------------------------------------------------------===//
@@ -658,125 +818,45 @@ struct FFECallOpLowering : public ConversionPattern {
             resultTypeVec.push_back(converted);
         }
 
-        // ABI Coercion for packed structs:
-        // Clang on x86_64 SysV ABI passes packed structs via byval pointer
-        // and returns them via sret (hidden first pointer argument).
-        // We must match this convention when calling the external C function.
-
+        // ABI coercion: match the x86-64 SysV convention the external C
+        // function was compiled with — sret for MEMORY-class returns, one
+        // scalar per eightbyte for register-class aggregates, byval stack
+        // copies for MEMORY-class by-value arguments. Shared with try_call.
         Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
         Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
-
-        // Return classification: MEMORY class (>16B or misaligned fields) uses
-        // sret; register-class structs are coerced to one scalar per eightbyte.
-        bool needsSret = false;
-        Type sretStructType;
-        Value sretSlot;
-        Type origRetStructType;   // non-null → register-class struct return
-        Type coercedRetType;
-        if (!resultTypeVec.empty()) {
-            if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
-                auto abi = classifySysVStruct(retStructType, rewriter.getContext());
-                if (abi.memoryClass) {
-                    needsSret = true;
-                    sretStructType = retStructType;
-                    sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
-                } else {
-                    origRetStructType = retStructType;
-                    coercedRetType = coercionSlotType(abi, rewriter.getContext());
-                }
-            }
-        }
-
-        // Build coerced argument list
-        SmallVector<Value, 4> coercedArgs;
-        SmallVector<Type, 4> coercedArgTypes;
-
-        // If sret, the return pointer is the first argument
-        if (needsSret) {
-            coercedArgs.push_back(sretSlot);
-            coercedArgTypes.push_back(ptrType);
-        }
-
-        for (Value arg : args) {
-            Type argType = arg.getType();
-
-            if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
-                auto abi = classifySysVStruct(structType, rewriter.getContext());
-                if (!abi.memoryClass) {
-                    // Register-class by-value struct: pass one scalar per
-                    // eightbyte (through memory, matching clang's coercion).
-                    Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType,
-                        coercionSlotType(abi, rewriter.getContext()), one);
-                    LLVM::StoreOp::create(rewriter, loc, arg, slot);
-                    for (unsigned i = 0; i < abi.eightbytes.size(); ++i) {
-                        Value p = slot;
-                        if (i > 0) {
-                            p = LLVM::GEPOp::create(rewriter, loc, ptrType,
-                                rewriter.getI8Type(), slot,
-                                ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(8 * i)});
-                        }
-                        Value v = LLVM::LoadOp::create(rewriter, loc, abi.eightbytes[i], p);
-                        coercedArgs.push_back(v);
-                        coercedArgTypes.push_back(abi.eightbytes[i]);
-                    }
-                    continue;
-                }
-                if (structType.isPacked()) {
-                    // MEMORY-class packed struct arg: pass by pointer
-                    Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType, one);
-                    LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
-                    coercedArgs.push_back(stackSlot);
-                    coercedArgTypes.push_back(ptrType);
-                    continue;
-                }
-            }
-
-            coercedArgs.push_back(arg);
-            coercedArgTypes.push_back(arg.getType());
-        }
+        SysVCallShape shape = buildSysVCallShape(rewriter, loc, resultTypeVec, args);
 
         // Determine call result types (void if using sret)
         SmallVector<Type, 1> callResultTypes;
-        if (!needsSret) {
+        if (!shape.needsSret) {
             callResultTypes = resultTypeVec;
-            if (coercedRetType)
-                callResultTypes[0] = coercedRetType;
+            if (shape.coercedRetType)
+                callResultTypes[0] = shape.coercedRetType;
         }
         // If sret, the call returns void; result is loaded from sret pointer
 
-        // Update the external function declaration's signature to match coerced types.
-        {
-            auto moduleOp = op->getParentOfType<ModuleOp>();
-            if (auto calleeFn = moduleOp.lookupSymbol<func::FuncOp>(calleeAttr.getValue())) {
-                auto newFuncType = FunctionType::get(rewriter.getContext(), coercedArgTypes, callResultTypes);
-                calleeFn.setFunctionType(newFuncType);
-            } else if (auto llvmCalleeFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(calleeAttr.getValue())) {
-                auto newFuncType = LLVM::LLVMFunctionType::get(
-                    callResultTypes.empty() ? LLVM::LLVMVoidType::get(rewriter.getContext()) : callResultTypes[0],
-                    coercedArgTypes,
-                    false // isVarArg
-                );
-                llvmCalleeFn.setFunctionType(newFuncType);
-            }
-        }
+        retargetCallee(rewriter, op->getParentOfType<ModuleOp>(),
+                       calleeAttr.getValue(), shape, callResultTypes);
 
         // Direct named call
-        auto callOp = LLVM::CallOp::create(rewriter, 
+        auto callOp = LLVM::CallOp::create(rewriter,
             loc, callResultTypes, calleeAttr.getValue(),
-            ValueRange(coercedArgs));
+            ValueRange(shape.args));
+        if (auto argAttrs = byValArgAttrs(rewriter, shape))
+            callOp.setArgAttrsAttr(argAttrs);
 
         // Replace the op
-        if (needsSret) {
+        if (shape.needsSret) {
             // Load the result from the sret pointer
-            Value result = LLVM::LoadOp::create(rewriter, loc, sretStructType, sretSlot);
+            Value result = LLVM::LoadOp::create(rewriter, loc, shape.sretStructType, shape.sretSlot);
             rewriter.replaceOp(op, result);
         } else if (!resultTypeVec.empty()) {
-            if (coercedRetType) {
+            if (shape.coercedRetType) {
                 // Reconstruct the struct from the coerced eightbyte scalars
                 // through memory.
-                Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, coercedRetType, one);
+                Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, shape.coercedRetType, one);
                 LLVM::StoreOp::create(rewriter, loc, callOp.getResult(), slot);
-                Value result = LLVM::LoadOp::create(rewriter, loc, origRetStructType, slot);
+                Value result = LLVM::LoadOp::create(rewriter, loc, shape.origRetStructType, slot);
                 rewriter.replaceOp(op, result);
             } else {
                 rewriter.replaceOp(op, callOp.getResults());
@@ -843,67 +923,13 @@ struct TryCallOpLowering : public ConversionPattern {
             resultTypeVec.push_back(converted);
         }
 
-        bool needsSret = false;
-        Type sretStructType;
-        Value sretSlot;
-        Type origRetStructType;   // non-null → register-class struct return
-        Type coercedRetType;
-        if (!resultTypeVec.empty()) {
-            if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
-                auto abi = classifySysVStruct(retStructType, rewriter.getContext());
-                if (abi.memoryClass) {
-                    needsSret = true;
-                    sretStructType = retStructType;
-                    sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, sretStructType, one);
-                } else {
-                    origRetStructType = retStructType;
-                    coercedRetType = coercionSlotType(abi, rewriter.getContext());
-                }
-            }
-        }
-
-        SmallVector<Value, 4> coercedArgs;
-        SmallVector<Type, 4> coercedArgTypes;
-
-        if (needsSret) {
-            coercedArgs.push_back(sretSlot);
-            coercedArgTypes.push_back(ptrType);
-        }
-
-        for (Value arg : args) {
-            Type argType = arg.getType();
-            if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
-                auto abi = classifySysVStruct(structType, rewriter.getContext());
-                if (!abi.memoryClass) {
-                    // Register-class by-value struct: one scalar per eightbyte
-                    // (see FFECallOpLowering for rationale).
-                    Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType,
-                        coercionSlotType(abi, rewriter.getContext()), one);
-                    LLVM::StoreOp::create(rewriter, loc, arg, slot);
-                    for (unsigned i = 0; i < abi.eightbytes.size(); ++i) {
-                        Value p = slot;
-                        if (i > 0) {
-                            p = LLVM::GEPOp::create(rewriter, loc, ptrType,
-                                rewriter.getI8Type(), slot,
-                                ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(8 * i)});
-                        }
-                        Value v = LLVM::LoadOp::create(rewriter, loc, abi.eightbytes[i], p);
-                        coercedArgs.push_back(v);
-                        coercedArgTypes.push_back(abi.eightbytes[i]);
-                    }
-                    continue;
-                }
-                if (structType.isPacked()) {
-                    Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType, one);
-                    LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
-                    coercedArgs.push_back(stackSlot);
-                    coercedArgTypes.push_back(ptrType);
-                    continue;
-                }
-            }
-            coercedArgs.push_back(arg);
-            coercedArgTypes.push_back(arg.getType());
-        }
+        SysVCallShape shape = buildSysVCallShape(rewriter, loc, resultTypeVec, args);
+        bool needsSret = shape.needsSret;
+        Type sretStructType = shape.sretStructType;
+        Value sretSlot = shape.sretSlot;
+        Type origRetStructType = shape.origRetStructType;
+        Type coercedRetType = shape.coercedRetType;
+        SmallVector<Value, 4>& coercedArgs = shape.args;
 
         SmallVector<Type, 1> callResultTypes;
         if (!needsSret) {
@@ -912,18 +938,7 @@ struct TryCallOpLowering : public ConversionPattern {
                 callResultTypes[0] = coercedRetType;
         }
 
-        // Update external function declaration signature
-        {
-            if (auto calleeFn = moduleOp.lookupSymbol<func::FuncOp>(calleeAttr.getValue())) {
-                auto newFuncType = FunctionType::get(rewriter.getContext(), coercedArgTypes, callResultTypes);
-                calleeFn.setFunctionType(newFuncType);
-            } else if (auto llvmCalleeFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(calleeAttr.getValue())) {
-                auto newFuncType = LLVM::LLVMFunctionType::get(
-                    callResultTypes.empty() ? voidType : callResultTypes[0],
-                    coercedArgTypes, false);
-                llvmCalleeFn.setFunctionType(newFuncType);
-            }
-        }
+        retargetCallee(rewriter, moduleOp, calleeAttr.getValue(), shape, callResultTypes);
 
         // --- Ensure EH helper functions are declared ---
 
@@ -1001,6 +1016,8 @@ struct TryCallOpLowering : public ConversionPattern {
             ValueRange{},
             catchBlock,       // unwind dest
             ValueRange{});
+        if (auto argAttrs = byValArgAttrs(rewriter, shape))
+            invokeOp.setArgAttrsAttr(argAttrs);
 
         // --- invokeOkBlock: store result, branch to mergeBlock ---
         rewriter.setInsertionPointToEnd(invokeOkBlock);

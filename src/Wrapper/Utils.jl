@@ -526,3 +526,131 @@ function _dedup_method_chunks(chunks::Vector{String})
     end
     return chunks[keep]
 end
+
+# =============================================================================
+# BYTE-BLOB STRUCT SETTERS
+# =============================================================================
+#
+# A struct whose layout could not be modelled field-by-field is emitted as an
+# immutable `_data::NTuple{N,UInt8}` blob with `Base.getproperty` accessors
+# reading each member at its DWARF offset. Nothing was emitted in the other
+# direction, so a param struct built BY the library
+# (`llama_context_default_params()`) was read-only from Julia — and for
+# llama.cpp that is the only path in: an embedding model returns NULL unless
+# `ctx_params.embeddings` is set. Callers were left patching bytes through
+# hand-rolled offset tables read out of `compilation_metadata.json`.
+#
+# The offsets and types are exactly what `getproperty` already emits, so the
+# setter is that same information in the other direction. Immutability is not
+# an obstacle — it only means the setter RETURNS a new value instead of
+# mutating. `Base.setproperty!` is defined too, purely to replace Julia's
+# "immutable struct cannot be modified" with a message naming the alternative,
+# because `x.field = v` is what someone will type first.
+
+"""
+    _blob_store_expr(m_name, offset, kind; ...) -> String
+
+The write matching one `getproperty` branch: an `s === :field` condition plus a
+body writing through `p`. Emitted as a bare condition so the caller can chain
+the branches with `elseif` — one exit, so nothing returns out of the enclosing
+`GC.@preserve` region.
+
+`kind` mirrors the getter's own type dispatch exactly. A member the getter
+skips gets no setter, and vice versa: a field settable but unreadable (or the
+reverse) would be worse than neither.
+"""
+function _blob_store_expr(m_name::AbstractString, offset::Int, kind::Symbol;
+                          julia_type::String="", struct_name::String="",
+                          nested_size::Int=0, actual_size::Int=0)
+    store = if kind === :pointer
+        "unsafe_store!(Ptr{Ptr{Cvoid}}(p + $offset), convert(Ptr{Cvoid}, v))"
+    elseif kind === :primitive
+        "unsafe_store!(Ptr{$julia_type}(p + $offset), convert($julia_type, v))"
+    elseif kind === :typed_struct
+        "unsafe_store!(Ptr{$struct_name}(p + $offset), convert($struct_name, v))"
+    elseif kind === :blob_struct_full
+        "unsafe_store!(Ptr{NTuple{$nested_size,UInt8}}(p + $offset), " *
+        "getfield(convert($struct_name, v), :_data))"
+    elseif kind === :blob_struct_partial
+        # The getter zero-pads a member the struct has no room for; the setter
+        # must write only the bytes that FIT or it scribbles over the next one.
+        join(["let _b = getfield(convert($struct_name, v), :_data)",
+              "                for _i in 1:$actual_size",
+              "                    unsafe_store!(Ptr{UInt8}(p + $offset + _i - 1), _b[_i])",
+              "                end",
+              "            end"], "\n")
+    else
+        return ""
+    end
+    return "s === :$m_name\n            $store"
+end
+
+"""
+    _blob_setter_chunk(name, store_branches, delegate_branches) -> String
+
+Emit `setproperty(::name, ::Symbol, v)` plus the `setproperty!` signpost.
+
+`delegate_branches` are complete `if ... end` blocks placed BEFORE the write
+chain, for C11 anonymous-member names that must round-trip through the member
+declaring them rather than write bytes directly.
+"""
+function _blob_setter_chunk(name::String, store_branches::Vector{String},
+                            delegate_branches::Vector{String}=String[])
+    (isempty(store_branches) && isempty(delegate_branches)) && return ""
+
+    L = String[]
+    push!(L, "\"\"\"")
+    push!(L, "    setproperty(x::$name, s::Symbol, v) -> $name")
+    push!(L, "")
+    push!(L, "Return a copy of `x` with field `s` set to `v`. `$name` is an immutable byte")
+    push!(L, "blob because it crosses the ABI by value, so this returns a new value rather")
+    push!(L, "than mutating it. See also `setproperties`.")
+    push!(L, "\"\"\"")
+    push!(L, "function setproperty(x::$name, s::Symbol, v)")
+    append!(L, delegate_branches)
+    if isempty(store_branches)
+        push!(L, "    Base.error(\"type $name has no settable field \$s\")")
+    else
+        push!(L, "    buf = Ref(getfield(x, :_data))")
+        push!(L, "    GC.@preserve buf begin")
+        push!(L, "        p = Ptr{UInt8}(pointer_from_objref(buf))")
+        for (i, b) in enumerate(store_branches)
+            push!(L, "        " * (i == 1 ? "if " : "elseif ") * b)
+        end
+        push!(L, "        else")
+        push!(L, "            Base.error(\"type $name has no settable field \$s\")")
+        push!(L, "        end")
+        push!(L, "    end")
+        push!(L, "    return $name(buf[])")
+    end
+    push!(L, "end")
+    push!(L, "")
+    push!(L, "function Base.setproperty!(x::$name, s::Symbol, v)")
+    push!(L, "    Base.error(\"`$name` is an immutable byte blob (it crosses the ABI by value), \" *")
+    push!(L, "          \"so `x.\$s = ...` cannot work. Use `x = setproperty(x, :\$s, v)` \" *")
+    push!(L, "          \"or `x = setproperties(x; \$s = v)`.\")")
+    push!(L, "end")
+    push!(L, "")
+    return join(L, "\n") * "\n"
+end
+
+"""
+    _blob_setproperties_chunk() -> String
+
+The module-level bulk form, emitted once when any struct got a setter. Folding
+`setproperty` over keywords is what collapses the repeated rebinding into one
+readable call.
+"""
+_blob_setproperties_chunk() = """
+\"\"\"
+    setproperties(x; field = value, ...) -> typeof(x)
+
+Return a copy of `x` with each named field set. Byte-blob structs are immutable
+(they cross the ABI by value), so this returns a new value rather than mutating:
+
+    cp = setproperties(llama_context_default_params(); n_ctx = 512, embeddings = true)
+\"\"\"
+setproperties(x; kwargs...) =
+    foldl((acc, kv) -> setproperty(acc, first(kv), last(kv)), pairs(kwargs); init = x)
+
+"""

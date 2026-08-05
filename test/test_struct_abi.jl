@@ -299,6 +299,129 @@ end
     destroy_context(ctx)
 end
 
+# ── D. MEMORY-class by-value args + emitted struct size (2026-08-05) ─────────
+#
+# Two defects that only a real clang++ callee can arbitrate, driven through the
+# WHOLE generator (metadata → StructGen → FunctionGen → lowering) rather than
+# hand-written IR, because the first of them lives in StructGen:
+#
+#  1. EMITTED SIZE. A non-packed struct used to be closed with one trailing
+#     filler of `byte_size - sum(member sizes)`, double-counting the interior
+#     alignment padding LLVM inserts anyway. `Gap` (24 bytes, members summing
+#     to 19) came out 32. Since `emit_c_interface` stores a MEMORY-class result
+#     straight into the caller's buffer, the thunk wrote 8 bytes past it — and
+#     past the `Ref{T}` a real wrapper hands it. Measured on llama.cpp:
+#     `llama_context_default_params` overran a 160-byte Ref by 34 bytes.
+#
+#  2. BY-VALUE ARGS. A MEMORY-class struct argument was passed as an LLVM
+#     first-class aggregate (backend splits it per element across registers) or,
+#     when packed, as a bare pointer. SysV wants a caller stack copy: `byval`.
+#     llama.cpp's `llama_model_load_from_file(path, llama_model_params)`
+#     segfaulted on the first shape.
+#
+# The sentinel probe is the load-bearing assertion for (1): a size check on the
+# type string would pass on a body that is merely mis-PADDED, whereas "which
+# bytes did the callee actually write" cannot be satisfied by the wrong layout.
+@testset "D: MEMORY-class by-value args and exact struct size" begin
+    vtinfo = DWARFParser.VtableInfo(Dict{String,DWARFParser.ClassInfo}(),
+                                    Dict{String,UInt64}(), Dict{String,UInt64}())
+    mem(n, c, o, s) = Dict{String,Any}("name" => n, "c_type" => c, "offset" => o, "size" => s)
+    gap = Dict{String,Any}("kind" => "struct", "byte_size" => "0x18",
+        "members" => [mem("a", "int", 0, 4), mem("p", "void*", 8, 8),
+                      mem("b", "int", 16, 4), mem("f1", "bool", 20, 1),
+                      mem("f2", "bool", 21, 1), mem("f3", "bool", 22, 1)])
+    b3 = Dict{String,Any}("kind" => "struct", "byte_size" => "0x18",
+        "members" => [mem("a", "long", 0, 8), mem("b", "long", 8, 8),
+                      mem("c", "long", 16, 8)])
+    fn(name, ret, params) = Dict{String,Any}(
+        "mangled" => name, "name" => name, "demangled" => "$(name)()",
+        "return_type" => Dict{String,Any}("c_type" => ret, "size" => 0, "julia_type" => "Any"),
+        "parameters" => [Dict{String,Any}("name" => "p$i", "c_type" => p, "size" => 0)
+                         for (i, p) in enumerate(params)],
+        "is_method" => false, "is_vararg" => false, "exported" => true, "is_noexcept" => true)
+    metadata = Dict{String,Any}("language" => "c",
+        "struct_definitions" => Dict{String,Any}("Gap" => gap, "B3" => b3),
+        "functions" => Any[fn("gap_make", "Gap", ["int", "void*", "int"]),
+                           fn("gap_probe", "long", ["Gap"]),
+                           fn("b3_sum", "long", ["B3"])])
+
+    ir = JLCSIRGenerator.generate_jlcs_ir(vtinfo, metadata)
+    # B3 has no interior padding (sum == byte_size) so it is "packed" by the
+    # generator's test; Gap must carry EXPLICIT interior padding and no
+    # oversized tail. Pre-fix it ended in `!llvm.array<5 x i8>`.
+    @test occursin("!llvm.array<4 x i8>", ir)
+    @test !occursin("!llvm.array<5 x i8>", ir)
+
+    ctx = create_context()
+    mod = parse_module(ctx, ir)
+    @test mod != C_NULL
+    @test lower_to_llvm(mod)
+    jit = create_jit(mod, opt_level=1, shared_libs=[abspath(ABI_LIB), JLCS])
+    @test jit != C_NULL
+    ciface(name) = MLIRNative.lookup(jit, "_mlir_ciface_$(name)_thunk")
+
+    # (1) sret return writes EXACTLY sizeof(Gap) == 24 bytes. The buffer is
+    # sentinel-filled and oversized, so an overrun shows up as a touched byte
+    # rather than as corruption somewhere else.
+    let fp = ciface("gap_make")
+        @test fp != C_NULL
+        a = Ref(Int32(11)); p = Ref(Ptr{Cvoid}(UInt(0x1234))); b = Ref(Int32(22))
+        buf = fill(0xAA, 128)
+        GC.@preserve a p b buf begin
+            slots = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, a),
+                               Base.unsafe_convert(Ptr{Cvoid}, p),
+                               Base.unsafe_convert(Ptr{Cvoid}, b)]
+            GC.@preserve slots ccall(fp, Cvoid, (Ptr{UInt8}, Ptr{Ptr{Cvoid}}), buf, slots)
+        end
+        last_written = something(findlast(i -> buf[i] != 0xAA, eachindex(buf)), 0)
+        @test last_written == 24                       # pre-fix: 32
+        @test reinterpret(Int32, buf[1:4])[1] == 11
+        @test reinterpret(UInt64, buf[9:16])[1] == 0x1234
+        @test reinterpret(Int32, buf[17:20])[1] == 22
+        @test (buf[21], buf[22], buf[23]) == (0x01, 0x00, 0x01)
+    end
+
+    # (2) MEMORY-class struct passed BY VALUE, both with interior padding (Gap,
+    # non-packed → used to cross as an LLVM first-class aggregate) and without
+    # (B3, `is_struct_packed` → used to cross as a bare pointer). Every field
+    # feeds the result, so a register-split or by-reference crossing is a wrong
+    # NUMBER rather than a crash we might misread.
+    #
+    # Negative-checked against the pre-fix dialect: `gap_probe` returns
+    # 22000000 instead of 11022105 — the aggregate was split per element, so
+    # the callee read `b` where `a` should be and zeros for the rest. `b3_sum`
+    # happens to survive the old bare-pointer path on this fixture (the thunk's
+    # alloca lands where the callee looks for its stack copy), so it pins the
+    # packed path's correctness without discriminating the fix. Gap is the
+    # discriminating case; keep it that way if this fixture ever changes.
+    let fp = ciface("gap_probe")
+        @test fp != C_NULL
+        g = zeros(UInt8, 24)
+        g[1:4]   = reinterpret(UInt8, Int32[11])
+        g[9:16]  = reinterpret(UInt8, UInt64[0x1234])
+        g[17:20] = reinterpret(UInt8, Int32[22])
+        g[21], g[22], g[23] = 0x01, 0x00, 0x01
+        GC.@preserve g begin
+            # Thunk arg-slot convention: the slot holds &struct DIRECTLY.
+            slots = Ptr{Cvoid}[Ptr{Cvoid}(pointer(g))]
+            r = GC.@preserve slots ccall(fp, Int64, (Ptr{Ptr{Cvoid}},), slots)
+            @test r == 11 * 1000000 + 22 * 1000 + 1 + 4 + 100
+        end
+    end
+    let fp = ciface("b3_sum")
+        @test fp != C_NULL
+        v = Ref{NTuple{3,Int64}}((Int64(100), Int64(20), Int64(3)))
+        GC.@preserve v begin
+            slots = Ptr{Cvoid}[Ptr{Cvoid}(Base.unsafe_convert(Ptr{NTuple{3,Int64}}, v))]
+            r = GC.@preserve slots ccall(fp, Int64, (Ptr{Ptr{Cvoid}},), slots)
+            @test r == 123
+        end
+    end
+
+    destroy_jit(jit)
+    destroy_context(ctx)
+end
+
 end # testset
 
 println("✅ struct-ABI trace tests passed")

@@ -63,6 +63,9 @@ of what it defined. The bug was precisely that those two disagreed, so a guard
 built on the same bookkeeping would have agreed with the bug.
 """
 function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::AbstractString)
+    _assert_wrapper_parses(wrapper_content, module_name)
+    _assert_base_calls_qualified(wrapper_content, module_name)
+
     undefined_types = _undefined_ccall_types(wrapper_content)
     isempty(undefined_types) && return nothing
 
@@ -82,6 +85,137 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     which suppresses declarations without suppressing uses and is what caused \
     this in the first place.
     """)
+end
+
+# Base functions the generated code calls on its own behalf, whose names a C
+# library is free to take. Anything here MUST be emitted `Base.`-qualified.
+const _MUST_QUALIFY_IN_WRAPPER = ("error",)
+
+"""
+    _assert_base_calls_qualified(wrapper_content, module_name)
+
+Refuse to write a wrapper that calls one of `_MUST_QUALIFY_IN_WRAPPER`
+unqualified.
+
+A generated module is a namespace the LIBRARY populates, so any bare Base name
+the generator relies on is one C symbol away from meaning something else. Found
+live on llama.cpp: libstdc++'s `std::codecvt_base::result` has an enum member
+named `error`, so `@enum result::Cuint begin … error = 2 … end` rebound `error`
+for the whole module and every failure path in the wrapper — including the
+long-standing `getproperty` "no field" branch — raised
+`MethodError: objects of type result are not callable` instead of its message.
+
+The check is on the emitted TEXT, not on a list of names the generator believes
+it avoided, for the same reason `_assert_wrapper_loadable` is: a guard sharing
+the bug's bookkeeping agrees with the bug. Refusing to emit the library's own
+`error = 2` is not an option — that is real API surface; qualifying our own
+calls is.
+"""
+function _assert_base_calls_qualified(wrapper_content::AbstractString, module_name::AbstractString)
+    offenders = String[]
+    for name in _MUST_QUALIFY_IN_WRAPPER
+        # A call position not already qualified (`Base.error(`), not part of a
+        # longer identifier (`_error(`, `error_code(`), and not a macro (`@error`).
+        # Matched on a STRING-LITERAL first argument, which is what distinguishes
+        # the generator's own diagnostics from the library's. A library is
+        # entitled to own the name: cJSON has a `struct error`, so its wrapper
+        # legitimately emits `struct error`, a zero-arg `function error()`, and
+        # `return error(Ptr{UInt8}())` inside it — all correct, none of them a
+        # call the generator made on its own behalf. Requiring the argument to
+        # be a literal separates the two with no false positives, and every
+        # emission site the generator has passes one.
+        pat = Regex("(?<![\\w.@])" * name * "\\s*\\(\\s*\"")
+        for (i, line) in enumerate(eachsplit(wrapper_content, '\n'))
+            s = strip(line)
+            startswith(s, "#") && continue     # comment
+            occursin(pat, line) && push!(offenders, "  line $i: $s")
+        end
+    end
+    isempty(offenders) && return nothing
+    shown = join(first(offenders, 10), "\n")
+    more = length(offenders) > 10 ? "\n  … and $(length(offenders) - 10) more" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(offenders)) unqualified call(s) \
+    to $(join(("`" * n * "`" for n in _MUST_QUALIFY_IN_WRAPPER), ", ")) in generated code.
+
+    $shown$more
+
+    The module's namespace belongs to the library, so a bare Base name can be \
+    rebound by any C symbol or enum member that happens to share it. Emit \
+    `Base.<name>(...)` instead.
+    """)
+end
+
+"""
+    _assert_wrapper_parses(wrapper_content, module_name)
+
+Refuse to write a wrapper that is not valid Julia **syntax**.
+
+`_assert_wrapper_loadable` checks that ccall signatures only name declared
+types, but its scope is deliberately semantic and deliberately narrow. A
+malformed *identifier* never gets that far: the file dies in the parser, and one
+bad character kills the entire module.
+
+Found on llama.cpp. DWARF spells a lambda's type as
+`(lambda at ./src/llama-model-loader.cpp:1538:79)`; the parentheses, slashes and
+colons reached a struct field, and all **98,094 lines** of the wrapper were a
+syntax error — every one of 4,990 functions dead, discovered only when a user
+tried to `include` it. Parsing the text we are about to write costs a couple of
+seconds and turns that into a generation-time failure naming the exact line.
+
+Deliberately a syntax check only: it makes no claim about whether the module
+runs, just that a parser accepts it.
+"""
+function _assert_wrapper_parses(wrapper_content::AbstractString, module_name::AbstractString)
+    function fail(detail)
+        # The rejected source is the only way to find the offending line, and the
+        # guard's whole point is that it never reaches the wrapper path. Dump it
+        # so the emitter bug is debuggable instead of merely reported.
+        dump_path = joinpath(tempdir(), "replibuild_rejected_$(module_name).jl")
+        try
+            write(dump_path, wrapper_content)
+        catch
+            dump_path = "<could not write dump>"
+        end
+        # Truncated: an embedded error node renders the surrounding expression,
+        # which on a 98k-line module ran to 340 KB and buried the message.
+        detail_str = first(string(detail), 1200)
+        error("""
+            Refusing to write wrapper '$module_name': the generated source is not \
+            valid Julia syntax. Writing it would produce a file that fails at parse \
+            time, disabling every function in the module.
+
+            $detail_str
+
+            Rejected source written to:
+              $dump_path
+
+            This is an emitter bug, not a configuration problem — some C++ spelling \
+            reached an identifier position without being sanitized. Fix the emitter \
+            (see _sanitize_cpp_type_name / _sanitize_c_type_name), not the library.
+            """)
+    end
+
+    parsed = try
+        Meta.parseall(wrapper_content; filename = "$(module_name).jl")
+    catch e
+        e isa Base.Meta.ParseError || rethrow()
+        fail(sprint(showerror, e))
+    end
+
+    # Older/alternative parsers embed the failure instead of raising it.
+    stack = Any[parsed]
+    while !isempty(stack)
+        node = pop!(stack)
+        node isa Expr || continue
+        if node.head === :error || node.head === :incomplete
+            # args[1] is the ParseError / message; the node itself carries the
+            # whole surrounding expression and is useless in a log line.
+            fail(isempty(node.args) ? node.head : node.args[1])
+        end
+        append!(stack, node.args)
+    end
+    return nothing
 end
 
 # =============================================================================

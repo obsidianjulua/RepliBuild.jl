@@ -21,7 +21,17 @@ function map_cpp_type(type_str::String)
         return "f64"
     elseif type_str == "bool" || type_str == "_Bool" || type_str == "Bool"
         return "i1"
-    elseif type_str == "char" || type_str == "int8_t" || type_str == "int8" || type_str == "uint8" || type_str == "UInt8" || type_str == "Cchar"
+    # `uint8_t` and the `signed/unsigned char` spellings were missing here. The
+    # gap was invisible while arrays mapped to `!llvm.ptr` without ever looking
+    # at the element type; once they recurse, `uint8_t[16]` resolves its element
+    # through this function and `uint8_t` fell to the struct-name branch below as
+    # `!llvm.struct<"uint8_t">` (undefined), while `unsigned char` missed even
+    # that (the space fails the identifier regex) and became `!llvm.ptr`.
+    # ggml's quant blocks are declared entirely in these spellings.
+    elseif type_str == "char" || type_str == "int8_t" || type_str == "int8" ||
+           type_str == "uint8" || type_str == "uint8_t" || type_str == "UInt8" ||
+           type_str == "unsigned char" || type_str == "signed char" || type_str == "Cchar" ||
+           type_str == "Cuchar"
         return "i8"
     elseif type_str == "short" || type_str == "int16_t" || type_str == "int16" || type_str == "unsigned short" || type_str == "uint16_t" || type_str == "uint16"
         return "i16"
@@ -31,6 +41,33 @@ function map_cpp_type(type_str::String)
     elseif type_str == "complex"
         # _Complex T — DWARF strips the element type; use opaque pointer since size is unknown
         return "!llvm.ptr"
+    # Fixed-size arrays — MUST be tested before the pointer branch below, or
+    # `char *[4]` matches on the '*' and collapses to a single pointer.
+    #
+    # There was no array case at all: `int8_t[32]` matched nothing, fell through
+    # to the `!llvm.ptr` fallback, and claimed 8 bytes at align 8 instead of 32
+    # bytes at align 1. That is why every ggml quant block failed layout —
+    # `block_q8_0` reported `qs` "needs align 8 but sits at offset 2", and the
+    # neighbouring blocks reported overlaps and past-the-end members for the
+    # same reason. It also matters more than usual here because DWARF gives
+    # these members `size = 0`, so the member record cannot supply the size
+    # either; the mapped type is the only source of truth for the layout.
+    #
+    # The element must be a plain type name (optionally pointer-qualified). The
+    # paren exclusion keeps `int (*)[4]` — a POINTER to an array, 8 bytes — out
+    # of this branch; it is not an array member.
+    elseif (am = match(r"^([A-Za-z_][A-Za-z0-9_ ]*?\s*\**)\s*((?:\[\d*\])+)$", type_str)) !== nothing &&
+           !contains(type_str, "(")
+        elem = map_cpp_type(String(strip(String(am.captures[1]))))
+        isempty(elem) && return "!llvm.ptr"   # T = void: no sensible element
+        # Innermost dimension binds tightest: `T[4][8]` is 4 arrays of 8 T.
+        dims = [isempty(d.captures[1]) ? 0 : parse(Int, d.captures[1])
+                for d in eachmatch(r"\[(\d*)\]", String(am.captures[2]))]
+        t = elem
+        for n in Iterators.reverse(dims)
+            t = "!llvm.array<$n x $t>"
+        end
+        return t
     elseif endswith(type_str, "*") || contains(type_str, "*") ||
            endswith(type_str, "&") || contains(type_str, "&") || # references are pointers in the ABI
            type_str == "unknown" # simplified pointer check

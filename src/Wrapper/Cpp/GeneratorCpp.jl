@@ -41,7 +41,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
     # Verify library exists
     if !isfile(LIBRARY_PATH)
-        error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
+        Base.error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
     end
 
     # Flush C stdout so printf output appears immediately in the Julia REPL
@@ -581,6 +581,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
     struct_chunks = String[]
     union_accessor_defs = ""  # Deferred union accessors (emitted after all struct defs)
+    blob_setters_emitted = false  # gates the one module-level `setproperties`
 
     # Emit forward declarations for:
     # 1. Truly opaque types (no DWARF definition) — as mutable struct
@@ -951,7 +952,20 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                     """)
 
-                    # Collect all struct names being generated for reference
+                    # Every struct name PRESENT IN DWARF — this is the generator's
+                    # intent, not its output. The two disagree constantly: names are
+                    # dropped above as STL-internal (~894), blocklisted (~899), or
+                    # as duplicate sanitized spellings (~911/914), and none of those
+                    # are ever emitted.
+                    #
+                    # Screening the union accessors below against THIS set is what
+                    # let llama.cpp emit `get__M_pos(...)::_normal_iterator_...` for
+                    # an STL iterator that no chunk declares — an eager annotation,
+                    # so the module died at load. Use `defined_struct_names` (filled
+                    # as structs are actually emitted) for the emit/skip decision;
+                    # this set is kept only for the reference lookups.
+                    # Same lesson as the 2026-08-02 ccall fix: gate on what was
+                    # emitted, never on what was intended.
                     known_struct_names = Set{String}()
                     for sn in keys(dwarf_structs)
                         push!(known_struct_names, _sanitize_cpp_type_name(sn))
@@ -991,11 +1005,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             while (pm = match(r"^Ptr\{(.+)\}$", inner)) !== nothing
                                 inner = pm.captures[1]
                             end
-                            if inner ∉ julia_builtins && inner ∉ known_struct_names
+                            if inner ∉ julia_builtins && inner ∉ defined_struct_names
                                 m_julia_type = "Ptr{Cvoid}"
                             end
-                        elseif m_julia_type ∉ julia_builtins && m_julia_type ∉ known_struct_names
-                            # Non-pointer, non-primitive, non-generated struct — skip
+                        elseif m_julia_type ∉ julia_builtins && m_julia_type ∉ defined_struct_names
+                            # Non-pointer, non-primitive, non-emitted struct — skip.
+                            # Both arms test `defined_struct_names`, not
+                            # `known_struct_names`: the annotations below are eager,
+                            # so a name that DWARF mentions but no chunk declares
+                            # takes the whole module down at load, not just this
+                            # accessor.
                             continue
                         end
 
@@ -1196,6 +1215,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                         # Generate Base.getproperty accessor for named member access on byte-blob structs
                         _accessor_branches = String[]
+                        # …and the matching writes. Built in the SAME loop off the
+                        # same offset/type decision, so a member can never be
+                        # readable but unsettable (see _blob_store_expr).
+                        _setter_branches = String[]
                         _loadable_primitives = Dict(
                             "Cdouble" => ("Cdouble", 8), "Cfloat" => ("Cfloat", 4),
                             "Cint" => ("Cint", 4), "Cuint" => ("Cuint", 4),
@@ -1247,6 +1270,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     if s === :$m_name
                                         return GC.@preserve x unsafe_load(Ptr{Ptr{Cvoid}}(pointer_from_objref(Ref(x._data)) + $m_offset))
                                     end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :pointer))
                             # Primitive types we can unsafe_load directly
                             elseif haskey(_loadable_primitives, m_julia_type)
                                 jt, _ = _loadable_primitives[m_julia_type]
@@ -1254,6 +1278,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     if s === :$m_name
                                         return GC.@preserve x unsafe_load(Ptr{$jt}(pointer_from_objref(Ref(x._data)) + $m_offset))
                                     end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=jt))
                             # Nested struct types — extract sub-blob
                             else
                                 if _is_stl_internal_type(String(m_c_type))
@@ -1291,6 +1316,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                         bytes = GC.@preserve x ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(Ref(x._data)) + $m_offset + i - 1)), $nested_bs)
                                         return $(m_sanitized)(bytes)
                                     end""")
+                                                    push!(_setter_branches, _blob_store_expr(m_name, m_offset, :blob_struct_full;
+                                                        struct_name=m_sanitized, nested_size=nested_bs))
                                                 else
                                                     push!(_accessor_branches, """
                                     if s === :$m_name
@@ -1298,6 +1325,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                         padded = ntuple(i -> i <= $actual_size ? raw[i] : 0x00, $nested_bs)
                                         return $(m_sanitized)(padded)
                                     end""")
+                                                    push!(_setter_branches, _blob_store_expr(m_name, m_offset, :blob_struct_partial;
+                                                        struct_name=m_sanitized, nested_size=nested_bs, actual_size=actual_size))
                                                 end
                                             else
                                                 # Target is a normal typed struct — unsafe_load directly
@@ -1305,6 +1334,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     if s === :$m_name
                                         return GC.@preserve x unsafe_load(Ptr{$m_sanitized}(pointer_from_objref(Ref(x._data)) + $m_offset))
                                     end""")
+                                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :typed_struct;
+                                                    struct_name=m_sanitized))
                                             end
                                         end
                                     end
@@ -1317,10 +1348,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             function Base.getproperty(x::$julia_struct_name, s::Symbol)
                                 s === :_data && return getfield(x, :_data)
                             $accessor_code
-                                error("type $julia_struct_name has no field \$s")
+                                Base.error("type $julia_struct_name has no field \$s")
                             end
 
                             """)
+                            filter!(!isempty, _setter_branches)
+                            setter_code = _blob_setter_chunk(julia_struct_name, _setter_branches)
+                            if !isempty(setter_code)
+                                push!(struct_chunks, setter_code)
+                                blob_setters_emitted = true
+                            end
                         end
 
                         continue
@@ -1407,6 +1444,27 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         # substitute Ptr{Cvoid} to avoid UndefVarError (same ABI size).
                         sanitized_type = _resolve_forward_ptr(sanitized_type, defined_struct_names)
 
+                        # Same hazard for a BARE field type, and worse. `Ptr{X}` at
+                        # least has a fixed width; a bare `x::T` needs T to exist at
+                        # struct-definition time, so one undeclared name raises
+                        # UndefVarError and takes the whole module with it. Structs
+                        # skipped above as STL-internal or blocklisted never enter
+                        # `defined_struct_names`, yet a field can still reference
+                        # them: llama.cpp's `_Sp_alloc_shared_tag` had
+                        # `_M_a::Ref_allocator_void` (from `const allocator<void>&`,
+                        # '&' → "Ref" at line ~906) — declared nowhere, used once,
+                        # and all 98k lines failed to load.
+                        # Degrade to the member's DWARF size as a byte region so the
+                        # containing struct keeps its exact layout; fall back to
+                        # pointer width only when the size is unknown. Emission is
+                        # topological, so "not yet defined" here means "cannot be
+                        # used", not "defined later".
+                        if !any(startswith(sanitized_type, bt) for bt in builtin_types) &&
+                           !(sanitized_type in defined_struct_names)
+                            m_size = get(member, "size", 0)
+                            sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
+                        end
+
                         push!(struct_chunks, "    $sanitized_name::$sanitized_type\n")
                         
                         # Update current offset
@@ -1479,6 +1537,22 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             julia_type = get(var_info, "julia_type", "Any")
             # Sanitize name
             safe_name = make_cpp_identifier(var_name)
+
+            # ...and the TYPE too. Only the name was sanitized here, so a global
+            # whose type is a C++ template kept its raw spelling and was emitted
+            # into four identifier positions below (`::$julia_type` twice and two
+            # cglobal args). llama.cpp's `unicode_ranges_nfd` is typed
+            # `initializer_list<range_nfd>`, and the `<` made the whole module a
+            # syntax error. `_assert_wrapper_loadable` deliberately does not look
+            # at these positions — they are lazy, so an *undeclared* type there
+            # costs one function — but a malformed one is a parse error and costs
+            # everything, which is why the parse guard is the complement.
+            # Residual, accepted: if the sanitized name is not a type this module
+            # declares, these two accessors throw when called. One function, not
+            # 98k lines.
+            if !_is_julia_type_spelling(julia_type)
+                julia_type = _sanitize_cpp_type_name(julia_type)
+            end
             
             # 1. Accessor for the value (read-only)
             # Only for simple types or pointers, struct values might be tricky
@@ -1658,7 +1732,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 
                 function $managed_name(ptr::Ptr{$safe_s_name})
                     if ptr == C_NULL
-                        error("Cannot wrap NULL pointer in $managed_name")
+                        Base.error("Cannot wrap NULL pointer in $managed_name")
                     end
                     obj = new(ptr)
                     finalizer(obj) do x
@@ -1738,7 +1812,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 push!(ctor_blocks, """
                     function $cls_nm($param_sig)
                         handle = $fac_jl($call_sig)
-                        Ptr{Cvoid}(handle) == C_NULL && error("$cls_nm: constructor returned NULL (allocation failed)")
+                        Ptr{Cvoid}(handle) == C_NULL && Base.error("$cls_nm: constructor returned NULL (allocation failed)")
                         obj = new(Ptr{Cvoid}(handle))
                         finalizer(obj) do o
                             $deleter_jl(o.handle)
@@ -2551,7 +2625,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
-                error(\"\"\"
+                Base.error(\"\"\"
                 FFI Safety Trap: Cannot call function '$julia_name'.
                 One or more types could not be mapped to Julia safely:
                 Return type: $julia_return_type (C++: $c_return_type)
@@ -3062,6 +3136,23 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
             push!(all_exports, julia_struct_name)
         end
+    end
+
+    # The bulk setter, once, only if some struct actually got a `setproperty`.
+    # Skipped outright if the library already owns the name: our definition
+    # takes no type-annotated argument, so it would not merely add a method —
+    # it would shadow the library's own `setproperties` for every call. The
+    # per-struct `setproperty` methods are safe either way (they dispatch on a
+    # concrete blob type, and `_dedup_method_chunks` settles exact collisions).
+    if blob_setters_emitted
+        if !("setproperties" in all_exports)
+            push!(struct_chunks, _blob_setproperties_chunk())
+            push!(all_exports, "setproperties")
+        else
+            @warn "wrap: the library exports `setproperties`; skipping the generated " *
+                  "bulk field setter. Use `setproperty(x, :field, v)` per field."
+        end
+        "setproperty" in all_exports || push!(all_exports, "setproperty")
     end
 
     export_statement = if !isempty(all_exports)

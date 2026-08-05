@@ -717,7 +717,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
     # Verify library exists
     if !isfile(LIBRARY_PATH)
-        error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
+        Base.error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
     end
 
     # ── Build identity ────────────────────────────────────────────────────────
@@ -798,9 +798,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
     Padding fields are carried over untouched. Not exported; call as
     `$module_name.with(...)`.
+
+    Byte-blob structs (a single `_data::NTuple{N,UInt8}`, used for layouts that
+    could not be modelled field-by-field) have no real fields to rebuild from,
+    so they are forwarded to `setproperties`, which writes at DWARF offsets.
+    One verb either way.
     \"\"\"
     function with(s::T; kw...) where {T}
         isempty(kw) && return s
+        if fieldnames(T) === (:_data,) && isdefined(@__MODULE__, :setproperties)
+            return setproperties(s; kw...)
+        end
         vals = Any[getfield(s, f) for f in fieldnames(T)]
         for (k, v) in kw
             i = findfirst(==(k), fieldnames(T))
@@ -1199,6 +1207,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
     struct_chunks = String[]
     union_accessor_chunks = String[]  # Deferred union accessors (emitted after all struct defs)
+    blob_setters_emitted = false  # gates the one module-level `setproperties`
 
     # Emit forward declarations for:
     # 1. Truly opaque types (no DWARF definition) — as mutable struct
@@ -1822,6 +1831,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
                         # Generate Base.getproperty accessor for named member access on byte-blob structs
                         _accessor_branches = String[]
+                        # …and the matching writes. Built in the SAME loop off the
+                        # same offset/type decision, so a member can never be
+                        # readable but unsettable (see _blob_store_expr).
+                        _setter_branches = String[]
+                        _setter_delegates = String[]
                         _loadable_primitives = Dict(
                             "Cdouble" => ("Cdouble", 8), "Cfloat" => ("Cfloat", 4),
                             "Cint" => ("Cint", 4), "Cuint" => ("Cuint", 4),
@@ -1877,6 +1891,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         r = Ref(getfield(x, :_data))
                                         return GC.@preserve r unsafe_load(Ptr{Ptr{Cvoid}}(pointer_from_objref(r) + $m_offset))
                                     end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :pointer))
                             # Primitive types we can unsafe_load directly
                             elseif haskey(_loadable_primitives, m_julia_type)
                                 jt, _ = _loadable_primitives[m_julia_type]
@@ -1885,6 +1900,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         r = Ref(getfield(x, :_data))
                                         return GC.@preserve r unsafe_load(Ptr{$jt}(pointer_from_objref(r) + $m_offset))
                                     end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=jt))
                             # Enum members. `@enum T::U` is a primitive type of the
                             # underlying integer's size, so it loads like one — but it
                             # is not in _loadable_primitives, so every enum member of a
@@ -1898,6 +1914,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         r = Ref(getfield(x, :_data))
                                         return GC.@preserve r unsafe_load(Ptr{$_ejt}(pointer_from_objref(r) + $m_offset))
                                     end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=_ejt))
                             # Fixed-size arrays (`char tag[16]`, `double raw[3]`) —
                             # NTuple loads directly and is exactly the member's size.
                             elseif startswith(m_julia_type, "NTuple{") &&
@@ -1909,6 +1926,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         r = Ref(getfield(x, :_data))
                                         return GC.@preserve r unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(r) + $m_offset))
                                     end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=m_julia_type))
                             # Nested struct/union types — extract sub-blob
                             else
                                 # Prefer the Julia type name: an anonymous aggregate
@@ -1955,6 +1973,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         bytes = GC.@preserve r ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(r) + $m_offset + i - 1)), $nested_bs)
                                         return $(m_sanitized)(bytes)
                                     end""")
+                                                    push!(_setter_branches, _blob_store_expr(m_name, m_offset, :blob_struct_full;
+                                                        struct_name=m_sanitized, nested_size=nested_bs))
                                                 else
                                                     push!(_accessor_branches, """
                                     if s === :$m_name
@@ -1963,6 +1983,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         padded = ntuple(i -> i <= $actual_size ? raw[i] : 0x00, $nested_bs)
                                         return $(m_sanitized)(padded)
                                     end""")
+                                                    push!(_setter_branches, _blob_store_expr(m_name, m_offset, :blob_struct_partial;
+                                                        struct_name=m_sanitized, nested_size=nested_bs, actual_size=actual_size))
                                                 end
                                             else
                                                 # Target is a normal typed struct — unsafe_load directly
@@ -1971,6 +1993,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         r = Ref(getfield(x, :_data))
                                         return GC.@preserve r unsafe_load(Ptr{$m_sanitized}(pointer_from_objref(r) + $m_offset))
                                     end""")
+                                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :typed_struct;
+                                                    struct_name=m_sanitized))
                                             end
                                         end
                                     end
@@ -1997,6 +2021,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                     if s === :$_nm
                                         return getproperty(getproperty(x, :$_fname), :$_nm)
                                     end""")
+                                # An injected name writes through the member that
+                                # declares it: set it on the inner value, then set
+                                # that value back. Handled before the byte-write
+                                # chain because it does not address `p` at all.
+                                push!(_setter_delegates, """
+                                    if s === :$_nm
+                                        return setproperty(x, :$_fname, setproperty(getproperty(x, :$_fname), :$_nm, v))
+                                    end""")
                             end
                         end
 
@@ -2006,10 +2038,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                             function Base.getproperty(x::$julia_struct_name, s::Symbol)
                                 s === :_data && return getfield(x, :_data)
                             $accessor_code
-                                error("type $julia_struct_name has no field \$s")
+                                Base.error("type $julia_struct_name has no field \$s")
                             end
 
                             """)
+                            filter!(!isempty, _setter_branches)
+                            setter_code = _blob_setter_chunk(julia_struct_name, _setter_branches, _setter_delegates)
+                            if !isempty(setter_code)
+                                push!(struct_chunks, setter_code)
+                                blob_setters_emitted = true
+                            end
                         end
 
                         continue
@@ -2951,7 +2989,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
-                error(\"\"\"
+                Base.error(\"\"\"
                 ABI Safety Trap: cannot call '$julia_name' through ccall.
                 This function crosses an opaque byte-blob struct by value inside
                 the SysV register window (≤16 bytes, float-bearing or packed): $offender_list.
@@ -2969,7 +3007,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
-                error(\"\"\"
+                Base.error(\"\"\"
                 FFI Safety Trap: Cannot call function '$julia_name'.
                 One or more types could not be mapped to Julia safely:
                 Return type: $julia_return_type (C: $c_return_type)
@@ -3290,6 +3328,23 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
             push!(all_exports, julia_struct_name)
         end
+    end
+
+    # The bulk setter, once, only if some struct actually got a `setproperty`.
+    # Skipped outright if the library already owns the name: our definition
+    # takes no type-annotated argument, so it would not merely add a method —
+    # it would shadow the library's own `setproperties` for every call. The
+    # per-struct `setproperty` methods are safe either way (they dispatch on a
+    # concrete blob type, and `_dedup_method_chunks` settles exact collisions).
+    if blob_setters_emitted
+        if !("setproperties" in all_exports)
+            push!(struct_chunks, _blob_setproperties_chunk())
+            push!(all_exports, "setproperties")
+        else
+            @warn "wrap: the library exports `setproperties`; skipping the generated " *
+                  "bulk field setter. Use `setproperty(x, :field, v)` per field."
+        end
+        "setproperty" in all_exports || push!(all_exports, "setproperty")
     end
 
     export_statement = if !isempty(all_exports)

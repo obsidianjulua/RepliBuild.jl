@@ -28,6 +28,16 @@ using Libdl
 
 const _CM = RepliBuild.ConfigurationManager
 
+"""Text of one top-level generated function, so an assertion about its body
+cannot be satisfied — or defeated — by unrelated code elsewhere in the module."""
+function _fn_body(code::AbstractString, header::AbstractString)
+    i = findfirst(header, code)
+    i === nothing && return ""
+    rest = SubString(code, first(i))
+    j = findfirst(r"\nend\b", rest)
+    return j === nothing ? String(rest) : String(rest[1:last(j)])
+end
+
 function _policy_config(dir::String)
     toml = joinpath(dir, "replibuild.toml")
     write(toml, """
@@ -219,7 +229,13 @@ end
         @test occursin("function get_x(s::BitTail)::UInt32", code)
         @test occursin("data[6 + i]", code)
         @test occursin("for i in 0:2", code)
-        @test !occursin("unsafe_store!", code)   # old setter's OOB write vector
+        # The old bitfield setter wrote through a pointer container and could run
+        # past the struct; the current one rebuilds a bounded byte array. Scoped
+        # to `set_x` itself — a module-wide scan was only ever equivalent because
+        # nothing else emitted a store, and blob-struct `setproperty` now does
+        # (bounded, at exact DWARF offsets).
+        @test !occursin("unsafe_store!", _fn_body(code, "function set_x(s::BitTail"))
+        @test occursin("BitTail(NTuple{8, UInt8}(data))", _fn_body(code, "function set_x(s::BitTail"))
     end
 
     @testset "globals + callback docs + dead branch" begin

@@ -148,6 +148,19 @@ include(joinpath(@__DIR__, "dag_test", "test_dag_diff.jl"))
 
 include(joinpath(@__DIR__, "test_wrapper_type_bindings.jl"))
 
+# ── Emitted struct size == DWARF byte_size (no toolchain required) ───────────
+# A Tier-2 MEMORY-class struct return is stored straight into the caller's
+# `Ref{T}`, so an emitted body one byte too large writes past a live Julia
+# object. Measures the emitted type string; needs no MLIR or clang.
+
+include(joinpath(@__DIR__, "test_struct_layout.jl"))
+
+# ── Byte-blob struct setters + the Base-name namespace guard (no toolchain) ──
+# Blob structs had accessors in one direction only, so a param struct the
+# library builds was read-only — the only path into llama.cpp runs through one.
+
+include(joinpath(@__DIR__, "test_blob_setters.jl"))
+
 # ── Suite wiring guard (no toolchain required) ───────────────────────────────
 # A test file that no suite includes is a test that silently never runs. That
 # is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3
