@@ -73,6 +73,42 @@ function compute_compile_fingerprint(config::RepliBuildConfig)::String
     return string(h, base=16)
 end
 
+"""
+    _ir_output_path(build_dir, source_file) -> String
+
+The `.ll` a source file compiles to. **One derivation, two call sites** — the
+cache pre-check in `compile_to_ir` and the emission in `compile_single_to_ir`
+must agree on this path or the cache checks one file and the compiler writes
+another.
+
+Keyed on the FULL source path, not on `splitext(basename(f))`. The old
+basename-only key collided in two ways, both silent:
+
+  * same leaf name in different directories — `src/llama.cpp` vs
+    `src/models/llama.cpp`, `ggml-cpu/quants.c` vs `ggml-cpu/arch/x86/quants.c`
+  * same stem, different extension in the SAME directory — `ggml.c` vs
+    `ggml.cpp` (`splitext` dropped what distinguished them)
+
+A collision cost real damage at three layers: the second compile **overwrote**
+the first's IR (that TU silently vanished from the library), `ir_files` still
+got one entry per source so the survivor was handed to the linker twice
+("multiple definition" for every symbol in it), and `needs_recompile` compared
+one source's mtime against the other's IR, so a warm cache could serve TU A's
+IR as TU B's. Compilation is `Threads.@threads`, so the two writers could also
+tear the same output file. Found on llama.cpp, where 195 sources produced 190
+`.ll` files and the link died on duplicate symbols.
+
+The extension is kept and the parent directory contributes an 8-hex digest, so
+the name stays readable (`ggml.c-3f2a1b9c.ll`) while being a pure function of
+the source path — no dependence on which other files happen to be in the build.
+"""
+function _ir_output_path(build_dir::AbstractString, source_file::AbstractString)::String
+    src = abspath(source_file)
+    dir_key = string(hash(dirname(src)), base=16)
+    dir_key = lpad(last(dir_key, 8), 8, '0')
+    return joinpath(build_dir, string(basename(src), "-", dir_key, ".ll"))
+end
+
 _compile_key_path(ir_file::String)::String = ir_file * ".key"
 
 """Record the compile fingerprint that produced `ir_file` (sidecar next to it)."""
@@ -268,8 +304,7 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
     build_dir = get_build_path(config)
     mkpath(build_dir)
 
-    base_name = splitext(basename(cpp_file))[1]
-    ir_file = joinpath(build_dir, base_name * ".ll")
+    ir_file = _ir_output_path(build_dir, cpp_file)
 
     if isempty(compile_fingerprint) && is_cache_enabled(config)
         compile_fingerprint = compute_compile_fingerprint(config)
@@ -373,9 +408,28 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
     ir_files = String[]
     cached_files = 0
 
+    # One IR path per source, and every path distinct. Two sources sharing an
+    # output used to be silent all the way to the linker (see _ir_output_path);
+    # now a repeated source is folded and anything else is a hard error rather
+    # than an overwrite. `owner` also catches the same file arriving twice under
+    # different spellings (./x.c vs x.c), which would double-link it.
+    owner = Dict{String,String}()
     for cpp_file in cpp_files
-        base_name = splitext(basename(cpp_file))[1]
-        ir_file = joinpath(build_dir, base_name * ".ll")
+        ir_file = _ir_output_path(build_dir, cpp_file)
+
+        prev = get(owner, ir_file, "")
+        if !isempty(prev)
+            if abspath(prev) != abspath(cpp_file)
+                error("""
+                      Two different sources map to the same IR output:
+                        $(prev)
+                        $(cpp_file)
+                        → $(ir_file)
+                      This would overwrite one TU and double-link the other.""")
+            end
+            continue   # same file listed twice — fold it
+        end
+        owner[ir_file] = cpp_file
 
         if needs_recompile(cpp_file, ir_file, is_cache_enabled(config), compile_fingerprint)
             push!(files_to_compile, cpp_file)
@@ -1062,10 +1116,50 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         error("Library file not created: $lib_path")
     end
 
+    _assert_library_resolves(lib_path)
+
     size_mb = round(filesize(lib_path) / 1024 / 1024, digits=2)
     println("  link: $lib_name ($size_mb MB)")
 
     return lib_path
+end
+
+"""
+    _assert_library_resolves(lib_path)
+
+Fail the BUILD if the freshly linked `.so` has a symbol nothing can resolve.
+
+`ld -shared` does not require every reference to be satisfied — that is what
+makes `DT_NEEDED` linking work — so a missing translation unit produces a
+library that links clean, reports success, and wraps normally. It then dies
+much later and much further from the cause. Generated wrappers dlopen with
+`RTLD_LAZY`, so the failure does not even surface at wrapper load: it surfaces
+at the first call to whichever function happened to need the missing symbol.
+
+Found on llama.cpp, where excluding `ggml-backend-dl.cpp` (its name implies a
+`GGML_BACKEND_DL` guard that does not exist) left `dl_load_library`,
+`dl_get_sym` and `dl_error` undefined. The build printed a 47 MB library and a
+success line.
+
+`RTLD_NOW` binds everything eagerly, so the loader itself does the check and
+names the first offending symbol. `RTLD_LOCAL` + `dlclose` keeps the probe from
+leaking the library into this process's namespace — the same scoping discipline
+the Tier-1 slice pre-flight uses.
+"""
+function _assert_library_resolves(lib_path::AbstractString)
+    handle = try
+        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+    catch e
+        error("""
+              Linked library has unresolved symbols: $(basename(lib_path))
+                $(sprint(showerror, e))
+              The link step succeeded — `ld -shared` permits undefined symbols —
+              but nothing can supply these at load time. Usually a source file
+              excluded in replibuild.toml that something still calls, or a
+              missing entry in [link] link_libraries.""")
+    end
+    Libdl.dlclose(handle)
+    return nothing
 end
 
 """
@@ -1705,14 +1799,18 @@ function compile_project(config::RepliBuildConfig)
         create_library(config, linked_ir)
     end
 
-    elapsed = round(time() - start_time, digits=2)
-
     # Step 4: Extract and save compilation metadata
     metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
 
     # Step 5: Save project hash for future cache hits
     save_project_hash(config)
 
+    # Timed HERE, not before step 4. DWARF extraction is part of the build and on
+    # a large library it dominates it: llama.cpp linked at 73s and then spent 18
+    # further minutes parsing a 252 MB readelf dump, while this line claimed
+    # "done: 73.69s". Anyone profiling the pipeline off that number would look in
+    # exactly the wrong place.
+    elapsed = round(time() - start_time, digits=2)
     println("  done: $(elapsed)s")
 
     return binary_path
@@ -2253,6 +2351,24 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
 end
 
 """
+    _arity_sample(msgs; limit=20) -> String
+
+Render an arity-mismatch list for a log message, capped.
+
+The under-count list is per-symbol and, on a C++ library, effectively unbounded:
+llama.cpp produced **73,570 lines** in a single `@warn` — every inlined
+libstdc++ destructor and lambda with a declaration-only DIE — which buried the
+compile and link output that actually needed reading. The count is the signal;
+the names are a sample. Sorted first so the sample is stable across runs.
+"""
+function _arity_sample(msgs::Vector{String}; limit::Int=20)::String
+    sorted = sort(msgs)
+    shown = join(first(sorted, limit), "\n  ")
+    length(sorted) <= limit && return shown
+    return "$shown\n  … and $(length(sorted) - limit) more (of $(length(sorted)) total)"
+end
+
+"""
     check_param_arity!(return_types, die_param_counts)
 
 Fail loudly when an extracted signature disagrees with the DIE tree it came from.
@@ -2285,14 +2401,14 @@ function check_param_arity!(return_types::Dict{String,Dict{String,Any}}, die_par
         @warn """
         DWARF parameter extraction dropped parameters present in the DIE tree.
         Wrappers for these functions will be called with too few arguments:
-          $(join(sort(dropped), "\n  "))"""
+          $(_arity_sample(dropped))"""
     end
 
     if !isempty(phantom)
         error("""
         DWARF parameter extraction produced phantom parameters not in the DIE tree.
         This emits a ccall with the wrong argument tuple — refusing to continue:
-          $(join(sort(phantom), "\n  "))
+          $(_arity_sample(phantom))
         The DIE tree is authoritative; the extraction walk mis-attributed \
         parameters from a neighbouring DIE.""")
     end

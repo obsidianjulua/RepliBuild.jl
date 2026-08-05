@@ -121,7 +121,17 @@ Parse an MLIR module from a string.
 function parse_module(ctx::MlirContext, source::String)
     mod = ccall((:jlcsModuleCreateParse, libJLCS), MlirModule, (MlirContext, Cstring), ctx, source)
     if mod == C_NULL
-        error("Failed to parse MLIR module")
+        # MLIR prints its diagnostic (with a loc("-":LINE:COL)) to stderr and we
+        # then threw away the only copy of the text those coordinates refer to,
+        # leaving "Failed to parse MLIR module" and nothing to debug. Keep it.
+        dump_path = joinpath(tempdir(), "replibuild_bad_module.mlir")
+        hint = try
+            write(dump_path, source)
+            "Module text written to:\n  $dump_path\n(MLIR's loc(\"-\":LINE:COL) diagnostic above indexes THIS file.)"
+        catch
+            "Module text could not be written to $dump_path."
+        end
+        error("Failed to parse MLIR module ($(count(==('\n'), source) + 1) lines).\n$hint")
     end
     return mod
 end
