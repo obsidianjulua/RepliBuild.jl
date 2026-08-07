@@ -47,6 +47,76 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
 end
 
 """
+    _write_wrapper(output_file, wrapper_content, module_name) -> String
+
+Guard, rotate, write. The single write path for every generated wrapper.
+
+**Rotation.** A regenerated wrapper overwrites the only copy of what the
+generator produced last time, and the `julia/` output directories are
+gitignored — so before this existed there was no way to answer "what did this
+change?" except moving the file aside by hand beforehand, which only works if
+you already suspected something. Regenerating is the moment the previous
+version becomes interesting, and also the moment it is destroyed.
+
+So the prior generation is kept beside the new one as `<Module>.jl.prev` —
+exactly one, never a growing pile. `.prev` does not end in `.jl`, so nothing
+that scans for wrappers picks it up.
+
+**Only rotated when the content actually differs**, ignoring the wrap-time
+timestamp in the header. Re-wrapping with no source or generator change would
+otherwise overwrite `.prev` with an effectively identical copy and destroy the
+last real diff — the failure you notice only when you need it. And the
+timestamp alone makes EVERY regeneration differ, so comparing raw bytes would
+have rotated unconditionally and quietly made the feature useless: `.prev`
+would always be the wrap from thirty seconds ago. `generated_at` in `METADATA`
+is deliberately NOT normalized — it comes from the build, not the wrap, so a
+change there is real news.
+
+This is deliberately NOT version control. It answers one question — "what did
+regenerating just change?" — which is the question a wrapper developer has
+several times an hour, and which `BUILD_ID` complements from the other side:
+that names the library a wrapper was generated FROM, this holds what the
+generator said about it last time.
+"""
+function _write_wrapper(output_file::AbstractString, wrapper_content::AbstractString,
+                        module_name::AbstractString)
+    _assert_wrapper_loadable(wrapper_content, module_name)
+
+    if isfile(output_file)
+        previous = try
+            read(output_file, String)
+        catch
+            nothing
+        end
+        if previous !== nothing && _wrapper_differs(previous, wrapper_content)
+            prev_file = output_file * ".prev"
+            try
+                # cp, not mv: the current wrapper stays valid on disk until the
+                # new one has been written over it.
+                cp(output_file, prev_file; force = true)
+                @info "wrap: previous generation kept at $(basename(prev_file)) " *
+                      "(diff it against $(basename(output_file)) to see what regenerating changed)"
+            catch e
+                # Losing the backup must never lose the wrap.
+                @warn "wrap: could not keep the previous wrapper generation" path=prev_file exception=e
+            end
+        end
+    end
+
+    write(output_file, wrapper_content)
+    return output_file
+end
+
+# The header carries the wrap-time clock, which changes on every run and means
+# nothing. Comparing raw bytes would rotate `.prev` unconditionally and leave it
+# holding the wrap from moments ago instead of the last generation that differed.
+_normalize_wrapper(s::AbstractString) =
+    replace(s, r"^# Generated: .*$"m => "# Generated: <n>")
+
+_wrapper_differs(a::AbstractString, b::AbstractString) =
+    _normalize_wrapper(a) != _normalize_wrapper(b)
+
+"""
     _assert_wrapper_loadable(wrapper_content, module_name)
 
 Refuse to write a wrapper that would raise `UndefVarError` at include time.
@@ -65,6 +135,7 @@ built on the same bookkeeping would have agreed with the bug.
 function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::AbstractString)
     _assert_wrapper_parses(wrapper_content, module_name)
     _assert_base_calls_qualified(wrapper_content, module_name)
+    _assert_exports_defined(wrapper_content, module_name)
 
     undefined_types = _undefined_ccall_types(wrapper_content)
     isempty(undefined_types) && return nothing
@@ -143,6 +214,66 @@ function _assert_base_calls_qualified(wrapper_content::AbstractString, module_na
     The module's namespace belongs to the library, so a bare Base name can be \
     rebound by any C symbol or enum member that happens to share it. Emit \
     `Base.<name>(...)` instead.
+    """)
+end
+
+"""
+    _assert_exports_defined(wrapper_content, module_name)
+
+Refuse to write a wrapper whose `export` line names a binding the module never
+makes.
+
+Julia does not validate export targets at load, so this costs nothing until
+something walks `names(Mod)` — and then it is an `UndefVarError` on a name the
+module itself advertised. REPL tab-completion is the shortest path to it: type
+`get_Val<TAB>` against the lua wrapper and Julia suggests `get_Value_gc`,
+which does not exist. Doc generators and introspection passes hit it on their
+first iteration.
+
+Measured across the Hub the day this guard was written: **102 undefined
+exports in 5 of 18 packages** — sqlite 64, llamacpp 22, lua 12, miniaudio 2,
+zlib 2 — from two derivations that had drifted from the definitions:
+
+  - union accessors screened OUT of the definitions (`defined_struct_names`)
+    but still pushed onto the export list
+  - enum members exported under the raw C spelling while `@enum` binds the
+    sanitized one: `__RLIMIT_NICE`/`_RLIMIT_NICE` (leading underscores
+    collapsed), `ma_dr_wav__metadata_…` (interior), zlib's `COPY_`/`COPY`
+    (trailing rstrip) — three transforms, one class
+
+`_export_statement` now filters against the emitted body, so this should never
+fire from that path. It exists for the paths that do not go through it and for
+the next derivation that drifts — the same reason `_assert_wrapper_loadable`
+reads the emitted TEXT rather than the generator's record of what it defined.
+A guard sharing the bug's bookkeeping agrees with the bug.
+"""
+function _assert_exports_defined(wrapper_content::AbstractString, module_name::AbstractString)
+    exported = _exported_names(wrapper_content)
+    isempty(exported) && return nothing
+
+    defined = _defined_names(wrapper_content)
+    # An empty set means the body did not parse — `_assert_wrapper_parses` runs
+    # first and owns that diagnosis, so do not pile a bogus 100%-undefined
+    # report on top of it.
+    isempty(defined) && return nothing
+
+    missing_names = sort!(filter(n -> !(n in defined), exported))
+    isempty(missing_names) && return nothing
+
+    shown = join(("  " * n for n in first(missing_names, 15)), "\n")
+    more = length(missing_names) > 15 ? "\n  … and $(length(missing_names) - 15) more" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(missing_names)) exported \
+    name(s) are never defined by the module.
+
+    $shown$more
+
+    `using` this module would succeed and then hand the caller names that raise \
+    UndefVarError — including through tab-completion, which reads the export \
+    list. Fix by deriving the export list from what was EMITTED rather than from \
+    the candidate set (see `_export_statement`), not by defining the missing \
+    names: they are usually screened out on purpose, or bound under a different \
+    spelling because the definition path sanitizes and the export path does not.
     """)
 end
 
@@ -261,8 +392,7 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
     mkpath(output_dir)
     output_file = joinpath(output_dir, "$(module_name).jl")
 
-    _assert_wrapper_loadable(wrapper_content, module_name)
-    write(output_file, wrapper_content)
+    _write_wrapper(output_file, wrapper_content, module_name)
 
     return output_file
 end
@@ -403,9 +533,11 @@ function generate_basic_module(config::RepliBuildConfig, lib_path::String,
 
     push!(exports, "library_info")
 
-    # Exports
+    # Exports — filtered against the body emitted so far. `content` at this point
+    # is the entire module apart from its closing `end`, which parseall must see
+    # or the whole body reads as unparseable and no filtering happens.
     content *= "# Exports\n"
-    content *= _export_statement(exports)
+    content *= _export_statement(exports, content * "\nend\n")
 
     content *= "end # module $module_name\n"
 
@@ -632,8 +764,7 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     mkpath(output_dir)
     output_file = joinpath(output_dir, "$(module_name).jl")
 
-    _assert_wrapper_loadable(wrapper_content, module_name)
-    write(output_file, wrapper_content)
+    _write_wrapper(output_file, wrapper_content, module_name)
 
     # Write thunk manifest for dead-thunk elimination.
     # JITManager reads this to skip generating MLIR thunks for functions

@@ -3155,7 +3155,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         "setproperty" in all_exports || push!(all_exports, "setproperty")
     end
 
-    export_statement = _export_statement(all_exports)
+    # NOTE: `export_statement` is built AFTER `_dedup_method_chunks` below, not
+    # here — it is filtered against the definitions that actually ship, and
+    # dedup runs between this point and the final join.
 
     # Footer
     footer = """
@@ -3221,7 +3223,18 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # last definition per dispatch signature (include()-identical semantics).
     func_chunks = _dedup_method_chunks(func_chunks)
 
-    wrapper_content = join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), union_accessor_defs, export_statement, join(func_chunks), footer])
+    # Each section is joined ONCE and reused for both the export filter and the
+    # file, so the list of names exported and the text defining them cannot be
+    # built from different inputs — which is exactly how 102 undefined exports
+    # reached the Hub (see `_export_statement`). Must stay below the dedup.
+    _enums   = join(enum_chunks)
+    _structs = join(struct_chunks)
+    _funcs   = join(func_chunks)
+    export_statement = _export_statement(all_exports,
+                                         _enums * _structs * union_accessor_defs * _funcs)
+
+    wrapper_content = join([header, init_block, metadata_section, _enums, _structs,
+                            union_accessor_defs, export_statement, _funcs, footer])
     return (wrapper_content, needed_function_thunks)
 end
 

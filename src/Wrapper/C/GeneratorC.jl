@@ -2324,6 +2324,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # signature fix, different path: miniaudio's `get_..._memoryStream` returned
     # `ma_dr_flac__memory_stream`, which no chunk defines. Drop those; the
     # member stays reachable through the parent struct's bytes.
+    #
+    # `_JULIA_TYPE_CTORS` is in the accepted set because the first regex, run
+    # over `::Ptr{Cvoid}`, captures `Ptr` — the CONSTRUCTOR, not the type. No
+    # wrapper defines `Ptr`, so screening it against `emitted_type_names`
+    # rejected every pointer-typed accessor whatever its pointee, and the
+    # emitter had already degraded genuinely-unresolvable pointees to
+    # `Ptr{Cvoid}` before they got here. The second regex extracts the pointee,
+    # which is the name that actually needs checking — so a `Ptr{X}` naming an
+    # undeclared X is still caught, which is the miniaudio case above.
+    rejected_type_names = Set{String}()
     filter!(union_accessor_chunks) do chunk
         used = String[]
         for re in (r"::([A-Za-z_][A-Za-z0-9_]*)", r"Ptr\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -2331,8 +2341,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 push!(used, m.captures[1])
             end
         end
-        all(t -> t in emitted_type_names || t in _JULIA_BUILTIN_TYPES, used)
+        undeclared = filter(used) do t
+            !(t in emitted_type_names || t in _JULIA_BUILTIN_TYPES || t in _JULIA_TYPE_CTORS)
+        end
+        union!(rejected_type_names, undeclared)
+        isempty(undeclared)
     end
+    _assert_no_bound_name_rejected(rejected_type_names, "Union accessor filter")
 
     for func in functions
         func_name = func["name"]
@@ -3347,7 +3362,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         "setproperty" in all_exports || push!(all_exports, "setproperty")
     end
 
-    export_statement = _export_statement(all_exports)
+    # NOTE: `export_statement` is built just before the return, not here — it is
+    # filtered against the definitions that actually ship, and `_dedup_method_chunks`,
+    # `_tier1_emit_slices!` and `tier1_registry` all land between this point and
+    # the final join.
 
     # Footer
     footer = """
@@ -3462,6 +3480,19 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
     """
 
-    return join([header, init_block, metadata_section, join(enum_chunks), join(struct_chunks), join(union_accessor_chunks), tier1_registry, export_statement, join(func_chunks), footer])
+    # Each section is joined ONCE and reused for both the export filter and the
+    # file, so the list of names exported and the text defining them cannot be
+    # built from different inputs — which is exactly how 102 undefined exports
+    # reached the Hub (see `_export_statement`). Must stay below the dedup, the
+    # slice emission, and `tier1_registry` (which defines TIER1_FUNCTIONS et al).
+    _enums    = join(enum_chunks)
+    _structs  = join(struct_chunks)
+    _unions   = join(union_accessor_chunks)
+    _funcs    = join(func_chunks)
+    export_statement = _export_statement(all_exports,
+                                         _enums * _structs * _unions * tier1_registry * _funcs)
+
+    return join([header, init_block, metadata_section, _enums, _structs, _unions,
+                 tier1_registry, export_statement, _funcs, footer])
 end
 

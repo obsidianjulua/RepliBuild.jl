@@ -27,6 +27,7 @@
 
 using Test
 using RepliBuild
+using Libdl
 
 const WU = RepliBuild.Wrapper
 
@@ -154,6 +155,218 @@ end
     @test WU._resolve_forward_ptr("Ptr{Ptr{_IO_FILE}}", Set{String}()) == "Ptr{Ptr{Cvoid}}"
     @test WU._resolve_forward_ptr("Ptr{_IO_FILE}", Set{String}()) == "Ptr{Cvoid}"
     @test WU._resolve_forward_ptr("Ptr{Known}", Set(["Known"])) == "Ptr{Known}"
+end
+
+# ── One prior generation kept beside a regenerated wrapper ───────────────────
+#
+# `julia/` output dirs are gitignored, so regenerating destroyed the only copy
+# of what the generator produced last time — and regenerating is exactly when
+# that copy becomes interesting. `.prev` answers "what did this change?".
+
+@testset "wrapper rotation keeps exactly one prior generation" begin
+    W = RepliBuild.Wrapper
+
+    mktempdir() do dir
+        out = joinpath(dir, "Rot.jl")
+        v1 = "# Generated: 2026-01-01 00:00:00\nmodule Rot\nexport a\na() = 1\nend\n"
+        v2 = "# Generated: 2026-01-02 00:00:00\nmodule Rot\nexport a, b\na() = 1\nb() = 2\nend\n"
+
+        # First write: nothing to rotate.
+        W._write_wrapper(out, v1, "Rot")
+        @test read(out, String) == v1
+        @test !isfile(out * ".prev")
+
+        # Same content, different wrap-time header. The timestamp alone must NOT
+        # trigger rotation, or `.prev` becomes "the wrap from moments ago" and
+        # the last real diff is gone — the failure you only notice when you need it.
+        v1b = replace(v1, "2026-01-01 00:00:00" => "2026-06-06 12:34:56")
+        @test v1b != v1                      # the bytes really do differ
+        W._write_wrapper(out, v1b, "Rot")
+        @test !isfile(out * ".prev")
+
+        # Real change: rotate, and `.prev` holds what was there before.
+        W._write_wrapper(out, v2, "Rot")
+        @test isfile(out * ".prev")
+        @test read(out, String) == v2
+        @test read(out * ".prev", String) == v1b
+        @test occursin("export a, b", read(out, String))
+        @test !occursin("export a, b", read(out * ".prev", String))
+
+        # Exactly one generation is kept — a third write overwrites `.prev`
+        # rather than accumulating .prev.prev.
+        v3 = "# Generated: 2026-01-03 00:00:00\nmodule Rot\nexport a\na() = 3\nend\n"
+        W._write_wrapper(out, v3, "Rot")
+        @test read(out * ".prev", String) == v2
+        @test !isfile(out * ".prev.prev")
+        @test count(f -> endswith(f, ".prev"), readdir(dir)) == 1
+
+        # `.prev` must not look like a Julia source file to anything scanning
+        # the output dir for wrappers.
+        @test !endswith(out * ".prev", ".jl")
+
+        # The guard still runs on the write path: a wrapper exporting a name it
+        # never binds is refused, and nothing is written or rotated.
+        before = read(out, String)
+        @test_throws ErrorException W._write_wrapper(
+            out, "module Rot\nexport a, ghost\na() = 1\nend\n", "Rot")
+        @test read(out, String) == before
+        @test read(out * ".prev", String) == v2
+    end
+
+    @test W._wrapper_differs("# Generated: A\nx = 1\n", "# Generated: B\nx = 1\n") == false
+    @test W._wrapper_differs("# Generated: A\nx = 1\n", "# Generated: A\nx = 2\n") == true
+end
+
+# ── A type CONSTRUCTOR is not a type name ────────────────────────────────────
+#
+# The screens above all work by scraping names out of emitted source and asking
+# "does the module bind this?". `Ptr` answers no — nothing declares it — but the
+# question is meaningless for a constructor, and the union-accessor filter asked
+# it anyway: its `::(\w+)` regex captures `Ptr` from `::Ptr{Cvoid}`, so EVERY
+# pointer-typed union accessor was dropped no matter how ordinary its pointee.
+# Cost across the Hub was 76 accessors — sqlite's `p4union` kept 1 member of 16
+# (`i::Cint`), lua's `Value` 3 of 6 — every one of them a fully-resolved type the
+# module did bind.
+#
+# It is invisible three times over: the wrapper loads, the build is green, and a
+# missing accessor is indistinguishable from a member the generator was right to
+# skip. So this pins the behaviour AND the guard, since only the guard
+# generalizes to the next constructor someone scrapes.
+
+@testset "union accessors survive a Ptr return type" begin
+    _member(name, jt, ct) = Dict{String,Any}(
+        "name" => name, "julia_type" => jt, "c_type" => ct, "offset" => "0x0", "size" => 8)
+
+    metadata = Dict{String,Any}(
+        "functions" => Any[],
+        "struct_definitions" => Dict{String,Any}(
+            # A struct the union can legitimately point at.
+            "Pointee" => Dict{String,Any}(
+                "kind" => "struct", "byte_size" => "0x4",
+                "members" => Any[Dict{String,Any}(
+                    "name" => "v", "julia_type" => "Cint", "c_type" => "int",
+                    "offset" => "0x0", "size" => 4)]),
+            # On `_INTERNAL_TYPE_BLOCKLIST`, so it is a known DWARF struct that
+            # deliberately gets no declaration — the only way to reach the
+            # filter's reject path, since the emitter's own gate gets anything
+            # DWARF never described. This is the miniaudio shape exactly.
+            "_IO_FILE" => Dict{String,Any}(
+                "kind" => "struct", "byte_size" => "0x8",
+                "members" => Any[Dict{String,Any}(
+                    "name" => "flags", "julia_type" => "Cint", "c_type" => "int",
+                    "offset" => "0x0", "size" => 4)]),
+            # sqlite's p4union in miniature: one scalar arm, the rest pointers.
+            "Arms" => Dict{String,Any}(
+                "kind" => "union", "byte_size" => "0x8",
+                "members" => Any[
+                    _member("i",       "Cint",            "int"),
+                    _member("p",       "Ptr{Cvoid}",      "void*"),
+                    _member("z",       "Ptr{UInt8}",      "char*"),
+                    _member("deep",    "Ptr{Ptr{Cvoid}}", "void**"),
+                    _member("known",   "Ptr{Pointee}",    "Pointee*"),
+                    # The two shapes the filter exists for, one per regex:
+                    # by value (first regex reads the annotation) and behind a
+                    # pointer (second regex reads the pointee).
+                    _member("blocked", "_IO_FILE",        "struct _IO_FILE"),
+                    _member("fp",      "Ptr{_IO_FILE}",   "struct _IO_FILE*"),
+                ]),
+        ),
+        "globals" => Dict{String,Any}(),
+        "function_pointer_typedefs" => Dict{String,Any}(),
+    )
+
+    dir = mktempdir()
+    toml = joinpath(dir, "replibuild.toml")
+    write(toml, """
+    [project]
+    name = "unionsynth"
+    root = "$(dir)"
+
+    [link]
+    enable_lto = false
+
+    [wrap]
+    language = "c"
+
+    [types]
+    strictness = "warn"
+    allow_unknown_structs = true
+
+    [cache]
+    enabled = false
+    """)
+    cfg = RepliBuild.ConfigurationManager.load_config(toml)
+    libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
+    code = WU.generate_introspective_module_c(
+        cfg, libref, metadata, "UnionSynth", WU.create_type_registry(cfg), true)
+
+    # The scalar arm always worked — it is the control that proves the union
+    # itself was emitted, so a failure below is about the member's TYPE.
+    @test occursin("function get_Arms_i(u::Arms)::Cint", code)
+
+    # Every pointer arm: this is the regression.
+    @test occursin("function get_Arms_p(u::Arms)::Ptr{Cvoid}", code)
+    @test occursin("function set_Arms_p!(u::Arms, v::Ptr{Cvoid})", code)
+    @test occursin("function get_Arms_z(u::Arms)::Ptr{UInt8}", code)
+    @test occursin("function get_Arms_deep(u::Arms)::Ptr{Ptr{Cvoid}}", code)
+    @test occursin("function get_Arms_known(u::Arms)::Ptr{Pointee}", code)
+
+    # …and the filter still does its job. `_IO_FILE` is a struct DWARF fully
+    # described, so both members clear the emitter's gate and reach the filter;
+    # the blocklist then means no chunk declares it. Widening the accepted set
+    # must not cost these — the pointer one especially, since it is the pointee
+    # the second regex has to keep reading.
+    @test !occursin("get_Arms_blocked", code)
+    @test !occursin("get_Arms_fp", code)
+    @test !occursin("struct _IO_FILE\n", code)
+
+    # Restored accessors are exported, not merely defined.
+    export_line = match(r"^export .*$"m, code)
+    @test export_line !== nothing
+    for n in ("get_Arms_p", "set_Arms_p!", "get_Arms_z", "get_Arms_known")
+        @test occursin(n, export_line.match)
+    end
+
+    # The whole point is that they RUN. Emitted code, executed.
+    m = Module(:UnionSynthProbe)
+    Core.eval(m, Meta.parseall(code))
+    Arms = Core.eval(m, :(UnionSynth.Arms))
+    u = Base.invokelatest(Arms)
+    probe = Ptr{Cvoid}(UInt(0xdeadbeef))
+    Base.invokelatest(Core.eval(m, :(UnionSynth.set_Arms_p!)), u, probe)
+    @test Base.invokelatest(Core.eval(m, :(UnionSynth.get_Arms_p)), u) == probe
+    # Same eight bytes, read through a different arm — that a union CAN do this
+    # is why the missing accessors mattered.
+    @test Base.invokelatest(Core.eval(m, :(UnionSynth.get_Arms_i)), u) ==
+          reinterpret(Int32, UInt32(0xdeadbeef))
+end
+
+@testset "rejecting on a bound name is refused" begin
+    # The guard is the durable half: `_JULIA_TYPE_CTORS` is a list someone must
+    # remember to extend, and this fires when they didn't.
+    @test_throws ErrorException WU._assert_no_bound_name_rejected(Set(["Ptr"]), "probe")
+    for ctor in WU._JULIA_TYPE_CTORS
+        @test_throws ErrorException WU._assert_no_bound_name_rejected(Set([ctor]), "probe")
+    end
+
+    # A genuinely undeclared DWARF leak is exactly what these filters SHOULD
+    # drop — the guard must stay out of the way of it.
+    @test WU._assert_no_bound_name_rejected(
+        Set(["ma_dr_flac__memory_stream", "_IO_FILE", "Ghost"]), "probe") === nothing
+    @test WU._assert_no_bound_name_rejected(Set{String}(), "probe") === nothing
+
+    # The message has to name the offender — the whole failure mode was not
+    # knowing which name did it.
+    err = try
+        WU._assert_no_bound_name_rejected(Set(["Ptr", "_IO_FILE"]), "Union accessor filter")
+        nothing
+    catch e
+        sprint(showerror, e)
+    end
+    @test err !== nothing
+    @test occursin("Union accessor filter", err)
+    @test occursin("Ptr", err)
+    @test !occursin("_IO_FILE", err)   # not a false positive; not reported as one
 end
 
 end  # testset

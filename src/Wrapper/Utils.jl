@@ -61,23 +61,179 @@ function _base_shadowing(names_to_export)::Vector{String}
 end
 
 """
-    _export_statement(all_exports) -> String
+    _defined_names(module_body) -> Set{String}
 
-The module's `export` line, with Base/Core-shadowing names withheld.
+Every name the emitted module body actually BINDS, read off the parsed source.
 
-Withheld names are still DEFINED and reachable as `Mod.name` — this drops them
+This is the counterpart to `emitted_type_names` in the C generator: the export
+list must be filtered against what was emitted, never against the generator's
+intent bookkeeping, because those two disagreeing IS the bug (see
+`_export_statement`).
+
+Collected: `function f(…)`, `f(…) = …`, `const x = …`, `x = …`, `struct`/
+`mutable struct`, `abstract type`, `primitive type`, `macro`, and `@enum` —
+both the enum type and every member, since `@enum T::U begin A = 1 end` binds
+`A` as surely as a `const` does.
+
+Deliberately does NOT descend into function bodies or struct bodies: a local
+variable and a field name are not module bindings. Recursion is limited to
+`:toplevel`, `:module` and `:block` so a `let` at module scope is the only
+over-collection route, and generated wrappers only use `let` on the RHS of a
+`const` (never descended into).
+
+An unparseable body returns an empty set rather than throwing —
+`_assert_wrapper_parses` owns that diagnosis and reports it far better.
+"""
+function _defined_names(module_body::AbstractString)::Set{String}
+    out = Set{String}()
+    ex = try
+        Meta.parseall(module_body)
+    catch
+        return out
+    end
+    _collect_defined!(out, ex)
+    return out
+end
+
+# Peel a definition target down to the bound name: `f`, `f(x)`, `f(x) where T`,
+# `T{P}`, `T <: S`, `name::Type` all bind `f`/`T`/`name`.
+function _bound_name(x)
+    x isa Symbol && return String(x)
+    x isa Expr || return nothing
+    x.head in (:call, :where, :curly, :(<:), :(::)) && !isempty(x.args) &&
+        return _bound_name(x.args[1])
+    return nothing
+end
+
+function _collect_defined!(out::Set{String}, ex)
+    ex isa Expr || return out
+    h = ex.head
+
+    if h === :function || h === :macro
+        n = _bound_name(get(ex.args, 1, nothing)); n === nothing || push!(out, n)
+    elseif h === :(=)
+        # Covers both `f(x) = …` (short-form method) and `x = …` (global).
+        n = _bound_name(ex.args[1]); n === nothing || push!(out, n)
+    elseif h === :const || h === :global || h === :local
+        for a in ex.args; _collect_defined!(out, a); end
+    elseif h === :struct
+        n = _bound_name(get(ex.args, 2, nothing)); n === nothing || push!(out, n)
+    elseif h === :abstract || h === :primitive
+        n = _bound_name(get(ex.args, 1, nothing)); n === nothing || push!(out, n)
+    elseif h === :macrocall && !isempty(ex.args) && ex.args[1] === Symbol("@enum")
+        # `@enum Name::T begin A = 1 … end` and `@enum Name A B C` both bind the
+        # type AND every member. Members carry the emitter's FINAL spelling,
+        # which is the whole reason this is read back rather than re-derived.
+        rest = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
+        if !isempty(rest)
+            n = _bound_name(rest[1]); n === nothing || push!(out, n)
+            for m in rest[2:end], s in (m isa Expr && m.head === :block ? m.args : (m,))
+                s isa LineNumberNode && continue
+                nm = s isa Expr && s.head === :(=) ? _bound_name(s.args[1]) : _bound_name(s)
+                nm === nothing || push!(out, nm)
+            end
+        end
+    elseif h === :macrocall
+        # A macro WRAPPING a definition still defines it, so descend. The
+        # generators lean on this constantly and it is entirely invisible in the
+        # source text: a docstring written directly above a definition, with no
+        # blank line between, parses as `@doc "…" <definition>` — so
+        # `function get_hdr(…)` becomes a macrocall argument, not a toplevel
+        # `:function`. Skipping these dropped every DOCUMENTED name while
+        # keeping the undocumented ones, which is how the first draft of this
+        # filter deleted `setproperty`, `g_count` and the bitfield accessors
+        # from a wrapper's export line. Also covers `@generated function
+        # _TIER1_x(…)` and `@inline f() = …`, both real emission shapes.
+        for a in ex.args; _collect_defined!(out, a); end
+    end
+
+    if h === :toplevel || h === :module || h === :block
+        for a in ex.args; _collect_defined!(out, a); end
+    end
+    return out
+end
+
+"""
+    _exported_names(module_body) -> Vector{String}
+
+Every name the emitted module body EXPORTS, read off the parsed source.
+
+The other half of `_defined_names`: together they let a guard compare the two
+lists the generator is supposed to keep in agreement, without consulting either
+of the bookkeeping structures that produced them.
+"""
+function _exported_names(module_body::AbstractString)::Vector{String}
+    out = String[]
+    ex = try
+        Meta.parseall(module_body)
+    catch
+        return out
+    end
+    _collect_exports!(out, ex)
+    return unique!(out)
+end
+
+function _collect_exports!(out::Vector{String}, ex)
+    ex isa Expr || return out
+    if ex.head === :export
+        for a in ex.args
+            n = _bound_name(a); n === nothing || push!(out, n)
+        end
+    elseif ex.head === :toplevel || ex.head === :module || ex.head === :block
+        for a in ex.args; _collect_exports!(out, a); end
+    end
+    return out
+end
+
+"""
+    _export_statement(all_exports, module_body="") -> String
+
+The module's `export` line: names the body does not define are dropped, and
+Base/Core-shadowing names are withheld.
+
+Withheld names are still DEFINED and reachable as `Mod.name` — that drops them
 from `export` only, so the library keeps its full API while `using` stops being
 a hazard. That is the right trade because the collision is silent for the
 consumer and the workaround (`Mod.name`) is both obvious and already what
 careful callers do.
 
+Dropped names are different: exporting a name the module never binds is a
+promise it cannot keep. `using` still succeeds (Julia does not check export
+targets at load), so it stays invisible until someone reaches the name — or
+until a doc generator, an introspection pass, or plain REPL tab-completion
+walks `names(Mod)` and hits `UndefVarError` on a name Julia itself suggested.
+
+Measured across the Hub before this filter existed: **102 undefined exports in
+5 of 18 packages** (sqlite 64, llamacpp 22, lua 12, miniaudio 2, zlib 2), from
+two derivations that had drifted apart:
+  - union accessors screened out of the DEFINITIONS but left in the export list
+  - enum members exported under their raw C spelling while `@enum` binds the
+    sanitized one (`__RLIMIT_NICE` vs `_RLIMIT_NICE`, `COPY_` vs `COPY`,
+    `ma_dr_wav__…` vs `ma_dr_wav_…` — leading, trailing and interior
+    underscore transforms, all the same class)
+
 Emitted as one derivation because all three generators (C, C++, basic) built
 this line themselves, which is exactly how the struct-filler bug shipped in
 triplicate.
 """
-function _export_statement(all_exports)::String
+function _export_statement(all_exports, module_body::AbstractString = "")::String
     names_vec = unique(String.(collect(all_exports)))
     isempty(names_vec) && return ""
+
+    if !isempty(module_body)
+        defined = _defined_names(module_body)
+        if !isempty(defined)      # empty ⇒ unparseable; leave the list alone
+            dropped = sort!(filter(n -> !(n in defined), names_vec))
+            if !isempty(dropped)
+                @info "wrap: $(length(dropped)) name(s) dropped from `export` — the " *
+                      "module never binds them, so `using` would offer a name that " *
+                      "raises UndefVarError: " * join(first(dropped, 12), ", ") *
+                      (length(dropped) > 12 ? " … (+$(length(dropped) - 12) more)" : "")
+                names_vec = filter(n -> n in defined, names_vec)
+                isempty(names_vec) && return ""
+            end
+        end
+    end
 
     withheld = _base_shadowing(names_vec)
     isempty(withheld) && return "export " * join(names_vec, ", ") * "\n\n"
@@ -112,6 +268,51 @@ const _JULIA_BUILTIN_TYPES = Set([
 const _JULIA_TYPE_CTORS = Set([
     "Ptr", "Ref", "NTuple", "Tuple", "Union", "Vararg", "String", "Symbol",
 ])
+
+"""
+    _assert_no_bound_name_rejected(rejected, what)
+
+Refuse to drop generated code because of a name that is already BOUND.
+
+Every "is this type declared?" screen in the generators works by regex-scraping
+names out of emitted source and testing them against the set of names the
+module binds. That test answers the right question only for names that
+*identify a type*; a scrape that also picks up a type CONSTRUCTOR asks it of
+`Ptr`, which no wrapper defines and every module has — so the screen rejects on
+a name that was never in doubt.
+
+That is not hypothetical: the union-accessor filter's `::([A-Za-z_]\\w*)` regex
+captures `Ptr` from `::Ptr{Cvoid}`, and screening it dropped **every**
+pointer-typed union accessor in the Hub regardless of its pointee — 76 of them,
+all fully resolvable (sqlite's `p4union` kept 1 member of 16, lua's `Value` 3 of
+6). The drop is silent by construction: the accessor is simply absent, so the
+only symptom is a union you cannot read a pointer out of, and nothing
+distinguishes that from a member the generator was right to skip.
+
+So the rejects themselves get screened. A name bound in `Base`/`Core` resolves
+inside the generated module (which does `using Base`) and therefore CANNOT be
+the undeclared-type case these filters exist to catch. Two ways to get here,
+both needing a human: a constructor missing from `_JULIA_TYPE_CTORS`, or a
+wrapper type genuinely colliding with a `Base` name — where silently keeping the
+accessor would bind `Base`'s type and misread the member's bytes. Hard error,
+because both are wrong answers, not risky ones.
+"""
+function _assert_no_bound_name_rejected(rejected, what::AbstractString)
+    bound = sort!(collect(Set(String(n) for n in rejected
+                              if isdefined(Base, Symbol(n)) || isdefined(Core, Symbol(n)))))
+    isempty(bound) && return nothing
+    Base.error("""
+        $what rejected on $(length(bound)) name(s) that are already bound: $(join(bound, ", "))
+
+        These screens drop code that names a type the module never binds. A name
+        bound in Base/Core always resolves inside the generated module, so it can
+        never be that case — the screen is answering the wrong question about it.
+
+        Either it is a type constructor (add it to `_JULIA_TYPE_CTORS` in
+        Wrapper/Utils.jl), or a wrapper type collides with a Base name and needs a
+        deliberate decision — keeping it would silently bind Base's type.
+        """)
+end
 
 """
     _elf_build_id(path) -> Union{Nothing,String}
