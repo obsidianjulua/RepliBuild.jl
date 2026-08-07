@@ -3155,11 +3155,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         "setproperty" in all_exports || push!(all_exports, "setproperty")
     end
 
-    export_statement = if !isempty(all_exports)
-        "export " * join(unique(all_exports), ", ") * "\n\n"
-    else
-        ""
-    end
+    export_statement = _export_statement(all_exports)
 
     # Footer
     footer = """

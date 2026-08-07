@@ -161,6 +161,13 @@ include(joinpath(@__DIR__, "test_struct_layout.jl"))
 
 include(joinpath(@__DIR__, "test_blob_setters.jl"))
 
+# ── Export hygiene (no toolchain) ────────────────────────────────────────────
+# The consumer-side half of the Base-name problem. `_assert_base_calls_qualified`
+# stops the wrapper breaking ITSELF; this stops it breaking whoever `using`s it,
+# which is silent until their first failure path runs.
+
+include(joinpath(@__DIR__, "test_export_hygiene.jl"))
+
 # ── Suite wiring guard (no toolchain required) ───────────────────────────────
 # A test file that no suite includes is a test that silently never runs. That
 # is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3

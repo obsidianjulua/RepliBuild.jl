@@ -33,6 +33,71 @@ function _escape_keyword(name::String)::String
     return name
 end
 
+"""
+    _base_shadowing(names) -> Vector{String}
+
+Which of `names` would shadow a Base/Core export if the module were `using`-ed.
+
+A generated module's namespace belongs to the LIBRARY, and the export list is
+harvested from every symbol that reached the debug info — libstdc++ included.
+Exporting one of these does not break the wrapper itself (that is
+`_assert_base_calls_qualified`'s job); it breaks the CONSUMER, silently and at
+a distance. Measured on the Hub: llamacpp exports `all`, `error`, `stat` and
+`symlink`; sqlite exports `Expr`, `Module` and `stat`; cjson exports `error`.
+
+`using .Llamacpp` therefore made a bare `error("...")` in the caller an
+ambiguous binding, so every failure path in that file raised
+`UndefVarError: error not defined` instead of its message — invisible until
+something actually went wrong, because the happy path never calls it. That cost
+a real debugging session in `examples/LlamaChat`, whose fix was to give up on
+`using` entirely and go through `L.` for everything.
+"""
+function _base_shadowing(names_to_export)::Vector{String}
+    shadow = Set{String}()
+    for m in (Base, Core), n in names(m)
+        push!(shadow, String(n))
+    end
+    return sort!(unique!(filter(n -> n in shadow, collect(String.(names_to_export)))))
+end
+
+"""
+    _export_statement(all_exports) -> String
+
+The module's `export` line, with Base/Core-shadowing names withheld.
+
+Withheld names are still DEFINED and reachable as `Mod.name` — this drops them
+from `export` only, so the library keeps its full API while `using` stops being
+a hazard. That is the right trade because the collision is silent for the
+consumer and the workaround (`Mod.name`) is both obvious and already what
+careful callers do.
+
+Emitted as one derivation because all three generators (C, C++, basic) built
+this line themselves, which is exactly how the struct-filler bug shipped in
+triplicate.
+"""
+function _export_statement(all_exports)::String
+    names_vec = unique(String.(collect(all_exports)))
+    isempty(names_vec) && return ""
+
+    withheld = _base_shadowing(names_vec)
+    isempty(withheld) && return "export " * join(names_vec, ", ") * "\n\n"
+
+    keep = filter(n -> !(n in Set(withheld)), names_vec)
+    @info "wrap: $(length(withheld)) name(s) withheld from `export` — they would " *
+          "shadow a Base/Core binding in any module that `using`s this wrapper. " *
+          "Still reachable as <Module>.<name>: " * join(withheld, ", ")
+
+    banner = """
+    # ── Withheld from `export` ───────────────────────────────────────────────
+    # These $(length(withheld)) name(s) are DEFINED by this module but not exported: each
+    # collides with a Base/Core export, and `using` this module would shadow it
+    # in the caller's namespace — silently, since the happy path never touches
+    # the shadowed binding. Reach them explicitly:  <Module>.$(first(withheld))
+    #   $(join(withheld, ", "))
+    """
+    return banner * "export " * join(keep, ", ") * "\n\n"
+end
+
 # Built-in Julia types that never need forward declaration
 const _JULIA_BUILTIN_TYPES = Set([
     "Cvoid", "Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",

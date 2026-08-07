@@ -432,7 +432,13 @@ function parse_vtables(binary_path::String)
         error("Binary not found: $binary_path")
     end
 
-    println("Parsing DWARF debug info from: $binary_path")
+    # @debug, not println: `parse_vtables` runs from JITManager's per-library
+    # engine init (JITManager.jl:293), i.e. inside a generated wrapper's load
+    # path. A library writing to the CONSUMER'S stdout there corrupts any
+    # program whose stdout is data — piping llamacpp's generate.jl put four
+    # lines of DWARF progress above the model's output. Opt back in with
+    # JULIA_DEBUG=RepliBuild.
+    @debug "Parsing DWARF debug info from: $binary_path"
 
     # Extract DWARF info
     dwarf_cmd = `llvm-dwarfdump --debug-info $binary_path`
@@ -446,9 +452,7 @@ function parse_vtables(binary_path::String)
     classes = parse_dwarf_output(dwarf_output)
     (vtable_addrs, method_addrs) = parse_symbol_table(nm_output)
 
-    println("Found $(length(classes)) classes with virtual methods")
-    println("Found $(length(vtable_addrs)) vtables")
-    println("Found $(length(method_addrs)) methods")
+    @debug "DWARF vtable scan complete" classes=length(classes) vtables=length(vtable_addrs) methods=length(method_addrs)
 
     return VtableInfo(classes, vtable_addrs, method_addrs)
 end

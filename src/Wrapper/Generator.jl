@@ -405,7 +405,7 @@ function generate_basic_module(config::RepliBuildConfig, lib_path::String,
 
     # Exports
     content *= "# Exports\n"
-    content *= "export " * join(unique(exports), ", ") * "\n\n"
+    content *= _export_statement(exports)
 
     content *= "end # module $module_name\n"
 
