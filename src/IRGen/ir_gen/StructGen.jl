@@ -384,14 +384,25 @@ function _dwarf_struct_align(info, all_structs, depth::Int)
     return a
 end
 
-# Structs already reported as unmodellable — one line each, then capped. A
-# whole-library wrap reaches every system and STL type the headers dragged in
-# (llama.cpp: 101 of 2864, nearly all libstdc++ internals and ggml quant blocks
-# whose fixed-size array members `map_cpp_type` still renders as pointers), and
-# a wall of warnings is how a real one gets missed. The full set stays
-# inspectable as `StructGen._LAYOUT_WARNED`.
+# Structs reported as unmodellable, one entry each.
+#
+# Reported at `@debug`, NOT `@warn`, because of WHERE this runs: StructGen is
+# only reached from `generate_jlcs_ir` during per-library JIT engine init,
+# which happens inside a generated wrapper's `__init__` — i.e. in the
+# CONSUMER'S load path, on their stderr. A whole-library wrap reaches every
+# system and STL type the headers dragged in (llama.cpp: 57 of 2864, almost
+# entirely libstdc++ internals), so `using` an app built on that wrapper
+# printed eleven paragraphs about `_BracketMatcher<...>` before it did
+# anything. Nothing an application user can act on, and the degrade is
+# safe by construction — the region is emitted at its exact DWARF size, so the
+# ABI is unaffected; only field addressability from Tier-2 IR is given up.
+#
+# Same call as the DWARF-progress printlns this pass removed from the same
+# path: `JULIA_DEBUG=RepliBuild` opts back in. Uncapped now — you only see
+# these having asked for them, and a truncated list is the wrong answer to
+# "show me every struct you could not model". The full set also stays
+# inspectable as `StructGen._LAYOUT_WARNED` with no logging configured at all.
 const _LAYOUT_WARNED = Set{String}()
-const _LAYOUT_WARN_CAP = 10
 
 """
     _dwarf_padded_members(name, info, member_types, all_structs, dwarf_size)
@@ -434,18 +445,10 @@ function _dwarf_padded_members(name::String, info::Any, member_types::Vector{Str
     why(msg) = begin
         if !(name in _LAYOUT_WARNED)
             push!(_LAYOUT_WARNED, name)
-            n = length(_LAYOUT_WARNED)
-            if n <= _LAYOUT_WARN_CAP
-                @warn "Struct `$name` cannot be modelled field-by-field in MLIR ($msg); " *
-                      "emitting a $(dwarf_size)-byte opaque region instead. By-value " *
-                      "crossings stay correctly sized, but its fields are not addressable " *
-                      "from Tier-2 IR."
-            elseif n == _LAYOUT_WARN_CAP + 1
-                @warn "More structs cannot be modelled field-by-field; further reports " *
-                      "suppressed. All of them are emitted at their exact DWARF size, so " *
-                      "the ABI is unaffected. Full set: `RepliBuild.JLCSIRGenerator." *
-                      "StructGen._LAYOUT_WARNED`."
-            end
+            @debug "Struct `$name` cannot be modelled field-by-field in MLIR ($msg); " *
+                   "emitting a $(dwarf_size)-byte opaque region instead. By-value " *
+                   "crossings stay correctly sized, but its fields are not addressable " *
+                   "from Tier-2 IR."
         end
         nothing
     end

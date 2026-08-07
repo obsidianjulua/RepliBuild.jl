@@ -21,6 +21,7 @@
 # These assertions need no toolchain: they measure the emitted type string.
 
 using Test
+using Logging
 using RepliBuild
 
 const SG = RepliBuild.JLCSIRGenerator.StructGen
@@ -77,9 +78,15 @@ mem(name, ctype, off, size) = Dict{String,Any}(
             "kind" => "struct", "byte_size" => "0x10",
             "members" => [mem("a", "long", 0, 8), mem("b", "long", 0, 8),
                           mem("c", "long", 8, 8)]))
-        body = @test_logs (:warn,) match_mode = :any SG.get_struct_definition_string(
+        # ...and it degrades SILENTLY at warn level. StructGen runs from
+        # per-library JIT init, inside a generated wrapper's __init__ — the
+        # CONSUMER'S load path. `using` an app on the llamacpp wrapper printed
+        # eleven paragraphs about libstdc++ internals before doing anything.
+        # The report is @debug now; JULIA_DEBUG=RepliBuild opts back in.
+        body = @test_logs min_level = Logging.Warn SG.get_struct_definition_string(
             "Overlap", structs["Overlap"], structs)
         @test SG._mlir_layout(body, structs)[1] == 16
+        @test "Overlap" in SG._LAYOUT_WARNED        # recorded without being printed
     end
 
     @testset "packed structs are untouched" begin
