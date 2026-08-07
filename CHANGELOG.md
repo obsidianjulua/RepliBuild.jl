@@ -4,6 +4,176 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### ⚠ Tier-2 MEMORY-class struct ABI — re-wrap your vendored wrappers (2026-08-05)
+
+**Action required.** If you vendored a generated wrapper for a library that
+passes or returns structs by value, re-run `wrap()` and replace it. A wrapper
+generated before this change can corrupt the caller's heap on a Tier-2 call,
+silently, with every test passing.
+
+A non-packed struct was closed with one trailing filler of
+`byte_size - sum(member sizes)`. That double-counts: LLVM inserts the *interior*
+alignment padding itself, and DWARF reports enum members with `size = 0`, so the
+filler paid a second time for gaps the natural layout had already paid for.
+Every non-packed struct with interior padding came out **larger than the C type
+it models** — and because `llvm.emit_c_interface` stores a MEMORY-class result
+straight into the caller's buffer, while `JITManager`'s `_invoke_call` sizes that
+`Ref{T}` from the Julia struct (the true `byte_size`), every such call wrote past
+a live Julia object.
+
+Measured on llama.cpp: `llama_context_params` emitted 200 bytes against a native
+160 and overran a 160-byte `Ref` by 34; `llama_model_params` 80 against 72, by 8.
+**Every member offset held the right value**, which is why it presented as
+intermittent corruption — a garbage `n_ctx` in one session, a SIGSEGV in the next
+— rather than as marshalling, and why it was first misdiagnosed as "the 160-byte
+return is broken, the 72-byte one is fine". Both marshalled perfectly and then
+overran; only the amount differed. pugixml's `xml_parse_result` (24 B, three
+members summing to 8) emitted 40 bytes and had been overrunning its `Ref` by 16
+on every `load_string` **since it shipped**, with all 13 of its tests green.
+
+Members are now laid out at their DWARF offsets with explicit padding, verified
+against a Julia mirror of the dialect's own `abiSize`/`abiAlign` — one shared
+derivation for all three body builders, since the buggy filler line had been
+copy-pasted into each. A struct that cannot be laid out consistently degrades to
+a `byte_size`-sized opaque region and warns: opaque, but never the wrong size.
+
+Three further fixes on the same path:
+
+- **MEMORY-class by-value ARGS now use `llvm.byval`** (closes a standing ledger
+  entry). SysV passes a >16-byte by-value struct as a caller-owned copy in the
+  outgoing stack argument area. The lowering did neither shape right: packed
+  structs went as a bare pointer (by *reference* — the callee reads an address
+  where it expects bytes), non-packed ones as an LLVM first-class aggregate (the
+  backend splits it per element across registers, shifting every later argument).
+  `llama_model_load_from_file(path, llama_model_params)` segfaulted on the
+  second. Both now take one path — alloca + store + pointer with `llvm.byval(T)`
+  and `llvm.align`, stamped on the call site *and* the declaration — emitting
+  what clang emits. `ffe_call` and `try_call` had carried independent copies of
+  the whole coercion; they share one `buildSysVCallShape` now.
+- **Fixed-size array members** map to `!llvm.array` instead of falling through to
+  the `!llvm.ptr` fallback, which claimed 8 bytes at align 8 for `int8_t[32]`.
+  Every ggml quant block failed layout on this. Tested before the pointer branch
+  so `char *[4]` does not match on the `*`; `uint8_t` and the signed/unsigned
+  `char` spellings were missing from the scalar table too, invisible while arrays
+  never looked at their element type.
+- **Byte-blob structs got setters.** They had accessors in one direction only,
+  and the only constructors are the zero-initializer and the raw-bytes inner one,
+  so a param struct built *by* the library was read-only. On llama.cpp that is
+  the only path in — an embedding model returns NULL unless `ctx.embeddings` is
+  set, and callers were patching bytes through hand-rolled offset tables copied
+  out of `compilation_metadata.json`. Now `setproperty(x, :f, v)` and
+  `setproperties(x; f = v, …)`; immutability just means they return a new value.
+  `Base.setproperty!` is defined only to replace Julia's "immutable struct cannot
+  be modified" with a message naming the alternative.
+
+### Generated wrappers no longer damage their consumer (2026-08-05 → 08-06)
+
+A generated module is a namespace the **library** populates, and its export list
+is harvested from every symbol that reached the debug info — libstdc++ included.
+Two ways that reached out and broke code outside the wrapper:
+
+- **`error` is rebindable by the library.** llama.cpp pulls in libstdc++'s
+  `std::codecvt_base::result`, whose members include one named `error`, so the
+  emitted `@enum` rebound it for the whole module: every failure path in the
+  wrapper — including the long-standing `getproperty` "no field" branch — raised
+  `MethodError: objects of type result are not callable` instead of its message.
+  cJSON is a second, independent instance (a `struct error`). Nine emission sites
+  are `Base.`-qualified now, and `_assert_base_calls_qualified` refuses to write
+  a wrapper containing an unqualified one — keyed on a string-literal first
+  argument, which is what separates the generator's own diagnostics from the
+  library's, since a library owning the name legitimately emits `struct error`,
+  `function error()` and `return error(Ptr{UInt8}())`.
+- **Base-shadowing names are withheld from `export`.** The guard above protects
+  the wrapper from itself; this protects whoever `using`s it. llamacpp exports
+  `all`, `error`, `stat`, `symlink`; sqlite exports `Expr`, `Module`, `stat`;
+  cjson exports `error` — so `using` such a module shadowed the caller's binding,
+  and a bare `error("…")` in *their* code became an `UndefVarError`, invisible
+  until their first failure path ran. Those names stay **defined and reachable**
+  as `Mod.name`; only the `export` is withheld, and the wrapper carries a banner
+  naming them. All three generators shared one emission line that had been
+  duplicated three ways; it is one `_export_statement` now.
+- **The load path is quiet.** `parse_vtables` ran four `println`s during a
+  wrapper's `__init__`, i.e. into the *consumer's* stdout — enough to corrupt any
+  program whose stdout is data. Now `@debug`; opt back in with
+  `JULIA_DEBUG=RepliBuild`.
+
+### Build pipeline + diagnostics hardening (2026-08-05)
+
+Found by putting llama.cpp (195 translation units, a 252 MB DWARF dump) through
+the pipeline; none of it is llama.cpp-specific.
+
+- **IR outputs collided on basename** — 195 sources produced 190 `.ll` files.
+  `splitext(basename(f))` keyed the output, so `src/llama.cpp` and
+  `src/models/llama.cpp` shared one, as did `ggml.c` and `ggml.cpp` in the *same*
+  directory. Damage at three layers, all silent: the second compile overwrote the
+  first's IR (that TU vanished from the library), `ir_files` still had one entry
+  per source so the survivor was handed to the linker twice, and
+  `needs_recompile` compared one source's mtime against another's IR — with
+  `Threads.@threads` able to tear the same file. One `_ir_output_path` keyed on
+  the full source path, shared by both call sites that had their own copy.
+- **Linking reported success with unresolvable symbols.** `ld -shared` permits
+  them — that is what makes `DT_NEEDED` work — and wrappers dlopen `RTLD_LAZY`,
+  so nothing failed at load either; the first sign was a call into the void.
+  `_assert_library_resolves` dlopens `RTLD_NOW | RTLD_LOCAL` after the link.
+- **Diagnostics.** A 73,570-line arity warning is capped at 20 plus a count, and
+  `done: Ns` no longer omits the DWARF phase (`elapsed` was computed before step
+  4 and printed after it — on llama.cpp it reported 73 s for a 19-minute build).
+- **`parse_module` keeps the module text** when MLIR refuses it. The diagnostic
+  is `loc("-":LINE:COL)` against a string that was then discarded.
+
+### Wrapper emission: syntax, undeclared types, portability (2026-08-01 → 08-05)
+
+- **Wrappers are parsed before they are written.** `_assert_wrapper_loadable`
+  checks that ccall signatures name declared types, but a malformed *identifier*
+  never gets that far — the file dies in the parser and one bad character kills
+  the module. DWARF spells a lambda's type as
+  `(lambda at ./src/llama-model-loader.cpp:1538:79)`; those parens, slashes and
+  colons reached a struct field, and all 98,094 lines of the llama.cpp wrapper
+  were a syntax error, discovered only on `include`. `_assert_wrapper_parses`
+  now refuses to write it, naming the line and dumping the rejected source. It
+  caught three further emitter bugs on its first run: an unsanitized global's
+  type, an undeclared bare struct-field type, and union accessors screened
+  against the generator's *intent* rather than what it emitted.
+- **Undeclared types in signatures degrade to `Ptr{Cvoid}`.**
+  `_INTERNAL_TYPE_BLOCKLIST` suppressed the *declaration* of libc internals that
+  leak through DWARF, but nothing suppressed their *uses*, so a library with a
+  `FILE*` in its surface emitted `ccall(…, (Ptr{Ptr{_IO_FILE}}, …), …)` against a
+  type it never bound. `ccall` resolves its type tuple eagerly, so that is an
+  `UndefVarError` at *include* — all 1178 of miniaudio's functions dead at once.
+- **Anonymous struct/union support** in the C generator. An aggregate DIE with no
+  `DW_AT_name` was dropped on export, so the member referencing it typed `Any`,
+  failed `_resolve_exact_layout`, and degraded the whole enclosing struct to an
+  opaque blob despite DWARF carrying the complete tree. tomlc17's `toml_datum_t`
+  and `toml_result_t` came out with no named fields — you could parse a document
+  but not read a value back.
+- **DWARF DIE attribution fix + arity guard.** `free_opaque` (one parameter) was
+  extracted with a phantom second one, emitting a two-argument ccall against a
+  one-argument function. `check_param_arity!` compares every extracted signature
+  against an independent count off the DIE tree; an over-count is now fatal.
+- **Portability guards.** A generated wrapper is portable *source*, but its
+  contents are a snapshot of one compilation — struct offsets, blob sizes, enum
+  values and sliced IR all come from a specific build. Wrappers now dlsym-check
+  their slice declares at load (an unresolved declare does not raise; ORC blocks
+  forever on the first call) and warn on a build-ID mismatch.
+
+### Tier-1 slice correctness (2026-07-28)
+
+- **Slice constants are keyed on the mangled symbol, never `julia_name`**, which
+  is not injective over it. Two functions shared one constant and the second
+  silently won — no redefinition warning under Julia 1.12 binding partitions —
+  and since `Base.llvmcall` resolves the constant at *codegen*, the loser broke
+  on its first call rather than at wrap time.
+- **The slice pre-flight is scoped to the library**, not the process. It resolved
+  through `dlsym(RTLD_DEFAULT, …)` after an `RTLD_GLOBAL` dlopen it never closed,
+  so wrapping B after A verified B's slices against **A's** exports — symbols
+  absent from a consumer's process, so the slice shipped and deadlocked there.
+- **Embedding an internal constant requires `unnamed_addr`.** Duplication is
+  harmless only if the address is dead; otherwise it is the cJSON divergence
+  class rotated from value identity onto address identity. Costs 18 of 208 lua
+  functions, which demote to Tier 3.
+- **Only slices a call site reads are written** — acceptance is strictly weaker
+  than emission, and the gap shipped 19 orphan `.ll` files in the lua wrapper.
+
 ### Tier 1 un-parked: per-function `llvmcall` bitcode slicing (2026-07-22 → 07-25)
 
 Tier 1 (`Base.llvmcall`) has been real but effectively parked: LTO embeds the
