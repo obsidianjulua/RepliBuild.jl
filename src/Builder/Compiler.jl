@@ -2309,12 +2309,27 @@ Returns: (return_types_dict, struct_defs_dict)
 function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
     # Parse DWARF debug info
 
-    # Extract DWARF debug info using readelf (parser is written for GNU readelf format).
-    # Prefer system GNU readelf, then llvm-dwarfdump as last resort (macOS).
-    output = ""
-    exitcode = 1
-
-    # Try system GNU readelf first (Linux) — parser expects this output format
+    # GNU readelf, and only GNU readelf. `parse_dwarf_dump` is a readelf-format
+    # parser: it keys every DIE on `<level><offset>: Abbrev Number: N (DW_TAG_*)`,
+    # and the LEVEL is load-bearing — closing DIE contexts on depth is what fixed
+    # the phantom-parameter leak (2026-07-26). llvm-dwarfdump prints neither a
+    # level nor an abbrev number (`0x0000000c: DW_TAG_compile_unit`, depth by
+    # indentation only), so it matches nothing here.
+    #
+    # There WAS an llvm-dwarfdump fallback, commented "(macOS, or when readelf
+    # unavailable)". Both halves were dead:
+    #   * macOS is unreachable — `RepliBuild.__init__` hard-errors on non-Linux.
+    #   * readelf-unavailable ran dwarfdump, parsed **0 functions, 0 structs,
+    #     0 globals, 0 typedefs** out of a valid 1.4 MB dump, and returned exit
+    #     code 0 — so the "Failed to read DWARF info" warning never fired either.
+    #     The build continued, every function fell back to
+    #     `parameters_source: "inferred"`, and the wrapper shipped with guessed
+    #     signatures. Silently.
+    # A fallback that returns empty is worse than no fallback, so: no fallback.
+    #
+    # (`DWARFParser.jl` legitimately uses llvm-dwarfdump — its vtable parser is
+    # written for that dialect. Two dialects, two parsers; neither reads the
+    # other's output.)
     readelf_tool = try
         (_, ec) = BuildBridge.execute("readelf", ["--version"])
         ec == 0 ? "readelf" : ""
@@ -2322,32 +2337,31 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         ""
     end
 
-    if !isempty(readelf_tool)
-        (output, exitcode) = BuildBridge.execute(readelf_tool, ["--debug-dump=info", binary_path])
+    isempty(readelf_tool) && error("""
+        GNU readelf not found — DWARF extraction cannot run.
+        RepliBuild's DWARF parser reads GNU readelf's format specifically; no
+        other dumper is substitutable. Install binutils.""")
+
+    (output, exitcode) = BuildBridge.execute(readelf_tool, ["--debug-dump=info", binary_path])
+    exitcode == 0 || error("readelf --debug-dump=info failed on $binary_path:\n$output")
+
+    (return_types, struct_defs, global_vars, typedefs) = parse_dwarf_dump(output)
+
+    # A non-empty dump that yields nothing is a dialect or format mismatch, not
+    # a library without debug info — and it is indistinguishable downstream from
+    # "this library has no functions", which is how the dead fallback above went
+    # unnoticed. Fail here instead of emitting a wrapper of guesses.
+    if isempty(return_types) && length(output) > 4096
+        error("""
+            DWARF parse produced no functions from a $(round(length(output)/1024)) KB dump of
+            $(basename(binary_path)).
+            The dump is non-empty, so this is a format mismatch rather than a
+            library without debug info. `parse_dwarf_dump` expects GNU readelf
+            `--debug-dump=info` output; check that `$readelf_tool` is GNU readelf
+            and not a differently-formatted stand-in (llvm-readelf, llvm-dwarfdump).""")
     end
 
-    # Fallback: llvm-dwarfdump (macOS, or when readelf unavailable)
-    if exitcode != 0
-        dwarfdump_tool = LLVMEnvironment.has_tool("llvm-dwarfdump") ? LLVMEnvironment.get_tool("llvm-dwarfdump") : ""
-        if isempty(dwarfdump_tool)
-            dwarfdump_tool = try
-                (_, ec) = BuildBridge.execute("llvm-dwarfdump", ["--version"])
-                ec == 0 ? "llvm-dwarfdump" : ""
-            catch
-                ""
-            end
-        end
-        if !isempty(dwarfdump_tool)
-            (output, exitcode) = BuildBridge.execute(dwarfdump_tool, ["--debug-info", binary_path])
-        end
-    end
-
-    if exitcode != 0
-        @warn "Failed to read DWARF info: $output"
-        return (Dict{String,Dict{String,Any}}(), Dict{String,Dict{String,Any}}(), Dict{String,Any}(), Dict{String,String}())
-    end
-
-    return parse_dwarf_dump(output)
+    return (return_types, struct_defs, global_vars, typedefs)
 end
 
 """
