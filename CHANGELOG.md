@@ -2,7 +2,125 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## Unreleased
+## v3.2.0 (2026-08-08)
+
+Minor, not patch: Tier 1 is un-parked, wrappers gained portability guards and
+struct setters, anonymous unions are modelled, and `[dependencies]` grew a new
+key. It also carries the Tier-2 struct-ABI fix below, which **requires re-wrapping
+vendored wrappers** — a patch number would tell `~3.1` users this was safe to take
+blindly. No exported API was removed since v3.1.0.
+
+### Git dependencies can be pinned to an immutable commit (2026-08-08)
+
+A git tag is a mutable ref. Upstream — or whoever takes over the account — can
+force-push `v1.15` to different content, and `git checkout v1.15` fetches it with
+no signal. Every dependency RepliBuild builds from was pinned that way, which is
+the vector of the 2026 AUR supply-chain waves applied to C sources.
+
+`[dependencies.<name>]` now accepts `commit = "<40-hex>"` beside `tag`. It is
+verified after every clone and checkout, and a mismatch is a **hard error** that
+refuses to build — a warning would let the compile proceed on unverified source,
+which is the failure this exists to stop. The value is validated at config-parse
+time (full 40-hex only; abbreviated shas are rejected as ambiguous against future
+history) so a malformed pin cannot reach the resolver and read as "no pin", and it
+round-trips through serialization so `discover(force=true)` cannot silently strip
+it.
+
+Separately, the `<name>.resolved` cache marker now records the resolved object
+name from `git rev-parse HEAD`, so a cached checkout that drifted out from under
+the marker is caught and re-resolved loudly rather than compiled. That layer dies
+with `clean()`, which deletes the clone and the marker together — the declared pin
+is the only one that survives the cold-rebuild path, which is exactly the path Hub
+`test.jl` takes on every run.
+
+Pins are optional; a recipe without one keeps the previous trust-the-tag
+behaviour. All 19 RepliBuild-Hub recipes are now pinned. Note `git fetch --tags`
+does not move an existing local tag without `--force`, so a warm cache is sticky
+while a cold rebuild follows the move — deliberately asymmetric in the safe
+direction, with the pin as the detector.
+
+### libJLCS.so shipped ten undefined symbols for its entire life (2026-08-07)
+
+`dlopen(libJLCS.so, RTLD_NOW)` refuses the library. Eight op `build()` bodies
+(`TypeInfoOp`, `GetFieldOp`, `SetFieldOp`, `VirtualCallOp`, `LoadArrayElementOp`,
+`StoreArrayElementOp`, `MarshalArgOp`, `MarshalRetOp`) and `ArrayViewType`'s
+`getElementType()`/`getRank()` were declared and never defined. Two causes, one
+shape — TableGen emits a declaration and expects the body in C++: for the ops it
+is `skipDefaultBuilders = 1` with a bodyless `OpBuilder<(ins …)>`; for the type it
+is `genStorageClass = 0`, where `CStructType`'s manual accessors were written and
+`ArrayViewType`'s, ten lines away, were not.
+
+It survived because `MLIRNative.jl` reaches the library through
+`ccall((:sym, path), …)`, which binds **lazily** — an undefined symbol nothing
+calls is never looked up — and because every producer builds IR as text and parses
+it, so no call site ever existed. The library loaded, the dialect worked, and the
+whole Tier-2 suite was green on a binary the loader would reject if asked to
+resolve it eagerly. Surfaced only by an unrelated `RTLD_NOW` probe.
+
+Guarded by `test_jlcs_invariants.jl` §D: a fresh **subprocess** `dlopen` with
+`RTLD_NOW` (an already-open lazy handle would not be upgraded), plus an
+`nm -D --undefined-only` sweep so a failure names every offender rather than the
+first one the loader trips over.
+
+### Export lists and type screens derive from emitted source, not intent (2026-08-07)
+
+Two defects with one root: a generator deciding something by consulting its own
+bookkeeping rather than the source it actually produced.
+
+**Exports — 102 undefined names across the Hub.** The export list was built
+independently of the definitions, and both generators computed it *before*
+`_dedup_method_chunks` (the C one also before `_tier1_emit_slices!` and the Tier-1
+registry). Names dropped after that point stayed on the export line, so `using`
+offered bindings that raise `UndefVarError`. `_export_statement` now filters
+against `_defined_names(module_body)` read off the parsed emitted source, and is
+built below every step that can remove a definition. Measured: sqlite 64,
+llamacpp 22, lua 12, miniaudio 2, zlib 2 → **0 everywhere**.
+
+**Union accessors — 76 dropped, all valid.** The undeclared-type filter captured
+`Ptr` out of `::Ptr{Cvoid}` — the *constructor*, not the type. No wrapper defines
+`Ptr`, so every pointer-typed accessor was dropped whatever its pointee: sqlite's
+`p4union` kept 1 member of 16, lua's `Value` 3 of 6. A `sqlite3_value` you could
+not read a pointer out of. `_JULIA_TYPE_CTORS` joins the accepted set; the second
+regex still extracts the pointee, so a genuinely undeclared one is caught as
+before.
+
+### Unmodellable structs report at `@debug`, not `@warn` (2026-08-06)
+
+`StructGen` is reached from per-library JIT engine init, which runs inside a
+generated wrapper's `__init__` — the **consumer's** load path, on their stderr. A
+whole-library wrap reaches every system and STL type the headers dragged in
+(llamacpp: 57 of 2864, almost entirely libstdc++ internals), so `using LlamaChat`
+printed eleven paragraphs about `_BracketMatcher<…regex_traits<wchar_t>>` before
+doing anything.
+
+Nothing an application user can act on, and the degrade is safe by construction:
+the region is emitted at its exact DWARF size, so the ABI is unaffected and only
+field addressability from Tier-2 IR is given up. `JULIA_DEBUG=RepliBuild` opts
+back in, and the full set stays inspectable as `StructGen._LAYOUT_WARNED` with no
+logging configured. Also uncapped — at `@debug` you are only seeing these because
+you asked, and a truncated list is the wrong answer to "show me every struct you
+could not model".
+
+### The dead llvm-dwarfdump fallback is gone — it was silently wrong (2026-08-06)
+
+`extract_dwarf_return_types` tried readelf, then fell back to `llvm-dwarfdump`.
+Both halves were dead. macOS is unreachable by construction (`__init__`
+hard-errors on non-Linux), and the readelf-unavailable half was **worse than
+dead**: `parse_dwarf_dump` is a readelf-format parser keyed on
+`<level><offset>: Abbrev Number: N (DW_TAG_*)`, where the level is load-bearing —
+closing DIE contexts on depth is what fixed the phantom-parameter leak.
+`llvm-dwarfdump` prints neither a level nor an abbrev number, so it matches
+nothing.
+
+Measured on `libzlib.so`: readelf yields 198 functions / 17 structs / 5 globals /
+51 typedefs; the same parser on a valid 1.4 MB dwarfdump of the same binary yields
+**0 / 0 / 0 / 0** — at exit code 0, so the "Failed to read DWARF info" warning
+never fired either. The build would continue, every function would fall back to
+`parameters_source: "inferred"`, and the wrapper would ship with signatures
+guessed from symbol names. A fallback that returns empty converts a missing tool
+into a plausible-looking wrapper. Missing readelf is now a hard error naming
+binutils, and a non-empty dump that parses to zero functions is a hard error
+naming the dialect mismatch.
 
 ### ⚠ Tier-2 MEMORY-class struct ABI — re-wrap your vendored wrappers (2026-08-05)
 
