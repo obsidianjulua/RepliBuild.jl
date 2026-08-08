@@ -331,6 +331,12 @@ Create a JIT execution engine for the module.
 Automatically attaches host data layout.
 Pass `shared_libs` to register shared libraries for symbol resolution (e.g., the C++ library
 whose functions are called by JIT thunks).
+
+`dump_object` enables the engine's object cache, which is the **precondition**
+for [`dump_object_file`](@ref) — MLIR only retains the emitted object if the
+cache exists when the engine is created, and it cannot be enabled afterwards.
+Costs the memory to hold every emitted object for the engine's lifetime, so it
+is off unless something asked for it.
 """
 function create_jit(mod::MlirModule; opt_level::Int=2, dump_object::Bool=false, shared_libs::Vector{String}=String[])
     if isempty(shared_libs)
@@ -348,6 +354,34 @@ function create_jit(mod::MlirModule; opt_level::Int=2, dump_object::Bool=false, 
         error("Failed to create JIT execution engine")
     end
     return jit
+end
+
+"""
+    dump_object_file(jit::MlirExecutionEngine, path::AbstractString) -> String
+
+Write the JIT's emitted object file to `path` and return it.
+
+This is the static counterpart to breaking on a thunk in gdb: the object carries
+the same DWARF the JIT registers, so `objdump -dS` interleaves the generated
+MLIR with the machine code without a live process, a resolved breakpoint, or a
+debugger at all.
+
+Requires the engine to have been created with `dump_object=true`. Throws when
+the object was not written — MLIR reports a disabled cache by printing to stderr
+and returning normally, which is indistinguishable from success at the call site
+and is precisely where a wrapper's diagnostics get lost.
+"""
+function dump_object_file(jit::MlirExecutionEngine, path::AbstractString)
+    mkpath(dirname(abspath(path)))
+    ok = ccall((:jlcs_dump_object, libJLCS), Bool,
+               (MlirExecutionEngine, Cstring), jit, String(path))
+    ok || error("""
+        Failed to write the JIT object to $path.
+        The engine must be created with `create_jit(...; dump_object=true)` —
+        MLIR's object cache cannot be enabled after the fact. Set
+        REPLIBUILD_JIT_OBJDUMP=1 before the wrapper is loaded to have
+        initialize_global_jit do it for you.""")
+    return String(path)
 end
 
 """

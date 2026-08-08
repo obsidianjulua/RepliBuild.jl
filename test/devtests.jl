@@ -290,3 +290,14 @@ include(joinpath(TEST_DIR, "test_dwarf_attribution.jl"))
 # SSE-vs-INTEGER region element-type rule under a live by-value crossing.
 
 include(joinpath(TEST_DIR, "test_anonymous_unions.jl"))
+
+# ── 16. Static inspection of emitted code (RepliBuild.Debug) ─────────────────
+# The JIT registers DWARF pointing at the generated MLIR, which is what lets a
+# debugger show dialect source inside a thunk. Nothing else in this suite would
+# notice if that broke: the thunks keep working, the tests keep passing, and the
+# capability quietly disappears. This pins it from the static side — dump the
+# emitted object, disassemble it, and require the MLIR to come back interleaved
+# with the machine code. Also pins what the DWARF does NOT contain, so the
+# emissionKind=Full question is answered by a failing test rather than a memory.
+
+include(joinpath(TEST_DIR, "test_debug_inspection.jl"))

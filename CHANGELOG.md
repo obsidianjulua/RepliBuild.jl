@@ -4,6 +4,50 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### `RepliBuild.Debug` — read the emitted code without running anything (2026-08-08)
+
+The gdb path from the entry below needs a live process stopped at exactly the
+right moment. This is the same information from a file.
+
+`enableObjectDump` was the one `ExecutionEngineOptions` debug field still at its
+default — and `dumpObject` had been a parameter of `jlcs_create_jit`, and of
+Julia's `create_jit`, since the JIT was written: threaded all the way down and
+then dropped on the floor. The knob read as supported and did nothing. It is now
+wired, plus a `jlcs_dump_object` export, so the engine's emitted object can be
+written to disk.
+
+`REPLIBUILD_JIT_OBJDUMP` turns it on. The object lands at `<pkg>/.debug/obj/<lib>.o`
+beside the generated MLIR, and carries the same DWARF the JIT registers with gdb
+— so `objdump -dS` interleaves dialect ops with the machine code they became,
+with no debugger involved:
+
+```
+  %ret_val = "jlcs.vcall"(%val_1) { slot = 2 : i64, may_throw } : (!llvm.ptr) -> i32
+     5db:  48 8b 07           mov    (%rdi),%rax
+     5de:  48 8b 40 10        mov    0x10(%rax),%rax
+     5ea:  ff d0              call   *%rax
+```
+
+The new `RepliBuild.Debug` module reads those artifacts: `thunks`, `mlir_body`,
+`disassemble`, `dwarf`, and `walk` (one thunk, both views). It touches no live
+state, so it answers about a package this process never built. Source resolution
+needs no working directory — `DW_AT_comp_dir` is absolute.
+
+Off unless asked for: the object cache retains every emitted object for the
+engine's lifetime. It also cannot be enabled after the fact — MLIR needs the
+cache to exist when the engine is created, and engines are cached per library
+per process — so the environment is read before the engine exists rather than
+offered as an argument nothing on that path could supply, and asking for a dump
+without it is a hard error naming the recipe rather than an empty file.
+
+Two things this pins that nothing else would have noticed, because thunks keep
+working without them: that the DWARF still points at the generated MLIR, and
+that `.debug_info` contains **only** a compile unit — no `DW_TAG_subprogram`, no
+variable DIEs. That is what `LineTablesOnly` means here, and it is why `info
+locals` and `p %val_1` come back empty in gdb while file and line work perfectly.
+Asserted negatively in `test_debug_inspection.jl` (devtests §16, 43 asserts), so
+raising `emissionKind` to `Full` announces itself as a failing test.
+
 ### JIT'd thunks are debuggable in gdb, at source level (2026-08-08)
 
 Break on a mangled thunk name and gdb stops *inside the emitted MLIR*, by file

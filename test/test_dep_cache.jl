@@ -21,7 +21,13 @@ const DR = RepliBuild.DependencyResolver
         @warn "git not found — skipping dependency cache version-awareness tests"
     else
         mktempdir() do sb
-            gitrun(repo, args...) = run(`git -C $repo -c user.email=t@example.com -c user.name=tester $(collect(args))`)
+            # Signing is disabled for the same reason identity is pinned: this
+            # must not depend on the developer's global git config. With
+            # `tag.gpgsign=true` set globally, a lightweight `git tag v1` below
+            # becomes a SIGNED tag, which requires a message and dies with
+            # "fatal: no tag message?" — a failure naming nothing about
+            # dependency caching.
+            gitrun(repo, args...) = run(`git -C $repo -c user.email=t@example.com -c user.name=tester -c commit.gpgsign=false -c tag.gpgsign=false $(collect(args))`)
 
             # upstream1: VERSION flips v1 -> v2 across tags v1/v2
             up1 = joinpath(sb, "upstream1"); mkpath(up1)
@@ -91,7 +97,13 @@ end
         @warn "git not found — skipping dependency commit-pinning tests"
     else
         mktempdir() do sb
-            gitrun(repo, args...) = run(`git -C $repo -c user.email=t@example.com -c user.name=tester $(collect(args))`)
+            # Signing is disabled for the same reason identity is pinned: this
+            # must not depend on the developer's global git config. With
+            # `tag.gpgsign=true` set globally, a lightweight `git tag v1` below
+            # becomes a SIGNED tag, which requires a message and dies with
+            # "fatal: no tag message?" — a failure naming nothing about
+            # dependency caching.
+            gitrun(repo, args...) = run(`git -C $repo -c user.email=t@example.com -c user.name=tester -c commit.gpgsign=false -c tag.gpgsign=false $(collect(args))`)
             gitout(repo, args...) = strip(read(`git -C $repo $(collect(args))`, String))
 
             # upstream: tag v1 -> commit A (GOOD). Later force-moved to commit B (EVIL).

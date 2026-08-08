@@ -427,7 +427,26 @@ function initialize_global_jit(binary_path::String)
             # singleton, so JITDUMPDIR is read once and the earliest setting wins.
             configure_jit_dump_session!()
             jlcs_lib_path = MLIRNative.libJLCS
-            eng.jit_engine = create_jit(mod, opt_level=1, shared_libs=[rp, jlcs_lib_path])
+
+            # The object cache has to be requested HERE — it cannot be enabled
+            # on a live engine — so the decision is read from the environment
+            # before the engine exists rather than offered as an argument
+            # nothing on this path could supply.
+            want_obj = haskey(ENV, "REPLIBUILD_JIT_OBJDUMP")
+            eng.jit_engine = create_jit(mod, opt_level=1, dump_object=want_obj,
+                                        shared_libs=[rp, jlcs_lib_path])
+
+            if want_obj
+                obj = joinpath(debug_base, "obj", first(splitext(basename(rp))) * ".o")
+                try
+                    MLIRNative.dump_object_file(eng.jit_engine, obj)
+                    @info "JIT object written for $(basename(rp))" object=obj
+                catch e
+                    # Never fatal: the object is an inspection artifact, and a
+                    # read-only install must still get a working engine.
+                    @warn "REPLIBUILD_JIT_OBJDUMP set but the object could not be written" object=obj exception=e
+                end
+            end
 
             # Mirror the first successful engine into the legacy single-engine
             # fields for backward compatibility.

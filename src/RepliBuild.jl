@@ -42,6 +42,11 @@ include("Wrapper/Cpp/STLWrappers.jl")
 # ThunkBuilder: bridge between Builder and IRGen (needs Wrapper.is_c_lto_safe)
 include("Builder/ThunkBuilder.jl")
 
+# Debug: static inspection of what the JIT emitted. Depends on nothing above —
+# it reads artifacts off disk — so it loads last and can be used against a
+# package this process never built.
+include("Debug/Debug.jl")
+
 # Import submodules for internal use
 using .LLVMEnvironment
 using .ConfigurationManager
@@ -61,6 +66,9 @@ using .STLWrappers
 using .ThunkBuilder
 using .EnvironmentDoctor
 using .PackageRegistry
+# NOT `using .Debug` — nothing in core calls it, and it exports generic names
+# (`walk`, `disassemble`, `thunks`, `dwarf`) that would sit in this namespace
+# waiting to collide with a future addition. Reached as `RepliBuild.Debug.x`.
 
 # ============================================================================
 # EXPORTS
@@ -77,7 +85,7 @@ export use, register, unregister, list_registry, search, scaffold_package
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser,
        JLCSIRGenerator, DAGDiff, MLIRNative, STLWrappers,
        LLVMEnvironment, BuildBridge, ASTWalker, JITManager, ClangJLBridge,
-       DependencyResolver, EnvironmentDoctor, PackageRegistry
+       DependencyResolver, EnvironmentDoctor, PackageRegistry, Debug
 
 # --- Configuration Types & Functions ---
 export RepliBuildConfig,

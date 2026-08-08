@@ -30,6 +30,7 @@
 
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 
@@ -344,6 +345,16 @@ extern "C" {
         options.enablePerfNotificationListener =
             (std::getenv("REPLIBUILD_JIT_PROFILE") != nullptr);
 
+        // Object cache. `dumpObject` has been a parameter of this function — and
+        // of Julia's create_jit — since the JIT was written, threaded all the
+        // way down and then dropped on the floor here, so the knob read as
+        // supported and did nothing. It is the precondition for
+        // jlcs_dump_object below: MLIR only retains the emitted object if the
+        // cache exists at engine-creation time, and it cannot be turned on
+        // afterwards. Off by default because the cache holds every emitted
+        // object for the engine's lifetime.
+        options.enableObjectDump = dumpObject;
+
         // 4. Register shared libraries for symbol resolution
         SmallVector<StringRef, 4> libPaths;
         for (int i = 0; i < numLibs; i++) {
@@ -370,6 +381,30 @@ extern "C" {
 
     void jlcs_jit_register_symbol(MlirExecutionEngine jit, const char *name, void *addr) {
         llvm::sys::DynamicLibrary::AddSymbol(name, addr);
+    }
+
+    // Write the JIT's emitted object file to `path`. Requires the engine to
+    // have been created with dumpObject=true; the cache cannot be added later.
+    //
+    // Returns success rather than void because MLIR's dumpToObjectFile REPORTS
+    // a disabled cache by printing to stderr and returning — indistinguishable
+    // from success at the call site, and stderr is exactly where a wrapper's
+    // diagnostics get lost. Existence + non-empty is checked here so the caller
+    // gets a value it can fail on.
+    bool jlcs_dump_object(MlirExecutionEngine jit, const char *path) {
+        if (!path || !*path) {
+            return false;
+        }
+        mlir::ExecutionEngine *engine = unwrap(jit);
+        if (!engine) {
+            return false;
+        }
+        engine->dumpToObjectFile(path);
+        uint64_t size = 0;
+        if (llvm::sys::fs::file_size(path, size)) {
+            return false;   // non-zero error code: absent or unreadable
+        }
+        return size > 0;
     }
 
     void *jlcs_jit_lookup(MlirExecutionEngine jit, const char *name) {
