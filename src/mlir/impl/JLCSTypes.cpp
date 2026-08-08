@@ -35,3 +35,18 @@ ArrayAttr CStructType::getFieldOffsets() const {
 bool CStructType::getIsPacked() const {
   return getImpl()->isPacked;
 }
+
+// Same reason for ArrayViewType — `genStorageClass = 0` means TableGen emits
+// the DECLARATIONS but not the bodies, because the bodies it would write reach
+// into a storage class it did not generate. CStructType's were written; these
+// were not, so `libJLCS.so` shipped with them undefined. Nothing called them
+// (`jlcs.array_view` is only reached through the lowering, which reads the
+// storage directly), so the gap survived every test: RTLD_LAZY binds on first
+// call, and there was no first call.
+Type ArrayViewType::getElementType() const {
+  return getImpl()->elementType;
+}
+
+unsigned ArrayViewType::getRank() const {
+  return getImpl()->rank;
+}

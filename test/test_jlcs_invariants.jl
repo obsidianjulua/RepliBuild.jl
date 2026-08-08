@@ -252,4 +252,75 @@ end
     @test parsed isa Bool  # record, don't presume
 end
 
+# ──────────────────────────────────────────────────────────────────────────────
+# D. Every symbol libJLCS.so references can be resolved
+#
+# `libJLCS.so` shipped for its whole life with TEN undefined symbols — eight
+# op `build()` bodies and `ArrayViewType`'s two accessors (found 2026-08-07).
+# `skipDefaultBuilders = 1` plus a bodyless `OpBuilder<(ins ...)>` makes
+# TableGen emit a declaration and expect the body in C++; nobody wrote them.
+# ODS still referenced them, because it generates a `static OpTy create(...)`
+# wrapper per builder that calls `build`. Same story for the type accessors:
+# `genStorageClass = 0` means TableGen declares them and leaves the bodies to
+# whoever wrote the storage class.
+#
+# Nothing caught it, and nothing could have. `MLIRNative.jl` reaches the
+# library through `ccall((:sym, path), ...)`, which binds LAZILY — an undefined
+# symbol nobody calls is never looked up. Every producer builds IR as text and
+# parses it, so no call site existed. The library loaded, the dialect worked,
+# 87/87 templates passed, and the whole Tier-2 suite was green on a library the
+# loader would have rejected if asked to resolve it eagerly.
+#
+# So ask it eagerly. RTLD_NOW is the exact failure mode, it costs one dlopen,
+# and it catches every future instance of the class — a new bodyless builder, a
+# new manual-storage accessor, a definition deleted in a refactor — rather than
+# just the ten that happened to exist. Negative-checked: on the pre-fix library
+# this fails with `undefined symbol: mlir::jlcs::SetFieldOp::build(...)`.
+
+@testset "D. no unresolved symbols (RTLD_NOW)" begin
+    lib = RepliBuild.MLIRNative.libJLCS
+
+    # Fresh subprocess: this process has already dlopened the library lazily,
+    # and dlopen on an ALREADY-LOADED handle returns it without upgrading the
+    # binding mode — so an in-process RTLD_NOW would silently pass regardless.
+    # Asserts on the EXIT CODE, not on stdout. The first draft of this probe
+    # matched `occursin("RESOLVED", out)` against a failure message reading
+    # "UNRESOLVED: ..." — which contains it, so the guard passed on the very
+    # library it was written to reject.
+    code = """
+    using Libdl
+    try
+        Libdl.dlopen($(repr(lib)), Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+        exit(0)
+    catch e
+        println(stderr, sprint(showerror, e))
+        exit(1)
+    end
+    """
+    err = IOBuffer()
+    ok = success(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$(PROJECT) -e $code`,
+                          stdout = devnull, stderr = err))
+    ok || println("  → ", strip(String(take!(err))))
+    @test ok
+
+    # The same question asked of the artifact rather than the loader, so a
+    # failure names every offender at once instead of only the first one the
+    # loader trips over. Restricted to our own namespace by the Itanium mangled
+    # spelling of `mlir::jlcs::` — MLIR/LLVM/libc symbols are supplied by the
+    # DT_NEEDED libraries and are legitimately undefined here. Matching the
+    # mangled form keeps this to one process and no `c++filt`.
+    #
+    # Match the nested-name body `4mlir4jlcs`, NOT the `_ZN` prefix: a CONST
+    # member function mangles as `_ZNK`, so an `_ZN4mlir4jlcs` filter reports 8
+    # of the 10 real offenders and silently drops both `ArrayViewType`
+    # accessors — one of the two classes this probe exists for.
+    if Sys.which("nm") !== nothing
+        syms = readlines(`nm -D --undefined-only $lib`)
+        undef = filter(s -> occursin("4mlir4jlcs", s), syms)
+        isempty(undef) || println("  → undefined jlcs symbols:\n    ",
+                                  join(strip.(undef), "\n    "))
+        @test isempty(undef)
+    end
+end
+
 end # testset

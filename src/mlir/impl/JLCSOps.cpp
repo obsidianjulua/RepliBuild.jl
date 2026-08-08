@@ -17,6 +17,101 @@ using namespace mlir;
 using namespace mlir::jlcs;
 
 //===----------------------------------------------------------------------===//
+// Builders
+//===----------------------------------------------------------------------===//
+//
+// Eight ops declare `skipDefaultBuilders = 1` plus a bodyless
+// `OpBuilder<(ins ...)>`. TableGen emits a DECLARATION for each of those and
+// expects the body here; none was ever written, so every one was an undefined
+// symbol in libJLCS.so. They are referenced even though no hand-written code
+// calls them: MLIR's ODS generates a `static OpTy create(OpBuilder&, Location,
+// ...)` wrapper per builder, and that wrapper calls `build`.
+//
+// It stayed invisible because MLIRNative.jl reaches the library through
+// `ccall((:sym, path), ...)`, which binds lazily — an undefined symbol nothing
+// calls is never resolved. `dlopen(..., RTLD_NOW)` refuses the library
+// outright. The producers all build IR as TEXT and parse it, which is why the
+// dialect works at all today and why no test noticed.
+//
+// Defaulted attributes (TypeInfoOp's base tables, VirtualCallOp's this_offset)
+// are deliberately NOT set here: `populateDefaultProperties` fills them when
+// the properties storage is initialized, which is also why the generated
+// builders for the non-skipping ops only assign their explicit arguments.
+// Assigning them here would duplicate that and drift from the .td defaults.
+
+void TypeInfoOp::build(OpBuilder &, OperationState &odsState, StringAttr typeName,
+                       TypeAttr structType, StringAttr superType,
+                       StringAttr destructorName) {
+    auto &props = odsState.getOrAddProperties<Properties>();
+    props.typeName = typeName;
+    props.structType = structType;
+    props.superType = superType;
+    props.destructorName = destructorName;
+}
+
+void GetFieldOp::build(OpBuilder &, OperationState &odsState, Value structValue,
+                       IntegerAttr fieldOffset, Type resultType) {
+    odsState.addOperands(structValue);
+    odsState.getOrAddProperties<Properties>().fieldOffset = fieldOffset;
+    odsState.addTypes(resultType);
+}
+
+void SetFieldOp::build(OpBuilder &, OperationState &odsState, Value structValue,
+                       Value newValue, IntegerAttr fieldOffset) {
+    odsState.addOperands({structValue, newValue});
+    odsState.getOrAddProperties<Properties>().fieldOffset = fieldOffset;
+    // No results: `let results = (outs);`
+}
+
+void VirtualCallOp::build(OpBuilder &, OperationState &odsState,
+                          SymbolRefAttr class_name, ValueRange args,
+                          IntegerAttr vtable_offset, IntegerAttr slot,
+                          Type resultType) {
+    odsState.addOperands(args);
+    auto &props = odsState.getOrAddProperties<Properties>();
+    props.class_name = class_name;
+    props.vtable_offset = vtable_offset;
+    props.slot = slot;
+    // The result is `Optional<AnyType>`, so a void virtual method passes a null
+    // Type and the op gets zero results. Adding a null type instead would build
+    // an op whose result exists with no type — the verifier reports that far
+    // from where it was made.
+    if (resultType)
+        odsState.addTypes(resultType);
+}
+
+void LoadArrayElementOp::build(OpBuilder &, OperationState &odsState, Value view,
+                               ValueRange indices, Type resultType) {
+    odsState.addOperands(view);
+    odsState.addOperands(indices);
+    odsState.addTypes(resultType);
+}
+
+void StoreArrayElementOp::build(OpBuilder &, OperationState &odsState, Value value,
+                                Value view, ValueRange indices) {
+    odsState.addOperands(value);
+    odsState.addOperands(view);
+    odsState.addOperands(indices);
+}
+
+void MarshalArgOp::build(OpBuilder &, OperationState &odsState, Value srcPtr,
+                         ArrayAttr memberTypes, ArrayAttr juliaOffsets,
+                         Type resultType) {
+    odsState.addOperands(srcPtr);
+    auto &props = odsState.getOrAddProperties<Properties>();
+    props.memberTypes = memberTypes;
+    props.juliaOffsets = juliaOffsets;
+    odsState.addTypes(resultType);
+}
+
+void MarshalRetOp::build(OpBuilder &, OperationState &odsState, Value packedValue,
+                         IntegerAttr numMembers, Type resultType) {
+    odsState.addOperands(packedValue);
+    odsState.getOrAddProperties<Properties>().numMembers = numMembers;
+    odsState.addTypes(resultType);
+}
+
+//===----------------------------------------------------------------------===//
 // Operation implementations
 //===----------------------------------------------------------------------===//
 
