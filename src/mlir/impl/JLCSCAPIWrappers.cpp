@@ -26,6 +26,7 @@
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
 
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/DynamicLibrary.h"
@@ -38,6 +39,7 @@
 
 #include "JLCSDialect.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
@@ -144,10 +146,24 @@ extern "C" {
         return wrap(mod);
     }
 
-    MlirModule jlcsModuleCreateParse(MlirContext context, const char *moduleStr) {
+    // sourceName names the parsed buffer instead of leaving MLIR's default "-"
+    // for in-memory text. The parser stamps a FileLineColLoc carrying that name
+    // onto every op, createDIScopeForLLVMFuncOpPass turns it into a DIFile, and
+    // the emitted DWARF then points gdb at a path it can actually open — so
+    // stepping a JIT'd thunk steps the generated MLIR. NULL/empty keeps the old
+    // unnamed behaviour, which only costs the source view.
+    //
+    // ABI note: an older two-parameter libJLCS called with three arguments is
+    // harmless under x86-64 SysV (the extra register is ignored), so a stale
+    // symlinked dialect build degrades to unnamed parsing rather than
+    // misbehaving — the worktree case.
+    MlirModule jlcsModuleCreateParse(MlirContext context, const char *moduleStr,
+                                     const char *sourceName) {
         MLIRContext *ctx = unwrap(context);
         llvm::StringRef source(moduleStr);
-        OwningOpRef<ModuleOp> mod = parseSourceString<ModuleOp>(source, ctx);
+        llvm::StringRef name(sourceName ? sourceName : "");
+        OwningOpRef<ModuleOp> mod =
+            parseSourceString<ModuleOp>(source, ParserConfig(ctx), name);
         if (!mod) {
             return {nullptr};
         }
@@ -228,6 +244,24 @@ extern "C" {
         // Cleanup casts
         pm.addPass(mlir::createReconcileUnrealizedCastsPass());
 
+        // Materialize a DISubprogram on every llvm.func that lacks one. Must run
+        // LAST: it operates on LLVM::LLVMFuncOp, which only exist after
+        // ConvertFuncToLLVM above.
+        //
+        // Without this the emitted object carries no DWARF at all, so the JIT
+        // event listeners registered in jlcs_create_jit_with_libs have nothing to
+        // report: perf jitdumps contain zero JIT_CODE_DEBUG_INFO records and gdb
+        // gets symbol names but no function scopes. Defaults to LineTablesOnly,
+        // which is what makes backtraces useful without the size cost of Full.
+        //
+        // The line table points somewhere REAL for anything that came through
+        // jlcsModuleCreateParse: the parser stamps a FileLineColLoc naming the
+        // buffer, this pass turns it into the DIFile, and the caller writes that
+        // buffer to the named path — so gdb's `list` shows the generated MLIR.
+        // Only the programmatic path (jlcsModuleCreate, UnknownLoc above) gets a
+        // synthetic file/line, and nothing currently ships thunks that way.
+        pm.addPass(mlir::LLVM::createDIScopeForLLVMFuncOpPass());
+
         bool ok = mlir::succeeded(pm.run(mod));
 
         // Post-pipeline fixup: ensure any llvm.func containing llvm.invoke
@@ -292,6 +326,23 @@ extern "C" {
             return llvm::Error::success();
         };
         options.jitCodeGenOptLevel = (llvm::CodeGenOptLevel)optLevel;
+
+        // JIT introspection listeners. MLIR turns BOTH on by default
+        // (ExecutionEngineOptions in mlir/ExecutionEngine/ExecutionEngine.h) —
+        // they are not registered by anything in this file, they arrive with
+        // MLIRExecutionEngine, which CMakeLists links --whole-archive.
+        //
+        //   GDB  — free, no filesystem side effects, and it is what lets gdb
+        //          resolve a thunk by its mangled name and step the generated
+        //          MLIR. Always on.
+        //   perf — writes a jitdump per PROCESS to $JITDUMPDIR/.debug/jit
+        //          (LLVM hardcodes the ".debug/jit" suffix; without JITDUMPDIR
+        //          it lands in $HOME). Nothing rotates or expires it: 718
+        //          directories / 164MB had accumulated unnoticed by 2026-08-08,
+        //          because the default is on and nobody knew. Opt-in now.
+        options.enableGDBNotificationListener = true;
+        options.enablePerfNotificationListener =
+            (std::getenv("REPLIBUILD_JIT_PROFILE") != nullptr);
 
         // 4. Register shared libraries for symbol resolution
         SmallVector<StringRef, 4> libPaths;

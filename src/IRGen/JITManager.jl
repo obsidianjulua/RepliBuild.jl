@@ -266,6 +266,47 @@ end
 # JIT Initialization
 # =============================================================================
 
+const _JIT_DUMP_CONFIGURED = Ref(false)
+
+"""
+    configure_jit_dump_session!()
+
+Point LLVM's perf jitdump at a **session** directory, once per process.
+
+The jitdump is one file per PROCESS holding every JIT'd symbol from every
+engine — verified by loading two wrapped libraries in one session and getting a
+single dump containing both libraries' thunks. So it is a session artifact, not
+a library one, and filing it under a package directory would become a lie the
+moment two wrappers coexist. The generated MLIR sources *are* per-library and do
+live in `<pkg>/.debug/mlir` (see `MLIRNative.debug_dir_for`).
+
+Off unless `REPLIBUILD_JIT_PROFILE` is set — the same variable the dialect reads
+to decide whether to register the perf listener at all. Set it to a path to
+choose the session root; any other value uses `~/.replibuild/jit-sessions`.
+LLVM appends `.debug/jit/` to whatever it is given.
+"""
+function configure_jit_dump_session!()
+    _JIT_DUMP_CONFIGURED[] && return nothing
+    _JIT_DUMP_CONFIGURED[] = true
+
+    prof = get(ENV, "REPLIBUILD_JIT_PROFILE", "")
+    isempty(prof) && return nothing
+
+    root = occursin('/', prof) ? prof : joinpath(homedir(), ".replibuild", "jit-sessions")
+    dir = joinpath(root, "session-$(getpid())")
+    try
+        mkpath(dir)
+        ENV["JITDUMPDIR"] = dir
+        @info "RepliBuild JIT profiling on; jitdump → $(joinpath(dir, ".debug", "jit"))"
+    catch e
+        # Leaving JITDUMPDIR unset is not neutral: LLVM then writes to
+        # $HOME/.debug/jit, which is exactly the unmanaged pile this replaces.
+        @warn "REPLIBUILD_JIT_PROFILE set but the session dir is unusable; " *
+              "jitdump will fall back to \$HOME/.debug/jit" dir exception=e
+    end
+    return nothing
+end
+
 """
     initialize_global_jit(binary_path::String)
 
@@ -365,7 +406,15 @@ function initialize_global_jit(binary_path::String)
                                                           needed_symbols=needed_symbols)
 
             # 4. Parse and Lower Module
-            mod = parse_module(eng.mlir_ctx, ir_source)
+            #
+            # debug_base puts the generated MLIR beside the wrapper it describes,
+            # so gdb can open it when you break in a thunk — including for a
+            # vendored wrapper, where a tempdir copy would not have travelled.
+            # Unwritable (read-only depot) falls back to tempdir, keeping the
+            # source view at the cost of co-location.
+            debug_base = MLIRNative.debug_dir_for(rp)
+            @debug "JIT debug artifacts for $(basename(rp))" mlir_sources=joinpath(debug_base, "mlir")
+            mod = parse_module(eng.mlir_ctx, ir_source; debug_base=debug_base)
 
             # Lower JLCS -> LLVM
             if !lower_to_llvm(mod)
@@ -373,6 +422,10 @@ function initialize_global_jit(binary_path::String)
             end
 
             # 5. Create JIT Engine with the C++ library and libJLCS for EH symbol resolution
+            #
+            # Must precede the FIRST engine: LLVM's perf listener is a process
+            # singleton, so JITDUMPDIR is read once and the earliest setting wins.
+            configure_jit_dump_session!()
             jlcs_lib_path = MLIRNative.libJLCS
             eng.jit_engine = create_jit(mod, opt_level=1, shared_libs=[rp, jlcs_lib_path])
 

@@ -2,6 +2,74 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### JIT'd thunks are debuggable in gdb, at source level (2026-08-08)
+
+Break on a mangled thunk name and gdb stops *inside the emitted MLIR*, by file
+and line, with `list` and `disassemble /s` working:
+
+```
+Thread 1 "julia" hit Breakpoint 1, _ZNK5Base15get_aEv_thunk () at jlcs_83a242c27fb37885.mlir:126
+126	  %val_ptr_1 = llvm.load %arg_ptr_1 : !llvm.ptr -> !llvm.ptr
+Producer is MLIR.   Compiled with DWARF 4 debugging format.
+```
+
+Three pieces, each small:
+
+- `jlcsModuleCreateParse` takes a `sourceName`. MLIR's parser stamps a
+  `FileLineColLoc` naming its buffer onto every op; left unnamed, in-memory text
+  gets `-` and the debugger asks for a file that cannot exist. Passing the extra
+  argument to an older two-parameter build is harmless under x86-64 SysV, so a
+  stale symlinked dialect degrades to unnamed parsing rather than misbehaving.
+- `createDIScopeForLLVMFuncOpPass` runs last in the lowering pipeline — it
+  operates on `LLVM::LLVMFuncOp`, which only exist after `ConvertFuncToLLVM`. It
+  materializes the `DISubprogram` that every `DILocation` needs as a scope.
+  Without it the object carries no DWARF at all, and the JIT event listeners
+  have nothing to report.
+- The module text is written to `<pkg>/.debug/mlir/jlcs_<sha256[1:16]>.mlir` —
+  the file those locations point at. It is not diagnostic output, it is the
+  debugger's source file. Content-keyed, so re-running a build reuses one path
+  instead of accumulating a file per run. It sits beside the wrapper rather than
+  in a tempdir so it travels with a vendored one; an unwritable install falls
+  back to tempdir, losing co-location rather than the source view.
+
+`clean()` now removes `.debug` alongside `build/` and `julia/`, and it is
+gitignored — regenerated at the next JIT init from the module text, so the
+capability is self-healing and a tracked copy could only ever be stale.
+
+Two gdb flags are mandatory, not stylistic: `set breakpoint pending on` (the
+thunk does not exist until the JIT emits it, so the breakpoint cannot resolve at
+load) and `handle SIGSEGV nostop noprint pass` (Julia's GC uses SIGSEGV for
+write barriers). `disassemble /s` interleaves dialect ops with the machine code
+they became.
+
+What it changes: eightbyte coercion, `byval` vs aggregate splitting, sret buffer
+sizing and vtable slot arithmetic move from reasoned to observed. The 2026-08-05
+heap smasher (`llama_context_params` emitting 200 bytes against a native 160)
+would have been `break` → `finish` → `x/25gx` on the sret buffer.
+
+### perf jitdump is opt-in; it had been writing to `$HOME` unasked (2026-08-08)
+
+MLIR's `ExecutionEngineOptions` defaults **both** JIT listeners on, and
+`MLIRExecutionEngine` is linked `--whole-archive`, so nothing in this repo ever
+had to ask for it. LLVM hardcodes a `.debug/jit` suffix under `$JITDUMPDIR`,
+which was never set — so every JIT'ing process dropped a jitdump in
+`$HOME/.debug/jit` with nothing rotating or expiring it. 718 directories /
+164 MB had accumulated unnoticed.
+
+The perf listener is now behind `REPLIBUILD_JIT_PROFILE`, read in both places
+that matter: the dialect decides whether to register it, and Julia points
+`JITDUMPDIR` at `~/.replibuild/jit-sessions/session-<pid>/` (or at the variable's
+value, if it looks like a path) before the **first** engine is created — LLVM's
+perf listener is a process singleton, so the earliest setting wins. Filing the
+dump per package would have been wrong: it is one file per *process* holding
+every symbol from every engine, verified by loading two wrapped libraries in one
+session and getting a single dump containing both.
+
+The GDB listener stays on unconditionally. It has no filesystem side effects,
+and it is what makes the entry above work.
+
 ## v3.2.0 (2026-08-08)
 
 Minor, not patch: Tier 1 is un-parked, wrappers gained portability guards and

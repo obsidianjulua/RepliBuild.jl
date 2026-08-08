@@ -25,6 +25,7 @@ export has_pending_exception, get_pending_exception, clear_pending_exception
 # Note: We use libJLCS for C API functions since it includes wrappers
 # that link against the static MLIRCAPIIR library
 import ..SRC_DIR
+import SHA
 const libJLCS_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS.so")
 const libJLCS = libJLCS_path  # Alias for convenience
 
@@ -114,12 +115,85 @@ function create_module(ctx::MlirContext)
 end
 
 """
-    parse_module(ctx::MlirContext, source::String) -> MlirModule
+    jit_source_path(source::String; base::AbstractString="") -> String
+
+Stable on-disk path for a parsed MLIR module, keyed on the module text itself.
+
+The parser stamps every op with a `FileLineColLoc` naming the buffer it came
+from, and `createDIScopeForLLVMFuncOpPass` turns that into the `DIFile` of the
+emitted DWARF. So whatever name the buffer carries is the filename gdb asks for
+when you break inside a JIT'd thunk. Naming it after a real file that exists on
+disk is what turns "`-`: No such file or directory" into stepping the generated
+MLIR.
+
+`base` is the library's `.debug` directory, so the sources sit beside the
+wrapper they belong to and travel with a vendored one. **A wrapper installed
+read-only cannot be written to**, so an unwritable `base` silently falls back to
+a shared temp directory: losing co-location costs nothing, losing the source
+view costs the whole feature.
+
+Keyed on a content hash so re-running the same build reuses one path instead of
+accumulating a file per run — which is the failure mode `~/.debug/jit`
+demonstrated at 718 directories.
+"""
+function jit_source_path(source::String; base::AbstractString="")
+    digest = bytes2hex(SHA.sha256(source))[1:16]
+    fname = "jlcs_$(digest).mlir"
+    if !isempty(base)
+        dir = joinpath(base, "mlir")
+        # Probe rather than predict: read-only depots, odd permissions and
+        # missing parents all present differently, and all mean the same thing.
+        try
+            mkpath(dir)
+            return joinpath(dir, fname)
+        catch
+        end
+    end
+    return joinpath(tempdir(), "replibuild_jit", fname)
+end
+
+"""
+    debug_dir_for(binary_path::AbstractString) -> String
+
+The `.debug` directory belonging to a wrapped library.
+
+Anchored on the wrapper directory holding the `.so` (`<pkg>/julia/lib*.so`), so
+this lands at `<pkg>/.debug` — a sibling of `build/`, `julia/` and
+`.replibuild_cache/`, and removed by [`RepliBuild.clean`](@ref) with them.
+"""
+debug_dir_for(binary_path::AbstractString) =
+    joinpath(dirname(dirname(abspath(binary_path))), ".debug")
+
+"""
+    parse_module(ctx, source; source_name="", debug_base="") -> MlirModule
 
 Parse an MLIR module from a string.
+
+`source_name` names the buffer for debug info; when omitted it defaults to
+[`jit_source_path`](@ref) under `debug_base` (the owning library's `.debug`
+directory) and the text is written there if not already present, so a JIT'd
+thunk is steppable in gdb. Writing is best-effort — a failure costs the source
+view and nothing else, so it must never take the parse down with it.
 """
-function parse_module(ctx::MlirContext, source::String)
-    mod = ccall((:jlcsModuleCreateParse, libJLCS), MlirModule, (MlirContext, Cstring), ctx, source)
+function parse_module(ctx::MlirContext, source::String;
+                      source_name::String="", debug_base::AbstractString="")
+    name = if !isempty(source_name)
+        source_name
+    else
+        p = jit_source_path(source; base=debug_base)
+        try
+            # Content-keyed, so an existing file is already this exact text.
+            if !isfile(p)
+                mkpath(dirname(p))
+                write(p, source)
+            end
+            p
+        catch
+            ""   # unnamed parse: DWARF still emitted, just no openable source
+        end
+    end
+    mod = ccall((:jlcsModuleCreateParse, libJLCS), MlirModule,
+                (MlirContext, Cstring, Cstring), ctx, source, name)
     if mod == C_NULL
         # MLIR prints its diagnostic (with a loc("-":LINE:COL)) to stderr and we
         # then threw away the only copy of the text those coordinates refer to,

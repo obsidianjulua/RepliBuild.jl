@@ -698,7 +698,10 @@ end
 
 # Internal clean function
 function clean_internal(path::String)
-    dirs_to_remove = ["build", "julia", ".replibuild_cache"]
+    # .debug holds the generated MLIR the JIT'd thunks carry in their DWARF, so
+    # gdb can show source when you break in one. Regenerated at the next JIT
+    # init from the module text, so removing it costs nothing but a rebuild.
+    dirs_to_remove = ["build", "julia", ".replibuild_cache", ".debug"]
 
     removed = String[]
     for dir in dirs_to_remove
