@@ -37,6 +37,35 @@ module Debug
 export debug_root, object_path, mlir_sources, has_object,
        thunks, mlir_body, disassemble, dwarf, walk
 
+"""
+    DebugText <: AbstractString
+
+Multi-line tool output that renders as itself at a REPL.
+
+A plain `String` return displays through `repr`, so a disassembly listing comes
+back as one escaped line of `\\n` and `\\t` with a byte-count elision in the
+middle — technically the right value, unreadable as the answer. Subtyping
+`AbstractString` rather than wrapping means `occursin`, `split`, `startswith`
+and regex matching all still work on it, so nothing downstream has to know.
+"""
+struct DebugText <: AbstractString
+    text::String
+end
+
+Base.ncodeunits(t::DebugText)                = ncodeunits(t.text)
+Base.codeunit(t::DebugText)                  = codeunit(t.text)
+Base.codeunit(t::DebugText, i::Integer)      = codeunit(t.text, i)
+Base.isvalid(t::DebugText, i::Integer)       = isvalid(t.text, i)
+Base.iterate(t::DebugText)                   = iterate(t.text)
+Base.iterate(t::DebugText, i::Integer)       = iterate(t.text, i)
+Base.String(t::DebugText)                    = t.text
+Base.print(io::IO, t::DebugText)             = print(io, t.text)
+# Only the MIME method prints raw: that is what `display` calls, so the REPL
+# shows the listing. Two-arg `show` keeps the escaped AbstractString default, so
+# a DebugText inside a container still renders as a value rather than smearing
+# its newlines across the collection.
+Base.show(io::IO, ::MIME"text/plain", t::DebugText) = print(io, t.text)
+
 # `objdump`/`llvm-dwarfdump` come from the same binutils/LLVM install the build
 # already requires; they are resolved at call time so a missing tool names
 # itself rather than failing this module's load.
@@ -211,7 +240,7 @@ function mlir_body(path::AbstractString, symbol::AbstractString)
     # how the generator emits it; nested regions are indented.
     stop = findnext(l -> l == "}", lines, start)
     stop === nothing && (stop = length(lines))
-    return join(lines[start:stop], "\n")
+    return DebugText(join(lines[start:stop], "\n"))
 end
 
 _closest(want, have; n=5) =
@@ -258,7 +287,7 @@ function disassemble(path::AbstractString; symbol::AbstractString="", source::Bo
     if !isempty(symbol) && !occursin(symbol, out)
         error("`$symbol` is not in $(basename(obj)). Use `thunks(...)` to list what is.")
     end
-    return out
+    return DebugText(out)
 end
 
 """
@@ -273,7 +302,7 @@ debugger and [`disassemble`](@ref) both read.
 function dwarf(path::AbstractString; section::AbstractString="info")
     obj = _require_object(path)
     try
-        return read(`$_DWARFDUMP --debug-$section $obj`, String)
+        return DebugText(read(`$_DWARFDUMP --debug-$section $obj`, String))
     catch e
         error("`$_DWARFDUMP --debug-$section` failed on $obj: $e")
     end
@@ -290,12 +319,12 @@ a package path and a name, and it answers without starting anything.
 function walk(path::AbstractString, symbol::AbstractString)
     body = mlir_body(path, symbol)
     asm  = disassemble(path; symbol=symbol)
-    return """
+    return DebugText("""
     ═══ MLIR ═══════════════════════════════════════════════════════════════
     $body
 
     ═══ EMITTED ════════════════════════════════════════════════════════════
-    $asm"""
+    $asm""")
 end
 
 end # module Debug

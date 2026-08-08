@@ -82,6 +82,32 @@ const VI_SO = joinpath(VI, "julia", "libvi_test.so")
         @test "_ZTv0_n32_NK7Diamond3tagEv_thunk" in t
     end
 
+    @testset "text output renders as text" begin
+        body = D.mlir_body(VI, "_ZNK5VBase3tagEv_thunk")
+        @test body isa D.DebugText
+
+        # The defect this exists for: a String return displays through `repr`,
+        # so a listing comes back as one escaped line of \n and \t with a
+        # byte-count elision in the middle. `display` uses the MIME method.
+        shown = sprint(show, MIME"text/plain"(), body)
+        @test occursin('\n', shown)
+        @test !occursin("\\n", shown)
+        @test shown == String(body)
+
+        # ...but two-arg show stays escaped, so one of these inside a container
+        # does not smear its newlines across the collection.
+        @test occursin("\\n", sprint(show, body))
+
+        # AbstractString, not a wrapper: everything downstream keeps working
+        # without knowing the type exists.
+        @test occursin("jlcs.vcall", body)
+        @test occursin(r"func\.func", body)
+        @test startswith(body, "func.func @")
+        @test length(split(body, '\n')) > 1
+        @test String(body) isa String
+        @test ncodeunits(body) == ncodeunits(String(body))
+    end
+
     @testset "mlir_body extracts exactly one function" begin
         body = D.mlir_body(VI, "_ZNK5VBase3tagEv_thunk")
         @test startswith(body, "func.func @_ZNK5VBase3tagEv_thunk(")
