@@ -131,11 +131,21 @@ struct CacheConfig
     directory::String
 end
 
-"""Nested struct for a single dependency"""
+"""
+Nested struct for a single dependency.
+
+`tag` is a MUTABLE ref — upstream can force-push a tag to different content, and a
+plain `git checkout <tag>` would fetch it with no signal. `commit` is the optional
+expected 40-hex object name for that ref: when set, DependencyResolver hard-errors if
+the resolved HEAD differs, which is the only check that survives a cache wipe (the
+sidecar marker cannot, since `clean()` deletes it along with the clone).
+Leave `commit` empty to keep the old trust-the-tag behaviour.
+"""
 struct DependencyItem
     type::String # "git", "system", "local"
     url::String
     tag::String
+    commit::String
     path::String
     pkg_config::String
     exclude::Vector{String}
@@ -507,10 +517,18 @@ function parse_dependencies_config(data::Dict)::DependenciesConfig
     
     for (name, conf) in deps
         if isa(conf, Dict)
+            commit = String(get(conf, "commit", ""))
+            # Validate here, not at fetch time: a malformed pin must not reach the
+            # resolver and read as "no pin" (silently restoring trust-the-tag).
+            if !isempty(commit) && !occursin(r"^[0-9a-fA-F]{40}$", commit)
+                error("[dependencies.$name] commit must be a full 40-hex object name, got: $commit\n" *
+                      "Abbreviated SHAs are rejected — they are ambiguous across future history.")
+            end
             items[String(name)] = DependencyItem(
                 get(conf, "type", "local"),
                 get(conf, "url", ""),
                 get(conf, "tag", ""),
+                lowercase(commit),
                 get(conf, "path", ""),
                 get(conf, "pkg_config", ""),
                 get(conf, "exclude", String[])
@@ -789,6 +807,9 @@ function save_config(config::RepliBuildConfig)
             item_dict = Dict{String,Any}("type" => item.type)
             if !isempty(item.url) item_dict["url"] = item.url end
             if !isempty(item.tag) item_dict["tag"] = item.tag end
+            # Must round-trip: discover(force=true) rewrites this file, and dropping
+            # the pin here would silently downgrade a pinned recipe to trust-the-tag.
+            if !isempty(item.commit) item_dict["commit"] = item.commit end
             if !isempty(item.path) item_dict["path"] = item.path end
             if !isempty(item.pkg_config) item_dict["pkg_config"] = item.pkg_config end
             if !isempty(item.exclude) item_dict["exclude"] = item.exclude end

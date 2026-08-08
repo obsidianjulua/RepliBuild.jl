@@ -86,4 +86,97 @@ const DR = RepliBuild.DependencyResolver
     end
 end
 
+@testset "git dependency commit pinning" begin
+    if Sys.which("git") === nothing
+        @warn "git not found — skipping dependency commit-pinning tests"
+    else
+        mktempdir() do sb
+            gitrun(repo, args...) = run(`git -C $repo -c user.email=t@example.com -c user.name=tester $(collect(args))`)
+            gitout(repo, args...) = strip(read(`git -C $repo $(collect(args))`, String))
+
+            # upstream: tag v1 -> commit A (GOOD). Later force-moved to commit B (EVIL).
+            up = joinpath(sb, "upstream"); mkpath(up)
+            run(`git -C $up init -q`)
+            write(joinpath(up, "VERSION"), "GOOD"); write(joinpath(up, "lib.c"), "int f(){return 1;}\n")
+            gitrun(up, "add", "-A"); gitrun(up, "commit", "-q", "-m", "good"); gitrun(up, "tag", "v1")
+            sha_good = lowercase(gitout(up, "rev-parse", "v1^{commit}"))
+
+            proj = joinpath(sb, "proj"); mkpath(proj)
+            toml_path = joinpath(proj, "replibuild.toml")
+            url = "file://" * up
+
+            write_toml(tag, commit="") = open(toml_path, "w") do io
+                println(io, "[project]\nname = \"pintest\"\nversion = \"0.0.1\"\nroot = \"", proj, "\"\n")
+                print(io, "[dependencies.fixturelib]\ntype = \"git\"\nurl = \"", url, "\"\ntag = \"", tag, "\"")
+                println(io, isempty(commit) ? "" : "\ncommit = \"" * commit * "\"")
+            end
+
+            depsdir = joinpath(proj, ".replibuild_cache", "deps")
+            deppath = joinpath(depsdir, "fixturelib")
+            marker  = joinpath(depsdir, "fixturelib.resolved")
+            readver() = strip(read(joinpath(deppath, "VERSION"), String))
+            function marker_commit()
+                c = ""
+                isfile(marker) && for l in eachline(marker); startswith(l, "commit=") && (c = l[8:end]); end
+                c
+            end
+            resolve() = DR.resolve_dependencies(CM.load_config(toml_path))
+            # Hub `test.jl` rebuilds cold via clean(), which deletes the clone AND the
+            # marker — the pin is the only layer that survives it, so exercise that path.
+            wipe() = rm(depsdir; recursive=true, force=true)
+
+            # --- the marker records the resolved object name -------------------
+            write_toml("v1"); resolve()
+            @test readver() == "GOOD"
+            @test marker_commit() == sha_good
+            @test occursin(r"^[0-9a-f]{40}$", marker_commit())
+
+            # --- a matching pin resolves normally ------------------------------
+            wipe(); write_toml("v1", sha_good); resolve()
+            @test readver() == "GOOD"
+            @test marker_commit() == sha_good
+
+            # --- THE ATTACK: upstream force-moves the tag to different content --
+            write(joinpath(up, "VERSION"), "EVIL"); write(joinpath(up, "lib.c"), "int f(){system(\"pwn\");return 1;}\n")
+            gitrun(up, "add", "-A"); gitrun(up, "commit", "-q", "-m", "evil")
+            gitrun(up, "tag", "-f", "v1")
+            sha_evil = lowercase(gitout(up, "rev-parse", "v1^{commit}"))
+            @test sha_evil != sha_good
+
+            # Unpinned + cold: the moved tag is fetched with no signal whatsoever.
+            # This is the pre-fix behaviour, asserted so the pin's value is explicit.
+            wipe(); write_toml("v1"); resolve()
+            @test readver() == "EVIL"
+            @test marker_commit() == sha_evil
+
+            # Pinned + cold: same fetch, but the build is REFUSED.
+            wipe(); write_toml("v1", sha_good)
+            @test_throws ErrorException resolve()
+            # And it must not leave a marker claiming the content was resolved.
+            @test !isfile(marker) || marker_commit() != sha_good
+
+            # --- a pin the recipe updates deliberately is not an error ----------
+            wipe(); write_toml("v1", sha_evil); resolve()
+            @test readver() == "EVIL"
+            @test marker_commit() == sha_evil
+
+            # --- local checkout drift is detected and re-resolved ---------------
+            # Roll the cached clone back to the good commit behind the resolver's back.
+            gitrun(deppath, "checkout", "-q", "--force", sha_good)
+            @test strip(read(joinpath(deppath, "VERSION"), String)) == "GOOD"
+            resolve()   # marker says EVIL, HEAD says GOOD -> re-resolve to the declared pin
+            @test readver() == "EVIL"
+            @test marker_commit() == sha_evil
+
+            # --- malformed pins are rejected at PARSE time ----------------------
+            # An abbreviated sha must not silently read as "no pin".
+            wipe(); write_toml("v1", sha_good[1:12])
+            @test_throws ErrorException CM.load_config(toml_path)
+            write_toml("v1", "not-a-sha")
+            @test_throws ErrorException CM.load_config(toml_path)
+        end
+    end
+end
+
 println("✅ dependency cache version-awareness tests passed")
+println("✅ dependency commit-pinning tests passed")
