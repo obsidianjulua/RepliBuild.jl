@@ -14,6 +14,28 @@ const VERSION = v"3.2.0"
 const PROJECT_ROOT = dirname(@__DIR__)
 const SRC_DIR = @__DIR__
 
+"""
+    INTERNAL_TYPE_BLOCKLIST
+
+Compiler and libc internals that leak through DWARF and must never reach a
+generated artifact — not a wrapper's type declarations, not its export list,
+and not the thunks the JIT compiles.
+
+Defined at package level rather than inside `Wrapper` because `IRGen` loads
+FIRST and needs the same screen. It was Wrapper-local when only the wrapper
+screened types, and the array-view thunk producer — added later, in IRGen —
+consequently emitted accessors for `_IO_FILE` members that no wrapper would ever
+declare a type for, let alone call.
+"""
+const INTERNAL_TYPE_BLOCKLIST = Set([
+    "__va_list_tag", "__mbstate_t", "__loadu_pd", "__storeu_pd",
+    "__loadu_ps", "__storeu_ps", "__loadu_si128", "__storeu_si128",
+    "_va_list_tag", "_mbstate_t", "_loadu_pd", "_storeu_pd",
+    "_loadu_ps", "_storeu_ps",
+    "ldiv_t", "lldiv_t", "div_t", "max_align_t", "imaxdiv_t",
+    "_IO_FILE", "_IO_marker", "_IO_codecvt", "_IO_wide_data",
+])
+
 # RepliBuild targets Linux only. The toolchain assumes ELF shared objects (.so),
 # DWARF via llvm-dwarfdump, GNU nm, and the Linux LLVM layout. macOS (Mach-O,
 # .dylib) and Windows (PE, .dll) are explicitly unsupported. Enforce at load so

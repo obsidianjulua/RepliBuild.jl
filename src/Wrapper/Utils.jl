@@ -15,15 +15,12 @@ const _JULIA_KEYWORDS = Set([
     "and", "or", "not",
 ])
 
-# Internal/compiler types that leak through DWARF but shouldn't be exported
-const _INTERNAL_TYPE_BLOCKLIST = Set([
-    "__va_list_tag", "__mbstate_t", "__loadu_pd", "__storeu_pd",
-    "__loadu_ps", "__storeu_ps", "__loadu_si128", "__storeu_si128",
-    "_va_list_tag", "_mbstate_t", "_loadu_pd", "_storeu_pd",
-    "_loadu_ps", "_storeu_ps",
-    "ldiv_t", "lldiv_t", "div_t", "max_align_t", "imaxdiv_t",
-    "_IO_FILE", "_IO_marker", "_IO_codecvt", "_IO_wide_data",
-])
+# Internal/compiler types that leak through DWARF but shouldn't be exported.
+# The set now lives at package level (RepliBuild.INTERNAL_TYPE_BLOCKLIST) so the
+# IR generator — which loads before this module — screens the same types. Kept
+# under the old name because it is referenced from six files in Wrapper.
+import ..INTERNAL_TYPE_BLOCKLIST
+const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 """Escape a name if it's a Julia keyword, using var\"...\" syntax."""
 function _escape_keyword(name::String)::String

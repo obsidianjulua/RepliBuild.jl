@@ -4,6 +4,46 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Array-view thunks now honour the manifest and the type blocklist (2026-08-08)
+
+`generate_function_thunks` has consulted the wrapper's `thunk_manifest.json`
+since dead-thunk elimination existed. The array-view producer, added later,
+never received it — so it emitted a get/set pair for every fixed-size array
+member in the DWARF whether or not anything could call it.
+
+Found by diffing what the JIT emitted against what the manifest asked for, which
+is a comparison `RepliBuild.Debug` made possible earlier the same day:
+
+```
+emitted   2759          # llamacpp
+manifest  2335
+          ────
+           424  all prefixed jlcs_av_, 212 pairs across 208 owning types
+```
+
+`grep -c jlcs_av_ julia/Llamacpp.jl` is **0**. Every one of them was lowered and
+JIT-compiled on each load, reachable by nothing — 15% of the package's thunks.
+Not a leak so much as the consumer side being unbuilt: `ArrayViewGen` produces
+the thunks, and `GeneratorCpp` does not yet emit the Julia accessors that call
+them (see the array-view roadmap entry). Gating on the manifest makes the cost
+follow the feature — they return by themselves once accessors are emitted and
+land in the manifest. `nothing` still means "no manifest, emit everything".
+
+The type blocklist applies too, and separately: 7 of those pairs were over
+`_IO_FILE` members. A wrapper never declares a type for a blocklisted internal,
+so an accessor over one could not have been called even in principle.
+`INTERNAL_TYPE_BLOCKLIST` therefore moves from `Wrapper` to package level —
+`IRGen` loads first and could not see it, which is exactly why the second
+producer went unscreened. `Wrapper._INTERNAL_TYPE_BLOCKLIST` is now an alias to
+the same object, asserted identical in the tests rather than kept in step by
+hand.
+
+llamacpp: 2759 → 2335 thunks, MLIR 4.88 → 4.15 MB, object 3.21 → 2.86 MB.
+Hub-wide the reachability gate currently reaches 4 of 16 packages — **only those
+four ship a `thunk_manifest.json`**, and the rest take the documented
+emit-everything fallback. Re-wrapping them writes a manifest and closes the
+remaining 474.
+
 ### `RepliBuild.Debug` — read the emitted code without running anything (2026-08-08)
 
 The gdb path from the entry below needs a live process stopped at exactly the

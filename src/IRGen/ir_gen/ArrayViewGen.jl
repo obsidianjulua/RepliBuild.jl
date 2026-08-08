@@ -24,6 +24,11 @@ the same form `test_jlcs_invariants.jl` proves parses and lowers.
 """
 module ArrayViewGen
 
+# Three dots: ArrayViewGen ⊂ JLCSIRGenerator ⊂ RepliBuild. The screen is defined
+# at package level precisely so this producer, which runs before Wrapper exists,
+# can apply the same one the wrapper does.
+import ...INTERNAL_TYPE_BLOCKLIST
+
 export generate_array_view_thunks
 
 # Primitive C element types the producer handles, mapped to MLIR types
@@ -84,18 +89,37 @@ function _emit_view_prologue(member_off::Int, n::Int)::String
 end
 
 """
-    generate_array_view_thunks(structs) -> String
+    generate_array_view_thunks(structs; needed_symbols=nothing) -> String
 
 Emit get/set accessor thunk pairs for every rank-1 fixed-size primitive array
 member found in the DWARF struct definitions. Returns "" when nothing applies.
+
+Two screens, both of which this producer went without until 2026-08-08:
+
+`needed_symbols` is the wrapper's thunk manifest — the same dead-thunk
+elimination `generate_function_thunks` has always honoured. This producer never
+received it, so it emitted a pair for every qualifying member whether or not
+anything could call it. Measured on llamacpp: **424 thunks, 212 pairs across 208
+owning types, and zero references from the generated wrapper** — 15% of the
+package's thunks, lowered and JIT-compiled on every load, reachable by nothing.
+That is not a leak so much as the consumer side being unbuilt (see the
+array-view entry in the roadmap); the gate makes the cost follow the feature, so
+they reappear on their own once accessors are emitted and land in the manifest.
+`nothing` keeps the documented no-manifest fallback: emit everything.
+
+`INTERNAL_TYPE_BLOCKLIST` drops members of compiler and libc internals that
+leak through DWARF — `_IO_FILE.short_backupbuf` and friends. The wrapper will
+not declare a type for those, so an accessor over one could never have been
+called even in principle.
 """
-function generate_array_view_thunks(structs)::String
+function generate_array_view_thunks(structs; needed_symbols=nothing)::String
     io = IOBuffer()
     emitted = Set{String}()
 
     for (sname_raw, info) in structs
         sname = String(sname_raw)
         startswith(sname, "__enum__") && continue
+        sname in INTERNAL_TYPE_BLOCKLIST && continue
         info isa AbstractDict || continue
         for m in get(info, "members", [])
             ct = strip(String(get(m, "c_type", "")))
@@ -115,6 +139,14 @@ function generate_array_view_thunks(structs)::String
             base = "jlcs_av_$(safe_s)_$(safe_m)"
             # Distinct DWARF keys can sanitize identically — one pair per name
             base in emitted && continue
+            # Reachability: a pair is worth emitting only if the wrapper asked
+            # for either half. Checked on the emitted thunk names, not on `base`,
+            # because the manifest records what the wrapper actually references.
+            if needed_symbols !== nothing &&
+               !("$(base)_get_thunk" in needed_symbols) &&
+               !("$(base)_set_thunk" in needed_symbols)
+                continue
+            end
             push!(emitted, base)
 
             elt = _AV_ELEM_MLIR[elem_c]

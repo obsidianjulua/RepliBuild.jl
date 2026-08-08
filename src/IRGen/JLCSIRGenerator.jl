@@ -410,7 +410,8 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
 
     # 6. Generate strided array-view accessor thunks for fixed-size array members
     if haskey(metadata, "struct_definitions")
-        av_ir = generate_array_view_thunks(metadata["struct_definitions"])
+        av_ir = generate_array_view_thunks(metadata["struct_definitions"];
+                                           needed_symbols=needed_symbols)
         isempty(av_ir) || println(io, av_ir)
     end
 

@@ -147,6 +147,50 @@ const IR = JLCSIRGenerator.generate_jlcs_ir(EMPTY_VT, METADATA)
         @test !occursin("jlcs_av_Grip", IR)
     end
 
+    @testset "C2. array-view producer — reachability and type screens" begin
+        AVG = RepliBuild.JLCSIRGenerator.ArrayViewGen
+        structs = Dict(
+            "Good"     => Dict("members" => [Dict("name"=>"vals",   "c_type"=>"float [4]", "offset"=>"0")]),
+            "_IO_FILE" => Dict("members" => [Dict("name"=>"backup", "c_type"=>"char [8]",  "offset"=>"0")]),
+        )
+
+        # No manifest keeps the documented fallback: emit everything. This is
+        # the path `IR` above takes, so it must not change.
+        all_ir = AVG.generate_array_view_thunks(structs)
+        @test occursin("jlcs_av_Good_vals_get_thunk", all_ir)
+
+        # ...but the blocklist applies even then. A wrapper never declares a
+        # type for _IO_FILE, so an accessor over its members could not have been
+        # called even in principle.
+        @test !occursin("_IO_FILE", all_ir)
+
+        # Reachability. This producer never received `needed_symbols`, so it
+        # emitted a pair per qualifying member whether or not anything could
+        # call it: on llamacpp that was 424 thunks — 212 pairs, 208 owning
+        # types, zero references from the generated wrapper — lowered and
+        # JIT-compiled on every load. `generate_function_thunks` has honoured
+        # the manifest since it existed; this is the second producer catching up.
+        @test isempty(strip(AVG.generate_array_view_thunks(structs; needed_symbols=Set{String}())))
+
+        # Asking for either half emits the pair — they share a prologue, and a
+        # consumer that reads a member almost always writes it too.
+        for half in ("get", "set")
+            ir = AVG.generate_array_view_thunks(structs;
+                     needed_symbols=Set(["jlcs_av_Good_vals_$(half)_thunk"]))
+            @test occursin("jlcs_av_Good_vals_get_thunk", ir)
+            @test occursin("jlcs_av_Good_vals_set_thunk", ir)
+        end
+
+        # An unrelated request must not drag anything in.
+        @test isempty(strip(AVG.generate_array_view_thunks(structs;
+                            needed_symbols=Set(["some_other_thunk"]))))
+
+        # One derivation: the screen IRGen applies is the object Wrapper uses,
+        # not a copy that can drift.
+        @test RepliBuild.Wrapper._INTERNAL_TYPE_BLOCKLIST === RepliBuild.INTERNAL_TYPE_BLOCKLIST
+        @test "_IO_FILE" in RepliBuild.INTERNAL_TYPE_BLOCKLIST
+    end
+
     @testset "D. producers lower and execute" begin
         ctx = create_context()
         try
