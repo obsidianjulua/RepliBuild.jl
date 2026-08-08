@@ -60,16 +60,27 @@ per library per process — enabling it afterwards cannot recover the object."""
 
 The `.debug` directory for a wrapped library.
 
-`path` may be the package directory, its `.so`, or the `.debug` directory
-itself — all three are things a caller reasonably has in hand, and guessing
-wrong is a confusing empty result rather than an error.
+Accepts anything a caller plausibly has in hand: the package directory, `"."`
+while standing in it, the wrapper `.so`, the `.debug` directory, a directory
+under it (`.debug/mlir`), or one of the artifacts themselves. Everything at or
+below a `.debug` component resolves to that component — the first version only
+matched `.debug` as an exact basename, so `.debug/mlir` re-appended and produced
+`…/.debug/mlir/.debug/mlir`, an error that blamed a missing directory for a path
+bug.
 """
 function debug_root(path::AbstractString)
-    p = abspath(path)
-    basename(p) == ".debug" && return p
-    # A .so lives at <pkg>/julia/lib*.so, so its .debug is two levels up.
-    if isfile(p) && endswith(p, ".so")
-        return joinpath(dirname(dirname(p)), ".debug")
+    p = abspath(isempty(path) ? "." : path)
+    # At or under a `.debug` component: that component IS the answer. Covers the
+    # directory, its subdirectories, and any file inside them.
+    parts = splitpath(p)
+    i = findlast(==(".debug"), parts)
+    i === nothing || return joinpath(parts[1:i]...)
+    if isfile(p)
+        # A wrapper .so lives at <pkg>/julia/lib*.so, so its `.debug` is two
+        # levels up; any other file is treated as a sibling of one.
+        d = dirname(p)
+        return basename(d) == "julia" ? joinpath(dirname(d), ".debug") :
+                                        joinpath(d, ".debug")
     end
     return joinpath(p, ".debug")
 end
@@ -114,23 +125,43 @@ function mlir_sources(path::AbstractString)
     return sort(srcs; by=mtime, rev=true)
 end
 
+# A missing artifact and a mistyped path produce the same empty directory, and
+# the second is far more common at a REPL. Distinguish them: if the `.debug`
+# root itself is absent, lead with the resolution rather than blaming the JIT.
+function _path_hint(path::AbstractString, root::AbstractString)
+    isdir(root) && return ""
+    return """
+
+
+        `.debug` does not exist here — check the path before the artifact:
+        `$path` resolved to `$root`
+        Accepted: a package directory, "." inside one, a wrapper .so, `.debug`,
+        or anything under it."""
+end
+
 function _require_object(path::AbstractString)
     obj = object_path(path)
-    isempty(obj) && error("""
-        No emitted object under $(joinpath(debug_root(path), "obj")).
+    if isempty(obj)
+        root = debug_root(path)
+        error("""
+            No emitted object under $(joinpath(root, "obj")).
 
-        $_CAPTURE_HINT""")
+            $_CAPTURE_HINT$(_path_hint(path, root))""")
+    end
     return obj
 end
 
 function _require_mlir(path::AbstractString)
     srcs = mlir_sources(path)
-    isempty(srcs) && error("""
-        No generated MLIR under $(joinpath(debug_root(path), "mlir")).
+    if isempty(srcs)
+        root = debug_root(path)
+        error("""
+            No generated MLIR under $(joinpath(root, "mlir")).
 
-        This is written at JIT initialization, so an empty directory means the
-        library's Tier-2 engine never came up in the process that last ran —
-        or `clean()` removed it and nothing has re-run since.""")
+            This is written at JIT initialization, so an empty directory means the
+            library's Tier-2 engine never came up in the process that last ran —
+            or `clean()` removed it and nothing has re-run since.$(_path_hint(path, root))""")
+    end
     return srcs[1]
 end
 

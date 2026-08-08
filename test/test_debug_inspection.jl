@@ -18,16 +18,49 @@ const VI_SO = joinpath(VI, "julia", "libvi_test.so")
 
     @testset "artifact locations" begin
         want = joinpath(VI, ".debug")
-        # Three spellings a caller plausibly has in hand; all must land in the
-        # same place, because guessing wrong returns confusing emptiness rather
-        # than an error.
+
+        # Every spelling a caller plausibly has in hand must land in the same
+        # place. The first version only matched `.debug` as an exact basename,
+        # so `.debug/mlir` re-appended to `…/.debug/mlir/.debug/mlir` and the
+        # failure blamed a missing directory for what was a path bug. Found at a
+        # REPL within an hour of shipping, which is why the list is exhaustive
+        # rather than representative.
         @test D.debug_root(VI) == want
         @test D.debug_root(want) == want
-        if isfile(VI_SO)
-            @test D.debug_root(VI_SO) == want
+        @test D.debug_root(want * "/") == want
+        @test D.debug_root(joinpath(want, "mlir")) == want
+        @test D.debug_root(joinpath(want, "obj")) == want
+        @test D.debug_root(joinpath(VI, "..", "vi_test")) == want
+        isfile(VI_SO) && @test D.debug_root(VI_SO) == want
+        for f in D.mlir_sources(VI)
+            @test D.debug_root(f) == want
         end
-        # Idempotent: feeding a resolved root back in must not nest.
-        @test D.debug_root(D.debug_root(VI)) == want
+        # Idempotent under repeated application.
+        @test D.debug_root(D.debug_root(D.debug_root(VI))) == want
+
+        # "" is the working directory, not an error: `D.thunks("")` while
+        # standing in a package is the shortest thing to type.
+        cd(VI) do
+            @test D.debug_root("") == want
+            @test D.debug_root(".") == want
+        end
+
+        # Same artifacts reached through unrelated spellings.
+        @test D.thunks(VI) == D.thunks(joinpath(want, "mlir"))
+    end
+
+    @testset "a mistyped path says so" begin
+        # A missing artifact and a bad path both present as an empty directory,
+        # and at a REPL the second is far likelier. The error must lead with the
+        # resolution instead of blaming the JIT for never running.
+        err = try; D.thunks(joinpath(VI, "vi_test")); "" catch e; sprint(showerror, e) end
+        @test occursin("resolved to", err)
+        @test occursin("Accepted:", err)
+        # ...and must NOT say that when the root is real and simply has no object.
+        if !D.has_object(VI)
+            e2 = try; D.disassemble(VI); "" catch e; sprint(showerror, e) end
+            @test !occursin("resolved to", e2)
+        end
     end
 
     @testset "MLIR sources and thunk enumeration" begin
