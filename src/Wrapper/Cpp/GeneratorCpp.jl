@@ -2209,13 +2209,40 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         julia_name = replace(julia_name, r"^replibuild_shim_" => "") # Remove macro shim prefix
         julia_name = String(rstrip(julia_name, '_'))
 
-        # Build function signature using ergonomic Julia types
+        # Build function signature using ergonomic Julia types.
+        #
+        # A parameter annotation naming a type this module never emitted is fatal:
+        # argument types are resolved EAGERLY at method definition, so an unbound
+        # name raises UndefVarError at include and kills the entire module, not just
+        # that one call. `julia_param_types` comes from DWARF, which describes plenty
+        # of types the generator deliberately declines to emit (STL internals,
+        # blocklisted system types), so intent and output disagree here exactly as
+        # they do for the union accessors above — gate on the EMITTED set.
+        #
+        # Latent until DW_AT_specification merging recovered real parameter lists
+        # (2026-08-09): `pugi::xml_attribute::set_name(std::basic_string_view<char,
+        # std::char_traits<char>>)` had its only parameter silently dropped as an
+        # unnamed declaration-DIE child, so the undeclared type never reached a
+        # signature. With the merge it does — 44 uses, wrapper dead at load.
+        #
+        # `Any` is ABI-neutral for these: Tier 2 marshals through
+        # JITManager.invoke, which packs by runtime value, and `this::Any` is
+        # already the norm. Only bare identifiers are rewritten — a composed type
+        # (`Ref{ImVec2}`, `Ptr{Cvoid}`) resolves through its parts and is left alone.
+        _param_type_is_bound(t::AbstractString) = begin
+            occursin(r"[{}<>,\s\.]", t) && return true
+            t in defined_struct_names && return true
+            sym = Symbol(t)
+            isdefined(Base, sym) || isdefined(Core, sym)
+        end
+
         param_sig_parts = String[]
         for (name, typ) in zip(param_names, julia_param_types)
             if name == "varargs..."
                 push!(param_sig_parts, name)
             else
-                push!(param_sig_parts, "$name::$typ")
+                safe_typ = _param_type_is_bound(String(typ)) ? typ : "Any"
+                push!(param_sig_parts, "$name::$safe_typ")
             end
         end
         param_sig = join(param_sig_parts, ", ")

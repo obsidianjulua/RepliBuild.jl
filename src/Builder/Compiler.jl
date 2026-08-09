@@ -2261,6 +2261,32 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
     return "Any"
 end
 
+"""
+    as_return_julia_type(c_type, mapped) -> String
+
+Adjust a mapped Julia type for a RETURN position.
+
+Only C++ reference types differ. A `T&` is an ADDRESS at the ABI level — the
+callee returns a pointer and the reference-ness is a source-language fiction —
+but both type mappers render it `Ref{T}`, because in a PARAMETER position that
+is correct *and* ergonomic: the caller passes a `Ref` and Julia converts it to a
+pointer at the boundary.
+
+In a return position `Ref{T}` is neither. `JITManager._invoke_call` allocates the
+result buffer as `Ref{T}()`, so a `Ref{Cvoid}` return asks for
+`Ref{Ref{Cvoid}}()` — an undefined reference whose `unsafe_convert` raises
+`UndefRefError` *before the call is ever made*. `ImGui::GetIO()`
+(`ImGuiIO&`, DWARF size 8) died exactly there.
+
+Reported as `Ref{Nothing}` because `Cvoid === Nothing`, which reads like a
+void-return bug and is why this was mis-filed as one.
+"""
+function as_return_julia_type(c_type::AbstractString, mapped::AbstractString)::String
+    endswith(strip(String(c_type)), "&") || return String(mapped)
+    m = match(r"^Ref\{(.*)\}$", String(mapped))
+    return m === nothing ? String(mapped) : "Ptr{$(m.captures[1])}"
+end
+
 # C/C++ → byte size table on x86_64 Linux. Hoisted to module scope.
 const _C_TYPE_SIZE_MAP = Dict{String,Int}(
     "void" => 0,
@@ -2298,6 +2324,92 @@ function get_type_size(c_type::AbstractString)::Int
     end
 
     return get(_C_TYPE_SIZE_MAP, stripped, 0)
+end
+
+"""
+    _dwarf_file_tables(readelf_tool, binary_path) -> Vector{Dict{Int,String}}
+
+One `file index => resolved path` table per compilation unit, in CU order,
+parsed from `readelf --debug-dump=rawline`.
+
+`DW_AT_decl_file` is an index into the CU's own line-program file table, so the
+tables are **CU-relative** — index 2 names a different file in every CU, and a
+single flattened map would mis-attribute every type in a multi-CU library. CU
+order is the only thing tying the two dumps together: readelf emits line
+programs and DIEs in the same section order.
+
+Names are resolved against the Directory Table, itself relative to directory 0
+(the compilation directory) when an entry is not absolute.
+"""
+function _dwarf_file_tables(readelf_tool::AbstractString, binary_path::AbstractString)::Vector{Dict{Int,String}}
+    (out, ec) = BuildBridge.execute(readelf_tool, ["--debug-dump=rawline", binary_path])
+    ec == 0 || return Vector{Dict{Int,String}}()
+
+    tables = Vector{Dict{Int,String}}()
+    dirs = Dict{Int,String}()
+    mode = :none
+    # readelf renders a string-table indirection as `(indirect line string,
+    # offset: 0x..): <value>` — the value is everything after the last `): `.
+    strip_indirect(s) = begin
+        m = match(r"\):\s*(.*)$", s)
+        String(strip(m === nothing ? s : m.captures[1]))
+    end
+
+    for line in split(out, '\n')
+        l = strip(line)
+        if occursin("The Directory Table", l)
+            dirs = Dict{Int,String}(); mode = :dirs; continue
+        elseif occursin("The File Name Table", l)
+            push!(tables, Dict{Int,String}()); mode = :files; continue
+        elseif isempty(l) || startswith(l, "Entry") || occursin("Offset:", l)
+            mode == :files && isempty(l) && (mode = :none)
+            continue
+        end
+
+        if mode == :dirs
+            m = match(r"^(\d+)\s+(.*)$", l)
+            m === nothing && continue
+            dirs[parse(Int, m.captures[1])] = strip_indirect(String(m.captures[2]))
+        elseif mode == :files && !isempty(tables)
+            # Entry, Dir, [MD5,] Name — MD5 is present only when the producer emitted it.
+            m = match(r"^(\d+)\s+(\d+)\s+(?:0x[0-9a-fA-F]+\s+)?(.*)$", l)
+            m === nothing && continue
+            idx = parse(Int, m.captures[1]); dir = parse(Int, m.captures[2])
+            name = strip_indirect(String(m.captures[3]))
+            isempty(name) && continue
+            base = get(dirs, dir, "")
+            path = if startswith(name, "/")
+                name
+            elseif startswith(base, "/") || isempty(base)
+                isempty(base) ? name : joinpath(base, name)
+            else
+                # Directory itself is relative to the compilation directory (dir 0).
+                joinpath(get(dirs, 0, ""), base, name)
+            end
+            tables[end][idx] = path
+        end
+    end
+    return tables
+end
+
+"""
+    _is_system_decl_file(path) -> Bool
+
+True when `path` is a toolchain or system header rather than project code.
+
+A **blocklist**, deliberately, not a project-root allowlist: dropping a type the
+project actually declares would produce an undeclared name in a signature, while
+keeping a system type that slipped through costs only noise. So the failure mode
+is biased toward keeping too much.
+"""
+function _is_system_decl_file(path::AbstractString)::Bool
+    isempty(path) && return false
+    p = String(path)
+    for pat in ("/usr/include", "/usr/lib/gcc", "/usr/lib/clang", "/usr/lib64/gcc",
+                "/usr/local/include", "/include/c++/", "/lib/clang/", "/lib64/gcc/")
+        occursin(pat, p) && return true
+    end
+    return false
 end
 
 """
@@ -2345,7 +2457,18 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     (output, exitcode) = BuildBridge.execute(readelf_tool, ["--debug-dump=info", binary_path])
     exitcode == 0 || error("readelf --debug-dump=info failed on $binary_path:\n$output")
 
-    (return_types, struct_defs, global_vars, typedefs) = parse_dwarf_dump(output)
+    # DW_AT_decl_file is a per-CU INDEX in readelf's output (llvm-dwarfdump
+    # resolves it to a path; readelf does not), so the line-program file tables
+    # are a second, separate dump. Failure here is non-fatal: without tables the
+    # provenance filter simply does not run and extraction behaves as before.
+    file_tables = try
+        _dwarf_file_tables(readelf_tool, binary_path)
+    catch e
+        @debug "DWARF file tables unavailable; system-header filter disabled" exception=e
+        Vector{Dict{Int,String}}()
+    end
+
+    (return_types, struct_defs, global_vars, typedefs) = parse_dwarf_dump(output; file_tables=file_tables)
 
     # A non-empty dump that yields nothing is a dialect or format mismatch, not
     # a library without debug info — and it is indistinguishable downstream from
@@ -2438,8 +2561,18 @@ Parse a GNU `readelf --debug-dump=info` dump into the type/signature tables.
 Split out from [`extract_dwarf_return_types`](@ref) so DIE-tree attribution can
 be pinned with synthetic dumps — no compiler, binary, or fixture build needed.
 See `test/test_dwarf_attribution.jl`.
+
+`file_tables` (one `index => path` map per CU, from [`_dwarf_file_tables`](@ref))
+enables the system-header provenance filter: a type declared in a toolchain
+header is dropped instead of emitted. Omitted — as every synthetic-dump test
+does — the filter simply does not run, and parsing behaves exactly as before.
 """
-function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
+function parse_dwarf_dump(output::AbstractString;
+                          file_tables::Vector{Dict{Int,String}}=Vector{Dict{Int,String}}()
+                         )::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
+    # Which CU we are inside, 1-based; readelf emits line programs and DIEs in the
+    # same section order, so the Nth "Compilation Unit @ offset" uses the Nth table.
+    cu_index = 0
     return_types = Dict{String,Dict{String,Any}}()
 
     # Parse DWARF output to extract type information
@@ -2523,6 +2656,12 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
     for line in split(output, '\n')
         line = strip(line)
 
+        # CU boundary — DW_AT_decl_file indices are CU-relative, so the table must
+        # advance with them.
+        if startswith(line, "Compilation Unit @")
+            cu_index += 1
+        end
+
         # Track ANY tag to avoid attribute pollution
         # Tags have format: <level><offset>: Abbrev Number: N (DW_TAG_*)
         if contains(line, "DW_TAG_")
@@ -2532,6 +2671,25 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
             if !isnothing(offset_match)
                 tag_offset = "0x" * offset_match.captures[1]
                 type_refs["last_tag_offset"] = tag_offset  # Always update for ANY tag
+            end
+        end
+
+        # Record where a type was DECLARED. This is the only provenance DWARF
+        # carries, and it is what separates a type the project defines from one
+        # `#include <iostream>` dragged in: hello_world.cpp declares ZERO types,
+        # yet six reach the wrapper (`max_align_t`, `__mbstate_t`, `ldiv_t`, …)
+        # along with accessors and exports for them. Functions never had this
+        # problem because they are gated by `nm --defined-only`; types had no
+        # gate at all.
+        if contains(line, "DW_AT_decl_file") && !isempty(file_tables) &&
+           haskey(type_refs, "last_tag_offset")
+            fm = match(r"DW_AT_decl_file\s*:?\s*(\d+)", line)
+            if !isnothing(fm) && 1 <= cu_index <= length(file_tables)
+                tgt = type_refs["last_tag_offset"]
+                if haskey(type_refs, tgt) && isa(type_refs[tgt], Dict)
+                    path = get(file_tables[cu_index], parse(Int, fm.captures[1]), "")
+                    isempty(path) || (type_refs[tgt]["decl_file_path"] = path)
+                end
             end
         end
 
@@ -3487,6 +3645,15 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
     current_param_offset = nothing
     current_param_level = nothing  # depth of the open DW_TAG_formal_parameter DIE
 
+    # Handle to the parameter dict most recently pushed, live only for the
+    # remainder of that parameter's own DIE. A parameter is pushed as soon as its
+    # DW_AT_type is seen, but clang emits DW_AT_artificial AFTER the type, so the
+    # receiver flag arrives once the parameter context has already been closed —
+    # and it must stay closed, because an unnamed parameter holding its context
+    # open past its own terminator is exactly the phantom-parameter leak fixed
+    # 2026-07-26. Cleared on every DW_TAG_ line so it can never reach another DIE.
+    pending_param_dict = nothing
+
     # DIE-tree arity witness: how many DW_TAG_formal_parameter children the
     # subprogram DIE actually has, counted straight off the readelf tree depth
     # and independent of whether name/type extraction succeeded for each one.
@@ -3495,6 +3662,15 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
     # tree, which is a silent wrong-call bug, so it fails loudly.
     formal_params_in_die = 0
     die_param_counts = Dict{String,Int}()  # function key => DIE-tree arity
+
+    # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
+    # resolved back to the declaration that owns the mangled name via
+    # DW_AT_specification (see the handler below). Declarations precede their
+    # out-of-line definitions within a CU — a class must be complete before its
+    # methods are defined — so a forward reference cannot occur here; an
+    # unresolved target simply leaves the key unchanged, i.e. the pre-existing
+    # behaviour.
+    linkage_by_offset = Dict{String,String}()
 
     # NEW: Track global variables
     current_variable_offset = nothing
@@ -3617,6 +3793,24 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
             end
         end
 
+        # A new DIE ends the previous parameter's attribute run — see
+        # `pending_param_dict`. Must precede every DW_TAG_ handler below.
+        if contains(line, "DW_TAG_")
+            pending_param_dict = nothing
+        elseif contains(line, "DW_AT_artificial") && !isnothing(pending_param_dict)
+            # DW_AT_artificial seen AFTER DW_AT_type (clang's order): the parameter
+            # is already pushed, so patch it. Only a position-0 parameter still
+            # carrying its synthesized name is renamed — a programmer-named
+            # parameter keeps its name, and a non-receiver artificial parameter
+            # (e.g. a lambda's captured-frame slot) is never at position 0 of a
+            # method, so it keeps argN.
+            if get(pending_param_dict, "position", -1) == 0 &&
+               startswith(String(get(pending_param_dict, "name", "")), "arg")
+                pending_param_dict["name"] = "this"
+            end
+            pending_param_dict = nothing
+        end
+
         # Detect function start (DW_TAG_subprogram)
         if contains(line, "DW_TAG_subprogram")
             offset_match = match(r"<\d+><([^>]+)>", line)
@@ -3719,6 +3913,12 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
                     "name" => nothing,
                     "type" => nothing,
                     "position" => position,
+                    # DW_AT_artificial marks a parameter the compiler synthesized
+                    # rather than the programmer writing it — for a member function
+                    # that is the implicit `this`. It is the only way to recognise a
+                    # receiver on a DECLARATION DIE, where the parameter has a type
+                    # but no name, so it decides the synthesized name below.
+                    "artificial" => false,
                     "parent_subroutine" => current_subroutine_offset  # Track which subroutine this belongs to
                 )
                 offset_to_kind[current_param_offset] = :parameter
@@ -3782,6 +3982,41 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
             if !isnothing(linkage_match)
                 current_function_linkage = String(strip(linkage_match.captures[1]))  # Convert SubString to String
+                if !isnothing(current_function_offset)
+                    linkage_by_offset[current_function_offset] = current_function_linkage
+                end
+            end
+        end
+
+        # Follow DW_AT_specification to the declaration that owns the mangled name.
+        #
+        # An out-of-line C++ method definition carries NEITHER DW_AT_linkage_name
+        # NOR DW_AT_name — only a back-reference to its in-class declaration:
+        #
+        #   <2><b3> DW_TAG_subprogram        <- declaration: linkage_name; params UNNAMED
+        #   <1><cc> DW_TAG_subprogram        <- definition: low_pc, object_pointer,
+        #             DW_AT_specification: <0xb3>    params NAMED (incl. `this`)
+        #
+        # Without this link `function_key` is `nothing` for the definition DIE, so
+        # finalize_current_function! discarded it whole and the only signature ever
+        # recorded was the declaration's — whose parameters are all unnamed and are
+        # therefore dropped by the name gate on the parameter push. That is the
+        # single source of BOTH the "extracted 0, DIE tree has N" arity warnings and
+        # the generic argN parameter names in generated wrappers, and it is why a
+        # real method's `this` never survived extraction (found via Dear ImGui,
+        # 2026-08-09).
+        #
+        # Adopting the declaration's key makes the definition merge onto it. The
+        # non-empty-wins rule already in finalize_current_function! then prefers the
+        # definition's real parameter list over the declaration's empty one,
+        # regardless of which DIE closes first.
+        if contains(line, "DW_AT_specification") && in_function_context
+            spec_match = match(r"DW_AT_specification\s*:\s*<(0x[0-9a-fA-F]+)>", line)
+            if !isnothing(spec_match)
+                spec_target = String(spec_match.captures[1])
+                if haskey(linkage_by_offset, spec_target)
+                    current_function_linkage = linkage_by_offset[spec_target]
+                end
             end
         end
 
@@ -3835,7 +4070,9 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
                     # It's a struct/class - use the struct name as the Julia type
                     c_type
                 else
-                    dwarf_type_to_julia(c_type)
+                    # Return position: `T&` must be a pointer, not a Ref — see
+                    # as_return_julia_type.
+                    as_return_julia_type(c_type, dwarf_type_to_julia(c_type))
                 end
                 type_size = get_type_size(c_type)
 
@@ -3886,6 +4123,11 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
 
             param_info = type_refs[current_param_offset]
 
+            # DW_AT_artificial seen BEFORE DW_AT_type — the push below reads it.
+            if contains(line, "DW_AT_artificial")
+                param_info["artificial"] = true
+            end
+
             # Extract parameter name
             if contains(line, "DW_AT_name")
                 name_match_quotes = match(r"DW_AT_name\s*\(\"([^\"]+)\"\)", line)
@@ -3915,15 +4157,37 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
                         push!(type_refs[parent_subroutine]["parameters"], type_ref)
                         current_param_offset = nothing
                         current_param_level = nothing
-                    elseif !isnothing(param_info["name"]) && !isnothing(param_info["type"])
-                        # Add to function's parameter list (needs both name and type)
-                        # Resolve type
+                    elseif !isnothing(param_info["type"])
+                        # A parameter's ABI identity is its TYPE and POSITION; the name
+                        # is documentation. Requiring a name here dropped every
+                        # parameter of every declaration-only DIE — which is where the
+                        # implicit `this` lives, and which is the whole of a function
+                        # whose definition is in another TU. That produced signatures
+                        # short by one or more arguments (the "extracted 0, DIE tree
+                        # has N" warnings) and, for a method, a receiver the generators
+                        # then had to guess at. Keep it and synthesize a name.
+                        #
+                        # DW_AT_artificial distinguishes a compiler-synthesized
+                        # parameter from a programmer-written one — on a member
+                        # function that is exactly the implicit `this`. Naming it
+                        # "this" is load-bearing: both generators skip receiver
+                        # synthesis when `params[1]["name"] == "this"`, so calling it
+                        # `arg0` would let them inject a SECOND receiver.
                         type_ref = param_info["type"]
                         c_type = resolve_type(type_ref, type_refs)
                         julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
 
+                        pos = get(param_info, "position", length(params_for_this_function))
+                        resolved_name = if !isnothing(param_info["name"])
+                            param_info["name"]
+                        elseif get(param_info, "artificial", false) && pos == 0
+                            "this"
+                        else
+                            "arg$(pos)"
+                        end
+
                         param_dict = Dict(
-                            "name" => param_info["name"],
+                            "name" => resolved_name,
                             "c_type" => c_type,
                             "julia_type" => julia_type,
                             "position" => param_info["position"]
@@ -3935,6 +4199,7 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
                         end
 
                         push!(params_for_this_function, param_dict)
+                        pending_param_dict = param_dict  # for a trailing DW_AT_artificial
 
                         # Reset param offset to avoid re-processing
                         current_param_offset = nothing
@@ -4083,6 +4348,15 @@ function parse_dwarf_dump(output::AbstractString)::Tuple{Dict{String,Dict{String
                     end
                     if !isempty(template_params)
                         struct_def["template_params"] = template_params
+                    end
+
+                    # Provenance gate: a type declared in a toolchain header is
+                    # not part of this library's API. Skipping it here — at the
+                    # emission point, on the ACTUAL record being written — rather
+                    # than post-filtering keeps the intent/output split that has
+                    # bitten the generators repeatedly.
+                    if _is_system_decl_file(get(type_info, "decl_file_path", ""))
+                        continue
                     end
 
                     struct_defs[struct_name] = struct_def
