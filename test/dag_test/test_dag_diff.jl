@@ -416,6 +416,81 @@ end
         end
     end
 
+    @testset "layout model vs. reality (2026-08-08)" begin
+        # Three separate places computed a member's alignment as `min(size, 8)`
+        # and looked enums up by their bare name. Both are wrong, and both
+        # produced LAYOUT_MISMATCH against wrappers that Julia's own `sizeof`
+        # and `fieldoffset` confirm are byte-exact. Hub-wide they accounted for
+        # 139 of 209 functions forced to Tier 2, and for every one of the three
+        # cases where DAGDiff was the ONLY reason a function left ccall — so
+        # the module's entire apparent unique value was its own bugs.
+
+        # ── enum member sizing ────────────────────────────────────────────
+        # Enums are keyed "__enum__<name>"; a bare lookup missed them, sized the
+        # member 0, and left current_offset unmoved — so every LATER member
+        # reported as drifted while byte_size still came out right, the tail pad
+        # absorbing it. This is b2BodyDef reduced to its essentials.
+        enum_meta = Dict(
+            "struct_definitions" => Dict(
+                "__enum__Kind" => Dict("kind" => "enum", "byte_size" => 4,
+                                       "enumerators" => [], "underlying_type" => "int"),
+                "HasEnum" => Dict("byte_size" => 12, "kind" => "struct", "members" => [
+                    Dict("name" => "kind", "c_type" => "Kind",  "offset" => 0, "size" => 0),
+                    Dict("name" => "a",    "c_type" => "float", "offset" => 4, "size" => 4),
+                    Dict("name" => "b",    "c_type" => "float", "offset" => 8, "size" => 4),
+                ]),
+            ),
+            "functions" => [],
+        )
+        jg = DD.build_julia_graph(enum_meta)
+        cg = DD.build_cpp_graph(enum_meta)
+        @test jg.types["HasEnum"].byte_size == cg.types["HasEnum"].byte_size == 12
+        for (a, b) in zip(cg.types["HasEnum"].members, jg.types["HasEnum"].members)
+            @test a.offset == b.offset
+        end
+        @test isempty(DD.diff_graphs(cg, jg))
+
+        # ── aggregate alignment ───────────────────────────────────────────
+        # A struct aligns to its widest MEMBER, not to its own size. `Vec3f` is
+        # 12 bytes and 4-aligned; the size rule called it 8-aligned and pushed
+        # everything after it. Verified against the real thing: miniaudio's
+        # ma_spatializer_listener_config is sizeof 48 with worldUp at 36, and
+        # this model reported 56 and 40.
+        vec_meta = Dict(
+            "struct_definitions" => Dict(
+                "Vec3f" => Dict("byte_size" => 12, "kind" => "struct", "members" => [
+                    Dict("name" => "x", "c_type" => "float", "offset" => 0, "size" => 4),
+                    Dict("name" => "y", "c_type" => "float", "offset" => 4, "size" => 4),
+                    Dict("name" => "z", "c_type" => "float", "offset" => 8, "size" => 4),
+                ]),
+                "Holder" => Dict("byte_size" => 20, "kind" => "struct", "members" => [
+                    Dict("name" => "n",   "c_type" => "int",   "offset" => 0,  "size" => 4),
+                    Dict("name" => "v",   "c_type" => "Vec3f", "offset" => 4,  "size" => 0),
+                    Dict("name" => "tag", "c_type" => "int",   "offset" => 16, "size" => 4),
+                ]),
+            ),
+            "functions" => [],
+        )
+        vjg = DD.build_julia_graph(vec_meta)
+        vcg = DD.build_cpp_graph(vec_meta)
+        @test DD._type_alignment(vec_meta["struct_definitions"], "Vec3f", 12) == 4
+        @test vjg.types["Holder"].byte_size == 20
+        @test [m.offset for m in vjg.types["Holder"].members] == [0, 4, 16]
+
+        # ── packed detection uses the same alignment ──────────────────────
+        # `v` at offset 4 is 4-aligned and therefore NOT packed. Under the size
+        # rule it was 8-aligned, 4 % 8 != 0, and the type was reported packed —
+        # which propagates to every function returning it by value.
+        @test !vcg.types["Holder"].is_packed
+        @test isempty(DD.diff_graphs(vcg, vjg))
+
+        # A genuinely packed layout must still be caught — the fix narrows the
+        # screen, it does not disable it.
+        packed_meta = deepcopy(vec_meta)
+        packed_meta["struct_definitions"]["Holder"]["members"][3]["offset"] = 17
+        @test DD.build_cpp_graph(packed_meta).types["Holder"].is_packed
+    end
+
     @testset "build_julia_graph" begin
         @testset "aligned struct matches DWARF" begin
             g = DD.build_julia_graph(make_aligned_metadata())

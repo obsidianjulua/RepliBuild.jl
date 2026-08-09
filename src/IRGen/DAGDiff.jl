@@ -180,6 +180,69 @@ function _build_shared_topology(metadata::Dict)
     return (type_edges, func_type_edges, functions)
 end
 
+"""
+    _member_size(dwarf_structs, m_type, declared) -> Int
+
+Size of a member whose DWARF entry declared none, resolved through the type table.
+
+Enums are keyed `"__enum__<name>"` in `struct_definitions` while a member's
+`c_type` names them bare, so a direct lookup misses every enum member and sizes
+it 0. In `build_julia_graph` that is not a harmless underestimate — the running
+`current_offset` never advances, so every member after an enum reports as
+drifted while `byte_size` still comes out right, the final alignment pad having
+absorbed the difference. `b2BodyDef` presented as 18 members, 80 bytes, and 8
+wrong offsets; the emitted wrapper was correct throughout and this walk was the
+only thing disagreeing.
+"""
+function _member_size(dwarf_structs, m_type, declared::Int)::Int
+    declared == 0 || return declared
+    cleaned = _strip_qualifiers(m_type)
+    for key in (cleaned, "__enum__" * cleaned)
+        haskey(dwarf_structs, key) &&
+            return _parse_size(get(dwarf_structs[key], "byte_size", "0"))
+    end
+    return 0
+end
+
+"""
+    _type_alignment(dwarf_structs, type_name, size) -> Int
+
+Alignment of a member type, as Julia and the C ABI both actually compute it.
+
+An aggregate aligns to the **maximum alignment of its members**, not to its own
+size. The model here previously used `min(size, 8)`, which is right for scalars
+and wrong for every struct whose size exceeds its alignment: `ma_vec3f` is three
+floats — 12 bytes, aligned to 4 — and got treated as 8-aligned. That pushed the
+following member from offset 36 to 40 and the enclosing
+`ma_spatializer_listener_config` from 48 bytes to 56, reported as layout drift
+against a wrapper that `sizeof` confirms is exactly right.
+"""
+function _type_alignment(dwarf_structs, type_name, size::Int,
+                         seen::Set{String}=Set{String}())::Int
+    # A pointer is 8-aligned regardless of what it points at, and recursing
+    # through one is how a self-referential struct becomes an infinite walk.
+    _is_indirection(type_name) && return 8
+    cleaned = _strip_qualifiers(type_name)
+    key = haskey(dwarf_structs, cleaned) ? cleaned :
+          haskey(dwarf_structs, "__enum__" * cleaned) ? "__enum__" * cleaned : ""
+    if isempty(key) || cleaned in seen
+        return size <= 0 ? 1 : min(size, 8)      # scalar, enum, or opaque
+    end
+    push!(seen, cleaned)
+    info = dwarf_structs[key]
+    members = get(info, "members", [])
+    isempty(members) && return size <= 0 ? 1 : min(size, 8)
+    align = 1
+    for m in members
+        mt = get(m, "c_type", get(m, "type", ""))
+        ms = _member_size(dwarf_structs, mt, _parse_size(get(m, "size", "0")))
+        align = max(align, _type_alignment(dwarf_structs, mt, ms, seen))
+    end
+    return align
+end
+
+
+
 # ============================================================================
 # Build C++ Graph (DWARF ground truth)
 # ============================================================================
@@ -209,12 +272,7 @@ function build_cpp_graph(metadata::Dict)::IRGraph
             m_offset = _parse_size(get(m, "offset", "0"))
             m_size = _parse_size(get(m, "size", "0"))
 
-            if m_size == 0
-                cleaned = _strip_qualifiers(m_type)
-                if haskey(dwarf_structs, cleaned)
-                    m_size = _parse_size(get(dwarf_structs[cleaned], "byte_size", "0"))
-                end
-            end
+            m_size = _member_size(dwarf_structs, m_type, m_size)
 
             # Bitfield info from DWARF (bit_size, data_bit_offset, bit_offset_legacy)
             m_bit_size = _parse_size(get(m, "bit_size", 0))
@@ -241,9 +299,15 @@ function build_cpp_graph(metadata::Dict)::IRGraph
             String[]
         end
 
-        # Detect packed layout: any member offset violates natural alignment
+        # Detect packed layout: any member offset violates natural alignment.
+        # Alignment comes from _type_alignment, not from the member's size —
+        # `min(size, 8)` calls every aggregate wider than its alignment packed.
+        # `ma_vec3f` (12 bytes, 4-aligned) at offset 36 read as packed under the
+        # size rule and was reported as a layout mismatch against a wrapper whose
+        # `sizeof` and `fieldoffset` both match DWARF exactly.
         is_packed = any(members) do m
-            m.size > 0 && m.offset % min(max(m.size, 1), 8) != 0
+            m.size > 0 &&
+                m.offset % _type_alignment(dwarf_structs, m.type_name, m.size) != 0
         end
 
         # Add inheritance edges: base classes treated as by-value containment for
@@ -295,20 +359,16 @@ function build_julia_graph(metadata::Dict)::IRGraph
             m_type = get(m, "c_type", get(m, "type", ""))
             m_size = _parse_size(get(m, "size", "0"))
 
-            if m_size == 0
-                cleaned = _strip_qualifiers(m_type)
-                if haskey(dwarf_structs, cleaned)
-                    m_size = _parse_size(get(dwarf_structs[cleaned], "byte_size", "0"))
-                end
-            end
+            m_size = _member_size(dwarf_structs, m_type, m_size)
 
-            # Julia alignment: min(sizeof(field), 8), same as get_julia_aligned_size
+            # An aggregate aligns to its widest member, NOT to its own size —
+            # see _type_alignment. Using the size treats every struct larger
+            # than 8 bytes as 8-aligned and drifts everything after it.
+            alignment = _type_alignment(dwarf_structs, m_type, m_size)
             if kind == :union
                 push!(julia_members, MemberLayout(m_name, m_type, 0, m_size, 0, 0))
-                max_align = max(max_align, min(max(m_size, 1), 8))
+                max_align = max(max_align, alignment)
             else
-                alignment = m_size > 8 ? 8 : m_size
-                alignment = alignment == 0 ? 1 : alignment
                 max_align = max(max_align, alignment)
 
                 padding = (alignment - (current_offset % alignment)) % alignment

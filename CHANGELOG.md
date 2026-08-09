@@ -4,6 +4,47 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### DAG diff was reporting its own layout model as wrapper drift (2026-08-08)
+
+`DAGDiff` compares the DWARF layout against the layout Julia would compute, and
+routes any function returning or taking a divergent struct by value to Tier 2.
+Auditing whether it still earns its keep turned up 209 functions forced to Tier 2
+Hub-wide, of which **3 were flagged by nothing else** — all three
+`RETURN_CONV_MISMATCH`, the class that produced the 2026-08-05 heap smasher.
+
+All three were bugs in the model, not in the wrappers. Julia's own `sizeof` and
+`fieldoffset` on the emitted structs match DWARF byte for byte:
+
+- **Enum members sized 0.** Enums are keyed `"__enum__<name>"` in
+  `struct_definitions` while a member's `c_type` names them bare, so the lookup
+  missed every one. In `build_julia_graph` the running offset then never
+  advanced, and every member *after* an enum reported as drifted — with
+  `byte_size` still correct, the tail pad absorbing the difference. `b2BodyDef`
+  presented as 80 bytes, 18 members, 8 wrong offsets.
+- **Aggregates aligned to their size.** `min(size, 8)` is right for scalars and
+  wrong for any struct wider than its alignment. `ma_vec3f` — three floats, 12
+  bytes, 4-aligned — was treated as 8-aligned, pushing the next member from 36
+  to 40 and `ma_spatializer_listener_config` from 48 bytes to 56. Julia reports
+  `sizeof` 48 and `fieldoffset` 36.
+- **Packed detection used the same rule**, so the same 4-aligned member at
+  offset 36 read as "unnatural alignment" and the type was called packed, which
+  propagates to every function returning it by value.
+
+All three now go through `_type_alignment` and `_member_size`, one derivation
+each. Hub-wide: mismatched types 902 → 710, functions forced to Tier 2 209 → 70,
+and **functions where DAGDiff was the only reason: 3 → 0**.
+
+That last number is the honest summary: on the current Hub, DAGDiff's entire
+apparent unique contribution was its own false positives, and every genuine
+mismatch it reports is also caught by `is_ccall_safe`. It is kept because the
+class it uniquely covers — member drift with a matching `byte_size`, which the
+struct-size guard cannot see — is the one that corrupts silently. A model that
+cries wolf on 139 functions cannot be trusted to catch the one that matters.
+Pinned by 11 new asserts including a genuinely-packed control, so narrowing the
+screen cannot become disabling it.
+
+**No wrapper bug was found.**
+
 ### Array-view thunks now honour the manifest and the type blocklist (2026-08-08)
 
 `generate_function_thunks` has consulted the wrapper's `thunk_manifest.json`
