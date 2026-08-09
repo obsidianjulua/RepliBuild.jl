@@ -23,6 +23,67 @@ function _fuzzy_struct_lookup(c_type::String, structs::Any)
 end
 
 """
+    _has_receiver(func, structs) -> Bool
+
+True only when `func`'s enclosing scope is a real class/struct, i.e. when the
+Itanium ABI actually passes a `this` pointer.
+
+`is_method` is a **string heuristic** upstream — `contains(_name_prefix(demangled),
+"::")` ([Compiler.jl](../../Builder/Compiler.jl)) — and Itanium mangles a
+namespace-scoped free function and a static member identically
+(`_ZN5ImGui10GetVersionEv` vs `_ZN3Obj3getEv`), so it is true for both. Only one
+of them has a receiver. DWARF does distinguish them (`DW_TAG_namespace` vs
+`DW_TAG_class_type`), but the extractor records neither that nor
+`DW_AT_object_pointer`, so the aggregate table is the witness available here — a
+namespace is never a key in it. This mirrors the `struct_types` gate the Julia
+generator already applies (`GeneratorCpp.jl`, "If it's a namespace name (e.g.
+\"pugi\") rather than a class, skip").
+
+Note the aggregate table is keyed on the **bare** type name (`xml_document`),
+while `class` carries the full scope (`pugi::xml_document`), so every `::`
+suffix is tried. Splitting is angle-bracket-depth aware — a naive `split("::")`
+cuts `std::vector<std::string>` at the inner separator. Trying every suffix is
+deliberately a superset of the Julia generator's `bare_class`/`safe_class`
+check: this gate can only over-admit relative to it, never wrongly deny a real
+method its receiver (the failure that direction is silent argument shifting).
+"""
+function _has_receiver(func, structs)::Bool
+    cls = String(get(func, "class", ""))
+    isempty(cls) && return false
+    for cand in _scope_suffixes(cls)
+        _fuzzy_struct_lookup(cand, structs) !== nothing && return true
+    end
+    return false
+end
+
+"""
+    _scope_suffixes(name) -> Vector{String}
+
+`name` plus each suffix obtained by dropping leading `::`-separated scopes,
+longest first. Separators inside `<>` are ignored, so
+`A::B<C::D>` yields `["A::B<C::D>", "B<C::D>"]` — not a cut at `C::D`.
+"""
+function _scope_suffixes(name::AbstractString)::Vector{String}
+    out = String[String(name)]
+    depth = 0
+    i = 1
+    n = lastindex(name)
+    while i < n
+        c = name[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ':' && name[i+1] == ':'
+            push!(out, String(name[i+2:end]))
+            i += 1
+        end
+        i += 1
+    end
+    return out
+end
+
+"""
     _byte_blob_type(byte_size) -> String
 
 Generate a packed MLIR struct type of exactly `byte_size` bytes.
@@ -71,7 +132,18 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         ret_info = get(func, "return_type", Dict())
         is_method = get(func, "is_method", false)
 
-        if is_method
+        # The receiver gate must match the Julia wrapper's, or the two sides
+        # disagree about the arg array. Synthesizing `this` for a namespace-scoped
+        # free function emits a thunk that loads args_ptr[0] and DEREFERENCES it,
+        # while the Julia wrapper — which DOES check (`struct_types`,
+        # GeneratorCpp.jl) — correctly emits zero arguments and passes an EMPTY
+        # `Ptr{Cvoid}[]`. Slot 0 is then read past the end of that array and the
+        # second load segfaults on the first call. Found on Dear ImGui 2026-08-08:
+        # 788 thunked `ImGui::` functions, 174 of them zero-arg (immediate SIGSEGV
+        # on any call), the remaining 614 with every argument shifted one slot.
+        # Two generators, one guard — the same shape as `ffe_call`/`try_call`
+        # carrying independent copies of the SysV coercion.
+        if is_method && _has_receiver(func, structs)
             if isempty(params) || get(params[1], "name", "") != "this"
                 pushfirst!(params, Dict("c_type" => "void*", "name" => "this"))
             end
