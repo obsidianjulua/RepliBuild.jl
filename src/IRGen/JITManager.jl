@@ -196,6 +196,61 @@ at compile time (ccall requires a concrete type, not a TypeVar).
 end
 
 """
+    _arg_marshal_plan(argtypes) -> (setup, ptr_exprs, preserve_syms)
+
+Build the argument-packing prologue shared by both `invoke` methods.
+
+A thunk slot must hold a pointer to a location *containing* the argument value:
+the emitted thunk double-loads, slot → storage → value. `Ref(x)` gives exactly
+that for an isbits `x`. Two argument kinds are **already** an indirection and
+must be flattened to a raw pointer first, or the double-load spends one level
+too many and the callee receives the payload's own bytes as an address:
+
+  * `AbstractString` — `Ref(::String)` points at the String object, not at its
+    bytes (found live on tinyxml2 `XMLDocument::Parse`).
+  * `Base.Ref` that is not already a `Ptr` — the spelling a Julia caller reaches
+    for first when a parameter is annotated `::Ref{T}`, which is what a C++
+    `T const&` generates. `Ptr{T} <: Ref{T}`, so the annotation accepts a
+    `RefValue` silently and nothing type-checks it away; the thunk then reads
+    the struct's first 8 bytes as an address. Presents as a SIGSEGV with a C++
+    frame in the backtrace, so it reads as a thunk ABI bug rather than a caller
+    mistake (found on `ImGui::ButtonEx` via `ImVec2 const&`, 2026-08-09).
+
+The `!(<: Ptr)` term is load-bearing: a raw pointer is already the flattened
+form and re-flattening it would strip the level the thunk needs.
+
+In both cases the original is GC-preserved across the call, since only a raw
+pointer into it reaches the slot.
+
+Kept as ONE plan consumed by both `invoke` methods — they carried byte-identical
+copies of this, which is how a fix to one silently misses the other.
+"""
+function _arg_marshal_plan(argtypes)
+    N = length(argtypes)
+    ref_syms = [Symbol("r$i") for i in 1:N]
+    src_syms = [Symbol("s$i") for i in 1:N]
+
+    is_str(T)      = T <: AbstractString
+    is_boxed_ref(T) = T <: Base.Ref && !(T <: Ptr)
+    indirect(T)    = is_str(T) || is_boxed_ref(T)
+
+    setup = map(1:N) do i
+        T = argtypes[i]
+        if is_str(T)
+            :($(src_syms[i]) = args[$i]; $(ref_syms[i]) = Ref(pointer($(src_syms[i]))))
+        elseif is_boxed_ref(T)
+            :($(src_syms[i]) = args[$i];
+              $(ref_syms[i]) = Ref(Base.unsafe_convert(Ptr{Cvoid}, $(src_syms[i]))))
+        else
+            :($(ref_syms[i]) = Ref(args[$i]))
+        end
+    end
+    ptrs = [:(Base.unsafe_convert(Ptr{Cvoid}, $(ref_syms[i]))) for i in 1:N]
+    preserve = vcat(ref_syms, [src_syms[i] for i in 1:N if indirect(argtypes[i])])
+    return (setup, ptrs, preserve)
+end
+
+"""
     invoke(func_name::String, ::Type{T}, args...) where T
 
 Invoke a JIT-compiled function with return type T.
@@ -205,20 +260,7 @@ For N≥5 this eliminates the Vector{Any}/Vector{Ptr{Cvoid}} allocation
 that the old generic fallback incurred on every call.
 """
 @generated function invoke(func_name::String, ::Type{T}, args::Vararg{Any, N}) where {T, N}
-    ref_syms = [Symbol("r$i") for i in 1:N]
-
-    # Strings marshal as pointers to their bytes (NUL-terminated in Julia).
-    # Packing Ref(::String) directly hands the callee a pointer into the
-    # String OBJECT, not its data — segfault on first dereference (found live
-    # on tinyxml2 XMLDocument::Parse). The String itself is GC-preserved via
-    # the args tuple held across the call.
-    str_syms = [Symbol("s$i") for i in 1:N]
-    setup = [args[i] <: AbstractString ?
-                 :($(str_syms[i]) = args[$i]; $(ref_syms[i]) = Ref(pointer($(str_syms[i])))) :
-                 :($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
-    ptrs = [:(Base.unsafe_convert(Ptr{Cvoid}, $(ref_syms[i]))) for i in 1:N]
-    # Preserve the Refs AND the strings whose byte pointers were taken
-    preserve_args = vcat(ref_syms, [str_syms[i] for i in 1:N if args[i] <: AbstractString])
+    (setup, ptrs, preserve_args) = _arg_marshal_plan(args)
 
     quote
         (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
@@ -238,16 +280,7 @@ end
 # =============================================================================
 
 @generated function invoke(func_name::String, args::Vararg{Any, N}) where N
-    ref_syms = [Symbol("r$i") for i in 1:N]
-
-    # Same String marshalling as the value-returning variant above
-    str_syms = [Symbol("s$i") for i in 1:N]
-    setup = [args[i] <: AbstractString ?
-                 :($(str_syms[i]) = args[$i]; $(ref_syms[i]) = Ref(pointer($(str_syms[i])))) :
-                 :($(ref_syms[i]) = Ref(args[$i])) for i in 1:N]
-    ptrs = [:(Base.unsafe_convert(Ptr{Cvoid}, $(ref_syms[i]))) for i in 1:N]
-    # Preserve the Refs AND the strings whose byte pointers were taken
-    preserve_args = vcat(ref_syms, [str_syms[i] for i in 1:N if args[i] <: AbstractString])
+    (setup, ptrs, preserve_args) = _arg_marshal_plan(args)
 
     quote
         (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
