@@ -22,6 +22,7 @@ makedocs(;
         ],
         "API Reference" => "api.md",
         "Advanced" => [
+            "ABI Marshalling as Compiler IR (MLIR/JLCS)" => "mlir.md",
             "The Inheritance ABI" => "inheritance-abi.md",
             "Internals & Dispatch" => "internals.md",
         ],
