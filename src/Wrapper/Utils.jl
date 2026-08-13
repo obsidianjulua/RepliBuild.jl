@@ -717,6 +717,337 @@ function _cstring_policy_lines(free_sym::String; indent::String="    ")::String
            "$(indent)return s"
 end
 
+"""
+    _cstring_wrapper_pair(julia_name, param_sig, raw_bind, raw_return, free_sym;
+                          doc_comment="") -> String
+
+The COMPLETE emission for a `char*`-returning function: the policy wrapper
+(`Union{String,Nothing}`) and its raw `<name>_ptr` sibling, as one chunk.
+
+The dispatch tier supplies only the two call bodies — `raw_bind` leaves the raw
+pointer in a local named `ptr`, `raw_return` returns it directly — and decides
+nothing else. The NULL policy, the copy, the `[wrap.cstring_owned]` free, the
+`_ptr` sibling and its docstring are derived here, once, for every tier and both
+generators.
+
+**Why this is one function and not a branch in each caller.** It used to be
+inline in the ccall path of both generators, so the C++ MLIR-dispatch path —
+which `continue`s past that code — emitted a bare `Cstring` instead: 77
+functions across five Hub packages returned an unwrapped pointer with no `_ptr`
+sibling, and any `[wrap.cstring_owned]` declaration on one of them was silently
+ignored (found 2026-08-12). A tier decides HOW to call, never how the result is
+presented. [`_assert_cstring_policy`](@ref) enforces that on the way out.
+"""
+function _cstring_wrapper_pair(julia_name::AbstractString, param_sig::AbstractString,
+                               raw_bind::AbstractString, raw_return::AbstractString,
+                               free_sym::AbstractString; doc_comment::AbstractString="")::String
+    owned_note = isempty(free_sym) ? "" : ", NOT freed — caller owns the buffer"
+    return """
+    $doc_comment
+    function $julia_name($param_sig)::Union{String,Nothing}
+    $raw_bind
+    $(_cstring_policy_lines(String(free_sym)))
+    end
+
+    \"\"\"
+        $(julia_name)_ptr($param_sig) -> Cstring
+
+    Raw-pointer variant of `$julia_name`: returns the C `char*` unchanged
+    (no copy, no NULL check$(owned_note)).
+    \"\"\"
+    function $(julia_name)_ptr($param_sig)::Cstring
+    $raw_return
+    end
+
+    """
+end
+
+
+# =============================================================================
+# DISPATCH INTROSPECTION + LAYOUT FACTS
+# -----------------------------------------------------------------------------
+# Both of these exist because twelve Hub consumers wrote them by hand first.
+#
+# `kernel_emits_llvmcall` — reach into the private `_TIER1_*` kernel, call
+# `code_typed`, string-match "llvmcall" — appears in 12 consumer files, 11 of
+# them byte-identical. They do that because `TIER1_FUNCTIONS` records what the
+# generator INTENDED and the `@generated` kernel can demote at generation time,
+# so nobody trusts the exported set. And `struct_size`/`meta_offset` — re-parsing
+# `compilation_metadata.json` for facts the generator held while emitting —
+# appears in four more. A helper written once is ergonomics; a helper written
+# twelve times independently is a missing feature.
+# =============================================================================
+
+"""
+    _dispatch_facts(func_chunks) -> (Dict{String,Symbol}, Dict{String,String})
+
+Classify every emitted function by the tier it actually dispatches through, and
+record the Tier-1 kernel each Tier-1 wrapper delegates to.
+
+Read off the FINAL chunks (post-dedup, post-slice-emission), never off the
+generator's own bookkeeping — the same discipline as `_tier1_emit_slices!` and
+`_assert_cstring_policy`, and for the same reason: a table built from intent
+agrees with the bug when intent and emission disagree.
+"""
+function _dispatch_facts(func_chunks)
+    tier = Dict{String,Symbol}()
+    kernels = Dict{String,String}()
+    current = ""
+    body = IOBuffer()
+
+    finish! = function ()
+        isempty(current) && return
+        b = String(take!(body))
+        # A Tier-1 wrapper delegates to its kernel; the kernel itself carries
+        # the llvmcall. Either shape means Tier 1 for the function in hand.
+        k = match(r"\b(_TIER1_\w+)\(", b)
+        t = if k !== nothing || occursin("Base.llvmcall(", b)
+            :tier1
+        elseif occursin("JITManager.invoke(", b) || occursin("THUNKS_LIBRARY_PATH", b)
+            :tier2
+        elseif occursin("ccall((:", b) || occursin("@ccall ", b)
+            :tier3
+        else
+            nothing
+        end
+        if t !== nothing
+            # One Julia name can carry methods on DIFFERENT tiers — a Tier-1
+            # primary plus a Tier-3 convenience overload is the common shape (48
+            # names across 5 Hub packages: cglm 35, miniaudio 5, llamacpp 3, lz4
+            # 3, imgui 2). A last-write-wins Dict answers confidently and
+            # WRONGLY for those, which is the failure this whole surface exists
+            # to remove. Record the disagreement instead.
+            prior = get(tier, current, nothing)
+            if prior === nothing
+                tier[current] = t
+                t === :tier1 && k !== nothing && (kernels[current] = String(k.captures[1]))
+            elseif prior !== t
+                tier[current] = :mixed
+                delete!(kernels, current)   # no single kernel can answer for it
+            elseif t === :tier1 && k !== nothing && !haskey(kernels, current)
+                kernels[current] = String(k.captures[1])
+            end
+        end
+        current = ""
+    end
+
+    for chunk in func_chunks, line in eachsplit(String(chunk), '\n')
+        m = match(r"^(?:@generated\s+)?function\s+([A-Za-z_][A-Za-z0-9_!]*)\s*\(", line)
+        if m !== nothing
+            finish!()
+            nm = String(m.captures[1])
+            # The kernels are an implementation detail the consumer should never
+            # have to name — that reach-in is exactly what this replaces.
+            current = startswith(nm, "_TIER1_") ? "" : nm
+            continue
+        end
+        isempty(current) || print(body, line, '\n')
+        line == "end" && finish!()
+    end
+    finish!()
+    return (tier, kernels)
+end
+
+"""
+    _dispatch_tier_chunk(tier, kernels) -> String
+
+Emit `DISPATCH_TIER` (what was emitted) and `dispatch_tier(f)` (what actually
+runs). Generated inline, because a wrapper cannot depend on RepliBuild at
+runtime.
+"""
+function _dispatch_tier_chunk(tier::Dict{String,Symbol}, kernels::Dict{String,String})::String
+    isempty(tier) && return ""
+    entries = join(("    :$(k) => :$(tier[k])," for k in sort(collect(keys(tier)))), "\n")
+    kentries = isempty(kernels) ? "" :
+        join(("    :$(k) => :$(kernels[k])," for k in sort(collect(keys(kernels)))), "\n")
+
+    return """
+    # ── Dispatch introspection ────────────────────────────────────────────────
+    # What the generator EMITTED for each function. Tier 1 is `Base.llvmcall` on
+    # a per-function bitcode slice, Tier 2 an MLIR thunk, Tier 3 a plain ccall.
+    const DISPATCH_TIER = Dict{Symbol,Symbol}(
+    $entries
+    )
+
+    # Tier-1 wrappers delegate to these `@generated` kernels. Private: ask
+    # `dispatch_tier` instead of naming one.
+    const _TIER1_KERNEL = Dict{Symbol,Symbol}(
+    $kentries
+    )
+
+    \"\"\"
+        dispatch_tier(f) -> Symbol
+
+    Which tier `f` **actually** dispatches through right now: `:tier1`
+    (`Base.llvmcall` on a bitcode slice), `:tier2` (MLIR thunk), `:tier3`
+    (`ccall`), `:unknown` for a name this module did not wrap, or `:mixed` when
+    this name carries methods on more than one tier — typically a Tier-1 primary
+    plus a Tier-3 convenience overload, where no single answer is true. Ask
+    about a name that resolves to one method, or read the emitted source.
+
+    Differs from `DISPATCH_TIER[nameof(f)]`, which is what the generator emitted.
+    The two disagree exactly when a Tier-1 kernel demotes — a missing `slices/`
+    directory, an unresolvable declare, or generation inside a precompile worker
+    — and the demoted answer is the honest one, because that is the code that
+    will run. Accepts the function or its `Symbol`.
+
+    Answering for a Tier-1 function forces its kernel to generate — that is what
+    makes the answer real rather than declared, and it is also why this is **not
+    a read-only call**.
+
+    Returns `:deferred` during precompilation and refuses to probe. A Tier-1
+    kernel generating inside a precompile worker deliberately splices its `ccall`
+    body, so an answer taken there would describe the worker and not the session
+    that runs: `const T = dispatch_tier(:f)` at module scope would freeze
+    `:tier3` into the pkgimage for a function that re-generates to `llvmcall` on
+    load. **Ask at runtime**, in the session whose behaviour you care about.
+    \"\"\"
+    function dispatch_tier(f)
+        # OUTPUT MODE: refuse, do not probe. Two reasons, both measured.
+        # (1) The answer would be frozen and WRONG — a Tier-1 kernel generating
+        #     inside a precompile worker deliberately splices its ccall body, so
+        #     `const T = dispatch_tier(:f)` at module scope bakes :tier3 into the
+        #     pkgimage while the same function re-generates to llvmcall in the
+        #     next session. Verified with an observer/control package pair.
+        # (2) Probing FORCES that generation. This function looks read-only and
+        #     is not; making it inert here keeps an introspection call from
+        #     having any effect on the code that ships.
+        # `ccall` is syntax, not a binding — it cannot be shadowed and must not
+        # be qualified. Same spelling the Tier-1 kernels already use.
+        ccall(:jl_generating_output, Cint, ()) == 1 && return :deferred
+        # Every Base name here is qualified: this module's namespace belongs to
+        # the LIBRARY, which is free to export `get`, `string`, `methods`… (see
+        # _assert_base_calls_qualified — llama.cpp already takes `error`, `all`,
+        # `stat` and `symlink`).
+        name = f isa Symbol ? f : Base.nameof(f)
+        t = Base.get(DISPATCH_TIER, name, :unknown)
+        t === :tier1 || return t
+        kern = Base.get(_TIER1_KERNEL, name, nothing)
+        kern === nothing && return :tier1
+        fn = Base.getfield(@__MODULE__, kern)
+        ms = Base.collect(Base.methods(fn))
+        Base.isempty(ms) && return :tier1
+        ct = try
+            Base.code_typed(fn, Base.tuple_type_tail(ms[1].sig))
+        catch
+            return :tier1
+        end
+        return (!Base.isempty(ct) && Base.occursin("llvmcall", Base.string(ct))) ? :tier1 : :tier3
+    end
+
+    """
+end
+
+"""
+    _layout_chunk(dwarf_structs, emitted_names, sanitize) -> String
+
+Emit the byte sizes and member offsets the generator read from DWARF, for the
+types this module actually declares.
+
+Scoped to `emitted_names` on purpose: a struct the wrapper never declared is not
+something a caller can name, and llama.cpp's metadata carries 2864 of them
+(mostly libstdc++ internals).
+
+**`sanitize` must be the caller's OWN type-name sanitizer** — the one that
+produced the emitted struct names — not a re-implementation. The first version
+of this re-derived the spelling with a generic `[^A-Za-z0-9_] => "_"`, which
+differs from both generators on any templated or scoped name: they collapse
+`_+` and trim, so `ImChunkStream<ImGuiTableSettings>` emits as
+`ImChunkStream_ImGuiTableSettings` while the generic rule yields a trailing
+underscore. The mismatch failed the `emitted_names` gate and dropped the type
+SILENTLY — 100 of imgui's 262 declared structs, 29 of tinyxml2's 42, i.e.
+precisely the templated types whose size a caller cannot compute any other way.
+"""
+function _layout_chunk(dwarf_structs, emitted_names, sanitize)::String
+    _num(v) = v isa Integer ? Int(v) :
+        (let s = string(v); startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s) end)
+
+    sizes = String[]
+    offsets = String[]
+    for key in sort(collect(keys(dwarf_structs)))
+        info = dwarf_structs[key]
+        info isa AbstractDict || continue
+        name = String(sanitize(String(key)))
+        name in emitted_names || continue
+        bs = try _num(get(info, "byte_size", 0)) catch; 0 end
+        bs > 0 || continue
+        push!(sizes, "    :$(name) => $(bs),")
+
+        members = String[]
+        for m in get(info, "members", [])
+            m isa AbstractDict || continue
+            raw = String(get(m, "name", ""))
+            isempty(raw) && continue
+            # Member names come from DWARF and are NOT all Julia identifiers:
+            # a polymorphic class carries a synthesized `_vptr$Class`, and `$`
+            # in a `const` Dict literal is interpolation — `UndefVarError: $`
+            # at module load, taking the whole wrapper with it. (The existing
+            # `getproperty` branches emit the same raw name, but inside a
+            # function body, so it only bites the caller who asks for that
+            # field. This table is evaluated eagerly, so it must be clean.)
+            mn = _sanitize_type_name_for_layout(raw)
+            (isempty(mn) || !(isletter(mn[1]) || mn[1] == '_')) && continue
+            off = try _num(get(m, "offset", -1)) catch; -1 end
+            off < 0 && continue
+            push!(members, ":$(mn) => $(off)")
+        end
+        isempty(members) || push!(offsets, "    :$(name) => Dict{Symbol,Int}($(join(members, ", "))),")
+    end
+    isempty(sizes) && return ""
+
+    return """
+    # ── Layout facts (from DWARF, as emitted) ────────────────────────────────
+    # The sizes and offsets this module was generated from. Exposed because
+    # callers need them for the cases the type system cannot cover — stack
+    # space for an in-place constructor, and reading a member through an opaque
+    # pointer the API hands back as `Ptr{Cvoid}`. Previously every consumer
+    # re-parsed `compilation_metadata.json` to recover them.
+    const STRUCT_SIZES = Dict{Symbol,Int}(
+    $(join(sizes, "\n"))
+    )
+
+    const STRUCT_OFFSETS = Dict{Symbol,Dict{Symbol,Int}}(
+    $(join(offsets, "\n"))
+    )
+
+    \"\"\"
+        struct_size(name) -> Int
+
+    Byte size of a wrapped struct, as DWARF reported it. Throws for an unknown
+    name rather than returning 0, which would silently under-allocate.
+    \"\"\"
+    function struct_size(name)
+        s = Base.Symbol(name)
+        Base.haskey(STRUCT_SIZES, s) || Base.error(Base.string(
+            "struct_size: no layout for ", s, ". ",
+            Base.length(STRUCT_SIZES), " struct(s) known; see STRUCT_SIZES."))
+        return STRUCT_SIZES[s]
+    end
+
+    \"\"\"
+        member_offset(name, member) -> Int
+
+    Byte offset of `member` within a wrapped struct. For structs with named
+    Julia fields prefer `getproperty`; this is for reading through a raw pointer.
+    \"\"\"
+    function member_offset(name, member)
+        s = Base.Symbol(name); m = Base.Symbol(member)
+        Base.haskey(STRUCT_OFFSETS, s) || Base.error(Base.string(
+            "member_offset: no layout for ", s, "."))
+        ms = STRUCT_OFFSETS[s]
+        Base.haskey(ms, m) || Base.error(Base.string(
+            "member_offset: ", s, " has no member ", m, ". Members: ",
+            Base.join(Base.sort(Base.string.(Base.keys(ms))), ", ")))
+        return ms[m]
+    end
+
+    """
+end
+
+# Layout keys come from DWARF and carry C++ spellings; the emitted Julia type
+# name is what a caller can actually name, so the table is keyed on that.
+_sanitize_type_name_for_layout(s::AbstractString) =
+    replace(String(s), r"[^A-Za-z0-9_]" => "_")
 
 # =============================================================================
 # DUPLICATE-METHOD DEDUPLICATION (package-precompilation safety)

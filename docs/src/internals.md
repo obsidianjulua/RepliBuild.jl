@@ -4,6 +4,8 @@ RepliBuild compiles C/C++ with Clang, reads the DWARF debug metadata the compile
 
 This page is the technical reference for how that pipeline is assembled — the stages, the three dispatch tiers, and the modules behind each. It is aimed at contributors and advanced integrators, not everyday use.
 
+Tier 2 — the MLIR/JLCS marshalling layer — has its own page: [ABI Marshalling as Compiler IR](mlir.md) covers the dialect's types and ops, the SysV lowering, the thunk calling contract, source-level debugging, and the failure classes the design exists to make loud. This page describes where it sits; that one describes what it is.
+
 ## The pipeline
 
 Source becomes a loadable Julia module in seven stages, each owned by one module:
@@ -218,7 +220,7 @@ Transforms parsed DWARF metadata (`VtableInfo`) into MLIR source text in the JLC
 | Module | Source | Input | Output |
 |--------|--------|-------|--------|
 | `TypeUtils` | `src/IRGen/ir_gen/TypeUtils.jl` | C++ type string | MLIR type string (`f64`, `i32`, `!llvm.ptr`, etc.) |
-| `StructGen` | `src/IRGen/ir_gen/StructGen.jl` | struct metadata | Struct type aliases + registration IR; aligned-vs-packed LLVM struct type strings; packed structs nested by value in other struct bodies are inlined as byte-identical LLVM literals |
+| `StructGen` | `src/IRGen/ir_gen/StructGen.jl` | struct metadata | Struct type aliases + registration IR; aligned-vs-packed LLVM struct type strings; members laid out at their **DWARF offsets** with explicit padding and verified against a Julia mirror of LLVM's `abiSize`/`abiAlign`, degrading to a correctly-sized opaque region when they cannot be; packed structs nested by value in other struct bodies are inlined as byte-identical LLVM literals |
 | `FunctionGen` | `src/IRGen/ir_gen/FunctionGen.jl` | function or virtual method metadata | external `func.func private @mangled` decl + public `func.func @mangled_thunk` wrapper with `llvm.emit_c_interface`; scope-RAII temporaries for non-trivial by-value class params |
 | `ArrayViewGen` | `src/IRGen/ir_gen/ArrayViewGen.jl` | fixed-size primitive array members | Zero-copy get/set thunks through `jlcs.load/store_array_element` |
 | `STLContainerGen` | `src/IRGen/ir_gen/STLContainerGen.jl` | STL method metadata | Accessor thunks for `size()`, `data()`, etc. |
@@ -255,7 +257,7 @@ Each `SliceResult` also records the symbols the slice `declare`s, post-DCE and e
 
 **Source:** `src/Builder/ThunkBuilder.jl`
 
-AOT compilation path for Tier 2 thunks. When `aot_thunks = true` in `replibuild.toml`, this module drives the same `JLCSIRGenerator.generate_jlcs_ir()` used by the JIT path, lowers the result to LLVM IR via `MLIRNative.lower_to_llvm()`, writes the LLVM IR to disk, runs `llc` to produce an object file, and links the object file with the user's compiled library into a companion shared library named `<libname>_thunks.so`.
+AOT compilation path for Tier 2 thunks. When `aot_thunks = true` in `replibuild.toml`, this module drives the same `JLCSIRGenerator.generate_jlcs_ir()` used by the JIT path, lowers the result with `MLIRNative.lower_to_llvm()`, emits an object file through `MLIRNative.emit_object()`, and links it against the user's compiled library (`clang`/`clang++ -shared`, rpath'd to the library directory) into a companion shared library named `<libname>_thunks.so`. With `[link] enable_lto` on it additionally emits and assembles the thunks' own LTO bitcode. An AOT failure is a warning, not a build failure — the JIT path remains available.
 
 The Julia wrapper then `ccall`s into the AOT thunks rather than calling `JITManager.invoke`. There is no MLIR JIT at runtime — `libJLCS.so` is only needed at build time for the lowering step. After AOT compilation, the user can ship the wrapped library + thunks `.so` without bundling LLVM/MLIR runtime libraries.
 
@@ -263,19 +265,25 @@ The Julia wrapper then `ccall`s into the AOT thunks rather than calling `JITMana
 
 **Source:** `src/IRGen/MLIRNative.jl`
 
-Low-level `ccall` bindings to `libJLCS.so`, the compiled JLCS MLIR dialect shared library. Provides context management, module parsing, JIT engine creation, LLVM lowering, and symbol lookup. The JLCS dialect is the Tier-2 marshalling layer: TableGen-defined ops (`jlcs.ffe_call`/`try_call` for calls and exception routing, `jlcs.vcall` for virtual dispatch, `jlcs.marshal_arg`/`marshal_ret` and the `!jlcs.c_struct` type for packed-struct ABI, `jlcs.scope` for by-value class RAII) that lower to LLVM IR via `src/mlir/impl/JLCSPasses.cpp`. Building it (`cd src/mlir && ./build.sh`) is required only for the C++/Tier-2 bucket.
+Low-level `ccall` bindings to `libJLCS.so`, the compiled JLCS MLIR dialect shared library. Provides context management, module parsing, JIT engine creation, LLVM lowering, symbol lookup, and the object/IR emission used by the AOT path. Building the dialect (`cd src/mlir && ./build.sh`) is required only for the C++/Tier-2 bucket.
+
+Two behaviours here are load-bearing beyond plain FFI plumbing. `parse_module` names the parse buffer after a **content-hashed file it writes** under the library's `.debug/mlir/` — MLIR's parser stamps that name onto every op as a `FileLineColLoc`, and the lowering turns it into the emitted DWARF's `DIFile`, which is what makes a JIT'd thunk steppable in gdb. And `jit_source_path` falls back to a temp directory when `.debug` is unwritable (a read-only install), because losing co-location costs nothing while losing the source view costs the whole capability.
+
+The dialect itself — its two types, fourteen ops, lowering pass, and calling contract — is documented in [ABI Marshalling as Compiler IR](mlir.md).
 
 ## JITManager
 
 **Source:** `src/IRGen/JITManager.jl`
 
-Singleton runtime (`GLOBAL_JIT`) for Tier 2 function dispatch. Manages the MLIR context, JIT execution engine, and compiled symbol cache.
+Runtime for Tier 2 dispatch: **one MLIR execution engine per wrapped binary** (`LibraryEngine`), held in a process-wide `GLOBAL_JIT` behind a shared, lock-free thunk cache.
 
 ### Key design points
 
+- **Per-library engines.** `initialize_global_jit(binary_path)` is called from each generated module's `__init__` and creates (or reuses) the engine for *its* binary. Multiple wrappers coexist in one session — previously the first wrapper won and the second library's entire Tier 2 silently died, found while composing box2d with pugixml. A per-library initialization failure degrades only that library, and a missing-symbol error names every engine that was searched.
 - **Manifest-driven initialization:** `initialize_global_jit()` reads `thunk_manifest.json` — the thunks the wrapper actually dispatches to — so dead thunks are never generated. Any initialization failure (including the pre-flight rejection of untranslatable IR types in `libJLCS`) degrades the module to "Tier 2 disabled" with `ccall` wrappers intact, never a process crash.
+- **Symbol registration before lowering:** the engine is given the library and `libJLCS.so` as shared libraries, and the C++ runtime EH symbols (`__gxx_personality_v0`, `__cxa_begin_catch`, `__cxa_end_catch`) plus the `jlcs_*` exception helpers are registered explicitly, since JIT'd landing pads reference them by name.
 - **Lock-free hot path:** `_lookup_cached()` reads from an `@atomic` snapshot of the symbol dictionary with no locking. The cache is published copy-on-write — a fresh dict is built with the new entry and atomically swapped in. Readers always see a stable, immutable snapshot.
-- **Arity specialization:** `invoke` is `@generated`, emitting arity-specialized code for any argument count — stack-allocated `Ref`s and a fixed-size `Ptr{Cvoid}[]`, allocation-free at every arity. `String` arguments marshal as pointers to their bytes with the `String` GC-preserved across the call.
+- **Arity specialization:** `invoke` is `@generated`, emitting arity-specialized code for any argument count — stack-allocated `Ref`s and a fixed-size `Ptr{Cvoid}[]`, allocation-free at every arity. A thunk slot holds a pointer to the argument's *storage*, so `Ref(x)` is the right shape for an `isbits` `x`; the two kinds that are **already** an indirection — an `AbstractString`, and a `Base.Ref` that is not a `Ptr` (what a caller passes for a C++ `T const&` parameter) — are flattened to a raw pointer first and GC-preserved across the call. Both `invoke` methods share one `_arg_marshal_plan`, because two copies is how a fix to one silently misses the other.
 - **`@generated` return dispatch:** `_invoke_call` resolves at compile time whether the return type is a primitive (direct `ccall` return) or a struct (`sret` buffer allocation). An unresolved `Any` return fails loudly with the actual cause instead of corrupting memory.
 - **Exception propagation:** After every Tier 2 call, `_check_pending_exception()` polls the thread-local exception buffer set by `jlcs.try_call` lowering. If a C++ exception was caught during the call, a `CxxException` is thrown with the original `what()` message.
 
@@ -288,6 +296,24 @@ All Tier 2 functions use a unified `ciface` calling convention:
 | Scalar | `T ciface(void** args_ptr)` |
 | Struct | `void ciface(T* sret, void** args_ptr)` |
 | Void | `void ciface(void** args_ptr)` |
+
+## Debug
+
+**Source:** `src/Debug/Debug.jl`
+
+Static inspection of what the Tier-2 pipeline actually emitted, for a package
+this process never built. `thunks(pkg)` lists the thunk symbols;
+`mlir_body(pkg, symbol)` prints the generated dialect; `disassemble(pkg;
+symbol=…)` shells to `objdump -dS` so dialect ops and machine code interleave;
+`dwarf(pkg; section=…)` shows the address → MLIR-line table; `walk(pkg, symbol)`
+does the common combination in one call.
+
+The object file it disassembles only exists when the JIT's object cache was
+enabled, and MLIR requires that at engine-creation time — so it is read from
+`REPLIBUILD_JIT_OBJDUMP` **before the wrapper loads**, not passed as an argument.
+Nothing here links gdb or LLVM: it shells to `objdump` and `llvm-dwarfdump`.
+See [Debugging a thunk](mlir.md#9.-Debugging-a-thunk) for the live-process
+counterpart.
 
 ## BuildBridge
 

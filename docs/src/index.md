@@ -27,8 +27,10 @@ Functions are automatically routed to one of three calling tiers — `Base.llvmc
 
 Tier selection is automatic — the wrapper generator analyses each function signature against DWARF metadata and emits the appropriate calling convention.
 
+Tier 2 is the architectural centre of the project: RepliBuild expresses ABI marshalling as **first-class compiler IR** in a purpose-built MLIR dialect (JLCS), derived from the same DWARF that describes the types, lowered by a pass that models the x86-64 SysV ABI explicitly, and debuggable at source level in gdb. See [ABI Marshalling as Compiler IR](mlir.md) for the full treatment.
+
 !!! note "Current Tier 1 status"
-    Tier 1 runs on **per-function bitcode slices** — declarations-only modules holding one function body, with everything it reaches left as a `declare` bound to the `.so` at JIT time. Opt in per project with `[wrap.tier1] enable = true` (C only, default off); it is live at library scale (Lua: 208 functions on slices, zero fallbacks). The older `[link] enable_lto` payload embeds the **whole linked module** per call site and remains scale-limited — it can crash Julia's JIT on large libraries and duplicates file-local `static` state — so production configs keep `enable_lto = false`; C++ defaults to LTO off. The two knobs are independent. See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch) for details.
+    Tier 1 runs on **per-function bitcode slices** — declarations-only modules holding one function body, with everything it reaches left as a `declare` bound to the `.so` at JIT time. Opt in per project with `[wrap.tier1] enable = true` (C only, default off); it is live at library scale (Lua: 209 slices accepted, 190 emitted across 189 functions, the rest cleanly on `ccall`). The older `[link] enable_lto` payload embeds the **whole linked module** per call site and remains scale-limited — it can crash Julia's JIT on large libraries and duplicates file-local `static` state — so production configs keep `enable_lto = false`; C++ defaults to LTO off. The two knobs are independent. See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch) for details.
 
 ## Quick start
 
@@ -139,9 +141,9 @@ url  = "https://github.com/example/mylib"
 tag  = "v1.0.0"
 ```
 
-Hand-curated sections survive re-discovery: `discover(force=true)` preserves user-intent keys (`[types].templates`/`template_headers`, `[wrap].varargs`/`macros`/`shim_headers`/`cstring_owned`) instead of regenerating them empty.
+Hand-curated sections survive re-discovery: `discover(force=true)` preserves user-intent keys (`[types].templates`/`template_headers`, `[wrap].varargs`/`macros`/`shim_headers`/`cstring_owned`/`tier1`, `[link].promote_statics`) instead of regenerating them empty.
 
-See the [Configuration Reference](config.md) for all available options.
+Discovery writes what it can see. What it *cannot* infer — template instantiations, macros, vararg signatures, `char*` ownership, the flags upstream's build system supplied — you declare, and the [Configuration Reference](config.md) documents every key, every default, and [exactly what each class of library requires you to state](config.md#2.-What-discovery-cannot-know).
 
 ## System requirements
 
@@ -153,9 +155,10 @@ See the [Configuration Reference](config.md) for all available options.
 ## Documentation
 
 - **[Workflow](guide.md)** — `discover → build → wrap → use`, dependencies, LTO, AOT thunks, templates, the registry and Hub, ingest
-- **[Configuration](config.md)** — Complete `replibuild.toml` reference: every section, the wrapper quirks (`shim_headers`, `varargs`, `macros`, `cstring_owned`), and dependency handling
+- **[Configuration](config.md)** — The complete `replibuild.toml` reference: what discovery cannot know and you must declare, every section and key with its true default, what fails loudly vs. what is silently ignored, worked configs, and a symptom → key troubleshooting index
+- **[ABI Marshalling as Compiler IR](mlir.md)** — The JLCS MLIR dialect: why marshalling is compiled IR, the thunk contract, the op reference, the SysV lowering, source-level debugging, and the failure classes the design is built around
 - **[Using a Wrapper](using-wrappers.md)** — Building a precompiled Julia package on a generated wrapper: vendoring, the JIT lifecycle, C++ object lifetimes, and the C++-isms your layer encapsulates
 - **[API Reference](api.md)** — The public entry points
 - **[The Inheritance ABI](inheritance-abi.md)** — How MI and virtual inheritance become callable: upcast helpers, class-local vcall dispatch
-- **[Internals & Dispatch](internals.md)** — Pipeline, the three dispatch tiers, DWARF extraction, the JLCS dialect, caching
+- **[Internals & Dispatch](internals.md)** — Pipeline, the three dispatch tiers, DWARF extraction, module-by-module reference, caching
 - **[Release Notes](release-notes.md)** — Version history

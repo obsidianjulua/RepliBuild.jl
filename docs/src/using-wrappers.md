@@ -133,6 +133,52 @@ degrades features rather than crashing imports.
 thunks — around a second for a mid-sized C++ library. It happens once per
 process, in `__init__`, not per call.
 
+**Ask the wrapper which tier a function actually uses.** Every generated module
+carries its own dispatch table and an introspection function — deliberately
+*not* exported, so reach for them qualified:
+
+```julia
+Lua.dispatch_tier(Lua.lua_gettop)        # :tier1 | :tier2 | :tier3 | :unknown
+Lua.DISPATCH_TIER[:lua_gettop]           # what the generator emitted
+```
+
+The two differ exactly when a Tier-1 kernel demotes — a wrapper relocated
+without its `slices/` directory, or an unresolvable declare. `DISPATCH_TIER` is
+the emitted intent; `dispatch_tier` reads the code that will actually run and is
+the one to assert on in a test.
+
+Two answers are not tiers and both mean "don't build on this":
+
+- `:mixed` — the name carries methods on more than one tier (typically a Tier-1
+  primary plus a Tier-3 convenience overload), so no single answer is true.
+- `:deferred` — you asked during precompilation. **`dispatch_tier` is not a
+  read-only call**: probing forces the `@generated` kernel to generate, and a
+  kernel generating inside a precompile worker deliberately splices its `ccall`
+  body. An answer taken there would describe the worker, not the session that
+  runs, so `const T = M.dispatch_tier(:f)` at module scope is refused rather than
+  frozen wrong. Ask at runtime.
+
+**Layout facts travel with the wrapper too.** Sizes and member offsets come from
+the DWARF the module was generated from, which you need for the two cases the
+type system cannot cover — stack space for an in-place constructor, and reading
+a member through an opaque pointer the API hands back as `Ptr{Cvoid}`:
+
+```julia
+buf = zeros(UInt8, Box2d.struct_size(:b2BodyDef))     # in-place ctor space
+off = Imgui.member_offset(:ImGuiIO, :MousePos)        # poke through ImGui_GetIO()
+```
+
+Both are scoped to the types the module actually declares, and both throw a
+message naming the alternatives rather than returning a zero that would silently
+under-allocate.
+
+**When a Tier-2 call misbehaves, you can look at it.** The thunks your package
+dispatches to are written as MLIR to `<wrapper>/../.debug/mlir/` and carry DWARF
+pointing there, so `RepliBuild.Debug.walk(pkg, symbol)` prints the dialect and
+the emitted machine code for one thunk, and gdb will stop *inside* the generated
+MLIR by file and line. See
+[Debugging a thunk](mlir.md#9.-Debugging-a-thunk).
+
 ## Calling conventions your layer will use
 
 The generated docstrings state each function's argument types. The patterns

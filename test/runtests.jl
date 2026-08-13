@@ -168,6 +168,21 @@ include(joinpath(@__DIR__, "test_blob_setters.jl"))
 
 include(joinpath(@__DIR__, "test_export_hygiene.jl"))
 
+# ── char* return policy + the tier-independence guard (no toolchain) ─────────
+# The policy lived on the ccall path only, so the C++ MLIR-dispatch branch —
+# which skips that path entirely — handed back bare pointers and silently
+# discarded any [wrap.cstring_owned] deallocator. One derivation now, and a
+# guard on the write path so a tier cannot decide presentation again.
+
+include(joinpath(@__DIR__, "test_cstring_policy.jl"))
+
+# ── Dispatch + layout introspection (no toolchain) ───────────────────────────
+# Twelve Hub consumers hand-rolled `kernel_emits_llvmcall` against a private
+# kernel, and four more re-parsed compilation_metadata.json for sizes/offsets.
+# The wrapper emits both now; these pin the emitters and execute what they emit.
+
+include(joinpath(@__DIR__, "test_introspection.jl"))
+
 # ── Suite wiring guard (no toolchain required) ───────────────────────────────
 # A test file that no suite includes is a test that silently never runs. That
 # is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3

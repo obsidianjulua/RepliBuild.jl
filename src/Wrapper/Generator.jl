@@ -136,6 +136,7 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     _assert_wrapper_parses(wrapper_content, module_name)
     _assert_base_calls_qualified(wrapper_content, module_name)
     _assert_exports_defined(wrapper_content, module_name)
+    _assert_cstring_policy(wrapper_content, module_name)
 
     undefined_types = _undefined_ccall_types(wrapper_content)
     isempty(undefined_types) && return nothing
@@ -155,6 +156,91 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     ABI-identical, via _resolve_forward_ptr — not by widening the blocklist, \
     which suppresses declarations without suppressing uses and is what caused \
     this in the first place.
+    """)
+end
+
+# A foreign call whose RETURN type is Cstring, in any of the shapes the
+# generators emit: plain ccall, the AOT-thunk ccall, the variadic `@ccall`
+# semicolon form, JIT dispatch, and a Tier-1 sliced llvmcall.
+#
+# Every pattern is anchored on the RETURN position, and both anchors were
+# earned. `[wrap.cstring_owned]`'s own free call
+# (`ccall((:free, LIBRARY_PATH), Cvoid, (Cstring,), ptr)`) names Cstring in an
+# argument tuple; and a variadic overload taking a string
+# (`@ccall LIB.var"b2Log"(fmt::Cstring; va_1::Cstring)::Cvoid`) names it in an
+# argument ANNOTATION — an unanchored `::Cstring` flagged all four of box2d's
+# b2Log/b2Dump overloads, which return void.
+const _RAW_CSTRING_CALL = (
+    r"ccall\(\(:[^)]*\)\s*,\s*Cstring\b",          # ccall((:sym, LIB), Cstring, …)
+    r"@ccall\s.*\)::Cstring\s*$",                   # @ccall LIB.var"sym"(…;…)::Cstring
+    r"invoke\(\"[^\"]*\"\s*,\s*Cstring\b",          # JITManager.invoke("…", Cstring, …)
+    r"llvmcall\(\([^)]*\)\s*,\s*Cstring\b",         # Base.llvmcall((ir, "sym"), Cstring, …)
+)
+
+"""
+    _assert_cstring_policy(wrapper_content, module_name)
+
+Refuse to write a wrapper in which a `char*` return escapes as a bare `Cstring`.
+
+Every `char*`-returning function must be presented one of exactly two ways: the
+policy wrapper (`::Union{String,Nothing}` — NULL is a value, the buffer is
+copied, and a `[wrap.cstring_owned]` deallocator runs), or its raw `<name>_ptr`
+sibling, which is *named* for the fact that it hands back an unmanaged pointer.
+Anything else is the caller receiving a pointer they did not ask for, with no
+NULL check and no free.
+
+**This guard exists because the tier decided the presentation.** The C++
+generator's MLIR-dispatch branch `continue`s past the ccall path, and the
+`Cstring` policy lived only on that path — so 77 functions across five Hub
+packages (imgui 31, tinyxml2 22, pugixml 14, llamacpp 9, hello_world 1) returned
+a raw pointer with no `_ptr` sibling, and any `cstring_owned` declaration on one
+of them was **silently ignored**, which is the leak version of the same bug.
+Found 2026-08-12 from a user calling `hello_message()` and getting
+`Cstring(0x7fb608c37000)` back.
+
+Checks the emitted TEXT, like its siblings: the defect was a code path that
+never consulted the policy, so a guard built on the generator's own bookkeeping
+would have agreed with it. Negative-checkable — run it over any pre-fix C++
+wrapper and it names every offender.
+"""
+function _assert_cstring_policy(wrapper_content::AbstractString, module_name::AbstractString)
+    offenders = String[]
+    current = ""
+    policy_typed = false
+
+    for line in eachsplit(wrapper_content, '\n')
+        m = match(r"^function\s+([A-Za-z_][A-Za-z0-9_!]*)\s*\(", line)
+        if m !== nothing
+            current = String(m.captures[1])
+            # The annotation can only be on the signature line the generators
+            # emit; a `_ptr` sibling is exempt by name, which is the contract.
+            policy_typed = occursin("::Union{String,Nothing}", line) || endswith(current, "_ptr")
+            continue
+        end
+        isempty(current) && continue
+        line == "end" && (current = ""; continue)
+        policy_typed && continue
+        if any(p -> occursin(p, line), _RAW_CSTRING_CALL)
+            current in offenders || push!(offenders, current)
+        end
+    end
+
+    isempty(offenders) && return nothing
+
+    shown = join(("  " * f for f in first(offenders, 20)), "\n")
+    more = length(offenders) > 20 ? "\n  … and $(length(offenders) - 20) more" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(offenders)) function(s) return \
+    a raw `Cstring` without the char* return policy and without being a `_ptr` variant.
+
+    $shown$more
+
+    A char* return must be emitted through _cstring_wrapper_pair (Wrapper/Utils.jl), \
+    which produces the `::Union{String,Nothing}` wrapper AND the raw `<name>_ptr` \
+    sibling from one derivation. Reaching this state means an emission path built \
+    the call itself and skipped that helper — the dispatch tier decides how a \
+    function is CALLED, never how its result is presented. Note a bare Cstring also \
+    silently discards any `[wrap.cstring_owned]` deallocator declared for it.
     """)
 end
 

@@ -15,7 +15,9 @@ RepliBuild.discover()               # current directory
 RepliBuild.discover("path/to/project")
 ```
 
-Re-running discovery with `force=true` regenerates the config but **preserves hand-curated keys** that cannot be derived from source: `[types].templates`/`template_headers` and `[wrap].varargs`/`macros`/`shim_headers`/`cstring_owned`. A `preserved: …` line in the output reports what carried over.
+Re-running discovery with `force=true` regenerates the config but **preserves hand-curated keys** that cannot be derived from source: `[types].templates`/`template_headers`, `[wrap].varargs`/`macros`/`shim_headers`/`cstring_owned`/`tier1`, and `[link].promote_statics`. A `preserved: …` line in the output reports what carried over. Everything else — including `[compile] flags`, `include_dirs`, and `[dependencies]` — is regenerated from the scan, so keep a hand-written config under version control rather than relying on `force=true` to round-trip it.
+
+Discovery sees the *shape* of a source tree and nothing else. The information it cannot derive — template instantiations, macros, vararg signatures, `char*` ownership, the flags upstream's build system would have supplied — is enumerated in [What discovery cannot know](config.md#2.-What-discovery-cannot-know), which is the section to read before wrapping an unfamiliar library.
 
 ### 2. Building
 
@@ -205,13 +207,23 @@ Vararg wrappers lower as **true variadic calls** (the `@ccall` semicolon form), 
 
 ```toml
 [wrap.varargs]
-printf = [
-    ["const char*", "int"],
-    ["const char*", "double", "int"]
+lua_pushfstring = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cstring", "Cint"],
 ]
 ```
 
-RepliBuild generates a concrete Julia binding for each signature.
+RepliBuild generates a concrete Julia binding for each signature. Two rules that
+are easy to get backwards, both enforced with a hard error:
+
+- **List only the variadic arguments.** The fixed parameters (here `lua_State*`
+  and the `const char* fmt`) come from DWARF and are prepended for you.
+- **The names are Julia types, not C types** — `Cstring`, `Cint`, `Cdouble`,
+  `Ptr{X}`, … (the full allowed set is in the
+  [configuration reference](config.md#2.3-Variadic-functions)). This is the
+  opposite of `[wrap.macros]`, whose `ret`/`args` are C type strings pasted into
+  generated C.
 
 ### Macro Expansion
 
@@ -221,12 +233,15 @@ C/C++ preprocessor macros don't exist in compiled binaries or DWARF metadata. To
 [wrap]
 shim_headers = ["<stdio.h>"]
 
-[wrap.macros.MY_MATH_MACRO]
+[wrap.macros.MY_MATH_MACRO]     # function-like: `args` present → MY_MATH_MACRO(a, b)
 ret = "int"
 args = ["int", "float"]
+
+[wrap.macros.MY_CONSTANT]       # value macro: `args` ABSENT → the bare expression
+ret = "int"
 ```
 
-RepliBuild generates a C/C++ source file that wraps `MY_MATH_MACRO` inside a typed function and compiles it alongside your project. Shims are emitted with default symbol visibility (they survive `-fvisibility=hidden` builds), and a header-collision guard verifies each shim `#include` resolves inside your project/dependency tree rather than to a system-installed copy of the same header at a different version.
+RepliBuild generates a C/C++ source file that wraps `MY_MATH_MACRO` inside a typed function and compiles it alongside your project. **The presence of the `args` key is the switch**, not its contents — `args = []` means a zero-argument function-like macro (`MACRO()`), omitting `args` means a value macro (`MACRO`). Shims are emitted with default symbol visibility (they survive `-fvisibility=hidden` builds), and a header-collision guard verifies each shim `#include` resolves inside your project/dependency tree rather than to a system-installed copy of the same header at a different version.
 
 ## Zero-Cost LTO Dispatch
 
@@ -357,6 +372,18 @@ aot_thunks = true
 ```
 
 During `RepliBuild.build()`, the JLCS dialect thunks are generated and compiled into a companion `<name>_thunks.so` placed alongside the main library. The generated wrapper emits static `ccall` bindings against `THUNKS_LIBRARY_PATH` — no JIT startup, no MLIR runtime dependency after build. Requires `src/mlir/build/libJLCS.so` (`cd src/mlir && ./build.sh`).
+
+## Debugging a Tier-2 Call
+
+Generated MLIR thunks carry real DWARF pointing at the dialect source RepliBuild wrote to `<project>/.debug/mlir/`, so a thunk is debuggable at *source level* — gdb stops inside the emitted MLIR by file and line, and `disassemble /s` interleaves dialect ops with the machine code they became. There is also a static path that needs no live process:
+
+```julia
+D = RepliBuild.Debug
+D.thunks("test/vi_test")                            # what you can ask about
+D.walk("test/vi_test", "_ZNK5VBase3tagEv_thunk")    # MLIR + emitted asm, one call
+```
+
+Both are covered in [ABI Marshalling as Compiler IR](mlir.md#9.-Debugging-a-thunk), including the two gdb flags that are mandatory and fail silently without explanation.
 
 ## Running Tests
 

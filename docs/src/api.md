@@ -29,9 +29,12 @@ RepliBuild.wrap(toml)                            # DWARF + symbols → julia/<Mo
 `discover` accepts `build=true, wrap=true` to run the whole pipeline in one call.
 Re-running `discover(force=true)` regenerates the config but **preserves the
 hand-curated keys** that cannot be derived from source — `[types].templates` /
-`template_headers` and `[wrap].varargs` / `macros` / `shim_headers` /
-`cstring_owned` — so a forced re-scan never eats your intent. `build(clean=true)`
-forces a full rebuild past the cache.
+`template_headers`, `[wrap].varargs` / `macros` / `shim_headers` /
+`cstring_owned` / `tier1`, and `[link].promote_statics` — so a forced re-scan
+never eats your intent. Everything else is regenerated from the scan. See
+[what discovery cannot know](config.md#2.-What-discovery-cannot-know) for the
+information you are expected to supply by hand. `build(clean=true)` forces a
+full rebuild past the cache.
 
 ```@docs
 discover
@@ -106,3 +109,42 @@ dispatch tiers are available, with OS-specific install hints for anything missin
 ```@docs
 check_environment
 ```
+
+## What a generated wrapper exposes about itself
+
+Beyond the wrapped API, every generated module carries facts about its own
+generation. None of these are exported — reach for them qualified:
+
+| Name | What it answers |
+|---|---|
+| `dispatch_tier(f)` | Which tier `f` **actually** dispatches through now: `:tier1` / `:tier2` / `:tier3`, `:unknown` (not wrapped), `:mixed` (methods on several tiers), `:deferred` (asked during precompilation — ask at runtime) |
+| `DISPATCH_TIER` | `Symbol => Symbol` — the tier the generator **emitted** for each function |
+| `struct_size(name)` | Byte size of a wrapped struct, from DWARF |
+| `member_offset(name, member)` | Byte offset of a member within it |
+| `STRUCT_SIZES` / `STRUCT_OFFSETS` | The tables behind those two |
+| `TIER1_FUNCTIONS` / `TIER1_DECLARES` | C only: functions on a bitcode slice, and the symbols each slice declares |
+| `BUILD_ID` / `BUILD_TARGET` / `BUILD_GENERATOR` | Identity of the library and generator the wrapper came from |
+
+`dispatch_tier` and `DISPATCH_TIER` disagree exactly when a Tier-1 kernel demotes
+(missing `slices/`, unresolvable declare); the function reports what will
+actually run, the table what was intended. `dispatch_tier` forces the kernel to
+generate, so it is not read-only and refuses to answer during precompilation.
+
+## Debugging generated thunks
+
+`RepliBuild.Debug` inspects what the Tier-2 pipeline emitted for a package —
+including one this process never built — without running anything:
+
+```julia
+D = RepliBuild.Debug
+D.thunks(pkg)                       # thunk symbols available to ask about
+D.mlir_body(pkg, symbol)            # the generated dialect for one thunk
+D.disassemble(pkg; symbol = s)      # objdump -dS: ops interleaved with machine code
+D.dwarf(pkg; section = "line")      # the address → MLIR-line table
+D.walk(pkg, symbol)                 # the common combination, one call
+```
+
+The disassembly path needs `ENV["REPLIBUILD_JIT_OBJDUMP"] = "1"` set **before
+the wrapper loads**. The live-process counterpart — breaking inside the emitted
+MLIR under gdb — is documented in
+[Debugging a thunk](mlir.md#9.-Debugging-a-thunk).

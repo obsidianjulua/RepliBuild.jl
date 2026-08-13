@@ -115,7 +115,7 @@ Struct emission follows one rule — **exact or opaque, never approximate**. The
 
 ## The TOML is the interface
 
-`discover()` generates it; you edit it. All library-specific knowledge lives here — never in generator code:
+`discover()` generates it; you edit it. All library-specific knowledge lives here — never in generator code. Discovery sees the *shape* of a source tree and nothing else, so the things it cannot infer are things you state: template instantiations (an uninstantiated `std::vector<int>` generated no code, so it is not in the DWARF — **STL support means STL in the TOML**), macros, vararg signatures, `char*` ownership, and the flags upstream's build system would have supplied. The reference page enumerates all of them, per class of library, with the symptom you get for each omission.
 
 ```toml
 [project]
@@ -144,7 +144,7 @@ enable = true                       # C only → Base.llvmcall on per-function b
 [wrap.macros.CJSON_VERSION_MAJOR]   # value macro → CJSON_VERSION_MAJOR()
 ret = "int"
 
-[wrap.varargs]                      # typed overloads for variadic functions
+[wrap.varargs]                      # typed overloads: JULIA types, variadic args only
 # fmt_fn = [["Cint"], ["Cstring", "Cint"]]
 
 [wrap.cstring_owned]                # malloc'd char* returns: copy, then free via
@@ -160,14 +160,24 @@ enabled = true
 
 ## The JLCS MLIR dialect (Tier 2)
 
-MLIR's dialect ecosystem is almost entirely about compute lowering; RepliBuild uses it for something nobody else does — **ABI marshalling as first-class IR**. The JLCS dialect (TableGen-defined, `src/mlir/`) models C/C++ interop semantics directly: `!jlcs.c_struct` types with explicit offsets and packing, `jlcs.ffe_call` / `jlcs.try_call` (exception-safe invoke + landing pad), `jlcs.vcall` (vtable dispatch), constructor/destructor ops with region-based RAII scopes.
+A foreign call is a compilation problem, so RepliBuild compiles it. Where a binding generator would paste a C shim or interpret a signature at runtime, RepliBuild emits a small program in a purpose-built MLIR dialect, lowers it, and runs the result — **ABI marshalling as first-class IR**, which as far as this project knows nobody else does with MLIR.
+
+The JLCS dialect (TableGen-defined, `src/mlir/`) models C/C++ interop semantics directly: `!jlcs.c_struct` types carrying explicit field offsets and packing, `jlcs.ffe_call` / `jlcs.try_call` (exception-safe invoke + landing pad), `jlcs.vcall` (vtable dispatch that honors overrides), `jlcs.marshal_arg` / `marshal_ret` (Julia-aligned ↔ C-packed), and constructor/destructor ops inside region-based RAII scopes for Itanium's non-trivial by-value parameters.
 
 ```mlir
-jlcs.type_info "Vec3", !jlcs.c_struct<"Vec3", [f32, f32, f32], [0, 4, 8], packed = false>, "", ""
-%ret = jlcs.try_call %arg0 { callee = @_Z12might_throwi } : (i32) -> i32   // C++ exception → CxxException
+func.func @_ZNK5Base25get_bEv_thunk(%args_ptr: !llvm.ptr) -> i32
+    attributes { llvm.emit_c_interface } {
+  %arg_ptr_1 = llvm.getelementptr %args_ptr[%idx_1] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+  %val_ptr_1 = llvm.load %arg_ptr_1 : !llvm.ptr -> !llvm.ptr     // slot → storage
+  %val_1     = llvm.load %val_ptr_1 : !llvm.ptr -> !llvm.ptr     // storage → `this`
+  %ret_val   = "jlcs.vcall"(%val_1) { class_name = @Base2, slot = 2 : i64, … } : (!llvm.ptr) -> i32
+  return %ret_val : i32
+}
 ```
 
-Ops lower to LLVM IR and execute via MLIR JIT or ahead-of-time `_thunks.so`. Full op reference: [MLIR / JLCS docs](https://obsidianjulua.github.io/RepliBuild.jl/dev/mlir/).
+Four things fall out of choosing an IR over a shim: the struct offsets in the marshalling code and in the Julia wrapper are the *same DWARF numbers*, read once; the ops carry verifiers, so a malformed thunk fails at parse instead of at runtime; the x86-64 SysV rules live in one readable pass (`classifySysVStruct`) rather than being implied by a code generator; and because the emitted dialect is written to disk and the JIT registers DWARF pointing at it, **gdb stops inside the generated MLIR by file and line** — `disassemble /s` interleaves dialect ops with the machine code they became. Ops execute through a per-library MLIR JIT engine, or ahead-of-time in a companion `_thunks.so`.
+
+Full treatment — the thesis, the op reference, the lowering, source-level debugging, and the failure classes the design exists to make loud: [ABI Marshalling as Compiler IR](https://obsidianjulua.github.io/RepliBuild.jl/dev/mlir/).
 
 ## Requirements
 
@@ -180,9 +190,10 @@ Ops lower to LLVM IR and execute via MLIR JIT or ahead-of-time `_thunks.so`. Ful
 ## Scope and honest limits
 
 - **Single-target today:** ABI classification is x86-64 SysV (Linux). Win64/AAPCS are not modeled yet.
-- **Tier 1 runs on slices, and only for C.** `[wrap.tier1] enable` cuts a declarations-only module per function — one body, everything it reaches left as a `declare` bound to the `.so` at JIT time — so slice size tracks the function, not the library (`lua_gettop`: 15.8 MB → 2.8 KB). Live at scale on Lua: 208 functions on `llvmcall`, zero fallbacks. Default off, and C++ has no slicing path. The **older whole-module payload (`[link] enable_lto`) stays parked**: it embeds the entire linked module per call site, which is unusable at library scale and diverges on file-local `static` state between the embedded copy and the `.so`. Hub configs keep `enable_lto = false`. Perf at library scale is not yet characterized — the 3.3×/call figure is one spiked function, not a suite.
-- **C++ multiple inheritance** is not modeled (single inheritance is); virtual dispatch through secondary bases would need `this`-pointer adjustment.
-- The full ledger of known-unbuilt pieces lives in the repo and stays honest — see the changelog and docs.
+- **Tier 1 runs on slices, and only for C.** `[wrap.tier1] enable` cuts a declarations-only module per function — one body, everything it reaches left as a `declare` bound to the `.so` at JIT time — so slice size tracks the function, not the library (`lua_gettop`: 15.8 MB → 2.8 KB). Live at scale on Lua: 209 slices accepted, 190 emitted across 189 functions, the rest cleanly on `ccall`. Default off, and C++ has no slicing path. The **older whole-module payload (`[link] enable_lto`) stays parked**: it embeds the entire linked module per call site, which is unusable at library scale and diverges on file-local `static` state between the embedded copy and the `.so`. Hub configs keep `enable_lto = false`. Perf at library scale is not yet characterized — the 3.3×/call figure is one spiked function, not a suite.
+- **C++ inheritance is modeled, with two gates.** Non-virtual multiple inheritance and virtual inheritance both work — static `<Derived>_as_<Base>` upcasts, dynamic vtable-resident `<Derived>_as_<VBase>` upcasts, and class-local `jlcs.vcall` dispatch that honors overrides (`test/mi_test/` 38/38, `test/vi_test/` 33/33). Still direct-called by design: destructors (exact-class semantics for finalizers and RAII), and virtual methods with struct-shaped signatures, since the vcall lowering does no sret/packed coercion yet.
+- **Tier 2 needs a system LLVM/MLIR install.** It is the largest dependency in the project; C-only libraries never touch it.
+- The full ledger of known-unbuilt pieces lives in the repo and stays honest — see the changelog and [the boundaries section](https://obsidianjulua.github.io/RepliBuild.jl/dev/mlir/) of the MLIR page.
 
 ## Battle testing
 
@@ -197,8 +208,10 @@ Ops lower to LLVM IR and execute via MLIR JIT or ahead-of-time `_thunks.so`. Ful
 
 ## Documentation
 
-- [Why RepliBuild](https://obsidianjulua.github.io/RepliBuild.jl/dev/why-replibuild/) — DWARF as source of truth, the exact-or-opaque rule, design rationale
-- [User Guide](https://obsidianjulua.github.io/RepliBuild.jl/dev/guide/) · [Configuration Reference](https://obsidianjulua.github.io/RepliBuild.jl/dev/config/) · [Introspection Tools](https://obsidianjulua.github.io/RepliBuild.jl/dev/introspect/) · [MLIR / JLCS](https://obsidianjulua.github.io/RepliBuild.jl/dev/mlir/) · [Architecture](https://obsidianjulua.github.io/RepliBuild.jl/dev/architecture/)
+- [User Guide](https://obsidianjulua.github.io/RepliBuild.jl/dev/guide/) — `discover → build → wrap → use`, dependencies, templates, macros, varargs, AOT thunks, ingest
+- [Configuration Reference](https://obsidianjulua.github.io/RepliBuild.jl/dev/config/) — every `replibuild.toml` key with its true default, **what discovery cannot know and you must declare**, what fails loudly vs. what is silently ignored, and a symptom → key troubleshooting index
+- [ABI Marshalling as Compiler IR](https://obsidianjulua.github.io/RepliBuild.jl/dev/mlir/) — the JLCS dialect: why marshalling is compiled IR, the thunk contract, the op reference, the SysV lowering, debugging a thunk in gdb
+- [Using a Wrapper in Your Package](https://obsidianjulua.github.io/RepliBuild.jl/dev/using-wrappers/) · [The Inheritance ABI](https://obsidianjulua.github.io/RepliBuild.jl/dev/inheritance-abi/) · [Internals & Dispatch](https://obsidianjulua.github.io/RepliBuild.jl/dev/internals/) · [API Reference](https://obsidianjulua.github.io/RepliBuild.jl/dev/api/)
 - [CHANGELOG](CHANGELOG.md) — v3.0.0 is the first registered release since 2.5.7; the **"Breaking changes since v2.5.7"** section covers everything between
 
 ## License

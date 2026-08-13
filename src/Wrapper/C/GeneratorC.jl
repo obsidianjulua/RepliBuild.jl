@@ -3073,24 +3073,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # alongside for callers that need the pointer itself (lifetime
             # management, passing along, avoiding the copy).
             cstring_free_sym = get(config.wrap.cstring_owned, func_name, "")
-            func_def = """
-            $doc_comment
-            function $julia_name($param_sig)::Union{String,Nothing}
-            $conversion_code    ptr = ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
-            $(_cstring_policy_lines(cstring_free_sym))
-            end
-
-            \"\"\"
-                $(julia_name)_ptr($param_sig) -> Cstring
-
-            Raw-pointer variant of `$julia_name`: returns the C `char*` unchanged
-            (no copy, no NULL check$(isempty(cstring_free_sym) ? "" : ", NOT freed — caller owns the buffer")).
-            \"\"\"
-            function $(julia_name)_ptr($param_sig)::Cstring
-            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
-            end
-
-            """
+            _cs_call = "ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)"
+            func_def = _cstring_wrapper_pair(julia_name, param_sig,
+                "$conversion_code    ptr = $_cs_call",
+                "$conversion_code    return $_cs_call",
+                cstring_free_sym; doc_comment=doc_comment)
             push!(exports, "$(julia_name)_ptr")
         elseif !isempty(conversion_code)
             # Has parameter conversions
@@ -3489,10 +3476,19 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     _structs  = join(struct_chunks)
     _unions   = join(union_accessor_chunks)
     _funcs    = join(func_chunks)
+
+    # Derived from the FINAL chunks, like the slices and TIER1_FUNCTIONS above:
+    # what dispatches how, and the layout facts consumers were re-parsing out of
+    # compilation_metadata.json.
+    (_tiers, _kernels) = _dispatch_facts(func_chunks)
+    introspection = _dispatch_tier_chunk(_tiers, _kernels) *
+                    _layout_chunk(dwarf_structs, _defined_type_names(_enums * _structs), _sanitize_c_type_name)
+
     export_statement = _export_statement(all_exports,
-                                         _enums * _structs * _unions * tier1_registry * _funcs)
+                                         _enums * _structs * _unions * tier1_registry *
+                                         introspection * _funcs)
 
     return join([header, init_block, metadata_section, _enums, _structs, _unions,
-                 tier1_registry, export_statement, _funcs, footer])
+                 tier1_registry, introspection, export_statement, _funcs, footer])
 end
 

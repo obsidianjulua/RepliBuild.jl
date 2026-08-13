@@ -4,8 +4,10 @@ A reasoning guide to how RepliBuild makes C++ inheritance — multiple inheritan
 (MI) and virtual inheritance (VMI) — callable from Julia. This page teaches the
 *mental model* so you can read a generated wrapper and know what it's doing. For
 the dated, blow-by-blow record of how it was built, see the update notes:
-[MI + vcall](../updates/2026-07-17-multiple-inheritance-and-vcall.md) and
-[virtual inheritance](../updates/2026-07-17-virtual-inheritance.md).
+[MI + vcall](https://github.com/obsidianjulua/RepliBuild.jl/blob/main/docs/updates/2026-07-17-multiple-inheritance-and-vcall.md)
+and [virtual inheritance](https://github.com/obsidianjulua/RepliBuild.jl/blob/main/docs/updates/2026-07-17-virtual-inheritance.md).
+For the dialect these decisions are expressed in — `jlcs.vcall`, `jlcs.type_info`
+and their lowering — see [ABI Marshalling as Compiler IR](mlir.md).
 
 ## The one invariant
 
@@ -174,19 +176,25 @@ The whole integration contract, at a glance:
 
 ## What is deliberately not built
 
-So you don't chase these as bugs — they're unbuilt pieces, tracked in
-[TODO.md](https://github.com/obsidianjulua/RepliBuild.jl/blob/main/TODO.md):
+So you don't chase these as bugs — they're unbuilt pieces, tracked alongside the
+rest in [Boundaries](mlir.md#11.-Boundaries):
 
-- MEMORY-class (>16-byte, or misaligned) by-value struct **arguments** don't yet
-  match native stack-copy passing — nothing exercises the path (non-trivial
-  classes take the RAII pointer path first).
 - `vcall` dispatch for struct-shaped virtual signatures (see the gate above).
+- A dialect-level virtual-base upcast op, for IR that must do the adjustment
+  *inside* a thunk. Nothing needs one today — the caller-side dynamic upcast
+  above composes with class-local vcall coordinates, which is why virtual
+  inheritance needed zero dialect changes.
 - The struct ABI classifier is **x86-64 SysV only**; Win64 / AAPCS are not
   modeled.
 
+(MEMORY-class by-value struct **arguments** were on this list and are now built:
+they pass as an alloca'd caller-owned copy with `llvm.byval(T)` and explicit
+alignment, matching what clang emits. See
+[the lowering](mlir.md#The-SysV-classifier).)
+
 ## Where the executable truth lives
 
-- `test/mi_test/` — compiler-laid-out two-base fixture (31/31): override through a
+- `test/mi_test/` — compiler-laid-out two-base fixture (38/38): override through a
   secondary vtable, C++-handed base pointer, a pinned wrong-`this` canary.
 - `test/vi_test/` — the diamond (33/33): the same-helper 16-vs-32 canary, single
   shared copy across three paths, override dispatch through the vbase vtable.

@@ -2354,10 +2354,19 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 end
             end
 
+            # Advertise what the function actually returns. Every `char*` return
+            # is emitted through _cstring_wrapper_pair on BOTH dispatch paths, so
+            # the policy type is unconditional here — the raw pointer is reachable
+            # as `<name>_ptr`, which carries its own docstring. (The C generator
+            # has always done this; the C++ side did not, so all 33 of llamacpp's
+            # Union-returning functions advertised `Cstring`.)
+            doc_ret = String(return_type["julia_type"])
+            doc_ret == "Cstring" && (doc_ret = "Union{String,Nothing}")
+
             # Build the docstring
             doc_parts = """
             \"\"\"
-                $julia_name($param_sig) -> $(return_type["julia_type"])
+                $julia_name($param_sig) -> $doc_ret
 
             Wrapper for `$demangled`
 
@@ -2365,7 +2374,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             $(join(arg_docs, "\n"))
 
             # Returns
-            - `$(return_type["julia_type"])`"""
+            - `$doc_ret`"""
 
             # Add callback documentation if any
             if !isempty(callback_docs)
@@ -2441,6 +2450,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # Struct returns: invoke(name, RetType, args...)
             is_void_ret = jit_ret_type == "Cvoid" || jit_c_ret == "void"
 
+            # A `char*` return gets the same policy here as on the ccall path.
+            # The tier decides how the call is MADE; it does not get to decide
+            # how the result is presented (see _cstring_wrapper_pair).
+            is_cstring_ret = !is_void_ret && jit_ret_type == "Cstring"
+            cstring_free_sym = is_cstring_ret ?
+                get(config.wrap.cstring_owned, func_name, "") : ""
+
             if config.compile.aot_thunks
                 # The AOT compiled thunks expect a single argument: void** args
                 thunk_sym = ":_mlir_ciface_$(mangled)_thunk"
@@ -2467,14 +2483,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 elseif jit_ret_type in ("Int8","UInt8","Int16","UInt16","Int32","UInt32","Int64","UInt64",
                                         "Float32","Float64","Cint","Cuint","Clong","Culong","Clonglong","Culonglong","Cshort","Cushort","Csize_t","Cchar","Cuchar",
                                         "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring") || startswith(jit_ret_type, "Ptr{")
-                    # Scalar return directly
-                    invoke_call = "        if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_call *= "            ret = Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), $jit_ret_type, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
-                    invoke_call *= "        else\n"
-                    invoke_call *= "            ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
-                    invoke_call *= "        end\n"
-                    invoke_call *= "    end\n"
-                    invoke_call *= "    return ret"
+                    # Scalar return directly. The tail is split out so a Cstring
+                    # return can bind `ptr` instead of returning `ret` — the
+                    # policy wrapper below reuses the identical call body.
+                    invoke_core = "        if !isempty(THUNKS_LTO_IR)\n"
+                    invoke_core *= "            ret = Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), $jit_ret_type, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
+                    invoke_core *= "        else\n"
+                    invoke_core *= "            ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
+                    invoke_core *= "        end\n"
+                    invoke_core *= "    end\n"
+                    invoke_call = invoke_core * "    return ret"
                 else
                     # Struct return via sret pointer
                     # ret_buf is Ref{T} (GC-managed, ptr addrspace 10) but llvmcall
@@ -2493,14 +2511,22 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     invoke_call *= "    return ret_buf[]"
                 end
 
-                func_def = """
-                $doc_comment
-                function $julia_name($param_sig)
-                    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-                $ptr_setup
-                $invoke_call
+                if is_cstring_ret
+                    _aot_head = "    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)\n"
+                    func_def = _cstring_wrapper_pair(julia_name, param_sig,
+                        _aot_head * ptr_setup * invoke_core * "    ptr = ret",
+                        _aot_head * ptr_setup * invoke_call,
+                        cstring_free_sym; doc_comment=doc_comment)
+                else
+                    func_def = """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
+                    $ptr_setup
+                    $invoke_call
+                    end
+                    """
                 end
-                """
             else
                 if is_void_ret
                     invoke_call = if isempty(invoke_args)
@@ -2516,17 +2542,26 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end
                 end
 
-                func_def = """
-                $doc_comment
-                function $julia_name($param_sig)
-                    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-                    return $invoke_call
+                if is_cstring_ret
+                    _jit_head = "    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)\n"
+                    func_def = _cstring_wrapper_pair(julia_name, param_sig,
+                        _jit_head * "    ptr = " * invoke_call,
+                        _jit_head * "    return " * invoke_call,
+                        cstring_free_sym; doc_comment=doc_comment)
+                else
+                    func_def = """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
+                        return $invoke_call
+                    end
+                    """
                 end
-                """
             end
 
             push!(func_chunks, func_def)
             push!(exports, julia_name)
+            is_cstring_ret && push!(exports, "$(julia_name)_ptr")
             continue # Skip the rest of the loop (ccall generation)
         end
 
@@ -2737,26 +2772,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         elseif julia_return_type == "Cstring"
             # Cstring return: NULL → nothing, else copy to String; owned buffers
             # ([wrap.cstring_owned]) freed through the library's deallocator.
-            # Raw `_ptr` variant emitted alongside (same policy as the C generator).
+            # Raw `_ptr` variant emitted alongside. Shared with the MLIR-dispatch
+            # branch above and with the C generator — see _cstring_wrapper_pair.
             cstring_free_sym = get(config.wrap.cstring_owned, func_name, "")
-            func_def = """
-            $doc_comment
-            function $julia_name($param_sig)::Union{String,Nothing}
-            $conversion_code    ptr = ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
-            $(_cstring_policy_lines(cstring_free_sym))
-            end
-
-            \"\"\"
-                $(julia_name)_ptr($param_sig) -> Cstring
-
-            Raw-pointer variant of `$julia_name`: returns the C `char*` unchanged
-            (no copy, no NULL check$(isempty(cstring_free_sym) ? "" : ", NOT freed — caller owns the buffer")).
-            \"\"\"
-            function $(julia_name)_ptr($param_sig)::Cstring
-            $conversion_code    return ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)
-            end
-
-            """
+            _cs_call = "ccall((:$mangled, LIBRARY_PATH), Cstring, $ccall_types, $ccall_args)"
+            func_def = _cstring_wrapper_pair(julia_name, param_sig,
+                "$conversion_code    ptr = $_cs_call",
+                "$conversion_code    return $_cs_call",
+                cstring_free_sym; doc_comment=doc_comment)
             push!(exports, "$(julia_name)_ptr")
         elseif !isempty(conversion_code)
             # Has parameter conversions
@@ -3257,11 +3280,21 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     _enums   = join(enum_chunks)
     _structs = join(struct_chunks)
     _funcs   = join(func_chunks)
+
+    # Derived from the FINAL chunks: what dispatches how (C++ is Tier 2/3, so
+    # this is a lookup table with no kernels), and the layout facts consumers
+    # were re-parsing out of compilation_metadata.json.
+    (_tiers, _kernels) = _dispatch_facts(func_chunks)
+    introspection = _dispatch_tier_chunk(_tiers, _kernels) *
+                    _layout_chunk(dwarf_structs, _defined_type_names(_enums * _structs), _sanitize_cpp_type_name)
+
     export_statement = _export_statement(all_exports,
-                                         _enums * _structs * union_accessor_defs * _funcs)
+                                         _enums * _structs * union_accessor_defs *
+                                         introspection * _funcs)
 
     wrapper_content = join([header, init_block, metadata_section, _enums, _structs,
-                            union_accessor_defs, export_statement, _funcs, footer])
+                            union_accessor_defs, introspection, export_statement,
+                            _funcs, footer])
     return (wrapper_content, needed_function_thunks)
 end
 
