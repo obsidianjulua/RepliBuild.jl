@@ -150,6 +150,29 @@ using .MiTest
             MiTest.free_base2(pb)
         end
     end
+
+    # ── 5. Adjustor thunks are ABI artifacts, not API ───────────────────────
+    # `_ZThn16_*` exist so a Base2* entry point can subtract 16 and tail-jump
+    # to the Derived method. They carry no DWARF subprogram, so their inferred
+    # "class" is the demangler's phrase ("non-virtual thunk to Derived") — no
+    # aggregate is named that, so neither receiver gate synthesizes `this` and
+    # the wrapper used to emit a zero-argument function calling a method that
+    # needs `this` in rdi. The right path to an override is the vtable or an
+    # explicit upcast, both exercised above.
+    @testset "Adjustor thunks excluded from the API" begin
+        # The fixture must still PRODUCE thunks, or the rest is vacuous.
+        nm_out = read(`nm -g --defined-only $(joinpath(SCRIPT_DIR, "julia", "libmi_test.so"))`, String)
+        @test occursin("_ZThn16_", nm_out)
+
+        thunky(s) = startswith(s, "_ZTh") || startswith(s, "_ZTv") || startswith(s, "_ZTc")
+        fns = JSON.parsefile(joinpath(SCRIPT_DIR, "julia", "compilation_metadata.json"))["functions"]
+        @test !any(thunky(get(f, "mangled", "")) for f in fns)
+
+        wrapper_src = read(wrapper_path, String)
+        @test !occursin("_ZThn", wrapper_src)
+        @test !occursin("thunk to", wrapper_src)
+        @test !any(n -> occursin("thunk_to", String(n)), names(MiTest))
+    end
 end
 
 println("MI_VERIFY_DONE")

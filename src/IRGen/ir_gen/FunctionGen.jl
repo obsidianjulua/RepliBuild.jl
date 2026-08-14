@@ -48,12 +48,69 @@ check: this gate can only over-admit relative to it, never wrongly deny a real
 method its receiver (the failure that direction is silent argument shifting).
 """
 function _has_receiver(func, structs)::Bool
+    # A constructor or destructor ALWAYS has a receiver — that is a fact about
+    # C++, not an inference from the aggregate table, so it is checked FIRST and
+    # independently. It matters because the table is not a complete list of the
+    # library's classes: a .cpp-local polymorphic class gets no type DIE, so
+    # box2d's internal contact subclasses (`b2CircleContact` and six siblings)
+    # are absent from it and their destructors were emitted as ZERO-ARGUMENT
+    # wrappers — the same shape as the adjustor-thunk bug, found the same day
+    # (2026-08-13) by rebuilding box2d for the first time since Jul 17.
+    _is_ctor_or_dtor(func) && return true
     cls = String(get(func, "class", ""))
     isempty(cls) && return false
     for cand in _scope_suffixes(cls)
         _fuzzy_struct_lookup(cand, structs) !== nothing && return true
     end
     return false
+end
+
+"""
+    _is_ctor_or_dtor(func) -> Bool
+
+True when `func` is a constructor or destructor, from the demangled `class` and
+`name` metadata alone.
+
+**This predicate is duplicated in `GeneratorCpp.jl` and the two copies MUST
+agree** — they decide the same argument array from opposite ends of the
+pipeline, which is the `ffe_call`/`try_call` hazard shape. The duplication is
+deliberate (the generators are isolated on purpose); the protection is
+`test_symbol_hygiene.jl` §"Both receiver gates agree", which drives BOTH gates
+over every Hub package's metadata and fails on any disagreement.
+
+Tests, and why each is safe in the dangerous direction (a false positive
+synthesizes `this` for a free function and shifts every argument):
+
+  * **Destructor** — the name begins with `~`. Nothing else in C++ does. This is
+    the same test `GeneratorCpp.jl`'s deleter scan and `_collect_class_raii`
+    already use, so all readers of this metadata agree.
+  * **Constructor** — the name equals the class's own bare name. A member
+    function may not share its class's name; that IS the constructor, so there
+    is no false positive to have.
+
+Template arguments are stripped from the class before comparing, because the
+demangler prints `Box<int>::Box()` — name `Box`, class `Box<int>`.
+"""
+function _is_ctor_or_dtor(func)::Bool
+    cls   = String(get(func, "class", ""))
+    fname = String(get(func, "name", ""))
+    (isempty(cls) || isempty(fname)) && return false
+    startswith(fname, "~") && return true
+    return fname == _bare_type_name(cls)
+end
+
+"""
+    _bare_type_name(cls) -> String
+
+The innermost `::` component of a scope with template arguments removed:
+`std::vector<int, std::allocator<int> >` → `vector`, `pugi::xml_document` →
+`xml_document`. Splitting is angle-bracket aware (via [`_scope_suffixes`]), so
+a separator inside `<>` is not a cut point.
+"""
+function _bare_type_name(cls::AbstractString)::String
+    inner = last(_scope_suffixes(cls))
+    i = findfirst('<', inner)
+    return String(strip(i === nothing ? inner : inner[1:prevind(inner, i)]))
 end
 
 """

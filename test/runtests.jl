@@ -183,6 +183,14 @@ include(joinpath(@__DIR__, "test_cstring_policy.jl"))
 
 include(joinpath(@__DIR__, "test_introspection.jl"))
 
+# ── Symbol hygiene (no toolchain) ────────────────────────────────────────────
+# Itanium thunk symbols (`_ZTh`/`_ZTv`/`_ZTc`) have no DWARF subprogram, so
+# their "class" is inferred as the demangler's phrase ("non-virtual thunk to
+# Derived") and neither receiver gate gives them `this`. They shipped as
+# exported zero-argument wrappers that SIGSEGV'd on call (2026-08-13).
+
+include(joinpath(@__DIR__, "test_symbol_hygiene.jl"))
+
 # ── Suite wiring guard (no toolchain required) ───────────────────────────────
 # A test file that no suite includes is a test that silently never runs. That
 # is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3

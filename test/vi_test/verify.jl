@@ -125,6 +125,33 @@ using .ViTest
             ViTest.free_diamond(pd)
         end
     end
+
+    # ── Adjustor/virtual thunks are ABI artifacts, not API ──────────────────
+    # The diamond produces both forms: `_ZThn16_*` (fixed subtraction) and
+    # `_ZTv0_n24_*` (vcall offset read THROUGH the vptr). Neither carries a
+    # DWARF subprogram, so the inferred "class" is the demangler's phrase
+    # ("virtual thunk to Diamond") and no receiver gate gives them `this`.
+    # `ViTest.virtual_thunk_to_Diamond_tag()` was an exported, documented,
+    # zero-argument function that SIGSEGV'd on call — the virtual form
+    # dereferences the garbage `this` twice before it even reaches the callee.
+    # Correct paths to an override are the vtable and Diamond_as_Right, both
+    # exercised above.
+    @testset "Adjustor thunks excluded from the API" begin
+        # The fixture must still PRODUCE both forms, or the rest is vacuous.
+        nm_out = read(`nm -g --defined-only $(joinpath(SCRIPT_DIR, "julia", "libvi_test.so"))`, String)
+        @test occursin("_ZThn16_", nm_out)
+        @test occursin("_ZTv0_n", nm_out)
+
+        thunky(s) = startswith(s, "_ZTh") || startswith(s, "_ZTv") || startswith(s, "_ZTc")
+        fns = JSON.parsefile(joinpath(SCRIPT_DIR, "julia", "compilation_metadata.json"))["functions"]
+        @test !any(thunky(get(f, "mangled", "")) for f in fns)
+
+        wrapper_src = read(wrapper_path, String)
+        @test !occursin("_ZThn", wrapper_src)
+        @test !occursin("_ZTv0_", wrapper_src)
+        @test !occursin("thunk to", wrapper_src)
+        @test !any(n -> occursin("thunk_to", String(n)), names(ViTest))
+    end
 end
 
 println("VI_VERIFY_DONE")
