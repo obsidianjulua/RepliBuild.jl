@@ -334,10 +334,22 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 end
             end
 
-            idx = i - 1
-            println(io, "  %idx_$(i) = arith.constant $(idx) : i64")
-            println(io, "  %arg_ptr_$(i) = llvm.getelementptr %args_ptr[%idx_$(i)] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr")
-            println(io, "  %val_ptr_$(i) = llvm.load %arg_ptr_$(i) : !llvm.ptr -> !llvm.ptr")
+            # Argument slot read. The ciface convention hands the thunk a
+            # `void**`, so slot i-1 is a field at byte offset 8*(i-1) — which
+            # is what jlcs.get_field says, in one op, instead of a constant
+            # plus a pointer-scaled GEP plus a load. Same address arithmetic:
+            # `getelementptr ptr, ptr %args, i64 N` and
+            # `getelementptr i8, ptr %args, i64 8N` compute the same address,
+            # and the emitted machine code is instruction-identical (proven
+            # per-shape in test_jlcs_producers.jl §E).
+            #
+            # This is the op stating the convention that CLAUDE.md records as
+            # having cost a debugging session: the result is the address of
+            # the argument's STORAGE, so scalars and pointers both need the
+            # second load below. The .mlir is the debugger's source file, so
+            # what is written here is what gdb shows at the breakpoint.
+            slot_off = 8 * (i - 1)
+            println(io, "  %val_ptr_$(i) = \"jlcs.get_field\"(%args_ptr) {fieldOffset = $(slot_off) : i64} : (!llvm.ptr) -> !llvm.ptr")
 
             if !isnothing(raii_specs[i])
                 # Non-trivial by-value param: the temporary is copy-constructed
@@ -394,6 +406,31 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             use_try_call && (vcall_attrs *= ", may_throw")
         end
 
+        # Destructor thunks: jlcs.dtor_call encodes exactly this shape — one
+        # object pointer in, void out — so the ABI coercion ffe_call/try_call
+        # carry has nothing to do, and the op states in the IR what the symbol
+        # name only implies. Destructor-ness is tested the same way both other
+        # readers of this metadata test it (`~` in the demangled name,
+        # GeneratorCpp.jl:125, JLCSIRGenerator._collect_class_raii).
+        #
+        # The ARITY GATE IS LOAD-BEARING, not defensive: under Itanium a
+        # base-object destructor (D2) of a class with virtual bases takes a
+        # second VTT argument — vi_test has three (`_ZN4LeftD2Ev(this, vtt)`)
+        # — and dtor_call has no operand to carry it. Those keep the
+        # ffe_call/try_call path; emitting dtor_call for them would drop the
+        # VTT silently. Same reason the gate is on the FINAL call_args, after
+        # `this` synthesis, rather than on the DWARF parameter list.
+        #
+        # may_throw comes from the same `may_throw && !is_noexcept` rule that
+        # picks try_call over ffe_call, so a thunk moving onto this op keeps
+        # the landing pad it had. (DWARF marks none of these noexcept, so in
+        # practice C++ destructor thunks land on the EH path.)
+        is_destructor = occursin("~", String(get(func, "demangled", "")))
+        use_dtor_call = is_destructor && !has_raii && !use_vcall &&
+                        func_ret == "" && length(call_args) == 1 &&
+                        length(arg_types) == 1 && arg_types[1] == "!llvm.ptr"
+        dtor_attrs = use_try_call ? " { may_throw }" : ""
+
         # Call using jlcs.ffe_call or jlcs.try_call (via Dialect)
         if has_raii
             # Scope-RAII: copy-construct temporaries, call inside the scope,
@@ -441,6 +478,8 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
              # Void return
              if use_vcall
                  println(io, "  \"jlcs.vcall\"($(join(call_args, ", "))) { $(vcall_attrs) } : ($(join(arg_types, ", "))) -> ()")
+             elseif use_dtor_call
+                 println(io, "  jlcs.dtor_call @$(mangled)($(call_args[1]))$(dtor_attrs) : (!llvm.ptr) -> ()")
              else
                  println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
              end

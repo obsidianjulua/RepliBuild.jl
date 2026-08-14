@@ -59,13 +59,11 @@ at the array member (byte offset `member_off`), dims=[n], strides=[1], rank=1.
 function _emit_view_prologue(member_off::Int, n::Int)::String
     io = IOBuffer()
     println(io, "  %one = llvm.mlir.constant(1 : i64) : i64")
-    println(io, "  %i0 = arith.constant 0 : i64")
-    println(io, "  %oslot = llvm.getelementptr %args_ptr[%i0] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr")
-    println(io, "  %optr = llvm.load %oslot : !llvm.ptr -> !llvm.ptr")
+    # Argument slots are fields of the ciface `void**` at byte offset 8*slot —
+    # same op, same reasoning as the FunctionGen prologue.
+    println(io, "  %optr = \"jlcs.get_field\"(%args_ptr) {fieldOffset = 0 : i64} : (!llvm.ptr) -> !llvm.ptr")
     println(io, "  %obj = llvm.load %optr : !llvm.ptr -> !llvm.ptr")
-    println(io, "  %i1 = arith.constant 1 : i64")
-    println(io, "  %islot = llvm.getelementptr %args_ptr[%i1] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr")
-    println(io, "  %iptr = llvm.load %islot : !llvm.ptr -> !llvm.ptr")
+    println(io, "  %iptr = \"jlcs.get_field\"(%args_ptr) {fieldOffset = 8 : i64} : (!llvm.ptr) -> !llvm.ptr")
     println(io, "  %idx64 = llvm.load %iptr : !llvm.ptr -> i64")
     println(io, "  %index = arith.index_cast %idx64 : i64 to index")
     # Data pointer: the array member inside the caller's struct (zero-copy)
@@ -76,15 +74,18 @@ function _emit_view_prologue(member_off::Int, n::Int)::String
     println(io, "  llvm.store %dimval, %dims : i64, !llvm.ptr")
     println(io, "  %strides = llvm.alloca %one x i64 : (i64) -> !llvm.ptr")
     println(io, "  llvm.store %one, %strides : i64, !llvm.ptr")
-    # ArrayView descriptor: data@0, dims@8, strides@16, rank@24
+    # ArrayView descriptor, one jlcs.set_field per field. This is the producer
+    # side of a layout the CONSUMER already reads in exactly these terms: the
+    # load/store_array_element lowering pulls data with getStructField(view, 0)
+    # and strides with getStructField(view, 16). Writing it as a GEP chain here
+    # meant the descriptor's layout was stated twice, in two notations, with
+    # nothing tying them together — the offsets below and the offsets in
+    # JLCSPasses.cpp have to agree, and now they at least agree in form.
     println(io, "  %view = llvm.alloca %one x !llvm.struct<(ptr, ptr, ptr, i64)> : (i64) -> !llvm.ptr")
-    println(io, "  llvm.store %data, %view : !llvm.ptr, !llvm.ptr")
-    println(io, "  %dimsfield = llvm.getelementptr %view[8] : (!llvm.ptr) -> !llvm.ptr, i8")
-    println(io, "  llvm.store %dims, %dimsfield : !llvm.ptr, !llvm.ptr")
-    println(io, "  %stridesfield = llvm.getelementptr %view[16] : (!llvm.ptr) -> !llvm.ptr, i8")
-    println(io, "  llvm.store %strides, %stridesfield : !llvm.ptr, !llvm.ptr")
-    println(io, "  %rankfield = llvm.getelementptr %view[24] : (!llvm.ptr) -> !llvm.ptr, i8")
-    println(io, "  llvm.store %one, %rankfield : i64, !llvm.ptr")
+    println(io, "  \"jlcs.set_field\"(%view, %data) {fieldOffset = 0 : i64} : (!llvm.ptr, !llvm.ptr) -> ()")
+    println(io, "  \"jlcs.set_field\"(%view, %dims) {fieldOffset = 8 : i64} : (!llvm.ptr, !llvm.ptr) -> ()")
+    println(io, "  \"jlcs.set_field\"(%view, %strides) {fieldOffset = 16 : i64} : (!llvm.ptr, !llvm.ptr) -> ()")
+    println(io, "  \"jlcs.set_field\"(%view, %one) {fieldOffset = 24 : i64} : (!llvm.ptr, i64) -> ()")
     return String(take!(io))
 end
 
@@ -164,9 +165,7 @@ function generate_array_view_thunks(structs; needed_symbols=nothing)::String
 
             println(io, "func.func @$(base)_set_thunk(%args_ptr: !llvm.ptr) attributes { llvm.emit_c_interface } {")
             print(io, _emit_view_prologue(off, n))
-            println(io, "  %vidx = arith.constant 2 : i64")
-            println(io, "  %vslot = llvm.getelementptr %args_ptr[%vidx] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr")
-            println(io, "  %vptr = llvm.load %vslot : !llvm.ptr -> !llvm.ptr")
+            println(io, "  %vptr = \"jlcs.get_field\"(%args_ptr) {fieldOffset = 16 : i64} : (!llvm.ptr) -> !llvm.ptr")
             println(io, "  %value = llvm.load %vptr : !llvm.ptr -> $(elt)")
             println(io, "  \"jlcs.store_array_element\"(%value, %view, %index) : ($(elt), !llvm.ptr, index) -> ()")
             println(io, "  return")

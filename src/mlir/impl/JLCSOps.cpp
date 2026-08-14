@@ -5,6 +5,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpImplementation.h"
@@ -176,6 +177,51 @@ LogicalResult TypeInfoOp::verify() {
             return emitOpError() << "vbaseVtableOffsets entries must be "
                                  << "integer attributes, got " << attr;
     return success();
+}
+
+// GetFieldOp / SetFieldOp / DestructorCallOp gained verifiers when they gained
+// producers (2026-08-13). All three lowerings take a pointer operand on faith:
+// get/set_field GEP it as an i8* base, dtor_call passes it as the `this`
+// argument. A non-pointer operand there is accepted by ODS (`AnyType`) and then
+// fails inside LLVM translation with a diagnostic that names neither the op nor
+// the producer that built it.
+
+static LogicalResult verifyPtrOperand(Operation *op, Value v, StringRef what) {
+    if (!isa<LLVM::LLVMPointerType>(v.getType()))
+        return op->emitOpError()
+            << what << " must be an !llvm.ptr — the lowering uses it as a "
+            << "memory base address, so a struct passed by value here cannot "
+            << "work; got " << v.getType();
+    return success();
+}
+
+// A struct field never sits at a negative offset from the struct's own base.
+// (Vtable reads DO address backwards from the address point — that is a
+// different base and a different convention, and it is not what this op
+// models: the vcall lowering reaches its vptr through the getStructField
+// helper directly, not through jlcs.get_field.)
+static LogicalResult verifyFieldOffset(Operation *op, int64_t off) {
+    if (off < 0)
+        return op->emitOpError()
+            << "fieldOffset must be non-negative, got " << off
+            << "; this op addresses forward from a record base";
+    return success();
+}
+
+LogicalResult GetFieldOp::verify() {
+    if (failed(verifyFieldOffset(getOperation(), getFieldOffset())))
+        return failure();
+    return verifyPtrOperand(getOperation(), getStructValue(), "structValue");
+}
+
+LogicalResult SetFieldOp::verify() {
+    if (failed(verifyFieldOffset(getOperation(), getFieldOffset())))
+        return failure();
+    return verifyPtrOperand(getOperation(), getStructValue(), "structValue");
+}
+
+LogicalResult DestructorCallOp::verify() {
+    return verifyPtrOperand(getOperation(), getObjPtr(), "obj_ptr");
 }
 
 LogicalResult MarshalArgOp::verify() {

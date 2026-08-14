@@ -1128,10 +1128,81 @@ struct DestructorCallOpLowering : public ConversionPattern {
         auto calleeAttr = dtorOp.getCalleeAttr();
         Value objPtr = adaptor.getObjPtr();
 
-        // Direct call to the destructor symbol — void return, single arg
-        LLVM::CallOp::create(rewriter, 
-            loc, TypeRange(), calleeAttr.getValue(), ValueRange({objPtr}));
+        if (!dtorOp.getMayThrow()) {
+            // Direct call to the destructor symbol — void return, single arg
+            LLVM::CallOp::create(rewriter,
+                loc, TypeRange(), calleeAttr.getValue(), ValueRange({objPtr}));
 
+            rewriter.eraseOp(op);
+            return success();
+        }
+
+        // --- may_throw: direct invoke + landing pad ----------------------
+        // Same sentinel-continue EH model as TryCallOpLowering and the vcall
+        // EH path, and simpler than both: a destructor has no result, so there
+        // is no sentinel slot to allocate and nothing to coerce. The producer
+        // sets may_throw under the same rule that would have picked try_call,
+        // so routing a destructor thunk through this op cannot silently drop
+        // the landing pad it used to get.
+        auto moduleOp = op->getParentOfType<ModuleOp>();
+        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+        auto voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
+        auto i32Type = rewriter.getI32Type();
+
+        getOrInsertLLVMFn(moduleOp, rewriter, "__gxx_personality_v0",
+            LLVM::LLVMFunctionType::get(i32Type, {}, true));
+        getOrInsertLLVMFn(moduleOp, rewriter, "__cxa_begin_catch",
+            LLVM::LLVMFunctionType::get(ptrType, {ptrType}, false));
+        getOrInsertLLVMFn(moduleOp, rewriter, "__cxa_end_catch",
+            LLVM::LLVMFunctionType::get(voidType, {}, false));
+        getOrInsertLLVMFn(moduleOp, rewriter, "jlcs_catch_current_exception",
+            LLVM::LLVMFunctionType::get(ptrType, {}, false));
+
+        if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
+            llvmFunc.setPersonalityAttr(
+                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+        } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
+            funcOp->setAttr("llvm.personality",
+                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+        }
+
+        Block* currentBlock = rewriter.getInsertionBlock();
+        auto* parentRegion = currentBlock->getParent();
+        Block* mergeBlock = rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+
+        Block* invokeOkBlock = new Block();
+        parentRegion->getBlocks().insertAfter(currentBlock->getIterator(), invokeOkBlock);
+        Block* catchBlock = new Block();
+        parentRegion->getBlocks().insertAfter(invokeOkBlock->getIterator(), catchBlock);
+
+        rewriter.setInsertionPointToEnd(currentBlock);
+        LLVM::InvokeOp::create(rewriter, loc,
+            /*resultTypes=*/TypeRange{},
+            calleeAttr,
+            ValueRange({objPtr}),
+            invokeOkBlock, /*normalDestOperands=*/ValueRange{},
+            catchBlock, /*unwindDestOperands=*/ValueRange{});
+
+        rewriter.setInsertionPointToEnd(invokeOkBlock);
+        LLVM::BrOp::create(rewriter, loc, ValueRange{}, mergeBlock);
+
+        rewriter.setInsertionPointToEnd(catchBlock);
+        auto lpStructType = LLVM::LLVMStructType::getLiteral(
+            rewriter.getContext(), {ptrType, i32Type}, false);
+        Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+        auto landingPad = LLVM::LandingpadOp::create(rewriter,
+            loc, lpStructType, /*cleanup=*/false, ValueRange{nullPtr});
+        Value exnPtr = LLVM::ExtractValueOp::create(rewriter, loc, ptrType,
+            landingPad, ArrayRef<int64_t>{0});
+        LLVM::CallOp::create(rewriter, loc, TypeRange{ptrType},
+            "__cxa_begin_catch", ValueRange{exnPtr});
+        LLVM::CallOp::create(rewriter, loc, TypeRange{ptrType},
+            "jlcs_catch_current_exception", ValueRange{});
+        LLVM::CallOp::create(rewriter, loc, TypeRange{},
+            "__cxa_end_catch", ValueRange{});
+        LLVM::BrOp::create(rewriter, loc, ValueRange{}, mergeBlock);
+
+        rewriter.setInsertionPointToStart(mergeBlock);
         rewriter.eraseOp(op);
         return success();
     }

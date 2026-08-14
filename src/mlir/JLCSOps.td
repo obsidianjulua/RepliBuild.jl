@@ -72,6 +72,17 @@ def TypeInfoOp : JLCS_Op<"type_info", [Pure, IsolatedFromAbove]> {
 // 2. Generic Field Access Op (Universal Getter)
 def GetFieldOp : JLCS_Op<"get_field", [MemoryEffects<[MemRead]>]> {
   let summary = "Generic operation to read a field from a C-compatible struct.";
+  let description = [{
+    Reads `*(T*)((i8*)structValue + fieldOffset)` — a byte-offset field read
+    against a record whose layout is already known to the producer.
+
+    Producers (`ir_gen/FunctionGen.jl`, `ir_gen/ArrayViewGen.jl`) use it for
+    the thunk argument array, which is exactly such a record: the ciface
+    convention hands the thunk a `void**`, so reading argument slot `i` is a
+    read at byte offset `8*i`. Lowering is a GEP + load, identical machine code
+    to the constant/GEP/load triple it replaces, with the offset stated as an
+    attribute rather than implied by a scaled index.
+  }];
 
   let arguments = (ins
     AnyType:$structValue, // The struct itself (a memory reference or value)
@@ -88,11 +99,25 @@ def GetFieldOp : JLCS_Op<"get_field", [MemoryEffects<[MemRead]>]> {
   let extraClassDeclaration = [{
     GetFieldOp(::mlir::Operation *op) : Op(op) {}
   }];
+
+  // The lowering GEPs structValue as an i8* base; a non-pointer operand or a
+  // negative offset is a producer bug that otherwise surfaces as a bad load.
+  let hasVerifier = 1;
 }
 
 // 3. Generic Field Mutate Op (Universal Setter)
 def SetFieldOp : JLCS_Op<"set_field", [MemoryEffects<[MemWrite]>]> {
   let summary = "Generic operation to write a field into a C-compatible struct.";
+  let description = [{
+    Writes `*(T*)((i8*)structValue + fieldOffset) = newValue` — the mirror of
+    `jlcs.get_field`.
+
+    The producer is `ir_gen/ArrayViewGen.jl`, which builds the `!jlcs.array_view`
+    descriptor (data@0, dims@8, strides@16, rank@24) with one `set_field` per
+    field. That makes the descriptor's layout stated in the same terms the
+    array-op lowering reads it back with (`getStructField` at 0 and 16), instead
+    of a GEP chain on one side and byte offsets on the other.
+  }];
 
   let arguments = (ins
     AnyType:$structValue,  // The struct memory reference
@@ -111,6 +136,9 @@ def SetFieldOp : JLCS_Op<"set_field", [MemoryEffects<[MemWrite]>]> {
   let extraClassDeclaration = [{
     SetFieldOp(::mlir::Operation *op) : Op(op) {}
   }];
+
+  // Same reasoning as GetFieldOp: the lowering GEPs structValue as an i8* base.
+  let hasVerifier = 1;
 }
 
 // ====================================================================
@@ -336,16 +364,36 @@ def DestructorCallOp : JLCS_Op<"dtor_call", [MemoryEffects<[MemRead, MemWrite]>]
     ```mlir
     jlcs.dtor_call @_ZN4BaseD1Ev(%ptr) : (!llvm.ptr) -> ()
     ```
+
+    The producer is `ir_gen/FunctionGen.jl`, which routes a destructor thunk
+    here instead of through `ffe_call`/`try_call`: a destructor is exactly the
+    single-pointer-argument void-return shape this op encodes, so the ABI
+    coercion those ops carry has nothing to do. `jlcs.scope` does NOT produce
+    these — it carries its destructors as a `dtors([...])` symbol list and its
+    own lowering emits the calls, because scope destruction happens at scope
+    *exit*, after the body region.
   }];
 
   let arguments = (ins
     FlatSymbolRefAttr:$callee,    // Mangled destructor symbol
-    AnyType:$obj_ptr              // Object pointer (this)
+    AnyType:$obj_ptr,             // Object pointer (this)
+    // When present, lower as invoke + landing pad rather than a plain call,
+    // with the same sentinel-continue EH model as jlcs.try_call. A destructor
+    // is implicitly noexcept in C++11+, so this is normally absent; the
+    // producer sets it under the same `may_throw && !is_noexcept` rule that
+    // picks try_call over ffe_call, so switching a thunk from try_call to
+    // dtor_call cannot silently drop its landing pad.
+    UnitAttr:$may_throw
   );
 
   let results = (outs);
 
   let assemblyFormat = "$callee `(` $obj_ptr `)` attr-dict `:` `(` type($obj_ptr) `)` `->` `(` `)`";
+
+  // The lowering passes obj_ptr straight to an llvm.call as the `this`
+  // argument; a non-pointer operand produces IR that fails the LLVM verifier
+  // deep inside translation rather than at parse.
+  let hasVerifier = 1;
 }
 
 // ====================================================================

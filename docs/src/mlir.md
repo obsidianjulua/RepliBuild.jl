@@ -275,8 +275,12 @@ generalization, and the lowering reads data and strides only.
 
 ## 6. The ops
 
-Fourteen ops. Liveness is tracked deliberately, because "defined in TableGen" and
-"something emits it" are different claims:
+Fourteen ops, **all fourteen with a producer** as of 2026-08-13. Liveness is
+tracked deliberately, because "defined in TableGen" and "something emits it" are
+different claims — and it is checked mechanically rather than asserted here, by
+`test_jlcs_invariants.jl` §E, which reads the mnemonics out of `JLCSOps.td`,
+greps `src/` for emission, and fails naming any op whose tier moved. That guard
+exists because this table was wrong for months (see below).
 
 | Op | Producer | Verifier | Role |
 |---|---|---|---|
@@ -288,19 +292,56 @@ Fourteen ops. Liveness is tracked deliberately, because "defined in TableGen" an
 | `jlcs.marshal_ret` | `FunctionGen` | — | C-packed struct value → Julia-aligned struct value |
 | `jlcs.scope` | `FunctionGen` | ✅ | RAII region; destructors fire in reverse at exit |
 | `jlcs.ctor_call` | `FunctionGen` | — | constructor on an object pointer |
-| `jlcs.dtor_call` | `FunctionGen` | — | destructor on an object pointer (exactly one operand) |
+| `jlcs.dtor_call` | `FunctionGen` | ✅ | destructor on an object pointer (exactly one operand) |
 | `jlcs.yield` | `FunctionGen` | — | `jlcs.scope` terminator |
 | `jlcs.load_array_element` | `ArrayViewGen` | — | strided read through an `!jlcs.array_view` |
 | `jlcs.store_array_element` | `ArrayViewGen` | — | strided write |
-| `jlcs.get_field` | **none** | — | generic struct field read by byte offset |
-| `jlcs.set_field` | **none** | — | generic struct field write by byte offset |
+| `jlcs.get_field` | `FunctionGen`, `ArrayViewGen` | ✅ | field read by byte offset |
+| `jlcs.set_field` | `ArrayViewGen` | ✅ | field write by byte offset |
 
-`get_field` / `set_field` are defined, lowered, and exercised **only by
-hand-written test IR** (`test_mlir_templates.jl` §3 and §10). Nothing under
-`src/` emits them: the producers address members with `llvm.getelementptr`
-directly. This is a claim about producers, not about coverage — the fixtures
-that drive real generated wrappers (`mi_test`, `vi_test`, `stl_test`) all reach
-the JIT through `FunctionGen`/`ArrayViewGen`.
+### How the last three got producers
+
+Until 2026-08-13 the bottom three rows read `none`, and one of them read `none`
+without saying so. `jlcs.dtor_call` was credited to `FunctionGen` here and in
+the internal devlog for months while nothing emitted it: the scope-RAII producer
+builds `jlcs.scope(...) dtors([@sym, ...])`, and it is the *scope's* lowering
+that emits those calls (as `LLVM::CallOp`, directly), so `DestructorCallOp` had
+a registered and unreachable conversion pattern. The pairing with `ctor_call` —
+which does have a producer — is what made the gap read as symmetry.
+
+- **`dtor_call`** — a destructor thunk is exactly this op's shape: one object
+  pointer in, void out. It used to go out as a generic `ffe_call`/`try_call`
+  with the full SysV coercion machinery attached to a signature that needs
+  none. The op gained a `may_throw` unit attribute (mirroring `vcall`'s) with
+  an invoke + landing-pad lowering, so a thunk moving onto it keeps the exact
+  EH semantics it had — DWARF marks no destructor `noexcept`, so in practice
+  C++ destructor thunks take the EH path.
+
+  The **arity gate is load-bearing**: under Itanium a base-object destructor
+  (`D2`) of a class with virtual bases takes a second VTT argument, and this op
+  has no operand to carry it. `vi_test` has three (`_ZN4LeftD2Ev(this, vtt)`).
+  Those keep the `ffe_call`/`try_call` path; converting them would drop the VTT
+  silently. The gate reads the *final* argument list, after `this` synthesis,
+  not the DWARF parameter list.
+
+- **`get_field` / `set_field`** — the thunk argument array is a record with a
+  fixed layout: the ciface convention hands the thunk a `void**`, so reading
+  argument slot `i` is a field read at byte offset `8i`. That is what both
+  producers now say, in one op, instead of a constant plus a pointer-scaled GEP
+  plus a load. `ArrayViewGen` additionally builds the `!jlcs.array_view`
+  descriptor with one `set_field` per field (data@0, dims@8, strides@16,
+  rank@24) — the same terms the array-op lowering reads it back in, which
+  previously was a GEP chain on the producer side and byte offsets on the
+  consumer side with nothing tying them together.
+
+This changes what the IR *says*, not what it *does*, and that is checked rather
+than asserted: every function of `mi_test`, `vi_test` and `stl_test` (188
+symbols) compiles to byte-identical machine code across the switch, and
+`test_jlcs_producers.jl` §G pins the per-shape equivalence directly. The
+motivation is that the `.mlir` is the debugger's source file (see *Debugging*
+below) — `jlcs.get_field ... {fieldOffset = 8}` is what gdb shows at the
+breakpoint, and the argument-slot convention it encodes is the one this
+project's notes record as having cost a debugging session.
 
 ### Metadata: `type_info`
 
@@ -627,8 +668,6 @@ not that marshalling be right, it is that wrong marshalling be *loud*.
 
 Deliberately unbuilt, so they are not chased as bugs:
 
-- **`get_field` / `set_field` have no producer.** Defined and lowered; only
-  hand-written test IR drives them.
 - **Array views are rank 1.** The producer's regex skips `T[N][M]`; the
   descriptor's dims/rank fields are populated but unread by the lowering, and
   the user-facing Julia accessors that would call these thunks are not emitted
@@ -636,9 +675,12 @@ Deliberately unbuilt, so they are not chased as bugs:
 - **`vcall` gates on scalar/pointer signatures.** Virtual methods returning a
   struct by value or taking a packed struct by value keep the direct-call path;
   closing this means giving the vcall lowering `try_call`'s coercion.
-- **Ten ops have no verifier** (`ffe_call`, `try_call`, `get_field`, `set_field`,
-  `load/store_array_element`, `ctor_call`, `dtor_call`, `yield`, `marshal_ret`).
-  No known crash paths, but hand-written IR gets no schema help.
+- **Seven ops have no verifier** (`ffe_call`, `try_call`,
+  `load/store_array_element`, `ctor_call`, `yield`, `marshal_ret`). No known
+  crash paths, but hand-written IR gets no schema help. `get_field`,
+  `set_field` and `dtor_call` gained theirs on 2026-08-13 with their producers
+  — all three lowerings take a pointer operand on faith, which ODS's `AnyType`
+  accepts and LLVM translation then rejects far from the mistake.
 - **The classifier is x86-64 SysV only.** The 16-byte MEMORY threshold, 64-bit
   pointers, and i64/f64 eightbytes are hardcoded. Win64 and AAPCS are not
   modeled.

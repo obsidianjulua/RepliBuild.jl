@@ -323,4 +323,61 @@ end
     end
 end
 
+# ── E. Producer liveness is DERIVED, not asserted ─────────────────────────────
+#
+# "Defined in TableGen" and "something emits it" are different claims, and the
+# second one rots. It did: after the scope-RAII producer landed, both
+# docs/src/mlir.md and CLAUDE.md credited `jlcs.dtor_call` to FunctionGen for
+# months while nothing under src/ emitted it — FunctionGen builds a
+# `jlcs.scope(...) dtors([...])` and the SCOPE's lowering emits the calls, so
+# DestructorCallOp had a registered, unreachable lowering pattern. Nothing
+# could catch that, because the producer table was prose.
+#
+# So compute it. Read the mnemonics out of JLCSOps.td, grep src/ for emission,
+# and compare against the expected split. Any producer added or lost fails this
+# and names the op — which is the point: the next person to move an op between
+# tiers is told to update the docs instead of discovering the drift later.
+@testset "E. producer liveness matches the recorded split" begin
+    td = read(joinpath(PROJECT, "src", "mlir", "JLCSOps.td"), String)
+    mnemonics = [m.captures[1] for m in eachmatch(r"JLCS_Op<\"([a-z_]+)\"", td)]
+    @test length(mnemonics) == 14
+
+    # Emission sites only: the producers build IR as TEXT, so a mnemonic is
+    # "produced" iff some .jl under src/ writes the string `jlcs.<mnemonic>`.
+    # src/mlir/** is the dialect's own C++/TableGen, not a producer.
+    jl_sources = String[]
+    for (root, _, files) in walkdir(joinpath(PROJECT, "src"))
+        occursin(joinpath("src", "mlir"), root) && continue
+        for f in files
+            endswith(f, ".jl") && push!(jl_sources, read(joinpath(root, f), String))
+        end
+    end
+    corpus = join(jl_sources, "\n")
+    produced = Set(m for m in mnemonics if occursin("jlcs.$m", corpus))
+
+    # dtor_call, get_field and set_field joined this set on 2026-08-13.
+    expected_produced = Set([
+        "type_info", "ffe_call", "try_call", "vcall", "marshal_arg",
+        "marshal_ret", "scope", "ctor_call", "dtor_call", "yield",
+        "load_array_element", "store_array_element", "get_field", "set_field",
+    ])
+    missing_now = sort(collect(setdiff(expected_produced, produced)))
+    extra_now = sort(collect(setdiff(produced, expected_produced)))
+    isempty(missing_now) || println("  → LOST a producer for: ", join(missing_now, ", "))
+    isempty(extra_now) || println("  → GAINED a producer for: ", join(extra_now, ", "))
+    @test isempty(missing_now)
+    @test isempty(extra_now)
+
+    # Every op in the dialect now has a producer. When that stops being true,
+    # this is the line that has to change — together with the table in
+    # docs/src/mlir.md, which is what it exists to keep honest.
+    @test produced == Set(mnemonics)
+
+    # The specific regression that motivated this: dtor_call must be emitted by
+    # FunctionGen, and must NOT be conjured by the scope lowering instead.
+    fg = read(joinpath(PROJECT, "src", "IRGen", "ir_gen", "FunctionGen.jl"), String)
+    @test occursin("jlcs.dtor_call", fg)
+    println("  → all $(length(mnemonics)) dialect ops have a producer under src/")
+end
+
 end # testset
