@@ -892,17 +892,49 @@ float varargs correctly when leftover AL happens to be nonzero.
 # neither the TOML entry nor the function. Validate here, at wrap time, with
 # an error that names both.
 const _VARARG_ALLOWED_TYPES = Set([
-    "Any", "Bool", "Cstring", "Cwstring",
-    "Cchar", "Cuchar", "Cshort", "Cushort", "Cint", "Cuint",
+    "Any", "Cstring", "Cwstring",
+    "Cint", "Cuint",
     "Clong", "Culong", "Clonglong", "Culonglong",
     "Cintmax_t", "Cuintmax_t", "Csize_t", "Cssize_t", "Cptrdiff_t", "Cwchar_t",
-    "Cfloat", "Cdouble", "Cintptr_t", "Cuintptr_t",
-    "Int8", "Int16", "Int32", "Int64", "Int128", "Int",
-    "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt",
-    "Float16", "Float32", "Float64",
+    "Cdouble", "Cintptr_t", "Cuintptr_t",
+    "Int32", "Int64", "Int128", "Int",
+    "UInt32", "UInt64", "UInt128", "UInt",
+    "Float64",
 ])
 
+# C DEFAULT ARGUMENT PROMOTION (C11 6.5.2.2p6-7). In the variadic part of a call
+# `float` becomes `double` and every integer type of rank below `int` becomes
+# `int`, so these types NEVER occupy a variadic slot — there is no ABI in which
+# a caller writes 4 bytes into a slot the callee reads with `va_arg(ap, double)`.
+#
+# `@ccall f(fixed…; va_1::Cfloat)` writes exactly Cfloat: Julia does not promote,
+# and nothing else in this generator does either. The callee then reads 8 bytes
+# where 4 were written and formats whatever followed — WRONG OUTPUT, NO CRASH,
+# which is the worst failure mode a printf wrapper has. It cannot be caught
+# downstream: the wrapper loads, the ccall is well-formed, and only the rendered
+# text is wrong. So it is rejected here, at wrap time, naming the type to use.
+const _VARARG_PROMOTED_TO = Dict(
+    "Cfloat" => "Cdouble", "Float32" => "Cdouble", "Float16" => "Cdouble",
+    "Cchar"  => "Cint", "Cuchar"  => "Cint",
+    "Cshort" => "Cint", "Cushort" => "Cint",
+    "Bool"   => "Cint",
+    "Int8"   => "Cint", "UInt8"   => "Cint",
+    "Int16"  => "Cint", "UInt16"  => "Cint",
+)
+
 function _validate_vararg_type(func_name::String, t::String)
+    if haskey(_VARARG_PROMOTED_TO, t)
+        promoted = _VARARG_PROMOTED_TO[t]
+        error("""
+            RepliBuild: '$t' cannot name a variadic argument in [wrap.varargs.$func_name].
+            C default argument promotion converts it to `$promoted` before the callee
+            ever sees it, so a slot declared '$t' is the wrong WIDTH — the call
+            succeeds and the callee reads garbage. Use "$promoted" instead:
+                $func_name = [["$promoted"]]
+            (If the C prototype says `$t`, that is the pre-promotion declaration;
+            the variadic slot still holds a $promoted.)
+            """)
+    end
     t in _VARARG_ALLOWED_TYPES && return
     m = match(r"^Ptr\{([A-Za-z_][A-Za-z0-9_]*)\}$", t)
     m !== nothing && return   # Ptr{AnyIdentifier} — struct pointers included
@@ -912,6 +944,22 @@ function _validate_vararg_type(func_name::String, t::String)
             $func_name = [["Cstring"], ["Cint", "Cdouble"]]
         Allowed: $(join(sort!(collect(_VARARG_ALLOWED_TYPES)), ", ")), or Ptr{...}.
         """)
+end
+
+# The type a variadic slot ACCEPTS in the generated signature. The @ccall keeps
+# the declared type, where cconvert/unsafe_convert run and their results stay
+# rooted for the call — so widening here changes nothing about the ABI and is
+# what lets `f_Cint(fmt, 42)` work at all (`42` is Int64; Cint is Int32, and a
+# `::Cint` signature rejects it before the ccall is ever reached).
+#
+# Safe against ambiguity by construction: every overload is its own named
+# function (`f_Cint`, `f_Cdouble`), so no two of these signatures compete.
+function _vararg_sig_type(t::String)
+    (t == "Cstring" || t == "Cwstring") && return "Union{AbstractString,$t}"
+    startswith(t, "Ptr{") && return "Any"
+    t == "Any" && return "Any"
+    t in ("Cdouble", "Float64") && return "Real"
+    return "Integer"   # every remaining allowed type is an integer type
 end
 
 # Overload names are derived from the type list; Ptr{Cvoid} would otherwise
@@ -1037,7 +1085,10 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
 
         # Build variadic parameter names and types
         va_param_names = ["va_$(i)" for i in 1:length(va_types)]
-        va_sig_parts = ["$(n)::$(t)" for (n, t) in zip(va_param_names, va_types)]
+        # Signature takes the WIDENED type, the @ccall below keeps the DECLARED
+        # one — see `_vararg_sig_type`. Splitting these is what makes the tail
+        # as ergonomic as the fixed params without touching the ABI.
+        va_sig_parts = ["$(n)::$(_vararg_sig_type(t))" for (n, t) in zip(va_param_names, va_types)]
 
         # Full signature = fixed + variadic
         all_sig_parts = vcat(fixed_sig_parts, va_sig_parts)

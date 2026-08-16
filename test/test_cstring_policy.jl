@@ -131,6 +131,19 @@ const W = RepliBuild.Wrapper
             end
             """, "M") === nothing
 
+        # The SAME overload as the generator actually emits it today: the
+        # variadic slot's signature type is widened to a Union so a caller can
+        # pass a plain String, while the @ccall keeps `Cstring`. Kept beside the
+        # bare-`Cstring` fixture above rather than replacing it — that spelling
+        # is still what a wrapper vendored before the widening looks like, and
+        # the guard has to stay right about both.
+        @test W._assert_cstring_policy(
+            """
+            function b2Log_Cstring(fmt::Any, va_1::Union{AbstractString,Cstring})::Cvoid
+                return @ccall LIBRARY_PATH.var"b2Log"(fmt::Cstring; va_1::Cstring)::Cvoid
+            end
+            """, "M") === nothing
+
         # A Cstring-typed ARGUMENT on an unrelated return type.
         @test W._assert_cstring_policy(
             "function g(s::Any)::Cint\n    return ccall((:g, LIBRARY_PATH), Cint, (Cstring,), s)\nend\n",

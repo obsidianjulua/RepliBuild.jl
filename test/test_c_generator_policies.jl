@@ -211,7 +211,10 @@ end
         # Vararg path: same policy on base + typed overload, @ccall form kept
         @test occursin("function fmt_msg(fmt::Cstring)::Union{String,Nothing}", code)
         @test occursin("ptr = @ccall LIBRARY_PATH.var\"fmt_msg\"(fmt::Cstring;)::Cstring", code)
-        @test occursin("function fmt_msg_Cint(fmt::Cstring, va_1::Cint)::Union{String,Nothing}", code)
+        # Signature takes the WIDENED type (`Integer`), the @ccall keeps the
+        # DECLARED one (`Cint`) — a `va_1::Cint` signature would reject the
+        # Int64 literal every caller writes. See `_vararg_sig_type`.
+        @test occursin("function fmt_msg_Cint(fmt::Cstring, va_1::Integer)::Union{String,Nothing}", code)
         @test occursin("ptr = @ccall LIBRARY_PATH.var\"fmt_msg\"(fmt::Cstring; va_1::Cint)::Cstring", code)
     end
 

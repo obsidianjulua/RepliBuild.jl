@@ -1069,6 +1069,34 @@ _sanitize_type_name_for_layout(s::AbstractString) =
 const _FUNC_SIG_RE = r"^function\s+([A-Za-z_][A-Za-z0-9_!.]*)\((.*?)\)(?:::\S.*)?\s*$"m
 
 """
+    _split_toplevel_commas(s) -> Vector{SubString}
+
+Split on commas at bracket depth 0. A parameter's TYPE may contain commas —
+`Union{AbstractString,Cstring}`, `NTuple{8,UInt8}`, `Dict{Symbol,Int}` — and a
+flat `split(s, ',')` turns one argument into two, silently changing the
+dispatch key this module keys dedup on. Depth is tracked over `{}`, `()` and
+`[]` and clamped at 0 so an unbalanced closer can't drive it negative.
+"""
+function _split_toplevel_commas(s::AbstractString)
+    parts = SubString{String}[]
+    str = String(s)
+    depth = 0
+    start = 1
+    for (i, c) in pairs(str)
+        if c in ('{', '(', '[')
+            depth += 1
+        elseif c in ('}', ')', ']')
+            depth = max(0, depth - 1)
+        elseif c == ',' && depth == 0
+            push!(parts, SubString(str, start, prevind(str, i)))
+            start = nextind(str, i)
+        end
+    end
+    push!(parts, SubString(str, start))
+    return parts
+end
+
+"""
     _method_sig_keys(chunk) -> Vector{String}
 
 Dispatch-significant signature keys (`name(argtype,argtype,…)`) for every
@@ -1082,7 +1110,7 @@ function _method_sig_keys(chunk::AbstractString)
         args = first(split(m.captures[2], ';'; limit=2))   # drop kwargs
         argtypes = String[]
         if !isempty(strip(args))
-            for a in split(args, ',')
+            for a in _split_toplevel_commas(args)
                 a = strip(first(split(a, '='; limit=2)))   # drop default value
                 isempty(a) && continue
                 push!(argtypes, occursin("::", a) ?
@@ -1104,21 +1132,60 @@ signature. Required for the wrapper to precompile inside a package.
 function _dedup_method_chunks(chunks::Vector{String})
     seen = Set{String}()
     keep = trues(length(chunks))
-    ndropped = 0
+    # Which chunk claimed each signature, so a drop can name what shadowed it.
+    claimed_by = Dict{String,String}()
+    dropped = Tuple{String,String,String}[]   # (signature, dropped symbol, kept symbol)
     for i in length(chunks):-1:1
         ks = _method_sig_keys(chunks[i])
         isempty(ks) && continue
         if all(k -> k in seen, ks)
             keep[i] = false
-            ndropped += 1
+            sym = _chunk_mangled_symbol(chunks[i])
+            for k in ks
+                push!(dropped, (k, sym, get(claimed_by, k, "?")))
+            end
         else
             union!(seen, ks)
+            sym = _chunk_mangled_symbol(chunks[i])
+            for k in ks
+                get!(claimed_by, k, sym)
+            end
         end
     end
-    if ndropped > 0
-        @info "wrap: dropped $ndropped duplicate method definition(s) — identical Julia name+signature from distinct C++ symbols; last definition kept (precompilation-safe)"
+    if !isempty(dropped)
+        # Naming the losers is the point. The count alone cannot distinguish a
+        # D1/D2 destructor pair — where dropping one is exactly right — from an
+        # ::Any-collapsed overload pair, where a DISTINCT C++ entry point became
+        # unreachable and only the symbol names show it (imgui's
+        # `TreeNode(const char*, const char*, ...)` losing to the `void const*`
+        # form: same `(Any, Any)` signature, different function).
+        shown = first(dropped, 12)
+        # Same symbol on both sides means one C++ entry point emitted two
+        # chunks (the D1/D2 destructor pair aliasing to one definition) — a
+        # correct drop, and naming the shadower twice would only read as noise.
+        detail = join([lost == kept ? "$sig ⟵ $lost" : "$sig ⟵ $lost (shadowed by $kept)"
+                       for (sig, lost, kept) in shown], ", ")
+        more = length(dropped) > 12 ? " … (+$(length(dropped) - 12) more)" : ""
+        @info "wrap: dropped $(length(dropped)) duplicate method definition(s) — identical Julia name+signature from distinct C++ symbols; last definition kept (precompilation-safe). Unreachable now: $detail$more"
     end
     return chunks[keep]
+end
+
+# The mangled symbol a chunk was generated from, as recorded in its own
+# docstring ("- Mangled symbol: `_ZN…`"). Read back off the emitted text rather
+# than threaded through, for the same reason the export lists and layout tables
+# are: the text is what ships, so it cannot disagree with itself.
+function _chunk_mangled_symbol(chunk::AbstractString)
+    m = match(r"Mangled symbol: `([^`]+)`", chunk)
+    m !== nothing && return String(m.captures[1])
+    # Varargs chunks document the demangled prototype instead, so fall back to
+    # the symbol their own @ccall names — which is the thing that would go
+    # unreachable, and the whole reason to print a symbol at all.
+    m = match(r"LIBRARY_PATH\.var\"([^\"]+)\"", chunk)
+    m !== nothing && return String(m.captures[1])
+    m = match(r"ccall\(\(:([A-Za-z_][A-Za-z0-9_]*),\s*LIBRARY_PATH\)", chunk)
+    m !== nothing && return String(m.captures[1])
+    return "<unknown symbol>"
 end
 
 # =============================================================================
