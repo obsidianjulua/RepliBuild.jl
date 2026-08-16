@@ -1,3 +1,147 @@
+"""
+    _bare_type_name_cpp(cls) -> String
+
+Innermost `::` component of a scope, template arguments removed:
+`std::vector<int, std::allocator<int> >` → `vector`. Angle-bracket aware, so a
+separator inside `<>` is not a cut point.
+"""
+function _bare_type_name_cpp(cls::AbstractString)::String
+    depth = 0
+    last_sep = 0
+    i = firstindex(cls)
+    n = lastindex(cls)
+    while i <= n
+        c = cls[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ':' && i < n && cls[nextind(cls, i)] == ':'
+            i = nextind(cls, i)
+            last_sep = i
+        end
+        i = nextind(cls, i)
+    end
+    inner = last_sep == 0 ? cls : cls[nextind(cls, last_sep):end]
+    j = findfirst('<', inner)
+    return String(strip(j === nothing ? inner : inner[1:prevind(inner, j)]))
+end
+
+"""
+    _is_ctor_or_dtor_cpp(class_name, func_name) -> Bool
+
+True when the function is a constructor or destructor — which has a `this`
+receiver by definition, whether or not its class reached `struct_types`.
+
+**Mirror of `FunctionGen._is_ctor_or_dtor`; the two MUST agree**, because they
+decide the same argument array from opposite ends of the pipeline. The
+duplication is deliberate (generator isolation); the protection is
+`test_symbol_hygiene.jl` §"Both receiver gates agree", which runs both over
+every Hub package's metadata.
+
+A destructor's name starts with `~`; a constructor's name equals its class's
+bare name, and a member function may not share its class's name — so neither
+test can fire on a free function, which is the direction that would shift
+arguments.
+"""
+function _is_ctor_or_dtor_cpp(class_name::AbstractString, func_name::AbstractString)::Bool
+    (isempty(class_name) || isempty(func_name)) && return false
+    startswith(func_name, "~") && return true
+    return func_name == _bare_type_name_cpp(class_name)
+end
+
+"""
+    _cpp_innermost_scope(cls) -> String
+
+Last `::`-separated component of `cls`, at angle-bracket depth 0, **keeping**
+template arguments: `ggml::cpu::repack::tensor_traits<block_q4_0, 8l>` →
+`tensor_traits<block_q4_0, 8l>`.
+
+Distinct from [`_bare_type_name_cpp`], which additionally strips the template
+arguments. Both spellings are needed and they are not interchangeable: this one
+is looked up in `struct_types` (which is keyed on raw DWARF names, template
+arguments and all), while the stripped one is what a constructor is *named*.
+Conflating them is exactly what made the first draft of the agreement test
+report 26 phantom disagreements on llamacpp's `tensor_traits` instantiations.
+"""
+function _cpp_innermost_scope(cls::AbstractString)::String
+    depth = 0
+    last_sep = 0
+    i = firstindex(cls)
+    n = lastindex(cls)
+    while i <= n
+        c = cls[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ':' && i < n && cls[nextind(cls, i)] == ':'
+            i = nextind(cls, i)
+            last_sep = i
+        end
+        i = nextind(cls, i)
+    end
+    return String(last_sep == 0 ? cls : cls[nextind(cls, last_sep):end])
+end
+
+"""
+    _cpp_this_param(class_name, func_name, struct_types) -> Dict | Nothing
+
+The C++ wrapper's receiver gate: the synthesized `this` parameter for a method
+whose DWARF entry omits it, or `nothing` when no receiver should be added.
+
+**This is the whole gate, in one place.** It used to be inlined in the emission
+loop, which meant the only way to test it was to re-implement it — a third copy
+of a decision that already exists twice, in a codebase whose worst outbreak
+(Dear ImGui, 788 thunks) came from exactly two copies drifting. It is called by
+the emission loop and by `test_symbol_hygiene.jl`, so the test exercises the
+shipping code rather than a paraphrase of it.
+
+The receiver is synthesized when EITHER:
+
+  * the class is a known aggregate — checked under both the raw DWARF spelling
+    (`Box<double>`, which is how `struct_types` is keyed) and the sanitized one
+    (`Box_double`); without the raw check, template-class methods never get a
+    receiver; or
+  * the function is a constructor or destructor, which has one by definition.
+    `struct_types` is NOT a complete list of the library's classes — a
+    .cpp-local polymorphic class gets no type DIE — so box2d's seven internal
+    contact subclasses were emitting zero-argument destructors (2026-08-13).
+
+An unknown class has no emitted Julia type, so the receiver is typed
+`Ptr{Cvoid}` rather than `Ptr{<undeclared name>}`: ABI-identical (both relax to
+`::Any` in the signature, and `_assert_wrapper_loadable` would refuse the
+undeclared spelling if it ever reached a ccall tuple).
+
+Must agree with `FunctionGen._has_receiver` on every input.
+"""
+function _cpp_this_param(class_name::AbstractString, func_name::AbstractString,
+                         struct_types)
+    isempty(class_name) && return nothing
+
+    bare_class = _cpp_innermost_scope(class_name)
+    safe_class = _sanitize_cpp_type_name(bare_class)
+    safe_class = replace(safe_class, r"[^A-Za-z0-9_]" => "")
+    safe_class = replace(safe_class, r"_+"            => "_")
+    safe_class = String(strip(safe_class, '_'))
+    # Garbled (empty, or an operator spelling) — no usable Julia type name.
+    if isempty(safe_class) || startswith(safe_class, "operator")
+        safe_class = "Cvoid"
+    end
+    safe_class == "Cvoid" && return nothing
+
+    known_class = bare_class in struct_types || safe_class in struct_types
+    (known_class || _is_ctor_or_dtor_cpp(class_name, func_name)) || return nothing
+
+    return Dict{String,Any}(
+        "name" => "this",
+        "c_type" => String(class_name) * "*",
+        "julia_type" => known_class ? "Ptr{" * safe_class * "}" : "Ptr{Cvoid}",
+        "position" => 0,
+        "is_synthesized" => true
+    )
+end
+
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
@@ -110,7 +254,38 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         f_name = func["name"]
         demangled = func["demangled"]
         params = func["parameters"]
-        
+
+        # A DESTRUCTOR names its own class, and that is authoritative — it does
+        # NOT depend on DWARF having supplied the `this` parameter. This scan
+        # used to infer the class from `params[1]::Ptr{X}`, so when DWARF
+        # stopped describing `this` for destructors the table silently
+        # collapsed and every `Managed`/finalizer built on it vanished:
+        # box2d 30 Managed types → 1, tinyxml2 11 → 2, llamacpp 127 → 18,
+        # measured 2026-08-13 on the first rebuild since July. Same underlying
+        # fact as the receiver gate (`_cpp_this_param`): a destructor has a
+        # receiver by definition, so read the class, not the argument shape.
+        #
+        # The key must be a member of `struct_types` — that was the old
+        # invariant (it came from a `Ptr{X}` whose `X` was checked) and the
+        # rest of the emitter relies on it — so try each spelling and key on
+        # whichever one actually matched.
+        if contains(demangled, "~")
+            cls = String(get(func, "class", ""))
+            if !isempty(cls)
+                inner = _cpp_innermost_scope(cls)
+                sname = inner in struct_types ? inner :
+                        cls   in struct_types ? cls   :
+                        let s = _sanitize_cpp_type_name(inner)
+                            s in struct_types ? s : ""
+                        end
+                if !isempty(sname) && !haskey(deleters, sname)
+                    deleters[sname] = f_name
+                    deleters_mangled[sname] = func["mangled"]
+                end
+            end
+            continue
+        end
+
         # Criteria: 1 arg, arg is Ptr{Struct}, name implies deletion
         if length(params) == 1
             arg_type = params[1]["julia_type"]
@@ -1959,63 +2134,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             has_this = !isempty(params) && (params[1]["name"] == "this")
             
             if !has_this
-                # Synthesize 'this' parameter.
-                # The class_name may be namespace-qualified (e.g. "pugi::xml_document").
-                # The Julia struct uses only the bare class name without namespace prefix,
-                # so strip everything up to and including the last "::".
-                # Also sanitize template brackets and other non-identifier characters.
-                raw_class = class_name
-                # Remove template parameters before splitting on ::
-                # (so "std::vector<int>" → bare name is "vector" not "vector<int>")
-                bare_class = let
-                    angle_depth = 0
-                    prefix_end = length(raw_class)
-                    for (i, c) in enumerate(raw_class)
-                        if c == '<'; angle_depth += 1
-                        elseif c == '>'; angle_depth = max(0, angle_depth - 1)
-                        end
-                    end
-                    # Find last "::" at angle-bracket depth 0
-                    last_sep = 0
-                    d = 0
-                    i = 1
-                    while i <= length(raw_class) - 1
-                        c = raw_class[i]
-                        if c == '<'; d += 1
-                        elseif c == '>'; d = max(0, d - 1)
-                        elseif c == ':' && raw_class[i+1] == ':' && d == 0
-                            last_sep = i + 1
-                            i += 1
-                        end
-                        i += 1
-                    end
-                    last_sep > 0 ? raw_class[last_sep+1:end] : raw_class
-                end
-                safe_class = _sanitize_cpp_type_name(bare_class)
-                safe_class = replace(safe_class, r"[^A-Za-z0-9_]" => "")
-                safe_class = replace(safe_class, r"_+"            => "_")
-                safe_class = String(strip(safe_class, '_'))
-                # If garbled (empty or looks like an operator), fall back to Cvoid
-                if isempty(safe_class) || startswith(safe_class, "operator")
-                    safe_class = "Cvoid"
-                end
-                
-                # Only synthesize 'this' when the class is a known struct type.
-                # Check both raw DWARF name (bare_class, e.g. "Box<double>") and
-                # sanitized name (safe_class, e.g. "Box_double") since struct_types
-                # contains raw DWARF names. Without checking bare_class, template
-                # class methods never get a 'this' pointer synthesized.
-                # If it's a namespace name (e.g. "pugi") rather than a class, skip.
-                if !isempty(safe_class) && safe_class != "Cvoid" && (bare_class in struct_types || safe_class in struct_types)
-                    this_param = Dict{String,Any}(
-                        "name" => "this",
-                        "c_type" => class_name * "*",
-                        "julia_type" => "Ptr{" * safe_class * "}",
-                        "position" => 0,
-                        "is_synthesized" => true
-                    )
-                    pushfirst!(params, this_param)
-                end
+                this_param = _cpp_this_param(class_name, func_name, struct_types)
+                this_param === nothing || pushfirst!(params, this_param)
             end
         end
 

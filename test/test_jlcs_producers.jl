@@ -15,6 +15,15 @@
 #  C. Array-view producer: fixed-size primitive array members get zero-copy
 #     get/set thunks through the strided ops. Verified end-to-end against a
 #     raw Julia buffer.
+#  E. dtor_call producer (2026-08-13): a destructor thunk is exactly the
+#     single-pointer-arg void-return shape jlcs.dtor_call encodes, so it stops
+#     going out as a generic ffe_call/try_call. Includes the Itanium VTT gate.
+#  F. get_field / set_field producers (2026-08-13): thunk argument slots are
+#     fields of the ciface `void**` at byte offset 8*slot, and the ArrayView
+#     descriptor is four fields at 0/8/16/24. Both were previously raw GEP
+#     chains. Pinned by MACHINE-CODE equality against the old spelling — the
+#     LLVM IR differs cosmetically (GEP element type, !dbg numbering), so a
+#     text diff would prove nothing.
 #
 # Requires libJLCS.so + clang++ (devtests tier).
 
@@ -270,10 +279,146 @@ const IR = JLCSIRGenerator.generate_jlcs_ir(EMPTY_VT, METADATA)
                 @test unsafe_load(Ptr{Int64}(qp), 1) == 0
             end
 
+            # ── dtor_call end-to-end ─────────────────────────────────────────
+            # The destructor thunk now goes out as jlcs.dtor_call rather than
+            # try_call. It must still destruct: Grip::~Grip() bumps the tally
+            # by 1, and the may_throw lowering (invoke + landing pad) is the
+            # path actually taken here, since DWARF marks no dtor noexcept.
+            _reset_tally()
+            dgrip = Int64[5]
+            GC.@preserve dgrip begin
+                obj = Ref(Ptr{Cvoid}(pointer(dgrip)))
+                inner = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, obj)]
+                GC.@preserve obj inner begin
+                    args_ref = Ref(Ptr{Cvoid}(pointer(inner)))
+                    ptrs = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, args_ref)]
+                    GC.@preserve args_ref begin
+                        @test jit_invoke(jit, "$(SYM_DTOR)_thunk", ptrs)
+                    end
+                end
+            end
+            @test _tally() == 1
+
             destroy_jit(jit)
-            println("  ✓ scope-RAII + array-view producers execute end-to-end")
+            println("  ✓ scope-RAII + array-view + dtor_call producers execute end-to-end")
         finally
             destroy_context(ctx)
         end
+    end
+
+    @testset "E. dtor_call producer — emission and the VTT arity gate" begin
+        # The destructor thunk carries the op, with may_throw (the module is
+        # C++ and DWARF marks no destructor noexcept, which is the same rule
+        # that used to pick try_call over ffe_call).
+        @test occursin("jlcs.dtor_call @$(SYM_DTOR)(%val_1) { may_throw } : (!llvm.ptr) -> ()", IR)
+        # ...and it is no longer routed through the generic call ops.
+        @test !occursin("try_call %val_1 { callee = @$(SYM_DTOR) }", IR)
+        # Non-destructors are untouched.
+        @test occursin("callee = @$(SYM_CONSUME)", IR)
+
+        FG = RepliBuild.JLCSIRGenerator.FunctionGen
+
+        # THE ARITY GATE. Under Itanium a base-object destructor (D2) of a
+        # class with virtual bases takes a second VTT argument — vi_test has
+        # three of these — and jlcs.dtor_call has no operand to carry it.
+        # Such a destructor must keep the ffe_call/try_call path; converting
+        # it would drop the VTT silently, which is a miscompile, not a
+        # cosmetic difference. Negative-checked below by the paired case.
+        vtt_dtor = Any[Dict{String,Any}(
+            "name" => "~Vb", "mangled" => "_ZN2VbD2Ev",
+            "demangled" => "Vb::~Vb()", "is_method" => true, "class" => "Vb",
+            "parameters" => Any[
+                Dict{String,Any}("name" => "this", "c_type" => "Vb*"),
+                Dict{String,Any}("name" => "vtt",  "c_type" => "void**")],
+            "return_type" => Dict{String,Any}("c_type" => "void"))]
+        vtt_ir = FG.generate_function_thunks(vtt_dtor, GRIP_STRUCTS; may_throw=true)
+        @test !occursin("jlcs.dtor_call", vtt_ir)
+        @test occursin("callee = @_ZN2VbD2Ev", vtt_ir)
+
+        # The same destructor WITHOUT the VTT parameter does convert — so the
+        # exclusion above is the arity, not the name or the class.
+        plain_dtor = Any[Dict{String,Any}(
+            "name" => "~Vb", "mangled" => "_ZN2VbD1Ev",
+            "demangled" => "Vb::~Vb()", "is_method" => true, "class" => "Vb",
+            "parameters" => Any[Dict{String,Any}("name" => "this", "c_type" => "Vb*")],
+            "return_type" => Dict{String,Any}("c_type" => "void"))]
+        plain_ir = FG.generate_function_thunks(plain_dtor, GRIP_STRUCTS; may_throw=true)
+        @test occursin("jlcs.dtor_call @_ZN2VbD1Ev(%val_1) { may_throw }", plain_ir)
+
+        # may_throw tracks the module setting, so a noexcept-clean module gets
+        # the plain-call lowering rather than an invoke it does not need.
+        noeh_ir = FG.generate_function_thunks(plain_dtor, GRIP_STRUCTS; may_throw=false)
+        @test occursin("jlcs.dtor_call @_ZN2VbD1Ev(%val_1) : (!llvm.ptr) -> ()", noeh_ir)
+        @test !occursin("may_throw", noeh_ir)
+    end
+
+    @testset "F. get_field / set_field producers" begin
+        AVG = RepliBuild.JLCSIRGenerator.ArrayViewGen
+
+        # Argument slots are fields of the ciface `void**`: slot i at byte 8i.
+        @test occursin("\"jlcs.get_field\"(%args_ptr) {fieldOffset = 0 : i64} : (!llvm.ptr) -> !llvm.ptr", IR)
+        # The raw spelling this replaced is gone from both producers.
+        @test !occursin("llvm.getelementptr %args_ptr", IR)
+
+        av = AVG.generate_array_view_thunks(GRIP_STRUCTS)
+        @test occursin("\"jlcs.get_field\"(%args_ptr) {fieldOffset = 8 : i64}", av)   # index slot
+        @test occursin("\"jlcs.get_field\"(%args_ptr) {fieldOffset = 16 : i64}", av)  # value slot (set thunk)
+        # ArrayView descriptor built field-by-field, in the same terms the
+        # load/store_array_element lowering reads it back with (data@0,
+        # strides@16 via getStructField in JLCSPasses.cpp).
+        for (off, val) in ((0, "%data"), (8, "%dims"), (16, "%strides"), (24, "%one"))
+            @test occursin("\"jlcs.set_field\"(%view, $(val)) {fieldOffset = $(off) : i64}", av)
+        end
+        @test !occursin("llvm.getelementptr %view", av)
+    end
+
+    @testset "G. get_field / set_field are machine-code identical to raw GEP" begin
+        # The whole justification for moving these producers onto the dialect
+        # is that it changes what the IR SAYS, not what it DOES. Text and even
+        # LLVM IR differ (GEP element type, !dbg numbering); the instructions
+        # must not. Compare the exact shapes the producers emit.
+        function insns(src, tag)
+            ctx = create_context()
+            obj = tempname() * ".o"
+            try
+                mod = parse_module(ctx, src; source_name="equiv_$tag.mlir")
+                @assert lower_to_llvm(mod)
+                RepliBuild.MLIRNative.emit_object(mod, obj)
+                out = String[]
+                for l in split(read(`objdump -d --no-show-raw-insn $obj`, String), '\n')
+                    m = match(r"^\s+[0-9a-f]+:\s+(.*)$", l)
+                    m === nothing && continue
+                    push!(out, replace(strip(m.captures[1]), r"\s+#.*$" => ""))
+                end
+                return out
+            finally
+                rm(obj, force=true); destroy_context(ctx)
+            end
+        end
+        wrap(body) = """
+        module {
+          func.func private @sink(!llvm.ptr)
+          func.func @t(%args_ptr: !llvm.ptr) attributes { llvm.emit_c_interface } {
+        $body
+            return
+          }
+        }
+        """
+        raw_slot = wrap("""
+            %idx_2 = arith.constant 1 : i64
+            %arg_ptr_2 = llvm.getelementptr %args_ptr[%idx_2] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+            %val_ptr_2 = llvm.load %arg_ptr_2 : !llvm.ptr -> !llvm.ptr
+            jlcs.ffe_call %val_ptr_2 { callee = @sink } : (!llvm.ptr) -> ()""")
+        new_slot = wrap("""
+            %val_ptr_2 = "jlcs.get_field"(%args_ptr) {fieldOffset = 8 : i64} : (!llvm.ptr) -> !llvm.ptr
+            jlcs.ffe_call %val_ptr_2 { callee = @sink } : (!llvm.ptr) -> ()""")
+        @test insns(raw_slot, "raw_slot") == insns(new_slot, "new_slot")
+
+        raw_store = wrap("""
+            %f = llvm.getelementptr %args_ptr[16] : (!llvm.ptr) -> !llvm.ptr, i8
+            llvm.store %args_ptr, %f : !llvm.ptr, !llvm.ptr""")
+        new_store = wrap("""
+            "jlcs.set_field"(%args_ptr, %args_ptr) {fieldOffset = 16 : i64} : (!llvm.ptr, !llvm.ptr) -> ()""")
+        @test insns(raw_store, "raw_store") == insns(new_store, "new_store")
     end
 end

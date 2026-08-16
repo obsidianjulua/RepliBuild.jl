@@ -2027,6 +2027,30 @@ function extract_symbols_from_binary(binary_path::String)
                     continue
                 end
 
+                # Itanium adjustor thunks are vtable-slot entry points, not API:
+                # they fix up `this` on entry (a fixed subtraction, or a vcall
+                # offset read through the vptr) and tail-jump to the real method.
+                # Nothing should reach one BY NAME — an override is reached
+                # through the vtable (the vcall producer) or after an explicit
+                # upcast (`Derived_as_Base2`).
+                #
+                # Same reasoning as `__rb_*` above, and the same failure: no
+                # DWARF subprogram describes a thunk, so `parse_function_signatures`
+                # infers the signature from the demangled string — where the
+                # "class" is the demangler's PHRASE ("non-virtual thunk to
+                # Derived"), not a class name. No aggregate is named that, so
+                # neither receiver gate (`FunctionGen._has_receiver`,
+                # `GeneratorCpp`'s `struct_types` check) synthesizes `this`, and
+                # the wrapper emits a zero-argument function calling a method that
+                # needs `this` in rdi. Proven live 2026-08-13, not latent:
+                # `ViTest.virtual_thunk_to_Diamond_tag()` was exported and
+                # SIGSEGV'd — the virtual-thunk form dereferences the garbage
+                # `this` twice (`mov (%rdi),%rax; mov -0x20(%rax),%rax`) to read
+                # the vcall offset out of the vptr.
+                if _is_itanium_thunk(mangled_name, demangled_name)
+                    continue
+                end
+
                 push!(symbols, Dict(
                     "mangled" => mangled_name,
                     "demangled" => demangled_name,
@@ -2038,6 +2062,33 @@ function extract_symbols_from_binary(binary_path::String)
     end
 
     return symbols
+end
+
+"""
+    _is_itanium_thunk(mangled, demangled) -> Bool
+
+Return true for Itanium ABI thunk symbols — `_ZTh` (non-virtual / this-adjusting),
+`_ZTv` (virtual), `_ZTc` (covariant return).
+
+These belong to the mangling grammar's `<special-name>` production, so a `_ZT`
+prefix can never collide with an ordinary function; the remaining `_ZT*` special
+names (`_ZTV` vtable, `_ZTI`/`_ZTS` typeinfo, `_ZTT` VTT, `_ZTC` construction
+vtable) are **data** symbols and never reach this filter — the caller admits only
+nm types `T`/`W`/`t`/`w`. Verified against the MI and VI fixtures: every `_ZT*`
+symbol with a code type is a thunk, and every vtable/typeinfo one is `D`/`R`/`V`.
+
+The demangled phrases are checked as well because the caller falls back to the
+demangled string when the address→mangled lookup misses, and because an ingested
+binary may be stripped of the mangled form.
+"""
+function _is_itanium_thunk(mangled::AbstractString, demangled::AbstractString)::Bool
+    startswith(mangled, "_ZTh") && return true    # non-virtual thunk to X
+    startswith(mangled, "_ZTv") && return true    # virtual thunk to X
+    startswith(mangled, "_ZTc") && return true    # covariant return thunk to X
+    startswith(demangled, "non-virtual thunk to ") && return true
+    startswith(demangled, "virtual thunk to ") && return true
+    startswith(demangled, "covariant return thunk to ") && return true
+    return false
 end
 
 """
@@ -4676,25 +4727,110 @@ function _name_prefix(demangled::String)::String
 end
 
 """
+    _strip_return_type(prefix) -> String
+
+Drop a leading return type from a demangled function-name prefix:
+`"bool gguf_reader::read<int>"` → `"gguf_reader::read<int>"`.
+
+Itanium mangles a function **template's** return type into the symbol, so the
+demangler prints it — ordinary functions carry none. The return type ends at the
+last space outside `<>`/`()`, which is enough even when it is itself qualified
+(`std::enable_if<std::is_integral<unsigned int>::value, bool>::type`).
+
+A **conversion operator** is the only C++ name that legitimately contains a
+top-level space (`operator bool`, `operator void (*)(…)`, `operator new`), and
+cutting at its space would eat the name. Those bail out unchanged, so the result
+is the historical behaviour rather than a new wrong answer — pugixml has 7.
+"""
+function _strip_return_type(prefix::AbstractString)::String
+    occursin("operator", prefix) && return String(prefix)
+    depth = 0
+    cut = 0
+    i = firstindex(prefix)
+    n = lastindex(prefix)
+    while i <= n
+        c = prefix[i]
+        if c == '<' || c == '('
+            depth += 1
+        elseif c == '>' || c == ')'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ' '
+            cut = i
+        end
+        i = nextind(prefix, i)
+    end
+    cut == 0 && return String(prefix)
+    return String(strip(prefix[nextind(prefix, cut):end]))
+end
+
+"""
+    _qualified_name_parts(demangled) -> Vector{String}
+
+The `::`-separated components of a demangled signature's qualified name, with any
+leading return type removed and template arguments left intact:
+`"bool gguf_reader::read<std::vector<int> >(…)"` → `["gguf_reader", "read<std::vector<int> >"]`.
+
+`extract_class_name` and `extract_function_name` both derive from this one
+function, so they cannot disagree about where the scope ends.
+
+The obvious `split(prefix, "::")` this replaces got two things wrong, both live
+in the Hub until 2026-08-13:
+
+  * **Template arguments contain `::`.** A flat split cuts inside them, so
+    `llama_model_loader::get_arr<std::vector<int, std::allocator<int> > >` yielded
+    class `"bool llama_model_loader::get_arr<std::vector<int, std"` and name
+    `"allocator<int> > >"`. Splitting is angle-bracket- and paren-depth aware
+    (depth clamps at 0 so `operator>` / `operator->` cannot drive it negative).
+
+  * **The return type of a function template.** The scope came out
+    `"bool gguf_reader"`; no aggregate is named that, so neither receiver gate
+    (`FunctionGen._has_receiver`, `GeneratorCpp`'s `struct_types` check)
+    synthesized `this` and every argument shifted one register — the silent
+    direction. Measured: **62 methods gained a receiver, 0 lost one** across
+    box2d (4), llamacpp (48), pugixml (8), tinyxml2 (2).
+"""
+function _qualified_name_parts(demangled::AbstractString)::Vector{String}
+    prefix = _strip_return_type(_name_prefix(String(demangled)))
+    out = String[]
+    depth = 0
+    start = firstindex(prefix)
+    i = start
+    n = lastindex(prefix)
+    while i <= n
+        c = prefix[i]
+        if c == '<' || c == '('
+            depth += 1
+        elseif c == '>' || c == ')'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ':' && i < n && prefix[nextind(prefix, i)] == ':'
+            push!(out, String(prefix[start:prevind(prefix, i)]))
+            i = nextind(prefix, i)
+            start = nextind(prefix, i)
+        end
+        i = nextind(prefix, i)
+    end
+    push!(out, String(prefix[start:end]))
+    return out
+end
+
+"""
 Extract function name from demangled signature.
 Example: "Calculator::compute(int, int, char)" -> "compute"
 Example: "sum_vector(std::vector<int, std::allocator<int> > const&)" -> "sum_vector"
+Example: "bool gguf_reader::read<std::vector<int> >(...)" -> "read<std::vector<int> >"
 """
 function extract_function_name(demangled::String)::String
-    prefix = _name_prefix(demangled)
-    # Split only on '::' within the prefix (safe – no templates here)
-    parts = split(prefix, "::")
-    return strip(parts[end])
+    return String(strip(_qualified_name_parts(demangled)[end]))
 end
 
 """
 Extract class name from method signature (only considers '::' in the function-name prefix).
 Example: "Calculator::compute(int, int)" -> "Calculator"
 Example: "sum_vector(std::vector<int> const&)"  -> ""  (free function)
+Example: "bool gguf_reader::read<int>(...)"     -> "gguf_reader"  (NOT "bool gguf_reader")
 """
 function extract_class_name(demangled::String)::String
-    prefix = _name_prefix(demangled)
-    parts = split(prefix, "::")
+    parts = _qualified_name_parts(demangled)
     length(parts) >= 2 || return ""
     return join(parts[1:end-1], "::")
 end
