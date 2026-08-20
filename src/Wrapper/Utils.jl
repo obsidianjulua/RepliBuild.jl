@@ -447,9 +447,8 @@ function _undefined_ccall_types(source::AbstractString)::Vector{Tuple{String,Str
     # wrapper references an undeclared `piecewise_construct_t` in exactly those
     # lazy positions and has always loaded (verified by including it).
     # Scanning more broadly turns working wrappers into refused ones.
-    for m in eachmatch(r"ccall\(\([^)]*\)\s*,\s*([^,]+),\s*\(([^)]*)\)", code)
-        pos = m.offset
-        for entry in vcat(String(m.captures[1]), split(m.captures[2], ','))
+    function record!(entries, pos)
+        for entry in entries
             t = strip(String(entry))
             isempty(t) && continue
             # Unwrap Ptr{…}/Ref{…} down to the leaf name.
@@ -461,6 +460,25 @@ function _undefined_ccall_types(source::AbstractString)::Vector{Tuple{String,Str
             key = (t, enclosing(pos))
             key in seen || (push!(seen, key); push!(bad, key))
         end
+    end
+
+    for m in eachmatch(r"ccall\(\([^)]*\)\s*,\s*([^,]+),\s*\(([^)]*)\)", code)
+        record!(vcat(String(m.captures[1]), split(m.captures[2], ',')), m.offset)
+    end
+
+    # The `@ccall` form is EQUALLY EAGER and was not scanned. It is the shape
+    # `generate_vararg_wrappers` emits — `@ccall LIB.var"sym"(a::T, b::U; va_1::V)::R`
+    # — so every variadic function was invisible to this guard. libcurl proved
+    # it: `curl_mfprintf`'s `fd::Ptr{_IO_FILE}` was written out, refused by
+    # Julia at include, and took all 1004 functions with it while this function
+    # reported nothing wrong. Argument annotations here are types, not values,
+    # and lower to a foreigncall with the same eager resolution as above.
+    for m in eachmatch(r"@ccall\s+[A-Za-z_][\w.]*\.var\"[^\"]*\"\(([^)]*)\)::([A-Za-z_][\w{}, ]*)", code)
+        anns = String[]
+        for part in _split_toplevel_commas(replace(String(m.captures[1]), ';' => ','))
+            occursin("::", part) && push!(anns, last(split(part, "::"; limit = 2)))
+        end
+        record!(vcat(anns, String(m.captures[2])), m.offset)
     end
     return bad
 end

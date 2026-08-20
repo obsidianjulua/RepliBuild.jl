@@ -137,6 +137,8 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     _assert_base_calls_qualified(wrapper_content, module_name)
     _assert_exports_defined(wrapper_content, module_name)
     _assert_cstring_policy(wrapper_content, module_name)
+    _assert_no_shadowed_ccall_types(wrapper_content, module_name)
+    _assert_no_any_ccall_return(wrapper_content, module_name)
 
     undefined_types = _undefined_ccall_types(wrapper_content)
     isempty(undefined_types) && return nothing
@@ -156,6 +158,123 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     ABI-identical, via _resolve_forward_ptr — not by widening the blocklist, \
     which suppresses declarations without suppressing uses and is what caused \
     this in the first place.
+    """)
+end
+
+"""
+    _assert_no_shadowed_ccall_types(wrapper_content, module_name)
+
+Refuse a wrapper where a PARAMETER shadows a type named in its own ccall tuple.
+
+Sibling of `_undefined_ccall_types`, and the same catastrophe from the other
+direction: there the name resolves to nothing, here it resolves to the *wrong
+thing* — a local. `ccall` evaluates its argument tuple eagerly at method
+definition, so either way the module dies at include and takes every function
+with it. That symmetry is why this belongs beside it rather than in a generator.
+
+The C idiom is `struct bufq *bufq`, a parameter named after its own type, which
+libcurl uses 26 times across 5 types. `_undefined_ccall_types` cannot see it:
+`bufq` IS declared by the module, so nothing is undefined — it is merely
+unreachable from inside that one function.
+
+Checked on the emitted TEXT, like its sibling, because the bug is precisely the
+generator's bookkeeping disagreeing with what it wrote.
+"""
+function _assert_no_shadowed_ccall_types(wrapper_content::AbstractString,
+                                         module_name::AbstractString)
+    offenders = Tuple{String,String}[]   # (function, shadowed type)
+    # `function f(a::T, b::U)` … `ccall((:sym, LIB), R, (types,), args)`.
+    # Non-greedy body so each function is matched against its OWN ccall.
+    pat = r"^function ([A-Za-z_]\w*)\(([^)]*)\)[^\n]*\n(?:(?!^function )[\s\S])*?ccall\(\([^)]*\),\s*[^,]+,\s*\(([^)]*)\)"m
+    for m in eachmatch(pat, wrapper_content)
+        fn, params, types = m.captures[1], m.captures[2], m.captures[3]
+        pnames = Set{String}()
+        for p in _split_toplevel_commas(params)
+            nm = strip(first(split(p, "::"; limit = 2)))
+            isempty(nm) || push!(pnames, String(nm))
+        end
+        isempty(pnames) && continue
+        for tm in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", types)
+            t = String(tm.match)
+            t in pnames && push!(offenders, (String(fn), t))
+        end
+    end
+    isempty(offenders) && return nothing
+
+    uniq = unique(offenders)
+    detail = join(("  $t  — shadowed by the parameter of $fn" for (fn, t) in first(uniq, 20)), "\n")
+    more = length(uniq) > 20 ? "\n  … (+$(length(uniq) - 20) more)" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(uniq)) ccall argument type(s) \
+    are shadowed by a parameter of the same name. `ccall` resolves its argument \
+    tuple eagerly at method definition, so Julia rejects the method with "could not \
+    evaluate ccall argument type (it might depend on a local variable)" and the \
+    whole module dies at include.
+
+    $detail$more
+
+    This is the `struct foo *foo` idiom — a C parameter named after its own type. \
+    Fix by renaming the PARAMETER at the emission site (the type name must survive; \
+    it is a module binding the ccall tuple has to reach), not by renaming the type.
+    """)
+end
+
+"""
+    _assert_no_any_ccall_return(wrapper_content, module_name)
+
+Refuse a wrapper that declares a foreign call's return type as `Any`.
+
+Unlike the two guards above this one is not about resolution — `Any` resolves
+fine. It is about MEANING: in a foreign call `Any` declares that the callee
+returns a `jl_value_t*`, so Julia takes whatever integer came back and treats
+it as a pointer to a Julia object. The crash lands inside method dispatch on a
+LATER call, with a stack that names neither the wrapper nor the library.
+
+`Any` reaches a return position when the type mapper could not name the type.
+That is a fine signal internally — the C emission loop uses `julia_return_type
+== "Any"` as its struct-return branch — but it must never survive into emitted
+text. libcurl shipped 18: every `curl_easy_setopt` / `curl_multi_setopt` /
+`curl_share_setopt` / `curl_easy_getinfo` overload, the whole configuration API,
+each one a segfault on first call.
+
+Checked on the emitted text, and deliberately NOT on `::Any` in a Julia
+signature — `f(x::Any)` is ordinary and correct. Only the foreign-call return
+position is wrong.
+"""
+function _assert_no_any_ccall_return(wrapper_content::AbstractString,
+                                     module_name::AbstractString)
+    offenders = Tuple{String,String}[]
+    fnames = [(m.offset, String(m.captures[1]))
+              for m in eachmatch(r"^\s*function\s+([A-Za-z_][A-Za-z0-9_!]*)"m, wrapper_content)]
+    enclosing(pos) = begin
+        best = "<module scope>"
+        for (o, n) in fnames; o < pos ? (best = n) : break; end
+        best
+    end
+    # @ccall form: `@ccall LIB.var"sym"(…)::Any`
+    for m in eachmatch(r"@ccall\s+[A-Za-z_][\w.]*\.var\"[^\"]*\"\([^)]*\)::Any\b", wrapper_content)
+        push!(offenders, (enclosing(m.offset), "@ccall"))
+    end
+    # classic form: `ccall((:sym, LIB), Any, (…), …)`
+    for m in eachmatch(r"ccall\(\([^)]*\)\s*,\s*Any\s*,", wrapper_content)
+        push!(offenders, (enclosing(m.offset), "ccall"))
+    end
+    isempty(offenders) && return nothing
+
+    uniq = unique(offenders)
+    detail = join(("  $fn  ($form)" for (fn, form) in first(uniq, 20)), "\n")
+    more = length(uniq) > 20 ? "\n  … (+$(length(uniq) - 20) more)" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(uniq)) foreign call(s) declare \
+    their RETURN type as `Any`. That tells Julia the callee returns a jl_value_t*, so \
+    the returned value is dereferenced as a Julia object — a segfault inside dispatch, \
+    far from the call site.
+
+    $detail$more
+
+    `Any` in a return position means the type mapper could not name the type. Resolve \
+    it to the real one (an enum's name usually sits in the metadata's `c_type`), or \
+    degrade to `Cvoid` — discarding a value is recoverable, corrupting one is not.
     """)
 end
 

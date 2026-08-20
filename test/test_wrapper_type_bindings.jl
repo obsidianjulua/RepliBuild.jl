@@ -369,4 +369,57 @@ end
     @test !occursin("_IO_FILE", err)   # not a false positive; not reported as one
 end
 
+# The mirror image of the undefined-type class above: there the ccall names a
+# type nothing defines, here it names one a PARAMETER has shadowed. Both kill
+# the module at include, because ccall resolves its argument tuple eagerly at
+# method definition. Found on libcurl (26 functions, 5 types), reproduced with
+# no library in play — `struct bufq *bufq` is ordinary C.
+@testset "Parameter must not shadow a ccall argument type" begin
+    W = RepliBuild.Wrapper
+
+    shadowed = """
+    struct bufq end
+    function sh_take_bufq(bufq::Any, n::Integer)::Cint
+        n_c = Cint(n)
+        return ccall((:sh_take_bufq, LIBRARY_PATH), Cint, (Ptr{bufq}, Cint,), bufq, n_c)
+    end
+    """
+    err = try
+        W._assert_no_shadowed_ccall_types(shadowed, "M"); ""
+    catch e; sprint(showerror, e) end
+    @test !isempty(err)
+    @test occursin("bufq", err)
+    @test occursin("sh_take_bufq", err)
+    # The message has to say which way to fix it — renaming the TYPE would be
+    # the wrong move, since the ccall tuple must still reach it.
+    @test occursin("renaming the PARAMETER", err) || occursin("rename the PARAMETER", err) ||
+          occursin("Fix by renaming the PARAMETER", err)
+
+    # Renaming the parameter is the fix, and must pass.
+    fixed = replace(shadowed,
+        "sh_take_bufq(bufq::Any" => "sh_take_bufq(bufq_1::Any",
+        "Cint,), bufq, n_c"      => "Cint,), bufq_1, n_c")
+    @test W._assert_no_shadowed_ccall_types(fixed, "M") === nothing
+
+    # Must-not-flag shapes ------------------------------------------------
+    # A parameter sharing a name with a type NOT in this function's tuple.
+    @test W._assert_no_shadowed_ccall_types("""
+    function f(other::Any, n::Integer)::Cint
+        return ccall((:f, LIBRARY_PATH), Cint, (Ptr{bufq}, Cint,), other, n)
+    end
+    """, "M") === nothing
+
+    # A comma inside a parameter's own type must not be read as an extra
+    # parameter — the split has to be depth-aware, same as _method_sig_keys.
+    @test W._assert_no_shadowed_ccall_types("""
+    function f(s::Union{AbstractString,Cstring}, n::Integer)::Cint
+        return ccall((:f, LIBRARY_PATH), Cint, (Cstring, Cint,), s, n)
+    end
+    """, "M") === nothing
+
+    # And it must be reachable from the real write path, or it prevents nothing.
+    @test occursin("_assert_no_shadowed_ccall_types",
+                   read(joinpath(@__DIR__, "..", "src", "Wrapper", "Generator.jl"), String))
+end
+
 end  # testset

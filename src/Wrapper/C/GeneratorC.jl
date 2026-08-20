@@ -2421,9 +2421,47 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 @warn "Varargs function '$func_name' has no overloads configured in [wrap.varargs]. Generating base wrapper only."
             end
 
+            # THE FIXED PARAMS STILL NEED THE UNDECLARED-TYPE DEGRADATION.
+            # This branch `continue`s past the emission loop below, and that is
+            # where `_resolve_forward_ptr` runs — so a variadic function whose
+            # FIXED parameters name a blocklisted system type shipped it raw.
+            # libcurl's `curl_mfprintf(FILE *fd, const char *fmt, ...)` emitted
+            # `fd::Ptr{_IO_FILE}` into an @ccall and killed the whole module at
+            # include: the miniaudio class of 2026-08-02, reappearing on the one
+            # path that skips the fix. Same shape as the Cstring-policy bug —
+            # a branch that emits and `continue`s past shared policy.
+            va_params = [copy(p) for p in params]
+            for p in va_params
+                p["julia_type"] = _resolve_forward_ptr(get(p, "julia_type", "Ptr{Cvoid}"),
+                                                       emitted_type_names)
+            end
+            va_return = copy(return_type)
+            va_return["julia_type"] = _resolve_forward_ptr(get(va_return, "julia_type", "Cvoid"),
+                                                           emitted_type_names)
+
+            # `Any` IS NOT AN EMITTABLE CCALL RETURN TYPE — it is a crash.
+            # `@ccall f(...)::Any` tells Julia the callee returns a
+            # `jl_value_t*`, so the returned integer is dereferenced as a Julia
+            # object: SIGSEGV inside dispatch, nowhere near the call. The
+            # emission loop below never hits this because it BRANCHES on
+            # `julia_return_type == "Any"` (that is its struct-return signal);
+            # this path had no such branch and spliced the word straight into
+            # the @ccall. libcurl shipped 18 of them — every `curl_*_setopt`
+            # and `curl_easy_getinfo`, i.e. the entire configuration API.
+            #
+            # `Any` here means "the mapper could not name the type", and for an
+            # enum return the real name is sitting in `c_type`. Prefer it when
+            # the module actually emitted it (`curl_easy_setopt` → `CURLcode`,
+            # which is what the non-variadic siblings already return); fall back
+            # to Cvoid, which discards a value rather than corrupting one.
+            if get(va_return, "julia_type", "") in ("Any", "unknown")
+                cand = _sanitize_c_type_name(get(va_return, "c_type", ""))
+                va_return["julia_type"] = cand in emitted_type_names ? cand : "Cvoid"
+            end
+
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
-                params, return_type, overloads,
+                va_params, va_return, overloads,
                 generate_docs, demangled, :c,
                 cstring_free=get(config.wrap.cstring_owned, func_name, "")
             )
@@ -2438,11 +2476,39 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         julia_param_types = String[]  # Julia types for function signature (may differ)
         needs_conversion = Bool[]
 
+        # A PARAMETER NAMED AFTER A TYPE IN THE CCALL TUPLE SHADOWS THAT TYPE.
+        # `struct bufq *bufq` is ordinary C — the parameter and its struct share
+        # a name — and it emitted
+        #     function f(bufq::Any, ...)
+        #         ccall(..., (Ptr{bufq}, ...), bufq, ...)
+        # where `Ptr{bufq}` resolves to the LOCAL, not the type. Julia refuses
+        # the method with "could not evaluate ccall argument type (it might
+        # depend on a local variable)" — and because ccall resolves its argument
+        # tuple EAGERLY at method definition, that one function takes the ENTIRE
+        # module down at include, exactly like the undeclared-type class
+        # `_assert_wrapper_loadable` was built for. Found via libcurl: 26
+        # functions over 5 type names (dynhds, cshutdn, bufq, cpool, ssl_peer),
+        # all 1004 of its functions dead on it. Reproduced with no library in
+        # play, so it is the generator's bug and not curl's.
+        #
+        # Collected from the julia_type strings rather than from a struct
+        # registry: what matters is only what LANDS in the tuple. `Ptr` and the
+        # C scalar aliases come along, which is correct — a parameter named
+        # `Ptr` or `Csize_t` would shadow just as fatally.
+        _ccall_type_names = Set{String}()
+        for p in params, m in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", get(p, "julia_type", ""))
+            push!(_ccall_type_names, m.match)
+        end
+        for m in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", get(return_type, "julia_type", "Cvoid"))
+            push!(_ccall_type_names, m.match)
+        end
+
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
             safe_name = make_c_identifier(param["name"])
             # Ensure unique parameter names (duplicate names cause Julia syntax errors)
-            if safe_name in param_names
+            # and that none shadows a type the ccall tuple names (see above).
+            if safe_name in param_names || safe_name in _ccall_type_names
                 safe_name = "$(safe_name)_$(i)"
             end
             push!(param_names, safe_name)
