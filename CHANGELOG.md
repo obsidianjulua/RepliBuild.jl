@@ -2,7 +2,491 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## Unreleased
+## v3.3.0 (unreleased)
+
+Minor, not patch. The theme is **C++ methods that were being called without their
+`this`** — three independent defects in the two receiver gates, plus the DWARF
+extraction feeding them — and the fixes change emitted signatures across every C++
+package. Alongside: `char*` returns stopped escaping raw from Tier 2, all three
+producer-less JLCS ops gained producers, Tier 2 accepts a `Base.Ref`, variadic
+overloads accept the values callers actually write, and the wrapper writer grew
+three more refusals. No exported API was removed since v3.2.0.
+
+**Upgrade note — C++ packages need a REBUILD, not a re-wrap.** The scope a method
+belongs to (`class` in `compilation_metadata.json`) is computed by
+`extract_compilation_metadata` at **build** time, so re-running `wrap()` replays the
+old scopes and reproduces the old signatures. Worse, the project content hash will
+skip the rebuild and print `cache: project unchanged` — delete
+`.replibuild_cache/project_hash` to force re-extraction while keeping the vendored
+clone and the per-file IR cache. C packages are structurally unaffected: a C symbol
+has no `::`, so `class` is always empty and none of this reaches them.
+
+### Two more ways a wrapper could kill its own module at include (2026-08-16)
+
+`ccall` resolves its argument tuple and return type **eagerly, at method
+definition**, so one bad type annotation takes the whole module down at `include` —
+the class `_assert_wrapper_loadable` was built for in v3.2.0, when the name resolved
+to nothing. libcurl found two more routes into it, plus a third shape that resolves
+fine and crashes later.
+
+- **A parameter can shadow a type its own ccall names.** `struct bufq *bufq` is
+  ordinary C — the parameter and its struct share a name — and it emitted
+  `function f(bufq::Any, …)` over `ccall(…, (Ptr{bufq}, …), bufq, …)`, where
+  `Ptr{bufq}` resolves to the **local**. Julia refuses the method with "could not
+  evaluate ccall argument type (it might depend on a local variable)". 26 functions
+  over 5 type names (`dynhds`, `cshutdn`, `bufq`, `cpool`, `ssl_peer`), and **all
+  1004 of libcurl's functions dead on it**. `_undefined_ccall_types` could not see
+  it: `bufq` *is* declared by the module — it is merely unreachable from inside that
+  one function. Fixed at the emission site by renaming the parameter, never the type
+  (the tuple still has to reach it), and guarded by
+  `_assert_no_shadowed_ccall_types`.
+- **The `@ccall` form was never scanned.** `_undefined_ccall_types` matched only the
+  classic `ccall((:sym, LIB), R, (T, …), …)` shape, and `@ccall` is what
+  `generate_vararg_wrappers` emits — so **every variadic function was invisible to
+  the guard**. libcurl's `curl_mfprintf(FILE *fd, …)` wrote `fd::Ptr{_IO_FILE}` out,
+  Julia refused it at include, and the guard reported nothing wrong. Both forms are
+  scanned now. The emission bug behind it is the same shape as the Cstring-policy
+  one below: the variadic branch `continue`s past the emission loop, and
+  `_resolve_forward_ptr` — the 2026-08-02 fix for exactly this class — lives inside
+  the loop. Fixed parameters go through it before the varargs path sees them.
+- **`Any` is not an emittable foreign return type; it is a crash.** In a foreign
+  call `Any` declares that the callee returns a `jl_value_t*`, so whatever integer
+  came back is dereferenced as a Julia object — SIGSEGV inside dispatch, on a later
+  call, with a stack naming neither the wrapper nor the library. `Any` reaches a
+  return position when the type mapper could not name the type; the C emission loop
+  branches on that (it is the struct-return signal) and the variadic path did not,
+  so it spliced the word straight into the `@ccall`. **libcurl shipped 18 — every
+  `curl_easy_setopt`, `curl_multi_setopt`, `curl_share_setopt` and
+  `curl_easy_getinfo` overload, i.e. the entire configuration API.** The variadic
+  path now prefers the name sitting in the metadata's `c_type` when the module
+  emitted it (`curl_easy_setopt` → `CURLcode`, which its non-variadic siblings
+  already return), and falls back to `Cvoid` — discarding a value is recoverable,
+  corrupting one is not. Guarded by `_assert_no_any_ccall_return`.
+
+Both new guards run on the emitted **text**, from `_assert_wrapper_loadable`,
+beside their sibling and for the same reason: the bug is the generator's
+bookkeeping disagreeing with what it actually wrote. The shadowing guard is gated in
+`test_wrapper_type_bindings.jl` — including the depth-aware parameter split, so a
+`Union{AbstractString,Cstring}` annotation is not read as two parameters — and was
+reproduced with no library in play, which is what makes it the generator's bug and
+not curl's.
+
+### Variadic overloads accept the values callers actually write (2026-08-16)
+
+`f_Cint(fmt, 42)` did not work. Each variadic slot was annotated with its
+**declared** type, so `va_1::Cint` rejected the `Int64` literal every caller writes
+before the `ccall` was ever reached. The signature takes a **widened** type now —
+`Integer`, `Real`, `Union{AbstractString,Cstring}`, `Any` for pointers — while the
+`@ccall` keeps the declared one, where `cconvert`/`unsafe_convert` run and their
+results stay rooted for the call. Widening the signature changes nothing about the
+ABI, and it cannot introduce an ambiguity by construction: every overload is its own
+named function (`f_Cint`, `f_Cdouble`), so no two of these signatures compete.
+
+**The types that cannot legally name a variadic slot are now rejected at wrap
+time.** C default argument promotion (C11 6.5.2.2p6–7) converts `float` to `double`
+and every integer type of rank below `int` to `int` before the callee sees it, so
+there is no ABI in which a caller writes 4 bytes into a slot read with
+`va_arg(ap, double)`. Julia does not promote, and neither did this generator:
+`va_1::Cfloat` wrote exactly `Cfloat`, the callee read 8 bytes where 4 were written,
+and formatted whatever followed. **Wrong output, no crash** — the worst failure mode
+a `printf` wrapper has, and one nothing downstream can catch, since the wrapper
+loads and the `ccall` is well-formed. `Cfloat`/`Float32`/`Float16`,
+`Cchar`/`Cuchar`, `Cshort`/`Cushort`, `Bool` and the sub-`int` sized integers now
+error at wrap time, naming the type to use instead.
+
+**Duplicate-method drops name what they dropped.** `_dedup_method_chunks` reported a
+count, which cannot distinguish a D1/D2 destructor pair — where dropping one is
+exactly right — from an `::Any`-collapsed overload pair, where a **distinct C++
+entry point silently became unreachable** (imgui's `TreeNode(const char*, const
+char*, …)` losing to the `void const*` form: same `(Any, Any)` signature, different
+function). It now names the signature, the symbol dropped and the symbol that
+shadowed it, reading the mangled name back off each chunk's own docstring rather
+than threading it through. The same symbol on both sides means one C++ entry point
+emitted two chunks, and prints without a shadower.
+
+Fixed while here: `_method_sig_keys` split its parameter list on every comma, so a
+type containing one — `Union{AbstractString,Cstring}`, `NTuple{8,UInt8}` — became
+two arguments and silently changed the dedup key. It is depth-aware now.
+
+### `class` is the demangler's prefix, not a scope — three ways to lose `this` (2026-08-13)
+
+`class` in `compilation_metadata.json` is everything before the last `::` in the
+demangled text preceding the first top-level `(`. That is a scope only when the
+string is `Scope::name(args)`. Three cases where it is not, all found in one
+session, all ending in a method wrapper called without its receiver — and **both**
+receiver gates trusted it.
+
+- **Itanium adjustor thunks** (`_ZTh`/`_ZTv`/`_ZTc`) demangle to `non-virtual thunk
+  to Derived::~Derived()`, so the scope came out as the *phrase* `non-virtual thunk
+  to Derived`. No aggregate is named that, so neither gate synthesized `this` and
+  the wrapper exported a documented **zero-argument** function calling a method that
+  needs `this` in rdi. Not latent: `ViTest.virtual_thunk_to_Diamond_tag()` cored the
+  process — the virtual form dereferences the garbage `this` twice
+  (`mov (%rdi),%rax; mov -0x20(%rax),%rax`) to read the vcall offset out of the vptr
+  before it ever reaches the callee. Filtered at the source in
+  `extract_symbols_from_binary`, beside the `__rb_*` exclusion, so it clears
+  metadata, wrapper, manifest and `.mlir` in one place — **a thunk is a vtable-slot
+  entry point, never an API function**; an override is reached through the vtable or
+  after an explicit upcast, both already exercised by the fixtures. 12 symbols,
+  fixtures only, 0 across the Hub.
+- **Member function templates.** Itanium mangles a function template's return type
+  into the symbol, so `bool gguf_reader::read<int>(…)` gave the scope
+  `bool gguf_reader`. `gguf_reader` *is* a real class, so both gates declined and
+  **every argument slid one register** — the silent direction. And template
+  arguments contain `::`, so the flat split also cut inside them
+  (`bool llama_model_loader::get_arr<std::vector<int, std`, with the function name
+  coming back as `allocator<int> > >`); the comment on that split claimed "safe – no
+  templates here". Class and name now derive from one depth-aware walker (angle
+  **and** paren depth, clamped so `operator>`/`operator->` cannot drive it negative).
+  The return-type strip bails on any prefix containing `operator` — a conversion
+  operator is the only C++ name with a legitimate top-level space — degrading to the
+  historical answer rather than to a new wrong one.
+- **A constructor or destructor always has a receiver.** `struct_types` is not a
+  complete list of a library's classes — a `.cpp`-local polymorphic class gets no
+  type DIE — so when DWARF also stopped describing `this`, box2d's seven internal
+  contact subclasses and imgui's eight `ImVector_*_destroy_ImVector` emitted
+  zero-argument destructors. That is a fact about the debug info; "a dtor has a
+  `this`" needs no table. Both gates test it first, and Hub-wide there are now
+  **zero** zero-argument method wrappers.
+
+**Validated by corpus diff before landing, not by eye**: old versus new over all
+10,618 demangled names in the Hub and fixtures, every distinct change read. The
+number that matters is the receiver decision — **62 methods gained `this`, 0 lost
+it** (llamacpp 48, pugixml 8, box2d 4, tinyxml2 2). imgui's 29 class changes are
+namespace→namespace and behaviourally inert, so counting class diffs alone would
+have overstated the blast radius 2×.
+
+**The same missing receiver had quietly gutted RAII.** The deleter scan inferred
+"this function deletes a `Ptr{X}`" from `params[1]`, so when `this` disappeared the
+`Managed` tables collapsed — box2d 30 → 1, tinyxml2 11 → 2, llamacpp 127 → 18. A
+destructor names its own class, so the scan reads `class` now and never the argument
+shape: tinyxml2 11/11, llamacpp 127/127, and **pugixml 2 → 10, imgui 8 → 79**, which
+gained finalizers they should always have had. box2d ends at 29 rather than 30
+because the missing one was a bug being removed: `Managedb2Fixture`'s finalizer
+called `b2Body::DestroyFixture` passing the **fixture** as `this`, and qualified only
+because the old metadata gave that method a single parameter.
+
+The C++ gate is one function now, `_cpp_this_param`. Inlined in the emission loop,
+the only way to test it was to re-implement it — a third copy of a decision that
+already existed twice — and the first draft of the agreement test did exactly that
+and reported 26 phantom disagreements, because it stripped template arguments where
+the real gate keeps them. Gated by `test/test_symbol_hygiene.jl` (94 asserts, no
+toolchain, in `runtests`), which drives **both real predicates** over every C++ Hub
+package's metadata and fails on any disagreement — the assertion that would have
+caught the ImGui incident, the thunks and these destructors, all three being gate
+disagreements or shared blind spots. Negative-checked from four directions;
+desyncing one gate reports 310 disagreements. Its own `checked > 1000` counter then
+caught a bug in itself: a `try/catch` around `JSON.parsefile` swallowed
+`UndefVarError: JSON`, so every package was skipped and the sweep proved nothing
+while passing standalone.
+
+All six C++ Hub packages rebuilt and green at baseline — box2d 15/15, tinyxml2
+11/11, pugixml 13/13, imgui 202/202, llamacpp 33/33, hello_world loads — each with 0
+undefined exports. mi_test 43/43, vi_test 40/40, stl_test 28/28. **pugixml is the
+regression canary**: byte-identical apart from its timestamp, since full debug info
+already supplied every `this`.
+
+### All 14 JLCS ops have a producer, and liveness is computed now (2026-08-13)
+
+`jlcs.dtor_call`, `jlcs.get_field` and `jlcs.set_field` were declared, lowered and
+registered, and never emitted. This changelog and `docs/src/mlir.md` said otherwise
+about `dtor_call` for months: `FunctionGen` builds `jlcs.scope(…) dtors([@sym, …])`
+and `ScopeOpLowering::emitDestructors` emits `LLVM::CallOp` directly, so
+`DestructorCallOpLowering` was registered and unreachable — and nothing could catch
+it, because the destructor *tally* fires through the scope lowering and the suite
+passed without the op existing.
+
+- **`dtor_call`** — a destructor thunk is exactly this op's shape (one object
+  pointer in, void out), so it stops going out as a generic `ffe_call`/`try_call`
+  carrying SysV coercion a `(ptr) -> void` signature has no use for. It gained
+  `may_throw` (UnitAttr plus invoke/landing-pad lowering, mirroring `vcall`'s) so
+  the switch preserves EH exactly. **The arity gate is load-bearing, not
+  defensive**: under Itanium a base-object destructor (D2) of a class with virtual
+  bases takes a second **VTT** argument and `dtor_call` has no operand for it, so
+  those keep the ffe/try path — converting them would drop the VTT silently.
+  Negative-checked by relaxing `== 1` to `>= 1`, and the paired
+  `_ZN2VbD1Ev`/`_ZN2VbD2Ev` fixtures prove the exclusion is arity, not name or class.
+- **`get_field`/`set_field`** — the ciface hands a thunk a `void**`, so argument
+  slot `i` is a field read at byte offset `8i`: one op instead of a constant plus a
+  pointer-scaled GEP plus a load. `ArrayViewGen` also builds the `!jlcs.array_view`
+  descriptor with one `set_field` per field — **the same terms the array-op lowering
+  already reads it in**, where before it was a GEP chain on one side and byte
+  offsets on the other with nothing tying them together.
+
+**This changes what the IR says, not what it does, and that is proven rather than
+argued**: all 188 symbols across `mi_test`/`vi_test`/`stl_test` compile to
+byte-identical machine code across the switch, compared per function with `objdump`.
+A text or even LLVM-IR diff proves nothing here — the IR differs in GEP element type
+and `!dbg` numbering — so compare instructions, and `test_jlcs_producers.jl` §G pins
+the per-shape equality permanently. The payoff is that the `.mlir` is the debugger's
+source file, so `jlcs.get_field … {fieldOffset = 8}` is what gdb shows.
+
+All three gained verifiers: the lowerings took a pointer operand on faith, which
+ODS's `AnyType` accepts and LLVM translation then rejects far from the mistake.
+`get_field`/`set_field` also reject a negative `fieldOffset`.
+
+**Liveness is derived now, not asserted.** `test_jlcs_invariants.jl` §E reads the
+mnemonics out of `JLCSOps.td`, greps `src/**/*.jl` for emission, and fails naming
+any op whose tier moved — negative-checked against the previous state, where it
+reports exactly `dtor_call, get_field, set_field`. That list had gone stale in the
+docs three times; writing the guard is what stops a fourth.
+
+Invariants 17/17, producers 57/57, templates 87/87, struct-ABI 30/30, multilib
+14/14, mi 38/38, vi 33/33, stl 28/28.
+
+### A dispatch tier decided a presentation policy: `char*` returns from Tier 2 (2026-08-12)
+
+Calling `hello_message()` returned `Cstring(0x7fb608c37000)`. `use_mlir_dispatch`
+emits its `invoke` and then `continue`s past the ccall branch, and the whole
+`Cstring` policy lived below that line — so a Tier-2 `char*` return got **no
+`Union{String,Nothing}` copy, no NULL check, no `_ptr` sibling, and its
+`[wrap.cstring_owned]` deallocator silently discarded**. The reach is everything
+C++: `is_ccall_safe` routes any function not marked `noexcept` to Tier 2, so only
+`extern "C"` symbols kept the good path. **75 offenders, measured** — imgui 30,
+tinyxml2 22, pugixml 13, llamacpp 9, hello_world 1 — **not one with a `_ptr`
+sibling**. Not a memory-safety bug (the pointer was valid), and the leak risk was
+latent, since both `cstring_owned` declarations in the Hub are C.
+
+The fix is one derivation rather than a patched branch: `_cstring_wrapper_pair` owns
+the policy wrapper, the `_ptr` sibling and the free, and a tier supplies only two
+call-body strings and decides nothing else. Four emission sites consume it — C
+ccall, C++ ccall, C++ Tier-2 JIT, C++ Tier-2 AOT. **Verified behaviour-preserving by
+construction, not by eye**: re-wrapping cjson gives a byte-identical wrapper, and
+box2d — 439 Tier-2 functions, no `char*` return — diffs **zero lines** against a
+wrapper generated from unpatched HEAD. That diff is the real regression test for a
+heredoc restructure.
+
+`_assert_cstring_policy` refuses a wrapper where a `char*` return escapes as a bare
+`Cstring` outside a `::Union{String,Nothing}` function and outside a `_ptr` variant.
+**Its own first draft had the bug it exists to catch**: an unanchored
+`@ccall .*::Cstring` matched an *argument* annotation and flagged all four of
+box2d's void-returning `b2Log`/`b2Dump` overloads. Every pattern is anchored on the
+return position now. Gated by `test/test_cstring_policy.jl` (53 asserts, no
+toolchain, in `runtests`), including a check that the guard is reachable from
+`_assert_wrapper_loadable`.
+
+Separately and in the opposite direction: C++ docstrings advertised `-> Cstring`
+while the ccall path already returned `Union{String,Nothing}`, so all 33 of
+llamacpp's Union-returning functions were mis-documented. Both generators rewrite
+the documented return now.
+
+**The consumer fallout is the tell that the fix was right.** Three Hub drivers
+hand-rolled a `cstr(x)` helper to undo the missing policy, and imgui's deep test
+went 202/202 → 183 passing + 14 errored the moment the wrapper started returning
+Strings. The ergonomic layer had been doing the wrapper's job. When a policy moves
+into the generator, grep the consumers for the compensation before declaring
+victory. Re-wrapped Hub-wide: policy-function count now equals `_ptr` count in every
+package, **+77 `_ptr` variants**, and imgui deep is back to 202/202.
+
+### Consumer compensation is a feature request: `dispatch_tier`, `struct_size` (2026-08-12)
+
+A consumer written against a Hub wrapper hand-rolls a workaround for whatever the
+generator failed to emit, and that workaround is executable evidence of a missing
+feature. **The discriminator is recurrence** — one package is library ergonomics,
+twelve is a gap. Two were mined out of `packages/*/test*.jl` and shipped:
+
+- **`dispatch_tier(f)` and `DISPATCH_TIER`** — 12 files carried a helper reaching
+  into the private `_TIER1_*` kernel to `code_typed` it and string-match
+  `"llvmcall"`, 11 of them byte-identical. Nobody trusted `TIER1_FUNCTIONS`, because
+  it records *intent* while the `@generated` kernel demotes at generation time. Both
+  are emitted now: `DISPATCH_TIER` for the intent, `dispatch_tier` for the reality.
+  Proven equivalent to the hand-rolled helper on all 84 of cjson's Tier-1 functions,
+  0 disagreements — and the gap is real: move `julia/slices` away and `DISPATCH_TIER`
+  still says `:tier1` while `dispatch_tier` says `:tier3` and the function still
+  returns the right answer.
+- **`struct_size` / `member_offset`, backed by `STRUCT_SIZES`/`STRUCT_OFFSETS`** —
+  four packages re-parsed `compilation_metadata.json` for facts the generator held
+  while emitting. Scoped to structs the module actually declares. It lands exactly
+  on the recorded pain: `llama_context_params` is 160 bytes with `embeddings` at
+  128, which callers had been patching through hand-rolled offset tables.
+
+Both are derived from the final chunks post-dedup, same discipline as
+`_tier1_emit_slices!`, and neither is exported — qualified access only, so they
+cannot shadow a consumer's names.
+
+**The self-audit of this feature found two silent-wrong-answer defects in it**,
+which is the part worth remembering: a feature built to remove silent wrongness is
+not automatically free of it.
+
+- The layout table re-derived the type-name spelling instead of using each
+  generator's own sanitizer, so a trailing underscore made
+  `ImChunkStream<ImGuiTableSettings>` never match the emitted name and the type was
+  **dropped silently**. Cost: 100 of imgui's 262 declared structs, 29 of tinyxml2's
+  42, 17 of pugixml's 69 — precisely the templated types whose size a caller cannot
+  compute any other way. After: imgui 162 → 248, tinyxml2 13 → 24, pugixml 52 → 62,
+  llamacpp 434 → 1222.
+- `DISPATCH_TIER` was last-write-wins over a non-injective key. One Julia name can
+  carry methods on different tiers — a Tier-1 primary plus a Tier-3 convenience
+  overload is the common shape — so the table answered confidently and wrongly for
+  **48 names** (cglm 35, miniaudio 5, llamacpp 3, lz4 3, imgui 2). They are recorded
+  `:mixed` now, which fails an ill-posed `=== :tier1` assertion loudly instead of
+  satisfying it by luck.
+
+**A third came from checking the JIT hot path**: `dispatch_tier` calls `code_typed`
+on a `@generated` kernel, which **forces that kernel to generate** — it looks
+read-only and is not. Runtime order is safe, measured both ways; output mode was
+not. A consumer doing `const T = M.dispatch_tier(:f)` at module scope froze
+`:tier3` into its pkgimage while the same function re-generates to `llvmcall` in the
+next session — reporting the precompile worker, not the session that runs. It
+returns **`:deferred`** in output mode now and does not probe at all, which also
+keeps generation out of the one place the sliced-llvmcall deadlock class lives. And
+`Base.ccall(...)` is `UndefVarError` — `ccall` is syntax, not a binding — the exact
+opposite hazard to the Base-qualification rule the emitted helpers otherwise follow,
+so the guard carries a comment saying so.
+
+Hub sweep: all 20 packages re-wrapped, 21 call sites migrated, 12 helper definitions
+deleted (3 of them already dead), 4 metadata re-parsers replaced by delegation. All
+16 deep verifiers green at their recorded counts.
+
+### Docs: the dialect page came back, and the TOML reference was wrong (2026-08-12)
+
+`docs/src/mlir.md` had been dropped from git alongside pages that were genuinely
+retired, and its `make.jl` entry went with it. The file survived untracked in the
+working tree, so the loss showed only as a 404 at `/dev/mlir/` — the sidebar simply
+had no Tier-2 dialect page. It is tracked and relisted, and rewritten as the
+architecture thesis for the dialect: what `ccall` cannot express, why not a C shim
+and why not libffi, the DWARF→JLCS→LLVM→ORC pipeline, the thunk contract with a
+worked example carried from the Julia call site to the three instructions gdb shows,
+a 14-op table with **producer and verifier status per op**, the SysV lowering, and
+the failure classes the design exists to make loud.
+
+`docs/src/config.md` was rewritten as the authoritative TOML reference. It needed a
+rewrite rather than a patch because of what it *claimed*:
+
+- The `[wrap.varargs]` example was wrong twice over — it showed C type names where
+  the parser requires Julia ones, and included the fixed format argument when only
+  variadic args are listed. Copying it produces a hard error at wrap.
+- The preserved-keys list said 6; `Discovery.PRESERVED_TOML_KEYS` has 8. Same error
+  in three other pages.
+- `optimization_level` documented a default of `"2"`; the parser's absent-key
+  default is `"0"`.
+- `[dependencies].commit` was entirely undocumented, despite being in every Hub
+  config and a hard error on mismatch.
+- A dependency's default `type` is `"local"`, not `"git"` — so a `[dependencies.x]`
+  with a `url` and no `type` silently never clones.
+- `exclude` was described as glob-matched; it is `==` / prefix / suffix / substring.
+- **Keys that are parsed and never consulted** are marked as such now: the whole
+  `[discovery]` section, `[workflow] stages`, `[wrap] style`, `[binary]
+  strip_symbols`, three `[paths]` keys, and `[project] version`. `extra_link_libs`
+  is `[ingest]`-only and silently inert under `[link]`. Unknown keys get **no
+  warning at all**, which the page now says outright.
+
+Also corrected across the manual: the README claimed C++ multiple inheritance is not
+modelled (MI and VI have both been built since 2026-07-17), `internals.md` said
+`ThunkBuilder` shells to `llc` and described `JITManager` as a singleton engine, the
+Tier-1 lua figures were stale everywhere, and the README linked four pages that have
+never existed. The docs build exits 0 with **zero** link or xref warnings.
+
+**The 2026-07-25 audit pattern held again**: everything wrong was a *derived* claim
+— counts, defaults, key lists, links — never the prose explaining how something
+works. Check derived claims first.
+
+### Tier 2 accepts a `Base.Ref` argument without segfaulting (2026-08-09)
+
+A thunk slot holds a pointer to a location containing the argument value — the
+emitted thunk double-loads, slot → storage → value. `Ref(x)` gives that for an
+isbits `x`, but a `Base.RefValue` **is already an indirection**, so wrapping it
+again spends one level too many and the callee receives the struct's own first eight
+bytes as an address.
+
+That is the spelling a caller reaches for first: a C++ `T const&` parameter
+generates `::Ref{T}`, and `Ptr{T} <: Ref{T}` means the annotation accepts a
+`RefValue` silently with nothing to type-check it away. It presents as a raw SIGSEGV
+with a C++ frame in the backtrace, so it reads as a thunk ABI bug rather than a
+caller mistake. Found on `ImGui::ButtonEx` dereferencing `size_arg`; the blast
+radius is every C++ package with by-reference struct params, and imgui is full of
+them — `Button`, `Dummy`, `SetNextWindowSize`, every `ImDrawList` primitive.
+
+It is flattened to a raw pointer first, exactly as `AbstractString` already was — a
+case that exists for the same reason. The `!(<: Ptr)` term is load-bearing: a raw
+pointer is already the flattened form, and re-flattening would strip the level the
+thunk needs. Both `invoke` methods carried byte-identical copies of this prologue,
+which is how a fix to one silently misses the other, so it is one
+`_arg_marshal_plan` now.
+
+Verified on a five-line by-reference fixture with no library in play — `Ptr`,
+`RefValue`, two `RefValue`s and mixed — then at the original crash site:
+`Button(label, Ref(ImVec2))` returns and the item rect measures 80×20, the exact
+vector passed, so the bytes arrive rather than merely not crashing. runtests
+626/626, imgui deep 202/202.
+
+### DWARF extraction: real signatures, and no system-header types (2026-08-09)
+
+Four defects, one root cause — information DWARF carries that nothing read.
+Measured coverage before this was 23 of 36 tags and 14 of 60 attributes.
+
+1. **`DW_AT_specification` was never followed** — 22.8k occurrences. An out-of-line
+   C++ method definition carries neither `DW_AT_linkage_name` nor `DW_AT_name`, only
+   a back-reference to its in-class declaration. Functions are keyed by linkage
+   name, so the definition DIE was discarded whole, taking its named parameters with
+   it; the declaration survived, and its parameters are unnamed.
+2. **Typed-but-unnamed parameters were dropped.** A parameter's ABI identity is its
+   type and position — the name is documentation. Requiring both dropped every
+   parameter of every declaration-only DIE, **including the implicit `this`**.
+   `DW_AT_artificial` marks that receiver, so it is named `this` rather than `argN`,
+   which is what stops both generators from injecting a second one; either attribute
+   order is handled, since the parameter context must not stay open past its own DIE
+   (the 2026-07-26 phantom-parameter leak).
+3. **C++ reference returns are pointers, not `Ref`s.** Both mappers render `T&` as
+   `Ref{T}` — correct and ergonomic for a parameter, where Julia converts at the
+   boundary. In return position `JITManager` allocates the buffer as `Ref{T}()`, so
+   `Ref{Cvoid}` asks for `Ref{Ref{Cvoid}}()`: an `UndefRefError` raised before the
+   call is even made, reported as `Ref{Nothing}` because `Cvoid === Nothing`, which
+   reads as a void-return bug. `ImGui::GetIO()` died here.
+4. **Types had no `DW_AT_decl_file` gate.** Functions are gated by
+   `nm --defined-only`; types were not, so `hello_world.cpp` — which declares zero
+   types — emitted six (`max_align_t`, `__mbstate_t`, `ldiv_t`, …) plus accessors
+   and exports for them. A system-directory blocklist, deliberately not a
+   project-root allowlist: dropping a type the project declares produces an
+   undeclared name in a signature, while keeping a stray system type costs only
+   noise.
+
+`GeneratorCpp` additionally degrades a parameter annotation naming a type the module
+never emitted to `Any`, since argument types resolve eagerly at method definition
+and an unbound name kills the whole module at include. That was latent until (1)
+recovered `xml_attribute::set_name(std::basic_string_view<…>)` — 44 uses, wrapper
+dead at load.
+
+Measured: ImGui arity warnings **3891 → 2**; methods disagreeing with their own
+mangled signature **1103 → 0**; parameter names real (`Begin(name, p_open, flags)`,
+was `arg1..arg3`). pugixml 0 warnings, 303 functions with a DWARF-supplied receiver,
+407 signatures gaining real names. hello_world types 6 → 1 — only the compiler
+builtin `__va_list_tag`, which has no `decl_file` — exports 7 → 4, and its dag-diff
+line disappears.
+
+**Expect `struct_definitions` counts to drop on rebuild**, which is this fix and not
+a regression: llamacpp goes 2864 → 465, and every dropped name was classified —
+**0 project types lost, all 292 `llama_*`/`ggml_*`/`gguf_*` retained**; the 2399
+dropped are libstdc++ and libc (`basic_string`, `basic_ostream`, `cpu_set_t`,
+`div_t`, `error_category`).
+
+### MLIR thunks: no receiver for namespace-scoped functions (2026-08-09)
+
+The Julia generator already gated `this` synthesis on the scope being a real
+aggregate. The thunk generator did not — it keyed on `is_method` alone, which
+upstream is `contains(demangled_prefix, "::")` and is therefore true for both
+`Obj::get()` and `ImGui::GetVersion()`. Itanium mangles the two identically, so the
+name cannot tell them apart.
+
+The two sides then disagreed about the argument array: Julia correctly emitted a
+zero-argument call passing an empty `Ptr{Cvoid}[]`, while the thunk loaded
+`args_ptr[0]` and dereferenced it. SIGSEGV on the first Tier-2 call. **Dear ImGui:
+788 thunked `ImGui::` functions, 174 of them zero-arg — immediate crash — and the
+remaining 614 with every argument shifted one slot.**
+
+Two generators deriving one decision independently, the same shape as `ffe_call` and
+`try_call` each carrying their own SysV coercion. Note the aggregate table keys on
+the bare name (`xml_document`) while `class` carries full scope
+(`pugi::xml_document`), so every `::` suffix is tried, angle-bracket-depth aware —
+matching the full name alone silently strips `this` from every namespaced class
+method, which took pugixml's `load_string` from 3 args to 2 before it was caught.
+
+`ImGui::GetVersion()` returns `"1.92.9b"` where it previously segfaulted. mi_test
+38/38, vi_test 33/33, stl_test 28/28, producers 36/36.
+
+**Two generators agreeing is necessary, not sufficient** — see the receiver-gate
+entry above, where this fix brought both sides to a shared *wrong* answer on the
+Itanium thunks they had previously merely disagreed about.
 
 ### DAG diff was reporting its own layout model as wrapper drift (2026-08-08)
 
