@@ -202,27 +202,27 @@ include(joinpath(TEST_DIR, "test_jlcs_invariants.jl"))
 
 include(joinpath(TEST_DIR, "test_c_inprocess.jl"))
 
-# ── 7b. Static promotion (llvmcall slicing contract, M1) ─────────────────────
-# Fixture-gated: internal statics (functions + mutable globals) become exported
-# __rb_<lib>_* symbols post-opt so per-function slices bind to the .so's single
-# copy of state; const statics stay internal; the wrapper never wraps __rb_*.
-
-include(joinpath(TEST_DIR, "test_static_promotion.jl"))
-
-# ── 7c. Per-function bitcode slicing (llvmcall slicing M2) ───────────────────
-# Slicer.jl over the promoted slice_test module: declarations-only slices
-# (single definition, mutable statics declared via __rb_*), hazard/refusal
-# policy, both state-coherence directions through live Base.llvmcall, cache.
-
-include(joinpath(TEST_DIR, "test_slicer.jl"))
-
-# ── 7d. Sliced-llvmcall dispatch (llvmcall slicing M3) ───────────────────────
-# The generated wrapper in mixed-tier mode: [wrap.tier1] enable routes eligible
-# functions through Base.llvmcall on their slice while varargs/setjmp stay
-# ccall, TIER1_FUNCTIONS records the Tier-1 surface, and both directions of the
-# cJSON state-divergence class stay coherent across the tier boundary.
-
-include(joinpath(TEST_DIR, "test_tier1_dispatch.jl"))
+# ── 7b/7c/7d. Tier 1 (llvmcall + bitcode slicing) — DELIBERATELY NOT RUN ─────
+#
+# M1 static promotion, M2 slicing and M3 sliced dispatch used to run here. They
+# are unwired on purpose (2026-08-19): Tier 1 is the most experimental part of
+# RepliBuild, it is OFF BY DEFAULT (`[wrap.tier1] enable = false`, and every
+# Hub config pins `enable_lto = false`), and it ships as a side project rather
+# than as a supported tier. Their three testsets rebuild test/slice_test/ once
+# each — real compute for a path nothing takes by default.
+#
+# They are NOT orphaned: `runtests.jl`'s "Every test file is wired into a
+# suite" testset carries an explicit `experimental` list naming all three, and
+# fails if one is deleted, renamed, or quietly re-wired. A NEW Tier-1 test file
+# still fails that guard until someone consciously adds it.
+#
+# Run them by hand when working on Tier 1 (needs the toolchain):
+#     julia --project=. test/test_static_promotion.jl
+#     julia --project=. test/test_slicer.jl
+#     julia --project=. test/test_tier1_dispatch.jl
+#
+# Slicer.jl, the promotion pass and the [wrap.tier1] knob all stay shipped and
+# unchanged — this removes the SUITE cost, not the feature.
 
 # ── 8. Nested-struct ABI resolution (pure ccall path) ────────────────────────
 # Library-free trace: structs with struct-typed members must come out with

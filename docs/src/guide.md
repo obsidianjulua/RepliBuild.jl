@@ -250,7 +250,21 @@ the C body directly into the calling Julia function — full cross-language
 inlining, no call instruction. There are two payloads that can carry that IR,
 and they are configured independently.
 
-### Per-function slices (`[wrap.tier1]`) — the supported path
+### Per-function slices (`[wrap.tier1]`) — experimental, off by default
+
+!!! warning "Tier 1 is a side project, not a supported tier"
+
+    It ships, it works on the libraries it has been driven over, and it is
+    **not** something to reach for in production. It is off by default
+    (`enable = false`), no RepliBuild-Hub package turns it on, and its test
+    suite is deliberately unwired from `devtests.jl` — run
+    `test/test_static_promotion.jl`, `test/test_slicer.jl` and
+    `test/test_tier1_dispatch.jl` by hand if you work on it.
+
+    Everything below is accurate; treat it as documentation of an experiment.
+    The design doctrine is that llvmcall is a passenger tier and never the
+    driver — any doubt resolves to `ccall`, which is why the machinery is
+    mostly refusals, demotions and guards. Improvements are welcome by PR.
 
 A **slice** is a declarations-only module: one function's body, and every callee
 and global it reaches left as a bare `declare`, resolved at JIT time against the

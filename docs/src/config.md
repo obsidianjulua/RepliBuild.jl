@@ -333,6 +333,14 @@ for what a slice is:
 enable = true
 ```
 
+!!! warning "Experimental — off by default, and not a supported tier"
+
+    Tier 1 is a side project inside RepliBuild. `enable` defaults to `false`,
+    no Hub package sets it, and its tests are deliberately unwired from
+    `devtests.jl`. Leaving it off costs you nothing but inlining: every
+    function stays on `ccall`, which is correct. The [guide](guide.md) has the
+    mechanism and the caveats.
+
 ### 2.11 Pinning content, not just a name
 
 A git tag is a mutable ref. `commit` is the only check that survives a cache wipe:
