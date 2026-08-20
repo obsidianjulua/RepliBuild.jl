@@ -422,4 +422,71 @@ end
                    read(joinpath(@__DIR__, "..", "src", "Wrapper", "Generator.jl"), String))
 end
 
+# The third member of the family, and the one that is NOT about resolution:
+# `Any` resolves fine, it just means the wrong thing. In a foreign call it
+# declares that the callee returns a `jl_value_t*`, so the returned integer is
+# dereferenced as a Julia object — a segfault inside dispatch on some LATER
+# call, with a stack naming neither the wrapper nor the library. libcurl shipped
+# 18: every curl_*_setopt and curl_easy_getinfo overload.
+@testset "Foreign call must not return Any" begin
+    W = RepliBuild.Wrapper
+
+    # The variadic shape that actually shipped: @ccall, return spliced as `Any`.
+    err = try
+        W._assert_no_any_ccall_return("""
+        function curl_easy_setopt(handle::Any, option::Any, va_1::Integer)::Any
+            return @ccall LIBRARY_PATH.var"curl_easy_setopt"(handle::Ptr{Cvoid}, option::Cint; va_1::Cint)::Any
+        end
+        """, "M"); ""
+    catch e; sprint(showerror, e) end
+    @test !isempty(err)
+    @test occursin("curl_easy_setopt", err)
+    @test occursin("Any", err)
+    # The message must say what to do, and `Cvoid` is the safe degradation —
+    # discarding a value is recoverable, corrupting one is not.
+    @test occursin("Cvoid", err)
+
+    # The classic form is equally eager and must be caught too.
+    err2 = try
+        W._assert_no_any_ccall_return("""
+        function g(x::Integer)::Any
+            return ccall((:g, LIBRARY_PATH), Any, (Cint,), x)
+        end
+        """, "M"); ""
+    catch e; sprint(showerror, e) end
+    @test !isempty(err2)
+    @test occursin("g", err2)
+
+    # Must-not-flag shapes ------------------------------------------------
+    # `::Any` in a Julia SIGNATURE is ordinary and correct — the C generator
+    # emits it for every unmodellable parameter. Flagging it would refuse
+    # essentially every wrapper, so this is the assertion that keeps the guard
+    # narrow enough to be reachable.
+    @test W._assert_no_any_ccall_return("""
+    function f(x::Any, y::Any)::Cint
+        return ccall((:f, LIBRARY_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), x, y)
+    end
+    """, "M") === nothing
+
+    # `Any` in the ARGUMENT tuple is also legitimate — it is the return
+    # position alone that is wrong. The classic-form pattern anchors on the
+    # element right after the (name, lib) pair for exactly this reason.
+    @test W._assert_no_any_ccall_return(
+        "function h(x)::Cint\n    return ccall((:h, LIBRARY_PATH), Cint, (Any,), x)\nend\n",
+        "M") === nothing
+
+    # A Julia function annotated `::Any` with no foreign call in it at all.
+    @test W._assert_no_any_ccall_return(
+        "function k(x)::Any\n    return x\nend\n", "M") === nothing
+
+    # And an @ccall with a real return type must pass.
+    @test W._assert_no_any_ccall_return(
+        "function m(x::Integer)::Cint\n    return @ccall LIBRARY_PATH.var\"m\"(x::Cint;)::Cint\nend\n",
+        "M") === nothing
+
+    # Reachable from the real write path, or it prevents nothing.
+    @test occursin("_assert_no_any_ccall_return",
+                   read(joinpath(@__DIR__, "..", "src", "Wrapper", "Generator.jl"), String))
+end
+
 end  # testset

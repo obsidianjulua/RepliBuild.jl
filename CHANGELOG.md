@@ -21,6 +21,44 @@ skip the rebuild and print `cache: project unchanged` — delete
 clone and the per-file IR cache. C packages are structurally unaffected: a C symbol
 has no `::`, so `class` is always empty and none of this reaches them.
 
+### `test_cache_invalidation.jl` was watching a file that never existed (2026-08-19)
+
+The second of the two standing `devtests.jl` reds, and like the first it was the
+test's fault. It failed **standalone** too, at 3/6.
+
+It watched `build/m.ll` and compared mtimes across builds to prove that a
+`[compile] flags` change invalidates the per-file IR cache. That path has not
+existed since the cache was keyed: per-file IR lands at `build/m.c-<8hex>.ll`.
+`mtime` on a missing file returns `0.0`, so `m3 > m2` was comparing `0.0 > 0.0`.
+
+**Two hashes, answering different questions** — the thing to know before touching
+this. The hash in the *filename* identifies the SOURCE and is stable across
+compile-config changes; the compile fingerprint lives in the `.key` sidecar beside
+it, and that is what gates the cache. Measured across the four builds, it moves
+exactly as designed: `aebbc4e5` → `c101f5b1` when `-fvisibility=hidden` is added →
+`aebbc4e5` when it is reverted. The testset asserts the sidecar now, including
+that reversion restores the *original* fingerprint — a stronger statement than "it
+recompiled", since an invalidation scheme that merely churned (a timestamp, a
+counter) would satisfy the change case and fail the revert.
+
+Its other assertion, `nsyms(so) == 1`, had become **unsatisfiable**. It counted
+exported symbols to show `-fvisibility=hidden` took effect, but `internal_helper`
+is external-linkage-and-hidden under that flag — the LUAI_FUNC shape — so static
+promotion (2026-07-22, added after this test was written) correctly re-exports it
+as `__rb_cachetest_internal_helper` with default visibility. Two symbols go in,
+two come out, and only their *names* record that anything happened. Asserted by
+name now, with the promoted name pinned explicitly so the next reader does not
+have to re-derive why the count cannot move. 11/11.
+
+**Also: `_assert_no_any_ccall_return` shipped guarded but ungated.** Its sibling
+got a full testset in the same commit; this one had none, which is precisely the
+shape that let `test_tier1_dispatch.jl` sit unwired and unrun. Now covered in
+`test_wrapper_type_bindings.jl` — both call forms refused, and four must-not-flag
+shapes that keep it narrow enough to be reachable: `::Any` in a Julia signature
+(which the C generator emits for every unmodellable parameter), `Any` in a ccall
+*argument* tuple, a `::Any`-annotated function with no foreign call in it, and a
+well-typed `@ccall`. Plus the reachability check against the write path. CI 907.
+
 ### `test_slicer.jl` was red for two reasons, neither of them slicing (2026-08-19)
 
 Both were the test's fault, and both made `devtests.jl` misreport — it aborts at
