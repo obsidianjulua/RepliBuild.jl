@@ -52,4 +52,15 @@ long st_scaled(long x);                    /* public API; calls it (slice_a) */
 __attribute__((visibility("hidden"))) extern const long ST_HIDDEN_TABLE[4];
 long st_table_at(int i);                   /* indexes it (slice_a)           */
 
+/* Scale + fan-out (slice_scale.c). st_sc_hub reaches every function in that TU
+ * through two layers, so a slicer that followed reachability would emit the
+ * whole module for it; declarations-only must emit one `define` plus `declare`s.
+ * Only the functions the tests target directly are declared here — the 64
+ * leaves and 8 mids are deliberately header-less. They are external-linkage and
+ * `default<O2>` has no internalize pass, so they survive to the dynsym and
+ * create the fan-out; they are call-graph, not API. */
+long st_sc_hub(long v);   /* = 192v + 8416 (see slice_scale.c for the algebra) */
+long st_sc_mid_0(long v); /* one layer down: 8 leaves                          */
+long st_sc_leaf_00(long v);
+
 #endif

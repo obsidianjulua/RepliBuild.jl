@@ -21,6 +21,57 @@ skip the rebuild and print `cache: project unchanged` — delete
 clone and the per-file IR cache. C packages are structurally unaffected: a C symbol
 has no `::`, so `class` is always empty and none of this reaches them.
 
+### `test_slicer.jl` was red for two reasons, neither of them slicing (2026-08-19)
+
+Both were the test's fault, and both made `devtests.jl` misreport — it aborts at
+the first failing top-level testset, so this one file was hiding the ten after it.
+
+**State leakage between suite files.** The coherence testset opened with
+`t1_get_count() == 0`, commented "fresh process state", which is false in-suite:
+`test_static_promotion.jl` (§7b) runs first over the same fixture in the same
+process, and its single-copy proof *deliberately* writes absolute values —
+`unsafe_store!(counter_ptr, 100)` then `st_bump(3)` leaves the counter at 103, and
+`st_set_op(2)` leaves the op slot at `op_square`. Exactly 7 failures in-suite
+against 154/154 standalone, reading as a Tier-1 regression when nothing was wrong
+with the slices.
+
+The subject of that testset is **coherence** — that a Tier-1 slice and a Tier-3
+ccall address one datum — which is a statement about deltas, never about the
+starting value. It asserts deltas now, which makes it independent of *every* prior
+file rather than of one particular prior file. §7b's writes are not cleanup it
+forgot; absolute stores are its proof mechanism, so the invariant belonged here.
+The new opening assertion is strictly stronger than the `== 0` it replaces: that
+one checked Tier 1 against a constant, this one checks both tiers against each
+other before a single delta is taken.
+
+**A core-engine test depended on another repo's build.** "Slicer: lua at scale"
+read the RepliBuild-Hub lua build by absolute path, so it tracked whichever library
+version happened to be built there. lua 5.5.1 turned `luaL_openlibs` into
+`#define luaL_openlibs(L) luaL_openselectedlibs(L, ~0, 0)`; RepliBuild correctly
+emitted `replibuild_shim_luaL_openlibs`, the plain symbol stopped existing, and the
+slice was refused "function not found in module". Hub rebuilds are the integration
+test — this file tests the mechanic.
+
+Replaced by a self-contained fixture, `test/slice_test/src/slice_scale.c`: 64
+leaves, 8 mids, one `st_sc_hub` whose transitive closure is the entire TU. It keeps
+what lua covered (breadth, declarations-only under heavy fan-out, live `llvmcall`
+against the same `.so` Tier 3 calls) and states it more sharply, because the
+numbers are now knowable:
+
+- The declarations-only property is **quantified** rather than gestured at — the
+  hub's slice must be under 1/20th of the module it reaches all of, and under 60 KB.
+- **The fan-out is asserted to be real.** `[link] optimization_level` is `"2"`, so
+  without `noinline` the leaves fold into the mids and the mids into the hub, and a
+  slice of an inlined-flat hub would satisfy "exactly one `define`" while testing
+  nothing. Negative-checked: dropping `noinline` fails exactly the 9 fan-out
+  assertions and nothing else.
+- An **oracle independent of the other tier**. Tier-1/Tier-3 agreement proves
+  coherence, not correctness — both tiers can be wrong together, which is how the
+  eightbyte-coercion bugs survived. The fixture's closed form
+  (`hub(v) = 192v + 8416`) is asserted alongside the cross-tier comparison.
+
+Slicer 154/154 and scale 169/169, standalone and in §7b→§7c order.
+
 ### Two more ways a wrapper could kill its own module at include (2026-08-16)
 
 `ccall` resolves its argument tuple and return type **eagerly, at method

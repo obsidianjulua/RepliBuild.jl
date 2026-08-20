@@ -1,7 +1,10 @@
 #!/usr/bin/env julia
 # Static-promotion pass (llvmcall slicing contract, M1) — fixture-gated tests.
 #
-# Builds test/slice_test/ (two TUs, O2) and asserts:
+# Builds test/slice_test/ (three TUs, O2) and asserts:
+# (slice_scale.c is the third — scale/fan-out for test_slicer.jl. It declares no
+# statics, so it contributes nothing to promoted_symbols and nothing here reads
+# it; it is listed only so "two TUs" stops being wrong.)
 #   1. Promotion decisions are exact: mutable statics + static functions get
 #      exported `__rb_slicetest_*` names; const statics and the public API
 #      don't; the same-named static in the second TU gets the linker's

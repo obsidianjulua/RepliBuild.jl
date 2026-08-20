@@ -168,21 +168,43 @@ end
 end
 
 @testset "Behavior + state coherence through llvmcall" begin
-    # Fresh process state: counter starts at 0
-    @test t1_get_count() == 0
+    # STATE IS RELATIVE TO WHATEVER RAN BEFORE, DELIBERATELY.
+    #
+    # This asserted absolute values and opened with `t1_get_count() == 0`
+    # ("fresh process state"), which is false in-suite: devtests runs
+    # test_static_promotion.jl (§7b) first, over this same fixture in this same
+    # process, and its single-copy proof deliberately writes absolute values —
+    # `unsafe_store!(counter_ptr, 100)` then `M.st_bump(3)` leaves the counter
+    # at 103, and `st_set_op(2)` leaves the op slot at op_square. That cost 7
+    # in-suite failures against 154/154 standalone, and read as a Tier-1
+    # regression when nothing was wrong with the slices.
+    #
+    # The subject here is COHERENCE — that a Tier-1 slice and a Tier-3 ccall
+    # address ONE datum — which is a statement about deltas and cross-tier
+    # agreement, never about the starting value. Asserting it that way makes
+    # the testset independent of every prior file rather than of one particular
+    # prior file, so a future §7b' cannot break it either. §7b's writes are not
+    # cleanup it forgot: absolute stores ARE its proof mechanism, so the
+    # invariant belongs here.
+    #
+    # The opening assertion is strictly STRONGER than the `== 0` it replaces:
+    # that one only checked Tier 1 against a constant, this one checks both
+    # tiers against each other before a single delta is taken.
+    base = ccall((:st_get_count, LIB), Clong, ())
+    @test t1_get_count() == base
 
     # Tier-3 write / Tier-1 read
-    @test ccall((:st_bump, LIB), Clong, (Clong,), 5) == 5
-    @test t1_get_count() == 5
+    @test ccall((:st_bump, LIB), Clong, (Clong,), 5) == base + 5
+    @test t1_get_count() == base + 5
 
     # Tier-1 write / Tier-3 read — the cJSON divergence class, closed
-    @test t1_bump(Clong(3)) == 8
-    @test ccall((:st_get_count, LIB), Clong, ()) == 8
+    @test t1_bump(Clong(3)) == base + 8
+    @test ccall((:st_get_count, LIB), Clong, ()) == base + 8
 
     # Symbol-level triangulation: dlsym pointer sees both tiers' writes
     h = Libdl.dlopen(LIB)
     counter_ptr = Ptr{Clong}(Libdl.dlsym(h, "__rb_slicetest_hidden_counter"))
-    @test unsafe_load(counter_ptr) == 8
+    @test unsafe_load(counter_ptr) == base + 8
 
     # Dispatch through the const table (embedded or devirtualized — behavior is
     # the contract)
@@ -190,8 +212,13 @@ end
     @test t1_apply(Cint(1), Clong(21)) == -21
     @test t1_apply(Cint(2), Clong(9)) == 81
 
-    # Mutable fn-ptr slot: Tier-3 writes the slot, Tier-1 dispatches through it
-    @test t1_call_op(Clong(21)) == 42            # default: op_double
+    # Mutable fn-ptr slot: Tier-3 writes the slot, Tier-1 dispatches through it.
+    # Set it EXPLICITLY rather than reading the initializer — "default" is only
+    # the default in a fresh process, and §7b leaves it at op_square. Setting it
+    # is also the honest shape for what this checks: every one of these is a
+    # Tier-3 write followed by a Tier-1 dispatch, including the first.
+    ccall((:st_set_op, LIB), Cvoid, (Cint,), 0)  # → op_double
+    @test t1_call_op(Clong(21)) == 42
     ccall((:st_set_op, LIB), Cvoid, (Cint,), 2)  # → op_square
     @test t1_call_op(Clong(9)) == 81
     ccall((:st_set_op, LIB), Cvoid, (Cint,), 0)
@@ -295,39 +322,70 @@ end
 
 end  # top-level testset
 
-# ── Real-library scale (uses the Hub lua build if present) ───────────────────
+# ── Scale + fan-out, self-contained (src/slice_scale.c) ──────────────────────
+#
+# This was "Slicer: lua at scale" and read the RepliBuild-Hub lua build by
+# absolute path. A core-engine test must not depend on which library version
+# happens to be built in another repo: lua 5.5.1 made luaL_openlibs a macro, the
+# plain symbol stopped existing, the slice was refused "function not found in
+# module", and this file went red for a reason with nothing to do with slicing.
+# Hub rebuilds are the integration test. This is the mechanic.
+#
+# What it keeps from the lua version — and states more sharply, because the
+# fixture is ours and the numbers are therefore knowable:
+#   * breadth: many targets sliced out of one module in one call
+#   * DECLARATIONS-ONLY at fan-out: st_sc_hub reaches all 73 functions of the TU
+#     through two layers, so reachability-following would emit the whole module;
+#     one `define` plus `declare`s is the contract, and the size RATIO measures it
+#   * live llvmcall against the same .so Tier 3 calls
+# What it adds: an oracle independent of the other tier (the closed form), and a
+# check that the call graph it claims to test actually survived -O2.
 
-const LUA_ABI = "/home/john/Desktop/Projects/RepliBuild-Hub/packages/lua/build/lua_abi.ll"
-const LUA_SO  = "/home/john/Desktop/Projects/RepliBuild-Hub/packages/lua/julia/liblua.so"
+@testset "Slicer: scale + fan-out" begin
+    leaves = ["st_sc_leaf_$(lpad(i, 2, '0'))" for i in 0:63]
+    mids   = ["st_sc_mid_$k" for k in 0:7]
+    scale_targets = vcat(["st_sc_hub"], mids, leaves)
 
-if isfile(LUA_ABI) && isfile(LUA_SO)
-    @testset "Slicer: lua at scale" begin
-        lua_targets = ["lua_gettop", "lua_settop", "lua_absindex", "lua_pushinteger",
-                       "lua_tointegerx", "lua_type", "lua_pcallk", "luaL_openlibs",
-                       "lua_close"]
-        LR = Slicer.slice_library(LUA_ABI; targets=lua_targets)
-        for t in lua_targets
-            @test Slicer.sliced(LR[t])
-            @test length(collect(eachmatch(r"^define "m, LR[t].ir))) == 1
-        end
-
-        Libdl.dlopen(LUA_SO, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
-        @eval lt1_gettop(L::Ptr{Cvoid}) =
-            Base.llvmcall(($(LR["lua_gettop"].ir), "lua_gettop"), Cint, Tuple{Ptr{Cvoid}}, L)
-        @eval lt1_absindex(L::Ptr{Cvoid}, i::Cint) =
-            Base.llvmcall(($(LR["lua_absindex"].ir), "lua_absindex"), Cint, Tuple{Ptr{Cvoid},Cint}, L, i)
-
-        L = ccall((:luaL_newstate, LUA_SO), Ptr{Cvoid}, ())
-        for i in 1:4
-            ccall((:lua_pushinteger, LUA_SO), Cvoid, (Ptr{Cvoid}, Clonglong), L, i)
-        end
-        @test lt1_gettop(L) == 4
-        @test lt1_absindex(L, Cint(-1)) == 4
-        @test lt1_absindex(L, Cint(2)) == 2
-        ccall((:lua_settop, LUA_SO), Cvoid, (Ptr{Cvoid}, Cint), L, 0)
-        @test lt1_gettop(L) == 0
-        ccall((:lua_close, LUA_SO), Cvoid, (Ptr{Cvoid},), L)
+    SR = Slicer.slice_library(ABI_LL; targets=scale_targets)
+    for t in scale_targets
+        @test Slicer.sliced(SR[t])
+        @test length(collect(eachmatch(r"^define "m, SR[t].ir))) == 1
     end
-else
-    @info "lua at scale: skipped (Hub lua build artifacts not found)"
+
+    # THE FAN-OUT MUST BE REAL, OR EVERYTHING BELOW IS VACUOUS. [link]
+    # optimization_level is "2"; without `noinline` in slice_scale.c the leaves
+    # fold into the mids and the mids into the hub, and a slice of an inlined-flat
+    # hub would trivially satisfy "one define" while testing nothing. Assert the
+    # edges survived, in the module and in the slice.
+    hub_ir = SR["st_sc_hub"].ir
+    @test all(m -> occursin(m, hub_ir), mids)          # hub still CALLS the mids
+    for m in mids
+        @test occursin(Regex("^declare[^\n]*@$m\\(", "m"), hub_ir)   # …as declares
+    end
+    @test !occursin(r"^define[^\n]*@st_sc_mid_"m, hub_ir)        # …never bodies
+    @test !occursin(r"^define[^\n]*@st_sc_leaf_"m, hub_ir)       # nor two layers down
+
+    # The declarations-only property, quantified. The hub's transitive closure is
+    # the whole TU, so a reachability slicer's output would be within a constant
+    # factor of the module; declarations-only keeps it kilobytes.
+    module_bytes = filesize(ABI_LL)
+    @test sizeof(hub_ir) * 20 < module_bytes
+    @test sizeof(hub_ir) < 60_000
+
+    # Live behaviour through llvmcall on the slice, against the RTLD_GLOBAL .so.
+    @eval sc1_hub(v::Clong) =
+        Base.llvmcall(($(SR["st_sc_hub"].ir), "st_sc_hub"), Clong, Tuple{Clong}, v)
+    @eval sc1_mid0(v::Clong) =
+        Base.llvmcall(($(SR["st_sc_mid_0"].ir), "st_sc_mid_0"), Clong, Tuple{Clong}, v)
+
+    # Closed form (slice_scale.c): leaf_i(v) = 3v + 100 + i, hub(v) = 192v + 8416.
+    # Tier-1 vs Tier-3 agreement alone would only prove COHERENCE — both tiers can
+    # be wrong together, which is the whole reason the eightbyte-coercion bugs went
+    # unnoticed for so long. The algebra is the independent oracle.
+    for v in (Clong(0), Clong(1), Clong(-7), Clong(1000))
+        @test sc1_hub(v) == 192v + 8416
+        @test sc1_hub(v) == ccall((:st_sc_hub, LIB), Clong, (Clong,), v)
+    end
+    @test sc1_mid0(Clong(2)) == sum(3 * 2 + 100 + i for i in 0:7)
+    @test sc1_mid0(Clong(2)) == ccall((:st_sc_mid_0, LIB), Clong, (Clong,), 2)
 end
