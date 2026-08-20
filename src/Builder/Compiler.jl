@@ -4453,6 +4453,73 @@ function parse_dwarf_dump(output::AbstractString;
     for (enum_name, enum_info) in enum_defs
         struct_defs["__enum__" * enum_name] = enum_info
     end
+
+    # ---- Repair by-value AGGREGATE return types that resolved to `Any` ----
+    #
+    # The in-loop return mapping ("Extract function return type reference",
+    # above) decides "is this an aggregate?" from the DIE kind of the type the
+    # subprogram POINTS AT — `kind in ["struct", "class"]` — not from the
+    # RESOLVED type. `typedef struct mpack_tag_t mpack_tag_t;`, the ordinary C
+    # spelling, makes that DIE a **typedef**, so the aggregate branch missed and
+    # the name-only fallback mapper returned "Any" with size 0. That test also
+    # never had a "union" branch — the same omission fixed in `resolve_type` on
+    # 2026-08-01 for member resolution.
+    #
+    # The asymmetry is the tell: the PARAMETER path (~line 4229) resolves the
+    # type and then maps it with the struct/enum-aware `cpp_to_julia_type`, so
+    # the very same type is typed correctly as an argument and `Any` as a
+    # return. `mpack_tag_cmp(mpack_tag_t, mpack_tag_t) -> int` extracted
+    # perfectly while `mpack_tag_make_nil() -> mpack_tag_t` did not.
+    #
+    # Downstream an `Any` return is not a cosmetic defect: the function is
+    # dropped rather than wrapped (an emitted one would trip
+    # `_assert_no_any_ccall_return` and refuse the WHOLE wrapper), so the symbol
+    # silently has no binding at all. Measured over the Hub before this fix:
+    # 27 unreachable exports in mpack, every `mpack_tag_*` returning
+    # `mpack_tag_t` by value.
+    #
+    # Deliberately a POST-PASS, not an inline fix. `struct_defs` is only
+    # complete after the parse loop, and a subprogram DIE can precede the DIE of
+    # the aggregate it returns, so an in-loop name test would be
+    # order-dependent. And it only ever rewrites "Any": it cannot change a
+    # return type that already mapped, so the blast radius is exactly the set of
+    # functions that previously had no wrapper. In particular the `char*` →
+    # `Cstring` mapping (and the whole Cstring return policy built on it) is
+    # untouched, which a wholesale swap to `cpp_to_julia_type` would have broken.
+    # TWO defects, not one — the size half also bites the DIRECT spelling.
+    # When the DW_AT_type does point straight at the structure the kind test
+    # matches and `julia_type` comes out right, but the size beside it is
+    # `get_type_size(c_type)`, which only knows primitives and answers 0 for
+    # every aggregate. A by-value struct return whose size is 0 is just as
+    # unclassifiable downstream as one typed `Any`, so both fields are repaired
+    # and they are repaired independently.
+    for (_fname, _info) in return_types
+        isa(_info, Dict) || continue
+        _jt = get(_info, "julia_type", "")
+        _sz = get(_info, "size", 0)
+        # Nothing to do unless the type is unresolved or the size unmeasured.
+        (_jt == "Any" || _sz == 0) || continue
+        _ct = String(get(_info, "c_type", ""))
+        # Pointers and arrays already map through the normal path; only a
+        # by-value aggregate or enum can land here. `void` has size 0 too, and
+        # falls out below because it is not a key in struct_defs.
+        (isempty(_ct) || occursin("*", _ct) || occursin("[", _ct)) && continue
+        _key = haskey(struct_defs, _ct) ? _ct :
+               (haskey(struct_defs, "__enum__" * _ct) ? "__enum__" * _ct : nothing)
+        _key === nothing && continue
+        _jt == "Any" && (_info["julia_type"] = _ct)
+        if _sz == 0
+            _bs = get(struct_defs[_key], "byte_size", nothing)
+            if !isnothing(_bs)
+                _info["size"] = try
+                    _s = string(_bs)
+                    startswith(_s, "0x") ? parse(Int, _s[3:end], base=16) : parse(Int, _s)
+                catch
+                    0
+                end
+            end
+        end
+    end
     
     # Process extracted variables into a clean dictionary
     global_vars = Dict{String,Any}()

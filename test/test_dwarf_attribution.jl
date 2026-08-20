@@ -90,6 +90,113 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test "process" in member_names
     end
 
+    # ── By-value aggregate returns reached through a typedef ────────────────
+    #
+    # `typedef struct mpack_tag_t mpack_tag_t;` is the ordinary C spelling, so
+    # a subprogram's DW_AT_type points at the TYPEDEF, not at the structure.
+    # The in-loop return mapping tested the DIE kind of what it pointed at
+    # (`kind in ["struct","class"]`), missed, and fell through to the name-only
+    # mapper, which answers "Any" with size 0. Downstream the function is
+    # dropped rather than wrapped -- an emitted one would trip
+    # `_assert_no_any_ccall_return` and refuse the whole wrapper -- so the
+    # symbol silently had no binding at all.
+    #
+    # The asymmetry is what makes it unmistakable, and it is asserted below:
+    # the SAME type as a PARAMETER always resolved, because that path runs the
+    # struct/enum-aware mapper. Measured on the Hub before the fix: 2724
+    # `Any` returns across 21 packages, incl. every libcurl function returning
+    # CURLcode and every mpack_tag_* returning mpack_tag_t.
+    dump_byval = """
+     <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+        <c>   DW_AT_producer    : (indexed string: 0x0): clang version 18.1.7jl
+        <d>   DW_AT_language    : 29	(C11)
+     <1><100>: Abbrev Number: 21 (DW_TAG_structure_type)
+        <101>   DW_AT_name        : (indexed string: 0x1): tag_s
+        <102>   DW_AT_byte_size   : 16
+     <2><103>: Abbrev Number: 10 (DW_TAG_member)
+        <104>   DW_AT_name        : (indexed string: 0x2): kind
+        <105>   DW_AT_type        : <0x300>
+        <106>   DW_AT_data_member_location: 0
+     <2><107>: Abbrev Number: 10 (DW_TAG_member)
+        <108>   DW_AT_name        : (indexed string: 0x3): value
+        <109>   DW_AT_type        : <0x300>
+        <10a>   DW_AT_data_member_location: 8
+     <2><10b>: Abbrev Number: 0
+     <1><200>: Abbrev Number: 34 (DW_TAG_typedef)
+        <201>   DW_AT_name        : (indexed string: 0x4): tag_t
+        <202>   DW_AT_type        : <0x100>
+     <1><300>: Abbrev Number: 5 (DW_TAG_base_type)
+        <301>   DW_AT_name        : (indexed string: 0x5): long int
+        <302>   DW_AT_byte_size   : 8
+        <303>   DW_AT_encoding    : 5	(signed)
+     <1><310>: Abbrev Number: 5 (DW_TAG_base_type)
+        <311>   DW_AT_name        : (indexed string: 0x6): char
+        <312>   DW_AT_byte_size   : 1
+        <313>   DW_AT_encoding    : 6	(signed char)
+     <1><320>: Abbrev Number: 7 (DW_TAG_pointer_type)
+        <321>   DW_AT_type        : <0x310>
+     <1><400>: Abbrev Number: 14 (DW_TAG_subprogram)
+        <401>   DW_AT_name        : (indexed string: 0x7): tag_make
+        <402>   DW_AT_type        : <0x200>
+        <403>   DW_AT_external    : 1
+     <1><410>: Abbrev Number: 0
+     <1><420>: Abbrev Number: 14 (DW_TAG_subprogram)
+        <421>   DW_AT_name        : (indexed string: 0x8): tag_make_direct
+        <422>   DW_AT_type        : <0x100>
+        <423>   DW_AT_external    : 1
+     <1><430>: Abbrev Number: 0
+     <1><440>: Abbrev Number: 14 (DW_TAG_subprogram)
+        <441>   DW_AT_name        : (indexed string: 0x9): tag_cmp
+        <442>   DW_AT_type        : <0x300>
+        <443>   DW_AT_external    : 1
+     <2><444>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <445>   DW_AT_name        : (indexed string: 0xa): left
+        <446>   DW_AT_type        : <0x200>
+     <2><447>: Abbrev Number: 0
+     <1><450>: Abbrev Number: 14 (DW_TAG_subprogram)
+        <451>   DW_AT_name        : (indexed string: 0xb): tag_name
+        <452>   DW_AT_type        : <0x320>
+        <453>   DW_AT_external    : 1
+     <1><460>: Abbrev Number: 0
+     <1><470>: Abbrev Number: 0
+    """
+
+    @testset "by-value aggregate return through a typedef resolves" begin
+        rt, structs, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump_byval)
+
+        @test haskey(structs, "tag_s")
+
+        # THE BUG: return reached through a typedef.
+        @test haskey(rt, "tag_make")
+        @test rt["tag_make"]["c_type"] == "tag_s"
+        @test rt["tag_make"]["julia_type"] != "Any"
+        @test rt["tag_make"]["julia_type"] == "tag_s"
+        # Size must come from the aggregate's own DIE. It was 0, and a 0-sized
+        # by-value struct return is exactly what the generator cannot classify.
+        @test rt["tag_make"]["size"] == 16
+
+        # The direct (non-typedef) spelling always worked — pinned so a future
+        # rewrite cannot fix one path by breaking the other.
+        @test rt["tag_make_direct"]["julia_type"] == "tag_s"
+        @test rt["tag_make_direct"]["size"] == 16
+
+        # THE ASYMMETRY that identified the bug: the same type as a PARAMETER
+        # resolved correctly the whole time.
+        @test rt["tag_cmp"]["julia_type"] == "Clong"
+        params = dwarf_params_of(rt, "tag_cmp")
+        @test length(params) == 1
+        @test params[1][2] == "tag_s"
+        @test rt["tag_cmp"]["parameters"][1]["julia_type"] == "tag_s"
+
+        # NEGATIVE CONTROL — the repair must never touch a return that already
+        # mapped. `char*` stays Cstring: the whole Cstring return policy
+        # (`_assert_cstring_policy`, the `_ptr` siblings, the
+        # `Union{String,Nothing}` wrappers) is built on this mapping, and a
+        # wholesale swap to the parameter path's mapper would have changed it
+        # to Ptr{UInt8} and silently dismantled the policy.
+        @test rt["tag_name"]["julia_type"] == "Cstring"
+    end
+
     @testset "parameter context closes at its DIE terminator" begin
         # Two adjacent void functions, the first with a parameter, the second
         # with none. If the parameter context survives its `Abbrev Number: 0`,
