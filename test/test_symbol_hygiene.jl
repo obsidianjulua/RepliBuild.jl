@@ -247,44 +247,64 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
             @test got_cpp == want
         end
 
-        # Drive BOTH full gates over every Hub package's real metadata and fail
-        # on any function where they disagree. This is the assertion that would
-        # have caught the ImGui incident, the adjustor thunks, and the box2d
-        # destructors — all three were gate disagreements or shared blind spots.
-        hub = joinpath(homedir(), "Desktop", "Projects", "RepliBuild-Hub", "packages")
+        # Drive BOTH full gates over real C++ metadata and fail on any function
+        # where they disagree. This is the assertion that would have caught the
+        # ImGui incident, the adjustor thunks, and the box2d destructors — all
+        # three were gate disagreements or shared blind spots.
+        #
+        # The corpus is VENDORED, not read from RepliBuild-Hub. This sweep used
+        # to walk `~/Desktop/Projects/RepliBuild-Hub` live, which made a
+        # no-toolchain CI test depend on a working tree in another repo. It was
+        # `isdir`-guarded so it did not fail elsewhere — it went **vacuously
+        # green**, which is the worse failure: the strongest assertion in this
+        # file only ever executed on one machine, against whatever happened to
+        # be built there that day.
+        #
+        # Both gates are pure functions of (class, name) plus the aggregate-NAME
+        # set — `_fuzzy_struct_lookup` reaches `structs` only through `haskey`
+        # and `keys`, never a value — so the fixture stores exactly that and
+        # nothing else. `test/gen_receiver_corpus.jl` regenerates it from the
+        # Hub and refuses to write unless both gates give identical verdicts on
+        # the real metadata and on the reduction.
+        corpus_path = joinpath(@__DIR__, "fixtures", "receiver_gate_corpus.json")
+        @test isfile(corpus_path)
+        # Deliberately NOT wrapped in try/catch. The first draft was, and it
+        # swallowed an `UndefVarError: JSON` — every package was skipped, the
+        # sweep proved nothing, and only the `checked` counter below revealed
+        # it. A bare catch around the one call that loads the corpus can
+        # silently turn this whole testset into a no-op; that is the failure
+        # this guard exists to prevent.
+        corpus = JSON.parsefile(corpus_path)
+        pkgs = get(corpus, "packages", [])
+
         checked = 0
+        expected = 0
         disagreements = String[]
-        if isdir(hub)
-            for pkg in readdir(hub)
-                mf = joinpath(hub, pkg, "julia", "compilation_metadata.json")
-                isfile(mf) || continue
-                # Deliberately NOT wrapped in try/catch. The first draft was, and
-                # it swallowed an `UndefVarError: JSON` — every package was
-                # skipped, the sweep proved nothing, and only the `checked`
-                # counter below revealed it. A bare catch around the one call
-                # that loads the corpus can silently turn this whole testset into
-                # a no-op; that is the failure this guard exists to prevent.
-                meta = JSON.parsefile(mf)
-                get(meta, "language", "") in ("c++", "cpp", "cxx") || continue
-                structs = get(meta, "struct_definitions", Dict())
-                # struct_types as GeneratorCpp builds it: the aggregate names.
-                stypes = Set{String}(String(k) for k in keys(structs))
-                for f in get(meta, "functions", [])
-                    get(f, "is_method", false) || continue
-                    cls = String(get(f, "class", ""))
-                    isempty(cls) && continue
-                    checked += 1
-                    fg  = FG._has_receiver(f, structs)
-                    # The REAL GeneratorCpp gate, not a paraphrase of it.
-                    cpp = W._cpp_this_param(cls, String(get(f, "name", "")), stypes) !== nothing
-                    fg == cpp || push!(disagreements,
-                        "$pkg :: $(get(f, "mangled", "?")) class=$(repr(cls)) FunctionGen=$fg GeneratorCpp=$cpp")
-                end
+        for p in pkgs
+            pkg = String(get(p, "name", "?"))
+            names = String[String(n) for n in get(p, "structs", [])]
+            # Reconstruct both shapes the gates want. Values are never read, so
+            # `nothing` is faithful — proven by the generator, not assumed.
+            structs = Dict{String,Any}(n => nothing for n in names)
+            stypes  = Set{String}(names)
+            rows = get(p, "methods", [])
+            expected += length(rows)
+            for row in rows
+                cls, nm, mangled = String(row[1]), String(row[2]), String(row[3])
+                checked += 1
+                fg  = FG._has_receiver(Dict("class" => cls, "name" => nm), structs)
+                # The REAL GeneratorCpp gate, not a paraphrase of it.
+                cpp = W._cpp_this_param(cls, nm, stypes) !== nothing
+                fg == cpp || push!(disagreements,
+                    "$pkg :: $mangled class=$(repr(cls)) FunctionGen=$fg GeneratorCpp=$cpp")
             end
         end
         isempty(disagreements) || @warn "Receiver gates disagree" n=length(disagreements) first=first(disagreements, 5)
         @test isempty(disagreements)
-        # The sweep must actually have run, or it proves nothing.
-        isdir(hub) && @test checked > 1000
+        # The sweep must actually have run, or it proves nothing — and it must
+        # have consumed every row it loaded, not stopped early.
+        @test checked == expected
+        @test checked > 3000
+        @test length(pkgs) >= 5
     end
 end
