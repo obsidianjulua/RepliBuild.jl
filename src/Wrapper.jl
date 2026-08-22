@@ -36,6 +36,11 @@ include("Wrapper/Symbols.jl")
 include("Wrapper/C/IdentifiersC.jl")
 include("Wrapper/Cpp/IdentifiersCpp.jl")
 include("Wrapper/FunctionPointers.jl")
+# Tier 1 (llvmcall over bitcode slices) — experimental, `[wrap.tier1] enable`
+# defaults false. Isolated so the whole surface is one file to work on, one
+# file to revert, and one guarded call to skip. Must precede GeneratorC.jl,
+# which calls into it.
+include("Wrapper/C/Tier1C.jl")
 include("Wrapper/C/GeneratorC.jl")
 include("Wrapper/Cpp/GeneratorCpp.jl")
 include("Wrapper/Generator.jl")

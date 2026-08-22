@@ -876,8 +876,54 @@ runtime.
 function _dispatch_tier_chunk(tier::Dict{String,Symbol}, kernels::Dict{String,String})::String
     isempty(tier) && return ""
     entries = join(("    :$(k) => :$(tier[k])," for k in sort(collect(keys(tier)))), "\n")
-    kentries = isempty(kernels) ? "" :
-        join(("    :$(k) => :$(kernels[k])," for k in sort(collect(keys(kernels)))), "\n")
+
+    # NO TIER-1 KERNELS ⇒ NO TIER-1 MACHINERY. Everything below the table exists
+    # to answer "did this kernel's @generated body actually splice llvmcall, or
+    # did it demote?" — a question with no referent when no kernel was emitted.
+    # Without this branch a `[wrap.tier1] enable = false` wrapper still shipped an
+    # empty `_TIER1_KERNEL`, a `code_typed` probe that could never fire, and a
+    # docstring about bitcode slices.
+    #
+    # The emitted table is the whole truth here, so `dispatch_tier` is a lookup.
+    # It also drops the output-mode `:deferred` guard, deliberately: that guard
+    # exists because probing a Tier-1 kernel FORCES generation and would freeze a
+    # worker's answer into the pkgimage. With nothing to probe the answer is
+    # static, so `const T = dispatch_tier(:f)` at module scope is now safe and
+    # correct — a behavioural difference between tier1-on and tier1-off wrappers,
+    # and the tier1-off one is the stronger guarantee.
+    if isempty(kernels)
+        return """
+        # ── Dispatch introspection ────────────────────────────────────────────────
+        # What the generator emitted for each function. Tier 2 is an MLIR thunk,
+        # Tier 3 a plain ccall. This wrapper has no Tier-1 (sliced) call sites, so
+        # the table is exhaustive and needs no runtime probe.
+        const DISPATCH_TIER = Dict{Symbol,Symbol}(
+        $entries
+        )
+
+        \"\"\"
+            dispatch_tier(f) -> Symbol
+
+        Which tier `f` dispatches through: `:tier2` (MLIR thunk), `:tier3`
+        (`ccall`), or `:unknown` for a name this module did not wrap. Accepts the
+        function or its `Symbol`.
+
+        This wrapper was generated with per-function bitcode slicing disabled, so
+        no call site can demote at runtime and this is a plain lookup — unlike a
+        Tier-1-enabled wrapper, where the answer must be probed and is refused
+        during precompilation.
+        \"\"\"
+        function dispatch_tier(f)
+            # Every Base name qualified: this module's namespace belongs to the
+            # LIBRARY, which is free to export `get`, `nameof`, `string`…
+            name = f isa Symbol ? f : Base.nameof(f)
+            return Base.get(DISPATCH_TIER, name, :unknown)
+        end
+
+        """
+    end
+
+    kentries = join(("    :$(k) => :$(kernels[k])," for k in sort(collect(keys(kernels)))), "\n")
 
     return """
     # ── Dispatch introspection ────────────────────────────────────────────────
