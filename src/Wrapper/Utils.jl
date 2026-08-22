@@ -877,6 +877,47 @@ function _dispatch_tier_chunk(tier::Dict{String,Symbol}, kernels::Dict{String,St
     isempty(tier) && return ""
     entries = join(("    :$(k) => :$(tier[k])," for k in sort(collect(keys(tier)))), "\n")
 
+    # A UNIFORM TABLE IS A CONSTANT — emit a sentence, not 100 rows.
+    #
+    # `dispatch_tier` exists to answer "which tier does this go through?". When
+    # every wrapped function has the same answer the question is already
+    # answered, and the table is one fact repeated once per function: cjson with
+    # slicing off emitted 100 rows of `=> :tier3` plus a lookup that could
+    # return only `:tier3` or `:unknown`.
+    #
+    # Keyed on UNIFORMITY rather than on language, though for C the two coincide:
+    # the C generator has no Tier-2 dispatch path at all (0 `JITManager.invoke`
+    # across all 14 C packages), so C with `[wrap.tier1] enable = false` is
+    # necessarily all-Tier-3. Gating on `language == :c` would also strip C++
+    # wrappers, where a tier2/tier3 mix is real information. Uniformity asks the
+    # question directly and stays correct if either generator gains a tier.
+    #
+    # Consequence, deliberate: a wrapper in this state has no `DISPATCH_TIER` and
+    # no `dispatch_tier`. Consumers asserting `dispatch_tier(:f) === :tier1` get
+    # an UndefVarError rather than a confident `:tier3` — louder, and those
+    # assertions are stale by construction once a package is unbolted.
+    # `isempty(kernels)` is load-bearing and NOT redundant with uniformity: a
+    # wrapper whose table is uniformly `:tier1` still needs the probe, because
+    # Tier 1 is the one tier whose emitted intent can disagree with what runs —
+    # a missing slice file, an unresolvable declare or output-mode generation all
+    # demote it to ccall. Gating on uniformity alone deleted `dispatch_tier` from
+    # exactly the wrapper that most needs it; caught by test_introspection's
+    # single-function all-tier1 fixture.
+    tiers = unique(values(tier))
+    if isempty(kernels) && length(tiers) == 1
+        only_tier = first(tiers)
+        return """
+        # ── Dispatch ──────────────────────────────────────────────────────────────
+        # Every function in this module dispatches through $(only_tier === :tier3 ?
+            "Tier 3 (`ccall` straight into the library)" :
+            (only_tier === :tier2 ? "Tier 2 (MLIR thunk)" : "Tier 1 (sliced `llvmcall`)")).
+        # No `DISPATCH_TIER` table and no `dispatch_tier` probe are emitted: with a
+        # single possible answer there is nothing to look up. A mixed-tier wrapper
+        # emits both.
+
+        """
+    end
+
     # NO TIER-1 KERNELS ⇒ NO TIER-1 MACHINERY. Everything below the table exists
     # to answer "did this kernel's @generated body actually splice llvmcall, or
     # did it demote?" — a question with no referent when no kernel was emitted.
