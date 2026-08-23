@@ -251,6 +251,42 @@ function _arg_marshal_plan(argtypes)
 end
 
 """
+    marshal_args(args...) -> (keepalive, inner_ptrs)
+
+Marshal `args` into the `void**` a `_mlir_ciface_*` thunk expects, and return
+the packed pointers together with everything that must outlive the call.
+
+    keep, inner_ptrs = marshal_args(a, b, c)
+    GC.@preserve keep inner_ptrs begin
+        ccall(fptr, T, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+    end
+
+This exists because there are two tiers that call the same thunks and they must
+agree on how an argument becomes a pointer. `invoke` marshals through
+[`_arg_marshal_plan`](@ref); the AOT dispatch path open-coded its own
+`cconvert`/`unsafe_convert` sequence, and the copies drifted — the plan learned
+`AbstractString` and boxed `Ref`, the open-coded version did not, so an AOT
+wrapper died on `unsafe_convert(Ptr{UInt8}, ::Cstring)` for any string argument
+while the JIT wrapper handled it. One plan, two callers, no second copy to
+forget.
+
+`@generated` for the same reason `invoke` is: the wrappers declare their
+parameters `::Any`, so the argument's real type is knowable only per call site.
+A generator emitting text cannot see it, which is why this could not be fixed
+where the bug appeared to live.
+"""
+@generated function marshal_args(args::Vararg{Any, N}) where N
+    (setup, ptrs, preserve_args) = _arg_marshal_plan(args)
+    quote
+        $(setup...)
+        inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
+        # The tuple roots every source and Ref; preserving it at the call site
+        # keeps them alive for exactly as long as inner_ptrs is used.
+        return (($(preserve_args...),), inner_ptrs)
+    end
+end
+
+"""
     invoke(func_name::String, ::Type{T}, args...) where T
 
 Invoke a JIT-compiled function with return type T.
@@ -285,6 +321,101 @@ end
     quote
         (@atomic GLOBAL_JIT.initialized) || _jit_not_initialized_error()
         fptr = _lookup_cached(func_name)
+        $(setup...)
+        inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
+        GC.@preserve $(preserve_args...) inner_ptrs begin
+            ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+        end
+        _check_pending_exception()
+        return nothing
+    end
+end
+
+# =============================================================================
+# AOT thunk invocation
+#
+# The same thunks, reached without a JIT. `build_aot_thunks` compiles the MLIR
+# at build time into `lib<name>_thunks.so`, so the wrapper dlopens that instead
+# of constructing an MLIR module in every process — the difference is ~34s of
+# startup for a large library, and nothing else. The thunk is byte-for-byte the
+# IR the JIT would have built; only the way its address is found differs.
+#
+# Which is exactly why these go through `_arg_marshal_plan` and `_invoke_call`
+# rather than reimplementing them. The AOT path used to have private copies of
+# both, and both drifted:
+#
+#   * marshalling forgot `AbstractString` and boxed `Ref`, so a string argument
+#     raised `unsafe_convert(Ptr{UInt8}, ::Cstring)`;
+#   * the return convention was picked by matching the type's NAME against a
+#     hardcoded list of scalar spellings. `isprimitivetype(XMLError)` is true —
+#     RepliBuild emits enums as real primitive types — but the string
+#     "XMLError" is in no list and never would be, so an `i32 (void**)` thunk
+#     got called as `void (i32*, void**)`. That reads args_ptr out of the
+#     register holding the return buffer: a segfault inside the thunk, for
+#     every enum-returning function in every C++ package.
+#
+# Two bugs, one cause: a decision the type system answers exactly, approximated
+# with string matching. Sharing the implementation is the fix; there is no
+# version of the duplicate that stays correct.
+# =============================================================================
+
+const _AOT_SYMBOLS = Dict{Tuple{Ptr{Cvoid},String},Ptr{Cvoid}}()
+const _AOT_SYMBOL_LOCK = ReentrantLock()
+
+"""
+Address of `name` in the thunks library behind `handle`, cached.
+
+`dlsym` is cheap but not free, and a thunk call site hits this on every
+invocation; the JIT path caches its lookups for the same reason.
+"""
+function _lookup_aot(handle::Ptr{Cvoid}, name::String)
+    handle == C_NULL && error(
+        "AOT thunks library is not loaded (THUNKS_HANDLE is null). The wrapper " *
+        "was generated with `aot_thunks = true` but lib*_thunks.so did not " *
+        "open — rebuild the package, or set aot_thunks = false to use the JIT.")
+    lock(_AOT_SYMBOL_LOCK) do
+        get!(_AOT_SYMBOLS, (handle, name)) do
+            p = Libdl.dlsym(handle, name; throw_error = false)
+            p === nothing && error(
+                "AOT thunk `$name` is missing from the thunks library. It is " *
+                "generated from the same MLIR the JIT would build, so a gap " *
+                "here means the thunks .so is stale — rebuild the package.")
+            p
+        end
+    end
+end
+
+"""
+    invoke_aot(handle, func_name::String, ::Type{T}, args...) where T
+
+Call an AOT-compiled thunk with return type `T`. Counterpart to [`invoke`](@ref)
+and deliberately identical to it apart from symbol resolution.
+"""
+@generated function invoke_aot(handle::Ptr{Cvoid}, func_name::String,
+                               ::Type{T}, args::Vararg{Any, N}) where {T, N}
+    (setup, ptrs, preserve_args) = _arg_marshal_plan(args)
+    quote
+        fptr = _lookup_aot(handle, func_name)
+        $(setup...)
+        inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
+        result = GC.@preserve $(preserve_args...) begin
+            _invoke_call(fptr, T, inner_ptrs)
+        end
+        _check_pending_exception()
+        return result
+    end
+end
+
+"""
+    invoke_aot(handle, func_name::String, args...)
+
+Void-return form — no `Type` parameter, same as [`invoke`](@ref)'s.
+"""
+@generated function invoke_aot(handle::Ptr{Cvoid}, func_name::String,
+                               args::Vararg{Any, N}) where N
+    (setup, ptrs, preserve_args) = _arg_marshal_plan(args)
+    quote
+        fptr = _lookup_aot(handle, func_name)
         $(setup...)
         inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
         GC.@preserve $(preserve_args...) inner_ptrs begin

@@ -2578,72 +2578,55 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 get(config.wrap.cstring_owned, func_name, "") : ""
 
             if config.compile.aot_thunks
-                # The AOT compiled thunks expect a single argument: void** args
-                thunk_sym = ":_mlir_ciface_$(mangled)_thunk"
-                
-                ptr_setup = ""
-                if !isempty(invoke_args)
-                    ptr_setup *= "    c_args = ($(join(["Base.cconvert($(param_types[i]), $(param_names[i]))" for i in 1:length(param_names)], ", ")),)\n"
-                    ptr_setup *= "    refs = ($(join(["Ref(Base.unsafe_convert($(param_types[i]), c_args[$i]))" for i in 1:length(param_names)], ", ")),)\n"
-                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[$(join(["Base.unsafe_convert(Ptr{Cvoid}, refs[$i])" for i in 1:length(param_names)], ", "))]\n"
-                    ptr_setup *= "    GC.@preserve c_args refs inner_ptrs begin\n"
-                else
-                    ptr_setup *= "    inner_ptrs = Ptr{Cvoid}[]\n"
-                    ptr_setup *= "    GC.@preserve inner_ptrs begin\n"
-                end
-                
+                # AOT dispatch is the JIT dispatch with a different way of
+                # finding the function: `invoke_aot` takes the thunks handle and
+                # dlsyms it, `invoke` asks the JIT engine. Everything after that
+                # — argument marshalling, scalar-vs-sret return convention,
+                # pending-exception check — is shared code in JITManager.
+                #
+                # This branch used to emit all of that inline, and both copies
+                # drifted from the originals. Marshalling forgot AbstractString
+                # and boxed Ref, so string arguments raised
+                # `unsafe_convert(Ptr{UInt8}, ::Cstring)`. Worse, the return
+                # convention was chosen by testing the type's NAME against a
+                # hardcoded list of scalar spellings — but RepliBuild emits
+                # enums as real primitive types, so `isprimitivetype(XMLError)`
+                # is true while the string "XMLError" matches no list entry and
+                # never could. An `i32 (void**)` thunk was then called as
+                # `void (i32*, void**)`, which reads args_ptr out of the
+                # register holding the return buffer: a segfault inside the
+                # thunk for every enum-returning function in every C++ package.
+                #
+                # Both were the same mistake — approximating, in generated text,
+                # a question the type system answers exactly at the call site.
+                # Neither is fixable here; only delegation fixes them.
+                _aot_handle = "THUNKS_HANDLE[]"
                 if is_void_ret
-                    invoke_call = "        if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_call *= "            Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
-                    invoke_call *= "        else\n"
-                    invoke_call *= "            ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
-                    invoke_call *= "        end\n"
-                    invoke_call *= "        return nothing\n"
-                    invoke_call *= "    end"
-                elseif jit_ret_type in ("Int8","UInt8","Int16","UInt16","Int32","UInt32","Int64","UInt64",
-                                        "Float32","Float64","Cint","Cuint","Clong","Culong","Clonglong","Culonglong","Cshort","Cushort","Csize_t","Cchar","Cuchar",
-                                        "Cdouble","Cfloat","Bool","Ptr{Cvoid}","Any","Cstring") || startswith(jit_ret_type, "Ptr{")
-                    # Scalar return directly. The tail is split out so a Cstring
-                    # return can bind `ptr` instead of returning `ret` — the
-                    # policy wrapper below reuses the identical call body.
-                    invoke_core = "        if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_core *= "            ret = Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), $jit_ret_type, Tuple{Ptr{Ptr{Cvoid}}}, inner_ptrs)\n"
-                    invoke_core *= "        else\n"
-                    invoke_core *= "            ret = ccall(($thunk_sym, THUNKS_LIBRARY_PATH), $jit_ret_type, (Ptr{Ptr{Cvoid}},), inner_ptrs)\n"
-                    invoke_core *= "        end\n"
-                    invoke_core *= "    end\n"
-                    invoke_call = invoke_core * "    return ret"
+                    invoke_call = if isempty(invoke_args)
+                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\")"
+                    else
+                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\", $invoke_args)"
+                    end
                 else
-                    # Struct return via sret pointer
-                    # ret_buf is Ref{T} (GC-managed, ptr addrspace 10) but llvmcall
-                    # needs Ptr{T} (raw, addrspace 0). Convert via unsafe_convert and
-                    # keep ret_buf alive with GC.@preserve.
-                    invoke_call = "        ret_buf = Ref{$jit_ret_type}()\n"
-                    invoke_call *= "        ret_ptr = Base.unsafe_convert(Ptr{$jit_ret_type}, ret_buf)\n"
-                    invoke_call *= "        GC.@preserve ret_buf begin\n"
-                    invoke_call *= "            if !isempty(THUNKS_LTO_IR)\n"
-                    invoke_call *= "                Base.llvmcall((THUNKS_LTO_IR, \"_mlir_ciface_$(mangled)_thunk\"), Cvoid, Tuple{Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}}, ret_ptr, inner_ptrs)\n"
-                    invoke_call *= "            else\n"
-                    invoke_call *= "                ccall(($thunk_sym, THUNKS_LIBRARY_PATH), Cvoid, (Ptr{$jit_ret_type}, Ptr{Ptr{Cvoid}}), ret_buf, inner_ptrs)\n"
-                    invoke_call *= "            end\n"
-                    invoke_call *= "        end\n"
-                    invoke_call *= "    end\n"
-                    invoke_call *= "    return ret_buf[]"
+                    invoke_call = if isempty(invoke_args)
+                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type)"
+                    else
+                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type, $invoke_args)"
+                    end
                 end
 
                 if is_cstring_ret
                     _aot_head = "    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)\n"
                     func_def = _cstring_wrapper_pair(julia_name, param_sig,
-                        _aot_head * ptr_setup * invoke_core * "    ptr = ret",
-                        _aot_head * ptr_setup * invoke_call,
+                        _aot_head * "    ptr = " * invoke_call,
+                        _aot_head * "    return " * invoke_call,
                         cstring_free_sym; doc_comment=doc_comment)
                 else
                     func_def = """
                     $doc_comment
                     function $julia_name($param_sig)
                         # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-                    $ptr_setup
-                    $invoke_call
+                        return $invoke_call
                     end
                     """
                 end

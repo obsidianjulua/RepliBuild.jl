@@ -2,6 +2,66 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v3.3.1 (2026-08-22)
+
+Patch. One release-hygiene fix that v3.3.0 needs, and one correctness fix to the
+AOT thunk dispatch path.
+
+### `RepliBuild.VERSION` did not move with `Project.toml` (2026-08-22)
+
+**v3.3.0 as registered fails its own test suite.** `runtests.jl` has asserted
+`RepliBuild.VERSION == pkgversion(RepliBuild)` since long before this release, and
+the v3.3.0 bump edited `Project.toml` and left the constant at `v"3.2.0"` — so the
+package reports one version to Pkg and another to anything reading
+`RepliBuild.VERSION`, and the first testset goes red. Caught by that assertion,
+which is what it is for. Both are `3.3.1` now.
+
+### AOT thunk dispatch shares the JIT's marshalling and return convention (2026-08-22)
+
+`config.compile.aot_thunks` compiles Tier-2 thunks at build time into
+`lib<name>_thunks.so`, so loading a wrapper is a `dlopen` rather than building and
+JITing an MLIR module in every process. It is off in every Hub package, and this
+is why: the emitted dispatch was broken in two independent ways, the first
+crashing early enough to hide the second.
+
+The thunk is the same object either way — the generated MLIR for
+`XMLDocument::Parse` is byte-for-byte identical between the two paths, which is
+what localised this to the Julia side. Only the way its address is found should
+have differed. Instead the AOT branch carried private copies of two decisions the
+JIT path already made through `JITManager`, and both copies had fallen behind:
+
+- **Marshalling.** It open-coded a `cconvert`/`unsafe_convert` pair per parameter.
+  `_arg_marshal_plan` had since learned `AbstractString` and boxed `Ref`; the copy
+  had not, so any string argument raised
+  `unsafe_convert(Ptr{UInt8}, ::Cstring)` on a call the JIT wrapper accepted.
+- **Return convention.** Scalar-vs-sret was chosen by testing the return type's
+  **name** against a hardcoded list of scalar spellings. RepliBuild emits enums as
+  real primitive types, so `isprimitivetype(XMLError)` is `true` while the string
+  `"XMLError"` matches no entry and never could. An `i32 (void**)` thunk was then
+  called as `void (i32*, void**)` — which reads `args_ptr` out of the register
+  holding the return buffer. **Segfault inside the thunk, for every
+  enum-returning function in every C++ package.**
+
+Both are the same mistake: approximating, in generated text, a question the type
+system answers exactly at the call site. Neither was fixable where it appeared —
+these wrappers declare their parameters `::Any`, so the argument's real type is
+knowable only per call site, which a `@generated` function can see and an emitter
+cannot.
+
+`JITManager.invoke_aot(handle, sym, T, args…)` is now `invoke` with exactly one
+difference — it resolves the symbol with `dlsym` on the thunks handle instead of
+asking the JIT engine — and the generator's AOT branch is a mirror of its JIT
+branch. 89 lines of emission became a delegation, and the type-name list is gone.
+`register_symbol`-style lookups are cached per (handle, symbol).
+
+Measured on tinyxml2, same package and same verifier on both tiers: **11/11 AOT,
+11/11 JIT**, load **5.0s → 1.0s**, and `GLOBAL_JIT.engines` is **0** on the AOT
+path — no MLIR module is constructed at load at all.
+
+**Removed:** the LTO/`llvmcall` variant of the AOT packed-args call site went with
+the open-coded branch. It required `enable_lto` **and** `aot_thunks`, which no
+package sets — and it carried both defects above.
+
 ## v3.3.0 (2026-08-22)
 
 Minor, not patch. The theme is **C++ methods that were being called without their
