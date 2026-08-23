@@ -810,6 +810,7 @@ agrees with the bug when intent and emission disagree.
 function _dispatch_facts(func_chunks)
     tier = Dict{String,Symbol}()
     kernels = Dict{String,String}()
+    unclassified = String[]
     current = ""
     body = IOBuffer()
 
@@ -821,11 +822,44 @@ function _dispatch_facts(func_chunks)
         k = match(r"\b(_TIER1_\w+)\(", b)
         t = if k !== nothing || occursin("Base.llvmcall(", b)
             :tier1
-        elseif occursin("JITManager.invoke(", b) || occursin("THUNKS_LIBRARY_PATH", b)
+        # THREE Tier-2 spellings, because AOT has TWO emission shapes and they
+        # are not variants of each other:
+        #   1. `JITManager.invoke(...)`                    — JIT, any function
+        #   2. `JITManager.invoke_aot(THUNKS_HANDLE[], …)` — AOT, ordinary fn
+        #   3. `ccall((:thunk_<mangled>, THUNKS_LIBRARY_PATH), …)`
+        #                                                  — AOT, VIRTUAL method
+        # Shape 3 is `GeneratorCpp.jl`'s AOT virtual-dispatch branch and has
+        # always been here; `THUNKS_LIBRARY_PATH` is its tell. Shape 2 arrived
+        # with `invoke_aot` and this classifier was never taught it, so every
+        # AOT-dispatched ORDINARY function matched nothing, fell past the ccall
+        # test as well, and was omitted from the table ENTIRELY rather than
+        # landing in it wrongly. On a library with no virtual methods what
+        # survived was whatever genuinely ccalls — which then read as a UNIFORM
+        # Tier-3 wrapper, and `_dispatch_tier_chunk` replaced the whole
+        # introspection API with a sentence claiming Tier 3 for a module that
+        # was 4/5 thunks. llamacpp shipped that sentence over 2280 call sites.
+        #
+        # ORDER IS LOAD-BEARING: shape 3 contains `ccall((:`, so this branch
+        # must precede the Tier-3 test or every AOT virtual method is filed as
+        # a plain ccall. Deleting the `THUNKS_LIBRARY_PATH` term while "fixing"
+        # shape 2 does exactly that, silently — test_introspection's AOT
+        # fixture is the thing that refuses it.
+        elseif occursin("JITManager.invoke(", b) ||
+               occursin("JITManager.invoke_aot(", b) ||
+               occursin("THUNKS_LIBRARY_PATH", b)
             :tier2
         elseif occursin("ccall((:", b) || occursin("@ccall ", b)
             :tier3
         else
+            # A chunk that NAMES the dispatch machinery and matched no branch
+            # above means this classifier has fallen behind emission. Recorded
+            # and raised after the walk. Keyed on `JITManager.`/`llvmcall`
+            # rather than on `ccall`, because an ordinary helper may ccall libc
+            # (`memcpy`, `free`) without dispatching to the wrapped library —
+            # those, and pure-Julia helpers, correctly classify as nothing and
+            # must not be flagged.
+            (occursin("JITManager.", b) || occursin("llvmcall", b)) &&
+                push!(unclassified, current)
             nothing
         end
         if t !== nothing
@@ -863,8 +897,51 @@ function _dispatch_facts(func_chunks)
         line == "end" && finish!()
     end
     finish!()
+
+    # REFUSE rather than ship a table that is silently short. An omitted
+    # function does not merely lose its own row — it can make the remainder
+    # look uniform, and a uniform table is emitted as a SENTENCE asserting the
+    # tier. That is how a wrong answer here becomes a wrapper that describes
+    # itself falsely, so the incomplete case has to be louder than the wrong
+    # one.
+    if !isempty(unclassified)
+        names = join(sort(unique(unclassified)), ", ")
+        error("""
+              _dispatch_facts could not classify $(length(unique(unclassified))) emitted function(s) \
+              that call the dispatch machinery: $names
+
+              A dispatch shape exists that this classifier does not recognise. Add it to
+              the tier test — do NOT let these fall out of `DISPATCH_TIER`, because an
+              incomplete table reads as uniform and makes the wrapper state a tier it
+              does not use.
+              """)
+    end
+
     return (tier, kernels)
 end
+
+"""
+Prepended to the dispatch section of any wrapper that has Tier-2 call sites.
+
+Answers "what is `invoke_aot`?" at the one place the reader is guaranteed to be
+standing when they ask it — their own generated wrapper — rather than in a docs
+page they reach only after deciding to trust the tool.
+"""
+const _THUNK_NOTE = """
+# ── What a thunk is ───────────────────────────────────────────────────────
+# A Tier-2 call goes through a *thunk*: the `extern "C"` shim you would
+# hand-write to call this C++ function from C, except RepliBuild generated it
+# and compiled it for you. `ccall` cannot express a virtual dispatch, a
+# by-value struct return, or a call that may throw — the thunk puts the
+# arguments where the C++ ABI wants them, and makes the call.
+#
+# Thunks are written in RepliBuild's MLIR dialect and compiled from there:
+# ahead of time into a companion `_thunks.so` (`[compile] aot_thunks = true`),
+# or JIT-compiled when this module loads. Either way the marshalling was
+# compiled in rather than decided per call — the cost is one extra call frame
+# and an argument array. gdb steps into the generated thunk by file and line.
+
+"""
 
 """
     _dispatch_tier_chunk(tier, kernels) -> String
@@ -904,10 +981,18 @@ function _dispatch_tier_chunk(tier::Dict{String,Symbol}, kernels::Dict{String,St
     # exactly the wrapper that most needs it; caught by test_introspection's
     # single-function all-tier1 fixture.
     tiers = unique(values(tier))
+
+    # The first thing a C++ user meets in their own wrapper is `invoke_aot` at
+    # every call site — `is_ccall_safe` routes anything not marked `noexcept` to
+    # Tier 2, so a C++ module is mostly thunk calls. This is where that question
+    # gets asked, so this is where it is answered. Emitted only when the wrapper
+    # HAS Tier-2 call sites; a pure-ccall wrapper never mentions thunks.
+    note = (:tier2 in tiers || :mixed in tiers) ? _THUNK_NOTE : ""
+
     if isempty(kernels) && length(tiers) == 1
         only_tier = first(tiers)
         return """
-        # ── Dispatch ──────────────────────────────────────────────────────────────
+        $note# ── Dispatch ──────────────────────────────────────────────────────────────
         # Every function in this module dispatches through $(only_tier === :tier3 ?
             "Tier 3 (`ccall` straight into the library)" :
             (only_tier === :tier2 ? "Tier 2 (MLIR thunk)" : "Tier 1 (sliced `llvmcall`)")).
@@ -934,7 +1019,7 @@ function _dispatch_tier_chunk(tier::Dict{String,Symbol}, kernels::Dict{String,St
     # and the tier1-off one is the stronger guarantee.
     if isempty(kernels)
         return """
-        # ── Dispatch introspection ────────────────────────────────────────────────
+        $note# ── Dispatch introspection ────────────────────────────────────────────────
         # What the generator emitted for each function. Tier 2 is an MLIR thunk,
         # Tier 3 a plain ccall. This wrapper has no Tier-1 (sliced) call sites, so
         # the table is exhaustive and needs no runtime probe.

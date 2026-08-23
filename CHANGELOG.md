@@ -2,10 +2,95 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## v3.3.2 (2026-08-22)
+## v3.3.2 (2026-08-23)
 
-Patch. Two scale defects, both found by putting v3.3.1's AOT path on llamacpp
-(3686 functions, 39 MB) and neither reachable at tinyxml2's 283.
+Patch. Scale defects found by putting v3.3.1's AOT path on llamacpp
+(3686 functions, 39 MB), none reachable at tinyxml2's 283 — plus one found by
+putting it on hello_world's three.
+
+### An AOT wrapper described itself as something it was not (2026-08-23)
+
+`_dispatch_facts` classifies each emitted function by the tier it dispatches
+through, reading the FINAL chunks rather than the generator's intent. It knew
+two spellings. There are three:
+
+| | shape | emitted for |
+|---|---|---|
+| 1 | `JITManager.invoke(…)` | JIT, any function |
+| 2 | `JITManager.invoke_aot(THUNKS_HANDLE[], …)` | **AOT, ordinary function** |
+| 3 | `ccall((:thunk_<mangled>, THUNKS_LIBRARY_PATH), …)` | AOT, virtual method |
+
+Shape 3 is `GeneratorCpp`'s AOT virtual-dispatch branch and was always
+recognised. **Shape 2 arrived with v3.3.1's `invoke_aot` work and the classifier
+was never taught it**, so an AOT-dispatched ordinary function matched no branch,
+fell past the Tier-3 test as well, and was dropped from `DISPATCH_TIER`
+**entirely** rather than filed wrongly.
+
+Omission is the worse failure. On a library with no virtual methods the only
+rows left are whatever genuinely `ccall`s — which reads as a **uniform Tier-3
+wrapper**, and `_dispatch_tier_chunk` renders a uniform table as a *sentence*:
+
+```julia
+# Every function in this module dispatches through Tier 3 (`ccall` straight into the library).
+```
+
+hello_world emitted that over four Tier-2 functions. **llamacpp emitted it over
+2280 `invoke_aot` call sites.** `DISPATCH_TIER` and `dispatch_tier` vanished from
+both, so a consumer asking got `UndefVarError` — loud, at least — while the
+wrapper's own header stated a tier it did not use.
+
+**Order in the tier test is load-bearing** and now says so: shape 3 contains
+`ccall((:`, so the Tier-2 branch must precede the Tier-3 one. The first draft of
+this fix *replaced* the `THUNKS_LIBRARY_PATH` term instead of adding to it,
+which would have re-filed every AOT virtual method as a plain ccall — caught by
+`test_introspection`'s existing AOT fixture, which is exactly what it was for.
+
+**Guard: `_dispatch_facts` now refuses rather than returning a short table.** A
+chunk naming `JITManager.` or `llvmcall` that matches no branch is a classifier
+that has fallen behind emission, and it raises naming the functions. Keyed on
+the dispatch machinery, not on `ccall`, so an ordinary helper that calls libc
+stays unclassified in peace. Negative-checked by removing the `invoke_aot` term:
+the guard fires on `aot_plain` before any assertion runs — the class is caught
+at generation time, not merely in CI.
+
+Covered by `test_introspection.jl` (46 → 49 asserts, no toolchain): shape 2 as
+its own fixture — untested until now, and untested is how it broke — plus the
+refusal and a must-not-flag helper.
+
+### Generated wrappers now explain what a thunk is (2026-08-23)
+
+`is_ccall_safe` routes anything not marked `noexcept` to Tier 2, so a C++
+wrapper is mostly thunk calls: hello_world 4 of 5, llamacpp 2280 sites. The
+first thing a C++ user meets is therefore `invoke_aot` at every call site, with
+nothing on hand to say what it is — `docs/src/mlir.md` is the deep treatment and
+is reached only after someone has already decided to trust the tool.
+
+The dispatch section now opens with a short note — a thunk is the `extern "C"`
+shim you would hand-write, generated and compiled; why `ccall` can't express the
+call; AOT vs JIT; that the marshalling is compiled in rather than decided per
+call; that gdb steps into it by file and line. Emitted only when the wrapper has
+Tier-2 call sites, so a pure-`ccall` wrapper never mentions thunks.
+
+### hello_world runs on AOT thunks (2026-08-23)
+
+`[compile] aot_thunks = true`, as the smallest possible exerciser of the AOT
+path — and the one that surfaced the classifier bug, since with no virtual
+methods it hits shape 2 exclusively.
+
+| | JIT | AOT |
+|---|---|---|
+| wrapper load | 3.712s | **0.128s** |
+| JIT engines at load | 1 | **0** |
+
+`libproject_thunks.so` is 16.5 KB, built in 2.3s. The 29× is entirely engine
+init: the cost was never the thunk count.
+
+### CLAUDE.md is tracked (2026-08-23)
+
+The working-state log ships with the repo now. `runtests.jl`, `test_struct_abi.jl`,
+`FunctionGen.jl` and the docs already cited it, so those references had been
+dangling for everyone who cloned. Machine-local paths, the home directory in a
+gdb transcript, and links into a private note store were scrubbed first.
 
 ### One symbol, two vtables, two definitions (2026-08-22)
 

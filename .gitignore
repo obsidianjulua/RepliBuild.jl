@@ -78,5 +78,7 @@ TODO.md
 
 # Claude Code
 .claude/
-CLAUDE.md
 CLAUDE
+# CLAUDE.md is TRACKED as of 2026-08-23 — it is the working-state log, and a
+# C++ user hitting the thunk/dual-LLVM machinery needs it. Keep it free of
+# machine-local paths before committing; do not re-add it here.

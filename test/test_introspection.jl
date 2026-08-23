@@ -38,11 +38,25 @@ const W = RepliBuild.Wrapper
                 return RepliBuild.JITManager.invoke("_mlir_ciface__Z7thunkedv_thunk", Cint, a)
             end
             """,
-            # Tier 2, AOT companion library
+            # Tier 2, AOT companion library — VIRTUAL dispatch shape.
+            # Note this body contains `ccall((:`, so it is only classified
+            # correctly while the Tier-2 test precedes the Tier-3 one.
             """
             function aot(a::Any)
                 ret = ccall((:_mlir_ciface__Z3aotv_thunk, THUNKS_LIBRARY_PATH), Cint, (Ptr{Ptr{Cvoid}},), inner_ptrs)
                 return ret
+            end
+            """,
+            # Tier 2, AOT companion library — ORDINARY function shape. A
+            # SECOND, unrelated spelling: `invoke_aot` through the dlopened
+            # handle, which shares no substring with the virtual shape above.
+            # Untested until 2026-08-23, and untested is how it broke: the
+            # classifier knew only the virtual spelling, so an AOT wrapper
+            # with no virtual methods lost EVERY Tier-2 row and then read as a
+            # uniform Tier-3 module.
+            """
+            function aot_plain(a::Any)
+                return RepliBuild.JITManager.invoke_aot(THUNKS_HANDLE[], "_mlir_ciface__Z9aot_plainv_thunk", Cint, a)
             end
             """,
             # Tier 3, plain and variadic
@@ -59,11 +73,34 @@ const W = RepliBuild.Wrapper
         ]
         (tier, kernels) = W._dispatch_facts(chunks)
 
-        @test tier["fast"]    === :tier1
-        @test tier["thunked"] === :tier2
-        @test tier["aot"]     === :tier2
-        @test tier["plain"]   === :tier3
-        @test tier["va"]      === :tier3
+        @test tier["fast"]      === :tier1
+        @test tier["thunked"]   === :tier2
+        @test tier["aot"]       === :tier2
+        @test tier["aot_plain"] === :tier2
+        @test tier["plain"]     === :tier3
+        @test tier["va"]        === :tier3
+
+        # A DISPATCHING FUNCTION MUST NEVER BE MERELY ABSENT. Omission is worse
+        # than misfiling: a short table can read as UNIFORM, and a uniform
+        # table is emitted as a sentence asserting the tier, so one unclassified
+        # shape makes the wrapper describe itself falsely. Keyed on naming the
+        # dispatch machinery, so an ordinary helper stays unclassified in peace.
+        @test_throws ErrorException W._dispatch_facts([
+            """
+            function future_shape(a::Any)
+                return RepliBuild.JITManager.invoke_by_some_new_means(H[], "sym", Cint, a)
+            end
+            """,
+        ])
+
+        helper_only = W._dispatch_facts([
+            """
+            function helper(p::Ptr{Cvoid})
+                return unsafe_load(Base.unsafe_convert(Ptr{Cint}, p))
+            end
+            """,
+        ])
+        @test isempty(helper_only[1])
 
         # The kernel is recorded so `dispatch_tier` can check it, and is itself
         # NOT classified — reaching for it is exactly what this replaces.
