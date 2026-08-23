@@ -21,6 +21,32 @@ skip the rebuild and print `cache: project unchanged` — delete
 clone and the per-file IR cache. C packages are structurally unaffected: a C symbol
 has no `::`, so `class` is always empty and none of this reaches them.
 
+### The dialect builds at install time now, or says why not (2026-08-22)
+
+`libJLCS.so` is not shipped and cannot be — it links the system MLIR and LLVM,
+so a prebuilt copy is wrong on any machine whose LLVM differs. The consequence
+used to land at the worst moment: `Pkg.add` succeeded, `using RepliBuild`
+succeeded, and the first call that reached Tier 2 raised "JLCS dialect library
+not found — build it first" naming a path inside a read-only depot.
+
+A new `deps/build.jl` runs `src/mlir/build.sh` at install time when the machine
+can, and otherwise explains what is missing. **It never throws.** A failing
+`deps/build.jl` fails `Pkg.add` outright, and that would be the wrong trade:
+RepliBuild without the dialect is still the whole product for C libraries, since
+Tier 3 is plain `ccall`. Only Tier 2 — C++ member functions and by-value
+aggregates — needs MLIR. A machine with no system MLIR should get a working
+install and a clear account of what it does not have.
+
+It also checks the existing library by **dlopening it**, not by `isfile`. That
+is the case a rolling distro produces: `libJLCS.so` links
+`libMLIR.so.<version>`, so an LLVM upgrade leaves a file that is present,
+plausible, and unloadable. Asking the loader is what distinguishes "built" from
+"built against an LLVM that is gone", and it triggers a rebuild instead of a
+mystery at the first Tier-2 call.
+
+`MLIRNative.check_library`'s error is still there and unchanged. It is a
+backstop now rather than the only line of defence.
+
 ### The JIT engine explained its failures to nobody (2026-08-22)
 
 Three defects in `JLCSCAPIWrappers.cpp` and its Julia bindings, found by reading
