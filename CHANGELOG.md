@@ -2,7 +2,7 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## v3.3.0 (unreleased)
+## v3.3.0 (2026-08-22)
 
 Minor, not patch. The theme is **C++ methods that were being called without their
 `this`** — three independent defects in the two receiver gates, plus the DWARF
