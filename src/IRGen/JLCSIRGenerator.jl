@@ -306,6 +306,25 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         push!(fthunk_decls, m)
     end
     println(io, "  // External Dispatch Declarations (Virtual Methods)")
+    # One symbol can be listed in more than one class's `virtual_methods` — the
+    # same override reachable through two vtables — and this loop walks classes,
+    # not symbols. So the "declared exactly once" invariant stated above needs a
+    # set to hold it; `fthunk_decls` only excludes the OTHER pass's symbols, and
+    # says nothing about this loop repeating itself.
+    #
+    # `needed_symbols` was hiding it. With a manifest, most of these land in
+    # `fthunk_decls` and get skipped here, so a repeat needs two vtable listings
+    # AND absence from the manifest. The AOT path passes no manifest and the
+    # whole class became reachable: llamacpp emitted
+    # `llm_graph_input_dsv4::set_input` and `::can_reuse` twice each and MLIR
+    # rejected the module outright — `redefinition of symbol named …`, no
+    # thunks library, at a scale tinyxml2's 283 functions never reached.
+    #
+    # Deduping by NAME is safe here and was checked rather than assumed: both
+    # llamacpp pairs are byte-identical declarations, same arity and same types.
+    # A genuine signature conflict would be a different bug and must not be
+    # silently collapsed, so it is reported instead.
+    declared_vmethods = Dict{String,String}()
     for (class_name, class_info) in vtinfo.classes
         for method in class_info.virtual_methods
              method_addr = get(vtinfo.method_addresses, method.mangled_name, UInt64(0))
@@ -315,7 +334,17 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
                  (ret_type, arg_types) = get_llvm_signature(method)
 
                  decl_ret = ret_type == "" ? "!llvm.void" : ret_type
-                 println(io, "  llvm.func @$(dispatch_name)($(arg_types)) -> $(decl_ret)")
+                 decl = "($(arg_types)) -> $(decl_ret)"
+                 prev = get(declared_vmethods, dispatch_name, nothing)
+                 if prev !== nothing
+                     prev == decl || @warn(
+                         "Virtual method declared with conflicting signatures; " *
+                         "keeping the first. This is a metadata bug, not a duplicate.",
+                         symbol = dispatch_name, kept = prev, discarded = decl)
+                     continue
+                 end
+                 declared_vmethods[dispatch_name] = decl
+                 println(io, "  llvm.func @$(dispatch_name)$(decl)")
              end
         end
     end
@@ -348,6 +377,15 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
                 # emitting the legacy thunk here would llvm.call a symbol whose
                 # declaration now belongs to the function-thunk pass.
                 method.mangled_name in fthunk_decls && continue
+                # Same reason the declaration loop above needs a set: one symbol
+                # can be listed in several classes' `virtual_methods`, and this
+                # walks classes. `generated_symbols` was already being filled
+                # here — but only READ by the function-thunk filter below, so it
+                # stopped that pass repeating this one's work while doing
+                # nothing about this one repeating itself. Emitting
+                # `thunk_<mangled>` twice is a redefinition and MLIR rejects the
+                # whole module.
+                method.mangled_name in generated_symbols && continue
                 println(io, generate_virtual_method_ir(method, method_addr))
                 println(io, "")
                 push!(generated_symbols, method.mangled_name)

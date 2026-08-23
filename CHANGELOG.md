@@ -2,6 +2,142 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v3.3.2 (2026-08-22)
+
+Patch. Two scale defects, both found by putting v3.3.1's AOT path on llamacpp
+(3686 functions, 39 MB) and neither reachable at tinyxml2's 283.
+
+### One symbol, two vtables, two definitions (2026-08-22)
+
+`generate_jlcs_ir` emits virtual-method declarations and `thunk_<mangled>`
+definitions by walking `vtinfo.classes` and, inside that, each class's
+`virtual_methods`. **One symbol can be listed in more than one class's vtable**,
+so both loops could emit it twice, and MLIR rejects the whole module:
+`redefinition of symbol named '_ZN20llm_graph_input_dsv49set_inputEPK12llama_ubatch'`.
+No thunks library, and the AOT path unusable on any library big enough to
+contain such a symbol.
+
+Both loops had a set sitting next to them that did not guard them. The
+declaration loop consulted `fthunk_decls`, which only excludes the *other* pass's
+symbols and says nothing about this loop repeating itself. The definition loop
+**filled** `generated_symbols` and never read it — that set is consumed by the
+function-thunk filter further down, so it stopped that pass duplicating this
+one's work while doing nothing about this one duplicating its own.
+
+`needed_symbols` was hiding it. With a thunk manifest most of these symbols land
+in `fthunk_decls` and get skipped, so a repeat needs two vtable listings **and**
+absence from the manifest. `build_aot_thunks` passes no manifest — it runs at
+build time, before `wrap` has written one — so the AOT path met the whole class
+at once.
+
+Deduping by name was checked rather than assumed: llamacpp's two colliding pairs
+are byte-identical declarations, same arity and same types. A genuine signature
+conflict is a different bug and is now reported instead of silently collapsed.
+
+After: 245 declarations and 3659 definitions, zero duplicates, module parses and
+lowers, `libllamacpp_thunks.so` builds at 4.3 MB in 52s.
+
+### A wrapper guard could not survive its own scale (2026-08-22)
+
+`_assert_no_shadowed_ccall_types` matched `function … ccall(…)` with a single
+regex spanning the whole wrapper, which needs
+`(?:(?!^function )[\s\S])*?` to stop at the next definition — a negative
+lookahead evaluated at every character of every body. A function containing no
+`ccall` makes that scan run to the next `function` and backtrack, and a Tier-2
+wrapper is mostly such functions. llamacpp exhausted PCRE outright:
+
+```
+ERROR: PCRE.exec error: JIT stack limit reached
+```
+
+That refused to write the wrapper at all — with `aot_thunks` on **or** off, so it
+blocked llamacpp entirely, not just the AOT path. It now splits on the `^function`
+anchor first and matches within each body: linear, and bounded per function.
+Refusal and pass-through behaviour verified unchanged on both the shape the guard
+exists for and the shapes it must not flag.
+
+### An unmappable by-value return is refused at the call site, not the wrapper (2026-08-22)
+
+`format[abi:cxx11]` returns `std::basic_string` by value. `cf09702` correctly
+drops STL types from `struct_definitions`, so nothing can name it and the mapper
+answered `Any` — which the generator emitted straight into a foreign call:
+
+```julia
+function format_abi_cxx11(fmt::Any)::Any
+    return @ccall LIBRARY_PATH.var"_Z6formatB5cxx11PKcz"(fmt::Ptr{UInt8};)::Any
+end
+```
+
+**This is not a regression.** That line shipped for as long as the function has
+existed; `_assert_no_any_ccall_return` is newer and refused to write the wrapper
+containing it. The guard was right — `Any` in a foreign return position tells
+Julia the callee returned a `jl_value_t*`, so the result is dereferenced as a
+Julia object. But refusing the wrapper takes 5,614 working functions down with
+the one broken declaration.
+
+Neither escape works. `Any` corrupts on dereference; `Cvoid` leaves a MEMORY-class
+aggregate's hidden sret pointer unaccounted for, so the ABI is wrong rather than
+merely lossy. The value cannot be discarded any more safely than it can be
+returned.
+
+So the function is now emitted as an **FFI Safety Trap** — the pattern the C++
+generator already used for unmappable *parameters*, extended to returns. The
+module loads, everything else works, and this one raises with an explanation if
+called.
+
+The fix lives in `generate_vararg_wrappers`, which is shared by both generators.
+That placement is the actual finding: varargs functions `continue` past normal
+wrapper generation entirely, so a fix applied at the ordinary return-type
+decision never runs for them — and `_Z6format…PKc**z**` is varargs.
+
+### A vendored thunks library loaded the build tree's copy of its own library (2026-08-22)
+
+`build_aot_thunks` linked the companion library with only
+`-Wl,-rpath,<build dir>`, an absolute path. The rest of RepliBuild resolves
+**sibling-first** — `LIBRARY_PATH` and `THUNKS_LIBRARY_PATH` both prefer a copy
+beside the wrapper — precisely so a generated set can be vendored into a
+consumer. The thunks library's own `NEEDED libllamacpp.so` did not.
+
+So a vendored copy loaded its sibling `.so` through the wrapper and the **build
+tree's** `.so` through the dynamic loader: two copies of a 41 MB library in one
+process, each with its own static state, both torn down at exit.
+
+```
+double free or corruption (!prev)
+signal (6): Aborted
+```
+
+Then it **hung**, because Julia's crash handler tries to symbolize the abort —
+`jl_print_native_codeloc` → `DWARFContext::create` → `operator new` — and that
+deadlocks on the malloc lock the abort came from. The visible symptom was a load
+that never returned; the abort scrolled past above it.
+
+Every test had already passed at that point. `test_deep.jl` reported 33/33 and
+exited 0 for the *package*, where both paths name the same file, so nothing
+caught it until the artifacts were vendored into LlamaChat.
+
+Now `-Wl,-rpath,$ORIGIN` ahead of the build directory. RUNPATH entries are
+searched in order, so a sibling wins when one exists — matching the wrapper —
+and the absolute path remains for a thunks library used where it was built.
+
+**Read exit codes, not output.** Every earlier run of this piped through `tail`,
+which reports the pipeline's status, not the program's. `33/33` and `275/275`
+both printed cleanly from processes that then aborted on the way out.
+
+### llamacpp on AOT thunks
+
+With all three fixes, the whole point of the exercise is reachable:
+
+| | JIT | AOT |
+|---|---|---|
+| wrapper load | 24.83s | **5.38s** |
+| `test_deep.jl` | 33/33 in 35.4s | **33/33 in 1.0s** |
+| JIT engines at load | 1 | **0** |
+
+The testset collapse is the same saving counted twice — the engine was
+initialising lazily on the first Tier-2 call, so the tests were paying for it
+too. 2280 dispatch sites, `libllamacpp_thunks.so` at 4.3 MB.
+
 ## v3.3.1 (2026-08-22)
 
 Patch. One release-hygiene fix that v3.3.0 needs, and one correctness fix to the

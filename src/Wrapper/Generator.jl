@@ -183,11 +183,31 @@ generator's bookkeeping disagreeing with what it wrote.
 function _assert_no_shadowed_ccall_types(wrapper_content::AbstractString,
                                          module_name::AbstractString)
     offenders = Tuple{String,String}[]   # (function, shadowed type)
-    # `function f(a::T, b::U)` … `ccall((:sym, LIB), R, (types,), args)`.
-    # Non-greedy body so each function is matched against its OWN ccall.
-    pat = r"^function ([A-Za-z_]\w*)\(([^)]*)\)[^\n]*\n(?:(?!^function )[\s\S])*?ccall\(\([^)]*\),\s*[^,]+,\s*\(([^)]*)\)"m
-    for m in eachmatch(pat, wrapper_content)
-        fn, params, types = m.captures[1], m.captures[2], m.captures[3]
+
+    # Split into function blocks FIRST, then match inside each one.
+    #
+    # This was a single regex spanning the whole file, which needed
+    # `(?:(?!^function )[\s\S])*?` to stop at the next definition — a negative
+    # lookahead evaluated at every character of every body. A function with no
+    # `ccall` makes that scan run all the way to the next `function` and
+    # backtrack, and a Tier-2 wrapper is mostly such functions. llamacpp
+    # (3686 functions, 3.1 MB) exhausted PCRE outright:
+    # `PCRE.exec error: JIT stack limit reached`, refusing to wrap at all.
+    #
+    # Splitting on the anchor is linear and bounds every subsequent match to one
+    # body, so cost grows with the wrapper instead of with the wrapper squared.
+    heads  = collect(eachmatch(r"^function ([A-Za-z_]\w*)\(([^)]*)\)"m, wrapper_content))
+    isempty(heads) && return nothing
+    # `ccall((:sym, LIB), R, (types,), args)` — the argument-type tuple.
+    ccall_pat = r"ccall\(\([^)]*\),\s*[^,]+,\s*\(([^)]*)\)"
+
+    for (i, h) in enumerate(heads)
+        stop = i < length(heads) ? prevind(wrapper_content, heads[i+1].offset) :
+                                   lastindex(wrapper_content)
+        body = SubString(wrapper_content, h.offset, stop)
+        cm = match(ccall_pat, body)
+        cm === nothing && continue
+        fn, params, types = h.captures[1], h.captures[2], cm.captures[1]
         pnames = Set{String}()
         for p in _split_toplevel_commas(params)
             nm = strip(first(split(p, "::"; limit = 2)))
@@ -1134,6 +1154,55 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
     end
 
     julia_return_type = get(return_type, "julia_type", "Cvoid")
+    c_return_type = String(get(return_type, "c_type", ""))
+
+    # An `Any` return whose C type is an aggregate is a by-value struct return
+    # the mapper could not NAME, and no ABI-correct call can be emitted for it.
+    #
+    # `Any` in a foreign return position tells Julia the callee returned a
+    # `jl_value_t*`, so the result is dereferenced as a Julia object — a segfault
+    # inside dispatch, far from the call site. Degrading to `Cvoid` is not the
+    # escape either: a MEMORY-class aggregate comes back through a hidden sret
+    # pointer, so dropping the value leaves the ABI wrong rather than merely
+    # lossy.
+    #
+    # Live case: llama.cpp's `format[abi:cxx11]` returns `std::basic_string`,
+    # correctly absent from `struct_definitions` because cf09702 drops STL types,
+    # so nothing can name it. The `::Any` ccall shipped for as long as the
+    # function has existed; `_assert_no_any_ccall_return` is what finally refused
+    # it, and refusing the whole wrapper takes 5,614 working functions with it.
+    #
+    # So refuse at the CALL SITE instead, exactly as the C++ generator already
+    # does for unmappable parameters: the module loads, everything else works,
+    # and this one function explains itself to anyone who calls it.
+    if julia_return_type == "Any" && !isempty(c_return_type) &&
+       c_return_type != "unknown" &&
+       !occursin("*", c_return_type) && !occursin("void", c_return_type)
+        trap = """
+        \"\"\"
+            $julia_name(args...)
+
+        **Unavailable.** `$func_name` returns `$c_return_type` by value, a type
+        RepliBuild could not map, so no ABI-correct call can be emitted. Calling
+        this raises rather than corrupting memory.
+        \"\"\"
+        function $julia_name(args...)
+            Base.error(\"\"\"
+            FFI Safety Trap: cannot call '$julia_name'.
+
+            It returns $c_return_type by value, and that type could not be
+            mapped to Julia. Declaring the return as a boxed value would make
+            Julia dereference the result as an object; declaring it void would
+            leave the hidden return pointer unaccounted for. Both corrupt
+            memory, so neither was emitted.
+
+            If you need this function, give the type a mapping in
+            replibuild.toml so it can be named.
+            \"\"\")
+        end
+        """
+        return (trap, [julia_name])
+    end
 
     # Cstring returns get the shared policy (NULL → nothing, String copy,
     # [wrap.cstring_owned] free) — printf-family varargs like sqlite3_mprintf

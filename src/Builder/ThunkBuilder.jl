@@ -53,8 +53,28 @@ function build_aot_thunks(config, library_path)
         # Link thunks against the main library so C function symbols resolve
         lib_dir = dirname(abspath(library_path))
         linker = config.wrap.language == :c ? "clang" : "clang++"
+        # `$ORIGIN` FIRST, build directory second.
+        #
+        # A generated wrapper is portable source: `LIBRARY_PATH` and
+        # `THUNKS_LIBRARY_PATH` both resolve sibling-first so the whole set can be
+        # vendored into a consumer. The thunks library's own `NEEDED libllamacpp.so`
+        # did not — it carried only an absolute RUNPATH into the build tree — so a
+        # vendored copy loaded ITS sibling `.so` through the wrapper and the
+        # BUILD TREE's `.so` through the loader.
+        #
+        # Two copies of the same library in one process, each with its own static
+        # state, and the C++ runtime tears both down at exit:
+        # `double free or corruption (!prev)`, then a hang, because Julia's crash
+        # handler calls malloc to symbolize an abort that came from inside malloc.
+        # Observed on LlamaChat vendoring llamacpp; the package's own tests never
+        # saw it, since there the two paths name the same file.
+        #
+        # RUNPATH entries are searched in order, so `$ORIGIN` wins when the
+        # sibling exists — matching the wrapper — and the absolute path stays as
+        # the fallback for a thunks library used where it was built.
         link_args = ["-shared", "-fPIC", "-o", thunks_so, thunks_obj,
-                     "-L", lib_dir, "-l:$lib_name", "-Wl,-rpath,$lib_dir"]
+                     "-L", lib_dir, "-l:$lib_name",
+                     "-Wl,-rpath,\$ORIGIN", "-Wl,-rpath,$lib_dir"]
         (output, exitcode) = BuildBridge.execute(linker, link_args)
         if exitcode != 0
             error("Failed to link thunks.o: $output")

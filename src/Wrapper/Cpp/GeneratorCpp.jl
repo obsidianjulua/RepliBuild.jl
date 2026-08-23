@@ -2784,7 +2784,34 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         # Check for _UnsafeUnknown trap to prevent segfaults
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
-        is_unknown_return = julia_return_type == "_UnsafeUnknown"
+        # An `Any` return whose C type is an aggregate is a by-value struct
+        # return the mapper could not NAME. `is_struct_return` above detects the
+        # shape but assumes a nameable type; when there is none the emission
+        # fell through to a plain ccall declaring `::Any`, and `Any` in a foreign
+        # return position tells Julia the callee returned a `jl_value_t*`, so the
+        # result is dereferenced as a Julia object — a segfault inside dispatch,
+        # far from the call site.
+        #
+        # It cannot degrade to `Cvoid` either, which is what the guard's message
+        # suggests for the enum case: a MEMORY-class aggregate is returned
+        # through a hidden sret pointer, so dropping the value leaves the ABI
+        # wrong rather than merely lossy.
+        #
+        # llamacpp is the live case — `format[abi:cxx11]` returns
+        # `std::basic_string`, which cf09702 correctly drops from
+        # `struct_definitions` as an STL type, so nothing can name it. The
+        # wrapper shipped that `::Any` ccall for as long as the function has
+        # existed; `_assert_no_any_ccall_return` is what finally refused it.
+        #
+        # Refusing at the CALL SITE is what `_UnsafeUnknown` already does for
+        # unmappable parameters: the module still loads and every other function
+        # works, and this one explains itself if anybody calls it.
+        is_unnameable_agg_return = is_struct_return &&
+            !(c_return_type in struct_types) &&
+            !haskey(julia_to_cpp_struct, julia_return_type)
+
+        is_unknown_return = julia_return_type == "_UnsafeUnknown" ||
+                            is_unnameable_agg_return
 
         if has_unknown_param || is_unknown_return
             func_def = """
