@@ -21,6 +21,77 @@ skip the rebuild and print `cache: project unchanged` — delete
 clone and the per-file IR cache. C packages are structurally unaffected: a C symbol
 has no `::`, so `class` is always empty and none of this reaches them.
 
+### The JIT engine explained its failures to nobody (2026-08-22)
+
+Three defects in `JLCSCAPIWrappers.cpp` and its Julia bindings, found by reading
+the JIT path rather than by anything failing. Two of them had the same shape: a
+parameter accepted and then dropped, so an API promised something it had never
+done. No behaviour changes on a healthy load — `initialize_global_jit` still
+takes the same time and produces the same engine.
+
+**MLIR's diagnostics were going to stderr and being discarded.** No
+`ScopedDiagnosticHandler` was registered anywhere, so every failure — a parse
+error, a failed lowering, a refused `ExecutionEngine::create` — reported itself
+to the default handler, which prints and returns. Julia then raised `Failed to
+parse MLIR module` with the explanation on a stream that, during a wrapper's
+`__init__`, frequently is not attached to anything. The worst case was
+`moduleTypesAreLLVMCompatible`: it calls `emitError` naming the offending op and
+type, which is the entire reason it emits one, and that went to stderr too — a
+refusal explained by nothing.
+
+Diagnostics are now captured into a thread-local buffer and appended to the
+Julia error. `MLIRNative.take_diagnostics()` reads and clears it. The handler
+returns `success()` so MLIR does not also print: one report, delivered to the
+caller that can act on it, rather than two with one of them into the void. It is
+scoped per fallible call, not registered once at context creation, so a failure
+cannot inherit diagnostics from unrelated work.
+
+The locations are the point, not a bonus. A parse is named after the
+content-keyed `.mlir` that `jit_source_path` already writes for gdb, so the
+`loc("…":LINE:COL)` in the error text names the same file and line the debugger
+opens when you break in the resulting thunk:
+
+```
+error: loc("/…/jlcs_7697cb4881e7.mlir":418:7): 'func.return' op has 0 operands,
+       but enclosing function (@f) returns 1
+```
+
+**`attachHostDataLayout` could null-deref, and warn-and-continue was worse.**
+`createTargetMachine` may return null and was dereferenced one line later — an
+uncatchable SIGSEGV taking the host process with it, which is the exact failure
+mode `moduleTypesAreLLVMCompatible` was written to prevent thirty lines below.
+The `target` lookup above it was already guarded; this was not.
+
+The bigger defect was the existing failure path. That attribute tells the LLVM
+conversion passes how wide a pointer is and where struct fields land; without it
+they fall back to a default layout and carry on. A wrapper whose entire job is
+matching the host ABI would therefore lower, JIT, run, and return quietly wrong
+answers, having printed a warning nobody reads. It now returns `bool` and
+`jlcs_create_jit_with_libs` refuses to JIT without a host data layout. A guess
+about the ABI is not a degraded mode of a thing that exists to get the ABI right.
+
+**`register_symbol(jit, …)` took an engine and ignored it.** Both it and
+`register_symbol_global` called one C entry point that unconditionally did
+`DynamicLibrary::AddSymbol`, so the per-engine isolation the signature implies
+had never existed. Two wrappers defining the same mangled name — two libraries
+vendoring the same C++ class, or one library reached by two paths — shared a
+single process-global slot, last registration winning, and the loser's thunks
+dispatched into the other library's code.
+
+A non-null engine now registers through `mlirExecutionEngineRegisterSymbol`
+(already exported, never called). Null still means the global table, and that is
+deliberate rather than residue: ORC resolves a symbol when it materialises the
+code referencing it, so anything the engine must see during `create_jit` has to
+be registered before an engine exists to hold it — which is precisely the window
+`initialize_global_jit` uses for its `dispatch_` and EH helpers. `register_symbol`
+now **throws** on a null engine instead of silently falling back, which is what
+keeps the old claim from being makeable again.
+
+`initialize_global_jit` still uses the global path, correctly. Moving it means
+registering after `create_jit`, and whether ORC materialises anything during
+engine creation — with the `dispatch_` symbols not yet present — is not
+established. That is a load-order change, not a rename.
+
 ### Tier 1 is quarantined: experimental, unwired from the suite (2026-08-19)
 
 Tier 1 — `Base.llvmcall` over per-function bitcode slices — is now explicitly a

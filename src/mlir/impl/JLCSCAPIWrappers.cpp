@@ -14,6 +14,7 @@
 #include "mlir-c/ExecutionEngine.h"
 
 #include "mlir/Parser/Parser.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -54,24 +55,134 @@ using namespace mlir;
 static thread_local char jlcs_exception_buffer[1024] = {0};
 static thread_local bool jlcs_has_exception = false;
 
+// =============================================================================
+// Diagnostic capture
+//
+// MLIR reports everything it knows about a failure through its DiagnosticEngine
+// — the op that is wrong, the type that will not translate, and a
+// FileLineColLoc naming the buffer and line. With no handler registered, that
+// all goes to the default handler, which prints to stderr and returns. Julia
+// then raised "Failed to parse MLIR module" and the one thing that would have
+// explained it was on a stream nothing was reading, in a wrapper load that
+// often is not even attached to a terminal.
+//
+// The locations are the reason this is worth capturing rather than merely
+// silencing: parses are named after the content-keyed .mlir that
+// jit_source_path already writes, so a captured diagnostic points at the exact
+// file and line that gdb opens when you break in the resulting thunk. The error
+// text and the debugger agree.
+//
+// Handlers are registered per-context and consulted innermost-first, and
+// returning success() marks the diagnostic handled so the default handler does
+// NOT also print it. That is deliberate: one report, delivered to the caller
+// that can act on it, instead of two — one of them into the void.
+// =============================================================================
+
+static thread_local std::string jlcs_diagnostics;
+
+namespace {
+
+// "error: /path/jlcs_ab12.mlir:418:7: message", plus any attached notes
+// indented beneath it. Severity is spelled out because a captured warning and a
+// captured error look identical once they are both just text in a buffer.
+void appendDiagnostic(std::string &out, mlir::Diagnostic &diag) {
+    llvm::raw_string_ostream os(out);
+    if (!out.empty()) {
+        os << "\n";
+    }
+    switch (diag.getSeverity()) {
+    case mlir::DiagnosticSeverity::Note:          os << "note: ";      break;
+    case mlir::DiagnosticSeverity::Warning:       os << "warning: ";   break;
+    case mlir::DiagnosticSeverity::Error:         os << "error: ";     break;
+    case mlir::DiagnosticSeverity::Remark:        os << "remark: ";    break;
+    }
+    os << diag.getLocation() << ": " << diag.str();
+    for (mlir::Diagnostic &note : diag.getNotes()) {
+        os << "\n  note: " << note.getLocation() << ": " << note.str();
+    }
+    os.flush();
+}
+
+// Append a message with no Diagnostic behind it — for the failures this file
+// detects itself (a refused pre-flight, an llvm::Error from the engine) rather
+// than ones MLIR reports through its own engine. Same buffer, so the caller has
+// one place to look regardless of which layer objected.
+void appendPlain(std::string &out, llvm::StringRef msg) {
+    if (!out.empty()) {
+        out += "\n";
+    }
+    out += "error: ";
+    out += msg.str();
+}
+
+// RAII capture for the duration of one fallible operation.
+//
+// Scoped rather than registered once at context creation because the buffer is
+// per-thread and per-attempt: a caller reads it immediately after a failure,
+// and a handler outliving the call would accumulate diagnostics from unrelated
+// work into the next failure's report.
+class DiagnosticCapture {
+public:
+    explicit DiagnosticCapture(mlir::MLIRContext *ctx)
+        : handler(ctx, [](mlir::Diagnostic &diag) {
+              appendDiagnostic(jlcs_diagnostics, diag);
+              return mlir::success();
+          }) {
+        jlcs_diagnostics.clear();
+    }
+
+private:
+    mlir::ScopedDiagnosticHandler handler;
+};
+
+} // namespace
+
 // --- Helper Functions ---
 
 // helper to attach host data layout
-static void attachHostDataLayout(mlir::ModuleOp module) {
+// Attach the host's data layout to the module. Returns false if it could not be
+// determined, having said why in the diagnostic buffer.
+//
+// Two things changed here, and the second is the reason for the first.
+//
+// `createTargetMachine` can return null, and the result was dereferenced
+// unchecked one line later — a null deref is an uncatchable SIGSEGV that takes
+// the host process with it, which is the exact failure mode
+// moduleTypesAreLLVMCompatible was written to prevent thirty lines below. The
+// `target` lookup above it was already checked; this was not.
+//
+// The warn-and-continue was worse than the crash, though. This attribute is
+// what tells the LLVM conversion passes how wide a pointer is and where struct
+// fields land. Without it they fall back to a default layout and carry on
+// happily — so a wrapper whose entire job is to match the host ABI would lower,
+// JIT, run, and return quietly wrong answers, having printed a warning to a
+// stderr nobody reads. Failing here is the only honest option: a guess about
+// the ABI is not a degraded mode of a thing that exists to get the ABI right.
+static bool attachHostDataLayout(mlir::ModuleOp module) {
     llvm::Triple triple(llvm::sys::getProcessTriple());
     std::string error;
     const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, error);
     if (!target) {
-        llvm::errs() << "Warning: Failed to lookup target for data layout: " << error << "\n";
-        return;
+        appendPlain(jlcs_diagnostics,
+                    "no LLVM target registered for host triple " + triple.str() +
+                        ": " + error +
+                        " (InitializeNativeTarget may not have run)");
+        return false;
     }
 
     auto machine = std::unique_ptr<llvm::TargetMachine>(
         target->createTargetMachine(triple, "generic", "", {}, std::nullopt));
+    if (!machine) {
+        appendPlain(jlcs_diagnostics,
+                    "could not create a TargetMachine for host triple " +
+                        triple.str() + "; host data layout is unavailable");
+        return false;
+    }
 
     const llvm::DataLayout &dl = machine->createDataLayout();
     module->setAttr(mlir::LLVM::LLVMDialect::getDataLayoutAttrName(),
                     mlir::StringAttr::get(module.getContext(), dl.getStringRepresentation()));
+    return true;
 }
 
 // Pre-flight: refuse modules containing types that cannot be translated to
@@ -161,6 +272,7 @@ extern "C" {
     MlirModule jlcsModuleCreateParse(MlirContext context, const char *moduleStr,
                                      const char *sourceName) {
         MLIRContext *ctx = unwrap(context);
+        DiagnosticCapture capture(ctx);
         llvm::StringRef source(moduleStr);
         llvm::StringRef name(sourceName ? sourceName : "");
         OwningOpRef<ModuleOp> mod =
@@ -169,6 +281,21 @@ extern "C" {
             return {nullptr};
         }
         return wrap(mod.release());
+    }
+
+    // Diagnostics captured during the most recent fallible call ON THIS THREAD,
+    // or "" if it had nothing to say. Empty is a real answer, not an error: a
+    // clean parse emits nothing.
+    //
+    // The pointer is into a thread_local std::string that the next capture
+    // clears, so the caller must copy before calling back in — which is what
+    // Julia's unsafe_string does.
+    const char *jlcs_get_diagnostics() {
+        return jlcs_diagnostics.c_str();
+    }
+
+    void jlcs_clear_diagnostics() {
+        jlcs_diagnostics.clear();
     }
 
     MlirModule jlcs_module_clone(MlirModule module) {
@@ -228,6 +355,7 @@ extern "C" {
 
     bool jlcs_lower_to_llvm(MlirModule module) {
         mlir::ModuleOp mod = unwrap(module);
+        DiagnosticCapture capture(mod.getContext());
         mlir::PassManager pm(mod.getContext());
         // Disable inter-pass verification: jlcs-lower-to-llvm emits llvm.call ops
         // that reference func.func symbols which won't become llvm.func until the
@@ -308,18 +436,27 @@ extern "C" {
 
         // Unwrap directly to ModuleOp
         mlir::ModuleOp modOp = unwrap(module);
+        DiagnosticCapture capture(modOp.getContext());
 
         // 1b. Pre-flight type check — see moduleTypesAreLLVMCompatible. A bad
         // type must fail here (null return, catchable in Julia), not SIGSEGV
         // inside translateModuleToLLVMIR.
+        //
+        // The guard's own emitError names the offending op and type, which is
+        // the entire reason it emits one — it used to go to stderr and be lost,
+        // leaving the refusal explained by nothing. It is now captured with the
+        // rest and reaches Julia.
         if (!moduleTypesAreLLVMCompatible(modOp)) {
-            llvm::errs() << "jlcs_create_jit_with_libs: module contains types that "
-                            "cannot be translated to LLVM IR; refusing to JIT\n";
+            appendPlain(jlcs_diagnostics,
+                        "module contains types that cannot be translated to "
+                        "LLVM IR; refusing to JIT");
             return {nullptr};
         }
 
-        // 2. Attach Data Layout
-        attachHostDataLayout(modOp);
+        // 2. Attach Data Layout — refuse to JIT without it, see the function.
+        if (!attachHostDataLayout(modOp)) {
+            return {nullptr};
+        }
 
         // 3. Configure JIT Options
         mlir::ExecutionEngineOptions options;
@@ -368,7 +505,12 @@ extern "C" {
         auto engineOrError = mlir::ExecutionEngine::create(modOp, options);
 
         if (!engineOrError) {
-            llvm::errs() << "Failed to create ExecutionEngine: " << engineOrError.takeError() << "\n";
+            // takeError() consumes it — an llvm::Error that is neither consumed
+            // nor handled aborts the process in a debug LLVM, so this must
+            // happen exactly once and the text has to be kept here.
+            appendPlain(jlcs_diagnostics,
+                        "failed to create ExecutionEngine: " +
+                            llvm::toString(engineOrError.takeError()));
             return {nullptr};
         }
 
@@ -379,7 +521,29 @@ extern "C" {
         mlirExecutionEngineDestroy(jit);
     }
 
+    // Register `name` -> `addr` for symbol resolution.
+    //
+    // A non-null engine registers ON that engine, which is what this signature
+    // has always promised and never did: the parameter was accepted and
+    // dropped, so Julia's `register_symbol(jit, ...)` — which takes an engine
+    // and documents per-engine behaviour — fell through to the process-global
+    // table exactly like `register_symbol_global`. Two wrappers defining the
+    // same mangled name then shared one slot silently, last writer winning, and
+    // the loser's thunks dispatched into the other library's code.
+    //
+    // A null engine still means the global table, and that is not a leftover.
+    // ORC resolves a symbol when it materialises the code referencing it, so
+    // anything the engine must see during ExecutionEngine::create has to be
+    // registered before the engine exists — which is precisely when
+    // initialize_global_jit registers its dispatch_ and EH helpers. Passing
+    // null is how a caller says "there is no engine yet"; it is the honest
+    // spelling of what the old code did unconditionally.
     void jlcs_jit_register_symbol(MlirExecutionEngine jit, const char *name, void *addr) {
+        if (unwrap(jit) != nullptr) {
+            mlirExecutionEngineRegisterSymbol(
+                jit, mlirStringRefCreateFromCString(name), addr);
+            return;
+        }
         llvm::sys::DynamicLibrary::AddSymbol(name, addr);
     }
 
@@ -463,7 +627,11 @@ extern "C" {
         }
 
         // 5. Attach data layout
-        attachHostDataLayout(*mod);
+        if (!attachHostDataLayout(*mod)) {
+            llvm::errs() << "[selftest] host data layout unavailable: "
+                         << jlcs_diagnostics << "\n";
+            return 3;
+        }
 
         // 6. Create ExecutionEngine
         mlir::ExecutionEngineOptions opts;

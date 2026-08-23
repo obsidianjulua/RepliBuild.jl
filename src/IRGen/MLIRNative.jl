@@ -16,6 +16,7 @@ export jit_invoke, invoke_safe
 export emit_llvmir, emit_object
 export check_library, test_dialect
 export has_pending_exception, get_pending_exception, clear_pending_exception
+export take_diagnostics
 
 # =============================================================================
 # MLIR C API Bindings
@@ -195,17 +196,20 @@ function parse_module(ctx::MlirContext, source::String;
     mod = ccall((:jlcsModuleCreateParse, libJLCS), MlirModule,
                 (MlirContext, Cstring, Cstring), ctx, source, name)
     if mod == C_NULL
-        # MLIR prints its diagnostic (with a loc("-":LINE:COL)) to stderr and we
-        # then threw away the only copy of the text those coordinates refer to,
-        # leaving "Failed to parse MLIR module" and nothing to debug. Keep it.
+        # The diagnostic below carries a loc() naming the buffer, which for a
+        # named parse is a real file that is still on disk. This copy is the
+        # fallback for the unnamed case, where the loc says "-" and the text
+        # would otherwise be gone: same coordinates, somewhere openable.
         dump_path = joinpath(tempdir(), "replibuild_bad_module.mlir")
         hint = try
             write(dump_path, source)
-            "Module text written to:\n  $dump_path\n(MLIR's loc(\"-\":LINE:COL) diagnostic above indexes THIS file.)"
+            "A copy of the module text is at:\n  $dump_path\n" *
+            "(If the loc() below says \"-\", its LINE:COL index THAT file.)"
         catch
             "Module text could not be written to $dump_path."
         end
-        error("Failed to parse MLIR module ($(count(==('\n'), source) + 1) lines).\n$hint")
+        error(_with_diagnostics(
+            "Failed to parse MLIR module ($(count(==('\n'), source) + 1) lines).\n$hint"))
     end
     return mod
 end
@@ -279,10 +283,47 @@ end
 # =============================================================================
 
 """
+    take_diagnostics() -> String
+
+Whatever MLIR said during the most recent fallible call on this thread, and
+clear it. `""` when it said nothing, which is the normal case.
+
+MLIR reports failures through its DiagnosticEngine — the offending op, the type
+that will not translate, and a `FileLineColLoc`. With no handler registered all
+of that went to stderr and Julia raised a generic message, so a wrapper that
+failed to load explained itself to a stream nobody was reading.
+
+The locations are why this is captured rather than merely silenced: a parse is
+named after the content-keyed `.mlir` [`jit_source_path`](@ref) already wrote,
+so the file and line in the error text are the ones gdb opens when you break in
+the resulting thunk.
+"""
+function take_diagnostics()
+    ptr = ccall((:jlcs_get_diagnostics, libJLCS), Cstring, ())
+    msg = ptr == C_NULL ? "" : unsafe_string(ptr)   # copies before the next call clears it
+    ccall((:jlcs_clear_diagnostics, libJLCS), Cvoid, ())
+    return msg
+end
+
+# Appends MLIR's own account of a failure to `msg`, when it had one.
+function _with_diagnostics(msg::AbstractString)
+    diag = try
+        take_diagnostics()
+    catch
+        ""      # an older libJLCS without the symbol must not mask the real error
+    end
+    return isempty(strip(diag)) ? String(msg) : "$msg\n\nMLIR reported:\n$diag"
+end
+
+"""
     lower_to_llvm(module::MlirModule) -> Bool
 
 Run standard lowering passes (Func -> LLVM, Arith -> LLVM) on the module.
 Returns true on success.
+
+Still returns Bool rather than throwing: callers branch on it, and one of them
+degrades to Tier-2-disabled rather than failing the load. They compose the
+error, so [`_with_diagnostics`](@ref) is theirs to call.
 """
 function lower_to_llvm(mod::MlirModule)
     return ccall((:jlcs_lower_to_llvm, libJLCS), Bool, (MlirModule,), mod)
@@ -351,7 +392,10 @@ function create_jit(mod::MlirModule; opt_level::Int=2, dump_object::Bool=false, 
         end
     end
     if jit == C_NULL
-        error("Failed to create JIT execution engine")
+        # Covers both ways this returns null: the pre-flight type check refusing
+        # the module, and ExecutionEngine::create failing. Each writes its reason
+        # into the same buffer, so the caller does not have to know which.
+        error(_with_diagnostics("Failed to create JIT execution engine."))
     end
     return jit
 end
@@ -394,16 +438,41 @@ function destroy_jit(jit::MlirExecutionEngine)
 end
 
 """
-    register_symbol(jit::MlirExecutionEngine, name::String, addr::Ptr{Cvoid})
+    register_symbol(jit, name, addr)
 
-Register a runtime address (symbol) with the JIT.
-Call this BEFORE invoking JIT functions that rely on external symbols.
+Make `addr` resolvable as `name` **on this engine only**. Call it before
+invoking JIT functions that rely on the symbol.
+
+Prefer this to [`register_symbol_global`](@ref) whenever an engine exists. The
+global table is shared by every engine in the process, so two wrappers defining
+the same mangled name — two libraries vendoring the same C++ class, or one
+library reached by two paths — quietly share one slot and the last registration
+wins, sending the loser's thunks into the other library.
+
+This took an engine and ignored it until 2026-08-22: both functions called one C
+entry point that always registered globally, so the isolation this signature
+implies did not exist.
 """
 function register_symbol(jit::MlirExecutionEngine, name::String, addr::Ptr{Cvoid})
+    jit == C_NULL && error(
+        "register_symbol needs a live engine; use register_symbol_global " *
+        "when there is deliberately no engine yet")
     ccall((:jlcs_jit_register_symbol, libJLCS), Cvoid,
           (MlirExecutionEngine, Cstring, Ptr{Cvoid}), jit, name, addr)
 end
 
+"""
+    register_symbol_global(name, addr)
+
+Make `addr` resolvable as `name` for **every** engine in this process.
+
+Shared, so it is the wrong tool wherever [`register_symbol`](@ref) will do. It
+is the right one in exactly one situation, which is why it exists: ORC resolves
+a symbol when it materialises the code referencing it, so anything the engine
+must see while `create_jit` runs has to be registered before there is an engine
+to attach it to. `initialize_global_jit` registers its `dispatch_` and EH
+helpers in that window.
+"""
 function register_symbol_global(name::String, addr::Ptr{Cvoid})
     ccall((:jlcs_jit_register_symbol, libJLCS), Cvoid,
           (MlirExecutionEngine, Cstring, Ptr{Cvoid}), C_NULL, name, addr)

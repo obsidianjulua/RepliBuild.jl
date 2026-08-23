@@ -451,7 +451,8 @@ function initialize_global_jit(binary_path::String)
 
             # Lower JLCS -> LLVM
             if !lower_to_llvm(mod)
-                error("Failed to lower JLCS dialect to LLVM")
+                error(MLIRNative._with_diagnostics(
+                    "Failed to lower JLCS dialect to LLVM."))
             end
 
             # 5. Create JIT Engine with the C++ library and libJLCS for EH symbol resolution
