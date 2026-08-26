@@ -3073,6 +3073,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             _check_build_identity()
     """
 
+    # Pre-load [ingest] extra_link_libs. Must precede every dlopen below,
+    # so it is spliced at the TOP of each __init__ variant, not appended
+    # with the other snippets.
+    _preload_snippet = _extra_link_libs_snippet(config)
+
     _setvbuf_snippet = """
             # Unbuffer C stdout so printf output appears immediately in the REPL
             let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
@@ -3087,7 +3092,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         const THUNKS_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
         function __init__()
-            # Load main library explicitly to ensure symbols are available
+$_preload_snippet            # Load main library explicitly to ensure symbols are available
             LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
 
             # Load AOT thunks library if it was successfully generated
@@ -3103,7 +3108,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         if requires_jit
             """
             function __init__()
-                # Initialize the global JIT context with this library's vtables
+$_preload_snippet                # Initialize the global JIT context with this library's vtables
                 RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
             $_identity_snippet$_setvbuf_snippet
             end
@@ -3114,7 +3119,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
             function __init__()
-                # Load library explicitly to ensure symbols are available
+$_preload_snippet                # Load library explicitly to ensure symbols are available
                 LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
             $_identity_snippet$_setvbuf_snippet
             end

@@ -191,6 +191,16 @@ include(joinpath(@__DIR__, "test_introspection.jl"))
 
 include(joinpath(@__DIR__, "test_symbol_hygiene.jl"))
 
+# ── Config surface (no toolchain) ────────────────────────────────────────────
+# A TOML key that parses and does nothing is worse than an absent one: it is
+# documented, users set it, and nothing reads it. `[ingest] extra_link_libs` was
+# documented as loading libraries and only ever serialized — the test that
+# "covered" it asserted the value round-tripped through the PARSER, which is
+# true whether or not the feature exists. Every field must now be consumed or
+# explicitly reserved, and the feature is asserted by EXECUTING what is emitted.
+
+include(joinpath(@__DIR__, "test_config_surface.jl"))
+
 # ── Suite wiring guard (no toolchain required) ───────────────────────────────
 # A test file that no suite includes is a test that silently never runs. That
 # is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3

@@ -2097,8 +2097,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
     # Dead-thunk elimination: collect mangled names of functions that actually
     # need MLIR thunks (Tier 2 dispatch). Written as thunk_manifest.json so
-    # JITManager can skip generating thunks for Tier 1 (ccall) functions.
+    # JITManager can skip generating thunks for Tier 3 (ccall) functions.
     needed_function_thunks = Set{String}()
+
+    # Constant name => the mangled symbol that owns it, for the AOT thunk-address
+    # slots. Keyed on `mangled` for the same reason `_slice_const_name!` is:
+    # `julia_name` is not injective over it, and two functions sharing one slot
+    # would each call whichever thunk `__init__` resolved last.
+    aot_fptr_taken = Dict{String,String}()
 
     for func in functions
         func_name = func["name"]
@@ -2600,18 +2606,28 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 # Both were the same mistake — approximating, in generated text,
                 # a question the type system answers exactly at the call site.
                 # Neither is fixable here; only delegation fixes them.
-                _aot_handle = "THUNKS_HANDLE[]"
+                # The thunks .so is fully linked the moment `__init__` dlopens
+                # it, and this generator knows every thunk name right here — so
+                # the address is a load-time fact, not a per-call question.
+                # Passing `(handle, name)` made every call re-answer it through a
+                # lock and a Dict that re-hashed the ~40-char symbol: measured on
+                # hello_world, 37.3 ns of a 53.6 ns call, against 3.5 ns for the
+                # thunk itself. The slot is filled once in `__init__`; see
+                # `_aot_thunk_slot_chunk`, which derives the slots from the FINAL
+                # wrapper text so a call site cannot reference one that no
+                # `__init__` fills.
+                _aot_slot = _aot_fptr_const_name!(aot_fptr_taken, mangled) * "[]"
                 if is_void_ret
                     invoke_call = if isempty(invoke_args)
-                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\")"
+                        "RepliBuild.JITManager.invoke_aot_ptr($_aot_slot)"
                     else
-                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\", $invoke_args)"
+                        "RepliBuild.JITManager.invoke_aot_ptr($_aot_slot, $invoke_args)"
                     end
                 else
                     invoke_call = if isempty(invoke_args)
-                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type)"
+                        "RepliBuild.JITManager.invoke_aot_ptr($_aot_slot, $jit_ret_type)"
                     else
-                        "RepliBuild.JITManager.invoke_aot($_aot_handle, \"_mlir_ciface_$(mangled)_thunk\", $jit_ret_type, $invoke_args)"
+                        "RepliBuild.JITManager.invoke_aot_ptr($_aot_slot, $jit_ret_type, $invoke_args)"
                     end
                 end
 
@@ -3348,6 +3364,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Unbuffer C stdout so printf output is visible in the REPL. Must run in
     # __init__, not the module body: top-level side effects execute during
     # PRECOMPILATION and never re-run at load time in a precompiled package.
+    # Pre-load [ingest] extra_link_libs. Must precede every dlopen below,
+    # so it is spliced at the TOP of each __init__ variant, not appended
+    # with the other snippets.
+    _preload_snippet = _extra_link_libs_snippet(config)
+
     _setvbuf_snippet = """
             # Unbuffer C stdout so printf output appears immediately in the REPL
             let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
@@ -3362,7 +3383,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         const THUNKS_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
         function __init__()
-            # Load main library explicitly to ensure symbols are available
+$_preload_snippet            # Load main library explicitly to ensure symbols are available
             LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
 
             # Load AOT thunks library if it was successfully generated
@@ -3371,6 +3392,19 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             elseif $requires_jit
                 @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
             end
+
+            # Resolve every thunk address once, here, so no call site pays for a
+            # lookup. A miss is collected rather than raised: a stale thunks .so
+            # is usually missing a set of symbols, and the whole set named at
+            # load beats the first one raised at some later call. Functions whose
+            # thunk did resolve keep working; calling one whose thunk did not
+            # raises with a pointer back to this warning.
+            let _missing = String[]
+                for (_slot, _sym) in _THUNK_SLOTS
+                    RepliBuild.JITManager.resolve_thunk!(_slot, THUNKS_HANDLE[], _sym, _missing)
+                end
+                RepliBuild.JITManager.warn_missing_thunks(_missing, THUNKS_LIBRARY_PATH)
+            end
         $_setvbuf_snippet
         end
         """
@@ -3378,7 +3412,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         if requires_jit
             """
             function __init__()
-                # Initialize this library's JIT engine (one engine per binary)
+$_preload_snippet                # Initialize this library's JIT engine (one engine per binary)
                 RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
             $_setvbuf_snippet
             end
@@ -3389,7 +3423,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             const LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
             function __init__()
-                # Load library explicitly to ensure symbols are available
+$_preload_snippet                # Load library explicitly to ensure symbols are available
                 LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
             $_setvbuf_snippet
             end
@@ -3418,11 +3452,19 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     introspection = _dispatch_tier_chunk(_tiers, _kernels) *
                     _layout_chunk(dwarf_structs, _defined_type_names(_enums * _structs), _sanitize_cpp_type_name)
 
+    # Also derived from the FINAL text: the thunk-address slots the emitted call
+    # sites read. Must stay below the dedup for the same reason the tier table
+    # does — a chunk dropped for a colliding dispatch signature must not leave a
+    # slot behind, and a slot a surviving chunk reads must exist.
+    thunk_slots = config.compile.aot_thunks ?
+        _aot_thunk_slot_chunk(_funcs, aot_fptr_taken) : ""
+
     export_statement = _export_statement(all_exports,
                                          _enums * _structs * union_accessor_defs *
                                          introspection * _funcs)
 
-    wrapper_content = join([header, init_block, metadata_section, _enums, _structs,
+    wrapper_content = join([header, thunk_slots, init_block, metadata_section,
+                            _enums, _structs,
                             union_accessor_defs, introspection, export_statement,
                             _funcs, footer])
     return (wrapper_content, needed_function_thunks)

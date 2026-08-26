@@ -427,6 +427,131 @@ Void-return form — no `Type` parameter, same as [`invoke`](@ref)'s.
 end
 
 # =============================================================================
+# Eagerly-resolved AOT dispatch
+#
+# `_lookup_aot` exists because the JIT resolves symbols lazily — a thunk's
+# address does not exist until the JIT has compiled it, so the first call is the
+# earliest moment a lookup can succeed, and caching it is the best available.
+# An AOT thunks library is fully linked the moment `__init__` dlopens it, and the
+# wrapper knows every thunk name at generation time, so neither the laziness nor
+# the cache buys anything on that path: it pays a lock acquire plus a Dict lookup
+# that re-hashes a ~40-char symbol name on EVERY call, forever, to answer a
+# question settled at load.
+#
+# Measured on hello_world (1M calls, best of 7): `_lookup_aot` is 37.3 ns of a
+# 53.6 ns call — the MLIR thunk itself is 3.5 ns against a 1.1 ns bare ccall, and
+# the returned String is 11.3 ns. So ~70% of a Tier-2 call was symbol resolution.
+# Resolving in `__init__` and passing the pointer takes hello_message to ~15 ns
+# and its `_ptr` sibling to ~3.5 ns.
+#
+# What deliberately does NOT change: `_arg_marshal_plan`, `_invoke_call` and
+# `_check_pending_exception` are shared verbatim. The comment above `invoke_aot`
+# records what happened the last time this path kept private copies of the first
+# two — a string argument that raised, and an enum return that segfaulted through
+# a mismatched call convention. Symbol resolution is the one part that path
+# already names as legitimately its own, which is why it is the part that moves.
+# =============================================================================
+
+@noinline function _aot_fptr_null()
+    error("AOT thunk pointer is null: this function's thunk was not resolved " *
+          "when the wrapper loaded. The wrapper's `__init__` warns at load " *
+          "naming every thunk it could not find — the thunks library is stale " *
+          "or was built from different sources. Rebuild the package.")
+end
+
+"""
+    resolve_thunk!(slot, handle, name, missing) -> Ptr{Cvoid}
+
+Resolve one AOT thunk into `slot` at module init, recording a miss in `missing`
+rather than raising.
+
+Collecting instead of throwing is deliberate: a stale thunks library is usually
+missing a *set* of symbols, and failing on the first one turns a diagnosable
+"these five thunks are gone, rebuild" into a guessing game. The module still
+loads and every function whose thunk resolved still works; a call into one that
+did not raises through [`_aot_fptr_null`](@ref).
+
+`slot` is a `Ref`, not a `const Ptr`, because a raw pointer cannot be serialized
+into a precompile image — it must be filled at `__init__` in the loading process.
+"""
+function resolve_thunk!(slot::Base.RefValue{Ptr{Cvoid}}, handle::Ptr{Cvoid},
+                        name::AbstractString, missing::Vector{String})
+    slot[] = C_NULL
+    if handle == C_NULL
+        push!(missing, String(name))
+        return C_NULL
+    end
+    p = Libdl.dlsym(handle, name; throw_error = false)
+    if p === nothing
+        push!(missing, String(name))
+        return C_NULL
+    end
+    slot[] = p
+    return p
+end
+
+"""
+    warn_missing_thunks(missing, library_path)
+
+Report thunks that `__init__` could not resolve, once, naming all of them.
+"""
+function warn_missing_thunks(missing::Vector{String}, library_path::AbstractString)
+    isempty(missing) && return nothing
+    shown = length(missing) > 20 ? vcat(missing[1:20], ["… and $(length(missing) - 20) more"]) : missing
+    @warn "AOT thunks missing from the thunks library — calling any of these " *
+          "will raise. The thunks .so is generated from the same MLIR the JIT " *
+          "would build, so a gap here means it is stale: rebuild the package." *
+          "\n  " * join(shown, "\n  ") library = library_path count = length(missing)
+    return nothing
+end
+
+"""
+    invoke_aot_ptr(fptr, ::Type{T}, args...) where T
+
+Call an AOT thunk whose address was already resolved (see [`resolve_thunk!`](@ref)).
+
+Identical to [`invoke_aot`](@ref) except that it is handed the function pointer
+instead of finding it. Takes no symbol name **by design** — with the same
+argument types as `invoke_aot` a name parameter would make the two calls
+visually interchangeable while the first argument meant different things, and
+the diagnostic it would carry is one `__init__` already emitted, naming every
+missing thunk at once rather than one per call site.
+"""
+@generated function invoke_aot_ptr(fptr::Ptr{Cvoid}, ::Type{T},
+                                   args::Vararg{Any, N}) where {T, N}
+    (setup, ptrs, preserve_args) = _arg_marshal_plan(args)
+    quote
+        fptr == C_NULL && _aot_fptr_null()
+        $(setup...)
+        inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
+        result = GC.@preserve $(preserve_args...) begin
+            _invoke_call(fptr, T, inner_ptrs)
+        end
+        _check_pending_exception()
+        return result
+    end
+end
+
+"""
+    invoke_aot_ptr(fptr, args...)
+
+Void-return form — no `Type` parameter, same as [`invoke_aot`](@ref)'s.
+"""
+@generated function invoke_aot_ptr(fptr::Ptr{Cvoid}, args::Vararg{Any, N}) where N
+    (setup, ptrs, preserve_args) = _arg_marshal_plan(args)
+    quote
+        fptr == C_NULL && _aot_fptr_null()
+        $(setup...)
+        inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
+        GC.@preserve $(preserve_args...) inner_ptrs begin
+            ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+        end
+        _check_pending_exception()
+        return nothing
+    end
+end
+
+# =============================================================================
 # JIT Initialization
 # =============================================================================
 

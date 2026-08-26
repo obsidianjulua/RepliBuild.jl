@@ -797,6 +797,145 @@ end
 # =============================================================================
 
 """
+    _extra_link_libs_snippet(config) -> String
+
+`__init__` prologue that pre-loads `[ingest] extra_link_libs`, or `""` when the
+config declares none.
+
+**Must run BEFORE the main library is opened.** An ingested `.so` is someone
+else's build: if it was linked without recording a dependency in `DT_NEEDED`, or
+that dependency lives somewhere the loader will not search, opening the main
+library fails with an undefined-symbol error naming a symbol this wrapper never
+mentions — the least actionable error the pipeline can produce. Opening these
+`RTLD_GLOBAL` first puts their symbols in the global namespace so resolution
+succeeds.
+
+Names follow the `-l` convention the TOML key is named for, so `"m"` means
+`libm`. A value that is already a path or a full soname is passed through: the
+candidates are tried in order and the first that opens wins.
+
+`-l` is a LINK-time name and does not always survive into a runtime one. On
+glibc ≥ 2.34 `m`, `pthread`, `dl` and `rt` are all merged into libc and
+`/usr/lib/libm.so` is a linker script rather than an object, so `-lm` links and
+`dlopen("libm.so")` fails — correctly, since there is nothing left to preload.
+Prefer a full soname or a path (`"libfoo.so.1"`, `"/opt/foo/lib/libfoo.so"`) for
+anything that genuinely needs loading.
+
+This was declared, documented and serialized for its whole life without ever
+being read — the only code that touched it was the TOML writer and a test
+asserting it round-tripped through the parser. See `test_config_surface.jl`,
+which now refuses that class.
+"""
+function _extra_link_libs_snippet(config)
+    # Plain field access, not `getfield`: the config-surface guard finds consumers
+    # by reading the source, and `getfield(config, :ingest)` is invisible to it —
+    # it reported this very function's field as unconsulted.
+    ing = config.ingest
+    ing === nothing && return ""
+    libs = ing.extra_link_libs
+    isempty(libs) && return ""
+    lit = "[" * join(("\"" * escape_string(l) * "\"" for l in libs), ", ") * "]"
+    return """
+        # [ingest] extra_link_libs — opened RTLD_GLOBAL before the main library so
+        # its undefined symbols can resolve against them. `-l` naming: "m" => libm.
+        for _lib in $lit
+            _h = nothing
+            for _cand in (_lib, "lib" * _lib, "lib" * _lib * ".so")
+                _h = Libdl.dlopen(_cand, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL; throw_error = false)
+                _h === nothing || break
+            end
+            _h === nothing && @warn "extra_link_libs: no candidate soname opened. Harmless if this names a library merged into libc (m, pthread, dl, rt on glibc >= 2.34) — there is nothing left to preload. Otherwise the main library may fail to resolve; use a full soname or path." lib=_lib
+        end
+"""
+end
+
+"""
+    _aot_fptr_const_name!(taken, mangled) -> String
+
+Name the wrapper constant holding `mangled`'s resolved AOT thunk address.
+
+Keyed on the MANGLED symbol, never on the Julia name, for the reason
+`_slice_const_name!` records: `julia_name` is not injective over `mangled` (the
+`replibuild_shim_` strip, the `_+` collapse and the trailing-`_` rstrip each
+merge distinct symbols), so a Julia-keyed slot would let two functions share one
+address and each call whichever thunk `__init__` happened to resolve last — a
+wrong-function call with no error anywhere.
+
+`taken` maps each issued constant to its owning symbol, so sanitizing a
+character that is not legal in an identifier cannot reintroduce the collision.
+"""
+function _aot_fptr_const_name!(taken::Dict{String,String}, mangled::AbstractString)
+    base = "_FPTR_" * replace(mangled, r"[^A-Za-z0-9_]" => "_")
+    name = base
+    n = 1
+    while get(taken, name, mangled) != mangled
+        n += 1
+        name = "$(base)_$n"
+    end
+    taken[name] = mangled
+    return name
+end
+
+"""
+    _aot_thunk_slot_chunk(func_text, taken) -> String
+
+Emit the thunk-address slots plus the `_THUNK_SLOTS` table `__init__` fills.
+
+Derived from the FINAL wrapper text, never from `taken` alone — same discipline
+as `_tier1_emit_slices!` and `_dispatch_facts`. `taken` records what the
+generator INTENDED to emit, and dedup runs after it: a chunk dropped for
+colliding on its dispatch signature would otherwise leave a slot that nothing
+reads, and (worse) the reverse drift would be invisible. Scanning the text that
+actually ships means the set of slots defined and the set referenced are one
+derivation.
+
+A `_FPTR_*` name in the text with no entry in `taken` is generator drift and
+raises here, at wrap time, rather than becoming an `UndefVarError` on whichever
+call the user makes first.
+
+Always emits the table — empty if there are no thunks — because `__init__`
+iterates it unconditionally, and a table that exists only sometimes is a second
+thing to keep in sync.
+"""
+function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,String})
+    referenced = String[]
+    seen = Set{String}()
+    for m in eachmatch(r"\b(_FPTR_\w+)\b", func_text)
+        nm = m.captures[1]
+        nm in seen && continue
+        push!(seen, nm)
+        haskey(taken, nm) || error(
+            "Wrapper text references AOT thunk slot `$nm`, which no emission " *
+            "site registered. The slot namer and the emission site have drifted " *
+            "— see `_aot_fptr_const_name!`.")
+        push!(referenced, nm)
+    end
+    sort!(referenced)
+
+    io = IOBuffer()
+    print(io, """
+
+    # =============================================================================
+    # AOT thunk addresses
+    #
+    # One slot per thunk, resolved once in `__init__` and read directly at each
+    # call site. These are `Ref`s rather than plain `const Ptr`s because a raw
+    # pointer cannot be serialized into a precompile image — the address has to be
+    # found in the process that is actually going to call it.
+    # =============================================================================
+    """)
+    for nm in referenced
+        println(io, "const $nm = Ref{Ptr{Cvoid}}(C_NULL)")
+    end
+    println(io, "\nconst _THUNK_SLOTS = Tuple{Base.RefValue{Ptr{Cvoid}},String}[")
+    for nm in referenced
+        println(io, "    ($nm, \"_mlir_ciface_$(taken[nm])_thunk\"),")
+    end
+    println(io, "]")
+    return String(take!(io))
+end
+
+"""
     _dispatch_facts(func_chunks) -> (Dict{String,Symbol}, Dict{String,String})
 
 Classify every emitted function by the tier it actually dispatches through, and
@@ -825,9 +964,15 @@ function _dispatch_facts(func_chunks)
         # THREE Tier-2 spellings, because AOT has TWO emission shapes and they
         # are not variants of each other:
         #   1. `JITManager.invoke(...)`                    — JIT, any function
-        #   2. `JITManager.invoke_aot(THUNKS_HANDLE[], …)` — AOT, ordinary fn
+        #   2. `JITManager.invoke_aot_ptr(_FPTR_x[], …)`   — AOT, ordinary fn
         #   3. `ccall((:thunk_<mangled>, THUNKS_LIBRARY_PATH), …)`
         #                                                  — AOT, VIRTUAL method
+        #
+        # Shape 2 was `invoke_aot(THUNKS_HANDLE[], "…")` until eager thunk
+        # resolution moved the lookup into `__init__`. Both spellings are matched:
+        # `invoke_aot` still exists and is still correct for a caller that has a
+        # handle and a name, and a wrapper generated before the change is a file
+        # on someone's disk, not a thing that gets migrated.
         # Shape 3 is `GeneratorCpp.jl`'s AOT virtual-dispatch branch and has
         # always been here; `THUNKS_LIBRARY_PATH` is its tell. Shape 2 arrived
         # with `invoke_aot` and this classifier was never taught it, so every
@@ -846,6 +991,7 @@ function _dispatch_facts(func_chunks)
         # fixture is the thing that refuses it.
         elseif occursin("JITManager.invoke(", b) ||
                occursin("JITManager.invoke_aot(", b) ||
+               occursin("JITManager.invoke_aot_ptr(", b) ||
                occursin("THUNKS_LIBRARY_PATH", b)
             :tier2
         elseif occursin("ccall((:", b) || occursin("@ccall ", b)

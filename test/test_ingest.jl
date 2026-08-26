@@ -38,6 +38,12 @@ using RepliBuild
             # Relative library path resolved against the toml's directory
             @test cfg.ingest.library == abspath(joinpath(dir, "build/libsample.so"))
             @test cfg.ingest.headers == ["include", "vendor/include"]
+            # PARSING ONLY. This assertion held for the entire period in which
+            # `extra_link_libs` was parsed, documented as loading libraries, and
+            # never read by anything — a round-trip through the parser is true
+            # whether or not the feature exists. The behavioural assertion (the
+            # emitted snippet is EXECUTED) lives in test_config_surface.jl; do not
+            # treat this line as coverage of the feature.
             @test cfg.ingest.extra_link_libs == ["m", "pthread"]
             # binary.output_name auto-derived from ingest.library so wrap() finds it
             @test cfg.binary.output_name == "libsample.so"

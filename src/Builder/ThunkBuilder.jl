@@ -31,7 +31,14 @@ function build_aot_thunks(config, library_path)
 
     ctx = MLIRNative.create_context()
     try
-        mod = MLIRNative.parse_module(ctx, ir_source)
+        # debug_base puts the generated MLIR beside the wrapper it describes, so
+        # gdb can open it when you break in a thunk — the same reason the JIT path
+        # passes it (JITManager.jl). Omitting it here sent every AOT package's
+        # `.mlir` to tempdir, which is both un-colocated and cleared on reboot;
+        # AOT thunks are the ones that actually ship next to the library, so this
+        # path needs it more than the JIT one does.
+        mod = MLIRNative.parse_module(ctx, ir_source;
+                                      debug_base = MLIRNative.debug_dir_for(library_path))
         if mod == C_NULL
             error("Failed to parse generated MLIR for AOT.")
         end

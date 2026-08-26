@@ -59,6 +59,18 @@ const W = RepliBuild.Wrapper
                 return RepliBuild.JITManager.invoke_aot(THUNKS_HANDLE[], "_mlir_ciface__Z9aot_plainv_thunk", Cint, a)
             end
             """,
+            # Tier 2, AOT companion library — ORDINARY function, EAGER shape.
+            # A THIRD spelling: since thunk addresses are resolved in `__init__`
+            # the call site names neither the handle nor the symbol, so it shares
+            # no substring with either shape above — `invoke_aot_ptr(` does not
+            # contain `invoke_aot(`. The shape above is kept alongside it rather
+            # than replaced: `invoke_aot` is still a supported entry point, and a
+            # wrapper generated before the change is a file on someone's disk.
+            """
+            function aot_eager(a::Any)
+                return RepliBuild.JITManager.invoke_aot_ptr(_FPTR__Z9aot_eagerv[], Cint, a)
+            end
+            """,
             # Tier 3, plain and variadic
             """
             function plain(x::Cint)::Cint
@@ -77,6 +89,7 @@ const W = RepliBuild.Wrapper
         @test tier["thunked"]   === :tier2
         @test tier["aot"]       === :tier2
         @test tier["aot_plain"] === :tier2
+        @test tier["aot_eager"] === :tier2
         @test tier["plain"]     === :tier3
         @test tier["va"]        === :tier3
 
@@ -261,5 +274,58 @@ const W = RepliBuild.Wrapper
     @testset "Empty inputs emit nothing rather than empty scaffolding" begin
         @test W._dispatch_tier_chunk(Dict{String,Symbol}(), Dict{String,String}()) == ""
         @test W._layout_chunk(Dict(), Set{String}(), identity) == ""
+    end
+
+    @testset "AOT thunk slots are derived from the final text" begin
+        # The slot namer is keyed on the MANGLED symbol so two functions cannot
+        # share an address. `_ZN1A1fEv` and `_ZN1A1f.Ev` sanitize to the same
+        # identifier; without the `taken` registry the second would silently
+        # rebind the first's slot and call the wrong thunk.
+        taken = Dict{String,String}()
+        a = W._aot_fptr_const_name!(taken, "_ZN1A1fEv")
+        b = W._aot_fptr_const_name!(taken, "_ZN1A1f.Ev")
+        @test a == "_FPTR__ZN1A1fEv"
+        @test a != b
+        # Idempotent: asking again for the same symbol returns the same slot.
+        @test W._aot_fptr_const_name!(taken, "_ZN1A1fEv") == a
+
+        # Derivation is from the text that ships, not from `taken` — a symbol
+        # the generator registered but whose chunk lost the dedup must not
+        # leave a slot behind.
+        W._aot_fptr_const_name!(taken, "_Z7droppedv")
+        text = """
+        function f(a::Any)
+            return RepliBuild.JITManager.invoke_aot_ptr($a[], Cint, a)
+        end
+        function g(a::Any)
+            return RepliBuild.JITManager.invoke_aot_ptr($b[], Cint, a)
+        end
+        """
+        chunk = W._aot_thunk_slot_chunk(text, taken)
+        @test occursin("const $a = Ref{Ptr{Cvoid}}(C_NULL)", chunk)
+        @test occursin("const $b = Ref{Ptr{Cvoid}}(C_NULL)", chunk)
+        @test !occursin("_FPTR__Z7droppedv", chunk)
+        @test occursin("\"_mlir_ciface__ZN1A1fEv_thunk\"", chunk)
+
+        # A cstring pair emits TWO functions reading ONE thunk; that must be one
+        # slot, not a duplicate definition (which is a hard error at load).
+        pair = """
+        function h(); ptr = RepliBuild.JITManager.invoke_aot_ptr($a[], Cstring); end
+        function h_ptr(); return RepliBuild.JITManager.invoke_aot_ptr($a[], Cstring); end
+        """
+        pair_chunk = W._aot_thunk_slot_chunk(pair, taken)
+        @test count(_ -> true, eachmatch(Regex("const \\Q$a\\E = Ref"), pair_chunk)) == 1
+
+        # The table exists even with nothing in it — `__init__` iterates it
+        # unconditionally, so a sometimes-absent table is a second thing to
+        # keep in sync.
+        @test occursin("const _THUNK_SLOTS", W._aot_thunk_slot_chunk("", taken))
+
+        # A slot in the text that no emission site registered is generator
+        # drift, and must raise at wrap time rather than become an
+        # UndefVarError on whichever call the user happens to make first.
+        @test_throws ErrorException W._aot_thunk_slot_chunk(
+            "RepliBuild.JITManager.invoke_aot_ptr(_FPTR__Z7unknownv[], Cint)",
+            Dict{String,String}())
     end
 end
