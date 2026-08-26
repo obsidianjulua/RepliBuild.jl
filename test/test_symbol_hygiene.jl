@@ -86,22 +86,27 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
     @testset "the fixtures' own thunk symbols are filtered" begin
         # Drives the real predicate over the exact symbol set `nm` reports for
         # the MI/VI fixtures, so the test pins BEHAVIOUR on real input rather
-        # than on hand-written strings. Skips when the fixtures aren't built —
-        # this file runs in the no-toolchain suite.
-        for fixture in ("mi_test", "vi_test")
-            so = joinpath(@__DIR__, fixture, "julia", "lib$(fixture).so")
-            isfile(so) || continue
-            out = try
-                read(`nm -g --defined-only $so`, String)
-            catch
-                continue
-            end
-            code_syms = String[]
-            for line in split(out, '\n')
-                parts = split(strip(line))
-                length(parts) >= 3 && parts[2] in ("T", "W", "t", "w") &&
-                    push!(code_syms, String(parts[3]))
-            end
+        # than on hand-written strings.
+        #
+        # THE SYMBOLS ARE VENDORED. This used to read the built `.so` and
+        # `continue` when it was absent — which meant that on any machine
+        # without built fixtures (every fresh clone, and CI) it silently dropped
+        # 8 assertions and still reported green. That is the same vacuously-green
+        # failure this very file records 150 lines below for the Hub sweep: the
+        # strongest assertion in the testset only ever ran on one box. Measured:
+        # 97 asserts here, 89 on a fresh clone.
+        #
+        # Regenerate after a change that moves fixture symbols:
+        #   julia --project=. test/gen_thunk_symbols.jl
+        fixture_path = joinpath(@__DIR__, "fixtures", "thunk_symbols.json")
+        @test isfile(fixture_path)
+        vendored = JSON.parsefile(fixture_path)["fixtures"]
+        @test length(vendored) == 2
+
+        swept = 0
+        for (fixture, code_syms_any) in vendored
+            code_syms = String.(code_syms_any)
+            swept += 1
             @test !isempty(code_syms)
 
             thunks = filter(s -> startswith(s, "_ZTh") || startswith(s, "_ZTv"), code_syms)
@@ -111,7 +116,22 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
             # And nothing else in the fixture is caught by it.
             others = filter(s -> !(s in thunks), code_syms)
             @test !any(s -> C._is_itanium_thunk(s, s), others)
+
+            # When the fixture IS built, the vendored list must still describe
+            # it — otherwise the file above could drift into fiction and this
+            # testset would keep passing against a snapshot of nothing.
+            so = joinpath(@__DIR__, fixture, "julia", "lib$(fixture).so")
+            if isfile(so)
+                live = String[]
+                for line in split(read(`nm -g --defined-only $so`, String), '\n')
+                    parts = split(strip(line))
+                    length(parts) >= 3 && parts[2] in ("T", "W", "t", "w") &&
+                        push!(live, String(parts[3]))
+                end
+                @test sort(unique(live)) == sort(code_syms)
+            end
         end
+        @test swept == 2   # the sweep actually ran; never assert into an empty loop
     end
 
     # ── `class` must be a SCOPE, not the demangler's prefix ─────────────────

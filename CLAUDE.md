@@ -92,8 +92,29 @@ into ingest mode — its presence is the mode switch:
 [ingest]
 library = "/path/to/libfoo.so"
 headers = ["/path/to/include"]
-extra_link_libs = ["m", "pthread"]   # optional — additional -l libs at load time
+extra_link_libs = ["libbar.so.1"]    # optional — dlopen'd RTLD_GLOBAL before the
+                                     # main library, so its undefined symbols can
+                                     # resolve against them
 ```
+
+**`extra_link_libs` was INERT until 2026-08-26** — parsed, documented as loading
+libraries, serialized back out, and read by nothing. `test_ingest.jl` "covered" it
+by asserting the value round-tripped through the PARSER, which is true whether or
+not the feature exists; that is the same class as "a WRONG harvested config does
+not fail the build". Now emitted as an `__init__` prologue in **both** generators
+(`_extra_link_libs_snippet`, Wrapper/Utils.jl), spliced ahead of every `dlopen` —
+opened afterwards they would resolve nothing. Guarded by `test_config_surface.jl`,
+which EXECUTES the emitted snippet, and which additionally requires every
+`RepliBuildConfig` field to be consumed or named in `RESERVED_UNUSED` with a
+reason. Nine were inert when that guard was written: `[binary] strip_symbols`, the
+whole `[discovery]` section, `[wrap] enabled`/`style`, `[workflow] stages` (only
+reachable via `is_stage_enabled`, which has no callers), `[project] uuid`, and
+`[paths] source`/`include`/`cache`.
+**Prefer a full soname or path over an `-l` name**: `-l` is a link-time spelling,
+and on glibc ≥ 2.34 `m`/`pthread`/`dl`/`rt` are merged into libc with
+`/usr/lib/libm.so` a linker script, so `-lm` links while `dlopen("libm.so")`
+fails. The wrapper warns and continues — correct, since there is nothing to
+preload.
 
 ### Package registry (local)
 
@@ -572,6 +593,59 @@ were all written while it was only inferable, and they are cheaper than they rea
   is hardcoded x86_64 SysV (16-byte MEMORY threshold, 64-bit ptrs, i64/f64 eightbytes).
   Other targets (Win64, AAPCS) are not modeled. The hub is currently a single-target
   hub. (verified 2026-05-29; classifier rewritten 2026-07-18)
+
+## Fresh-clone readiness (Linux) — audited 2026-08-26
+
+**A clone of HEAD on another Linux box works.** Verified by actually doing it
+(`git clone --local` to a tempdir, tracked files only, no build artifacts):
+`Pkg.instantiate()` resolves, `test/runtests.jl` is **green, 0 failures, 25
+testsets**, `src/mlir/build.sh` builds `libJLCS.so` (21.7 MB) clean,
+`MLIRNative.test_dialect()` passes, and `check_environment()` reports both tiers
+live. Do the same clone-to-tempdir check before claiming portability again —
+reading `.gitignore` does not settle it.
+
+Fixed in the same pass, all found by that clone:
+- **`build.sh` had no LLVM version gate.** It printed the version and proceeded, so
+  a too-old toolchain failed inside CMake/TableGen naming a missing header rather
+  than the version. Debian/Ubuntu default `llvm-config` is 14–18, so this was the
+  common case. Now gates on major ≥ 21 with per-distro install lines, plus a
+  **`mlir-tblgen` vs `llvm-config` major-version match** (several LLVMs side by side
+  is the normal Ubuntu arrangement, and PATH order can pick one of each — the
+  mismatch otherwise surfaces as unresolved symbols at `dlopen`, not at build), plus
+  an explicit check that `lib/cmake/mlir` exists under the LLVM prefix (MLIR is a
+  separate package on most distros).
+- **`build.sh`'s success message named a file that does not exist** —
+  `include("src/MLIRNative.jl")`; it lives at `src/IRGen/MLIRNative.jl`. It is the
+  first thing a contributor runs after a successful build. Now
+  `using RepliBuild; RepliBuild.MLIRNative.test_dialect()`, which is verified to work.
+  Also `du -h` on `libJLCS.so` reported **Size: 0** — it is a symlink to
+  `libJLCS.so.<soname>`; `du -Lh`.
+- **`check_environment()` called ccall "Tier 1"** — it is Tier 3. The first command
+  in the README taught the tier model backwards. Fixed in EnvironmentDoctor.jl,
+  RepliBuild.jl and a GeneratorCpp comment.
+- **`gen_receiver_corpus.jl` hardcoded `~/Desktop/Projects/RepliBuild-Hub`**, so the
+  corpus-regeneration tool was unusable by anyone else. Now the repo's sibling by
+  default, `REPLIBUILD_HUB_PATH` to override.
+- **`test_symbol_hygiene.jl` went vacuously weaker on a fresh clone: 89 asserts vs
+  97 here.** Its strongest testset read the built `mi_test`/`vi_test` `.so` and
+  `continue`d when absent — so the "drive the real predicate over real `nm` output"
+  check, the one guarding the Itanium-thunk SIGSEGV class, never ran anywhere but
+  this box, and both runs reported green. **That is the exact failure this file
+  already records for the Hub sweep, 150 lines further down, in the same file.**
+  Symbols are vendored now (`test/fixtures/thunk_symbols.json`,
+  `test/gen_thunk_symbols.jl`); the behavioural assertions run everywhere (fresh
+  clone **100/100**, here **102/102** — the 2 extra are a live-vs-vendored staleness
+  cross-check that legitimately needs the artifact), and `@test swept == 2` refuses
+  to assert into an empty loop. The generator refuses to write a fixture whose
+  symbols contain no `_ZTh`/`_ZTv`, so it cannot pin a guard that proves nothing.
+
+Known and accepted, NOT fixed: `test_slicer` / `test_static_promotion` /
+`test_tier1_dispatch` still fail on a fresh clone because
+`test/slice_test/replibuild.toml` is gitignored and nothing regenerates it. They are
+the quarantined Tier-1 three and are unwired from `devtests.jl`, so no suite reaches
+them — this only bites someone running them by hand. `test_abi_nested` and
+`test_convenience_overloads` were checked and are fine: they **write their own toml**
+at runtime from `@__DIR__`.
 
 ## System Requirements
 

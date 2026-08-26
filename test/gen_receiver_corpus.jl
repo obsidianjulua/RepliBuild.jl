@@ -41,7 +41,12 @@ import Dates
 
 const FG   = RepliBuild.JLCSIRGenerator.FunctionGen
 const W    = RepliBuild.Wrapper
-const HUB  = joinpath(homedir(), "Desktop", "Projects", "RepliBuild-Hub", "packages")
+# The Hub is normally cloned beside this repo, so default to the sibling rather
+# than to one contributor's directory layout — this hand-run tool hardcoded
+# `~/Desktop/Projects/` and was unusable by anyone who lays their checkouts out
+# differently. `REPLIBUILD_HUB_PATH` overrides for any other arrangement.
+const HUB = get(ENV, "REPLIBUILD_HUB_PATH",
+                joinpath(dirname(dirname(@__DIR__)), "RepliBuild-Hub", "packages"))
 const OUT  = joinpath(@__DIR__, "fixtures", "receiver_gate_corpus.json")
 
 # Both gates, against one (class, name) and one aggregate-name set.

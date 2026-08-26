@@ -269,9 +269,9 @@ function _print_report(status::ToolchainStatus)
 
     if status.ready
         if status.tier2_ready
-            println("  $(_ok())  $(GREEN)$(BOLD)All systems go — Tier 1 (ccall) and Tier 2 (MLIR JIT) ready$(RESET)")
+            println("  $(_ok())  $(GREEN)$(BOLD)All systems go — Tier 3 (ccall) and Tier 2 (MLIR thunks) ready$(RESET)")
         else
-            println("  $(_ok())  $(GREEN)$(BOLD)Tier 1 (ccall) ready$(RESET) — standard builds will work")
+            println("  $(_ok())  $(GREEN)$(BOLD)Tier 3 (ccall) ready$(RESET) — standard builds will work")
             println("  $(_warn())  $(YELLOW)Tier 2 (MLIR JIT) unavailable — C++ virtual dispatch requires MLIR$(RESET)")
         end
     else

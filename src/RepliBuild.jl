@@ -232,7 +232,7 @@ instructions for anything missing. Use `throw_on_error=true` to abort on missing
 # Example
 ```julia
 status = RepliBuild.check_environment()
-status.ready          # true if Tier 1 (ccall) builds will work
+status.ready          # true if Tier 3 (ccall) builds will work
 status.tier2_ready    # true if MLIR JIT tier is also available
 ```
 """
