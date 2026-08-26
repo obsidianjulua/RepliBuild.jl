@@ -74,12 +74,36 @@ const VI_SO = joinpath(VI, "julia", "libvi_test.so")
         @test all(endswith("_thunk"), t)
         @test issorted(t)
         @test length(unique(t)) == length(t)
-        # The diamond's shapes: a plain method, a non-virtual `this` adjustment,
-        # and a virtual override thunk. If the enumeration regex ever narrows,
-        # these are the classes it would silently drop.
+        # A plain method still gets a thunk. If the enumeration regex ever
+        # narrows, this is the class it would silently drop.
         @test "_ZNK5VBase3tagEv_thunk" in t
-        @test "_ZThn16_N7DiamondD0Ev_thunk" in t
-        @test "_ZTv0_n32_NK7Diamond3tagEv_thunk" in t
+
+        # ADJUSTOR THUNKS ARE DELIBERATELY ABSENT, and this assertion used to
+        # say the opposite. `_ZThn…`/`_ZTv…`/`_ZTc…` are Itanium vtable-slot
+        # entry points, never API functions: DWARF gives them no subprogram, so
+        # `class` resolved to the demangler's phrase ("non-virtual thunk to
+        # Derived"), neither receiver gate granted `this`, and they shipped as
+        # exported zero-argument wrappers. Not latent — proven SIGSEGV:
+        # `ViTest.virtual_thunk_to_Diamond_tag()` cored the process, because the
+        # virtual form dereferences the garbage `this` twice to read the vcall
+        # offset before it ever reaches the callee. `_is_itanium_thunk` removes
+        # them at the source (2026-08-13), which takes them out of metadata,
+        # wrapper, manifest AND the `.mlir` in one place.
+        #
+        # Inverted rather than deleted — same guard pointed the other way — so a
+        # regression that re-admits them fails loudly instead of going quiet.
+        # This testset had not run in-suite since the §13 multilib red shadowed
+        # everything after it, which is why a stale expectation survived.
+        @test !any(s -> startswith(s, "_ZTh") || startswith(s, "_ZTv") ||
+                        startswith(s, "_ZTc"), t)
+
+        # ...and the exclusion is what makes them absent, NOT the fixture having
+        # quietly stopped producing them. Without this the guard above would
+        # pass just as happily against a vi_test that no longer exercises the
+        # class at all.
+        so_syms = read(`nm -g --defined-only $VI_SO`, String)
+        @test occursin("_ZThn16_N7DiamondD0Ev", so_syms)
+        @test occursin("_ZTv0_n32_NK7Diamond3tagEv", so_syms)
     end
 
     @testset "text output renders as text" begin

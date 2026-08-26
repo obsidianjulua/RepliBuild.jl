@@ -2,6 +2,233 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v3.3.3 (2026-08-26)
+
+Patch. A Tier-2 call spent most of its time re-answering a question settled at
+load; a config key that never did anything now does; a fresh Linux clone is
+verified by cloning rather than by reading `.gitignore`; and the Win64 struct ABI
+classifier lands with its specification test wired in.
+
+### Tier-2 calls resolved the same symbol on every invocation (2026-08-26)
+
+`invoke_aot(handle, name, …)` went through a `ReentrantLock` and a `Dict` that
+re-hashed a ~40-character symbol name **on every call**, to find an address that
+cannot change after `__init__` dlopens the thunks `.so`.
+
+Measured on hello_world, 1M calls, best of seven:
+
+| stage | ns/call |
+|---|---|
+| raw `ccall` → C++ symbol (Tier 3) | 1.1 |
+| `ccall` → thunk, fptr pre-resolved | 3.5 |
+| `_lookup_aot` alone (lock + Dict) | 37.3 |
+| `hello_message()` | 53.6 |
+
+The MLIR thunk costs **2.4 ns over a bare `ccall`**. Symbol resolution was ~70%
+of the call.
+
+The laziness was inherited from the JIT path, where it is correct — a thunk's
+address does not exist until the JIT compiles it. An AOT thunks library is fully
+linked at `dlopen`, and the generator knows every thunk name at emission, so
+neither the laziness nor the cache buys anything there. `__init__` now fills one
+`Ref{Ptr{Cvoid}}` slot per thunk and each call site reads it through
+`invoke_aot_ptr`. A `Ref` rather than a `const Ptr` because a raw pointer cannot
+be serialized into a precompile image.
+
+| | before | after |
+|---|---|---|
+| `hello_message()` | 53.6 ns | **17.8 ns** |
+| `hello_message_ptr()` | 37.8 ns | **6.8 ns** |
+| first call | 4 allocs / 528 B | **1 alloc / 32 B** |
+
+**That first-call delta was never the String.** The 32-byte `unsafe_string` copy
+is present in every call including the second; the extra three allocations were
+the symbol cache's `Dict` allocating its backing arrays. The `_ptr` variant shows
+it plainly — it allocated 3 on its own first call and 0 thereafter.
+
+`_arg_marshal_plan`, `_invoke_call` and `_check_pending_exception` are shared
+verbatim; only symbol resolution moves, which `JITManager`'s own comment already
+names as the legitimate divergence between the two paths. Slots are derived from
+the **final post-dedup wrapper text**, so a call site cannot read a slot no
+`__init__` fills, and a `_FPTR_*` no emission site registered raises at wrap time
+rather than becoming an `UndefVarError` on whichever call the user makes first.
+Slot names are keyed on the **mangled symbol**, for the reason
+`_slice_const_name!` records: `julia_name` is not injective over it, and two
+functions sharing one slot would each call whichever thunk resolved last.
+
+A missing thunk now warns **at load, naming every one at once**, and raises at
+the call pointing back at that warning — rather than raising one at a time.
+
+Verified: llamacpp re-wrapped (2280 call sites → 2271 slots; the nine-slot gap is
+exactly its nine Tier-2 `char*` returns, whose `f`/`f_ptr` pairs share a slot),
+`test_deep` 33/33 against a real 274 MB model and the native C oracle; box2d
+15/15, tinyxml2 11/11, pugixml 13/13, imgui 202/202. A consumer-precompile probe
+confirms `Ref` identity survives the pkgimage — the one way this design could
+have failed silently.
+
+### Generated MLIR did not travel with the AOT wrapper (2026-08-26)
+
+`ThunkBuilder` called `parse_module` without `debug_base`, so every AOT package's
+`.mlir` fell through to `tempdir()` instead of `<pkg>/.debug/mlir`. The JIT path
+has passed it since the debugging work landed. AOT thunks are the ones that
+actually ship beside the library, so gdb needs the co-location more there, and
+`/tmp` clears on reboot. `DW_AT_comp_dir` now points into the package.
+
+### `[ingest] extra_link_libs` did nothing, and the test could not tell (2026-08-26)
+
+The key was parsed, documented as *"additional -l libs at load time"*, serialized
+back out, and **read by nothing**. `test_ingest.jl` "covered" it by asserting the
+value round-tripped through the parser — which is true whether or not the feature
+exists. Same class as *a wrong harvested config does not fail the build*.
+
+Now emitted as an `__init__` prologue in both generators, spliced **ahead of every
+`dlopen`** — opened afterwards they resolve nothing.
+
+New `test_config_surface.jl` (in CI, no toolchain) refuses the whole class: every
+`RepliBuildConfig` field must be consumed or named in `RESERVED_UNUSED` with a
+reason, and `extra_link_libs` is asserted by **executing** what the generator
+emits. Nine of 81 fields were inert: `[binary] strip_symbols`, the whole
+`[discovery]` section, `[wrap] enabled`/`style`, `[workflow] stages` (reachable
+only via `is_stage_enabled`, which has no callers), `[project] uuid`, and
+`[paths] source`/`include`/`cache`.
+
+Getting the guard right took four wrong versions, each instructive: bare
+field-name matching is unsafe (`enabled` exists on three structs, and the only
+`.style` outside `ConfigurationManager` is `tooltip.style` in a JavaScript string
+literal in DAGDiff); `save_config` touches every field there is, so counting
+CM-internal reads makes the whole surface look live; and export lists wrap across
+lines with only the first carrying the keyword, which is how an exported
+zero-caller accessor read as consumed. The guard caught its own author on day
+one — `getfield(config, :ingest)` is invisible to it.
+
+**Prefer a full soname or path over an `-l` name.** `-l` is a link-time spelling:
+on glibc ≥ 2.34 `m`/`pthread`/`dl`/`rt` are merged into libc and
+`/usr/lib/libm.so` is a linker script, so `-lm` links while `dlopen("libm.so")`
+fails. The wrapper warns and continues, correctly — there is nothing to preload.
+The documented example was updated accordingly.
+
+### A fresh Linux clone works, and that is now checked by cloning (2026-08-26)
+
+Audited by `git clone --local` to a tempdir — tracked files only, no build
+artifacts — rather than by reading `.gitignore`. `Pkg.instantiate()` resolves,
+`runtests.jl` is green with **0 failures across 25 testsets**, `src/mlir/build.sh`
+produces a 21.7 MB `libJLCS.so`, `MLIRNative.test_dialect()` passes, and
+`check_environment()` reports both tiers live.
+
+Five things that clone found:
+
+- **`build.sh` had no LLVM version gate.** It printed the version and proceeded,
+  so a too-old toolchain died inside CMake or TableGen naming a missing header
+  rather than the version. Debian/Ubuntu's default `llvm-config` is 14–18, making
+  this the common case. Now gates on major ≥ 21 with per-distro install lines,
+  plus a **`mlir-tblgen` ↔ `llvm-config` major-version match** — several LLVMs
+  side by side is the normal Ubuntu arrangement and `PATH` order can pick one of
+  each, where the mismatch otherwise surfaces as unresolved symbols at `dlopen`
+  rather than as a build failure — plus a check that `lib/cmake/mlir` exists under
+  the LLVM prefix, since MLIR is a separate package on most distros.
+- **`build.sh`'s success message named a file that does not exist**
+  (`src/MLIRNative.jl`; it lives at `src/IRGen/MLIRNative.jl`) — the first thing a
+  contributor runs after a successful build. Its size report also read `Size: 0`,
+  `du` on the symlink rather than its target.
+- **`check_environment()` called `ccall` "Tier 1".** It is Tier 3. The first
+  command in the README taught the tier model backwards.
+- **`gen_receiver_corpus.jl` hardcoded `~/Desktop/Projects/RepliBuild-Hub`**, so
+  the corpus-regeneration tool was unusable by anyone else. Now the repo's sibling
+  by default, `REPLIBUILD_HUB_PATH` to override.
+- **`test_symbol_hygiene` went vacuously weaker on a fresh clone — 89 asserts
+  there against 97 here, both green.** Its strongest testset read the built
+  `mi_test`/`vi_test` `.so` and `continue`d when absent, so the check driving the
+  real predicate over real `nm` output — the one guarding the Itanium-thunk
+  SIGSEGV class — only ever ran on one machine. **That is the exact failure this
+  project already recorded for the Hub sweep.** Symbols are vendored now
+  (`test/fixtures/thunk_symbols.json`, regenerated by `test/gen_thunk_symbols.jl`);
+  the behavioural assertions run everywhere (fresh clone 100/100, dev box
+  102/102 — the two extra are a live-vs-vendored staleness cross-check that
+  legitimately needs the artifact), `@test swept == 2` refuses to assert into an
+  empty loop, and the generator refuses to write a fixture containing no
+  `_ZTh`/`_ZTv` symbols.
+
+Still failing from a fresh clone, deliberately: `test_slicer`,
+`test_static_promotion` and `test_tier1_dispatch`, because
+`test/slice_test/replibuild.toml` is gitignored and nothing regenerates it. They
+are the quarantined Tier-1 three, unwired from `devtests.jl`, so no suite reaches
+them.
+
+### Win64 (Microsoft x64) struct ABI classifier (2026-08-24, landed 2026-08-26)
+
+The struct classifier was x86-64 SysV only. It now selects between two
+conventions behind `enum class AbiTarget { SysV, Win64 }`, with
+`classifyWin64Struct` implementing Microsoft x64 as a separate and much narrower
+algorithm rather than a variation on SysV. On Linux `kHostAbi` stays `SysV`, so
+this changes no behaviour on the current host, and a non-x86-64 build is an
+`#error` rather than a silent misapply of x86-64 rules to AAPCS.
+
+`-DJLCS_FORCE_ABI_WIN64` compiles the Win64 rules into a Linux `libJLCS.so` that
+cannot run anything — the JIT would emit Win64 calls into a SysV process — but
+can be inspected. It is the only way to exercise the Win64 *lowering*, not just
+the decision table, without a Windows host. Build it to a scratch path, never
+over the working `libJLCS.so`.
+
+Four pinned divergences from SysV, three of them silent: size is the only
+criterion (1/2/4/8 bytes in a register, everything else indirect, **including**
+the 9–16 byte band SysV splits across two registers); aggregates never reach XMM
+(`{float,float}` is `i64` here, XMM0 under SysV); coercion is `iN` of the
+struct's own size, not always `i64`; and indirect arguments take **no** `byval`
+attribute.
+
+`test_win64_abi.jl` (devtests §6b, 95/95) is a **specification** test and the
+distinction is load-bearing. `test_struct_abi.jl` proves the SysV path against a
+real `clang++` callee because a self-JIT'd callee shares the JIT's own convention
+and cannot catch a mismatch — and that trick is unavailable here, since a Win64
+callee cannot be loaded on Linux. The oracle is clang lowering the same
+signatures for `x86_64-w64-windows-gnu`. **It catches an encoded rule that
+disagrees with clang; it does not prove the lowering runs correctly on Windows.**
+Only a Windows host does that.
+
+### `exit(0)` inside an include ends the suite with a success status (2026-08-26)
+
+Two test files skipped unavailable prerequisites by calling `exit(0)`. Run
+standalone that is correct and indistinguishable from a skip. Run as an
+`include` from `devtests.jl` it terminates the **entire suite with exit code 0** —
+every section after it silently never runs, and the run still looks green. Both
+(`test_win64_abi.jl`, `test_multilib_jit.jl`) are skipped testsets now, verified
+by hiding the prerequisite and confirming execution continues past the include.
+
+### `devtests.jl` runs to the end again (2026-08-26)
+
+`test_multilib_jit.jl` §"one engine per binary" had been a standing red since
+2026-08-20: `length(engines) == 2` evaluating `3 == 2`. Not a product bug — the
+file passed 14/14 standalone and an A/B against the pre-session commit was
+byte-identical. It asserted an **absolute count of a process global**
+(`GLOBAL_JIT.engines`) inside a suite that shares one process, so it was only
+valid while nothing before it touched the JIT, and some earlier file started
+initializing a third engine.
+
+The subject of that testset is "one engine *per binary*", which is a statement
+about the **delta** from loading two libraries. It snapshots the engine set on
+entry and asserts the delta, so it is now independent of every prior file — the
+same fix, for the same reason, as `test_slicer`'s coherence testset. It also
+`@info`s any pre-existing engines, so the next time suite order changes the
+identity of the extra binary is reported rather than mysterious.
+
+Because `devtests.jl` aborts the file at the first failing top-level testset,
+everything after §13 had been unrun in-suite — and fixing it immediately surfaced
+what had been hiding.
+
+`test_debug_inspection.jl` §"MLIR sources and thunk enumeration" asserted that
+`_ZThn16_N7DiamondD0Ev_thunk` and `_ZTv0_n32_NK7Diamond3tagEv_thunk` appear in
+the generated thunk list. They have been **deliberately absent since 2026-08-13**:
+Itanium adjustor thunks are vtable-slot entry points, never API functions, and
+`_is_itanium_thunk` removes them at the source. The test was written before that
+filter and never ran again to notice — it fails standalone too, so this was a
+stale expectation rather than process-state leakage.
+
+**Inverted rather than deleted**, the same treatment cjson's Tier-1 testset got:
+it now asserts no `_ZTh`/`_ZTv`/`_ZTc` thunk is emitted, so a regression that
+re-admits them fails loudly. Paired with an `nm` check that `vi_test.so` still
+*defines* those symbols — otherwise the guard would pass just as happily against
+a fixture that had quietly stopped exercising the class.
+
 ## v3.3.2 (2026-08-23)
 
 Patch. Scale defects found by putting v3.3.1's AOT path on llamacpp

@@ -36,10 +36,30 @@ end
 const MI_WRAPPER = joinpath(@__DIR__, "mi_test", "julia", "MiTest.jl")
 const VI_WRAPPER = joinpath(@__DIR__, "vi_test", "julia", "ViTest.jl")
 
-if !(isfile(MI_WRAPPER) && isfile(VI_WRAPPER))
-    @info "mi_test/vi_test wrappers not built — skipping multi-library JIT tests (run their verify scripts first)"
-    exit(0)
-end
+# Skip, never `exit`. `exit(0)` inside an `include` ends the whole suite with a
+# SUCCESS status — every testset after this one silently never runs and the run
+# still looks green. Standalone the two are indistinguishable; in a suite they
+# are opposites.
+const WRAPPERS_BUILT = isfile(MI_WRAPPER) && isfile(VI_WRAPPER)
+WRAPPERS_BUILT || @info "mi_test/vi_test wrappers not built — skipping multi-library JIT tests (run their verify scripts first)"
+
+# SNAPSHOT BEFORE THE INCLUDES. `GLOBAL_JIT.engines` is a process global and
+# devtests shares one process, so the engine set on entry is whatever every
+# earlier file happened to leave behind — this testset used to assert
+# `length(engines) == 2` and went red the day some earlier file started
+# initializing a third. That is a fact about suite order, not about the product:
+# the file passes standalone, and an A/B against the pre-session commit was
+# byte-identical.
+#
+# The subject here is "one engine PER BINARY", which is a statement about the
+# DELTA from loading two libraries, so the delta is what gets asserted. Same fix
+# as test_slicer's coherence testset, and for the same reason.
+const ENGINES_BEFORE =
+    Set(e.binary_path for e in RepliBuild.JITManager.GLOBAL_JIT.engines)
+isempty(ENGINES_BEFORE) ||
+    @info "multilib: JIT engines already live on entry (earlier devtests files)" count=length(ENGINES_BEFORE) paths=sort(collect(ENGINES_BEFORE))
+
+if WRAPPERS_BUILT
 
 include(MI_WRAPPER)
 using .MiTest
@@ -50,14 +70,18 @@ using .ViTest
 
     @testset "one engine per binary" begin
         engines = RepliBuild.JITManager.GLOBAL_JIT.engines
-        @test length(engines) == 2
-        @test length(unique(e.binary_path for e in engines)) == 2
-        @test all(e -> e.init_error === nothing, engines)
-        @test all(e -> e.jit_engine !== nothing, engines)
+        mine = filter(e -> !(e.binary_path in ENGINES_BEFORE), engines)
 
-        # Re-running init for an already-initialized binary is a no-op
-        RepliBuild.JITManager.initialize_global_jit(engines[1].binary_path)
-        @test length(RepliBuild.JITManager.GLOBAL_JIT.engines) == 2
+        # Exactly two NEW binaries, one engine each.
+        @test length(mine) == 2
+        @test length(unique(e.binary_path for e in mine)) == 2
+        @test all(e -> e.init_error === nothing, mine)
+        @test all(e -> e.jit_engine !== nothing, mine)
+
+        # Re-running init for an already-initialized binary is a no-op.
+        n_before = length(engines)
+        RepliBuild.JITManager.initialize_global_jit(first(mine).binary_path)
+        @test length(RepliBuild.JITManager.GLOBAL_JIT.engines) == n_before
     end
 
     @testset "first library dispatches Tier 2" begin
@@ -92,3 +116,9 @@ using .ViTest
 end
 
 println("✅ multi-library JIT tests passed")
+
+else
+    @testset "multi-library JIT (skipped — wrappers not built)" begin
+        @test_skip false
+    end
+end  # WRAPPERS_BUILT
