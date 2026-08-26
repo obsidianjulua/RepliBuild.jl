@@ -328,3 +328,15 @@ include(joinpath(TEST_DIR, "test_anonymous_unions.jl"))
 # emissionKind=Full question is answered by a failing test rather than a memory.
 
 include(joinpath(TEST_DIR, "test_debug_inspection.jl"))
+
+# ── 18. SysConfigGen: generate a library's configure-time headers ────────────
+# A project whose headers come from feature detection (`configure_file` over a
+# `config.h.in`) cannot be BUILT without this — the compile has nothing to
+# include. That makes it a build capability, which is why it moved out of
+# RepliBuildTooling and into src/Builder/ (2026-08-26). Tooling is for looking
+# at what was produced; this produces something.
+#
+# Needs cmake, hence devtests. The end-to-end case drives a self-contained
+# generated CMakeLists, so no network and no vendored library.
+
+include(joinpath(TEST_DIR, "test_sysconfiggen.jl"))
