@@ -7,8 +7,20 @@ module RepliBuild
 using TOML
 using JSON
 
-# Version
-const VERSION = v"3.3.3"
+# Version — DERIVED from Project.toml, never a second literal.
+#
+# These were two independent literals that nothing reconciled, so a release
+# could ship with `Project.toml` saying one version and `RepliBuild.VERSION`
+# saying another. That is not cosmetic: `VERSION` feeds `_generator_fingerprint`
+# (which gates the registry build cache, so a stale-codegen wrapper would be
+# served rather than rebuilt) and the `BUILD_GENERATOR` stamped into every
+# emitted wrapper. Both would have been confidently wrong.
+#
+# `include_dependency` makes an edit to Project.toml invalidate this module's
+# precompile cache — without it the old version stays baked into the `.ji`.
+const _PROJECT_TOML = joinpath(dirname(@__DIR__), "Project.toml")
+include_dependency(_PROJECT_TOML)
+const VERSION = VersionNumber(TOML.parsefile(_PROJECT_TOML)["version"])
 
 # Stable path constants — modules use these instead of @__DIR__ so file moves don't break paths
 const PROJECT_ROOT = dirname(@__DIR__)

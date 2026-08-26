@@ -201,6 +201,36 @@ include(joinpath(@__DIR__, "test_symbol_hygiene.jl"))
 
 include(joinpath(@__DIR__, "test_config_surface.jl"))
 
+# ── Version is one number, read two ways (no toolchain) ──────────────────────
+# `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
+# `pkgversion` answers from Julia's own package resolution, an independent path.
+# Agreement means the file the module read and the file Julia loaded are the same
+# one — which is exactly what breaks when a package is dev'd from one checkout
+# and loaded from another.
+#
+# It matters because VERSION feeds `_generator_fingerprint`, which gates the
+# registry build cache: a wrong version there serves a stale-codegen wrapper
+# instead of rebuilding it.
+
+@testset "Version has a single source of truth" begin
+    # Explicit: runtests.jl loads only Test + RepliBuild, and a name that happens
+    # to resolve through a dependency today is one refactor from an
+    # `UndefVarError` that a try/catch would swallow into a vacuous pass.
+    import TOML
+
+    declared = VersionNumber(TOML.parsefile(joinpath(@__DIR__, "..", "Project.toml"))["version"])
+    @test RepliBuild.VERSION == declared
+    @test RepliBuild.VERSION == pkgversion(RepliBuild)
+
+    # A hardcoded literal would satisfy the checks above on the day it was
+    # written and drift the next time Project.toml moved. Assert the derivation
+    # itself, so re-introducing a literal fails here rather than silently later.
+    src = read(joinpath(@__DIR__, "..", "src", "RepliBuild.jl"), String)
+    @test occursin("VersionNumber(TOML.parsefile(_PROJECT_TOML)", src)
+    @test occursin("include_dependency(_PROJECT_TOML)", src)
+    @test !occursin(r"const VERSION = v\"", src)
+end
+
 # ── Suite wiring guard (no toolchain required) ───────────────────────────────
 # A test file that no suite includes is a test that silently never runs. That
 # is exactly what happened to test_tier1_dispatch.jl: it shipped with the M3
@@ -272,4 +302,33 @@ include(joinpath(@__DIR__, "test_config_surface.jl"))
     unwired = filter(f -> !(f in wired) && !(f in experimental), test_files)
     isempty(unwired) || @warn "Test files included by no suite — they never run" unwired
     @test isempty(unwired)
+
+    # ── ONE SUITE OWNS EACH FILE ─────────────────────────────────────────────
+    # "Wired into a suite" was the only rule, so a file could sit in BOTH and
+    # satisfy it. `test_registry.jl` did: no suite owned it, it ran twice for
+    # anyone running both, and the question "is this a CI test or a toolchain
+    # test?" had no answer in the tree — which is the same ambiguity that lets a
+    # toolchain dependency drift into CI unnoticed.
+    #
+    # The split is the contract: runtests.jl is what runs with no C/C++
+    # toolchain, devtests.jl is everything that needs one. A file belongs to
+    # exactly one of them. If a genuine reason to share ever appears, name the
+    # file in SHARED with that reason — the point is that it becomes a decision
+    # someone made rather than an accident nobody noticed.
+    SHARED = Dict{String,String}()
+
+    ci_files  = included_basenames(joinpath(@__DIR__, "runtests.jl"))
+    dev_files = included_basenames(joinpath(@__DIR__, "devtests.jl"))
+    overlap   = filter(f -> !haskey(SHARED, f), collect(intersect(ci_files, dev_files)))
+    isempty(overlap) || @warn "Included by BOTH suites — give it one owner, or declare it in SHARED with a reason" overlap
+    @test isempty(overlap)
+
+    # A stale SHARED entry is a claim about a file that no longer overlaps.
+    stale_shared = filter(f -> !(f in intersect(ci_files, dev_files)), collect(keys(SHARED)))
+    @test isempty(stale_shared)
+
+    # The scan has to be seeing both suites for any of the above to mean
+    # anything — an empty side would make the intersection trivially empty.
+    @test length(ci_files)  > 5
+    @test length(dev_files) > 5
 end

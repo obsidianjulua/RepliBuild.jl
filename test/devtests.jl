@@ -170,9 +170,15 @@ end
     end
 end
 
-# ── 3. Registry tests ────────────────────────────────────────────────────────
-
-include(joinpath(TEST_DIR, "test_registry.jl"))
+# ── 3. Registry tests — OWNED BY runtests.jl, deliberately not included here ──
+# `test_registry.jl` needs no toolchain: it is registry/cache mechanics driven
+# entirely through `REPLIBUILD_HOME` → tempdir and `mktempdir()`, and `discover`
+# (which scans and writes a TOML, and never invokes a compiler). Verified by
+# running it with clang hidden from `PATH` — 6/6.
+#
+# It used to be included by BOTH suites, which meant no file owned it and it ran
+# twice for anyone running both. One suite per file now, enforced by the
+# disjointness guard in runtests.jl.
 
 # ── 4. MLIR JLCS dialect template stress tests ───────────────────────────────
 # Self-skips if libJLCS isn't built; otherwise exercises nested CStructs,
