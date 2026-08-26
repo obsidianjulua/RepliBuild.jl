@@ -588,11 +588,37 @@ were all written while it was only inferable, and they are cheaper than they rea
   lowering with try_call's coercion would close this. Also still direct-called by
   design: destructors (exact-class semantics for Managed/RAII — polymorphic deletion
   through a base pointer must go through a C++-side helper for now). (2026-07-17)
-- **Multi-target ABI classifier** — the struct classification in `ffe_call`/`try_call`
-  lowering (`classifySysVStruct`: MEMORY vs per-eightbyte register class, 2026-07-18)
-  is hardcoded x86_64 SysV (16-byte MEMORY threshold, 64-bit ptrs, i64/f64 eightbytes).
-  Other targets (Win64, AAPCS) are not modeled. The hub is currently a single-target
-  hub. (verified 2026-05-29; classifier rewritten 2026-07-18)
+- **Multi-target ABI classifier** — **Win64 BUILT 2026-08-24, AAPCS still unmodeled.**
+  The classifier now selects between two conventions behind `enum class AbiTarget
+  { SysV, Win64 }`; `classifyWin64Struct` implements Microsoft x64 as a separate and
+  much narrower algorithm rather than a variation on SysV. On Linux `kHostAbi` stays
+  `SysV`, so the change is behaviourally inert here, and a non-x86-64 build is an
+  `#error` rather than a silent misapply of x86-64 rules to AAPCS.
+  **`-DJLCS_FORCE_ABI_WIN64`** compiles the Win64 rules into a Linux `libJLCS.so`
+  that cannot run anything (the JIT would emit Win64 calls into a SysV process) but
+  can be inspected — the only way to exercise the Win64 *lowering*, not just the
+  decision table, without a Windows host. Build it to a scratch path, never over the
+  working `libJLCS.so`.
+  **`test_win64_abi.jl` (devtests §6b, 95/95) is a SPECIFICATION test and the
+  distinction is load-bearing**: `test_struct_abi.jl` proves the SysV path by calling
+  a real clang++ callee, because a self-JIT'd callee shares the JIT's own convention
+  and cannot catch a mismatch — and that trick is unavailable here, since a Win64
+  callee cannot be loaded on Linux. The oracle is clang lowering the same signatures
+  for `x86_64-w64-windows-gnu`. **It catches an encoded rule that disagrees with
+  clang; it does NOT prove the lowering runs correctly on Windows.** Until a Windows
+  host exists the Win64 path stays unproven in the way that matters.
+  Four pinned divergences from SysV, three of them silent: size is the only criterion
+  (1/2/4/8 in a register, everything else indirect, *including* the 9–16 byte band
+  SysV splits across two registers); aggregates never reach XMM (`{float,float}` is
+  `i64` here, XMM0 under SysV); coercion is `iN` of the struct's own size, not always
+  `i64`; indirect arguments take **no** `byval` attribute.
+  Placed at §6b rather than at the end **deliberately** — a failing top-level testset
+  aborts the rest of `devtests.jl` and §13 is a standing red, so anything after it
+  does not run in-suite. It also needs only clang (no JIT, no `libJLCS`, no built
+  fixture), so it belongs with the cheap probes regardless. Its unavailable-oracle
+  path is a **skip, never an `exit`**: `exit(0)` inside an include ends the whole
+  suite with a success status, and standalone the two are indistinguishable.
+  (verified 2026-05-29; classifier rewritten 2026-07-18; Win64 added 2026-08-24)
 
 ## Fresh-clone readiness (Linux) — audited 2026-08-26
 

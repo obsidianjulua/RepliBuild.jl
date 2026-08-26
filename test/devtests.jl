@@ -195,6 +195,27 @@ include(joinpath(TEST_DIR, "callback_test", "test_exceptions.jl"))
 
 include(joinpath(TEST_DIR, "test_jlcs_invariants.jl"))
 
+# ── 6b. Win64 (Microsoft x64) struct ABI decision table ──────────────────────
+# The struct classifier used to be x86-64 SysV only; `classifyWin64Struct` adds
+# the second convention behind `AbiTarget`. On Linux the host stays SysV, so the
+# rules pinned here are exactly the ones nothing on this machine can execute.
+#
+# Needs clang, which is why it is here and not in CI. It is a SPECIFICATION
+# test: a Win64 callee cannot be loaded or run on Linux, so the oracle is clang
+# lowering the same signatures for x86_64-w64-windows-gnu, and what it catches
+# is an encoded rule that disagrees with clang. It does NOT prove the lowering
+# runs correctly on Windows; only a Windows host does that.
+#
+# Placed with the other static dialect probes rather than at the end, and the
+# ordering is load-bearing: a failing top-level testset aborts the rest of this
+# file, and §13 is a standing red, so anything after it does not run in-suite.
+# This test needs no JIT, no libJLCS and no built fixture — only clang — so it
+# belongs with the cheap checks regardless.
+#
+# Skips (rather than exits) when clang is absent or cannot target Windows.
+
+include(joinpath(TEST_DIR, "test_win64_abi.jl"))
+
 # ── 7. C-bucket in-process libLLVM pipeline ──────────────────────────────────
 # Traces the C link/opt path through Julia's resident libLLVM (default) and the
 # external escape hatch ([link] fallback = true), asserting DWARF survives each

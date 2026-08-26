@@ -489,26 +489,41 @@ static uint64_t getPackedSizeInBits(Type type) {
     return 0; // Unknown
 }
 
-// --- x86-64 SysV struct classification -------------------------------------
+// --- Struct ABI classification ----------------------------------------------
 //
-// A struct is MEMORY class (hidden sret pointer for returns) only when it is
-// larger than 16 bytes or contains a misaligned field. Small structs with
-// naturally aligned fields travel in registers, one per eightbyte: INTEGER
-// eightbytes in GPRs, SSE (all-float) eightbytes in XMMs. "Packed" in the
-// generator's sense merely means padding-free, NOT MEMORY class — an 8-byte
-// {ptr} handle (pugixml xml_node) is returned in RAX by native code, and
-// forcing sret shifted every argument by one register (the callee read the
-// sret slot as `this`; found live 2026-07-18).
+// Two x86-64 conventions, one derivation. The host IS the target: this pass
+// feeds an in-process JIT (and the AOT thunks built beside it), so the ABI is
+// picked at compile time from the host and never varies at run time.
 //
-// LLVM's own return lowering for a literal struct assigns one register PER
-// ELEMENT, which diverges from SysV's one-per-eightbyte whenever two fields
-// share an eightbyte ({i32,i32} → SysV packs both in RAX). So register-class
-// structs are coerced through memory to one scalar per eightbyte (i64 / f64),
-// exactly clang's coercion, and reconstructed by a typed load on the way out.
+// Both rule sets are compiled on every host — only the default differs — so
+// the inactive one cannot bit-rot unnoticed the way a #ifdef'd-out branch does.
 
-struct SysVStructABI {
-    bool memoryClass = true;              // true → sret / byval-pointer path
-    SmallVector<Type, 2> eightbytes;      // coerced scalar per eightbyte
+enum class AbiTarget { SysV, Win64 };
+
+// -DJLCS_FORCE_ABI_WIN64 builds the Win64 rules into a Linux libJLCS. The
+// resulting library CANNOT run anything — the JIT would emit Win64 calls into a
+// SysV process — but the pass itself is IR→IR and touches no OS API, so it can
+// still be driven on Linux and its output diffed against
+// `clang --target=x86_64-w64-windows-gnu`. That is the only way to exercise the
+// Win64 LOWERING (not just the decision table) without a Windows host, so build
+// it to a scratch path and never over the working libJLCS.so.
+#if defined(JLCS_FORCE_ABI_WIN64)
+static constexpr AbiTarget kHostAbi = AbiTarget::Win64;
+#elif defined(_WIN32)
+static constexpr AbiTarget kHostAbi = AbiTarget::Win64;
+#elif defined(__x86_64__) || defined(_M_X64)
+static constexpr AbiTarget kHostAbi = AbiTarget::SysV;
+#else
+// Silently applying x86-64 struct classification to AArch64 AAPCS (or anything
+// else) miscompiles every aggregate call with no diagnostic. Fail at build.
+#error "JLCS struct ABI classification supports x86-64 only (SysV or Win64)."
+#endif
+
+// `regs` is the coerced scalar per argument register the aggregate occupies:
+// up to two on SysV (one per eightbyte), exactly one on Win64.
+struct StructABI {
+    bool memoryClass = true;              // true → sret / indirect-pointer path
+    SmallVector<Type, 2> regs;
 };
 
 static uint64_t abiAlign(Type t) {
@@ -585,8 +600,24 @@ static void collectAbiLeaves(Type t, uint64_t base, SmallVectorImpl<AbiLeaf>& ou
         out.push_back({base, sz, isa<FloatType>(t)});
 }
 
-static SysVStructABI classifySysVStruct(LLVM::LLVMStructType s, MLIRContext* ctx) {
-    SysVStructABI r;
+// x86-64 System V.
+//
+// A struct is MEMORY class (hidden sret pointer for returns) only when it is
+// larger than 16 bytes or contains a misaligned field. Small structs with
+// naturally aligned fields travel in registers, one per eightbyte: INTEGER
+// eightbytes in GPRs, SSE (all-float) eightbytes in XMMs. "Packed" in the
+// generator's sense merely means padding-free, NOT MEMORY class — an 8-byte
+// {ptr} handle (pugixml xml_node) is returned in RAX by native code, and
+// forcing sret shifted every argument by one register (the callee read the
+// sret slot as `this`; found live 2026-07-18).
+//
+// LLVM's own return lowering for a literal struct assigns one register PER
+// ELEMENT, which diverges from SysV's one-per-eightbyte whenever two fields
+// share an eightbyte ({i32,i32} → SysV packs both in RAX). So register-class
+// structs are coerced through memory to one scalar per eightbyte (i64 / f64),
+// exactly clang's coercion, and reconstructed by a typed load on the way out.
+static StructABI classifySysVStruct(LLVM::LLVMStructType s, MLIRContext* ctx) {
+    StructABI r;
     uint64_t size = abiSize(s);
     if (size == 0 || size > 16)
         return r;
@@ -606,31 +637,81 @@ static SysVStructABI classifySysVStruct(LLVM::LLVMStructType s, MLIRContext* ctx
     unsigned nEB = (size + 7) / 8;
     for (unsigned i = 0; i < nEB; ++i) {
         bool sse = anyFP[i] && !anyInt[i];
-        r.eightbytes.push_back(sse ? (Type)Float64Type::get(ctx)
-                                   : (Type)IntegerType::get(ctx, 64));
+        r.regs.push_back(sse ? (Type)Float64Type::get(ctx)
+                             : (Type)IntegerType::get(ctx, 64));
     }
     return r;
 }
 
-// Alloca element type sized/aligned for coercion: the coerced eightbyte
-// scalars round the slot up to a multiple of 8 with 8-byte alignment, so
-// storing the struct and loading eightbytes (or vice versa) never reads or
-// writes past the slot.
-static Type coercionSlotType(const SysVStructABI& abi, MLIRContext* ctx) {
-    if (abi.eightbytes.size() == 1)
-        return abi.eightbytes[0];
-    return LLVM::LLVMStructType::getLiteral(ctx, abi.eightbytes);
+// Microsoft x64 (what mingw-w64 GCC/clang target — GCC implements Win64 here,
+// it does not carry SysV onto Windows).
+//
+// Not a variation on SysV; a different and much narrower algorithm:
+//
+//   * SIZE IS THE ONLY CRITERION. An aggregate travels in one register iff its
+//     size is exactly 1, 2, 4 or 8 bytes. Everything else — 3, 5, 6, 7, and
+//     anything above 8, INCLUDING the 9..16-byte band SysV splits across two
+//     registers — is indirect. There is no eightbyte concept to split into.
+//   * NO SSE CLASS FOR AGGREGATES. Only scalar float/double parameters reach
+//     XMM registers; a struct never does. `{float,float}` is 8 bytes, so SysV
+//     sends it in XMM0 and Win64 sends it in RCX as an i64. Coercing it to f64
+//     here would compile clean and hand the callee the wrong register file —
+//     the same silent class as the 2026-07-18 sret shift, so: integers only.
+//   * NO MISALIGNMENT ESCAPE. An attribute-packed 4-byte struct is still
+//     register class; the SysV alignment probe has no counterpart.
+//   * EXACT-WIDTH COERCION. clang coerces to iN of the struct's own size, not
+//     always i64. That matters most on return: loading i64 out of RAX when the
+//     callee only wrote EAX yields garbage in the high half, and the following
+//     store would then write 8 bytes into a 4-byte slot.
+//
+// Shared gap with the SysV path: neither models the C++ "non-trivial for the
+// purposes of calls" rule (copy ctor / dtor / virtuals force indirect under
+// both conventions). By this point the type is an LLVM struct with no C++
+// semantics attached, so the information is already gone.
+static StructABI classifyWin64Struct(LLVM::LLVMStructType s, MLIRContext* ctx) {
+    StructABI r;
+    uint64_t size = abiSize(s);
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+        return r;                  // includes opaque (size 0) → indirect
+    r.memoryClass = false;
+    r.regs.push_back(IntegerType::get(ctx, static_cast<unsigned>(size * 8)));
+    return r;
 }
 
-// Stack slots that stand in for a SysV MEMORY-class argument or return value
-// are addressed by native code, so they must carry the alignment that code
-// assumes. Clang never emits an sret/byval slot below 8 on x86-64, and a
-// struct we failed to model field-by-field degrades to `!llvm.array<N x i8>`,
-// whose natural alignment is 1 — leaving the slot alignment implicit would
-// hand the callee an underaligned buffer for exactly the types we understand
-// least.
-static unsigned memorySlotAlign(Type t) {
-    return static_cast<unsigned>(std::max<uint64_t>(8, abiAlign(t)));
+static StructABI classifyStruct(LLVM::LLVMStructType s, MLIRContext* ctx,
+    AbiTarget target)
+{
+    return target == AbiTarget::Win64 ? classifyWin64Struct(s, ctx)
+                                      : classifySysVStruct(s, ctx);
+}
+
+// Alloca element type sized/aligned for coercion. On SysV the coerced eightbyte
+// scalars round the slot up to a multiple of 8 with 8-byte alignment; on Win64
+// the single register is iN of the struct's own size, so the slot fits it
+// exactly. Either way, storing the struct and loading the register scalars (or
+// vice versa) never reads or writes past the slot.
+static Type coercionSlotType(const StructABI& abi, MLIRContext* ctx) {
+    if (abi.regs.size() == 1)
+        return abi.regs[0];
+    return LLVM::LLVMStructType::getLiteral(ctx, abi.regs);
+}
+
+// Stack slots that stand in for a MEMORY-class argument or return value are
+// addressed by native code, so they must carry the alignment that code assumes.
+// Clang never emits an sret/byval slot below 8 on x86-64, and a struct we
+// failed to model field-by-field degrades to `!llvm.array<N x i8>`, whose
+// natural alignment is 1 — leaving the slot alignment implicit would hand the
+// callee an underaligned buffer for exactly the types we understand least.
+//
+// Win64 raises that floor to 16, because the x64 convention requires the
+// caller-allocated temporary backing an indirect aggregate to be 16-byte
+// aligned. Note this is deliberately ABOVE what clang stamps on the callee
+// declaration (it emits the type's natural alignment there — `align 4` for a
+// 12-byte struct); the floor is ours, and over-aligning a caller-owned slot is
+// always safe while under-aligning it is not.
+static unsigned memorySlotAlign(Type t, AbiTarget target) {
+    uint64_t floor = target == AbiTarget::Win64 ? 16 : 8;
+    return static_cast<unsigned>(std::max<uint64_t>(floor, abiAlign(t)));
 }
 
 // --- Shared SysV call shape ------------------------------------------------
@@ -640,7 +721,11 @@ static unsigned memorySlotAlign(Type t) {
 // independent copies of this logic, which is how a fix to one could silently
 // miss the other. One derivation.
 
-struct SysVCallShape {
+struct CallShape {
+    // Carried on the shape rather than passed alongside it: byValArgAttrs and
+    // retargetCallee have to size their slots the same way buildCallShape did,
+    // and a separate parameter is a second place to get it wrong.
+    AbiTarget target = kHostAbi;
     bool needsSret = false;
     Type sretStructType;
     Value sretSlot;
@@ -648,28 +733,31 @@ struct SysVCallShape {
     Type coercedRetType;
     SmallVector<Value, 4> args;
     SmallVector<Type, 4> argTypes;
-    // (argument index, pointee type) for every MEMORY-class by-value struct.
+    // (argument index, pointee type) for every by-value struct that takes the
+    // `llvm.byval` attribute. SysV only — see the indirect-argument comment.
     SmallVector<std::pair<unsigned, Type>, 2> byval;
 };
 
-static SysVCallShape buildSysVCallShape(ConversionPatternRewriter& rewriter, Location loc,
-    ArrayRef<Type> resultTypeVec, ValueRange args)
+static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location loc,
+    ArrayRef<Type> resultTypeVec, ValueRange args, AbiTarget target = kHostAbi)
 {
-    SysVCallShape s;
+    CallShape s;
+    s.target = target;
     MLIRContext* ctx = rewriter.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx);
     Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
 
-    // Return classification: MEMORY class (>16B or misaligned fields) uses
-    // sret; register-class structs are coerced to one scalar per eightbyte.
+    // Return classification: MEMORY class uses sret; register-class structs
+    // are coerced to one scalar per register (SysV: per eightbyte, up to two;
+    // Win64: exactly one, iN of the struct's size).
     if (!resultTypeVec.empty()) {
         if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
-            auto abi = classifySysVStruct(retStructType, ctx);
+            auto abi = classifyStruct(retStructType, ctx, target);
             if (abi.memoryClass) {
                 s.needsSret = true;
                 s.sretStructType = retStructType;
                 s.sretSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, retStructType,
-                    one, memorySlotAlign(retStructType));
+                    one, memorySlotAlign(retStructType, target));
             } else {
                 s.origRetStructType = retStructType;
                 s.coercedRetType = coercionSlotType(abi, ctx);
@@ -687,32 +775,37 @@ static SysVCallShape buildSysVCallShape(ConversionPatternRewriter& rewriter, Loc
         Type argType = arg.getType();
 
         if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
-            auto abi = classifySysVStruct(structType, ctx);
+            auto abi = classifyStruct(structType, ctx, target);
             if (!abi.memoryClass) {
-                // Register-class by-value struct: pass one scalar per
-                // eightbyte (through memory, matching clang's coercion).
+                // Register-class by-value struct: pass one scalar per register
+                // (through memory, matching clang's coercion). The 8-byte GEP
+                // stride is the SysV eightbyte layout; Win64 yields a single
+                // register, so the stride is never exercised there.
                 Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType,
                     coercionSlotType(abi, ctx), one);
                 LLVM::StoreOp::create(rewriter, loc, arg, slot);
-                for (unsigned i = 0; i < abi.eightbytes.size(); ++i) {
+                for (unsigned i = 0; i < abi.regs.size(); ++i) {
                     Value p = slot;
                     if (i > 0) {
                         p = LLVM::GEPOp::create(rewriter, loc, ptrType,
                             rewriter.getI8Type(), slot,
                             ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(8 * i)});
                     }
-                    Value v = LLVM::LoadOp::create(rewriter, loc, abi.eightbytes[i], p);
+                    Value v = LLVM::LoadOp::create(rewriter, loc, abi.regs[i], p);
                     s.args.push_back(v);
-                    s.argTypes.push_back(abi.eightbytes[i]);
+                    s.argTypes.push_back(abi.regs[i]);
                 }
                 continue;
             }
 
-            // MEMORY-class by-value struct: SysV wants a CALLER-OWNED STACK
-            // COPY in the outgoing argument area, not a reference to one.
-            // `llvm.byval` on a pointer parameter is precisely that, and
-            // precisely what clang emits. Both of the shapes this replaces
-            // were wrong:
+            // Indirect by-value struct. Same IR shape on both targets — alloca,
+            // store, pass the pointer — but the attribute differs, and it is
+            // not cosmetic.
+            //
+            // SysV wants a CALLER-OWNED STACK COPY in the outgoing argument
+            // area, not a reference to one. `llvm.byval` on a pointer parameter
+            // is precisely that, and precisely what clang emits. Both of the
+            // shapes this replaces were wrong:
             //   • packed structs were passed as a BARE pointer — by reference,
             //     so the callee read an address where it expected bytes;
             //   • non-packed ones were passed as a first-class LLVM struct
@@ -721,10 +814,18 @@ static SysVCallShape buildSysVCallShape(ConversionPatternRewriter& rewriter, Loc
             //     SysV's, so every subsequent argument shifted too.
             // llama.cpp's `llama_model_load_from_file(path, llama_model_params)`
             // — 72 bytes, MEMORY class — segfaulted on the second (2026-08-05).
+            //
+            // Win64 does NOT use byval: the convention is a pointer to a
+            // caller-allocated temporary, and clang's WinX86_64ABIInfo emits
+            // getIndirect(..., /*ByVal=*/false) for exactly this case. The
+            // alloca+store above ALREADY IS that temporary, so the pointer is
+            // complete on its own; adding byval would ask the backend to make a
+            // second copy into an outgoing area the convention does not have.
             Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType,
-                one, memorySlotAlign(argType));
+                one, memorySlotAlign(argType, target));
             LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
-            s.byval.push_back({static_cast<unsigned>(s.args.size()), argType});
+            if (target == AbiTarget::SysV)
+                s.byval.push_back({static_cast<unsigned>(s.args.size()), argType});
             s.args.push_back(stackSlot);
             s.argTypes.push_back(ptrType);
             continue;
@@ -740,7 +841,7 @@ static SysVCallShape buildSysVCallShape(ConversionPatternRewriter& rewriter, Loc
 // `llvm.byval` has to travel on the call site AND on the declaration: the
 // call site is what the backend lowers, and the declaration is what the
 // verifier checks the call site against.
-static ArrayAttr byValArgAttrs(ConversionPatternRewriter& rewriter, const SysVCallShape& s) {
+static ArrayAttr byValArgAttrs(ConversionPatternRewriter& rewriter, const CallShape& s) {
     if (s.byval.empty())
         return nullptr;
     SmallVector<Attribute> attrs(s.args.size(), rewriter.getDictionaryAttr({}));
@@ -749,7 +850,7 @@ static ArrayAttr byValArgAttrs(ConversionPatternRewriter& rewriter, const SysVCa
             rewriter.getNamedAttr(LLVM::LLVMDialect::getByValAttrName(),
                                   TypeAttr::get(pointee)),
             rewriter.getNamedAttr(LLVM::LLVMDialect::getAlignAttrName(),
-                                  rewriter.getI64IntegerAttr(memorySlotAlign(pointee)))});
+                                  rewriter.getI64IntegerAttr(memorySlotAlign(pointee, s.target)))});
     }
     return rewriter.getArrayAttr(attrs);
 }
@@ -757,7 +858,7 @@ static ArrayAttr byValArgAttrs(ConversionPatternRewriter& rewriter, const SysVCa
 // Rewrite the external declaration to the coerced signature and stamp byval
 // onto its pointer parameters.
 static void retargetCallee(ConversionPatternRewriter& rewriter, ModuleOp moduleOp,
-    StringRef callee, const SysVCallShape& s, ArrayRef<Type> callResultTypes)
+    StringRef callee, const CallShape& s, ArrayRef<Type> callResultTypes)
 {
     if (auto calleeFn = moduleOp.lookupSymbol<func::FuncOp>(callee)) {
         calleeFn.setFunctionType(
@@ -766,7 +867,7 @@ static void retargetCallee(ConversionPatternRewriter& rewriter, ModuleOp moduleO
             calleeFn.setArgAttr(idx, LLVM::LLVMDialect::getByValAttrName(),
                                 TypeAttr::get(pointee));
             calleeFn.setArgAttr(idx, LLVM::LLVMDialect::getAlignAttrName(),
-                                rewriter.getI64IntegerAttr(memorySlotAlign(pointee)));
+                                rewriter.getI64IntegerAttr(memorySlotAlign(pointee, s.target)));
         }
     } else if (auto llvmCalleeFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(callee)) {
         llvmCalleeFn.setFunctionType(LLVM::LLVMFunctionType::get(
@@ -777,7 +878,7 @@ static void retargetCallee(ConversionPatternRewriter& rewriter, ModuleOp moduleO
             llvmCalleeFn.setArgAttr(idx, LLVM::LLVMDialect::getByValAttrName(),
                                     TypeAttr::get(pointee));
             llvmCalleeFn.setArgAttr(idx, LLVM::LLVMDialect::getAlignAttrName(),
-                                    rewriter.getI64IntegerAttr(memorySlotAlign(pointee)));
+                                    rewriter.getI64IntegerAttr(memorySlotAlign(pointee, s.target)));
         }
     }
 }
@@ -818,13 +919,14 @@ struct FFECallOpLowering : public ConversionPattern {
             resultTypeVec.push_back(converted);
         }
 
-        // ABI coercion: match the x86-64 SysV convention the external C
-        // function was compiled with — sret for MEMORY-class returns, one
-        // scalar per eightbyte for register-class aggregates, byval stack
-        // copies for MEMORY-class by-value arguments. Shared with try_call.
+        // ABI coercion: match the convention the external C function was
+        // compiled with — sret for MEMORY-class returns, one scalar per
+        // argument register for register-class aggregates, and a caller-owned
+        // stack copy for indirect by-value arguments. Target is the host
+        // (SysV or Win64); see the classification block. Shared with try_call.
         Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
         Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
-        SysVCallShape shape = buildSysVCallShape(rewriter, loc, resultTypeVec, args);
+        CallShape shape = buildCallShape(rewriter, loc, resultTypeVec, args);
 
         // Determine call result types (void if using sret)
         SmallVector<Type, 1> callResultTypes;
@@ -923,7 +1025,7 @@ struct TryCallOpLowering : public ConversionPattern {
             resultTypeVec.push_back(converted);
         }
 
-        SysVCallShape shape = buildSysVCallShape(rewriter, loc, resultTypeVec, args);
+        CallShape shape = buildCallShape(rewriter, loc, resultTypeVec, args);
         bool needsSret = shape.needsSret;
         Type sretStructType = shape.sretStructType;
         Value sretSlot = shape.sretSlot;
