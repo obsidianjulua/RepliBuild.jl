@@ -298,6 +298,52 @@ standalone (empty default) it is computed here so the fingerprint check still
 applies — `_detect_target_triple` shells out, so the batch avoids paying that
 per file by passing it down.
 """
+# _clang_for_c_bucket(compiler, cmd_args) -> (output, exitcode)
+#
+# Run `compiler` over `cmd_args`, routing the C BUCKET (`compiler == "clang"`)
+# through Clang_unified_jll so the tool is version-locked to Julia's resident
+# libLLVM. Anything else — and any failure to reach the JLL — falls back to
+# BuildBridge.execute, i.e. the system PATH.
+#
+# The C bucket's invariant is that every tool touching its IR is version-matched:
+# JLL clang emits it, Julia's libLLVM links and optimizes it. `create_library`
+# used to shell straight to system `clang` for the final `.ll -> .so`, which
+# quietly stepped off that path. JLL clang 18 legally emits `icmp` constant
+# expressions; LLVM 19 removed them; a system clang 22 then rejects IR that this
+# pipeline itself produced. Any C library containing a weak-symbol NULL check
+# (`if (weak_fn != NULL)`) emits that form — zstd's tracing hooks were the first
+# in the Hub to hit it (packages/zstd/GENERATOR-icmp-constexpr.md).
+#
+# LLVMEnvironment.resolve_tool(name, :c) is deliberately NOT used here. It looks
+# for a parallel SYSTEM install (/usr/lib/llvm18/bin), and Arch's `llvm18`
+# package ships LLVM tools with no clang in it at all — so it finds the
+# directory, misses the binary, and silently returns the bare name, landing back
+# on the system compiler. It is the right hook for llvm-link/opt, which that
+# package does ship.
+function _clang_for_c_bucket(compiler::String, cmd_args)
+    compiler == "clang" || return BuildBridge.execute(compiler, cmd_args)
+    try
+        Clang_mod = Base.require(Base.PkgId(
+            Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
+        isdefined(Clang_mod, :Clang_unified_jll) ||
+            return BuildBridge.execute(compiler, cmd_args)
+
+        clang_cmd = Clang_mod.Clang_unified_jll.clang()
+        cmd = ignorestatus(`$(clang_cmd) $cmd_args`)
+
+        out_pipe = Pipe()
+        err_pipe = Pipe()
+        process = run(pipeline(cmd, stdout = out_pipe, stderr = err_pipe))
+        close(out_pipe.in)
+        close(err_pipe.in)
+
+        return (String(read(out_pipe)) * "\n" * String(read(err_pipe)),
+                process.exitcode)
+    catch
+        return BuildBridge.execute(compiler, cmd_args)
+    end
+end
+
 function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
                               compile_fingerprint::String="")
     # Generate IR file path
@@ -335,40 +381,11 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
         ["-o", ir_file, cpp_file]
     )
 
-    # Compile using BuildBridge or Clang_unified_jll for C
+    # Use Julia's internal Clang for C so the IR matches Julia's LLVM version.
+    # Shared with create_library — both ends of the C bucket must agree on the
+    # compiler, which is exactly what they did not do before (see the helper).
     compiler = endswith(cpp_file, ".c") ? "clang" : "clang++"
-    
-    output = ""
-    exitcode = 1
-    if compiler == "clang"
-        try
-            # Use Julia's internal Clang to emit IR that perfectly matches the Julia LLVM version
-            Clang_mod = Base.require(Base.PkgId(Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
-            if isdefined(Clang_mod, :Clang_unified_jll)
-                clang_cmd = Clang_mod.Clang_unified_jll.clang()
-                cmd = ignorestatus(`$(clang_cmd) $cmd_args`)
-                
-                # Capture output
-                out_pipe = Pipe()
-                err_pipe = Pipe()
-                process = run(pipeline(cmd, stdout=out_pipe, stderr=err_pipe))
-                close(out_pipe.in)
-                close(err_pipe.in)
-                
-                out_str = String(read(out_pipe))
-                err_str = String(read(err_pipe))
-                
-                output = out_str * "\n" * err_str
-                exitcode = process.exitcode
-            else
-                (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
-            end
-        catch e
-            (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
-        end
-    else
-        (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
-    end
+    (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
 
     if !isempty(output) && exitcode != 0
         println("  $(basename(cpp_file)): $output")
@@ -1106,7 +1123,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     end
 
     compiler = config.wrap.language == :c ? "clang" : "clang++"
-    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+    (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
 
     if exitcode != 0
         error("Library creation failed: $output")
@@ -1198,7 +1215,7 @@ function create_executable(config::RepliBuildConfig, ir_files::Union{String,Vect
     end
 
     compiler = config.wrap.language == :c ? "clang" : "clang++"
-    (output, exitcode) = BuildBridge.execute(compiler, cmd_args)
+    (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
 
     if exitcode != 0
         error("Executable creation failed: $output")
