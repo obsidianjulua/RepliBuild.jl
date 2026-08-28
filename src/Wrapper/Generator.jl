@@ -33,6 +33,12 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
         error("Library not found: $library_path")
     end
 
+    # A [wrap.varargs] table is a human claim about upstream's variadic API that
+    # no rebuild can re-derive. Enforce its `proven_at` pin HERE rather than at
+    # config load: wrapping is the only stage that consumes those signatures, so
+    # this is where a stale table turns into wrong wrappers.
+    enforce_varargs_provenance(config)
+
     # Check for metadata (DWARF + symbol info from compilation)
     metadata_file = joinpath(dirname(library_path), "compilation_metadata.json")
     has_metadata = isfile(metadata_file)

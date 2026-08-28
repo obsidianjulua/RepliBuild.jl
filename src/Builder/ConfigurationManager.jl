@@ -107,6 +107,12 @@ struct WrapConfig
     module_name::String  # Empty = auto from project.name
     use_clang_jl::Bool
     varargs_overloads::Dict{String,Vector{Vector{String}}}
+    # Upstream commit the [wrap.varargs] signatures were verified against, from
+    # the reserved `proven_at` key in that table. Empty = unversioned (warned).
+    # A varargs table is a HUMAN claim about upstream's variadic API that no
+    # rebuild can re-derive — pinning it lets a dependency bump fail loud
+    # instead of silently regenerating wrappers from stale signatures.
+    varargs_proven_at::String
     macros::Dict{String,Dict{String,Any}}
     shim_headers::Vector{String}
     cstring_owned::Dict{String,String}  # func => free symbol for malloc'd char* returns
@@ -401,8 +407,17 @@ function parse_wrap_config(data::Dict)::WrapConfig
     # the user only saw a "no overloads configured" warning at wrap time.
     varargs = get(wrap, "varargs", Dict())
     varargs_overloads = Dict{String,Vector{Vector{String}}}()
+    varargs_proven_at = ""
 
     for (func, sigs) in varargs
+        # Reserved metadata key: the upstream commit these signatures were
+        # verified against. Only claimed when the value is a String — a C
+        # function genuinely named `proven_at` would carry a Vector and still
+        # parse as an overload table, so the reservation cannot shadow real API.
+        if String(func) == "proven_at" && isa(sigs, AbstractString)
+            varargs_proven_at = String(sigs)
+            continue
+        end
         isa(sigs, Vector) || error("""
             RepliBuild: [wrap.varargs.$func] must be a list of type lists, e.g.
                 $func = [["Cstring"], ["Cint", "Cdouble"]]
@@ -461,6 +476,7 @@ function parse_wrap_config(data::Dict)::WrapConfig
         get(wrap, "module_name", ""),  # Empty = auto-generate
         get(wrap, "use_clang_jl", true),
         varargs_overloads,
+        varargs_proven_at,
         macros,
         shim_headers,
         cstring_owned,
@@ -575,6 +591,96 @@ function parse_types_config(data::Dict)::TypesConfig
 end
 
 """
+    enforce_varargs_provenance(config)
+
+Check a `[wrap.varargs]` table against the upstream commit it claims to have been
+verified against (`proven_at`).
+
+A varargs table is the one part of a `replibuild.toml` that a rebuild cannot
+re-derive. Sources, flags, headers and excludes all fail loudly when they stop
+matching upstream — a missing file, an unresolvable header, a link error. The
+variadic signatures do not: they are a human's reading of upstream's API, and
+after a version bump they will happily regenerate wrappers describing calls that
+no longer exist. `proven_at` turns that silent drift into a hard stop.
+
+Rules:
+  * no varargs table                     -> nothing to check
+  * varargs, no `proven_at`              -> warn (unversioned claim)
+  * `proven_at` != resolved dep commit   -> error
+  * `proven_at` with nothing to compare  -> error (a pin that cannot be checked
+                                            is worse than no pin: it reads as
+                                            verified and is not)
+
+The commit is resolved from `[dependencies]`: the entry whose name matches
+`project.name` if there is one, otherwise the sole entry carrying a commit.
+Prefixes match, so a short hash is accepted.
+
+Called from `Wrapper.wrap_library`, not from `load_config`: wrapping is the only
+stage that consumes varargs signatures, so a bare `build()` has nothing to go
+stale. Keeping it out of the config layer also keeps the config-surface guard
+honest — a field read only by its own parser is exactly what that guard exists
+to catch.
+"""
+function enforce_varargs_provenance(config::RepliBuildConfig)
+    isempty(config.wrap.varargs_overloads) && return nothing
+
+    funcs = join(sort(collect(keys(config.wrap.varargs_overloads))), ", ")
+    pinned = config.wrap.varargs_proven_at
+
+    if isempty(pinned)
+        @warn """
+        [wrap.varargs] in $(config.config_file) is unversioned.
+        These signatures ($funcs) are a human claim about upstream's variadic
+        API that no rebuild can re-verify. If the dependency is bumped they will
+        silently regenerate against the new sources and report success.
+        Pin them by adding the commit they were checked against:
+            [wrap.varargs]
+            proven_at = "<upstream commit>"
+        """
+        return nothing
+    end
+
+    # Resolve the commit this pin should be compared against.
+    with_commit = [(n, d.commit) for (n, d) in config.dependencies.items
+                   if !isempty(d.commit)]
+    resolved = if isempty(with_commit)
+        nothing
+    elseif haskey(config.dependencies.items, config.project.name) &&
+           !isempty(config.dependencies.items[config.project.name].commit)
+        config.dependencies.items[config.project.name].commit
+    elseif length(with_commit) == 1
+        with_commit[1][2]
+    else
+        names = join(sort([n for (n, _) in with_commit]), ", ")
+        error("""
+        RepliBuild: [wrap.varargs] proven_at = "$pinned" cannot be checked —
+        $(length(with_commit)) dependencies declare a commit ($names) and none is
+        named "$(config.project.name)", so there is no single upstream to compare
+        against. Rename the primary dependency to match project.name.""")
+    end
+
+    resolved === nothing && error("""
+    RepliBuild: [wrap.varargs] proven_at = "$pinned" cannot be checked — no
+    [dependencies.*] entry declares a `commit`. A pin that cannot be verified
+    reads as provenance and provides none. Either pin the dependency commit or
+    drop proven_at and accept the unversioned warning.""")
+
+    # Prefixes match so a short hash is usable.
+    if !startswith(resolved, pinned) && !startswith(pinned, resolved)
+        error("""
+        RepliBuild: [wrap.varargs] is stale in $(config.config_file).
+          proven_at:        $pinned
+          dependency commit: $resolved
+        The variadic signatures ($funcs) were verified against a different
+        upstream revision than the one being built. Nothing in the build can
+        re-derive them, so they must be re-checked by hand against the new
+        sources. Once confirmed, update proven_at to the commit above.""")
+    end
+
+    return nothing
+end
+
+"""
 Parse [ingest] section. Returns `nothing` when the section is absent (source-build mode).
 """
 function parse_ingest_config(data::Dict, toml_path::String)::Union{Nothing,IngestConfig}
@@ -646,7 +752,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
         LinkConfig("2", false, String[], String[], false, true),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), Dict{String,Dict{String,Any}}(), String[], Dict{String,String}(), false, Tier1Config(false, String[], 64, false)),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], Dict{String,String}(), false, Tier1Config(false, String[], 64, false)),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -757,7 +863,15 @@ function save_config(config::RepliBuildConfig)
         wrap_dict["module_name"] = config.wrap.module_name
     end
     if !isempty(config.wrap.varargs_overloads)
-        wrap_dict["varargs"] = config.wrap.varargs_overloads
+        # Copy before injecting the reserved key: varargs_overloads is the live
+        # config field, and writing proven_at into it would make the metadata
+        # look like an overload entry to anything that reads the config after a
+        # save (discover regenerates tomls, so this round-trips repeatedly).
+        varargs_out = Dict{String,Any}(config.wrap.varargs_overloads)
+        if !isempty(config.wrap.varargs_proven_at)
+            varargs_out["proven_at"] = config.wrap.varargs_proven_at
+        end
+        wrap_dict["varargs"] = varargs_out
     end
     if !isempty(config.wrap.macros)
         wrap_dict["macros"] = config.wrap.macros

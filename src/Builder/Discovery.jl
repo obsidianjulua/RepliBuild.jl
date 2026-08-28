@@ -597,6 +597,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         "",                                      # module_name (auto-generate)
         true,                                    # use_clang_jl
         Dict{String,Vector{Vector{String}}}(),   # varargs_overloads
+        "",                                      # varargs_proven_at
         Dict{String,Dict{String,Any}}(),         # macros
         String[],                                # shim_headers
         Dict{String,String}(),                   # cstring_owned

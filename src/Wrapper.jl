@@ -10,7 +10,8 @@ using Libdl   # Tier-1 slice symbol pre-flight (GeneratorC._tier1_preflight!)
 
 # Import from parent RepliBuild module
 import ..ConfigurationManager: RepliBuildConfig, get_output_path, get_module_name,
-                                get_build_path, get_cache_path
+                                get_build_path, get_cache_path,
+                                enforce_varargs_provenance
 import ..Slicer
 import ..ClangJLBridge
 import ..BuildBridge
