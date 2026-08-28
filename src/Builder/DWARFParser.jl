@@ -295,9 +295,17 @@ function parse_dwarf_output_robust(dwarf_text::String)
                     #    DW_OP_deref, DW_OP_plus)
                     # = "this + *(vptr - N)". Record -N: the vbase-offset entry's
                     # byte position relative to the vtable address point.
-                    vb = match(r"DW_OP_dup[;,].*DW_OP_deref[;,].*DW_OP_constu:?\s*(0x[0-9a-fA-F]+|\d+)\s*[;,].*DW_OP_minus[;,].*DW_OP_deref[;,].*DW_OP_plus", line)
+                    #
+                    # The constant has TWO spellings and both occur in the wild:
+                    # clang emits DW_OP_constu N, gcc emits DW_OP_lit<N> for
+                    # N <= 31 (the single-byte DW_OP_lit0..DW_OP_lit31 forms).
+                    # libstdc++ is gcc-built and uses DW_OP_lit24, so matching
+                    # only constu silently left the offset at 0 — see the guard
+                    # in GeneratorCpp's _collect_upcasts! which now rejects 0.
+                    vb = match(r"DW_OP_dup[;,].*DW_OP_deref[;,].*(?:DW_OP_constu:?\s*(0x[0-9a-fA-F]+|\d+)|DW_OP_lit(\d+))\s*[;,].*DW_OP_minus[;,].*DW_OP_deref[;,].*DW_OP_plus", line)
                     if !isnothing(vb)
-                        val_str = vb.captures[1]
+                        val_str = vb.captures[1] !== nothing ? vb.captures[1] :
+                                                               vb.captures[2]
                         n = startswith(val_str, "0x") ?
                             parse(Int, val_str[3:end], base=16) :
                             parse(Int, val_str)

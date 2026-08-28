@@ -3122,9 +3122,19 @@ function parse_dwarf_dump(output::AbstractString;
                         # "offset" field stays 0 — there IS no static offset.
                         # (Without the byte-block guard the constant regex below
                         # matched the "7" of "7 byte block" — a bogus offset 7.)
-                        expr_match = match(r"DW_OP_dup[;,].*DW_OP_deref[;,].*DW_OP_constu:?\s*(0x[0-9a-fA-F]+|\d+)\s*[;,].*DW_OP_minus[;,].*DW_OP_deref[;,].*DW_OP_plus", line)
+                        #
+                        # The constant has TWO spellings and both occur in the
+                        # wild: clang emits DW_OP_constu N, gcc emits the
+                        # single-byte DW_OP_lit<N> form for N <= 31. libstdc++
+                        # is gcc-built and uses DW_OP_lit24, so matching only
+                        # constu left the key unset — and an unset key reads as
+                        # `nothing` in GeneratorCpp's _collect_upcasts!, which
+                        # silently skipped the upcast. DWARFParser.jl carries
+                        # the same pair of spellings; both parsers must agree.
+                        expr_match = match(r"DW_OP_dup[;,].*DW_OP_deref[;,].*(?:DW_OP_constu:?\s*(0x[0-9a-fA-F]+|\d+)|DW_OP_lit(\d+))\s*[;,].*DW_OP_minus[;,].*DW_OP_deref[;,].*DW_OP_plus", line)
                         if !isnothing(expr_match)
-                            val_str = expr_match.captures[1]
+                            val_str = expr_match.captures[1] !== nothing ?
+                                      expr_match.captures[1] : expr_match.captures[2]
                             n = startswith(val_str, "0x") ?
                                 parse(Int, val_str[3:end], base=16) :
                                 parse(Int, val_str)

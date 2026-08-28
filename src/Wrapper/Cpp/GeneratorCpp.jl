@@ -1795,10 +1795,32 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 isempty(bt) && continue
                 if get(base, "virtual", false) == true
                     vboff = get(base, "vbase_vtable_offset", nothing)
-                    if vboff isa Integer
+                    if vboff isa Integer && Int(vboff) != 0
                         push!(acc, (bt, :virtual, static_off, Int(vboff)))
                     else
-                        @debug "$(s_name): virtual base $(bt) has no resolvable vtable offset — upcast not emitted"
+                        # No usable vbase-offset, in either spelling the two
+                        # producers use for "I could not parse it":
+                        #   * Compiler.jl omits the key entirely -> nothing
+                        #   * DWARFParser.jl leaves its pushed default -> 0
+                        # 0 is independently impossible: the vbase-offset entry
+                        # always sits BELOW the vtable address point, so any
+                        # genuinely parsed value is negative.
+                        #
+                        # This used to be an @debug and fall through, which
+                        # silently dropped the upcast helper — the wrapper then
+                        # had no way to reach the virtual base at all, with no
+                        # diagnostic at default log level. Fail loud instead.
+                        # Both parsers handle DW_OP_constu and DW_OP_lit<N>;
+                        # an unhandled form (DW_OP_const1u, DW_OP_consts, ...)
+                        # lands here.
+                        error("$(s_name): virtual base $(bt) has no usable " *
+                              "vbase-offset (got $(repr(vboff))). The " *
+                              "DW_AT_data_member_location expression on this " *
+                              "inheritance edge was not parsed, so the upcast " *
+                              "helper cannot be emitted. Check for an unhandled " *
+                              "DW_OP form in Compiler.jl's readelf parser and " *
+                              "DWARFParser.jl's llvm-dwarfdump parser — both " *
+                              "must recognise the spelling.")
                     end
                 else
                     off = get(base, "offset", 0)
