@@ -3481,6 +3481,14 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     thunk_slots = config.compile.aot_thunks ?
         _aot_thunk_slot_chunk(_funcs, aot_fptr_taken) : ""
 
+    # AOT (build time, from compilation metadata) and this generator (wrap time,
+    # from the dispatch decision) can disagree about which thunks exist. Ask the
+    # library what it defines before shipping call sites that assume it — a slot
+    # resolving to C_NULL is a hard error on first call, found by a user rather
+    # than by the build.
+    config.compile.aot_thunks &&
+        _assert_aot_thunks_present(_funcs, aot_fptr_taken, thunks_lib_path)
+
     export_statement = _export_statement(all_exports,
                                          _enums * _structs * union_accessor_defs *
                                          introspection * _funcs)

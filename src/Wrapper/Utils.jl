@@ -897,7 +897,13 @@ Always emits the table — empty if there are no thunks — because `__init__`
 iterates it unconditionally, and a table that exists only sometimes is a second
 thing to keep in sync.
 """
-function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,String})
+# _aot_thunk_slot_names(func_text, taken) -> Vector{String}
+#
+# The `_FPTR_*` slots the FINAL wrapper text actually reads, sorted and validated
+# against `taken`. Split out so the emitted table and the wrap-time presence check
+# (`_assert_aot_thunks_present`) share one derivation — two scans of the same text
+# is exactly the drift this whole area exists to prevent.
+function _aot_thunk_slot_names(func_text::AbstractString, taken::Dict{String,String})
     referenced = String[]
     seen = Set{String}()
     for m in eachmatch(r"\b(_FPTR_\w+)\b", func_text)
@@ -910,7 +916,19 @@ function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,Str
             "— see `_aot_fptr_const_name!`.")
         push!(referenced, nm)
     end
-    sort!(referenced)
+    return sort!(referenced)
+end
+
+# _aot_thunk_symbol(taken, slot) -> String
+#
+# The dynamic symbol a slot resolves. One spelling, used by the emitted
+# `_THUNK_SLOTS` table AND by the presence check — a second copy of this format
+# string is a way for the wrapper to look for a name the check never verified.
+_aot_thunk_symbol(taken::Dict{String,String}, slot::AbstractString) =
+    "_mlir_ciface_$(taken[slot])_thunk"
+
+function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,String})
+    referenced = _aot_thunk_slot_names(func_text, taken)
 
     io = IOBuffer()
     print(io, """
@@ -929,10 +947,83 @@ function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,Str
     end
     println(io, "\nconst _THUNK_SLOTS = Tuple{Base.RefValue{Ptr{Cvoid}},String}[")
     for nm in referenced
-        println(io, "    ($nm, \"_mlir_ciface_$(taken[nm])_thunk\"),")
+        println(io, "    ($nm, \"$(_aot_thunk_symbol(taken, nm))\"),")
     end
     println(io, "]")
     return String(take!(io))
+end
+
+"""
+    _assert_aot_thunks_present(func_text, taken, thunks_lib_path)
+
+Refuse to ship a wrapper that binds AOT thunks the thunks library does not
+define.
+
+**The thunk set is derived twice and the two derivations can disagree.** AOT runs
+at BUILD, from `compilation_metadata.json` via `JLCSIRGenerator`; wrap runs later
+and takes a thunk for every method `is_ccall_safe` rejects or `DAGDiff` marks.
+A header-inline method that only became a symbol because some later TU emitted it
+can appear in wrap's list and be absent from AOT's. Nothing reconciled them, so
+the wrapper emitted `invoke_aot_ptr` sites whose slots resolve to `C_NULL`, and
+the failure surfaced as a load-time warning plus a hard error on whichever call
+the user made first — the silent-until-you-touch-it class.
+
+This does not fix the double derivation; it makes the disagreement stop the wrap
+instead of reaching a caller. Both facts are available here: the slots come from
+the final text, and the thunks library exists by now (AOT ran at build, wrap runs
+after), so it can simply be asked what it defines.
+
+Reported by Clipper2 2.0.1 — 7 of 12 thunk sites missing, the set growing 1 → 7
+when an export TU instantiated more header-inline methods
+(`packages/clipper2/GENERATOR-aot-thunk-gap.md`).
+"""
+function _assert_aot_thunks_present(func_text::AbstractString,
+                                    taken::Dict{String,String},
+                                    thunks_lib_path::AbstractString)
+    slots = _aot_thunk_slot_names(func_text, taken)
+    isempty(slots) && return nothing
+
+    if isempty(thunks_lib_path) || !isfile(thunks_lib_path)
+        error("""
+        Wrapper binds $(length(slots)) AOT thunk(s) but the thunks library is missing:
+          $(isempty(thunks_lib_path) ? "<no path>" : thunks_lib_path)
+        Every `invoke_aot_ptr` call site would raise. Rebuild with
+        `[compile] aot_thunks = true`, or turn it off so the generator emits the
+        JIT dispatch path instead.""")
+    end
+
+    (out, code) = BuildBridge.execute("nm", ["-D", "--defined-only", thunks_lib_path])
+    code == 0 || error("""
+    Cannot verify AOT thunks: `nm -D --defined-only $thunks_lib_path` exited $code.
+    Refusing to emit a wrapper whose thunk bindings are unverified — an unresolved
+    slot is a hard error at the call site, not a fallback.
+    $out""")
+
+    defined = Set{String}()
+    for line in eachsplit(out, '\n')
+        parts = split(strip(line))
+        isempty(parts) || push!(defined, String(parts[end]))
+    end
+
+    missing_syms = [(nm, _aot_thunk_symbol(taken, nm))
+                    for nm in slots if !(_aot_thunk_symbol(taken, nm) in defined)]
+    isempty(missing_syms) && return nothing
+
+    listed = join(("  $sym" for (_, sym) in missing_syms), "\n")
+    error("""
+    AOT thunks library is missing $(length(missing_syms)) of $(length(slots)) symbol(s)
+    the wrapper binds:
+    $listed
+
+    Library: $thunks_lib_path
+
+    The AOT pass (build) and the wrapper generator (wrap) derived different thunk
+    sets. Wrap's set is the one the emitted call sites use, so these would resolve
+    to C_NULL and raise on first call. Typical cause: header-inline or template
+    methods that only became symbols in a TU compiled after AOT ran.
+
+    Rebuild so AOT sees the same symbols, or set `[compile] aot_thunks = false`
+    for this package to take the JIT dispatch path.""")
 end
 
 """

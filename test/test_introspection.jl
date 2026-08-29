@@ -328,4 +328,48 @@ const W = RepliBuild.Wrapper
             "RepliBuild.JITManager.invoke_aot_ptr(_FPTR__Z7unknownv[], Cint)",
             Dict{String,String}())
     end
+
+    @testset "AOT thunk presence is checked at wrap, not at first call" begin
+        # The thunk set is derived TWICE — AOT at build from compilation
+        # metadata, wrap from the dispatch decision — and nothing reconciles
+        # them. A slot the thunks library does not define resolves to C_NULL
+        # and raises on whichever call the user makes first. Reported by
+        # Clipper2 (7 of 156 missing).
+        taken = Dict("_FPTR__ZN1A1fEv" => "_ZN1A1fEv")
+        text  = "RepliBuild.JITManager.invoke_aot_ptr(_FPTR__ZN1A1fEv[], Cint)"
+
+        # The two derivations the check and the emitted table share. If these
+        # ever disagree, the wrapper looks for a name the check never verified.
+        @test W._aot_thunk_slot_names(text, taken) == ["_FPTR__ZN1A1fEv"]
+        @test W._aot_thunk_symbol(taken, "_FPTR__ZN1A1fEv") ==
+              "_mlir_ciface__ZN1A1fEv_thunk"
+        @test occursin("\"$(W._aot_thunk_symbol(taken, "_FPTR__ZN1A1fEv"))\"",
+                       W._aot_thunk_slot_chunk(text, taken))
+
+        # Nothing bound: vacuously fine, and must not demand a library.
+        @test W._assert_aot_thunks_present("", Dict{String,String}(), "") === nothing
+
+        # Slots bound but no library at all — every call site would raise.
+        @test_throws ErrorException W._assert_aot_thunks_present(text, taken, "")
+        @test_throws ErrorException W._assert_aot_thunks_present(
+            text, taken, joinpath(@__DIR__, "no_such_thunks.so"))
+
+        # A real library that certainly does not define an MLIR ciface thunk.
+        # This is the case the guard exists for, so assert it fires rather than
+        # trusting the negative-library branch above to stand in for it.
+        reallib = first(filter(isfile, ["/usr/lib/libc.so.6", "/lib/libc.so.6",
+                                        "/lib/x86_64-linux-gnu/libc.so.6"]), 1)
+        if !isempty(reallib) && Sys.which("nm") !== nothing
+            err = try
+                W._assert_aot_thunks_present(text, taken, reallib[1]); ""
+            catch e
+                sprint(showerror, e)
+            end
+            @test occursin("missing 1 of 1 symbol", err)
+            @test occursin("_mlir_ciface__ZN1A1fEv_thunk", err)
+            @test occursin("aot_thunks = false", err)   # names the escape hatch
+        else
+            @warn "skipped: no libc.so.6 or no nm — the fires-on-real-library check did not run"
+        end
+    end
 end
