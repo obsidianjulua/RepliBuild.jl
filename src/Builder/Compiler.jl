@@ -5125,8 +5125,62 @@ const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
     "bool" => "Bool",
     "_Bool" => "Bool",
     "void" => "Cvoid",
-    "char*" => "Cstring",
-    "const char*" => "Cstring",
+
+    # NO `char*` / `const char*` ENTRY, DELIBERATELY. Two used to sit here
+    # mapping to `Cstring`, and they were unreachable: `cpp_to_julia_type` peels
+    # trailing `*` BEFORE consulting this map, so a pointer never reaches a
+    # pointer-spelled key. They read as if this map unified the two type
+    # mappings, and it does not.
+    #
+    # It must not. `dwarf_type_to_julia` (RETURN types) maps `char*` to
+    # `Cstring`, which is what the whole Cstring return policy is built on —
+    # `_cstring_wrapper_pair`, the `_ptr` siblings, `_assert_cstring_policy`.
+    # This map serves PARAMETERS and gives `Ptr{UInt8}`. Two answers to one C
+    # spelling, on purpose, because they answer different questions. Re-adding a
+    # `char*` key here would not change behaviour (still unreachable) but would
+    # re-plant the idea that these should agree. See the 2026-08-20 note.
+
+    # DWARF's CANONICAL INTEGER SPELLINGS. DWARF emits the expanded form
+    # (`long int`, `short int`, `signed char`), and this map only had the short
+    # ones — so those parameters resolved to `Any` while the return path typed
+    # them correctly. Measured across the Hub: 11 parameters affected, so the
+    # gap is narrow, but every one of these is an ordinary integer with nothing
+    # subtle about its ABI.
+    "signed" => "Cint",
+    "signed int" => "Cint",
+    "unsigned" => "Cuint",
+    "signed char" => "Cchar",
+    "short int" => "Cshort",
+    "signed short" => "Cshort",
+    "signed short int" => "Cshort",
+    "unsigned short int" => "Cushort",
+    "long int" => "Clong",
+    "signed long" => "Clong",
+    "signed long int" => "Clong",
+    "unsigned long int" => "Culong",
+    "long long int" => "Clonglong",
+    "signed long long" => "Clonglong",
+    "signed long long int" => "Clonglong",
+    "unsigned long long int" => "Culonglong",
+    "wchar_t" => "Cwchar_t",
+    "char16_t" => "UInt16",
+    "char32_t" => "UInt32",
+    "time_t" => "Ctime_t",
+
+    # `__int128` / `__uint128_t` are INTEGER class and pass in a register pair,
+    # so `Int128`/`UInt128` are right. Only fmt uses them (4 params) and fmt has
+    # no build artifacts, so this is unexercised — correct by the ABI rules, not
+    # by a live test.
+    "__int128" => "Int128",
+    "__uint128_t" => "UInt128",
+
+    # `long double` is DELIBERATELY ABSENT. It is x87 80-bit, SysV class X87,
+    # passed on the x87 stack — NOT in the integer registers an `NTuple{2,UInt64}`
+    # would claim. The return map answers `NTuple{2, UInt64}`, which is a storage
+    # size, not a calling convention. Typing it here would convert a loud `Any`
+    # into a silently mis-passed argument, which is strictly worse. 6 parameters
+    # in fmt hit this and should keep failing visibly until the classifier grows
+    # an X87 path.
     "size_t" => "Csize_t",
     "ssize_t" => "Cssize_t",
     "ptrdiff_t" => "Cptrdiff_t",
