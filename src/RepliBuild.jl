@@ -121,117 +121,24 @@ export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser,
        LLVMEnvironment, BuildBridge, ASTWalker, JITManager, ClangJLBridge,
        DependencyResolver, EnvironmentDoctor, PackageRegistry, Debug
 
-# --- Configuration Types & Functions ---
-export RepliBuildConfig,
-       ProjectConfig, PathsConfig, DiscoveryConfig, CompileConfig,
-       LinkConfig, BinaryConfig, WrapConfig, LLVMConfig,
-       WorkflowConfig, CacheConfig, DependenciesConfig, DependencyItem, TypesConfig,
-       load_config, save_config, create_default_config,
-       merge_compile_flags, with_source_files, with_include_dirs, with_discovery_results,
-       get_output_path, get_build_path, get_cache_path,
-       get_library_name, get_module_name,
-       is_stage_enabled, get_source_files, get_include_dirs, get_compile_flags,
-       is_parallel_enabled, is_cache_enabled,
-       validate_config, validate_config!,
-       print_config
-
-# --- Compiler Tooling ---
-export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
-       extract_compilation_metadata, save_compilation_metadata,
-       compute_project_hash, is_project_cache_valid, save_project_hash,
-       assemble_bitcode, sanitize_ir_for_julia,
-       # Previously internal compiler utilities
-       needs_recompile, compile_single_to_ir,
-       generate_template_instantiations, generate_macro_shims,
-       extract_stl_method_symbols, extract_symbols_from_binary,
-       extract_mangled_name, extract_dwarf_return_types,
-       extract_function_name, extract_class_name,
-       dwarf_type_to_julia, get_type_size,
-       cpp_to_julia_type, build_type_registry,
-       infer_return_type, parse_parameters, parse_function_signatures
-
-# --- DWARF & Binary Analysis ---
-export parse_vtables, export_vtable_json,
-       VirtualMethod, MemberInfo, ClassInfo, VtableInfo,
-       # Previously internal DWARF utilities
-       parse_dwarf_output, parse_dwarf_output_robust,
-       parse_symbol_table, read_vtable_data
-
-# --- LLVM Environment & Toolchain ---
-export LLVMToolchain,
-       get_toolchain, init_toolchain, with_llvm_env,
-       get_tool, has_tool, get_library,
-       get_include_flags, get_link_flags,
-       run_tool, print_toolchain_info, verify_toolchain,
-       get_jll_llvm_root, get_llvm_root, LLVM_JLL_AVAILABLE
-
-# --- Build Bridge (command execution & tool discovery) ---
-export run_command, execute, capture,
-       find_executable, command_exists,
-       analyze_compiler_error, compile_with_analysis,
-       throw_compilation_error, execute_with_retry,
-       get_llvm_version, get_compiler_info
-
-# --- MLIR Native (full MLIR lifecycle) ---
-export create_context, create_module, destroy_context, parse_module, clone_module,
-       get_module_operation, print_module,
-       get_function_op, get_function_type,
-       get_num_inputs, get_input_type,
-       is_integer, get_integer_width, is_f32, is_f64,
-       lower_to_llvm,
-       create_jit, destroy_jit, register_symbol, register_symbol_global, lookup,
-       jit_invoke, invoke_safe,
-       emit_llvmir, emit_object,
-       check_library, test_dialect
-
-# --- JLCS IR Generation ---
-export generate_jlcs_ir, generate_mlir_module
-
-# --- DAG Diff (structural mismatch detection + visualization) ---
-export dag_diff, needs_dag_thunk, DAGDiffResult, DAGMismatch, MismatchKind,
-       export_dot, export_graph_dot, render_dot, render_html
-
-# --- JIT Manager ---
-export get_jit_thunk, ensure_jit_initialized, JITContext
-
-# --- AST Walker & Dependency Analysis ---
-export FileDependencies, DependencyGraph,
-       build_dependency_graph,
-       extract_includes_simple, extract_includes_clang,
-       parse_source_structure,
-       resolve_include_path,
-       export_dependency_graph_json, load_dependency_graph_json,
-       print_dependency_summary
-
-# --- Wrapper & Type System ---
-export wrap_library, wrap_basic, extract_symbols,
-       TypeRegistry, SymbolInfo, ParamInfo,
-       TypeStrictness, STRICT, WARN, PERMISSIVE,
-       is_struct_like, is_enum_like, is_function_pointer_like
-
-# --- Clang.jl Bridge ---
-export generate_bindings_clangjl, extract_header_types,
-       sanitize_module_name, add_replibuild_metadata,
-       discover_headers, generate_from_config
-
-# --- STL Wrappers ---
-export CppVector, CppString, CppMap, CppUnorderedMap
-
-# --- IR Gen (struct/function/STL thunk generation) ---
-export generate_function_thunks, generate_stl_thunks,
-       generate_struct_definitions, get_struct_type_string, get_struct_definition_string,
-       is_struct_packed, get_julia_offsets,
-       get_llvm_equivalent_type_string, get_llvm_aligned_type_string,
-       map_cpp_type, get_llvm_signature
-
-# --- Dependency Resolution ---
-export resolve_dependencies
-
-# --- Environment Doctor ---
-export ToolchainStatus, ToolStatus
-
-# --- Package Registry Types ---
-export RegistryEntry, RegistryIndex
+# --- Everything else is INTERNAL and reachable qualified ---
+#
+# The public API is the three blocks above: the six pipeline verbs, the registry,
+# and the submodules. Everything under those submodules stays reachable as
+# `RepliBuild.Compiler.compile_to_ir`, `RepliBuild.parse_vtables`, and so on --
+# removing an `export` does not remove a binding, it only stops `using RepliBuild`
+# from dumping the name into the caller's namespace.
+#
+# This block used to publish 221 names, ~195 of them implementation detail:
+# every DWARF parser entry point, the whole MLIR lifecycle, the IR-gen thunk
+# emitters, BuildBridge's command runners, the config accessors. A generated
+# wrapper is a namespace the LIBRARY populates, and the same logic applies one
+# level up -- `execute`, `capture`, `lookup`, `search`, `info`, `build` are
+# plausible names in a consumer's own code, and exporting them means
+# `using RepliBuild` silently competes for them.
+#
+# If something here turns out to be genuinely public, export it deliberately and
+# document it. The default is qualified access.
 
 """
     check_environment(; verbose=true, throw_on_error=false) -> ToolchainStatus
