@@ -102,30 +102,14 @@ Returns the exact ABI byte size of common STL containers on x86_64 SysV.
 Returns 0 if unknown.
 """
 function get_stl_container_size(c_type::String)::Int
-    clean = strip(replace(c_type, r"^(const|struct|class|union)\b" => ""))
-    clean = strip(replace(clean, r"[*&]+$" => ""))
-    
-    # Check for both "std::..." and raw prefixes (since DWARF sometimes strips std::)
-    # Use _stl_name_match for std:: prefixes to avoid false positives
-    # (e.g. "std::string_view" matching "std::string")
-    if _stl_name_match(clean, "std::vector") || startswith(clean, "vector<")
-        return 24
-    elseif _stl_name_match(clean, "std::basic_string") || _stl_name_match(clean, "std::string") || startswith(clean, "basic_string<")
-        return 32 # libstdc++ SSO string size is 32 bytes on 64-bit
-    elseif _stl_name_match(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
-        return 16
-    elseif _stl_name_match(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
-        return 8
-    elseif _stl_name_match(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || _stl_name_match(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
-        return 56 # Typical hashtable size — check before std::map/std::set to avoid prefix collision
-    elseif _stl_name_match(clean, "std::map") || startswith(clean, "map<") || _stl_name_match(clean, "std::set") || startswith(clean, "set<")
-        return 48 # Typical rb_tree size
-    elseif _stl_name_match(clean, "std::list") || startswith(clean, "list<")
-        return 24
-    elseif _stl_name_match(clean, "std::deque") || startswith(clean, "deque<")
-        return 80
-    end
-    return 0
+    # ONE TABLE, and it lives in the layer below — Wrapper imports IRGen, IRGen
+    # cannot import Wrapper, so TypeUtils is the only place both sides reach.
+    # These were two copies until 2026-08-29 and had drifted: this one used
+    # `_stl_name_match` (so `std::string_view` correctly answered 0) while
+    # TypeUtils used bare `startswith` (and answered 32). FunctionGen reads the
+    # TypeUtils one, so a by-value `string_view` would have had a 32-byte blob
+    # thunk on one side and "not a container" on the other.
+    return JLCSIRGenerator.TypeUtils.get_stl_container_size(c_type)
 end
 
 """

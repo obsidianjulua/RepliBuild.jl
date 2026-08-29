@@ -115,25 +115,46 @@ end
 Returns the exact ABI byte size of common STL containers on x86_64 SysV.
 Returns 0 if unknown.
 """
+# Match an STL type name with word-boundary awareness: `clean` equals `prefix`,
+# or is `prefix` followed by `<` or a space. Without this, `startswith` makes
+# `std::string_view` match `std::string` and answer 32 — while the wrapper side
+# (TypesCpp `is_stl_container_type`) correctly says "not a container, size 0".
+# FunctionGen would then emit a 32-byte blob thunk for a buffer the wrapper does
+# not treat as one: thunk and wrapper disagreeing about a buffer, which is the
+# ImGui receiver-miss shape.
+#
+# THIS IS THE ONE TABLE. `Wrapper/Cpp/TypesCpp.jl` delegates here rather than
+# keeping a second copy — Wrapper imports IRGen, so this is the layer both can
+# reach. The two copies had already drifted twice (the `string_view` match above,
+# and a different unordered-before-map ordering that happened to be harmless).
+function _stl_name_match(clean::AbstractString, prefix::AbstractString)::Bool
+    startswith(clean, prefix) || return false
+    ncodeunits(clean) == ncodeunits(prefix) && return true
+    c = clean[ncodeunits(prefix) + 1]
+    return c == '<' || c == ' '
+end
+
 function get_stl_container_size(c_type::String)::Int
     clean = strip(replace(c_type, r"^(const|struct|class|union)\b" => ""))
     clean = strip(replace(clean, r"[*&]+$" => ""))
 
-    if startswith(clean, "std::vector") || startswith(clean, "vector<")
+    # Bare (std::-stripped) spellings require `<` — DWARF drops the namespace but
+    # keeps the template arguments, so a bare `string` is not a container name.
+    if _stl_name_match(clean, "std::vector") || startswith(clean, "vector<")
         return 24
-    elseif startswith(clean, "std::basic_string") || startswith(clean, "std::string") || startswith(clean, "basic_string<") || startswith(clean, "string")
-        return 32
-    elseif startswith(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
+    elseif _stl_name_match(clean, "std::basic_string") || _stl_name_match(clean, "std::string") || startswith(clean, "basic_string<")
+        return 32  # libstdc++ SSO string is 32 bytes on 64-bit
+    elseif _stl_name_match(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
         return 16
-    elseif startswith(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
+    elseif _stl_name_match(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
         return 8
-    elseif startswith(clean, "std::map") || startswith(clean, "map<") || startswith(clean, "std::set") || startswith(clean, "set<")
-        return 48
-    elseif startswith(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || startswith(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
-        return 56
-    elseif startswith(clean, "std::list") || startswith(clean, "list<")
+    elseif _stl_name_match(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || _stl_name_match(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
+        return 56  # hashtable
+    elseif _stl_name_match(clean, "std::map") || startswith(clean, "map<") || _stl_name_match(clean, "std::set") || startswith(clean, "set<")
+        return 48  # rb_tree
+    elseif _stl_name_match(clean, "std::list") || startswith(clean, "list<")
         return 24
-    elseif startswith(clean, "std::deque") || startswith(clean, "deque<")
+    elseif _stl_name_match(clean, "std::deque") || startswith(clean, "deque<")
         return 80
     end
     return 0

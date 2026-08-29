@@ -35,6 +35,25 @@ non-trivial for the purposes of calls under the Itanium ABI — by-value
 crossings must go through a caller-owned temporary that is destructed after
 the call, which is exactly what the scope-RAII producer emits.
 """
+# The demangled form of a constructor is `<fully-qualified class>::<bare name>(`
+# — `pugi::xml_node::xml_node(…)`, not `pugi::xml_node::pugi::xml_node(…)`.
+# Interpolating the class twice built the latter, which matches no real demangle,
+# so every NAMESPACED class silently recorded no copy constructor and the
+# scope-RAII producer never emitted one for it. Non-namespaced fixture classes
+# were unaffected, which is why nothing caught it.
+#
+# Bare name = the last `::` segment of the class with template arguments removed
+# FIRST, since those can themselves contain `::` (`Foo<std::string>`). Wrapper's
+# `_bare_type_name_cpp` does the same job; IRGen is the lower layer and cannot
+# import from Wrapper, so this is a deliberate small local scan rather than a
+# third copy of a shared helper.
+function _bare_class_name(cls::AbstractString)::String
+    cut = findfirst('<', cls)
+    base = cut === nothing ? cls : cls[1:prevind(cls, cut)]
+    sep = findlast("::", base)
+    return sep === nothing ? String(base) : String(base[nextind(base, last(sep)):end])
+end
+
 function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
     raii = Dict{String,Dict{Symbol,String}}()
     for f in get(metadata, "functions", [])
@@ -52,7 +71,7 @@ function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
             if !haskey(entry, :dtor) || (occursin("D1E", mangled) && !occursin("D1E", entry[:dtor]))
                 entry[:dtor] = mangled
             end
-        elseif occursin("$(cls)::$(cls)(", demangled)
+        elseif occursin("$(cls)::$(_bare_class_name(cls))(", demangled)
             # Constructor: a copy ctor takes exactly one param of `const cls&`
             # (metadata params exclude the implicit `this`)
             params = get(f, "parameters", [])
