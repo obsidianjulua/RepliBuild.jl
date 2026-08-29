@@ -287,12 +287,33 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     # until the MI fixture drove one (2026-07-17). Note the resulting call is
     # the statically-named class's implementation (`p->Base2::get_b()`
     # semantics); override-honoring dispatch is the future vcall producer.
+    # WHAT THE WRAPPER CAN BIND — the routing key, and it must have an answer
+    # even with no manifest.
+    #
+    # A manifest is the exact set the wrapper emitted, so prefer it. But AOT runs
+    # at BUILD and the manifest is written at WRAP, so a cold build has none —
+    # and `needed_symbols === nothing` used to mean "no virtual is
+    # wrapper-needed", sending every one of them to the legacy vmethod pass.
+    # That is backwards: absent a manifest the best available proxy is
+    # metadata's own function list, which is precisely the collection
+    # GeneratorCpp iterates when deciding what to emit. Anything in it is a
+    # function the wrapper may bind, and a bound virtual needs FunctionGen's
+    # ciface convention.
+    #
+    # What legitimately stays in `gen_pre` either way: virtuals with an address
+    # that are NOT in the function list — inherited `std::exception::what`, D4
+    # deleting destructors, `std::type_info` members. Those are reached through
+    # the vtable internally and never become API, so the legacy declaration is
+    # all they need.
+    wrappable = needed_symbols !== nothing ? needed_symbols :
+        Set{String}(get(f, "mangled", "") for f in get(metadata, "functions", []))
+
     gen_pre = Set{String}()
     for (class_name, class_info) in vtinfo.classes
         (class_info.size == 0 || isempty(class_info.members)) && continue
         for method in class_info.virtual_methods
             get(vtinfo.method_addresses, method.mangled_name, UInt64(0)) == 0 && continue
-            needed_symbols !== nothing && method.mangled_name in needed_symbols && continue
+            method.mangled_name in wrappable && continue
             push!(gen_pre, method.mangled_name)
         end
     end

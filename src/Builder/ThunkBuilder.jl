@@ -27,7 +27,33 @@ function build_aot_thunks(config, library_path)
 
     vtable_info = DWARFParser.parse_vtables(library_path)
     metadata = JSON.parsefile(metadata_path)
-    ir_source = JLCSIRGenerator.generate_jlcs_ir(vtable_info, metadata)
+
+    # AOT MUST READ THE THUNK MANIFEST, for the same reason the JIT path does
+    # (JITManager, "Load thunk manifest").
+    #
+    # `needed_symbols` is not only dead-thunk elimination — it is what ROUTES a
+    # virtual method to the right emitter. A virtual the wrapper binds has to go
+    # through the function-thunk pass, because only FunctionGen emits the
+    # `_mlir_ciface_<mangled>_thunk` convention `invoke`/`invoke_aot_ptr` looks
+    # up; the legacy vmethod-IR pass emits `thunk_<mangled>`, which no wrapper
+    # has looked up since 2026-07-17 (see JLCSIRGenerator's comment above
+    # `gen_pre`). Passing nothing here sent every virtual down the legacy pass,
+    # so AOT built a symbol the wrapper never asks for and omitted the one it
+    # does — clipper2's 7 unresolved slots of 156.
+    manifest_path = joinpath(output_dir, "thunk_manifest.json")
+    needed_symbols = if isfile(manifest_path)
+        try
+            manifest = JSON.parsefile(manifest_path)
+            Set{String}(get(manifest, "function_thunks", String[]))
+        catch
+            nothing
+        end
+    else
+        nothing
+    end
+
+    ir_source = JLCSIRGenerator.generate_jlcs_ir(vtable_info, metadata;
+                                                 needed_symbols = needed_symbols)
 
     ctx = MLIRNative.create_context()
     try
