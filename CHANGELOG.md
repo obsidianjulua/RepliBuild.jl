@@ -2,6 +2,337 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v3.3.4 (2026-08-30)
+
+Patch, and mostly guards that were not guarding. A build-identity check that
+returned on its first line for every package that had one; a docstring on every
+generated function that Julia never attached; a virtual method the AOT path
+built under a name no wrapper looks up; a `.ll → .so` step reaching for a
+different clang than the one that emitted the IR. Also: `using RepliBuild`
+stops publishing 221 names, and a `[wrap.varargs]` table now records the
+upstream commit that proved it.
+
+### The build-identity check never ran (2026-08-30)
+
+Every generated C wrapper carried `BUILD_ID`, the GNU build ID of the library
+it was generated from, and compared it at load. A build ID only exists if the
+linker was asked to emit one, and RepliBuild never asks: the C bucket links
+through `Clang_unified_jll` (`_clang_for_c_bucket`), which unlike the system
+driver emits no note by default. So `BUILD_ID` interpolated empty and
+`_check_build_identity` returned on its first line — for every C package built
+after that routing landed.
+
+Identity is the **SHA-256 of the library file** now. No linker flag, identical
+behaviour for both buckets, and it also catches post-link modification. What it
+gives up: a build ID survives `strip` and a file hash does not. The `binary`
+stage strips before `wrap` runs, so the hash is taken of the already-stripped
+file and the normal flow is unaffected — stripping a library *after* generating
+its wrapper will now warn.
+
+**The C++ bucket had no identity check at all**, despite its wrappers carrying
+the same snapshot the C ones do — struct offsets, blob byte sizes, enum values,
+sliced IR. It runs the same check now, in all three `__init__` variants.
+
+**A second drift direction, because the hash cannot see it.** A file hash
+catches a library that moved under a wrapper that was not regenerated. It is
+blind to the reverse — the wrapper going stale against RepliBuild's codegen
+while the `.so` matches byte for byte — and that is live here: struct layout,
+dispatch tiers and ABI handling have all moved under existing wrappers this
+year. `BUILD_GENERATOR` holds the generating version and is compared against
+`pkgversion(RepliBuild)` at load. Neither check subsumes the other, so both run
+separately with separate warnings.
+
+`SHA` is re-exposed as `RepliBuild.SHA`: a wrapper vendored into a consumer
+package cannot `using SHA` unless that package declares the dep, and routing
+through RepliBuild — which the wrapper already imports — leaves the consumer's
+Project.toml untouched.
+
+### Every generated docstring was detached from its function (2026-08-30)
+
+The doc heredocs end in a newline and every splice site emitted
+`$doc_comment\nfunction …`, putting a blank line between the docstring and its
+definition. Julia's docstring attachment does not survive that: the string is
+evaluated as a no-op literal and the function ships undocumented, with no error
+anywhere.
+
+Measured across the shipped Hub wrappers by counting docstring closes, **11118
+are followed by a blank line then `function`, against 1558 closing flush**. The
+1558 are the generator's inline boilerplate — struct `setproperty`, the
+`_cstring_wrapper_pair` `_ptr` siblings — which has always closed tight. That
+asymmetry inside a single generated file is what makes this findable at all.
+
+Chomped at all four splice sites: C, C++, and both vararg forms. Every existing
+wrapper stays undocumented until regenerated.
+
+### `long int`, `signed char` and 20 more spellings on the parameter path (2026-08-29)
+
+DWARF emits the expanded C forms — `long int`, `short int`, `signed char`,
+`unsigned`, `long long int` — and `_CPP_TO_JULIA_TYPE_MAP` carried only the
+short ones, so those parameters resolved to `Any` while the return path typed
+them correctly. 23 spellings were in `_DWARF_TYPE_MAP` and absent here; the 22
+that are ordinary integers were added.
+
+**`long double` is the 23rd and stays out, deliberately.** It is x87 80-bit,
+SysV class X87, passed on the x87 stack — not in the integer registers an
+`NTuple{2,UInt64}` would claim. The return map's answer is a storage size, not
+a calling convention. Typing it here would convert a loud `Any` into a silently
+mis-passed argument, which is strictly worse. It should stay the one gap until
+the classifier grows an X87 path.
+
+Also removed: `"char*" => "Cstring"` and `"const char*" => "Cstring"`, which
+were unreachable — `cpp_to_julia_type` peels a trailing `*` before the lookup,
+so a pointer never reaches a pointer-spelled key. Inert, but they read as if
+this map unified the return and parameter mappings, which it must not: that
+split is what `_cstring_wrapper_pair`, the `_ptr` siblings and
+`_assert_cstring_policy` all rest on. The place someone would try to "fix" it
+now says so.
+
+Blast radius measured: across every Hub package exactly 11 parameters carried a
+missing spelling — `long double` 6 and `__int128` 4 (both fmt, which has no
+build artifacts), `signed char` 1 (llamacpp).
+
+### The copy-constructor matcher never matched a namespaced class (2026-08-29)
+
+`_collect_class_raii` tested `occursin("$(cls)::$(cls)(", demangled)`. A
+constructor demangles as `<fully-qualified class>::<bare name>(` —
+`pugi::xml_node::xml_node(…)` — so interpolating the class twice built
+`pugi::xml_node::pugi::xml_node(`, which matches no real demangle. Every
+namespaced class silently recorded no copy constructor, and the scope-RAII
+producer never emitted the caller-owned temporary the Itanium ABI wants for a
+by-value parameter of such a class. Non-namespaced fixture classes were
+unaffected, which is why mi/vi/stl never caught it. Two copy constructors
+gained across the Hub, both pugixml.
+
+**STL container size was hardcoded twice.** `TypesCpp` used the word-boundary
+aware `_stl_name_match` (added so `std::string_view` does not match
+`std::string`); `TypeUtils` used bare `startswith` and answered 32 for
+`std::string_view`. FunctionGen reads the TypeUtils one, so a by-value
+`string_view` would have had a 32-byte blob thunk on the thunk side and "not a
+container, size 0" on the wrapper side — thunk and wrapper disagreeing about a
+buffer, the ImGui receiver-miss shape. Latent; no by-value `string_view` in the
+Hub today. Now one table, in TypeUtils, because Wrapper imports IRGen and not
+the reverse.
+
+Both found by an audit of the "one fact, two derivations" class
+(`docs/updates/2026-08-29-one-fact-two-derivations.md`).
+
+### `using RepliBuild` published 221 names (2026-08-29)
+
+Roughly 195 of them were implementation detail: every DWARF parser entry point,
+the whole MLIR context/JIT lifecycle, the IR-gen thunk emitters, BuildBridge's
+command runners, the config accessors, the LLVM toolchain helpers.
+**`names(RepliBuild)` reports 31 now** — 13 verbs and the 18 submodules. The
+verbs are the six pipeline steps
+(`build`/`wrap`/`info`/`discover`/`clean`/`ingest`), the registry
+(`use`/`register`/`unregister`/`list_registry`/`search`/`scaffold_package`) and
+`check_environment`; the submodule names are the deliberate escape hatch every
+Hub consumer reaches through.
+
+**Removing an `export` removes no binding.** `RepliBuild.Compiler.compile_to_ir`
+and `RepliBuild.parse_vtables` still resolve; only the namespace dump stops.
+That matters because `execute`, `capture`, `lookup`, `search`, `info` and
+`build` are all plausible names in a consumer's own code — the same
+namespace-competition argument the generated wrappers already apply when they
+withhold `error` and `stat`.
+
+Measured before cutting: of the 221, only 59 appear as a bare word anywhere
+under `test/`, `docs/` or the Hub, and the Hub's share turned out to be
+entirely comments and prose (`lookup` in five files is the English word).
+
+### A wrapper-bound virtual took the legacy thunk path on AOT builds (2026-08-29)
+
+A virtual method the wrapper binds must go through the function-thunk pass:
+only FunctionGen emits the `_mlir_ciface_<mangled>_thunk` convention that
+`invoke`/`invoke_aot_ptr` looks up, and only it emits `jlcs.vcall`, so an
+override is honoured instead of getting `p->Class::method()` static semantics.
+The legacy vmethod-IR pass emits `thunk_<mangled>`, which no wrapper has looked
+up since 2026-07-17.
+
+`needed_symbols` is the routing key for that decision — not merely dead-thunk
+elimination. JITManager passes the thunk manifest and gets the right answer;
+`build_aot_thunks` passed nothing, so every virtual fell to the legacy pass.
+AOT built a symbol the wrapper never asks for and omitted the one it does.
+
+Two changes, because the manifest alone is not sufficient. ThunkBuilder reads
+`thunk_manifest.json` and threads it through as JITManager does. And
+`needed_symbols === nothing` no longer means "no virtual is wrapper-needed":
+AOT runs at **build** and the manifest is written at **wrap**, so a cold build
+has none, and the old default reproduced the bug on any fresh package. Absent a
+manifest, routing falls back to metadata's function list — the collection
+GeneratorCpp iterates when deciding what to emit. Virtuals outside it
+(inherited `std::exception::what`, D4 deleting destructors, `std::type_info`
+members) still take the legacy path; they are reached through the vtable
+internally and never become API.
+
+Verified on clipper2: all seven now define `_mlir_ciface_*_thunk`, zero legacy
+`thunk__Z*` remain, wrap succeeds with 157 `invoke_aot_ptr` sites and 0 legacy
+ccalls, and `Clipper2Exception::what` comes back as `Union{String,Nothing}` —
+the Cstring policy applies, which it did not on the legacy path.
+
+The diagnosis is `docs/updates/2026-08-29-virtual-branch-policy-audit.md`. It
+also caught that the obvious fix — pointing the wrapper at `thunk_<mangled>` —
+reverts the 2026-07-17 routing decision, drops override-honouring dispatch,
+carries the wrong arity and skips the Cstring pair. That approach was
+implemented, measured with `test/ab_virtual_dispatch.jl`, and abandoned on the
+audit's evidence.
+
+### A wrapper could bind AOT thunks its library does not define (2026-08-29)
+
+The AOT pass (build, from compilation metadata) and the wrapper generator
+(wrap, from the dispatch decision) can disagree about which thunks exist, and
+nothing checked. A slot the thunks library does not define resolves to `C_NULL`
+and raises on whichever call the user makes first, announced only by a
+load-time warning — the silent-until-you-touch-it class.
+
+Wrap already knows the exact slot list and the thunks library exists by then,
+since AOT runs at build, so it can simply be asked what it defines.
+`_aot_thunk_slot_names` derives the referenced set once and `_aot_thunk_symbol`
+owns the `_mlir_ciface_<mangled>_thunk` spelling once, so the check and the
+emitted `_THUNK_SLOTS` table cannot diverge.
+
+Found clipper2's gap immediately — 7 of 156 — which the entry above fixes.
+`test_introspection` 60 → 69, including a fires-on-a-real-library check against
+libc rather than trusting the missing-file branch to stand in for it.
+
+### `[wrap.varargs]` is pinned to the commit it was verified against (2026-08-27)
+
+A varargs table is the one part of a `replibuild.toml` a rebuild cannot
+re-derive. Sources, flags, headers and excludes all fail loudly when they stop
+matching upstream — a missing file, an unresolvable header, a link error.
+Variadic signatures do not: they are a human's reading of upstream's API, and
+after a version bump they regenerate wrappers describing calls that may no
+longer exist, reporting success either way.
+
+```toml
+[wrap.varargs]
+proven_at = "7579fc9d7ed90240487251dfb69168f8e64e9294"
+lua_pushfstring = [["Cstring"], ["Cint"]]
+```
+
+Enforced in `wrap_library` against the resolved `[dependencies.*]` commit —
+the entry matching `project.name`, else the sole entry carrying one. Prefixes
+match, so a short hash works. A mismatch is an error naming both commits and
+the affected functions. **A pin with nothing to compare against is also an
+error**: it reads as provenance and provides none. A varargs table with no pin
+warns. Claimed only when the value is a `String`, so a C function genuinely
+named `proven_at` still parses as an overload table.
+
+Enforcement sits in `wrap_library` rather than `load_config` because wrapping
+is the only stage that consumes varargs — a bare `build()` has nothing to go
+stale — and because the config-surface guard correctly refused to count a field
+read only inside its own parser. Seven Hub packages carry varargs tables and
+will warn until pinned: curl, lua, box2d, box2d3, zlib, imgui, sqlite.
+
+### The C bucket's final link used a different clang than its IR (2026-08-27)
+
+The C bucket keeps every tool that touches its IR version-matched: JLL clang
+emits it, Julia's resident libLLVM links and optimizes it. The final
+`.ll → .so` step was not on that path — `create_library` and
+`create_executable` shelled straight to system `clang`.
+
+That breaks on any C source containing a weak-symbol NULL check. JLL clang 18
+legally emits `icmp eq (ptr @weak_fn, ptr null)` as a constant expression, LLVM
+19 removed icmp constexprs, and system clang 22 then rejects IR this pipeline
+produced itself:
+
+```
+error: icmp constexprs are no longer supported
+```
+
+zstd's tracing hooks are the first Hub source to do it. `_clang_for_c_bucket`
+is extracted and `create_library`, `create_executable` and
+`compile_single_to_ir` all route through it.
+
+Deliberately **not** `LLVMEnvironment.resolve_tool(name, :c)`: that looks for a
+parallel system install, and Arch's `llvm18` package ships LLVM tools with no
+clang binary at all — so it finds `/usr/lib/llvm18/bin`, misses clang, and
+silently returns the bare name, landing back on the system compiler. It remains
+correct for `llvm-link` and `opt`, which that package does ship.
+
+Verified by rebuilding Hub zstd with its `-DZSTD_TRACE=0` pin **removed**: 26
+`icmp eq (ptr @ZSTD_trace…)` constexprs present in the per-file IR and in the
+assembled `zstd_abi.ll`, build succeeds at 4.2 MB with 4 `ZSTD_trace` symbols
+in the `.so`. That pin can come out.
+
+### gcc's `DW_OP_lit` spelling lost every virtual-base offset (2026-08-27)
+
+Both DWARF parsers matched only clang's `DW_OP_constu N` when reading the
+vbase-offset expression off a `DW_TAG_inheritance` edge. gcc emits the
+single-byte `DW_OP_lit<N>` form for N ≤ 31, so every gcc-built library —
+libstdc++ among them — failed to parse and silently lost the offset.
+
+The two producers failed *differently*, which is why nothing caught it:
+`Compiler.jl` (readelf) never set the key, so `_collect_upcasts!` saw `nothing`
+and took its `@debug` branch; `DWARFParser.jl` (llvm-dwarfdump) left the pushed
+default 0, and JLCSIRGenerator skips on `!= 0`. Either way the virtual-base
+upcast helper was simply not emitted, and the only trace was an `@debug` line
+invisible at default log level. No wrong pointers — a missing capability
+announcing itself to nobody.
+
+Both regexes accept either spelling now, and the `@debug` fall-through is an
+error. A vbase-offset of 0 is structurally impossible — the entry always sits
+below the vtable address point, so a parsed value is always negative — so both
+`nothing` and 0 mean "unparsed" and stop the build naming the class and base.
+An unhandled `DW_OP` form lands there instead of silently degrading.
+
+Found while probing libstdc++'s iostream diamond. Neither path is reachable
+from a supported config today (RepliBuild consumes only DWARF it generated with
+clang, and `ingest` refuses C++), so the widened regex is defensive; the guard
+is the part that earns its place now.
+
+### Configure-time header generation is a build capability: `SysConfigGen` (2026-08-26)
+
+A library whose headers come from feature detection cannot be *built* without
+this — the compile has nothing to include — so it belongs in the builder, not
+in RepliBuildTooling, which is for looking at what was produced.
+`RepliBuildTooling/src/Introspect/CMakeHarvest.jl` moves to
+`src/Builder/SysConfigGen.jl` as a proper module.
+
+The lift was clean; the one thing the file took from its old host's namespace
+was `execute`, now an explicit `using ..BuildBridge: execute`. That dependency
+was invisible until the move and surfaced as an `UndefVarError` the first time
+the end-to-end test ran in the new home.
+
+Renamed while moving, because "harvest" reads as generated filler rather than
+as what the code does: `harvest_config` → `capture_config`, `propose_toml` →
+`toml_fragment`, `HARVEST.md` → `SYSCONFIG.md` (the emitted provenance file).
+`cmake_probe`, `main_target` and `uniform` keep their names — those describe
+the operation.
+
+Tests moved into `test/test_sysconfiggen.jl`, wired at devtests §18 because the
+end-to-end case shells to cmake; 31/31, driving a self-contained generated
+CMakeLists, so no network and no vendored library. Tooling stays green at
+97/97 with zero remaining references. Hub-side, pcre2's `harvest.jl` uses
+`RepliBuild.SysConfigGen` and its checked-in `config/HARVEST.md` became
+`config/SYSCONFIG.md` — which matters beyond cosmetics, since
+`packages/pcre2/test.jl` asserts that file by name.
+
+### One suite owns each test file, and the version is one number (2026-08-26)
+
+The wiring guard's only rule was "included by *a* suite", which a file sitting
+in **both** satisfies. `test_registry.jl` did exactly that: no suite owned it,
+it ran twice for anyone running both, and nothing in the tree answered "is this
+a CI test or a toolchain test?" — the same ambiguity that lets a toolchain
+dependency drift into CI unnoticed. It is runtests-owned now, verified
+toolchain-free rather than assumed (run with clang hidden from `PATH` it passes
+6/6). `runtests.jl` asserts the two suites are disjoint, with a `SHARED` dict —
+empty — for a deliberate exception, so an overlap has to be someone's decision
+rather than nobody's accident.
+
+`Project.toml` and `const VERSION` were two independent literals with nothing
+reconciling them. **`VERSION` is derived from `Project.toml` now**, with an
+`include_dependency` so editing Project.toml invalidates this module's
+precompile cache — without it the old number stays baked into the `.ji` and the
+derivation would be a fiction.
+
+Not cosmetic: `VERSION` feeds `_generator_fingerprint`, which gates the
+registry build cache, so a wrong version serves a stale-codegen wrapper instead
+of rebuilding it — and it is stamped into every emitted wrapper as
+`BUILD_GENERATOR`. Guarded in `runtests.jl` by three checks: it equals the
+TOML, it equals `pkgversion(RepliBuild)` (an independent read through Julia's
+own resolution), and the source still contains the derivation rather than a
+re-introduced literal.
+
 ## v3.3.3 (2026-08-26)
 
 Patch. A Tier-2 call spent most of its time re-answering a question settled at
