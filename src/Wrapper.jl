@@ -7,6 +7,7 @@ module Wrapper
 using Dates
 using JSON
 using Libdl   # Tier-1 slice symbol pre-flight (GeneratorC._tier1_preflight!)
+using SHA     # library identity stamped into every wrapper (Utils._library_sha256)
 
 # Import from parent RepliBuild module
 import ..ConfigurationManager: RepliBuildConfig, get_output_path, get_module_name,

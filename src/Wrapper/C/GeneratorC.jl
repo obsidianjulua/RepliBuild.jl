@@ -336,7 +336,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     const Cuintptr_t = UInt
 
     using Libdl
-    import RepliBuild
+    import RepliBuild  # build-identity check: RepliBuild.SHA + pkgversion
     import Base: unsafe_convert
 
     # Resolve the library next to this file first: build artifacts travel as a
@@ -366,62 +366,65 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # build — a JLL, a distro package, a rebuild with different flags — and
     # nothing fails loudly; it just reads the wrong offsets. So the identity of
     # the library it was generated against travels with it.
-    const BUILD_ID = \"$(_elf_build_id(lib_path) === nothing ? "" : _elf_build_id(lib_path))\"
+    # Identity is the SHA-256 of the library file, not its GNU build ID. A build
+    # ID only exists if the linker was asked for one, and the C bucket links
+    # through Clang_unified_jll, which emits none by default — so that check sat
+    # inert. A file hash needs no linker flag and behaves the same for C and C++.
     const BUILD_TARGET = \"$(Sys.MACHINE)\"
-    const BUILD_GENERATOR = \"RepliBuild v$(pkgversion(@__MODULE__) === nothing ? "?" : pkgversion(@__MODULE__))\"
-
-    \"\"\"GNU build ID of the ELF at `path`, or \"\" — read from PT_NOTE, so it survives stripping.\"\"\"
-    function _read_build_id(path::AbstractString)
-        try
-            open(path, \"r\") do io
-                read(io, 4) == UInt8[0x7f, 0x45, 0x4c, 0x46] || return \"\"
-                seek(io, 4); read(io, UInt8) == 2 || return \"\"
-                seek(io, 0x20); phoff = read(io, UInt64)
-                seek(io, 0x36); phentsize = read(io, UInt16); phnum = read(io, UInt16)
-                for i in 0:(phnum - 1)
-                    seek(io, phoff + i * phentsize)
-                    read(io, UInt32) == 4 || continue
-                    skip(io, 4); off = read(io, UInt64); skip(io, 16); sz = read(io, UInt64)
-                    pos, stop = off, off + sz
-                    while pos + 12 <= stop
-                        seek(io, pos)
-                        namesz = read(io, UInt32); descsz = read(io, UInt32); ntype = read(io, UInt32)
-                        name = String(read(io, namesz))
-                        pad(n) = (n + 3) & ~UInt32(3)
-                        desc_at = pos + 12 + pad(namesz)
-                        if ntype == 3 && startswith(name, \"GNU\")
-                            seek(io, desc_at); return bytes2hex(read(io, descsz))
-                        end
-                        pos = desc_at + pad(descsz)
-                    end
-                end
-                return \"\"
-            end
-        catch
-            return \"\"
-        end
-    end
+    const BUILD_GENERATOR = \"$(pkgversion(@__MODULE__) === nothing ? "" : pkgversion(@__MODULE__))\"
+    const LIBRARY_SHA = \"$(_library_sha256(lib_path))\"
 
     \"\"\"
-    Warn if the library beside this wrapper is not the one it was generated from.
+    Warn if this wrapper has drifted from what it was generated against.
 
-    Only a warning: a rebuild of the same source is usually fine, and refusing
-    to load would break legitimate workflows. But layout drift is silent and
+    Two drifts, checked separately because they fail independently:
+
+      * the LIBRARY changed under a wrapper that was not regenerated — struct
+        offsets, enum values, blob sizes and any sliced IR go stale against the
+        new binary;
+      * the GENERATOR moved on under a library that did not — the wrapper is
+        stale against RepliBuild's current codegen even though the .so matches.
+
+    The file hash sees the first and is blind to the second; the version stamp
+    is the reverse. Neither subsumes the other.
+
+    Only warnings: a rebuild of the same source is usually fine, and refusing to
+    load would break legitimate workflows. But layout drift is silent and
     unrecoverable at the call site, so the user gets told once. Tier 1, where
     this wrapper has any, protects itself separately and automatically through
     its own load-time symbol check.
     \"\"\"
     function _check_build_identity()
-        isempty(BUILD_ID) && return nothing          # no build ID to compare
-        actual = _read_build_id(LIBRARY_PATH)
-        (isempty(actual) || actual == BUILD_ID) && return nothing
-        @warn \"\"\"
-        $(module_name): the library loaded is NOT the build this wrapper was generated from.
-        Struct layouts, enum values, blob sizes and any sliced IR in this wrapper are a
-        snapshot of the original build; a mismatch can read wrong offsets with no error.
-        Regenerate the wrapper against this library if the two are not known-compatible.\"\"\" *
-        \"\\n  expected build id: \$BUILD_ID\\n  actual build id:   \$actual\\n  library:           \$LIBRARY_PATH\" *
-        \"\\n  generated for:     \$BUILD_TARGET by \$BUILD_GENERATOR\"
+        if !isempty(LIBRARY_SHA)
+            actual = try
+                bytes2hex(open(RepliBuild.SHA.sha256, LIBRARY_PATH))
+            catch
+                \"\"                                   # unreadable: nothing to compare
+            end
+            if !isempty(actual) && actual != LIBRARY_SHA
+                @warn \"\"\"
+                $(module_name): the library loaded is NOT the build this wrapper was generated from.
+                Struct layouts, enum values, blob sizes and any sliced IR in this wrapper are a
+                snapshot of the original build; a mismatch can read wrong offsets with no error.
+                Regenerate the wrapper against this library if the two are not known-compatible.\"\"\" *
+                \"\\n  expected sha256: \$LIBRARY_SHA\\n  actual sha256:   \$actual\\n  library:         \$LIBRARY_PATH\" *
+                \"\\n  generated for:   \$BUILD_TARGET by RepliBuild v\$BUILD_GENERATOR\"
+            end
+        end
+        if !isempty(BUILD_GENERATOR)
+            running = try
+                string(pkgversion(RepliBuild))
+            catch
+                \"\"                                   # RepliBuild absent: skip
+            end
+            if !isempty(running) && running != BUILD_GENERATOR
+                @warn \"\"\"
+                $(module_name): this wrapper was generated by an older RepliBuild than the one loaded.
+                The library itself may be fine — but codegen (struct layout, dispatch tiers, ABI
+                handling) can have changed since, leaving this wrapper stale. Re-run wrap().\"\"\" *
+                \"\\n  wrapper generated by: RepliBuild v\$BUILD_GENERATOR\\n  currently loaded:     RepliBuild v\$running\"
+            end
+        end
         return nothing
     end
 
@@ -2395,7 +2398,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             \"\"\"
             """
 
-            doc_comment = doc_parts
+            # Chomp the heredoc's trailing newline. Every splice site emits
+            # `$doc_comment\nfunction ...`, so a docstring that ends in a
+            # newline puts a BLANK LINE between itself and the definition —
+            # and Julia's docstring attachment does not survive that. It fails
+            # silently: the string is evaluated as a no-op literal and the
+            # function ships undocumented. See _cstring_wrapper_pair, which
+            # has always closed its `_ptr` docstring tight against `function`.
+            doc_comment = chomp(doc_parts)
         end
 
         # =========================================================

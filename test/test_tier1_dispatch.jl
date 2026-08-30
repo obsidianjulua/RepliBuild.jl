@@ -18,6 +18,7 @@
 using Test
 using TOML
 using Pkg
+using SHA
 using RepliBuild
 
 const FIXTURE = joinpath(@__DIR__, "slice_test")
@@ -303,12 +304,18 @@ end
     @test Slicetest._slice_symbols_resolve(["st_bump"])        # a real exported symbol
 
     # Guard 2: build identity is recorded and actually distinguishes builds.
-    @test !isempty(Slicetest.BUILD_ID)
+    # Identity is the library's SHA-256, not its GNU build ID — a build ID is
+    # only present if the linker was asked for one, and the C bucket's
+    # Clang_unified_jll does not emit one, which left this guard inert.
+    @test !isempty(Slicetest.LIBRARY_SHA)
     @test Slicetest.BUILD_TARGET == string(Sys.MACHINE)
-    @test Slicetest._read_build_id(LIB) == Slicetest.BUILD_ID
-    foreign_id = Slicetest._read_build_id(foreign_so)
-    @test !isempty(foreign_id)
-    @test foreign_id != Slicetest.BUILD_ID     # independent builds differ
+    @test bytes2hex(open(SHA.sha256, LIB)) == Slicetest.LIBRARY_SHA
+    foreign_sha = bytes2hex(open(SHA.sha256, foreign_so))
+    @test foreign_sha != Slicetest.LIBRARY_SHA     # independent builds differ
+
+    # And the generator stamp is recorded for the other drift direction (the
+    # wrapper going stale against RepliBuild's codegen while the .so matches).
+    @test Slicetest.BUILD_GENERATOR == string(pkgversion(RepliBuild))
 
     # The end-to-end behaviour (wrapper staged next to the foreign .so warns,
     # demotes every promoted-static slice, and still computes correctly) is

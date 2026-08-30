@@ -80,7 +80,7 @@ change there is real news.
 
 This is deliberately NOT version control. It answers one question — "what did
 regenerating just change?" — which is the question a wrapper developer has
-several times an hour, and which `BUILD_ID` complements from the other side:
+several times an hour, and which `LIBRARY_SHA` complements from the other side:
 that names the library a wrapper was generated FROM, this holds what the
 generator said about it last time.
 """
@@ -1242,13 +1242,15 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
 
     doc = ""
     if generate_docs
-        doc = """
+        # chomp: the docstring must sit flush against `function` below. A blank
+        # line between them detaches it and Julia drops the doc silently.
+        doc = chomp("""
         \"\"\"
             $julia_name($fixed_sig) -> $sig_return_type
 
         Wrapper for variadic C function: `$demangled` (base call with fixed args only)
         \"\"\"
-        """
+        """)
     end
 
     if is_cstring_ret
@@ -1294,14 +1296,15 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
 
         overload_doc = ""
         if generate_docs
-            overload_doc = """
+            # chomp: see the note on the base wrapper's docstring above.
+            overload_doc = chomp("""
             \"\"\"
                 $overload_name($all_sig) -> $sig_return_type
 
             Typed variadic overload for: `$demangled`
             Variadic types: $(join(va_types, ", "))
             \"\"\"
-            """
+            """)
         end
 
         if is_cstring_ret

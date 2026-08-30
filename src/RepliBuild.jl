@@ -6,6 +6,12 @@ module RepliBuild
 
 using TOML
 using JSON
+# Re-exposed as `RepliBuild.SHA` for generated wrappers: their build-identity
+# check hashes the library beside them, and a wrapper vendored into a consumer
+# package cannot `using SHA` unless that package declares it as a dep. Routing
+# through RepliBuild — which the wrapper already imports — keeps the consumer's
+# Project.toml untouched.
+import SHA
 
 # Version — DERIVED from Project.toml, never a second literal.
 #

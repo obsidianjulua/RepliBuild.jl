@@ -312,9 +312,9 @@ function _assert_no_bound_name_rejected(rejected, what::AbstractString)
 end
 
 """
-    _elf_build_id(path) -> Union{Nothing,String}
+    _library_sha256(path) -> String
 
-The GNU build ID of an ELF file as lowercase hex, or `nothing` if absent.
+SHA-256 of a library file as lowercase hex, or `""` if it cannot be read.
 
 Identifies a BUILD, not a version: two compilations of identical source differ
 here. That is exactly the question a generated wrapper needs answered, because
@@ -322,43 +322,25 @@ its struct layouts, enum values and blob sizes are a snapshot of one
 compilation — point it at a different build and nothing complains, it just
 reads the wrong offsets.
 
-Read from the PT_NOTE segment rather than a section header: `strip` drops
-sections but keeps segments, so this still works on a stripped library.
+This used to read the GNU build ID out of PT_NOTE. A build ID is only present
+if the linker was asked to emit one, and RepliBuild never asks: the C bucket
+links through `Clang_unified_jll` (see `_clang_for_c_bucket`), which unlike the
+system driver emits no note by default, so every C library built after that
+routing landed carried no build ID and the check silently did nothing. Hashing
+the file depends on no linker flag, behaves identically for the C and C++
+buckets, and is stronger — it also catches post-link modification.
+
+The one thing it gives up: a build ID survives `strip`, a file hash does not.
+The `binary` stage strips before `wrap` runs, so the hash is taken of the
+already-stripped file and the normal flow is unaffected; stripping a library
+*after* generating its wrapper will warn.
 """
-function _elf_build_id(path::AbstractString)::Union{Nothing,String}
-    isfile(path) || return nothing
+function _library_sha256(path::AbstractString)::String
+    isfile(path) || return ""
     try
-        open(path, "r") do io
-            read(io, 4) == UInt8[0x7f, 0x45, 0x4c, 0x46] || return nothing  # \x7fELF
-            seek(io, 4); read(io, UInt8) == 2 || return nothing             # ELFCLASS64
-            seek(io, 0x20); e_phoff = read(io, UInt64)
-            seek(io, 0x36); e_phentsize = read(io, UInt16); e_phnum = read(io, UInt16)
-            for i in 0:(e_phnum - 1)
-                seek(io, e_phoff + i * e_phentsize)
-                p_type = read(io, UInt32)
-                p_type == 4 || continue                                     # PT_NOTE
-                skip(io, 4)                                                 # p_flags
-                p_offset = read(io, UInt64); skip(io, 16)                   # vaddr, paddr
-                p_filesz = read(io, UInt64)
-                pos = p_offset
-                stop = p_offset + p_filesz
-                while pos + 12 <= stop
-                    seek(io, pos)
-                    namesz = read(io, UInt32); descsz = read(io, UInt32); ntype = read(io, UInt32)
-                    name = String(read(io, namesz))
-                    pad(n) = (n + 3) & ~UInt32(3)
-                    desc_at = pos + 12 + pad(namesz)
-                    if ntype == 3 && startswith(name, "GNU")               # NT_GNU_BUILD_ID
-                        seek(io, desc_at)
-                        return bytes2hex(read(io, descsz))
-                    end
-                    pos = desc_at + pad(descsz)
-                end
-            end
-            return nothing
-        end
+        return bytes2hex(open(SHA.sha256, path))
     catch
-        return nothing    # unreadable/odd ELF is not worth failing a build over
+        return ""    # unreadable file is not worth failing a build over
     end
 end
 
