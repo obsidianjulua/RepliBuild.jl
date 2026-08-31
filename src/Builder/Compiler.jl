@@ -1872,22 +1872,48 @@ function ingest_library(config::RepliBuildConfig)::String
         error("Ingest library not found: $src_lib")
     end
 
-    # Cheap DWARF presence check — mirror the tool order used by extract_dwarf_return_types
-    # so we don't reject a .so that the rest of the pipeline would happily ingest.
-    # extract_compilation_metadata would otherwise silently produce a wrapper full of
-    # untyped void* signatures on a stripped .so.
-    has_dwarf = try
-        (out, code) = BuildBridge.execute("readelf", ["-S", src_lib])
-        code == 0 && occursin(".debug_info", out)
-    catch
-        try
-            (out, code) = BuildBridge.execute("llvm-dwarfdump", ["--debug-info", src_lib])
-            code == 0 && occursin("DW_TAG_compile_unit", out)
-        catch
-            false
-        end
+    # Cheap DWARF presence check. It gates `extract_compilation_metadata`, which
+    # would otherwise emit a wrapper full of untyped void* signatures on a
+    # stripped library — so it must agree with what extraction can actually read,
+    # and extraction is GNU readelf and nothing else (see the note on
+    # `extract_dwarf_return_types` for why the llvm-dwarfdump fallback there was
+    # removed: it parsed a valid dump into zero functions and shipped guesses).
+    #
+    # This check claimed to "mirror the tool order" and did not. It carried an
+    # llvm-dwarfdump fallback the extractor does not have — a gate more
+    # permissive than the thing it gates — and that fallback was UNREACHABLE
+    # besides: it sat in a `catch`, but `BuildBridge.execute` never throws
+    # (`_run_command_impl` returns `("Error: …", 1)` for every exception,
+    # including a missing binary). So it never ran once, and the only thing it
+    # did was make two derivations of one fact disagree on paper. Removed.
+    #
+    # The three outcomes are now distinguished, because they need different
+    # answers from the user and the old code collapsed all of them into
+    # "rebuild with -g".
+    (readelf_probe, readelf_code) = BuildBridge.execute("readelf", ["--version"])
+    readelf_code == 0 || error("""
+        GNU readelf not found — DWARF extraction cannot run.
+        RepliBuild's DWARF parser reads GNU readelf's format specifically; no
+        other dumper is substitutable. Install binutils.
+        readelf said: $(strip(readelf_probe))""")
+
+    (sections, sections_code) = BuildBridge.execute("readelf", ["-S", src_lib])
+    if sections_code != 0
+        # Not an ELF container at all. The live case is PE/COFF: a mingw-w64
+        # .dll carries perfectly good DWARF — llvm-dwarfdump reads it, and
+        # `long int` even shows the LLP64 byte_size of 4 — but GNU readelf is
+        # ELF-only and `parse_dwarf_dump` is a readelf-format parser, so the
+        # CONTAINER is what stops us, not the debug info. Telling the user to
+        # rebuild with -g sends them to fix something that is not broken.
+        error("""
+            readelf cannot read $src_lib as an ELF object.
+            If this is a PE/COFF (.dll) or Mach-O file it may well contain DWARF
+            — llvm-dwarfdump will show it — but RepliBuild's extractor parses GNU
+            readelf output, and readelf reads only ELF. Non-ELF containers are
+            not supported.
+            readelf said: $(strip(sections))""")
     end
-    if !has_dwarf
+    if !occursin(".debug_info", sections)
         error("No DWARF debug info found in $src_lib — rebuild upstream with -g (or pass a debug build)")
     end
 
