@@ -312,6 +312,111 @@ function _assert_no_bound_name_rejected(rejected, what::AbstractString)
 end
 
 """
+    _is_bitflag_enum(values) -> Bool
+
+Whether a C enum's enumerators are a BITMASK rather than an enumeration.
+
+C spells two different things with one keyword. `enum { RED, GREEN, BLUE }` is
+a closed set of alternatives and is exactly a Julia `@enum`. `enum { NULLTERM =
+1<<0, STABLE = 1<<1, COMPOSE = 1<<3 }` is an ALGEBRA: callers OR members
+together and pass a value that is not itself a member. A Julia `@enum` rejects
+such a value — `utf8proc_option_t(NULLTERM|STABLE|COMPOSE) == 11` throws — so
+the library's own documented calling convention cannot be expressed at all.
+See `packages/utf8proc/GENERATOR-enum-bitflags.md` in the Hub.
+
+Deliberately conservative. A false positive costs a real enumeration its named
+printing and its distinct type, silently; a false negative just leaves today's
+behaviour. So all four of these must hold:
+
+  * **at least three distinct single-bit members.** Two is not enough: `{0,1,2}`
+    is the most common ordinary enum shape there is, and it satisfies every
+    other rule here.
+  * **no contiguous runs.** `{0,1,2,3}` passes the bit tests (`3 == 1|2`) and is
+    plainly a sequence. `{1,2,4,8}` is not contiguous, and no real mask is.
+  * **every value must be spelled in declared bits.** A member using a bit that
+    no single-bit member declares means the enum is carrying a number, not a
+    mask, so leave it alone.
+  * **no negatives.** A negative enumerator means the underlying type is signed
+    and being used arithmetically.
+  * **the declared bits must be dense.** A mask allocates consecutive bit
+    positions; an enumeration that merely happens to land on powers of two does
+    not. Measured over the Hub, this is the rule that matters: it is the only
+    one that rejects libstdc++'s `_Ios_Seekdir` (`{0,1,2,65536}` — `beg`, `cur`,
+    `end` and a sentinel), which passes every other test with bits 0, 1 and 16.
+
+`{1,2,4,7}` is accepted — 7 is an all-bits-set member, which real flag enums
+carry. `{1,2,4,100}` is refused, because bit 6 belongs to nothing. Flags that
+start high are fine (`ImGuiTabBarFlagsPrivate` occupies bits 20–22); it is the
+GAPS that disqualify, not the offset.
+"""
+function _is_bitflag_enum(values)::Bool
+    vals = Int64[]
+    for v in values
+        v isa Integer || return false
+        push!(vals, Int64(v))
+    end
+    uniq = sort!(unique(vals))
+    length(uniq) >= 3 || return false
+    any(<(0), uniq) && return false
+
+    # A contiguous run is an enumeration whatever its values look like.
+    uniq[end] - uniq[1] + 1 == length(uniq) && return false
+
+    singles = filter(v -> v > 0 && count_ones(v) == 1, uniq)
+    length(singles) >= 3 || return false
+
+    mask = reduce(|, singles; init=Int64(0))
+    all(v -> v & ~mask == 0, uniq) || return false
+
+    # Declared bits must be dense: at least half the positions between the
+    # lowest and highest single-bit member are themselves members.
+    bitpos = sort!([trailing_zeros(v) for v in singles])
+    2 * length(bitpos) >= (bitpos[end] - bitpos[1] + 1) || return false
+
+    return true
+end
+
+"""
+    _bitflag_enum_chunk(enum_name, underlying, members) -> String
+
+Emit a bitflag enum as an integer alias plus named constants.
+
+`members` are `name => value` pairs ALREADY sanitized and keyword-escaped by
+the caller, because the two generators sanitize differently and the emitted
+spelling has to be theirs.
+
+The alias is the whole point: the members are ordinary integers, so `|`, `&`
+and `~` are Julia's own and any value the C API accepts can be constructed.
+Nothing else in the pipeline needs to know — `Ptr{<name>}` in a blob-struct
+accessor resolves through the alias, a `ccall` argument typed `<name>` resolves
+to the integer, `_defined_type_names` already matches `const X =`, and
+`_collect_defined!` descends `:const`. That is why this shape was chosen over
+keeping `@enum` and widening the call sites.
+
+Duplicate VALUES need no special handling here (unlike `@enum`, which rejects
+them) — only duplicate names, which would be a repeated `const` binding.
+
+The cost, accepted: members print as integers rather than by name, and two
+bitflag enums over the same underlying type are the same Julia type.
+"""
+function _bitflag_enum_chunk(enum_name::AbstractString, underlying::AbstractString,
+                             members)::String
+    io = IOBuffer()
+    println(io, "# Bitflag enum: $enum_name — members OR together, so this is an")
+    println(io, "# integer alias rather than an `@enum` (which would reject the result).")
+    println(io, "const $enum_name = $underlying")
+    seen = Set{String}()
+    for (name, value) in members
+        n = String(name)
+        n in seen && continue
+        push!(seen, n)
+        println(io, "const $n = $enum_name($value)")
+    end
+    println(io)
+    return String(take!(io))
+end
+
+"""
     _library_sha256(path) -> String
 
 SHA-256 of a library file as lowercase hex, or `""` if it cannot be read.

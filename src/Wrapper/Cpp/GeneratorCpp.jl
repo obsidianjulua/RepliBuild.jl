@@ -583,25 +583,30 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             enumerators = get(enum_info, "enumerators", [])
 
             if !isempty(enumerators)
+                # Sanitize first, then choose the shape. Mirrors GeneratorC.jl's
+                # DWARF enum site exactly — a C++ `enum` used as a mask is the same
+                # problem, and the two generators diverging on one decision is the
+                # failure this codebase keeps re-learning.
+                members = Pair{String,Any}[]
+                seen_names = Set{String}()
+                for enumerator in enumerators
+                    name = _escape_keyword(_sanitize_cpp_type_name(get(enumerator, "name", "Unknown")))
+                    name in seen_names && continue
+                    push!(seen_names, name)
+                    push!(members, name => get(enumerator, "value", 0))
+                end
+
+                if _is_bitflag_enum(last.(members))
+                    push!(enum_chunks, _bitflag_enum_chunk(enum_name, julia_underlying, members))
+                else
                 push!(enum_chunks, """
                 # C++ enum: $enum_name (underlying type: $underlying_type)
                 @enum $enum_name::$julia_underlying begin
                 """)
 
                 seen_values = Set{Any}()
-                seen_names = Set{String}()
                 duplicate_defs = String[]
-                for (i, enumerator) in enumerate(enumerators)
-                    name = get(enumerator, "name", "Unknown")
-                    name = _sanitize_cpp_type_name(name)
-                    value = get(enumerator, "value", 0)
-                    name = _escape_keyword(name)
-                    
-                    if name in seen_names
-                        continue
-                    end
-                    push!(seen_names, name)
-
+                for (name, value) in members
                     if value in seen_values
                         push!(duplicate_defs, "const $name = $enum_name($value)")
                     else
@@ -616,6 +621,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 """)
                 if !isempty(duplicate_defs)
                     push!(enum_chunks, join(duplicate_defs, "\n") * "\n\n")
+                end
                 end
             end
         end
@@ -660,23 +666,28 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     "Cint"
                 end
 
+                # Sanitize first, then choose the shape — see the DWARF enum site
+                # above. `emitted`, not `members`: the loop variable is taken.
+                emitted = Pair{String,Any}[]
+                seen_names = Set{String}()
+                for (member_name, value) in members
+                    n = _escape_keyword(_sanitize_cpp_type_name(string(member_name)))
+                    n in seen_names && continue
+                    push!(seen_names, n)
+                    push!(emitted, n => value)
+                end
+
+                if _is_bitflag_enum(last.(emitted))
+                    push!(enum_chunks, _bitflag_enum_chunk(enum_name_jl, underlying, emitted))
+                else
                 push!(enum_chunks, """
                 # C++ enum: $enum_name (from header - not in DWARF)
                 @enum $enum_name_jl::$underlying begin
                 """)
 
                 seen_values = Set{Any}()
-                seen_names = Set{String}()
                 duplicate_defs = String[]
-                for (member_name, value) in members
-                    member_name = _sanitize_cpp_type_name(string(member_name))
-                    member_name = _escape_keyword(member_name)
-                    
-                    if member_name in seen_names
-                        continue
-                    end
-                    push!(seen_names, member_name)
-
+                for (member_name, value) in emitted
                     if value in seen_values
                         push!(duplicate_defs, "const $member_name = $enum_name_jl($value)")
                     else
@@ -691,6 +702,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 """)
                 if !isempty(duplicate_defs)
                     push!(enum_chunks, join(duplicate_defs, "\n") * "\n\n")
+                end
                 end
                 added_header_enums += 1
             end

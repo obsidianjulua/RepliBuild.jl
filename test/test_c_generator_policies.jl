@@ -102,6 +102,27 @@ function _policy_metadata()
                 Dict{String,Any}("name" => "hdr", "julia_type" => "Cuint", "c_type" => "unsigned int", "offset" => "0x0", "size" => 4),
                 Dict{String,Any}("name" => "x", "julia_type" => "Cuint", "c_type" => "unsigned int", "bit_size" => 17, "data_bit_offset" => 45),
             ]),
+        # A bitmask: four single bits plus a combined member, exactly utf8proc's
+        # shape. Must NOT become an `@enum`, which would reject SYNTH_A|SYNTH_B.
+        "__enum__SynthFlags" => Dict{String,Any}(
+            "kind" => "enum", "underlying_type" => "unsigned int", "julia_type" => "Cuint",
+            "enumerators" => Any[
+                Dict{String,Any}("name" => "SYNTH_A", "value" => 1),
+                Dict{String,Any}("name" => "SYNTH_B", "value" => 2),
+                Dict{String,Any}("name" => "SYNTH_C", "value" => 4),
+                Dict{String,Any}("name" => "SYNTH_D", "value" => 8),
+                Dict{String,Any}("name" => "SYNTH_CD", "value" => 12),
+            ]),
+        # An ordinary enumeration whose values are 0,1,2 — powers of two by
+        # coincidence. The single most common enum shape there is, and the one a
+        # careless bitflag rule turns into an untyped integer.
+        "__enum__SynthMode" => Dict{String,Any}(
+            "kind" => "enum", "underlying_type" => "int", "julia_type" => "Int32",
+            "enumerators" => Any[
+                Dict{String,Any}("name" => "SYNTH_OFF", "value" => 0),
+                Dict{String,Any}("name" => "SYNTH_ON", "value" => 1),
+                Dict{String,Any}("name" => "SYNTH_AUTO", "value" => 2),
+            ]),
     )
 
     functions = Any[
@@ -255,6 +276,88 @@ end
         # Packed structs are blobs; the old dedicated packed branch is gone
         @test occursin("byte blob for ABI safety", code)
         @test !occursin("C packed struct:", code)
+    end
+
+    @testset "bitflag enums emit as integer aliases" begin
+        # A mask is emitted as an alias + constants, so `|` is Julia's own and
+        # any value the C API accepts can be constructed. An `@enum` here would
+        # reject SYNTH_A|SYNTH_B, which is the documented way to call the API.
+        @test occursin("const SynthFlags = Cuint", code)
+        @test occursin("const SYNTH_A = SynthFlags(1)", code)
+        @test occursin("const SYNTH_CD = SynthFlags(12)", code)
+        @test !occursin("@enum SynthFlags", code)
+
+        # …and an ordinary enumeration is untouched. {0,1,2} is powers of two by
+        # coincidence; losing its type would be a silent downgrade.
+        @test occursin("@enum SynthMode::Int32", code)
+        @test !occursin("const SynthMode = ", code)
+
+        # The rule itself, at its boundaries. Bit DENSITY is what separates a
+        # mask from an enumeration that happens to land on powers of two —
+        # {0,1,2,65536} is libstdc++'s _Ios_Seekdir and passes every other test.
+        _bf = RepliBuild.Wrapper._is_bitflag_enum
+        @test _bf([1, 2, 4])
+        @test _bf([0, 1, 2, 4])
+        @test _bf([1, 2, 4, 7])                  # all-bits-set member
+        @test _bf([1048576, 2097152, 4194304])   # high bits are fine; gaps are not
+        @test !_bf([0, 1, 2])                    # <3 single bits, and contiguous
+        @test !_bf([0, 1, 2, 3])                 # contiguous run
+        @test !_bf([1, 2, 4, 100])               # bit 6 declared by nothing
+        @test !_bf([0, 1, 2, 65536])             # sparse: _Ios_Seekdir
+        @test !_bf([-1, 1, 2, 4])                # negative enumerator
+        @test !_bf([1, 2])                       # too few
+
+        # The C++ generator must reach the SAME decision. It has its own copy of
+        # the emission site, and two generators diverging on one rule is the
+        # failure this codebase keeps re-learning — so both are pinned here
+        # rather than in separate files that can drift apart unnoticed.
+        cppdir = mktempdir()
+        write(joinpath(cppdir, "replibuild.toml"), """
+        [project]
+        name = "cppenumsynth"
+        root = "$(cppdir)"
+        [wrap]
+        language = "cpp"
+        [types]
+        strictness = "warn"
+        allow_unknown_structs = true
+        [cache]
+        enabled = false
+        """)
+        cppcfg = _CM.load_config(joinpath(cppdir, "replibuild.toml"))
+        cppmeta = Dict{String,Any}(
+            "functions" => Any[],
+            "globals" => Dict{String,Any}(),
+            "struct_definitions" => Dict{String,Any}(
+                "__enum__CppFlags" => Dict{String,Any}(
+                    "kind" => "enum", "underlying_type" => "unsigned int", "julia_type" => "Cuint",
+                    "enumerators" => Any[
+                        Dict{String,Any}("name" => "CF_A", "value" => 1),
+                        Dict{String,Any}("name" => "CF_B", "value" => 2),
+                        Dict{String,Any}("name" => "CF_C", "value" => 4),
+                        Dict{String,Any}("name" => "CF_D", "value" => 8),
+                        Dict{String,Any}("name" => "CF_CD", "value" => 12),
+                    ]),
+                "__enum__CppMode" => Dict{String,Any}(
+                    "kind" => "enum", "underlying_type" => "int", "julia_type" => "Int32",
+                    "enumerators" => Any[
+                        Dict{String,Any}("name" => "CM_OFF", "value" => 0),
+                        Dict{String,Any}("name" => "CM_ON", "value" => 1),
+                        Dict{String,Any}("name" => "CM_AUTO", "value" => 2),
+                    ]),
+            ))
+        cppres = RepliBuild.Wrapper.generate_introspective_module_cpp(
+            cppcfg, libref, cppmeta, "CppEnumSynth",
+            RepliBuild.Wrapper.create_type_registry(cppcfg), true)
+        cppcode = cppres isa Tuple ? cppres[1] : cppres
+        @test occursin("const CppFlags = Cuint", cppcode)
+        @test occursin("const CF_CD = CppFlags(12)", cppcode)
+        @test !occursin("@enum CppFlags", cppcode)
+        @test occursin("@enum CppMode::Int32", cppcode)
+        # The alias and its members must still reach `export` — they are `const`
+        # bindings now, not `@enum` members, and a different collector sees them.
+        @test occursin(r"export[^\n]*\bCppFlags\b", cppcode)
+        @test occursin(r"export[^\n]*\bCF_CD\b", cppcode)
     end
 
     @testset "generated module loads and behaves" begin
