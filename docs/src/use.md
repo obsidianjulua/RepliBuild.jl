@@ -1,42 +1,33 @@
-# Use a library
+# Registry
 
-The Hub is a set of ready-made `replibuild.toml` files for popular C/C++
-libraries. `use` is the one call that fetches, builds, wraps, and loads.
+`use("name")` loads a project that is already in **your** local registry
+(`~/.replibuild/registry/`). A fresh install has none. It does not fetch Hub
+packages, and `search` does not register anything.
 
-```julia
-using RepliBuild
+## After you wrap something
 
-Lua = RepliBuild.use("lua")
-L = Lua.luaL_newstate()
-Lua.luaL_openlibs(L)
-Lua.luaL_dostring(L, "print(1 + 1)")
-Lua.lua_close(L)
-```
-
-First call compiles from source (minutes). Later calls hit
-`~/.replibuild/builds/<hash>/` and load instantly. The cache key includes
-RepliBuild's own version, so upgrading the generator rebuilds each package once
-instead of serving a stale wrapper.
-
-## Browse the Hub
+`discover()` registers the project automatically (`[project].name`). From then
+on you can skip `include`:
 
 ```julia
-RepliBuild.search()          # everything
-RepliBuild.search("xml")     # name, description, tags, or language
-RepliBuild.search("cpp")
+toml = RepliBuild.discover("path/to/project", build=true, wrap=true)
+
+MyProject = RepliBuild.use("myproject")   # name from [project].name
+MyProject.some_function(...)
 ```
 
-The index lives in [RepliBuild-Hub](https://github.com/obsidianjulua/RepliBuild-Hub).
-Packages there today include lua, sqlite, cjson, zlib, zstd, lz4, pcre2, curl,
-box2d, pugixml, tinyxml2, imgui, fmt, and more. Names are lowercase, no
-underscores.
+First `use` after a wrap is usually a cache hit. Later calls stay cached at
+`~/.replibuild/builds/<hash>/` until the TOML, the sources, or RepliBuild
+itself change. The cache key includes the generator version, so upgrading
+RepliBuild rebuilds once instead of serving a stale wrapper.
 
-`use` checks your local registry first, then the Hub. A private Hub mirror is
-`ENV["REPLIBUILD_HUB_URL"]`.
+```julia
+RepliBuild.use("myproject"; force_rebuild=true)
+```
 
-## Local registry
+## Register by hand
 
-`discover()` registers the project automatically. You can also do it by hand:
+If you wrote the TOML yourself (or copied one), register it before `use`:
 
 ```julia
 RepliBuild.register("path/to/replibuild.toml")   # name from [project].name
@@ -44,30 +35,38 @@ RepliBuild.list_registry()
 RepliBuild.unregister("myproject")
 ```
 
-Local entries live in `~/.replibuild/registry/`. `ENV["REPLIBUILD_HOME"]`
-relocates the whole tree (`registry/` and `builds/`).
+`ENV["REPLIBUILD_HOME"]` relocates the whole tree (`registry/` and `builds/`).
 
-```julia
-RepliBuild.use("myproject")                 # cached build
-RepliBuild.use("myproject"; force_rebuild=true)
+Missing name:
+
+```
+Package 'cjson' not in registry. Use RepliBuild.list_registry() to see
+available packages, or RepliBuild.register("path/to/replibuild.toml") to add one.
 ```
 
-## What `use` returns
+That is the empty-registry case. Wrap the library, or `register` its TOML.
 
-A loaded Julia module. Call it like the C API, with the types the wrapper
-generated. Hub packages skip the `include` step — that is only for [wrappers you
-built yourself](guide.md).
+## Hub catalog (optional)
+
+[RepliBuild-Hub](https://github.com/obsidianjulua/RepliBuild-Hub) is a collection
+of ready-made `replibuild.toml` files — lua, sqlite, cjson, zlib, box2d, and
+others. `search` lists them. It does **not** install them.
 
 ```julia
+RepliBuild.search()          # names, versions, tags
+RepliBuild.search("xml")
+```
+
+To actually load one, register its TOML, then `use` the name:
+
+```julia
+# after cloning or downloading RepliBuild-Hub
+RepliBuild.register("path/to/RepliBuild-Hub/packages/cjson/replibuild.toml")
 C = RepliBuild.use("cjson")
-C.cJSON_Parse("{\"a\": 1}")
 ```
 
-What the generated functions, structs, and C++ handles look like:
-[Call a wrapper](calling.md).
+`ENV["REPLIBUILD_HUB_URL"]` points `search` at a private mirror of that index.
+It does not change `use`.
 
-## When a Hub package is not enough
-
-If the library is not on the Hub, or you need different flags, wrap it yourself:
-[Wrap a library](guide.md). If you already have a working TOML, `register` it
-and `use` it by name from then on.
+What the generated functions look like: [Call a wrapper](calling.md).
+The wrap path if you are starting from source: [Wrap a library](guide.md).

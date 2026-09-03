@@ -9,44 +9,30 @@ compiler actually emitted, and writes a Julia module you can call. You drive it
 with a few verbs and a `replibuild.toml`. You do not write `ccall`s, and you do
 not maintain generated bindings.
 
-This site is the user manual: how to install, how to load a library, how to wrap
-one, what to edit in the TOML, and how to call the result.
+This site is the user manual: how to install, how to wrap a library, what to
+edit in the TOML, and how to call the result.
 
 ## I want to…
 
 | Goal | Page |
 |:-----|:-----|
 | Check the toolchain | [Install](install.md) |
-| Load a library that is already wrapped | [Use a library](use.md) |
-| Wrap my own C/C++ project | [Wrap a library](guide.md) |
+| Wrap a C/C++ project | [Wrap a library](guide.md) |
 | Fill in macros, varargs, ownership, flags, excludes | [Edit the TOML](config.md) |
 | Call the generated functions, structs, and C++ classes | [Call a wrapper](calling.md) |
 | Ship a Julia package on top of a wrapper | [Ship a package](using-wrappers.md) |
+| Reload a project you already wrapped | [Registry](use.md) |
 | Look up a function | [API](api.md) |
 | Something failed or is missing | [Troubleshooting](troubleshooting.md) |
 
 How RepliBuild is built — the dialect, the inheritance ABI, the pipeline — is
 under [Developer](developer.md). You do not need it to wrap a library.
 
-## 60 seconds
+## First wrap
 
 ```julia
 using RepliBuild
 
-C = RepliBuild.use("cjson")        # Hub config → build → wrap → load (cached)
-
-doc = C.cJSON_Parse("""{"answer": 42}""")
-C.cJSON_GetNumberValue(C.cJSON_GetObjectItem(doc, "answer"))   # 42.0
-C.cJSON_Print(doc)                 # String; the malloc'd C buffer is freed
-C.cJSON_Delete(doc)
-```
-
-`use("name")` fetches a config from the [RepliBuild Hub](https://github.com/obsidianjulua/RepliBuild-Hub)
-when the name is not in your local registry. Browse with `RepliBuild.search("json")`.
-
-## Wrap your own
-
-```julia
 toml = RepliBuild.discover("path/to/project")   # writes replibuild.toml
 # edit the TOML: flags, excludes, macros, varargs, ownership
 RepliBuild.build(toml)                          # clang → .so
@@ -61,17 +47,22 @@ Then open the TOML and fill in what discovery cannot see — that edit is the
 whole skill. [Wrap a library](guide.md) walks it; [Edit the TOML](config.md)
 is the reference.
 
+`discover` also registers the project locally. Later you can reload it with
+`RepliBuild.use("myproject")` (`[project].name`) instead of `include`. A fresh
+install has an empty registry — `use("cjson")` does not work until you have
+registered that name yourself. See [Registry](use.md).
+
 ## The verbs
 
 | Function | What it does |
 |:---------|:---------------|
-| `use("name")` | Resolve, build, wrap, load. Cached. Hub on a miss. |
-| `search("xml")` | Browse Hub configs by name, description, tags, language. |
-| `discover(path)` | Scan a source tree, write `replibuild.toml`. |
+| `discover(path)` | Scan a source tree, write `replibuild.toml`, register locally. |
 | `build(toml)` | Compile to a `.so` plus debug metadata. |
 | `wrap(toml)` | Emit `julia/<Module>.jl`. |
 | `register(toml)` | Put a project in the local registry so `use` finds it. |
+| `use("name")` | Build, wrap, and load a **registered** project (cached). |
 | `list_registry()` / `unregister("name")` | Inspect / drop local entries. |
+| `search("xml")` | Browse Hub config *names* (does not install or register). |
 | `clean(toml)` | Remove `build/`, `julia/`, caches. |
 | `info(toml)` | Print whether the library and wrapper exist. |
 | `check_environment()` | Report which toolchains this machine has. |

@@ -11,28 +11,13 @@ with a few verbs and a `replibuild.toml`. You do not write `ccall`s, and you do
 not maintain generated bindings.
 
 **[User manual](https://obsidianjulua.github.io/RepliBuild.jl/stable/)** — install,
-use a Hub package, wrap your own library, edit the TOML, call the result.
+wrap a library, edit the TOML, call the result.
 
-## 60 seconds
+## First wrap
 
 ```julia
 using RepliBuild
 
-C = RepliBuild.use("cjson")        # Hub config → build → wrap → load (cached)
-
-doc = C.cJSON_Parse("""{"answer": 42}""")
-C.cJSON_GetNumberValue(C.cJSON_GetObjectItem(doc, "answer"))   # 42.0
-C.cJSON_Print(doc)                 # String; the malloc'd C buffer is freed
-C.cJSON_Delete(doc)
-```
-
-The [RepliBuild Hub](https://github.com/obsidianjulua/RepliBuild-Hub) carries
-configs for lua, sqlite, zlib, box2d, pugixml, curl, and more —
-`RepliBuild.search("json")` to browse. Builds are cached at `~/.replibuild/`.
-
-## Wrap your own
-
-```julia
 toml = RepliBuild.discover("path/to/project")   # scan sources, write replibuild.toml
 # edit the TOML: flags, excludes, macros, varargs, ownership
 RepliBuild.build(toml)                          # clang → .so
@@ -46,7 +31,9 @@ Or `RepliBuild.discover("path/to/project", build=true, wrap=true)` in one call.
 Then open the TOML — discovery writes the shape of the tree; you add the things
 it cannot see.
 
-Hub packages skip `include`: `use("name")` returns the loaded module.
+`discover` registers the project locally, so later `RepliBuild.use("myproject")`
+reloads it without `include`. A fresh install has an empty registry:
+`use("cjson")` is not a first-run command.
 
 ## What you edit
 

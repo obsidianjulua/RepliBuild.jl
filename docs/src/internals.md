@@ -359,8 +359,8 @@ The `exclude` list is applied after scanning. Resolved source files merge into t
 Local package registry at `~/.replibuild/registry/`. Provides:
 
 - `register()` — Store a project's build configuration
-- `use()` — Build + wrap + load, with artifact caching in `~/.replibuild/builds/<hash>/`; on a local miss, fetches the package config from the RepliBuild-Hub community registry
-- `search()` — Query the Hub index by name, description, tags, or language
+- `use()` — Build + wrap + load a **locally registered** name, with artifact caching in `~/.replibuild/builds/<hash>/`. No Hub fallback — a missing name is an error
+- `search()` — Query the Hub index by name, description, tags, or language (browse only; does not register)
 - `list_registry()` — Print all registered packages with hash, source, and build status
 - `unregister()` — Remove a package and clean cached builds
 

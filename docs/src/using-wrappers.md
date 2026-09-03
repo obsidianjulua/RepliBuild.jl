@@ -57,9 +57,10 @@ The copy in `lib/` is self-contained:
 3. The only Julia dependency is `RepliBuild`. There is no MLIR/LLVM package in
    the consumer — `libJLCS.so` is found through the installed RepliBuild.
 
-Alternatives: `RepliBuild.use("box2d")` at runtime (scripts, not precompiled
-packages), or `RepliBuild.scaffold_package` for a skeleton that *builds* the
-library on the consumer's machine instead of shipping a binary.
+Alternatives: `RepliBuild.use("box2d")` at runtime if that name is already in
+your local registry (scripts, not precompiled packages), or
+`RepliBuild.scaffold_package` for a skeleton that *builds* the library on the
+consumer's machine instead of shipping a binary.
 
 ## Precompilation
 

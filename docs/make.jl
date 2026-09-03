@@ -17,11 +17,11 @@ makedocs(;
     pages=[
         "Home" => "index.md",
         "Install" => "install.md",
-        "Use a library" => "use.md",
         "Wrap a library" => "guide.md",
         "Edit the TOML" => "config.md",
         "Call a wrapper" => "calling.md",
         "Ship a package" => "using-wrappers.md",
+        "Registry" => "use.md",
         "API" => "api.md",
         "Troubleshooting" => "troubleshooting.md",
         "Changelog" => "release-notes.md",

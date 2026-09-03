@@ -32,18 +32,22 @@ clean
 info
 ```
 
-## Registry and Hub
+## Registry
+
+`use("name")` loads a project already in the **local** registry. `discover`
+registers for you; otherwise call `register` first. A fresh install has an
+empty registry — there is no Hub fallback.
 
 ```julia
-Lua = RepliBuild.use("lua")          # local registry, then Hub; cached
-RepliBuild.search("xml")
 RepliBuild.register("replibuild.toml")
+RepliBuild.use("myproject")              # name from [project].name; cached
 RepliBuild.list_registry()
+RepliBuild.search("xml")                 # browse Hub TOML names; does not register
 ```
 
-`REPLIBUILD_HOME` relocates `~/.replibuild/`. `REPLIBUILD_HUB_URL` points Hub
-operations at a private mirror. The cache key includes RepliBuild's version, so
-an upgrade rebuilds each package once.
+`REPLIBUILD_HOME` relocates `~/.replibuild/`. `REPLIBUILD_HUB_URL` points
+`search` at a private index mirror. The `use` cache key includes RepliBuild's
+version, so an upgrade rebuilds each registered package once.
 
 ```@docs
 register

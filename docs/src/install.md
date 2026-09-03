@@ -49,7 +49,7 @@ Put `llvm-config` and `clang++` on `PATH`. Versioned names (`llvm-config-21`,
 
 ```julia
 RepliBuild.check_environment()          # what works
-RepliBuild.search()                     # Hub packages you can use()
 ```
 
-Then either [use a Hub library](use.md) or [wrap your own](guide.md).
+Then [wrap a library](guide.md). The registry is empty until `discover` or
+`register` puts something in it — see [Registry](use.md).

@@ -120,22 +120,22 @@ preload.
 
 ```julia
 RepliBuild.register("path/to/project/replibuild.toml")  # register locally
-Lua = RepliBuild.use("lua")          # build + wrap + load (cached at ~/.replibuild/builds/<hash>/)
-Lua.luaL_newstate()
-
-RepliBuild.list_registry()           # show registered packages
-RepliBuild.unregister("lua")         # remove from local registry
+M = RepliBuild.use("myproject")      # [project].name; build + wrap + load (cached)
+RepliBuild.list_registry()
+RepliBuild.unregister("myproject")
 ```
+
+`use` only sees the local registry. A missing name is an error — there is no Hub fallback.
 
 ### RepliBuild-Hub (community registry)
 
-The Hub repo is [obsidianjulua/RepliBuild-Hub](https://github.com/obsidianjulua/RepliBuild-Hub) (cloned beside this one for local work). It holds `replibuild.toml` configs for popular C/C++ libraries so users can `use()` them without manual setup. `examples/BoxWorld/` there is the reference CONSUMER package (physics app on the box2d wrapper, 15/15): vendored-wrapper layout, ergonomic layer over ctor-only classes / inline defaults / shape vtables, finalizer-warming, precompiles clean — documented in docs/src/using-wrappers.md.
+The Hub repo is [obsidianjulua/RepliBuild-Hub](https://github.com/obsidianjulua/RepliBuild-Hub) (cloned beside this one for local work). It holds `replibuild.toml` configs for popular C/C++ libraries. `search()` lists them; `use()` does **not** fetch them — register the package TOML, then `use` the name. `examples/BoxWorld/` there is the reference CONSUMER package (physics app on the box2d wrapper, 15/15): vendored-wrapper layout, ergonomic layer over ctor-only classes / inline defaults / shape vtables, finalizer-warming, precompiles clean — documented in docs/src/using-wrappers.md.
 
 ```julia
-RepliBuild.search()           # list all hub packages (fetches index.toml from GitHub)
-RepliBuild.search("xml")      # filter by name, description, tags, or language
+RepliBuild.search()           # list catalog names (fetches index.toml from GitHub)
+RepliBuild.search("xml")
 
-# use() checks local registry first, then fetches from the Hub on miss
+RepliBuild.register("path/to/RepliBuild-Hub/packages/lua/replibuild.toml")
 Lua = RepliBuild.use("lua")
 ```
 
@@ -504,7 +504,7 @@ TableGen-defined dialect for ABI marshalling (`src/mlir/JLCSOps.td`, `Types.td`)
   - **`test_cache_invalidation.jl` — FIXED, 11/11.** Failed standalone too. **Two hashes, different questions:** the hash in the IR *filename* (`build/m.c-<8hex>.ll`) identifies the SOURCE and is stable across compile-config changes; the compile fingerprint is the **`.key` sidecar**, and that gates the cache. The test watched `build/m.ll` — never existed — so `mtime` returned `0.0` and `m3 > m2` compared `0.0 > 0.0`. Sidecar measured live: `aebbc4e5` → `c101f5b1` (+`-fvisibility=hidden`) → `aebbc4e5` (reverted). Its other assert, `nsyms == 1`, was **unsatisfiable**: `internal_helper` under that flag is external-linkage-and-hidden (the LUAI_FUNC shape), so static promotion re-exports it as `__rb_cachetest_internal_helper` — two symbols in, two out, only the NAMES change. Assert names, never export counts, on anything downstream of promotion.
 - **`test_slicer.jl` NO LONGER READS THE HUB (2026-08-19).** "Slicer: lua at scale" read `RepliBuild-Hub/packages/lua/build/lua_abi.ll` by absolute path, so a core-engine test tracked whichever library version happened to be built in another repo — and it went red when the local lua moved to 5.5.1, where `luaL_openlibs` became a macro and only `replibuild_shim_luaL_openlibs` exists. Replaced by `test/slice_test/src/slice_scale.c` (64 leaves → 8 mids → `st_sc_hub`, whose transitive closure is the whole TU): declarations-only is now **quantified** (hub slice < 1/20th of the module), the fan-out is **asserted to have survived -O2** (drop `noinline` → exactly 9 assertions fail), and there is an **oracle independent of the other tier** (`hub(v) = 192v + 8416`) because cross-tier agreement proves coherence, not correctness. Slicer 154/154, scale 169/169. **Rule going forward: RepliBuild.jl tests the engine and calling mechanics; Hub rebuilds are the integration test. No test here may read a Hub artifact.**
   **RULE NOW HOLDS REPO-WIDE, swept and enforced 2026-08-20.** The second offender was `test_symbol_hygiene.jl` — in **runtests**, i.e. CI — and it hid from the first grep because it built the path with `joinpath(homedir(), "Desktop", …)` rather than a slash-joined literal. **Grep for the SHAPE (`homedir()`, `expanduser`, `ENV["HOME"]`, `"/home/`), not for the string `RepliBuild-Hub`.** Fixed by vendoring the corpus (see the receiver-gates guard above).
-  **Why not route such a test through `register()`/`use()` instead — asked and answered 2026-08-20.** The registry cache is the wrong tool for a *test corpus*: `use()` on a cold cache **fetches from the Hub over the network and runs a full build**, so a no-toolchain CI test would gain a network and toolchain dependency — strictly worse than reading the directory. And `_generator_fingerprint` folds in the **dirty-tree digest**, so every uncommitted `src/` edit mints a new hash and would force a rebuild *inside CI* on exactly the workflow that edits generators. Registry mechanics are for **consumers**; a test wants a frozen fixture. The register/use path is already covered hermetically by `test_registry.jl` (`REPLIBUILD_HOME` → tempdir, `mktempdir()` throughout, incl. a build-artifact cache round-trip) — that is the model to copy, not `use()` in a test.
+  **Why not route such a test through `register()`/`use()` instead — asked and answered 2026-08-20.** The registry cache is the wrong tool for a *test corpus*: `use()` on a cold cache **runs a full build** of whatever TOML is registered under that name, so a no-toolchain CI test would gain a toolchain dependency — strictly worse than reading the directory. And `_generator_fingerprint` folds in the **dirty-tree digest**, so every uncommitted `src/` edit mints a new hash and would force a rebuild *inside CI* on exactly the workflow that edits generators. Registry mechanics are for **consumers**; a test wants a frozen fixture. The register/use path is already covered hermetically by `test_registry.jl` (`REPLIBUILD_HOME` → tempdir, `mktempdir()` throughout, incl. a build-artifact cache round-trip) — that is the model to copy, not `use()` in a test.
   **Building packages in-place in the Hub is the RIGHT dev loop, and is not what needed fixing.** It is the fast path for generator work precisely because it skips the content-addressed cache the dirty-tree digest would keep invalidating. The defect was never the workflow — it was **tests reading the dev workspace**. Fix at the test boundary.
 - **`test/slice_test/replibuild.toml` IS GITIGNORED AND REGENERATED BY NOTHING — these three files are MACHINE-LOCAL.** `.gitignore:52` (`test/*/*.toml`) covers it, and `slice_test` is absent from devtests' `INTEGRATION_TESTS`, so the `discover(force=true)` loop never reaches it. `test_static_promotion`, `test_slicer` and `test_tier1_dispatch` all build from that file, so **a fresh clone fails all three at line 1**. It is now path-free and CWD-independent (`root` omitted → defaults to `dirname(abspath(toml_path))`; sources/includes relative), so tracking it would be a one-line negation — but `.gitignore` carries an explicit "do NOT re-add a `!replibuild.toml` negation" and John's call (2026-08-19) is **document, don't track**. Do not quietly flip this.
 - Historical framing of the two reds above, kept for the A/B method: both were PRE-EXISTING and proven by A/B against the pre-session commit (checked 2026-08-13), i.e. NOT caused by the receiver/symbol-hygiene work.

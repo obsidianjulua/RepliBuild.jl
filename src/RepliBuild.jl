@@ -186,13 +186,16 @@ end
 """
     use(name::String; force_rebuild=false, verbose=true) -> Module
 
-Load a wrapper by registry name. Resolves dependencies, checks environment,
-builds if needed, and returns the loaded Julia module.
+Load a wrapper by **local registry** name. Resolves dependencies, checks
+environment, builds if needed, and returns the loaded Julia module.
+
+The name must already be registered (`discover` does this; otherwise
+`register(toml)`). There is no Hub fallback — a missing name errors.
 
 # Example
 ```julia
-Lua = RepliBuild.use("lua")
-Lua.luaL_newstate()
+RepliBuild.register("path/to/replibuild.toml")   # or discover(), which registers
+M = RepliBuild.use("myproject")                  # [project].name
 ```
 """
 function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)
@@ -230,11 +233,11 @@ end
 """
     search(query::String="")
 
-Search the RepliBuild Hub for available packages. Matches against names,
-descriptions, tags, and language. Call with no arguments to list everything.
+Browse the RepliBuild Hub catalog by name, description, tags, or language.
+Does not register or install anything — `use` only sees the local registry.
 
 ```julia
-RepliBuild.search()           # list all hub packages
+RepliBuild.search()           # list catalog names
 RepliBuild.search("json")     # filter by keyword
 ```
 """

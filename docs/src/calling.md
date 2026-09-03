@@ -10,8 +10,9 @@ using .MyProject
 MyProject.some_function(...)     # everything exported; docs on each symbol
 ```
 
-Hub packages skip `include`: `RepliBuild.use("lua")` already returns the loaded
-module.
+If the project is in your local registry (`discover` registers it),
+`RepliBuild.use("myproject")` returns the loaded module and you can skip
+`include`. [Registry](use.md).
 
 Never hand-edit `julia/MyProject.jl`. Regenerate with `wrap()`. Put Julia-shaped
 API in your own module — [Ship a package](using-wrappers.md).
