@@ -9,24 +9,29 @@ makedocs(;
     sitename="RepliBuild.jl",
     format=Documenter.HTML(;
         prettyurls=get(ENV, "CI", "false") == "true",
-        canonical="https://obsidianjulua.github.io/RepliBuild.jl",
+        canonical="https://obsidianjulua.github.io/RepliBuild.jl/stable",
         edit_link="main",
         assets=String[],
+        collapselevel=1,
     ),
     pages=[
         "Home" => "index.md",
-        "Guide" => [
-            "Workflow" => "guide.md",
-            "Configuration (replibuild.toml)" => "config.md",
-            "Using a Wrapper" => "using-wrappers.md",
+        "Install" => "install.md",
+        "Use a library" => "use.md",
+        "Wrap a library" => "guide.md",
+        "Edit the TOML" => "config.md",
+        "Call a wrapper" => "calling.md",
+        "Ship a package" => "using-wrappers.md",
+        "API" => "api.md",
+        "Troubleshooting" => "troubleshooting.md",
+        "Changelog" => "release-notes.md",
+        "Developer" => [
+            "Overview" => "developer.md",
+            "JLCS / MLIR" => "mlir.md",
+            "The inheritance ABI" => "inheritance-abi.md",
+            "Internals" => "internals.md",
+            "Tier 1 (experimental)" => "tier1.md",
         ],
-        "API Reference" => "api.md",
-        "Advanced" => [
-            "ABI Marshalling as Compiler IR (MLIR/JLCS)" => "mlir.md",
-            "The Inheritance ABI" => "inheritance-abi.md",
-            "Internals & Dispatch" => "internals.md",
-        ],
-        "Release Notes" => "release-notes.md",
     ],
     warnonly=true,
 )
@@ -34,4 +39,5 @@ makedocs(;
 deploydocs(;
     repo="github.com/obsidianjulua/RepliBuild.jl",
     devbranch="main",
+    versions=["stable" => "v^", "v#.#", "dev" => "dev"],
 )

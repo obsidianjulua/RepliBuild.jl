@@ -1,5 +1,9 @@
 # The inheritance ABI
 
+!!! note "Developer documentation"
+    This page is for contributors. To *call* the generated upcast helpers, see
+    [Call a wrapper](calling.md). The user manual starts at [Home](index.md).
+
 A reasoning guide to how RepliBuild makes C++ inheritance — multiple inheritance
 (MI) and virtual inheritance (VMI) — callable from Julia. This page teaches the
 *mental model* so you can read a generated wrapper and know what it's doing. For

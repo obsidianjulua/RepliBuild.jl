@@ -1,8 +1,12 @@
 # ABI Marshalling as Compiler IR — the JLCS Dialect
 
-This is the architecture page. Every other page in this manual describes what
-RepliBuild *does*; this one describes the mechanism that makes the hard half of
-it possible, and argues for why it is built the way it is.
+!!! note "Developer documentation"
+    This page is for contributors. The user manual starts at [Home](index.md).
+    Sister pages: [Internals](internals.md), [Inheritance ABI](inheritance-abi.md),
+    [Developer index](developer.md).
+
+This is the architecture page. It describes the mechanism that makes the hard
+half of RepliBuild possible, and argues for why it is built the way it is.
 
 The short version: **a foreign call is a compilation problem, so RepliBuild
 compiles it.** Where a wrapper generator would emit a C shim or interpret a

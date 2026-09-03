@@ -1,14 +1,15 @@
-# The `replibuild.toml` Reference
+# Edit the TOML
 
 `replibuild.toml` is the interface. Every piece of library-specific knowledge
-lives in this file and nowhere else — not in a generator fork, not in a patch, not
-in a hand-written shim. `discover()` writes what it can see by scanning; the rest
-is what **you** have to tell it, and §2 is the list of exactly what that is.
+lives in this file — not in a generator fork, not in a patch, not in a
+hand-written shim. `discover()` writes what it can see by scanning. The rest is
+what **you** tell it, and [§2](#2.-What-discovery-cannot-know) is the list of
+exactly that.
 
-The file is read in one place ([`ConfigurationManager.load_config`](internals.md#Configuration-Manager))
-and frozen into an immutable `RepliBuildConfig`. Everything below is what that
-parser actually does — including the keys it validates loudly, the keys it warns
-about, and the handful it currently accepts and ignores.
+How to get to a file you can edit: [Wrap a library](guide.md). Symptom → key:
+[Troubleshooting](troubleshooting.md). The tables below are what the parser
+actually does — including keys it validates loudly, keys it warns about, and the
+handful it currently accepts and ignores.
 
 ---
 
@@ -25,7 +26,7 @@ anything that is not visible in the source tree's *shape* — see §2.
 
 **Forced re-discovery preserves hand-curated keys.** `discover(force=true)`
 regenerates the file, and without carry-over it would emit these empty, silently
-destroying your intent. The preserved set (`Discovery.PRESERVED_TOML_KEYS`) is:
+destroying your intent. The preserved set is:
 
 | Section | Key |
 |---|---|
@@ -39,14 +40,9 @@ destroying your intent. The preserved set (`Discovery.PRESERVED_TOML_KEYS`) is:
 | `[link]` | `promote_statics` |
 
 A regenerated *non-empty* value wins; an empty or absent one gets the preserved
-value. **If you add a new user-intent key to the schema, add it to that list too**
-— otherwise the next forced re-discovery eats it. (This is not hypothetical: the
-`stl_test` fixture was red for six weeks because `[types].templates` vanished on
-every run.)
-
-Anything **not** in that table is regenerated from the scan. Notably `[compile]
-flags`, `include_dirs`, and `[dependencies]` are not preserved — keep a
-hand-written config under version control rather than relying on `force=true` to
+value. A hand-edited key **not** in that table is wiped by `force=true`.
+`[compile] flags`, `include_dirs`, and `[dependencies]` are not preserved — keep
+a hand-written config in version control rather than relying on `force=true` to
 round-trip it.
 
 `save_config` only writes keys with non-default or non-empty values, so a
@@ -323,23 +319,18 @@ SQLITE_THREADSAFE = "1"
 use `[compile] flags`. Both feed the compile fingerprint, so changing either
 correctly invalidates the per-file IR cache.
 
-### 2.10 Tier 1 (C only)
-
-Opt in per package. See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch)
-for what a slice is:
+### 2.10 Tier 1 (C only) — leave off
 
 ```toml
 [wrap.tier1]
-enable = true
+enable = false
 ```
 
-!!! warning "Experimental — off by default, and not a supported tier"
+!!! warning "Experimental — off by default, not a supported path"
 
-    Tier 1 is a side project inside RepliBuild. `enable` defaults to `false`,
-    no Hub package sets it, and its tests are deliberately unwired from
-    `devtests.jl`. Leaving it off costs you nothing but inlining: every
-    function stays on `ccall`, which is correct. The [guide](guide.md) has the
-    mechanism and the caveats.
+    `enable` defaults to `false`. Leaving it off costs you nothing but
+    inlining: every function stays on `ccall`, which is correct. The mechanism
+    lives under [Developer: Tier 1](tier1.md).
 
 ### 2.11 Pinning content, not just a name
 
@@ -424,17 +415,12 @@ IR cache — it is keyed on a compile fingerprint as well as source `mtime`.
 | `fallback` | Bool | `false` | **C only.** `false` = link/optimize/assemble in-process on Julia's resident libLLVM, and a failure is a hard error. `true` = external `llvm-link`/`opt`. C++ always uses the external pipeline |
 | `promote_statics` | Bool | `true` | **C in-process bucket only.** Rename anything a slice may bind by `declare` but that cannot reach the `.so` dynamic symbol table to an exported `__rb_<lib>_<name>`. Required by `[wrap.tier1]`, harmless otherwise |
 
-!!! warning "`enable_lto` embeds the whole module — prefer `[wrap.tier1]`"
+!!! warning "Leave `enable_lto = false`"
     `enable_lto` embeds the **entire linked module** at every `llvmcall` site. At
     whole-library scale that can crash Julia's JIT, and it duplicates file-local
-    `static` state between the embedded bitcode and the `.so` — two calls to the
-    same library can observe different copies of its internal state. Every Hub
-    config sets `enable_lto = false`.
-
-    This is not a statement about Tier 1. The per-function slicing path under
-    `[wrap.tier1]` is immune to both problems and is the supported way to get
-    Tier 1. The knobs are independent, and `enable_lto = false` together with
-    `[wrap.tier1] enable = true` is the intended combination.
+    `static` state between the embedded bitcode and the `.so`. Every Hub config
+    sets `enable_lto = false`. The experimental per-function path is
+    `[wrap.tier1]`, also off by default — [Tier 1](tier1.md).
 
 ### `[binary]`
 
@@ -680,7 +666,7 @@ afternoon.
 
 ## 6. Worked configurations
 
-### A C library from git, with Tier 1
+### A C library from git
 
 ```toml
 [project]
@@ -710,7 +696,7 @@ language     = "c"
 shim_headers = ["lua.h", "lauxlib.h", "lualib.h"]
 
 [wrap.tier1]
-enable = true
+enable = false
 
 [wrap.varargs]
 lua_pushfstring = [["Cstring"], ["Cint"], ["Cdouble"], ["Cstring", "Cint"]]
@@ -782,23 +768,18 @@ language = "c"
 
 ---
 
-## 7. Troubleshooting index
+## 7. Troubleshooting
 
-| What you see | Look at |
+Symptom → key, including build and cache failures, lives on
+[Troubleshooting](troubleshooting.md). The rows that point at this file:
+
+| What you see | Section on this page |
 |---|---|
-| A C++ template type is missing, or members are `Any` | `[types] templates` / `template_headers` — §2.1 |
-| A struct from a header has **no fields** | `-fstandalone-debug` — §2.5 |
-| A struct became an opaque blob with a layout warning | Unmodellable member; check the warning's named type |
-| A macro-based API is absent from the wrapper | `[wrap.macros]` + `shim_headers` — §2.2 |
-| Macro values are wrong but everything compiled | A shim header resolved to a system copy — §2.2 |
-| `printf`-style function only takes its fixed arguments | `[wrap.varargs]` — §2.3 |
-| `invalid type '…' in [wrap.varargs.f]` | You wrote C types; use Julia types — §2.3 |
-| `must be a list of type lists` | You wrote `f = ["Cint"]`; write `f = [["Cint"]]` |
-| Memory grows on every string-returning call | `[wrap.cstring_owned]` — §2.4 |
-| Unrelated symbols from tests/examples in the wrapper | `exclude` — §2.6 |
-| A TU fails to compile with a missing header | `[compile] include_dirs` — §2.7 |
-| A TU fails on an undeclared identifier upstream's build defines | `[compile] flags` / `defines` — §2.9 |
-| Tier 1 accepted slices but most functions demoted | Missing `-l` in `link_libraries` — §2.8 |
-| "Tier 1 disabled for this wrap" | `fallback = true`, ingest mode, C++, or `promote_statics = false` |
-| A setting seems to have no effect at all | Check it is not in the "accepted and ignored" list — §5 |
-| `use()` serves a stale wrapper | The build cache keys on RepliBuild's own version too; see [the registry](internals.md#PackageRegistry) |
+| Template type missing / members `Any` | §2.1 |
+| Header struct has no fields | §2.5 |
+| Macro API absent, or wrong values | §2.2 |
+| Variadic function only takes fixed args | §2.3 |
+| Memory grows on string-returning calls | §2.4 |
+| Tests/examples leaked into the wrapper | §2.6 |
+| Missing header / missing `-D` | §2.7, §2.9 |
+| Setting does nothing | §5 — typos are silent |

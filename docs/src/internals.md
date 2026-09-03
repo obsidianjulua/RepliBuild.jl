@@ -1,8 +1,13 @@
 # Internals & Dispatch
 
+!!! note "Developer documentation"
+    This page is for contributors. The user manual starts at [Home](index.md).
+    Sister pages: [JLCS / MLIR](mlir.md), [Inheritance ABI](inheritance-abi.md),
+    [Developer index](developer.md).
+
 RepliBuild compiles C/C++ with Clang, reads the DWARF debug metadata the compiler emits about its own output, and generates Julia bindings that are correct by construction — struct offsets, enum underlying types, vtable slots, base-subobject offsets, and calling conventions all come from the compiler's own record rather than being guessed. Where DWARF is incomplete (enums the optimizer folded away, macro definitions, function-pointer typedefs) the Clang.jl AST fills the gap; where Julia's computed struct alignment disagrees with the DWARF size, the struct is treated as packed and routed away from `ccall`.
 
-This page is the technical reference for how that pipeline is assembled — the stages, the three dispatch tiers, and the modules behind each. It is aimed at contributors and advanced integrators, not everyday use.
+This page is the technical reference for how that pipeline is assembled — the stages, the three dispatch tiers, and the modules behind each.
 
 Tier 2 — the MLIR/JLCS marshalling layer — has its own page: [ABI Marshalling as Compiler IR](mlir.md) covers the dialect's types and ops, the SysV lowering, the thunk calling contract, source-level debugging, and the failure classes the design exists to make loud. This page describes where it sits; that one describes what it is.
 
@@ -39,7 +44,7 @@ The routing decision lives in `Wrapper/DispatchLogic.jl` (`is_ccall_safe`, `is_c
 
     **Whole-module bitcode — `[link] enable_lto`** embeds the entire linked module at each call site: scale-limited (can crash Julia's JIT on large libraries) and it duplicates file-local `static` state between the embedded bitcode and the `.so`. Production configurations set `enable_lto = false`; C++ defaults to LTO off. Treat it as an experimentation path for small stateless kernels.
 
-    See [Zero-cost LTO dispatch](guide.md#Zero-Cost-LTO-Dispatch).
+    See [Tier 1](tier1.md).
 
 ## Wrapper
 
