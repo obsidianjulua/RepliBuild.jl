@@ -46,6 +46,50 @@ jobs:
       - uses: julia-actions/julia-docdeploy@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Documenter only creates /stable/ from a v* tag. This repo has none, so
+      # the README stable badge 404s while /dev/ (main) is the live manual.
+      # Until a tag exists, copy /dev/ → /stable/ after each main deploy.
+      # Once tags exist, Documenter owns /stable/ and this step no-ops.
+      - name: Mirror /dev/ to /stable/
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --tags origin 'refs/tags/v*' | grep -q .; then
+            echo "Version tags exist; Documenter owns /stable/"
+            exit 0
+          fi
+          git clone --branch gh-pages --single-branch --depth 1 \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages-work
+          cd gh-pages-work
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          test -d dev
+          rm -rf stable
+          cp -a dev stable
+          printf '%s\n' \
+            'var DOC_VERSIONS = [' \
+            '  "stable",' \
+            '  "dev",' \
+            '];' \
+            'var DOCUMENTER_NEWEST = "dev";' \
+            'var DOCUMENTER_STABLE = "stable";' \
+            > versions.js
+          printf '%s\n' \
+            '<!DOCTYPE html>' \
+            '<html><head>' \
+            '<meta http-equiv="refresh" content="0; url=./stable/"/>' \
+            '<link rel="canonical" href="https://obsidianjulua.github.io/RepliBuild.jl/stable/"/>' \
+            '</head></html>' \
+            > index.html
+          git add -A
+          if git diff --cached --quiet; then
+            echo "stable already in sync with dev"
+          else
+            git commit -m "Mirror /dev/ → /stable/"
+            git push
+          fi
       - name: Run doctests
         shell: julia --project=docs {0}
         run: |
