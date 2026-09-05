@@ -20,6 +20,10 @@ const _JULIA_KEYWORDS = Set([
 # IR generator — which loads before this module — screens the same types. Kept
 # under the old name because it is referenced from six files in Wrapper.
 import ..INTERNAL_TYPE_BLOCKLIST
+# `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
+# format has no dynamic symbol table"). The export directory is the same
+# question there — see Builder/Compiler.jl's _pe_exported_names.
+import ..Compiler: _pe_exported_names
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 """Escape a name if it's a Julia keyword, using var\"...\" syntax."""
@@ -1079,17 +1083,27 @@ function _assert_aot_thunks_present(func_text::AbstractString,
         JIT dispatch path instead.""")
     end
 
-    (out, code) = BuildBridge.execute("nm", ["-D", "--defined-only", thunks_lib_path])
-    code == 0 || error("""
-    Cannot verify AOT thunks: `nm -D --defined-only $thunks_lib_path` exited $code.
-    Refusing to emit a wrapper whose thunk bindings are unverified — an unresolved
-    slot is a hard error at the call site, not a fallback.
-    $out""")
+    # What the thunks library actually offers. `nm -D` asks ELF's dynamic
+    # symbol table; on PE that is an error rather than an empty answer, so this
+    # refused to emit ANY wrapper carrying AOT thunks on Windows — the check
+    # that exists to catch an unresolved slot could not run at all.
+    #
+    # The export directory is the same question on PE, and a sharper one than
+    # nm: it is exactly what the loader resolves against at the call site.
+    defined = _pe_exported_names(thunks_lib_path)
+    if defined === nothing
+        (out, code) = BuildBridge.execute("nm", ["-D", "--defined-only", thunks_lib_path])
+        code == 0 || error("""
+        Cannot verify AOT thunks: `nm -D --defined-only $thunks_lib_path` exited $code.
+        Refusing to emit a wrapper whose thunk bindings are unverified — an unresolved
+        slot is a hard error at the call site, not a fallback.
+        $out""")
 
-    defined = Set{String}()
-    for line in eachsplit(out, '\n')
-        parts = split(strip(line))
-        isempty(parts) || push!(defined, String(parts[end]))
+        defined = Set{String}()
+        for line in eachsplit(out, '\n')
+            parts = split(strip(line))
+            isempty(parts) || push!(defined, String(parts[end]))
+        end
     end
 
     missing_syms = [(nm, _aot_thunk_symbol(taken, nm))

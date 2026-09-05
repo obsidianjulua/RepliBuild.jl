@@ -221,6 +221,26 @@ include(joinpath(@__DIR__, "test_json_mmap_hygiene.jl"))
 
 include(joinpath(@__DIR__, "test_cxx_personality.jl"))
 
+# ── The C bucket's compiler needs a libc on Windows (toolchain) ──────────────
+# .c goes through Clang_unified_jll's clang so its IR is version-locked to
+# Julia's libLLVM. That JLL is a bare compiler artifact: right triple, no libc.
+# On Linux it silently falls through to /usr/include; on Windows there is
+# nothing to fall through to, and every C file dies on its first system
+# #include. Only a Windows run can observe it.
+
+include(joinpath(@__DIR__, "test_c_bucket_sysroot.jl"))
+
+# ── One C type, two tiers, two widths (no toolchain) ─────────────────────────
+# C long is 32 bits on Win64 (LLP64) and 64 on Unix64 (LP64) — the one integer
+# whose width the word size does not settle. Wrapper emits Julia Clong and is
+# right for free; the IRGen producers hardcoded i64 in two hand-filled tables.
+# A disagreement raises no error anywhere: the thunk just reads a different
+# number of bytes than the caller wrote. The guard compares the two tiers
+# rather than restating the constant, so it also catches the next type added
+# to one table and not the other.
+
+include(joinpath(@__DIR__, "test_llp64_widths.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

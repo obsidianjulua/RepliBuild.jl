@@ -128,7 +128,80 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
                     length(parts) >= 3 && parts[2] in ("T", "W", "t", "w") &&
                         push!(live, String(parts[3]))
                 end
-                @test sort(unique(live)) == sort(code_syms)
+                live = sort(unique(live))
+                code_syms = sort(code_syms)
+
+                if !Sys.iswindows()
+                    @test live == code_syms
+                else
+                    # ── PE static-links its runtime; ELF does not ──────────
+                    # On Linux a fixture .so defines exactly what its own TUs
+                    # define. printf, operator new, the unwinder and the CRT
+                    # startup all stay in libc/libstdc++/libgcc and are merely
+                    # REFERENCED. mingw-w64 has no such split: it links those
+                    # archives INTO every DLL, so `nm --defined-only` on the
+                    # very same fixture reports ~29 extra defined symbols that
+                    # no fixture source declares.
+                    #
+                    # Nothing is MISSING on Windows — measured, both fixtures,
+                    # every thunk present — so the build is right and it is the
+                    # EQUALITY that is Linux-shaped. It is replaced by the two
+                    # implications it stood for, and both are kept: nothing
+                    # vendored may be absent (the list cannot drift into
+                    # fiction) and nothing built may be un-vendored (no symbol
+                    # drifted in) unless the toolchain itself put it there.
+                    #
+                    # The excused set is written out rather than pattern-
+                    # matched. A loose prefix rule would be the cheaper thing
+                    # to maintain and the wrong thing to have: it would swallow
+                    # real drift silently, which is the exact failure this file
+                    # records against itself 40 lines up. Written out, a new
+                    # mingw release fails loudly and a human looks at it.
+                    pe_static_runtime = Set([
+                        # PE image startup and per-DLL bookkeeping
+                        "DllMain", "DllMainCRTStartup", "_CRT_INIT", "__main",
+                        "_initterm", "_initterm_e",
+                        "__do_global_ctors", "__do_global_dtors",
+                        "_pei386_runtime_relocator", "_GetPEImageBase",
+                        "__mingw_GetSectionCount", "__mingw_GetSectionForAddress",
+                        "___chkstk_ms", "__guard_dispatch_icall_dummy",
+                        # atexit machinery
+                        "atexit", "_execute_onexit_table",
+                        "_initialize_onexit_table", "_register_onexit_function",
+                        # UCRT stdio shims, pulled in by the fixtures' printf
+                        "fprintf", "vfprintf", "__acrt_iob_func",
+                        "__stdio_common_vfprintf", "__local_stdio_printf_options",
+                        # libc
+                        "memcpy", "abort",
+                        # C++ runtime: the global operators, and the SEH
+                        # personality mingw unwinds with — the v0/seh0 split
+                        # MLIRNative.CXX_PERSONALITY exists for.
+                        "_Znwy", "_ZdlPv", "__gxx_personality_seh0", "_Unwind_Resume",
+                    ])
+
+                    excused = filter(in(pe_static_runtime), live)
+
+                    # The escape hatch may never cover what this testset
+                    # polices. `_Znwy`/`_ZdlPv` are `_Zn`/`_Zd` global
+                    # operators, not nested names, so no fixture member and no
+                    # thunk can hide behind the set above — assert that, rather
+                    # than trust it stays true.
+                    @test !any(s -> startswith(s, "_ZN") || startswith(s, "_ZTh") ||
+                                    startswith(s, "_ZTv"), excused)
+                    @test !isempty(excused)   # the mechanism actually engaged
+
+                    absent = setdiff(code_syms, live)
+                    isempty(absent) ||
+                        @info "vendored symbols missing from the build:\n  " *
+                              join(absent, "\n  ")
+                    @test isempty(absent)
+
+                    drifted = setdiff(live, code_syms, excused)
+                    isempty(drifted) ||
+                        @info "built symbols neither vendored nor mingw runtime:\n  " *
+                              join(drifted, "\n  ")
+                    @test isempty(drifted)
+                end
             end
         end
         @test swept == 2   # the sweep actually ran; never assert into an empty loop

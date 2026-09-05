@@ -477,6 +477,31 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Metadata section
     compiler_info = get(metadata, "compiler_info", Dict())
     lto_name = config.project.name
+
+    # Every symbol the monolithic LTO module declares must resolve in the
+    # consumer's process, or ORC deadlocks on first call instead of raising.
+    # See _lto_unresolved_symbols. Whole-module, because the embedded module is
+    # whole: over-demoting costs Tier 1 for this library and nothing else, and
+    # the ccall path it falls back to is always correct.
+    lto_unresolved = if config.link.enable_lto && !config.compile.aot_thunks
+        _lto_unresolved_symbols(
+            joinpath(get_output_path(config), "$(lto_name)_lto.ll"), lib_path)
+    else
+        String[]
+    end
+    if !isempty(lto_unresolved)
+        @warn """
+              Monolithic LTO (Tier 1 llvmcall) disabled for this wrapper: its LTO module
+              declares $(length(lto_unresolved)) symbol(s) that '$(basename(lib_path))' and
+              its dependencies cannot supply, and each would have deadlocked the JIT on
+              first call rather than erroring. Those functions dispatch via ccall instead,
+              which is always correct — only the zero-cost path is lost.
+
+              On Windows this is expected for anything touching the C runtime: mingw links
+              the CRT statically into the DLL, so the symbol is defined in the binary but
+              not exported, and nothing in the process can bind it.""" symbols=lto_unresolved
+    end
+
     lto_ir_block = if config.link.enable_lto && config.compile.aot_thunks
         # AOT thunks mode: skip monolithic LTO bitcode (avoids OOM/hang on large projects),
         # only load per-function thunks bitcode
@@ -486,7 +511,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     const THUNKS_LTO_IR = isfile(THUNKS_LTO_IR_PATH) ? read(THUNKS_LTO_IR_PATH) : UInt8[]
 
     """
-    elseif config.link.enable_lto
+    elseif config.link.enable_lto && isempty(lto_unresolved)
         """
     # LTO: load LLVM bitcode at module parse time for Base.llvmcall zero-cost dispatch
     # Using bitcode (.bc) is significantly faster for Julia to parse than text IR (.ll)
@@ -494,6 +519,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     const LTO_IR = isfile(LTO_IR_PATH) ? read(LTO_IR_PATH) : UInt8[]
     const THUNKS_LTO_IR_PATH = joinpath(@__DIR__, "$(lto_name)_thunks_lto.bc")
     const THUNKS_LTO_IR = isfile(THUNKS_LTO_IR_PATH) ? read(THUNKS_LTO_IR_PATH) : UInt8[]
+
+    """
+    elseif config.link.enable_lto
+        # Pre-flight demotion: the bitcode is on disk but must not be bound.
+        """
+    const LTO_IR = UInt8[]  # LTO bitcode declares symbols this process cannot resolve
+    const THUNKS_LTO_IR = UInt8[]
 
     """
     else

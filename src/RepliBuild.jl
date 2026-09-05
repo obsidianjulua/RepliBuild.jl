@@ -33,7 +33,30 @@ const PROJECT_ROOT = dirname(@__DIR__)
 const SRC_DIR = @__DIR__
 
 """
-    INTERNAL_TYPE_BLOCKLIST
+    C_LONG_MLIR
+
+The MLIR integer type for C's `long`: `i32` on Windows, `i64` everywhere else.
+
+C's `long` is the one integer whose width is not settled by the word size.
+Win64 is LLP64 — `long` is 32 bits while pointers and `long long` are 64 —
+and every Unix64 target is LP64, where `long` is 64. `int`, `long long`,
+`size_t` and the fixed-width spellings are the same on both and are NOT
+routed through here.
+
+Defined at package level for the same reason INTERNAL_TYPE_BLOCKLIST is: the
+fact is needed on both sides of the tier boundary. `Wrapper` already gets this
+right for free, because it emits Julia's `Clong`, which is Int32 on Windows and
+Int64 elsewhere. The `IRGen` producers hardcoded `i64` and had no such luck, so
+on Windows a `long` argument was passed as 64 bits into a thunk whose C side
+reads 32 — the silent kind of wrong, wrong values rather than a crash.
+
+`test/test_llp64_widths.jl` asserts the two tiers still agree.
+"""
+const C_LONG_MLIR = Sys.iswindows() ? "i32" : "i64"
+
+"""
+    INTERNAL_TYPE_BLOCKLIST,
+    C_LONG_MLIR
 
 Compiler and libc internals that leak through DWARF and must never reach a
 generated artifact — not a wrapper's type declarations, not its export list,
@@ -52,6 +75,18 @@ const INTERNAL_TYPE_BLOCKLIST = Set([
     "_loadu_ps", "_storeu_ps",
     "ldiv_t", "lldiv_t", "div_t", "max_align_t", "imaxdiv_t",
     "_IO_FILE", "_IO_marker", "_IO_codecvt", "_IO_wide_data",
+    # The same libc internals under the Windows CRT, which spells all of them
+    # differently. `FILE` is `struct _iobuf` here, not `struct _IO_FILE`, so a
+    # list naming only the glibc spellings screens nothing on Windows: a
+    # `FILE**` parameter came out as `Ptr{Ptr{_iobuf}}`, `_iobuf` was declared
+    # as a one-field struct and EXPORTED into the wrapper's API surface, and a
+    # caller passing the documented `Ref{Ptr{Cvoid}}` could not convert to it.
+    # The glibc entries above have covered this since the FILE class was first
+    # found; these are the missing half of the same fact.
+    "_iobuf",
+    "__crt_locale_data", "__crt_locale_pointers", "__crt_multibyte_data",
+    "_Mbstatet", "localeinfo_struct", "threadlocaleinfostruct",
+    "threadmbcinfostruct", "tagLC_ID", "lconv",
 ])
 
 # RepliBuild targets Linux (ELF/.so) and Windows (PE/.dll, x86_64-w64-windows-gnu).

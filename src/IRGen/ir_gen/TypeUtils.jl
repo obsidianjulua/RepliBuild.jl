@@ -1,5 +1,10 @@
 module TypeUtils
 
+# C's `long` is 32 bits on Windows and 64 on Unix, and the width has to match
+# what the wrapper emits on the other side of the thunk. See the constant's
+# docstring in RepliBuild.jl.
+import ...C_LONG_MLIR
+
 export map_cpp_type, get_llvm_signature, get_stl_container_size
 
 """
@@ -13,7 +18,17 @@ function map_cpp_type(type_str::String)
         return "" # Void return usually means no value
     elseif type_str == "int" || type_str == "int32_t" || type_str == "int32" || type_str == "Cint" || type_str == "unsigned int" || type_str == "uint32_t" || type_str == "uint32" || type_str == "Cuint"
         return "i32"
-    elseif type_str == "long" || type_str == "long long" || type_str == "int64_t" || type_str == "int64" || type_str == "size_t" || type_str == "Csize_t" || type_str == "Clong" || type_str == "unsigned long" || type_str == "uint64_t" || type_str == "uint64" || type_str == "Culong" || type_str == "unsigned long long"
+    # `long` is the one integer spelling whose width moves with the platform:
+    # 32 bits on Win64 (LLP64), 64 on Unix64 (LP64). It used to sit in the i64
+    # bucket below with everything else, which silently widened every `long`
+    # parameter and return on Windows. `Clong`/`Culong` are the Julia spellings
+    # of the same C type and follow it. Everything in the next branch is 64 bits
+    # on both platforms.
+    elseif type_str == "long" || type_str == "unsigned long" ||
+           type_str == "long int" || type_str == "unsigned long int" ||
+           type_str == "Clong" || type_str == "Culong"
+        return C_LONG_MLIR
+    elseif type_str == "long long" || type_str == "int64_t" || type_str == "int64" || type_str == "size_t" || type_str == "Csize_t" || type_str == "uint64_t" || type_str == "uint64" || type_str == "unsigned long long"
         return "i64"
     elseif type_str == "float" || type_str == "float32" || type_str == "Cfloat"
         return "f32"

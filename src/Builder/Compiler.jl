@@ -298,6 +298,140 @@ standalone (empty default) it is computed here so the fingerprint check still
 applies — `_detect_target_triple` shells out, so the batch avoids paying that
 per file by passing it down.
 """
+# _c_bucket_sysroot() -> String
+#
+# The `--sysroot` the C bucket's compiler needs on Windows, or "" when none is
+# needed or none can be found.
+#
+# Clang_unified_jll's clang is built for `x86_64-w64-windows-gnu` — the right
+# triple, matching Julia's own mingw-w64 build — but it is a bare compiler
+# artifact: it ships no libc headers and no mingw CRT. Its InstalledDir is a
+# Julia artifact directory holding tools and nothing else, so the header search
+# it derives from that prefix is empty and `#include <math.h>` fails on the
+# first C file. A system clang finds those through its own InstalledDir; the JLL
+# has no equivalent to find.
+#
+# Pointing it at the MSYS2 CLANG64 prefix supplies exactly the missing half and
+# disturbs nothing else: JLL clang 18 still emits the IR, Julia's resident
+# libLLVM still consumes it, so the version lock this bucket exists to enforce
+# (see _clang_for_c_bucket) is untouched. The triple does not move either — it
+# is already the mingw one.
+#
+# Discovery, in order:
+#   1. REPLIBUILD_C_SYSROOT — an explicit override always wins.
+#   2. The prefix of whatever `clang` is on PATH. Under the supported Windows
+#      setup that is MSYS2 CLANG64, and following PATH means a non-default MSYS2
+#      install needs no configuration at all.
+#   3. MSYS2_ROOT (default C:/msys64) x {clang64, ucrt64, mingw64}.
+#
+# A candidate is accepted only if it actually holds include/math.h. Testing for
+# the directory would not do: an MSYS2 install carries empty `ucrt64/` and
+# `mingw64/` trees for environments that were never installed, and handing clang
+# one of those trades "no sysroot" for "wrong sysroot" — the same failure with a
+# worse error message.
+const _C_SYSROOT = Ref{Union{Nothing,String}}(nothing)
+
+function _c_bucket_sysroot()::String
+    Sys.iswindows() || return ""
+    cached = _C_SYSROOT[]
+    cached === nothing || return cached
+
+    _usable(p) = !isempty(p) && isfile(joinpath(p, "include", "math.h"))
+
+    found = ""
+
+    override = get(ENV, "REPLIBUILD_C_SYSROOT", "")
+    if !isempty(override)
+        if _usable(override)
+            found = override
+        else
+            @warn "REPLIBUILD_C_SYSROOT is set but holds no include/math.h — ignoring it" REPLIBUILD_C_SYSROOT=override
+        end
+    end
+
+    if isempty(found)
+        path_clang = Sys.which("clang")
+        if path_clang !== nothing
+            prefix = dirname(dirname(abspath(path_clang)))
+            _usable(prefix) && (found = prefix)
+        end
+    end
+
+    if isempty(found)
+        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
+        for env in ("clang64", "ucrt64", "mingw64")
+            cand = joinpath(msys_root, env)
+            if _usable(cand)
+                found = cand
+                break
+            end
+        end
+    end
+
+    if isempty(found)
+        @warn """
+              No mingw sysroot found for the C bucket. Clang_unified_jll's clang ships no
+              libc headers of its own, so compiling a .c file will fail on its first system
+              #include. Install the MSYS2 CLANG64 environment, or point REPLIBUILD_C_SYSROOT
+              at a prefix containing include/math.h."""
+    end
+
+    # Cached either way, including the empty result: the search is the same every
+    # time within a session, and this keeps the warning above to one line.
+    _C_SYSROOT[] = found
+    return found
+end
+
+# _c_bucket_rtlib() -> String
+#
+# The `-rtlib` the C bucket's JLL clang must link with, or "" to leave its
+# default alone.
+#
+# Giving the JLL clang a sysroot (above) fixes compiling and only half of
+# linking. clang's mingw driver defaults to `-rtlib=libgcc`, so the link ends in
+#
+#     lld: error: unable to find library -lgcc_s
+#     lld: error: unable to find library -lgcc
+#
+# against MSYS2 CLANG64, which is a compiler-rt/libc++/libunwind environment and
+# ships no libgcc at all. MSYS2's own clang is configured with
+# CLANG_DEFAULT_RTLIB=compiler-rt; the JLL is not, and cannot be told at build
+# time, so it is told here.
+#
+# This is asked of the SYSROOT, not the platform: UCRT64 and MINGW64 are GCC
+# environments where libgcc is present and correct, and forcing compiler-rt on
+# them would break a link that works. So the probe looks for a libgcc to link
+# against and only overrides when there is none.
+const _C_RTLIB = Ref{Union{Nothing,String}}(nothing)
+
+function _c_bucket_rtlib()::String
+    Sys.iswindows() || return ""
+    cached = _C_RTLIB[]
+    cached === nothing || return cached
+
+    rtlib = ""
+    sysroot = _c_bucket_sysroot()
+    if !isempty(sysroot)
+        libdir = joinpath(sysroot, "lib")
+        # libgcc.a sits directly in lib/ on some layouts and under
+        # lib/gcc/<triple>/<version>/ on others, so this walks rather than
+        # guessing a path.
+        has_libgcc = false
+        if isdir(libdir)
+            for (_, _, files) in walkdir(libdir)
+                if "libgcc.a" in files || "libgcc_s.a" in files
+                    has_libgcc = true
+                    break
+                end
+            end
+        end
+        has_libgcc || (rtlib = "compiler-rt")
+    end
+
+    _C_RTLIB[] = rtlib
+    return rtlib
+end
+
 # _clang_for_c_bucket(compiler, cmd_args) -> (output, exitcode)
 #
 # Run `compiler` over `cmd_args`, routing the C BUCKET (`compiler == "clang"`)
@@ -329,7 +463,26 @@ function _clang_for_c_bucket(compiler::String, cmd_args)
             return BuildBridge.execute(compiler, cmd_args)
 
         clang_cmd = Clang_mod.Clang_unified_jll.clang()
-        cmd = ignorestatus(`$(clang_cmd) $cmd_args`)
+
+        # On Windows the JLL compiler brings no libc of its own — see
+        # _c_bucket_sysroot. This covers compiling AND linking: without a sysroot
+        # the link step cannot find the mingw CRT and startup objects either. A
+        # caller that already chose a sysroot keeps it.
+        sysroot = any(a -> startswith(string(a), "--sysroot"), cmd_args) ? "" :
+                  _c_bucket_sysroot()
+
+        # -rtlib is a LINK option; clang warns it is unused on a compile-only
+        # run, and that warning would print once per C file. These flags are
+        # what make an invocation compile-only.
+        is_link = !any(a -> string(a) in ("-S", "-c", "-emit-llvm", "-fsyntax-only"),
+                       cmd_args)
+        rtlib = (is_link && !any(a -> startswith(string(a), "-rtlib"), cmd_args)) ?
+                _c_bucket_rtlib() : ""
+
+        extra = String[]
+        isempty(sysroot) || push!(extra, "--sysroot=$sysroot")
+        isempty(rtlib)   || push!(extra, "-rtlib=$rtlib")
+        cmd = ignorestatus(`$(clang_cmd) $extra $cmd_args`)
 
         out_pipe = Pipe()
         err_pipe = Pipe()
@@ -1265,6 +1418,183 @@ function _auto_detect_stl_headers(templates::Vector{String})::Vector{String}
     return collect(headers)
 end
 
+# =============================================================================
+# FORCED ODR-USE OF CONTAINER MEMBERS
+# -----------------------------------------------------------------------------
+# `template class std::vector<int>;` is not enough to put std::vector<int>'s
+# members in the binary, and on libc++ it puts almost none of them there.
+#
+# libc++ marks nearly every inline member `_LIBCPP_HIDE_FROM_ABI`, which expands
+# to `__attribute__((exclude_from_explicit_instantiation))`. That attribute means
+# exactly what it says: an explicit instantiation emits NOTHING for that member.
+# It exists only where some translation unit actually odr-uses it. There is no
+# knob to turn this off — libc++'s __config gates the attribute on
+# `__has_attribute`, not on any user-settable macro.
+#
+# Measured on a real build before this: std::vector<int> carried ONE symbol, its
+# destructor, and CppVector had no size() and no push_back() to bind. What did
+# survive — size, push_back, operator[] — survived only because the fixture's own
+# C++ happened to call them. std::map's at() and count(), which nothing called,
+# were simply absent. libstdc++ emits every member on explicit instantiation, so
+# none of this was visible on Linux.
+#
+# The generated functions below are never called. Their only job is to be
+# compiled: naming a member odr-uses it, and the symbol lands in the binary.
+#
+# Every touch is guarded by `if constexpr` on whether the expression is valid for
+# that container at all, so ONE generic body covers vector, string, map, set,
+# deque and list with no per-container table — std::list has no operator[],
+# std::vector no key_type, std::map no push_back, and each simply drops out.
+# Arguments are spelled with the container's own nested typedefs for the same
+# reason: value_type, key_type and size_type say what the container wants
+# without this code having to know which container it is.
+#
+# `if constexpr` covers the immediate context only. A member whose body hard-
+# errors deep inside its own instantiation would still break the TU, so the
+# caller syntax-checks the generated file and falls back to the bare
+# instantiations if it does not compile. Nothing that builds today can regress.
+# =============================================================================
+
+"The C++ preamble: a T& for any T, and the `if constexpr` guard the touches ride on."
+const _TEMPLATE_FORCE_PREAMBLE = raw"""
+// ── Forced odr-use (see generate_template_instantiations) ───────────────────
+// None of this is ever called. It exists so that naming a member odr-uses it,
+// which is what makes libc++ emit a member that `template class C;` skips.
+#include <type_traits>
+
+namespace replibuild_force {
+
+// A T& for any T, including types that are not default-constructible. Never
+// evaluated: every caller below sits in a function that is never called.
+template <class T> T& ref() { return *reinterpret_cast<T*>(1); }
+
+// Runs `f(c)` only if that is a valid expression. The discarded branch of an
+// `if constexpr` is not instantiated, so a member the container does not have
+// costs nothing and errors nowhere.
+template <class F, class C>
+inline void touch(F&& f, C& c) {
+    if constexpr (std::is_invocable_v<F&, C&>) { f(c); }
+}
+
+}  // namespace replibuild_force
+
+// The container's own type, for naming its nested typedefs.
+#define RB_SELF std::decay_t<decltype(x)>
+
+// The lambda's trailing return type is what does the SFINAE: if EXPR is not
+// valid for this container the lambda is not invocable, and `touch` drops it.
+#define RB_TOUCH(EXPR)                                                         \
+    ::replibuild_force::touch(                                                 \
+        [](auto& x) -> decltype((EXPR), void()) { (void)(EXPR); }, c)
+"""
+
+# Every member name `_classify_stl_method` knows how to classify. Element access,
+# lookup, insertion and erasure appear twice: once in the sequence spelling (an
+# index) and once in the associative one (a key). A container has one or the
+# other, never both, and the guard drops whichever it does not have.
+const _TEMPLATE_FORCE_EXPRS = [
+    # Observers
+    "x.size()", "x.length()", "x.empty()", "x.capacity()", "x.max_size()",
+    "x.data()", "x.c_str()", "x.begin()", "x.end()", "x.front()", "x.back()",
+    # Mutators taking nothing
+    "x.clear()", "x.pop_back()",
+    # Sized operations
+    "x.reserve(0)", "x.resize(0)",
+    # Element access
+    "x.at(::replibuild_force::ref<const typename RB_SELF::size_type>())",
+    "x.at(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    "x[::replibuild_force::ref<const typename RB_SELF::size_type>()]",
+    "x[::replibuild_force::ref<const typename RB_SELF::key_type>()]",
+    # Lookup
+    "x.find(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    "x.count(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    # Insertion and erasure
+    "x.push_back(::replibuild_force::ref<const typename RB_SELF::value_type>())",
+    "x.insert(::replibuild_force::ref<const typename RB_SELF::value_type>())",
+    "x.insert(x.begin(), ::replibuild_force::ref<const typename RB_SELF::value_type>())",
+    "x.erase(x.begin())",
+    "x.erase(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    # std::string's own
+    "x.append(::replibuild_force::ref<const RB_SELF>())",
+]
+
+"""
+One never-called function per instantiated container, touching every member in
+`_classify_stl_method`'s vocabulary.
+
+`used` keeps it through dead-code removal of an unreferenced static — without it
+the function can be dropped before codegen, and dropping it drops the odr-use
+along with the symbols this whole mechanism exists to produce. The anonymous
+namespace keeps it out of the DLL's export table, and so out of the symbol sweep
+and the wrapper's API surface.
+"""
+function _template_force_body(instantiation_type::String, index::Int)::String
+    io = IOBuffer()
+    println(io, "namespace {")
+    println(io, "#if defined(__GNUC__) || defined(__clang__)")
+    println(io, "__attribute__((used))")
+    println(io, "#endif")
+    println(io, "void replibuild_force_$(index)($(instantiation_type)& c) {")
+    for expr in _TEMPLATE_FORCE_EXPRS
+        println(io, "    RB_TOUCH($expr);")
+    end
+    println(io, "}")
+    println(io, "}  // namespace")
+    return String(take!(io))
+end
+
+"Write the instantiation TU. `force` adds the odr-use block; without it this is the bare form."
+function _write_template_tu(path::String, headers::Vector{String},
+                            instantiation_types::Vector{String}, force::Bool)
+    open(path, "w") do io
+        println(io, "// Auto-generated by RepliBuild to force template instantiations")
+        for header in headers
+            if startswith(header, "<") || startswith(header, "\\\"")
+                println(io, "#include $header")
+            else
+                println(io, "#include \"$header\"")
+            end
+        end
+        println(io, "")
+        for t in instantiation_types
+            println(io, "template class $t;")
+        end
+        if force
+            println(io, "")
+            println(io, _TEMPLATE_FORCE_PREAMBLE)
+            for (i, t) in enumerate(instantiation_types)
+                println(io, "")
+                print(io, _template_force_body(t, i))
+            end
+            println(io, "")
+            println(io, "#undef RB_TOUCH")
+            println(io, "#undef RB_SELF")
+        end
+    end
+end
+
+"""
+Does the generated TU compile? Decides whether the odr-use block can stay.
+
+An unavailable probe compiler counts as NOT compiling: the forcing block is the
+optional half of this file, so anything that cannot be verified is dropped
+rather than risked.
+"""
+function _template_tu_compiles(config::RepliBuildConfig, path::String)::Tuple{Bool,String}
+    probe = _probe_compiler(:cpp)
+    flags = get_compile_flags(config)
+    incs  = ["-I$dir" for dir in get_include_dirs(config)]
+    defs  = ["-D$(k)=$(v)" for (k, v) in config.compile.defines]
+    errbuf = IOBuffer()
+    try
+        p = run(pipeline(ignorestatus(`$probe -fsyntax-only $flags $incs $defs $path`),
+                         stdout = devnull, stderr = errbuf))
+        return (p.exitcode == 0, String(take!(errbuf)))
+    catch e
+        return (false, "probe compiler unavailable: $e")
+    end
+end
+
 """
 Generate a dummy C++ file to explicitly instantiate requested templates
 so they appear in the DWARF metadata.
@@ -1291,20 +1621,25 @@ function generate_template_instantiations(config::RepliBuildConfig, cpp_files::V
         "std::u32string" => "std::basic_string<char32_t>",
     )
 
-    open(dummy_file, "w") do io
-        println(io, "// Auto-generated by RepliBuild to force template instantiations")
-        for header in all_headers
-            if startswith(header, "<") || startswith(header, "\\\"")
-                println(io, "#include $header")
-            else
-                println(io, "#include \"$header\"")
-            end
-        end
-        println(io, "")
-        for t in config.types.templates
-            instantiation_type = get(stl_typedef_expansions, t, t)
-            println(io, "template class $instantiation_type;")
-        end
+    instantiation_types = [get(stl_typedef_expansions, t, t) for t in config.types.templates]
+
+    # Written with the odr-use block, then verified. `template class C;` alone
+    # leaves libc++ containers nearly empty (see the section comment above), so
+    # the block is what makes the mechanism work there — but it is generated C++
+    # over user-chosen element types, and a member that hard-errors inside its
+    # own instantiation is outside what `if constexpr` can guard. So it is
+    # checked before it is trusted, and dropped if it does not compile: a build
+    # that works today cannot start failing because of this.
+    _write_template_tu(dummy_file, all_headers, instantiation_types, true)
+    (ok, output) = _template_tu_compiles(config, dummy_file)
+    if !ok
+        _write_template_tu(dummy_file, all_headers, instantiation_types, false)
+        @warn """
+              Template odr-use forcing did not compile — falling back to bare explicit \
+              instantiations. On libstdc++ that is the same thing; on libc++ any container \
+              member your own code never calls will be missing from the build, and binding \
+              it will fail with "no <method> thunk available".
+              """ templates=instantiation_types output=strip(output)
     end
 
     return vcat(cpp_files, [dummy_file])
@@ -1331,7 +1666,11 @@ function _probe_compiler(language::Symbol)::Cmd
             Clang_mod = Base.require(Base.PkgId(
                 Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
             if isdefined(Clang_mod, :Clang_unified_jll)
-                return Clang_mod.Clang_unified_jll.clang()
+                clang_cmd = Clang_mod.Clang_unified_jll.clang()
+                # Same sysroot the real compile gets, or the probe would resolve a
+                # different set of headers than the build it is vouching for.
+                sysroot = _c_bucket_sysroot()
+                return isempty(sysroot) ? clang_cmd : `$clang_cmd --sysroot=$sysroot`
             end
         catch
         end
@@ -1558,7 +1897,24 @@ function _normalize_stl_type(demangled_type::String)::String
     end
 
     # std::basic_string<char, std::char_traits<char>, std::allocator<char>>
-    if startswith(t, "std::basic_string<char")
+    #
+    # Anchored on the closing `>`, and that anchor is the whole point. Written as
+    # a bare `startswith`, this branch also swallowed basic_string's NESTED
+    # helper classes — libc++ has several — so
+    #
+    #   std::basic_string<char, ...>::__annotation_guard
+    #
+    # normalized to `std::basic_string<char>` and its members were recorded as
+    # the string's own. Dedup keeps the FIRST match per method name, so
+    # `~__annotation_guard()` was stored as the string's destructor and the real
+    # `~basic_string()` never got in. CppString then destroyed itself by calling
+    # a guard's destructor on a string: EXCEPTION_ACCESS_VIOLATION inside
+    # __is_long, one frame under ~__annotation_guard.
+    #
+    # The vector/map/unordered_map branches below are `$`-anchored regexes and
+    # were never exposed to this. libstdc++ does not emit these helpers, so the
+    # defect was latent on Linux and immediate on libc++.
+    if startswith(t, "std::basic_string<char") && endswith(t, ">")
         return "std::basic_string<char>"
     end
 
@@ -1586,6 +1942,25 @@ Returns (method_name, is_const) or nothing if not a recognized method.
 function _classify_stl_method(method_sig::String, container_type::String="")::Union{Tuple{String,Bool}, Nothing}
     sig = strip(method_sig)
     is_map = startswith(container_type, "std::map") || startswith(container_type, "std::unordered_map")
+
+    # An ABI tag is not part of the method's identity, so it is dropped before
+    # any of the name tests below.
+    #
+    # libc++ marks nearly every inline member `_LIBCPP_HIDE_FROM_ABI`, which
+    # expands to an `abi_tag` attribute, and the tag mangles into the symbol
+    # AFTER the name: `_ZNKSt3__16vectorIiNS_9allocatorIiEEE4sizeB9nqe220108Ev`,
+    # demangling to `size[abi:nqe220108]() const`. Every test here is a
+    # `startswith(sig, "size(")`, so every tagged member failed to classify and
+    # was dropped — std::vector<int> came out of a real build with exactly ONE
+    # method (the destructor, which survived only because its test is on the
+    # leading `~`, and the tag trails the name). CppVector then had no size and
+    # no push_back thunk to call.
+    #
+    # libstdc++ tags only `std::__cxx11` string/list members, so on Linux this
+    # cost a couple of methods and was never traced; on libc++ it costs the
+    # whole container. Same treatment as Wrapper/Cpp/IdentifiersCpp.jl, which
+    # strips these tags for the same reason.
+    sig = replace(sig, r"\[abi:[^\]]*\]" => "")
 
     # Constructor: ClassName(...)  or ClassName()
     # The method_sig is just the part after "::", e.g., "vector()" or "basic_string(char const*)"
@@ -2018,6 +2393,88 @@ function _scan_noexcept_functions(source_files::Vector{String},
     return noexcept_names
 end
 
+# =============================================================================
+# WHAT A PE BINARY ACTUALLY EXPORTS
+# -----------------------------------------------------------------------------
+# `nm -g --defined-only` is not a library's API on Windows, and the gap is not
+# cosmetic.
+#
+# mingw links its C runtime, startup code and unwinder STATICALLY into every
+# DLL. Those objects carry defined global symbols, so nm reports them exactly
+# like the library's own functions: snprintf, memcpy, atexit, fprintf, abort,
+# _CRT_INIT, operator new. On ELF the same code lives in a shared libc and is
+# only ever REFERENCED, so nm's answer and the library's API are the same list
+# and nothing had to distinguish them.
+#
+# The consequence is not a longer list, it is a broken build. `snprintf` was
+# recorded as an exported function of test/c_test, RepliBuild generated a thunk
+# for it, and the JIT then had to resolve `snprintf` at materialisation. It
+# cannot: the symbol is in the COFF symbol table but NOT in the DLL's export
+# directory, so GetProcAddress — and therefore dlsym, and therefore ORC's
+# process search — does not find it. The session died with
+#
+#     JIT session error: Symbols not found: [ snprintf ]
+#
+# and the run then hung rather than failing.
+#
+# PE answers the question exactly, in the export directory, which is also the
+# only thing GetProcAddress will ever consult — so it is the right authority in
+# the strongest sense: a symbol outside it cannot be called through the library
+# even in principle. Measured across the fixtures: c_test 115 nm symbols / 28
+# exports, mi_test 133/43, vi_test 142/56, stl_test 691/513, and zero CRT
+# symbols in any export table.
+#
+# ELF's equivalent is the dynamic symbol table, which is what `nm -D` reads —
+# and `nm -D` is an error on PE ("File format has no dynamic symbol table"),
+# which is why the sites that used it never worked on Windows.
+# =============================================================================
+
+"""
+    _pe_exported_names(binary_path) -> Union{Nothing,Set{String}}
+
+The names in a PE binary's export directory, or `nothing` when the question
+cannot be answered — not Windows, no GNU objdump, or a binary with no export
+table at all.
+
+`nothing` means "do not filter", so a missing tool degrades to the old
+behaviour rather than silently emptying a library's API.
+"""
+function _pe_exported_names(binary_path::String)
+    Sys.iswindows() || return nothing
+    dumper = _dwarf_dumper()
+    dumper === nothing && return nothing
+
+    out = try
+        readchomp(pipeline(ignorestatus(`$(dumper.tool) -p $binary_path`), stderr = devnull))
+    catch
+        return nothing
+    end
+
+    names = Set{String}()
+    started = false
+    for line in split(out, '\n')
+        if !started
+            occursin("[Ordinal/Name Pointer] Table", line) && (started = true)
+            continue
+        end
+        # Rows are `[   0] +base[   1]  0000 aabb_area`; older binutils drop the
+        # +base/hint columns. Taking the last field covers both.
+        m = match(r"^\s*\[\s*\d+\]\s+(.*\S)\s*$", line)
+        if m === nothing
+            # objdump prints an `Ordinal Hint Name` header under the marker
+            # before the first row, so a non-row line only ends the table once
+            # rows have started. Breaking on the header instead made the answer
+            # always empty, which reads as "could not ask" and silently
+            # restores the unfiltered behaviour this exists to replace.
+            isempty(names) && continue
+            break
+        end
+        push!(names, String(last(split(m.captures[1]))))
+    end
+
+    return isempty(names) ? nothing : names
+end
+
 """
 Extract symbol information from compiled binary using nm.
 Returns vector of symbol dictionaries with mangled/demangled names.
@@ -2036,6 +2493,11 @@ function extract_symbols_from_binary(binary_path::String)
         @warn "nm demangled command failed: $demangled_output"
         return Dict{String,Any}[]
     end
+
+    # On PE, nm's answer includes the statically-linked C runtime and is not
+    # this library's API — see _pe_exported_names for what that cost. `nothing`
+    # means the question could not be asked, and then nothing is screened out.
+    exported = _pe_exported_names(binary_path)
 
     # Build address → mangled mapping. Accept T (text/code) and W (weak)
     # symbols. Weak symbols cover C++ template instantiations and inline
@@ -2083,6 +2545,17 @@ function extract_symbols_from_binary(binary_path::String)
                 # Deliberate STL container wrapping goes through extract_stl_method_symbols
                 # under [types].templates, not this general path.
                 if _is_stdlib_internal(mangled_name, demangled_name)
+                    continue
+                end
+
+                # Not in the PE export directory ⇒ not API, whatever nm says.
+                # This is the screen that keeps mingw's statically-linked CRT
+                # out: snprintf and friends are defined globals in the COFF
+                # symbol table and absent from the export directory, so nothing
+                # can reach them through the library — GetProcAddress consults
+                # only that directory. Wrapping one produced a thunk the JIT
+                # could not resolve, and the failure hung the run.
+                if exported !== nothing && !(mangled_name in exported)
                     continue
                 end
 
