@@ -33,7 +33,30 @@ const PROJECT_ROOT = dirname(@__DIR__)
 const SRC_DIR = @__DIR__
 
 """
-    INTERNAL_TYPE_BLOCKLIST
+    C_LONG_MLIR
+
+The MLIR integer type for C's `long`: `i32` on Windows, `i64` everywhere else.
+
+C's `long` is the one integer whose width is not settled by the word size.
+Win64 is LLP64 — `long` is 32 bits while pointers and `long long` are 64 —
+and every Unix64 target is LP64, where `long` is 64. `int`, `long long`,
+`size_t` and the fixed-width spellings are the same on both and are NOT
+routed through here.
+
+Defined at package level for the same reason INTERNAL_TYPE_BLOCKLIST is: the
+fact is needed on both sides of the tier boundary. `Wrapper` already gets this
+right for free, because it emits Julia's `Clong`, which is Int32 on Windows and
+Int64 elsewhere. The `IRGen` producers hardcoded `i64` and had no such luck, so
+on Windows a `long` argument was passed as 64 bits into a thunk whose C side
+reads 32 — the silent kind of wrong, wrong values rather than a crash.
+
+`test/test_llp64_widths.jl` asserts the two tiers still agree.
+"""
+const C_LONG_MLIR = Sys.iswindows() ? "i32" : "i64"
+
+"""
+    INTERNAL_TYPE_BLOCKLIST,
+    C_LONG_MLIR
 
 Compiler and libc internals that leak through DWARF and must never reach a
 generated artifact — not a wrapper's type declarations, not its export list,

@@ -382,6 +382,56 @@ function _c_bucket_sysroot()::String
     return found
 end
 
+# _c_bucket_rtlib() -> String
+#
+# The `-rtlib` the C bucket's JLL clang must link with, or "" to leave its
+# default alone.
+#
+# Giving the JLL clang a sysroot (above) fixes compiling and only half of
+# linking. clang's mingw driver defaults to `-rtlib=libgcc`, so the link ends in
+#
+#     lld: error: unable to find library -lgcc_s
+#     lld: error: unable to find library -lgcc
+#
+# against MSYS2 CLANG64, which is a compiler-rt/libc++/libunwind environment and
+# ships no libgcc at all. MSYS2's own clang is configured with
+# CLANG_DEFAULT_RTLIB=compiler-rt; the JLL is not, and cannot be told at build
+# time, so it is told here.
+#
+# This is asked of the SYSROOT, not the platform: UCRT64 and MINGW64 are GCC
+# environments where libgcc is present and correct, and forcing compiler-rt on
+# them would break a link that works. So the probe looks for a libgcc to link
+# against and only overrides when there is none.
+const _C_RTLIB = Ref{Union{Nothing,String}}(nothing)
+
+function _c_bucket_rtlib()::String
+    Sys.iswindows() || return ""
+    cached = _C_RTLIB[]
+    cached === nothing || return cached
+
+    rtlib = ""
+    sysroot = _c_bucket_sysroot()
+    if !isempty(sysroot)
+        libdir = joinpath(sysroot, "lib")
+        # libgcc.a sits directly in lib/ on some layouts and under
+        # lib/gcc/<triple>/<version>/ on others, so this walks rather than
+        # guessing a path.
+        has_libgcc = false
+        if isdir(libdir)
+            for (_, _, files) in walkdir(libdir)
+                if "libgcc.a" in files || "libgcc_s.a" in files
+                    has_libgcc = true
+                    break
+                end
+            end
+        end
+        has_libgcc || (rtlib = "compiler-rt")
+    end
+
+    _C_RTLIB[] = rtlib
+    return rtlib
+end
+
 # _clang_for_c_bucket(compiler, cmd_args) -> (output, exitcode)
 #
 # Run `compiler` over `cmd_args`, routing the C BUCKET (`compiler == "clang"`)
@@ -420,9 +470,19 @@ function _clang_for_c_bucket(compiler::String, cmd_args)
         # caller that already chose a sysroot keeps it.
         sysroot = any(a -> startswith(string(a), "--sysroot"), cmd_args) ? "" :
                   _c_bucket_sysroot()
-        cmd = isempty(sysroot) ?
-              ignorestatus(`$(clang_cmd) $cmd_args`) :
-              ignorestatus(`$(clang_cmd) --sysroot=$sysroot $cmd_args`)
+
+        # -rtlib is a LINK option; clang warns it is unused on a compile-only
+        # run, and that warning would print once per C file. These flags are
+        # what make an invocation compile-only.
+        is_link = !any(a -> string(a) in ("-S", "-c", "-emit-llvm", "-fsyntax-only"),
+                       cmd_args)
+        rtlib = (is_link && !any(a -> startswith(string(a), "-rtlib"), cmd_args)) ?
+                _c_bucket_rtlib() : ""
+
+        extra = String[]
+        isempty(sysroot) || push!(extra, "--sysroot=$sysroot")
+        isempty(rtlib)   || push!(extra, "-rtlib=$rtlib")
+        cmd = ignorestatus(`$(clang_cmd) $extra $cmd_args`)
 
         out_pipe = Pipe()
         err_pipe = Pipe()
@@ -1358,6 +1418,183 @@ function _auto_detect_stl_headers(templates::Vector{String})::Vector{String}
     return collect(headers)
 end
 
+# =============================================================================
+# FORCED ODR-USE OF CONTAINER MEMBERS
+# -----------------------------------------------------------------------------
+# `template class std::vector<int>;` is not enough to put std::vector<int>'s
+# members in the binary, and on libc++ it puts almost none of them there.
+#
+# libc++ marks nearly every inline member `_LIBCPP_HIDE_FROM_ABI`, which expands
+# to `__attribute__((exclude_from_explicit_instantiation))`. That attribute means
+# exactly what it says: an explicit instantiation emits NOTHING for that member.
+# It exists only where some translation unit actually odr-uses it. There is no
+# knob to turn this off — libc++'s __config gates the attribute on
+# `__has_attribute`, not on any user-settable macro.
+#
+# Measured on a real build before this: std::vector<int> carried ONE symbol, its
+# destructor, and CppVector had no size() and no push_back() to bind. What did
+# survive — size, push_back, operator[] — survived only because the fixture's own
+# C++ happened to call them. std::map's at() and count(), which nothing called,
+# were simply absent. libstdc++ emits every member on explicit instantiation, so
+# none of this was visible on Linux.
+#
+# The generated functions below are never called. Their only job is to be
+# compiled: naming a member odr-uses it, and the symbol lands in the binary.
+#
+# Every touch is guarded by `if constexpr` on whether the expression is valid for
+# that container at all, so ONE generic body covers vector, string, map, set,
+# deque and list with no per-container table — std::list has no operator[],
+# std::vector no key_type, std::map no push_back, and each simply drops out.
+# Arguments are spelled with the container's own nested typedefs for the same
+# reason: value_type, key_type and size_type say what the container wants
+# without this code having to know which container it is.
+#
+# `if constexpr` covers the immediate context only. A member whose body hard-
+# errors deep inside its own instantiation would still break the TU, so the
+# caller syntax-checks the generated file and falls back to the bare
+# instantiations if it does not compile. Nothing that builds today can regress.
+# =============================================================================
+
+"The C++ preamble: a T& for any T, and the `if constexpr` guard the touches ride on."
+const _TEMPLATE_FORCE_PREAMBLE = raw"""
+// ── Forced odr-use (see generate_template_instantiations) ───────────────────
+// None of this is ever called. It exists so that naming a member odr-uses it,
+// which is what makes libc++ emit a member that `template class C;` skips.
+#include <type_traits>
+
+namespace replibuild_force {
+
+// A T& for any T, including types that are not default-constructible. Never
+// evaluated: every caller below sits in a function that is never called.
+template <class T> T& ref() { return *reinterpret_cast<T*>(1); }
+
+// Runs `f(c)` only if that is a valid expression. The discarded branch of an
+// `if constexpr` is not instantiated, so a member the container does not have
+// costs nothing and errors nowhere.
+template <class F, class C>
+inline void touch(F&& f, C& c) {
+    if constexpr (std::is_invocable_v<F&, C&>) { f(c); }
+}
+
+}  // namespace replibuild_force
+
+// The container's own type, for naming its nested typedefs.
+#define RB_SELF std::decay_t<decltype(x)>
+
+// The lambda's trailing return type is what does the SFINAE: if EXPR is not
+// valid for this container the lambda is not invocable, and `touch` drops it.
+#define RB_TOUCH(EXPR)                                                         \
+    ::replibuild_force::touch(                                                 \
+        [](auto& x) -> decltype((EXPR), void()) { (void)(EXPR); }, c)
+"""
+
+# Every member name `_classify_stl_method` knows how to classify. Element access,
+# lookup, insertion and erasure appear twice: once in the sequence spelling (an
+# index) and once in the associative one (a key). A container has one or the
+# other, never both, and the guard drops whichever it does not have.
+const _TEMPLATE_FORCE_EXPRS = [
+    # Observers
+    "x.size()", "x.length()", "x.empty()", "x.capacity()", "x.max_size()",
+    "x.data()", "x.c_str()", "x.begin()", "x.end()", "x.front()", "x.back()",
+    # Mutators taking nothing
+    "x.clear()", "x.pop_back()",
+    # Sized operations
+    "x.reserve(0)", "x.resize(0)",
+    # Element access
+    "x.at(::replibuild_force::ref<const typename RB_SELF::size_type>())",
+    "x.at(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    "x[::replibuild_force::ref<const typename RB_SELF::size_type>()]",
+    "x[::replibuild_force::ref<const typename RB_SELF::key_type>()]",
+    # Lookup
+    "x.find(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    "x.count(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    # Insertion and erasure
+    "x.push_back(::replibuild_force::ref<const typename RB_SELF::value_type>())",
+    "x.insert(::replibuild_force::ref<const typename RB_SELF::value_type>())",
+    "x.insert(x.begin(), ::replibuild_force::ref<const typename RB_SELF::value_type>())",
+    "x.erase(x.begin())",
+    "x.erase(::replibuild_force::ref<const typename RB_SELF::key_type>())",
+    # std::string's own
+    "x.append(::replibuild_force::ref<const RB_SELF>())",
+]
+
+"""
+One never-called function per instantiated container, touching every member in
+`_classify_stl_method`'s vocabulary.
+
+`used` keeps it through dead-code removal of an unreferenced static — without it
+the function can be dropped before codegen, and dropping it drops the odr-use
+along with the symbols this whole mechanism exists to produce. The anonymous
+namespace keeps it out of the DLL's export table, and so out of the symbol sweep
+and the wrapper's API surface.
+"""
+function _template_force_body(instantiation_type::String, index::Int)::String
+    io = IOBuffer()
+    println(io, "namespace {")
+    println(io, "#if defined(__GNUC__) || defined(__clang__)")
+    println(io, "__attribute__((used))")
+    println(io, "#endif")
+    println(io, "void replibuild_force_$(index)($(instantiation_type)& c) {")
+    for expr in _TEMPLATE_FORCE_EXPRS
+        println(io, "    RB_TOUCH($expr);")
+    end
+    println(io, "}")
+    println(io, "}  // namespace")
+    return String(take!(io))
+end
+
+"Write the instantiation TU. `force` adds the odr-use block; without it this is the bare form."
+function _write_template_tu(path::String, headers::Vector{String},
+                            instantiation_types::Vector{String}, force::Bool)
+    open(path, "w") do io
+        println(io, "// Auto-generated by RepliBuild to force template instantiations")
+        for header in headers
+            if startswith(header, "<") || startswith(header, "\\\"")
+                println(io, "#include $header")
+            else
+                println(io, "#include \"$header\"")
+            end
+        end
+        println(io, "")
+        for t in instantiation_types
+            println(io, "template class $t;")
+        end
+        if force
+            println(io, "")
+            println(io, _TEMPLATE_FORCE_PREAMBLE)
+            for (i, t) in enumerate(instantiation_types)
+                println(io, "")
+                print(io, _template_force_body(t, i))
+            end
+            println(io, "")
+            println(io, "#undef RB_TOUCH")
+            println(io, "#undef RB_SELF")
+        end
+    end
+end
+
+"""
+Does the generated TU compile? Decides whether the odr-use block can stay.
+
+An unavailable probe compiler counts as NOT compiling: the forcing block is the
+optional half of this file, so anything that cannot be verified is dropped
+rather than risked.
+"""
+function _template_tu_compiles(config::RepliBuildConfig, path::String)::Tuple{Bool,String}
+    probe = _probe_compiler(:cpp)
+    flags = get_compile_flags(config)
+    incs  = ["-I$dir" for dir in get_include_dirs(config)]
+    defs  = ["-D$(k)=$(v)" for (k, v) in config.compile.defines]
+    errbuf = IOBuffer()
+    try
+        p = run(pipeline(ignorestatus(`$probe -fsyntax-only $flags $incs $defs $path`),
+                         stdout = devnull, stderr = errbuf))
+        return (p.exitcode == 0, String(take!(errbuf)))
+    catch e
+        return (false, "probe compiler unavailable: $e")
+    end
+end
+
 """
 Generate a dummy C++ file to explicitly instantiate requested templates
 so they appear in the DWARF metadata.
@@ -1384,20 +1621,25 @@ function generate_template_instantiations(config::RepliBuildConfig, cpp_files::V
         "std::u32string" => "std::basic_string<char32_t>",
     )
 
-    open(dummy_file, "w") do io
-        println(io, "// Auto-generated by RepliBuild to force template instantiations")
-        for header in all_headers
-            if startswith(header, "<") || startswith(header, "\\\"")
-                println(io, "#include $header")
-            else
-                println(io, "#include \"$header\"")
-            end
-        end
-        println(io, "")
-        for t in config.types.templates
-            instantiation_type = get(stl_typedef_expansions, t, t)
-            println(io, "template class $instantiation_type;")
-        end
+    instantiation_types = [get(stl_typedef_expansions, t, t) for t in config.types.templates]
+
+    # Written with the odr-use block, then verified. `template class C;` alone
+    # leaves libc++ containers nearly empty (see the section comment above), so
+    # the block is what makes the mechanism work there — but it is generated C++
+    # over user-chosen element types, and a member that hard-errors inside its
+    # own instantiation is outside what `if constexpr` can guard. So it is
+    # checked before it is trusted, and dropped if it does not compile: a build
+    # that works today cannot start failing because of this.
+    _write_template_tu(dummy_file, all_headers, instantiation_types, true)
+    (ok, output) = _template_tu_compiles(config, dummy_file)
+    if !ok
+        _write_template_tu(dummy_file, all_headers, instantiation_types, false)
+        @warn """
+              Template odr-use forcing did not compile — falling back to bare explicit \
+              instantiations. On libstdc++ that is the same thing; on libc++ any container \
+              member your own code never calls will be missing from the build, and binding \
+              it will fail with "no <method> thunk available".
+              """ templates=instantiation_types output=strip(output)
     end
 
     return vcat(cpp_files, [dummy_file])
