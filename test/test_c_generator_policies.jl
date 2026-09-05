@@ -43,7 +43,9 @@ function _policy_config(dir::String)
     write(toml, """
     [project]
     name = "policysynth"
-    root = "$(dir)"
+    # escape_string: TOML basic strings take escapes, so a Windows path
+    # (`C:\\Users\\...`) must not be interpolated raw — `\\U` fails to parse.
+    root = "$(escape_string(dir))"
 
     [link]
     enable_lto = false
@@ -178,7 +180,7 @@ end
         write(badtoml, """
         [project]
         name = "badowned"
-        root = "$(baddir)"
+        root = "$(escape_string(baddir))"
 
         [wrap]
         language = "c"
@@ -315,7 +317,7 @@ end
         write(joinpath(cppdir, "replibuild.toml"), """
         [project]
         name = "cppenumsynth"
-        root = "$(cppdir)"
+        root = "$(escape_string(cppdir))"
         [wrap]
         language = "cpp"
         [types]

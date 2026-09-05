@@ -26,10 +26,12 @@ using Test
     base = """
     [project]
     name = "cachetest"
-    root = "$dir"
+    # escape_string on every interpolated path: TOML basic strings take escapes,
+    # so a Windows `C:\\Users\\...` would parse as `\\U` and fail.
+    root = "$(escape_string(dir))"
     [compile]
     flags = ["-O1", "-fPIC"]
-    source_files = ["$(joinpath(dir, "src", "m.c"))"]
+    source_files = ["$(escape_string(joinpath(dir, "src", "m.c")))"]
     [link]
     enable_lto = false
     [binary]

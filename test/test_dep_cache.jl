@@ -16,6 +16,13 @@ using RepliBuild
 const CM = RepliBuild.ConfigurationManager
 const DR = RepliBuild.DependencyResolver
 
+# A local path is not a URL. `"file://" * "/tmp/up"` happens to produce the valid
+# `file:///tmp/up` on Unix only because the path already starts with a slash; the
+# same concatenation on Windows yields `file://C:\sb\upstream1`, where `C:` reads
+# as the authority and the backslashes are not separators at all. The portable
+# spelling is three slashes and forward separators.
+_file_url(p) = "file://" * (Sys.iswindows() ? "/" * replace(abspath(p), '\\' => '/') : abspath(p))
+
 @testset "git dependency cache is version-aware" begin
     if Sys.which("git") === nothing
         @warn "git not found — skipping dependency cache version-awareness tests"
@@ -45,11 +52,13 @@ const DR = RepliBuild.DependencyResolver
 
             proj = joinpath(sb, "proj"); mkpath(proj)
             toml_path = joinpath(proj, "replibuild.toml")
-            url1 = "file://" * up1
-            url2 = "file://" * up2
+            url1 = _file_url(up1)
+            url2 = _file_url(up2)
 
+            # escape_string: `proj` is a real path, and this is a TOML basic
+            # string — a raw Windows `C:\...` parses as the escape `\U`.
             write_toml(url, tag) = open(toml_path, "w") do io
-                println(io, "[project]\nname = \"deptest\"\nversion = \"0.0.1\"\nroot = \"", proj, "\"\n")
+                println(io, "[project]\nname = \"deptest\"\nversion = \"0.0.1\"\nroot = \"", escape_string(proj), "\"\n")
                 println(io, "[dependencies.fixturelib]\ntype = \"git\"\nurl = \"", url, "\"\ntag = \"", tag, "\"")
             end
 
@@ -115,10 +124,10 @@ end
 
             proj = joinpath(sb, "proj"); mkpath(proj)
             toml_path = joinpath(proj, "replibuild.toml")
-            url = "file://" * up
+            url = _file_url(up)
 
             write_toml(tag, commit="") = open(toml_path, "w") do io
-                println(io, "[project]\nname = \"pintest\"\nversion = \"0.0.1\"\nroot = \"", proj, "\"\n")
+                println(io, "[project]\nname = \"pintest\"\nversion = \"0.0.1\"\nroot = \"", escape_string(proj), "\"\n")
                 print(io, "[dependencies.fixturelib]\ntype = \"git\"\nurl = \"", url, "\"\ntag = \"", tag, "\"")
                 println(io, isempty(commit) ? "" : "\ncommit = \"" * commit * "\"")
             end

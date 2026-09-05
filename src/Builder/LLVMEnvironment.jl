@@ -165,25 +165,66 @@ Search common system paths for LLVM installation.
 Returns the root directory if found, nothing otherwise.
 """
 function find_system_llvm()
+    # Windows binaries carry the suffix; `isfile("…/bin/clang++")` is false on a
+    # perfectly good install, so the probe below has to ask for the real name.
+    exe = Sys.iswindows() ? ".exe" : ""
+
+    # `LLVM_CONFIG` is what the "LLVM Toolchain not found" error has always told
+    # the user to set, and until now NOTHING read it — the advice was dead, and
+    # a user who followed it got the identical error with no hint that the
+    # variable was ignored. Honour it here rather than inventing a second name:
+    # the message and the mechanism should be one fact, not two.
+    #
+    # It names the llvm-config BINARY (that is what the name means, and what
+    # every autotools build expects), so the root is its bin/'s parent.
+    llvm_config_env = get(ENV, "LLVM_CONFIG", "")
+    if !isempty(llvm_config_env)
+        if isfile(llvm_config_env)
+            root = dirname(dirname(abspath(llvm_config_env)))
+            if isdir(joinpath(root, "lib")) && isdir(joinpath(root, "include"))
+                return root
+            end
+            @warn "LLVM_CONFIG is set but its install has no lib/ and include/ — ignoring it" LLVM_CONFIG=llvm_config_env root
+        else
+            @warn "LLVM_CONFIG is set but names no existing file — ignoring it" LLVM_CONFIG=llvm_config_env
+        end
+    end
+
     # Common LLVM installation prefixes
-    search_paths = [
-        "/usr",
-        "/usr/local",
-        "/opt/llvm",
-        "/usr/lib/llvm-20",
-        "/usr/lib/llvm-19",
-        "/usr/lib/llvm-18",
-        "/usr/lib/llvm-17",
-        "/usr/lib/llvm-16",
-        "/usr/lib/llvm-15",
-    ]
+    search_paths = if Sys.iswindows()
+        # MSYS2 environment roots, CLANG64 first, and for two reasons that both
+        # matter: it is the `x86_64-w64-windows-gnu` environment matching Julia's
+        # own mingw-w64 build (so wrapper DLLs share the loading process's C++
+        # ABI), and it is the only MSYS2 repo that ships MLIR — which Tier 2
+        # needs. UCRT64/MINGW64 are searched after it as a courtesy; they can
+        # host clang but carry no MLIR.
+        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
+        [
+            joinpath(msys_root, "clang64"),
+            joinpath(msys_root, "ucrt64"),
+            joinpath(msys_root, "mingw64"),
+            "C:/Program Files/LLVM",
+        ]
+    else
+        [
+            "/usr",
+            "/usr/local",
+            "/opt/llvm",
+            "/usr/lib/llvm-20",
+            "/usr/lib/llvm-19",
+            "/usr/lib/llvm-18",
+            "/usr/lib/llvm-17",
+            "/usr/lib/llvm-16",
+            "/usr/lib/llvm-15",
+        ]
+    end
 
     for prefix in search_paths
         # Check for clang++ and llvm-config in bin directory
         bin_dir = joinpath(prefix, "bin")
         if isdir(bin_dir)
-            clang_path = joinpath(bin_dir, "clang++")
-            llvm_config_path = joinpath(bin_dir, "llvm-config")
+            clang_path = joinpath(bin_dir, "clang++" * exe)
+            llvm_config_path = joinpath(bin_dir, "llvm-config" * exe)
 
             if isfile(clang_path) && isfile(llvm_config_path)
                 # Verify it's a working LLVM by checking lib and include dirs
@@ -261,8 +302,14 @@ function discover_llvm_tools(llvm_root::String, source::String="intree")
         "dsymutil", "bugpoint"
     ]
 
+    # Windows tools are `clang++.exe`, not `clang++`. The KEY stays the bare name
+    # — callers ask for `get_tool("clang++")` on every platform — while the value
+    # is the real path, suffix and all. Without this the loop finds nothing at
+    # all on Windows and the toolchain reports zero tools from a complete install.
+    exe = Sys.iswindows() ? ".exe" : ""
+
     for tool_name in essential_tools
-        tool_path = joinpath(tools_dir, tool_name)
+        tool_path = joinpath(tools_dir, tool_name * exe)
 
         # Check if it exists (might be a symlink)
         if isfile(tool_path) || islink(tool_path)
@@ -368,9 +415,16 @@ Build environment variables for isolated LLVM toolchain.
 function build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::String, source::String)
     env_vars = Dict{String,String}()
 
+    # The list separator for PATH-shaped variables is `;` on Windows and `:`
+    # everywhere else. Hardcoding `:` does not fail loudly on Windows — it
+    # produces one unparseable PATH entry, so the prepended LLVM bin directory
+    # is silently not on PATH and every tool lookup falls through to whatever
+    # the ambient environment happens to have (or nothing).
+    sep = Sys.iswindows() ? ";" : ":"
+
     # PATH - prepend LLVM bin directory
     current_path = get(ENV, "PATH", "")
-    env_vars["PATH"] = "$bin_dir:$current_path"
+    env_vars["PATH"] = isempty(current_path) ? bin_dir : "$bin_dir$sep$current_path"
 
     # LLVM-specific variables
     env_vars["LLVM_ROOT"] = llvm_root
@@ -387,16 +441,16 @@ function build_environment_vars(llvm_root::String, bin_dir::String, lib_dir::Str
 
     # LD_LIBRARY_PATH - add LLVM lib directory
     current_ld_path = get(ENV, "LD_LIBRARY_PATH", "")
-    env_vars["LD_LIBRARY_PATH"] = isempty(current_ld_path) ? lib_dir : "$lib_dir:$current_ld_path"
+    env_vars["LD_LIBRARY_PATH"] = isempty(current_ld_path) ? lib_dir : "$lib_dir$sep$current_ld_path"
 
     # LIBRARY_PATH - for linking
     current_lib_path = get(ENV, "LIBRARY_PATH", "")
-    env_vars["LIBRARY_PATH"] = isempty(current_lib_path) ? lib_dir : "$lib_dir:$current_lib_path"
+    env_vars["LIBRARY_PATH"] = isempty(current_lib_path) ? lib_dir : "$lib_dir$sep$current_lib_path"
 
     # CPATH - for C/C++ includes
     include_dir = joinpath(llvm_root, "include")
     current_cpath = get(ENV, "CPATH", "")
-    env_vars["CPATH"] = isempty(current_cpath) ? include_dir : "$include_dir:$current_cpath"
+    env_vars["CPATH"] = isempty(current_cpath) ? include_dir : "$include_dir$sep$current_cpath"
 
     return env_vars
 end
@@ -470,8 +524,16 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
         end
     end
 
-    # Get version
-    llvm_config = joinpath(bin_dir, "llvm-config")
+    # Get version.
+    #
+    # The `.exe` matters: without it `isfile` is false for every Windows install,
+    # and the fallback below is not a harmless default — it is a SILENT WRONG
+    # ANSWER. `20.1.2jl` is a *Julia* libLLVM version, so a machine with system
+    # LLVM 22 would report 20, then `check_tool_version_coherence` would warn
+    # "llc reports v22 but llvm-config reports v20" about every correctly-matched
+    # tool in a coherent toolchain. The version also feeds `query_llvm_config`
+    # below, so getting it wrong misreports cxxflags/ldflags too.
+    llvm_config = joinpath(bin_dir, "llvm-config" * (Sys.iswindows() ? ".exe" : ""))
     version_str = "20.1.2jl"  # Default
 
     if isfile(llvm_config)
@@ -480,6 +542,11 @@ function init_toolchain(; isolated::Bool=true, config=nothing, source::Symbol=:a
         catch
             @warn "Could not query LLVM version, using default: $version_str"
         end
+    else
+        # Previously silent. A missing llvm-config means every version-derived
+        # decision below rests on a literal, so say so.
+        @warn "llvm-config not found — LLVM version falls back to a hardcoded default, " *
+              "and version-coherence warnings from here on are unreliable" llvm_config version_str
     end
 
     (major, minor, patch) = parse_llvm_version(String(version_str))

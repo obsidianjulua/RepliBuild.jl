@@ -280,7 +280,9 @@ end
     write(toml, """
     [project]
     name = "unionsynth"
-    root = "$(dir)"
+    # escape_string: TOML basic strings take escapes, so a Windows path
+    # (`C:\\Users\\...`) must not be interpolated raw — `\\U` fails to parse.
+    root = "$(escape_string(dir))"
 
     [link]
     enable_lto = false

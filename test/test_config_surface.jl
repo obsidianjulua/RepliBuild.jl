@@ -220,7 +220,14 @@ end
         # which makes the success case deterministic. Naming it `-l` style would
         # not be: on glibc `/usr/lib/libm.so` is a linker SCRIPT, so `-lm` links
         # fine and `dlopen("libm.so")` fails — see the docstring note.
-        real = first(filter(p -> occursin(".so", p) && isfile(p), Libdl.dllist()))
+        # `Libdl.dlext` rather than a literal "so": this process loads `.dll` on
+        # Windows and `.dylib` on macOS, where filtering for ".so" matches
+        # nothing and `first` throws BoundsError on an empty list — a crash that
+        # says nothing about preloading.
+        _ext = "." * Libdl.dlext
+        _loaded = filter(p -> occursin(_ext, p) && isfile(p), Libdl.dllist())
+        @test !isempty(_loaded)   # otherwise the case below is vacuous
+        real = first(_loaded)
         good = W._extra_link_libs_snippet(
             (ingest = CFG.IngestConfig("/x", String[], [real]),))
         m = Module(:PreloadGood)

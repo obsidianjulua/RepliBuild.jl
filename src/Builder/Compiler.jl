@@ -1350,10 +1350,21 @@ collision, and is deliberately NOT reported here.
 function _shim_headers_out_of_tree(shim_file::String, probe::Cmd,
                                    extra_flags::Vector{String},
                                    allowed_roots::Vector{String})::Vector{String}
+    # Compare paths in one canonical spelling. On Windows `realpath` hands back
+    # `\` separators and the filesystem is case-insensitive, so the containment
+    # test below — which was written as `startswith(rp, root * "/")` — could
+    # never match: every resolved header looked out-of-tree, and the guard
+    # flagged the correctly-vendored header as a collision. That fails the build
+    # for exactly the packages the guard exists to protect.
+    #
+    # Only the comparison is normalized; `offenders` keeps the real path, since
+    # that string is what the error message shows the user.
+    _canon(p) = Sys.iswindows() ? lowercase(replace(p, '\\' => '/')) : p
+
     norm_roots = String[]
     for r in allowed_roots
         try
-            push!(norm_roots, realpath(abspath(r)))
+            push!(norm_roots, _canon(realpath(abspath(r))))
         catch
         end
     end
@@ -1374,7 +1385,8 @@ function _shim_headers_out_of_tree(shim_file::String, probe::Cmd,
         m === nothing && continue
         inc = strip(String(m.captures[1]))
         rp = try realpath(inc) catch; abspath(inc) end
-        if !any(root -> rp == root || startswith(rp, root * "/"), norm_roots)
+        rpc = _canon(rp)
+        if !any(root -> rpc == root || startswith(rpc, root * "/"), norm_roots)
             push!(offenders, rp)
         end
     end
@@ -1890,28 +1902,23 @@ function ingest_library(config::RepliBuildConfig)::String
     # The three outcomes are now distinguished, because they need different
     # answers from the user and the old code collapsed all of them into
     # "rebuild with -g".
-    (readelf_probe, readelf_code) = BuildBridge.execute("readelf", ["--version"])
-    readelf_code == 0 || error("""
-        GNU readelf not found — DWARF extraction cannot run.
-        RepliBuild's DWARF parser reads GNU readelf's format specifically; no
-        other dumper is substitutable. Install binutils.
-        readelf said: $(strip(readelf_probe))""")
+    dumper = _dwarf_dumper()
+    dumper === nothing && error(_no_dwarf_dumper_error())
 
-    (sections, sections_code) = BuildBridge.execute("readelf", ["-S", src_lib])
+    (sections, sections_code) = BuildBridge.execute(dumper.tool, [dumper.sections, src_lib])
     if sections_code != 0
-        # Not an ELF container at all. The live case is PE/COFF: a mingw-w64
-        # .dll carries perfectly good DWARF — llvm-dwarfdump reads it, and
-        # `long int` even shows the LLP64 byte_size of 4 — but GNU readelf is
-        # ELF-only and `parse_dwarf_dump` is a readelf-format parser, so the
-        # CONTAINER is what stops us, not the debug info. Telling the user to
-        # rebuild with -g sends them to fix something that is not broken.
+        # The container could not be opened. This USED to be the PE case as
+        # well — the gate ran `readelf -S`, readelf is ELF-only, and a
+        # mingw-w64 .dll carrying perfectly good DWARF was refused for its
+        # container rather than its debug info. `_dwarf_dumper` now hands back
+        # GNU objdump on Windows, which reads PE/COFF, so a .dll gets past here
+        # and is parsed by the same code path as an ELF .so.
         error("""
-            readelf cannot read $src_lib as an ELF object.
-            If this is a PE/COFF (.dll) or Mach-O file it may well contain DWARF
-            — llvm-dwarfdump will show it — but RepliBuild's extractor parses GNU
-            readelf output, and readelf reads only ELF. Non-ELF containers are
-            not supported.
-            readelf said: $(strip(sections))""")
+            $(dumper.tool) cannot read $src_lib as an object file.
+            RepliBuild reads DWARF through GNU binutils, which handles ELF and
+            PE/COFF. A file it cannot open is either not an object file or is a
+            container binutils does not support (e.g. Mach-O).
+            $(dumper.tool) said: $(strip(sections))""")
     end
     if !occursin(".debug_info", sections)
         error("No DWARF debug info found in $src_lib — rebuild upstream with -g (or pass a debug build)")
@@ -2421,7 +2428,108 @@ function get_type_size(c_type::AbstractString)::Int
 end
 
 """
-    _dwarf_file_tables(readelf_tool, binary_path) -> Vector{Dict{Int,String}}
+    _dwarf_dumper() -> NamedTuple or nothing
+
+The GNU binutils program used to dump DWARF, plus how it spells its flags.
+`nothing` when no acceptable one is installed.
+
+`parse_dwarf_dump` is a GNU **binutils**-format parser: it keys every DIE on
+`<level><offset>: Abbrev Number: N (DW_TAG_*)`. Two binutils programs print
+exactly that, and they print it from the same source file (binutils' `dwarf.c`),
+so their output is not merely similar — it is the same text:
+
+    readelf --debug-dump=info   ==   objdump --dwarf=info
+
+Verified byte-identical over the DIE lines of one object, for `info` and for
+`rawline`. What they do NOT share is the set of containers they can open, and
+that is the only reason to choose between them:
+
+  * `readelf` is a standalone ELF reader. It cannot open a PE/COFF `.dll` at all.
+  * `objdump` goes through BFD, so it reads `pei-x86-64` as readily as ELF.
+
+Hence Windows uses objdump. Linux keeps readelf, which is what the reference
+host has always run; there is nothing to gain by moving a proven path.
+
+**The `--version` check is load-bearing, not a formality.** In an MSYS2 CLANG64
+environment the names `objdump` and `readelf` on PATH are `llvm-objdump` and
+`llvm-readelf`, and LLVM's dump format is a different dialect entirely — no
+level, no abbrev number. Accepting one would not fail loudly: `parse_dwarf_dump`
+would match nothing, return zero functions, and every signature would fall back
+to `parameters_source: "inferred"` — the exact silent-guess failure the
+llvm-dwarfdump fallback was deleted for. So a candidate is used only if it
+identifies itself as GNU.
+
+Set `REPLIBUILD_OBJDUMP` to an explicit path to override the search.
+"""
+function _dwarf_dumper()
+    candidates = String[]
+    env_override = get(ENV, "REPLIBUILD_OBJDUMP", "")
+    isempty(env_override) || push!(candidates, env_override)
+
+    if Sys.iswindows()
+        # MSYS2 ships GNU binutils in the GCC-flavoured trees; CLANG64's own
+        # `objdump` is llvm-objdump and will fail the GNU check below, so the
+        # bare name is tried first only for the case where a GNU one is on PATH.
+        push!(candidates, "objdump")
+        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
+        for envdir in ("mingw64", "ucrt64", "mingw32")
+            push!(candidates, joinpath(msys_root, envdir, "bin", "objdump.exe"))
+        end
+    else
+        push!(candidates, "readelf", "objdump")
+    end
+
+    for tool in candidates
+        (out, ec) = try
+            BuildBridge.execute(tool, ["--version"])
+        catch
+            ("", 1)
+        end
+        ec == 0 || continue
+        occursin("GNU", out) || continue   # rejects llvm-objdump / llvm-readelf
+
+        # readelf spells it `--debug-dump=info` and lists sections with `-S`;
+        # objdump spells the same dump `--dwarf=info`, and sections with `-h`.
+        is_readelf = occursin("readelf", lowercase(basename(tool)))
+        return (tool     = tool,
+                dwarf    = is_readelf ? "--debug-dump=" : "--dwarf=",
+                sections = is_readelf ? "-S" : "-h")
+    end
+    return nothing
+end
+
+"""
+    _no_dwarf_dumper_error() -> String
+
+Shared text for "no GNU DWARF dumper", so the ingest gate and the extractor
+cannot drift into describing the same missing tool two different ways.
+"""
+function _no_dwarf_dumper_error()
+    if Sys.iswindows()
+        """
+        No GNU binutils DWARF dumper found — DWARF extraction cannot run.
+
+        RepliBuild parses GNU binutils' dump format specifically. On Windows the
+        container is PE/COFF, which GNU `readelf` cannot open at all, so the
+        dumper must be GNU `objdump` (BFD-based, reads PE and prints the same
+        format from the same code).
+
+        The `objdump` in an MSYS2 CLANG64 shell is llvm-objdump, which prints a
+        DIFFERENT dialect and is deliberately rejected — accepting it would
+        yield zero parsed functions and a wrapper full of guessed signatures.
+
+        Install GNU binutils:   pacman -S mingw-w64-x86_64-binutils
+        Or point at one:        REPLIBUILD_OBJDUMP=/path/to/objdump.exe"""
+    else
+        """
+        GNU readelf/objdump not found — DWARF extraction cannot run.
+        RepliBuild's DWARF parser reads GNU binutils' format specifically; no
+        other dumper is substitutable. Install binutils."""
+    end
+end
+
+"""
+    _dwarf_file_tables(dumper, binary_path) -> Vector{Dict{Int,String}}
 
 One `file index => resolved path` table per compilation unit, in CU order,
 parsed from `readelf --debug-dump=rawline`.
@@ -2435,8 +2543,8 @@ programs and DIEs in the same section order.
 Names are resolved against the Directory Table, itself relative to directory 0
 (the compilation directory) when an entry is not absolute.
 """
-function _dwarf_file_tables(readelf_tool::AbstractString, binary_path::AbstractString)::Vector{Dict{Int,String}}
-    (out, ec) = BuildBridge.execute(readelf_tool, ["--debug-dump=rawline", binary_path])
+function _dwarf_file_tables(dumper, binary_path::AbstractString)::Vector{Dict{Int,String}}
+    (out, ec) = BuildBridge.execute(dumper.tool, [dumper.dwarf * "rawline", binary_path])
     ec == 0 || return Vector{Dict{Int,String}}()
 
     tables = Vector{Dict{Int,String}}()
@@ -2536,27 +2644,18 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     # (`DWARFParser.jl` legitimately uses llvm-dwarfdump — its vtable parser is
     # written for that dialect. Two dialects, two parsers; neither reads the
     # other's output.)
-    readelf_tool = try
-        (_, ec) = BuildBridge.execute("readelf", ["--version"])
-        ec == 0 ? "readelf" : ""
-    catch
-        ""
-    end
+    dumper = _dwarf_dumper()
+    dumper === nothing && error(_no_dwarf_dumper_error())
 
-    isempty(readelf_tool) && error("""
-        GNU readelf not found — DWARF extraction cannot run.
-        RepliBuild's DWARF parser reads GNU readelf's format specifically; no
-        other dumper is substitutable. Install binutils.""")
-
-    (output, exitcode) = BuildBridge.execute(readelf_tool, ["--debug-dump=info", binary_path])
-    exitcode == 0 || error("readelf --debug-dump=info failed on $binary_path:\n$output")
+    (output, exitcode) = BuildBridge.execute(dumper.tool, [dumper.dwarf * "info", binary_path])
+    exitcode == 0 || error("$(dumper.tool) $(dumper.dwarf)info failed on $binary_path:\n$output")
 
     # DW_AT_decl_file is a per-CU INDEX in readelf's output (llvm-dwarfdump
     # resolves it to a path; readelf does not), so the line-program file tables
     # are a second, separate dump. Failure here is non-fatal: without tables the
     # provenance filter simply does not run and extraction behaves as before.
     file_tables = try
-        _dwarf_file_tables(readelf_tool, binary_path)
+        _dwarf_file_tables(dumper, binary_path)
     catch e
         @debug "DWARF file tables unavailable; system-header filter disabled" exception=e
         Vector{Dict{Int,String}}()

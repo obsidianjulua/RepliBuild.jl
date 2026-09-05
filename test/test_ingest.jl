@@ -118,12 +118,17 @@ using RepliBuild
     @testset "Round-trip: save_config preserves [ingest]" begin
         mktempdir() do dir
             toml_path = joinpath(dir, "replibuild.toml")
+            # `escape_string` because this is a TOML *basic* string and `dir` is a
+            # real filesystem path: on Windows it is `C:\\Users\\...`, and the raw
+            # backslash reaches the parser as an escape (`\U` → "invalid unicode
+            # scalar"). Interpolating a path into TOML unescaped is the same bug
+            # the ingest() writer had; a test that reproduces it is not a fixture.
             write(toml_path, """
             [project]
             name = "rt"
 
             [ingest]
-            library = "$(joinpath(dir, "libfoo.so"))"
+            library = "$(escape_string(joinpath(dir, "libfoo.so")))"
             headers = ["inc"]
             """)
             touch(joinpath(dir, "libfoo.so"))

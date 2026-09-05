@@ -26,12 +26,14 @@ const CONV_TEST_DIR = joinpath(@__DIR__, "convenience_overload_test")
     write(toml_path, """
     [project]
     name = "gripkit"
-    root = "$(CONV_TEST_DIR)"
+    # escape_string on every interpolated path: TOML basic strings take escapes,
+    # so a Windows `C:\\Users\\...` would parse as `\\U` and fail.
+    root = "$(escape_string(CONV_TEST_DIR))"
 
     [compile]
     flags = ["-O2", "-fPIC"]
-    source_files = ["$(joinpath(CONV_TEST_DIR, "src", "grip.c"))"]
-    include_dirs = ["$(joinpath(CONV_TEST_DIR, "include"))"]
+    source_files = ["$(escape_string(joinpath(CONV_TEST_DIR, "src", "grip.c")))"]
+    include_dirs = ["$(escape_string(joinpath(CONV_TEST_DIR, "include")))"]
 
     [link]
     # LTO off: trace the pure Tier-3 ccall path (Hub production configuration)

@@ -58,7 +58,10 @@ function make_test_toml(dir::String; name="test_pkg", lto=false, extra="")
     [project]
     name = "$name"
     uuid = "00000000-0000-0000-0000-000000000001"
-    root = "$dir"
+    # escape_string: `root` is a real path, and TOML basic strings take escapes.
+    # A Windows tempdir (`C:\\Users\\...`) otherwise reaches the parser as `\\U`
+    # and dies as "invalid unicode scalar".
+    root = "$(escape_string(dir))"
 
     [compile]
     source_files = []

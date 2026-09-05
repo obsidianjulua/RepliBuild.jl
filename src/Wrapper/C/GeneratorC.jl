@@ -345,11 +345,18 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # generation-time absolute path is only a fallback — shared dirs like
     # ~/.replibuild/registry/julia/ get overwritten by later builds, stranding
     # any wrapper that baked them in.
-    const LIBRARY_PATH = let baked = \"$(abspath(lib_path))\"
+    #
+    # `repr` supplies the quotes AND the escaping. Hand-quoting as `\"\$(path)\"`
+    # emits the path's own backslashes raw into generated Julia source, so on
+    # Windows every wrapper baked `C:\\Users\\...` and failed to parse at `\\U`
+    # ("invalid unicode escape sequence") — the generated module could not be
+    # loaded at all. A path is data; it has to be escaped for the language it is
+    # being written into, not concatenated into it.
+    const LIBRARY_PATH = let baked = $(repr(abspath(lib_path)))
         sibling = joinpath(@__DIR__, basename(baked))
         isfile(sibling) ? sibling : baked
     end
-    const THUNKS_LIBRARY_PATH = let baked = \"$(thunks_lib_path)\"
+    const THUNKS_LIBRARY_PATH = let baked = $(repr(thunks_lib_path))
         sibling = isempty(baked) ? \"\" : joinpath(@__DIR__, basename(baked))
         !isempty(sibling) && isfile(sibling) ? sibling : baked
     end
@@ -3100,10 +3107,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # with the other snippets.
     _preload_snippet = _extra_link_libs_snippet(config)
 
+    # `stdout` is an exported data symbol in glibc, and is NOT a symbol at all on
+    # Windows: the UCRT declares it as a macro over `__acrt_iob_func(1)`. So
+    # `cglobal(:stdout, …)` throws "could not load symbol" there — and because
+    # this runs inside `__init__`, it took the entire generated module down with
+    # it, turning a cosmetic buffering tweak into "the wrapper cannot be loaded".
+    #
+    # The branch is emitted as `@static if` rather than resolved here, so the
+    # decision belongs to the machine that LOADS the wrapper, not the one that
+    # generated it. And the whole thing is best-effort: a module that could not
+    # unbuffer someone else's stdout is still a working module.
     _setvbuf_snippet = """
             # Unbuffer C stdout so printf output appears immediately in the REPL
-            let c_stdout = unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
-                ccall(:setvbuf, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Csize_t), c_stdout, C_NULL, 2, 0)
+            try
+                c_stdout = @static if Sys.iswindows()
+                    ccall(:__acrt_iob_func, Ptr{Cvoid}, (Cuint,), 1)
+                else
+                    unsafe_load(cglobal(:stdout, Ptr{Cvoid}))
+                end
+                if c_stdout != C_NULL
+                    ccall(:setvbuf, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Csize_t), c_stdout, C_NULL, 2, 0)
+                end
+            catch e
+                @debug "could not unbuffer the C runtime's stdout" exception=e
             end"""
 
     # Generate initialization block
