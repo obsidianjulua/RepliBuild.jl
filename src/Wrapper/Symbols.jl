@@ -127,8 +127,19 @@ Extract symbols using nm command.
 function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangle::Bool=true)
     symbols = SymbolInfo[]
 
-    # Use nm to extract symbols
-    nm_cmd = demangle ? `nm -D --defined-only --demangle $binary_path` : `nm -D --defined-only $binary_path`
+    # `nm -D` reads ELF's dynamic symbol table, which PE does not have: the
+    # command errors, the catch below turns that into "Symbol extraction
+    # failed", and the caller then warns "No symbols found in library" and
+    # emits nothing. On PE the defined-symbol list comes from `-g` instead and
+    # is screened by the export directory, because `-g` alone also reports
+    # mingw's statically-linked CRT as defined globals (see _pe_exported_names).
+    #
+    # nm either way: the export directory names the API but carries no symbol
+    # TYPE, and this function needs T/W/D to tell a function from a global.
+    pe_exports = _pe_exported_names(binary_path)
+    nm_flags = pe_exports === nothing ? "-D" : "-g"
+    nm_cmd = demangle ? `nm $nm_flags --defined-only --demangle $binary_path` :
+                        `nm $nm_flags --defined-only $binary_path`
 
     try
         output = read(nm_cmd, String)
@@ -146,6 +157,13 @@ function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangl
             # Parse nm output: address type name
             symbol_type_char = parts[2]
             symbol_name = join(parts[3:end], " ")  # Handle demangled names with spaces
+
+            # On PE, only what the export directory lists is reachable through
+            # the library at all; everything else nm reports is linked-in
+            # runtime.
+            if pe_exports !== nothing && !(symbol_name in pe_exports)
+                continue
+            end
 
             # Map nm symbol type to our enum
             symbol_type = if symbol_type_char in ["T", "t"]
