@@ -394,22 +394,35 @@ extern "C" {
         bool ok = mlir::succeeded(pm.run(mod));
 
         // Post-pipeline fixup: ensure any llvm.func containing llvm.invoke
-        // has the __gxx_personality_v0 personality set. This must happen after
-        // ALL passes (including ConvertFuncToLLVM) have completed.
+        // has the host's C++ personality set. This must happen after ALL
+        // passes (including ConvertFuncToLLVM) have completed.
+        //
+        // The name is target-dependent and must agree with JLCSPasses.cpp's
+        // kCxxPersonality: Itanium unwinding calls it `__gxx_personality_v0`,
+        // mingw-w64 x86-64 unwinds with SEH and calls it
+        // `__gxx_personality_seh0`, and the Windows C++ runtime exports only
+        // the latter — so emitting v0 there links with one undefined symbol.
+        // Two copies of one fact, so they are spelled identically and both say
+        // so; if you change one, change the other.
+#if defined(_WIN32)
+        static constexpr const char *kCxxPersonality = "__gxx_personality_seh0";
+#else
+        static constexpr const char *kCxxPersonality = "__gxx_personality_v0";
+#endif
         mod.walk([&](mlir::LLVM::LLVMFuncOp funcOp) {
             bool hasInvoke = false;
             funcOp.walk([&](mlir::LLVM::InvokeOp) { hasInvoke = true; });
             if (hasInvoke && !funcOp.getPersonalityAttr()) {
-                // Ensure __gxx_personality_v0 is declared
-                if (!mod.lookupSymbol<mlir::LLVM::LLVMFuncOp>("__gxx_personality_v0")) {
+                // Ensure the personality routine is declared
+                if (!mod.lookupSymbol<mlir::LLVM::LLVMFuncOp>(kCxxPersonality)) {
                     mlir::OpBuilder builder(mod.getContext());
                     builder.setInsertionPointToStart(mod.getBody());
                     auto i32Type = builder.getI32Type();
                     auto personalityFnType = mlir::LLVM::LLVMFunctionType::get(i32Type, {}, true);
-                    mlir::LLVM::LLVMFuncOp::create(builder, mod.getLoc(), "__gxx_personality_v0", personalityFnType);
+                    mlir::LLVM::LLVMFuncOp::create(builder, mod.getLoc(), kCxxPersonality, personalityFnType);
                 }
                 auto personalityRef = mlir::FlatSymbolRefAttr::get(
-                    mod.getContext(), "__gxx_personality_v0");
+                    mod.getContext(), kCxxPersonality);
                 funcOp.setPersonalityAttr(personalityRef);
             }
         });

@@ -468,7 +468,9 @@ function load_dependency_graph_json(json_path::String)
     end
 
     try
-        data = JSON.parsefile(json_path)
+        # use_mmap=false: a live mmap blocks deletion on Windows and is released
+        # only at GC — see Builder/ThunkBuilder.jl.
+        data = JSON.parsefile(json_path; use_mmap=false)
 
         # Reconstruct FileDependencies for each file
         files = Dict{String,FileDependencies}()

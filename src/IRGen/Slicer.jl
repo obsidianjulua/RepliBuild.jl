@@ -396,7 +396,9 @@ function _cache_load(key_dir::String, target::String)
     meta_path = joinpath(key_dir, target * ".json")
     isfile(meta_path) || return nothing
     try
-        meta = JSON.parsefile(meta_path)
+        # use_mmap=false: a live mmap blocks deletion on Windows and is released
+        # only at GC — see Builder/ThunkBuilder.jl.
+        meta = JSON.parsefile(meta_path; use_mmap=false)
         ir = nothing
         if get(meta, "sliced", false)
             ll_path = joinpath(key_dir, target * ".ll")

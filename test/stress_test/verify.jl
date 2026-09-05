@@ -203,8 +203,32 @@ if MLIR_AVAILABLE
                 @test MLIRNative.emit_object(mod, thunks_obj)
                 @test isfile(thunks_obj) && filesize(thunks_obj) > 0
 
-                thunks_so = joinpath(@__DIR__, "julia", "libstress_test_thunks.so")
-                run(`gcc -shared -o $thunks_so $thunks_obj`)
+                # This link was `gcc -shared -o … thunks.o` and nothing else,
+                # which is a weaker link than the one ThunkBuilder actually
+                # performs. Two separate reasons it could not hold on Windows:
+                #
+                #   * `gcc` is not a given. MSYS2 CLANG64 — the
+                #     x86_64-w64-windows-gnu environment this port targets —
+                #     ships clang and no gcc at all, so the command spawned
+                #     nothing (ENOENT).
+                #   * An ELF shared object may keep undefined symbols and let
+                #     `dlopen` bind them later against an RTLD_GLOBAL library.
+                #     PE has no such thing: every symbol in a DLL must resolve at
+                #     LINK time. Unlinked, these thunks left ~17 undefined —
+                #     the C++ runtime (`operator new`, `__cxa_begin_catch`), the
+                #     wrapped library's own symbols (`Shape::Shape()`,
+                #     `compute_eigen`), and libJLCS's exception shim.
+                #
+                # So link what the thunks actually reference, the way
+                # Builder/ThunkBuilder.jl does: clang++ for the C++ runtime, the
+                # library under test, and libJLCS. Correct on Linux too — it was
+                # only ever getting away with the looser link there.
+                cc      = RepliBuild.LLVMEnvironment.get_tool("clang++")
+                lib_dir = joinpath(@__DIR__, "julia")
+                jlcs    = RepliBuild.MLIRNative.libJLCS
+                thunks_so = joinpath(lib_dir, "libstress_test_thunks." * Libdl.dlext)
+                run(`$cc -shared -o $thunks_so $thunks_obj
+                     -L$lib_dir -l:$(basename(lib_path)) $jlcs`)
                 @test isfile(thunks_so)
 
                 main_lib = Libdl.dlopen(abspath(lib_path), Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)

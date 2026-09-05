@@ -1515,13 +1515,31 @@ end
 Normalize an STL container type by stripping default allocator arguments.
 E.g., "std::vector<int, std::allocator<int> >" -> "std::vector<int>"
 Handles extra spaces that nm -C outputs (e.g., "allocator<int> >").
-Also strips __cxx11:: namespace prefix.
+Also strips the standard library's INLINE NAMESPACE (`__cxx11`, `__1`).
 """
 function _normalize_stl_type(demangled_type::String)::String
     t = strip(demangled_type)
 
-    # Remove __cxx11:: namespace
-    t = replace(t, "std::__cxx11::" => "std::")
+    # Strip the standard library's ABI inline namespace.
+    #
+    # Which one appears is a property of the standard library, not the platform:
+    # libstdc++ puts its C++11-ABI types in `std::__cxx11::`, and libc++ puts
+    # EVERYTHING in `std::__1::`. A user writes `std::vector<int>` in
+    # `[types] templates`, so whichever the toolchain emits has to be folded
+    # back to that spelling or the requested instantiation matches nothing.
+    #
+    # Only `__cxx11` was handled, which was enough for as long as the only
+    # toolchain in use was libstdc++. MSYS2 CLANG64 — the environment this
+    # Windows port targets, and the only MSYS2 repo shipping MLIR — is a libc++
+    # toolchain, so every STL type arrived as `std::__1::vector<int,
+    # std::__1::allocator<int>>`, matched no template, and the wrapper silently
+    # emitted none of the `create_*` factories. Nothing errored; the functions
+    # simply were not there.
+    #
+    # Applied to the WHOLE string, not just a prefix: the allocator arguments
+    # carry the namespace too, and the allocator-stripping patterns below match
+    # on `std::allocator<...>` spelled plainly.
+    t = replace(t, "std::__cxx11::" => "std::", "std::__1::" => "std::")
 
     # Normalize spaces around angle brackets for consistent matching
     # nm -C outputs "allocator<int> >" with space before final >
@@ -5499,7 +5517,10 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
     # declarations through this map; tooling uses it to de-mystify nm output.
     promoted_map_path = joinpath(get_build_path(config), "promoted_symbols.json")
     if isfile(promoted_map_path)
-        metadata["promoted_symbols"] = JSON.parsefile(promoted_map_path)
+        # use_mmap=false: a live mmap blocks deletion on Windows and is released
+        # only at GC — and this file lives in build/, which clean() removes.
+        # See Builder/ThunkBuilder.jl.
+        metadata["promoted_symbols"] = JSON.parsefile(promoted_map_path; use_mmap=false)
     end
 
     # Save to JSON file next to binary

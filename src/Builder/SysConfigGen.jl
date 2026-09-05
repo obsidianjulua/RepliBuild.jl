@@ -409,7 +409,10 @@ function cmake_probe(source_dir::String;
     ccpath = joinpath(build_dir, "compile_commands.json")
     by_target = Dict{String,Vector{Tuple{String,Vector{String}}}}()  # target => [(file, sig)]
     if isfile(ccpath)
-        for e in JSON.parsefile(ccpath)
+        # use_mmap=false: a live mmap blocks deletion on Windows and is released
+        # only at GC — and this one maps a file inside the cmake build tree that
+        # `capture_config` removes moments later. See Builder/ThunkBuilder.jl.
+        for e in JSON.parsefile(ccpath; use_mmap=false)
             file = get(e, "file", "")
             isempty(file) && continue
             eargs = _entry_args(e)

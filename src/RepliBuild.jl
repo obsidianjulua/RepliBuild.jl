@@ -677,6 +677,59 @@ function clean(toml_path::String="replibuild.toml")
     clean_internal(project_dir)
 end
 
+"""
+    _rm_tree(path; attempts=5)
+
+`rm(path, recursive=true, force=true)`, but tolerant of Windows delete
+semantics.
+
+On POSIX, unlinking a file that something still has open succeeds — the name
+goes immediately and the inode outlives it. Windows has no such move: while any
+handle remains, the file cannot be removed, and a directory holding it reports
+ENOTEMPTY. `force=true` does not help, because the failure is not about
+permissions.
+
+Handles linger here for reasons that have nothing to do with RepliBuild and
+that no amount of care on our side prevents:
+
+  * a real-time virus scanner opens every freshly written `.dll` to inspect it,
+    and a build produces one immediately before `clean` wants it gone;
+  * the search indexer and Explorer preview do the same;
+  * a wrapper loaded earlier in the session still has the library mapped, and
+    `dlclose` is not something a caller of `clean` can be asked to arrange.
+
+All but the last are transient — a fraction of a second — so a short backoff
+turns a spurious hard failure into a pause nobody notices. A handle that is
+genuinely held (a loaded library) still fails, and still should: silently
+leaving a stale build directory is worse than saying so.
+
+The retry only exists on Windows; POSIX takes the direct path unchanged.
+"""
+function _rm_tree(path::String; attempts::Int = Sys.iswindows() ? 5 : 1)
+    local last_err
+    for attempt in 1:attempts
+        try
+            rm(path, recursive=true, force=true)
+            return true
+        catch e
+            last_err = e
+            attempt == attempts && break
+            # Clear read-only bits, which a cloud-sync client (OneDrive Files
+            # On-Demand marks build trees ReadOnly + reparse point) sets on
+            # files it has dehydrated. Those fail with EACCES, not ENOTEMPTY.
+            if Sys.iswindows()
+                try
+                    run(pipeline(`attrib -R $(joinpath(path, "*.*")) /S /D`,
+                                 stdout=devnull, stderr=devnull))
+                catch
+                end
+            end
+            sleep(0.2 * attempt)   # 0.2s, 0.4s, 0.6s, 0.8s
+        end
+    end
+    throw(last_err)
+end
+
 # Internal clean function
 function clean_internal(path::String)
     # .debug holds the generated MLIR the JIT'd thunks carry in their DWARF, so
@@ -688,7 +741,7 @@ function clean_internal(path::String)
     for dir in dirs_to_remove
         dir_path = joinpath(path, dir)
         if isdir(dir_path)
-            rm(dir_path, recursive=true, force=true)
+            _rm_tree(dir_path)
             push!(removed, dir)
         end
     end

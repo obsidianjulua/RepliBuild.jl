@@ -16,7 +16,14 @@ const TEST_DIR = @__DIR__
 function clean_test_dir(dir::String)
     for name in ["build", "julia", ".replibuild_cache"]
         p = joinpath(dir, name)
-        ispath(p) && rm(p, recursive=true, force=true)
+        # RepliBuild._rm_tree, not a bare rm: on Windows a file with any handle
+        # still open cannot be unlinked (POSIX allows it), so the directory
+        # reports ENOTEMPTY and `force=true` does not help — the failure is not
+        # about permissions. A real-time virus scanner opening the `.dll` this
+        # suite has just built is enough to cause it, which made the very first
+        # integration testset fail on a tree it had itself produced seconds
+        # earlier. _rm_tree retries with a short backoff.
+        ispath(p) && RepliBuild._rm_tree(p)
     end
 end
 

@@ -23,6 +23,35 @@ using namespace mlir::jlcs;
 
 namespace {
 
+// The C++ exception PERSONALITY. A separate axis from the struct ABI selected
+// by `kHostAbi` further down, and not derivable from it.
+//
+// The Itanium C++ ABI unwinds with DWARF CFI and calls its personality routine
+// `__gxx_personality_v0`. mingw-w64 on x86-64 unwinds with SEH and calls it
+// `__gxx_personality_seh0` — and that is not a spelling preference: the C++
+// runtime there EXPORTS seh0 and does not export v0 at all. A thunk emitting v0
+// therefore fails to link with exactly one undefined symbol and no other
+// symptom, which is a long way from the word "exceptions".
+//
+// Checked against the toolchain rather than assumed: `clang++` for
+// x86_64-w64-windows-gnu emits `personality ptr @__gxx_personality_seh0`, and
+// v0 appears in no libc++/libc++abi/libunwind archive shipped there.
+//
+// Keyed on the host for the same reason `kHostAbi` is: this library feeds an
+// in-process JIT and the AOT thunks built beside it, so the target IS the host.
+// JLCS_FORCE_ABI_WIN64 deliberately does NOT change it — that flag exists to
+// diff Win64 struct lowering from a Linux box, such a library cannot run
+// anything regardless, and giving it a personality the Linux runtime lacks
+// would break that build for nothing.
+//
+// Declared here, above every use, rather than beside kHostAbi: the first use is
+// in the vcall lowering far above that point.
+#if defined(_WIN32)
+static constexpr const char *kCxxPersonality = "__gxx_personality_seh0";
+#else
+static constexpr const char *kCxxPersonality = "__gxx_personality_v0";
+#endif
+
 //===----------------------------------------------------------------------===//
 // GetFieldOp Lowering
 //===----------------------------------------------------------------------===//
@@ -224,7 +253,7 @@ struct VirtualCallOpLowering : public ConversionPattern {
         auto i32Type = rewriter.getI32Type();
 
         auto personalityFnType = LLVM::LLVMFunctionType::get(i32Type, {}, true);
-        getOrInsertLLVMFn(moduleOp, rewriter, "__gxx_personality_v0", personalityFnType);
+        getOrInsertLLVMFn(moduleOp, rewriter, kCxxPersonality, personalityFnType);
         getOrInsertLLVMFn(moduleOp, rewriter, "__cxa_begin_catch",
             LLVM::LLVMFunctionType::get(ptrType, {ptrType}, false));
         getOrInsertLLVMFn(moduleOp, rewriter, "__cxa_end_catch",
@@ -234,10 +263,10 @@ struct VirtualCallOpLowering : public ConversionPattern {
 
         if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
             llvmFunc.setPersonalityAttr(
-                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+                FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
         } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
             funcOp->setAttr("llvm.personality",
-                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+                FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
         }
 
         // Result slot, zero-initialized for the exception path. Created
@@ -1046,7 +1075,7 @@ struct TryCallOpLowering : public ConversionPattern {
 
         // __gxx_personality_v0
         auto personalityFnType = LLVM::LLVMFunctionType::get(i32Type, {}, true);
-        getOrInsertFunction(moduleOp, rewriter, "__gxx_personality_v0", personalityFnType);
+        getOrInsertFunction(moduleOp, rewriter, kCxxPersonality, personalityFnType);
 
         // __cxa_begin_catch(void*) -> void*
         auto cxaBeginType = LLVM::LLVMFunctionType::get(ptrType, {ptrType}, false);
@@ -1067,11 +1096,11 @@ struct TryCallOpLowering : public ConversionPattern {
         // --- Set personality function on parent function ---
         // Must handle both func.func (pre-lowering) and llvm.func (post-lowering)
         if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
-            llvmFunc.setPersonalityAttr(FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+            llvmFunc.setPersonalityAttr(FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
         } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
             // Set as a generic attribute that FuncToLLVM will carry through
             funcOp->setAttr("llvm.personality",
-                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+                FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
         }
 
         // --- Emit invoke + landing pad ---
@@ -1251,7 +1280,7 @@ struct DestructorCallOpLowering : public ConversionPattern {
         auto voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
         auto i32Type = rewriter.getI32Type();
 
-        getOrInsertLLVMFn(moduleOp, rewriter, "__gxx_personality_v0",
+        getOrInsertLLVMFn(moduleOp, rewriter, kCxxPersonality,
             LLVM::LLVMFunctionType::get(i32Type, {}, true));
         getOrInsertLLVMFn(moduleOp, rewriter, "__cxa_begin_catch",
             LLVM::LLVMFunctionType::get(ptrType, {ptrType}, false));
@@ -1262,10 +1291,10 @@ struct DestructorCallOpLowering : public ConversionPattern {
 
         if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
             llvmFunc.setPersonalityAttr(
-                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+                FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
         } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
             funcOp->setAttr("llvm.personality",
-                FlatSymbolRefAttr::get(rewriter.getContext(), "__gxx_personality_v0"));
+                FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
         }
 
         Block* currentBlock = rewriter.getInsertionBlock();
@@ -1597,7 +1626,7 @@ struct LowerJLCSToLLVMPass
             funcOp.walk([&](LLVM::InvokeOp) { hasInvoke = true; });
             if (hasInvoke && !funcOp.getPersonalityAttr()) {
                 auto personalityRef = FlatSymbolRefAttr::get(
-                    &getContext(), "__gxx_personality_v0");
+                    &getContext(), kCxxPersonality);
                 funcOp.setPersonalityAttr(personalityRef);
             }
         });

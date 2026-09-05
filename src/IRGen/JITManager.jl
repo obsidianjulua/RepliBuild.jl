@@ -5,6 +5,7 @@
 module JITManager
 
 using ..MLIRNative
+import ..MLIRNative: CXX_PERSONALITY
 using ..JLCSIRGenerator
 using ..DWARFParser
 using Libdl
@@ -625,7 +626,9 @@ function initialize_global_jit(binary_path::String)
             # Load metadata
             metadata_path = joinpath(dirname(rp), "compilation_metadata.json")
             metadata = if isfile(metadata_path)
-                JSON.parsefile(metadata_path)
+                # use_mmap=false: a live mmap blocks deletion on Windows and is
+                # released only at GC — see Builder/ThunkBuilder.jl.
+                JSON.parsefile(metadata_path; use_mmap=false)
             else
                 Dict()
             end
@@ -651,17 +654,32 @@ function initialize_global_jit(binary_path::String)
                 end
             end
 
-            # Register C++ runtime EH symbols (__gxx_personality_v0, __cxa_begin/end_catch)
-            # Use C_NULL handle to search the default global symbol space
+            # Register C++ runtime EH symbols (the personality routine plus the
+            # __cxa_begin/end_catch pair). Use C_NULL handle to search the
+            # default global symbol space.
+            #
+            # Neither the runtime's FILENAME nor the personality's NAME is
+            # universal. GNU/Linux ships libstdc++; MSYS2 CLANG64 — the
+            # x86_64-w64-windows-gnu environment this targets — ships libc++ as
+            # a DLL; macOS ships libc++.1.dylib. And mingw unwinds with SEH, so
+            # the personality is `__gxx_personality_seh0` there, which is why
+            # the symbol comes from CXX_PERSONALITY rather than a literal.
             cxxrt_handle = C_NULL
             try
-                # Try libstdc++ first, then libc++abi
-                cxxrt_handle = something(Libdl.dlopen("libstdc++.so.6", Libdl.RTLD_LAZY | Libdl.RTLD_NOLOAD, throw_error=false), C_NULL)
-                if cxxrt_handle == C_NULL
-                    cxxrt_handle = something(Libdl.dlopen("libstdc++.so", Libdl.RTLD_LAZY, throw_error=false), C_NULL)
+                candidates = if Sys.iswindows()
+                    ("libc++.dll", "libstdc++-6.dll")
+                elseif Sys.isapple()
+                    ("libc++.1.dylib", "libc++.dylib")
+                else
+                    ("libstdc++.so.6", "libstdc++.so")
+                end
+                for cand in candidates
+                    cxxrt_handle = something(
+                        Libdl.dlopen(cand, Libdl.RTLD_LAZY, throw_error=false), C_NULL)
+                    cxxrt_handle == C_NULL || break
                 end
             catch; end
-            for sym in (:__gxx_personality_v0, :__cxa_begin_catch, :__cxa_end_catch)
+            for sym in (Symbol(CXX_PERSONALITY), :__cxa_begin_catch, :__cxa_end_catch)
                 ptr = C_NULL
                 if cxxrt_handle != C_NULL
                     ptr = something(Libdl.dlsym(cxxrt_handle, sym, throw_error=false), C_NULL)
@@ -681,7 +699,7 @@ function initialize_global_jit(binary_path::String)
             manifest_path = joinpath(dirname(rp), "thunk_manifest.json")
             needed_symbols = if isfile(manifest_path)
                 try
-                    manifest = JSON.parsefile(manifest_path)
+                    manifest = JSON.parsefile(manifest_path; use_mmap=false)
                     Set{String}(get(manifest, "function_thunks", String[]))
                 catch
                     nothing

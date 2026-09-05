@@ -36,6 +36,25 @@ import Libdl
 const libJLCS_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
 const libJLCS = libJLCS_path  # Alias for convenience
 
+"""
+    CXX_PERSONALITY
+
+Name of the C++ exception personality routine on this host.
+
+Itanium-ABI unwinding is DWARF-based and calls `__gxx_personality_v0`. mingw-w64
+on x86-64 unwinds with SEH and calls `__gxx_personality_seh0` — and that is not
+a spelling preference: the C++ runtime there exports only the latter, so IR
+naming v0 fails to link with exactly one undefined symbol, a diagnostic that
+mentions neither exceptions nor Windows.
+
+This MUST agree with `kCxxPersonality` in `src/mlir/impl/JLCSPasses.cpp`, the
+same fact on the dialect's C++ side. Both key on the host because the dialect
+feeds an in-process JIT and the AOT thunks built beside it, so the target is
+always the host.
+"""
+const CXX_PERSONALITY = Sys.iswindows() ? "__gxx_personality_seh0" :
+                                          "__gxx_personality_v0"
+
 # Check if JLCS library exists
 function check_library()
     if !isfile(libJLCS_path)

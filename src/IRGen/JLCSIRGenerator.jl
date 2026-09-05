@@ -5,6 +5,7 @@
 module JLCSIRGenerator
 
 using ..DWARFParser
+import ..MLIRNative: CXX_PERSONALITY
 import JSON
 
 # Modular includes
@@ -21,6 +22,34 @@ using .STLContainerGen
 using .ArrayViewGen
 
 export generate_jlcs_ir, generate_mlir_module
+
+"""
+    EH_RUNTIME_SYMBOLS
+
+C++ exception-runtime symbols the module prologue declares itself, and which
+must therefore never also be given a function thunk.
+
+The prologue emits `llvm.func @<name>` for each of these. If the same name
+reaches the function-thunk pass it emits `func.func private @<name>` for it too,
+and MLIR rejects the whole module: *redefinition of symbol named …*. Not a
+partial failure — nothing lowers.
+
+This is invisible on Linux, where the C++ runtime is a shared libstdc++ and none
+of these appear in the wrapped library's own DWARF. mingw-w64 links its runtime
+pieces STATICALLY into the DLL, so they land in the binary's debug info and
+arrive in `metadata["functions"]` looking like ordinary API — the personality
+routine included. (The same statically-linked CRT is why a Windows wrapper also
+sees `atexit`, `cos`, `sqrt` and friends among its "functions".)
+
+Both personality spellings are listed, not just this host's: the metadata is
+read from a binary, and a binary built by a different toolchain than the one
+running is exactly the ingest case.
+"""
+const EH_RUNTIME_SYMBOLS = Set([
+    "__gxx_personality_v0", "__gxx_personality_seh0",
+    "__cxa_begin_catch", "__cxa_end_catch",
+    "jlcs_set_pending_exception", "jlcs_catch_current_exception",
+])
 
 """
     _collect_class_raii(metadata) -> Dict{String,Dict{Symbol,String}}
@@ -279,7 +308,13 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
               startswith(get(f, "mangled", ""), "_Z"), get(metadata, "functions", [])))
     if is_cpp
         println(io, "  // Exception handling helper declarations")
-        println(io, "  llvm.func @__gxx_personality_v0(...) -> i32")
+        # Must name the SAME personality the dialect's lowering emits
+        # (kCxxPersonality in src/mlir/impl/JLCSPasses.cpp). Itanium unwinding
+        # calls it `__gxx_personality_v0`; mingw-w64 x86-64 unwinds with SEH and
+        # calls it `__gxx_personality_seh0`, and the Windows C++ runtime exports
+        # only the latter — declaring v0 there leaves one undefined symbol at
+        # link time and nothing else to go on.
+        println(io, "  llvm.func @$(CXX_PERSONALITY)(...) -> i32")
         println(io, "  llvm.func @__cxa_begin_catch(!llvm.ptr) -> !llvm.ptr")
         println(io, "  llvm.func @__cxa_end_catch()")
         println(io, "  llvm.func @jlcs_set_pending_exception(!llvm.ptr)")
@@ -341,6 +376,11 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         m = get(f, "mangled", "")
         isempty(m) && continue
         m in gen_pre && continue
+        # The EH prologue already declared these as `llvm.func`; a second
+        # declaration as `func.func private` is a redefinition and MLIR rejects
+        # the entire module. See EH_RUNTIME_SYMBOLS — they only reach metadata
+        # on a target that links its C++ runtime statically, i.e. mingw-w64.
+        m in EH_RUNTIME_SYMBOLS && continue
         needed_symbols !== nothing && !(m in needed_symbols) && continue
         get(f, "is_vararg", false) && continue
         push!(fthunk_decls, m)
@@ -441,6 +481,14 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         filtered_functions = filter(metadata["functions"]) do f
             m = get(f, "mangled", "")
             m in generated_symbols && return false
+            # The EH prologue already declared these as `llvm.func`. Emitting a
+            # thunk gives them a second declaration as `func.func private`, and
+            # MLIR rejects the ENTIRE module — "redefinition of symbol named
+            # …" — so nothing lowers. They reach metadata only where the C++
+            # runtime is linked statically into the binary, which is what
+            # mingw-w64 does; on Linux they live in a shared libstdc++ and never
+            # appear in the wrapped library's own DWARF. See EH_RUNTIME_SYMBOLS.
+            m in EH_RUNTIME_SYMBOLS && return false
             needed_symbols !== nothing && !(m in needed_symbols) && return false
             return true
         end

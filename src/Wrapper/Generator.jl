@@ -890,7 +890,9 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         error("Compilation metadata not found: $metadata_file\nRun RepliBuild.build() first to generate metadata")
     end
 
-    metadata = JSON.parsefile(metadata_file)
+    # use_mmap=false: a live mmap blocks deletion on Windows and is released
+    # only at GC — see the note in Builder/ThunkBuilder.jl.
+    metadata = JSON.parsefile(metadata_file; use_mmap=false)
 
     if !haskey(metadata, "functions")
         error("Invalid metadata: missing 'functions' key")

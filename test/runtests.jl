@@ -201,6 +201,26 @@ include(joinpath(@__DIR__, "test_symbol_hygiene.jl"))
 
 include(joinpath(@__DIR__, "test_config_surface.jl"))
 
+# ── JSON.parsefile must not memory-map (no toolchain) ────────────────────────
+# A leaked mmap is free on POSIX, where a mapped file still unlinks, and fatal
+# on Windows, where it blocks deleting the file. `clean()` failed on a build
+# tree RepliBuild had just produced, and the file left behind was
+# compilation_metadata.json — not the .dll anyone would have suspected.
+# The guard is textual because the defect is: a new call site omitting the
+# keyword is the failure mode, and no Linux run can observe it.
+
+include(joinpath(@__DIR__, "test_json_mmap_hygiene.jl"))
+
+# ── C++ personality is one fact in two languages (no toolchain) ──────────────
+# The dialect emits llvm.invoke from its C++ passes AND from the Julia IR
+# generator; neither can see the other, so the personality name is written down
+# twice. Itanium unwinding calls it __gxx_personality_v0, mingw-w64 x86-64
+# unwinds with SEH and calls it __gxx_personality_seh0, and the Windows C++
+# runtime exports only the latter — so a drift costs one undefined symbol at
+# link time, on one platform, and no Linux run can see it.
+
+include(joinpath(@__DIR__, "test_cxx_personality.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

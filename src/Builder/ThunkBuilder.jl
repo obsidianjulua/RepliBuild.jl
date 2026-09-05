@@ -26,7 +26,16 @@ function build_aot_thunks(config, library_path)
     start_time = time()
 
     vtable_info = DWARFParser.parse_vtables(library_path)
-    metadata = JSON.parsefile(metadata_path)
+    # `use_mmap=false` — REQUIRED, not a tuning knob. JSON.parsefile defaults to
+    # `use_mmap=true`, and Julia releases a mapping only when the GC finalizes
+    # it. POSIX does not care: a mapped file unlinks fine. Windows does: while
+    # the mapping is live the file cannot be deleted, and the directory holding
+    # it reports ENOTEMPTY, so `clean()` failed on a build tree RepliBuild had
+    # produced itself — with the JSON, not the .dll, as the file left behind.
+    # These metadata files are small; mmap buys nothing and costs that.
+    # Guarded by test_json_mmap_hygiene.jl, which fails on a call site that
+    # omits it.
+    metadata = JSON.parsefile(metadata_path; use_mmap=false)
 
     # AOT MUST READ THE THUNK MANIFEST, for the same reason the JIT path does
     # (JITManager, "Load thunk manifest").
@@ -43,7 +52,7 @@ function build_aot_thunks(config, library_path)
     manifest_path = joinpath(output_dir, "thunk_manifest.json")
     needed_symbols = if isfile(manifest_path)
         try
-            manifest = JSON.parsefile(manifest_path)
+            manifest = JSON.parsefile(manifest_path; use_mmap=false)
             Set{String}(get(manifest, "function_thunks", String[]))
         catch
             nothing
