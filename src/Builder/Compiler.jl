@@ -298,6 +298,90 @@ standalone (empty default) it is computed here so the fingerprint check still
 applies — `_detect_target_triple` shells out, so the batch avoids paying that
 per file by passing it down.
 """
+# _c_bucket_sysroot() -> String
+#
+# The `--sysroot` the C bucket's compiler needs on Windows, or "" when none is
+# needed or none can be found.
+#
+# Clang_unified_jll's clang is built for `x86_64-w64-windows-gnu` — the right
+# triple, matching Julia's own mingw-w64 build — but it is a bare compiler
+# artifact: it ships no libc headers and no mingw CRT. Its InstalledDir is a
+# Julia artifact directory holding tools and nothing else, so the header search
+# it derives from that prefix is empty and `#include <math.h>` fails on the
+# first C file. A system clang finds those through its own InstalledDir; the JLL
+# has no equivalent to find.
+#
+# Pointing it at the MSYS2 CLANG64 prefix supplies exactly the missing half and
+# disturbs nothing else: JLL clang 18 still emits the IR, Julia's resident
+# libLLVM still consumes it, so the version lock this bucket exists to enforce
+# (see _clang_for_c_bucket) is untouched. The triple does not move either — it
+# is already the mingw one.
+#
+# Discovery, in order:
+#   1. REPLIBUILD_C_SYSROOT — an explicit override always wins.
+#   2. The prefix of whatever `clang` is on PATH. Under the supported Windows
+#      setup that is MSYS2 CLANG64, and following PATH means a non-default MSYS2
+#      install needs no configuration at all.
+#   3. MSYS2_ROOT (default C:/msys64) x {clang64, ucrt64, mingw64}.
+#
+# A candidate is accepted only if it actually holds include/math.h. Testing for
+# the directory would not do: an MSYS2 install carries empty `ucrt64/` and
+# `mingw64/` trees for environments that were never installed, and handing clang
+# one of those trades "no sysroot" for "wrong sysroot" — the same failure with a
+# worse error message.
+const _C_SYSROOT = Ref{Union{Nothing,String}}(nothing)
+
+function _c_bucket_sysroot()::String
+    Sys.iswindows() || return ""
+    cached = _C_SYSROOT[]
+    cached === nothing || return cached
+
+    _usable(p) = !isempty(p) && isfile(joinpath(p, "include", "math.h"))
+
+    found = ""
+
+    override = get(ENV, "REPLIBUILD_C_SYSROOT", "")
+    if !isempty(override)
+        if _usable(override)
+            found = override
+        else
+            @warn "REPLIBUILD_C_SYSROOT is set but holds no include/math.h — ignoring it" REPLIBUILD_C_SYSROOT=override
+        end
+    end
+
+    if isempty(found)
+        path_clang = Sys.which("clang")
+        if path_clang !== nothing
+            prefix = dirname(dirname(abspath(path_clang)))
+            _usable(prefix) && (found = prefix)
+        end
+    end
+
+    if isempty(found)
+        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
+        for env in ("clang64", "ucrt64", "mingw64")
+            cand = joinpath(msys_root, env)
+            if _usable(cand)
+                found = cand
+                break
+            end
+        end
+    end
+
+    if isempty(found)
+        @warn """
+              No mingw sysroot found for the C bucket. Clang_unified_jll's clang ships no
+              libc headers of its own, so compiling a .c file will fail on its first system
+              #include. Install the MSYS2 CLANG64 environment, or point REPLIBUILD_C_SYSROOT
+              at a prefix containing include/math.h."""
+    end
+
+    # Cached either way, including the empty result: the search is the same every
+    # time within a session, and this keeps the warning above to one line.
+    _C_SYSROOT[] = found
+    return found
+end
+
 # _clang_for_c_bucket(compiler, cmd_args) -> (output, exitcode)
 #
 # Run `compiler` over `cmd_args`, routing the C BUCKET (`compiler == "clang"`)
@@ -329,7 +413,16 @@ function _clang_for_c_bucket(compiler::String, cmd_args)
             return BuildBridge.execute(compiler, cmd_args)
 
         clang_cmd = Clang_mod.Clang_unified_jll.clang()
-        cmd = ignorestatus(`$(clang_cmd) $cmd_args`)
+
+        # On Windows the JLL compiler brings no libc of its own — see
+        # _c_bucket_sysroot. This covers compiling AND linking: without a sysroot
+        # the link step cannot find the mingw CRT and startup objects either. A
+        # caller that already chose a sysroot keeps it.
+        sysroot = any(a -> startswith(string(a), "--sysroot"), cmd_args) ? "" :
+                  _c_bucket_sysroot()
+        cmd = isempty(sysroot) ?
+              ignorestatus(`$(clang_cmd) $cmd_args`) :
+              ignorestatus(`$(clang_cmd) --sysroot=$sysroot $cmd_args`)
 
         out_pipe = Pipe()
         err_pipe = Pipe()
@@ -1331,7 +1424,11 @@ function _probe_compiler(language::Symbol)::Cmd
             Clang_mod = Base.require(Base.PkgId(
                 Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
             if isdefined(Clang_mod, :Clang_unified_jll)
-                return Clang_mod.Clang_unified_jll.clang()
+                clang_cmd = Clang_mod.Clang_unified_jll.clang()
+                # Same sysroot the real compile gets, or the probe would resolve a
+                # different set of headers than the build it is vouching for.
+                sysroot = _c_bucket_sysroot()
+                return isempty(sysroot) ? clang_cmd : `$clang_cmd --sysroot=$sysroot`
             end
         catch
         end
@@ -1558,7 +1655,24 @@ function _normalize_stl_type(demangled_type::String)::String
     end
 
     # std::basic_string<char, std::char_traits<char>, std::allocator<char>>
-    if startswith(t, "std::basic_string<char")
+    #
+    # Anchored on the closing `>`, and that anchor is the whole point. Written as
+    # a bare `startswith`, this branch also swallowed basic_string's NESTED
+    # helper classes — libc++ has several — so
+    #
+    #   std::basic_string<char, ...>::__annotation_guard
+    #
+    # normalized to `std::basic_string<char>` and its members were recorded as
+    # the string's own. Dedup keeps the FIRST match per method name, so
+    # `~__annotation_guard()` was stored as the string's destructor and the real
+    # `~basic_string()` never got in. CppString then destroyed itself by calling
+    # a guard's destructor on a string: EXCEPTION_ACCESS_VIOLATION inside
+    # __is_long, one frame under ~__annotation_guard.
+    #
+    # The vector/map/unordered_map branches below are `$`-anchored regexes and
+    # were never exposed to this. libstdc++ does not emit these helpers, so the
+    # defect was latent on Linux and immediate on libc++.
+    if startswith(t, "std::basic_string<char") && endswith(t, ">")
         return "std::basic_string<char>"
     end
 
@@ -1586,6 +1700,25 @@ Returns (method_name, is_const) or nothing if not a recognized method.
 function _classify_stl_method(method_sig::String, container_type::String="")::Union{Tuple{String,Bool}, Nothing}
     sig = strip(method_sig)
     is_map = startswith(container_type, "std::map") || startswith(container_type, "std::unordered_map")
+
+    # An ABI tag is not part of the method's identity, so it is dropped before
+    # any of the name tests below.
+    #
+    # libc++ marks nearly every inline member `_LIBCPP_HIDE_FROM_ABI`, which
+    # expands to an `abi_tag` attribute, and the tag mangles into the symbol
+    # AFTER the name: `_ZNKSt3__16vectorIiNS_9allocatorIiEEE4sizeB9nqe220108Ev`,
+    # demangling to `size[abi:nqe220108]() const`. Every test here is a
+    # `startswith(sig, "size(")`, so every tagged member failed to classify and
+    # was dropped — std::vector<int> came out of a real build with exactly ONE
+    # method (the destructor, which survived only because its test is on the
+    # leading `~`, and the tag trails the name). CppVector then had no size and
+    # no push_back thunk to call.
+    #
+    # libstdc++ tags only `std::__cxx11` string/list members, so on Linux this
+    # cost a couple of methods and was never traced; on libc++ it costs the
+    # whole container. Same treatment as Wrapper/Cpp/IdentifiersCpp.jl, which
+    # strips these tags for the same reason.
+    sig = replace(sig, r"\[abi:[^\]]*\]" => "")
 
     # Constructor: ClassName(...)  or ClassName()
     # The method_sig is just the part after "::", e.g., "vector()" or "basic_string(char const*)"

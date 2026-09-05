@@ -221,6 +221,15 @@ include(joinpath(@__DIR__, "test_json_mmap_hygiene.jl"))
 
 include(joinpath(@__DIR__, "test_cxx_personality.jl"))
 
+# ── The C bucket's compiler needs a libc on Windows (toolchain) ──────────────
+# .c goes through Clang_unified_jll's clang so its IR is version-locked to
+# Julia's libLLVM. That JLL is a bare compiler artifact: right triple, no libc.
+# On Linux it silently falls through to /usr/include; on Windows there is
+# nothing to fall through to, and every C file dies on its first system
+# #include. Only a Windows run can observe it.
+
+include(joinpath(@__DIR__, "test_c_bucket_sysroot.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.
