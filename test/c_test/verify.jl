@@ -51,8 +51,35 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test occursin("module", code)
         @test occursin("add_i32", code)
         @test occursin("Point2D", code)
-        @test occursin("Base.llvmcall", code)          # LTO Tier 1 dispatch
-        println("  ✓ wrap → $wrapper (LTO active)")
+        # Tier 1 (llvmcall) embeds the whole post-LTO module and lets ORC
+        # resolve what it declares. mathkit.c calls snprintf and sqrt, and on
+        # Windows mingw links those statically into the DLL: defined in the
+        # COFF symbol table, absent from the export directory, so nothing in
+        # the process can bind them and ORC deadlocks rather than erroring.
+        # RepliBuild pre-flights the module and demotes the whole path to
+        # ccall when that happens (Wrapper._lto_unresolved_symbols).
+        #
+        # So this asserts the CORRECT outcome per platform rather than skipping
+        # on Windows — and the Windows arm is the stronger claim of the two: it
+        # pins that the demotion actually happened and left a working call
+        # path, which is what the pre-flight exists to guarantee.
+        lto_syms = RepliBuild.Wrapper._lto_unresolved_symbols(
+            joinpath(dirname(wrapper), "c_test_lto.ll"),
+            joinpath(dirname(wrapper), "libc_test.so"))
+        # The generator always emits BOTH call paths and chooses at load time on
+        # `!isempty(LTO_IR)`, so the presence of the llvmcall text says nothing
+        # about which one runs. What the pre-flight actually controls — and so
+        # what this checks — is whether the bitcode gets BOUND.
+        @test occursin("Base.llvmcall", code)          # both arms emit the path
+        if isempty(lto_syms)
+            @test occursin("LTO_IR_PATH", code)        # ... and bind the bitcode
+            println("  ✓ wrap → $wrapper (LTO active)")
+        else
+            @test occursin("const LTO_IR = UInt8[]", code)   # bound to nothing
+            @test occursin("cannot resolve", code)           # and says why
+            println("  ✓ wrap → $wrapper (LTO demoted to ccall: " *
+                    join(lto_syms, ", ") * " unresolvable in-process)")
+        end
     end
 
     # ── 5. info ─────────────────────────────────────────────────────────

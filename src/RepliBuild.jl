@@ -75,6 +75,18 @@ const INTERNAL_TYPE_BLOCKLIST = Set([
     "_loadu_ps", "_storeu_ps",
     "ldiv_t", "lldiv_t", "div_t", "max_align_t", "imaxdiv_t",
     "_IO_FILE", "_IO_marker", "_IO_codecvt", "_IO_wide_data",
+    # The same libc internals under the Windows CRT, which spells all of them
+    # differently. `FILE` is `struct _iobuf` here, not `struct _IO_FILE`, so a
+    # list naming only the glibc spellings screens nothing on Windows: a
+    # `FILE**` parameter came out as `Ptr{Ptr{_iobuf}}`, `_iobuf` was declared
+    # as a one-field struct and EXPORTED into the wrapper's API surface, and a
+    # caller passing the documented `Ref{Ptr{Cvoid}}` could not convert to it.
+    # The glibc entries above have covered this since the FILE class was first
+    # found; these are the missing half of the same fact.
+    "_iobuf",
+    "__crt_locale_data", "__crt_locale_pointers", "__crt_multibyte_data",
+    "_Mbstatet", "localeinfo_struct", "threadlocaleinfostruct",
+    "threadmbcinfostruct", "tagLC_ID", "lconv",
 ])
 
 # RepliBuild targets Linux (ELF/.so) and Windows (PE/.dll, x86_64-w64-windows-gnu).

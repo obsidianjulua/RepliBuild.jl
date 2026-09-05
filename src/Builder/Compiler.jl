@@ -2393,6 +2393,88 @@ function _scan_noexcept_functions(source_files::Vector{String},
     return noexcept_names
 end
 
+# =============================================================================
+# WHAT A PE BINARY ACTUALLY EXPORTS
+# -----------------------------------------------------------------------------
+# `nm -g --defined-only` is not a library's API on Windows, and the gap is not
+# cosmetic.
+#
+# mingw links its C runtime, startup code and unwinder STATICALLY into every
+# DLL. Those objects carry defined global symbols, so nm reports them exactly
+# like the library's own functions: snprintf, memcpy, atexit, fprintf, abort,
+# _CRT_INIT, operator new. On ELF the same code lives in a shared libc and is
+# only ever REFERENCED, so nm's answer and the library's API are the same list
+# and nothing had to distinguish them.
+#
+# The consequence is not a longer list, it is a broken build. `snprintf` was
+# recorded as an exported function of test/c_test, RepliBuild generated a thunk
+# for it, and the JIT then had to resolve `snprintf` at materialisation. It
+# cannot: the symbol is in the COFF symbol table but NOT in the DLL's export
+# directory, so GetProcAddress — and therefore dlsym, and therefore ORC's
+# process search — does not find it. The session died with
+#
+#     JIT session error: Symbols not found: [ snprintf ]
+#
+# and the run then hung rather than failing.
+#
+# PE answers the question exactly, in the export directory, which is also the
+# only thing GetProcAddress will ever consult — so it is the right authority in
+# the strongest sense: a symbol outside it cannot be called through the library
+# even in principle. Measured across the fixtures: c_test 115 nm symbols / 28
+# exports, mi_test 133/43, vi_test 142/56, stl_test 691/513, and zero CRT
+# symbols in any export table.
+#
+# ELF's equivalent is the dynamic symbol table, which is what `nm -D` reads —
+# and `nm -D` is an error on PE ("File format has no dynamic symbol table"),
+# which is why the sites that used it never worked on Windows.
+# =============================================================================
+
+"""
+    _pe_exported_names(binary_path) -> Union{Nothing,Set{String}}
+
+The names in a PE binary's export directory, or `nothing` when the question
+cannot be answered — not Windows, no GNU objdump, or a binary with no export
+table at all.
+
+`nothing` means "do not filter", so a missing tool degrades to the old
+behaviour rather than silently emptying a library's API.
+"""
+function _pe_exported_names(binary_path::String)
+    Sys.iswindows() || return nothing
+    dumper = _dwarf_dumper()
+    dumper === nothing && return nothing
+
+    out = try
+        readchomp(pipeline(ignorestatus(`$(dumper.tool) -p $binary_path`), stderr = devnull))
+    catch
+        return nothing
+    end
+
+    names = Set{String}()
+    started = false
+    for line in split(out, '\n')
+        if !started
+            occursin("[Ordinal/Name Pointer] Table", line) && (started = true)
+            continue
+        end
+        # Rows are `[   0] +base[   1]  0000 aabb_area`; older binutils drop the
+        # +base/hint columns. Taking the last field covers both.
+        m = match(r"^\s*\[\s*\d+\]\s+(.*\S)\s*$", line)
+        if m === nothing
+            # objdump prints an `Ordinal Hint Name` header under the marker
+            # before the first row, so a non-row line only ends the table once
+            # rows have started. Breaking on the header instead made the answer
+            # always empty, which reads as "could not ask" and silently
+            # restores the unfiltered behaviour this exists to replace.
+            isempty(names) && continue
+            break
+        end
+        push!(names, String(last(split(m.captures[1]))))
+    end
+
+    return isempty(names) ? nothing : names
+end
+
 """
 Extract symbol information from compiled binary using nm.
 Returns vector of symbol dictionaries with mangled/demangled names.
@@ -2411,6 +2493,11 @@ function extract_symbols_from_binary(binary_path::String)
         @warn "nm demangled command failed: $demangled_output"
         return Dict{String,Any}[]
     end
+
+    # On PE, nm's answer includes the statically-linked C runtime and is not
+    # this library's API — see _pe_exported_names for what that cost. `nothing`
+    # means the question could not be asked, and then nothing is screened out.
+    exported = _pe_exported_names(binary_path)
 
     # Build address → mangled mapping. Accept T (text/code) and W (weak)
     # symbols. Weak symbols cover C++ template instantiations and inline
@@ -2458,6 +2545,17 @@ function extract_symbols_from_binary(binary_path::String)
                 # Deliberate STL container wrapping goes through extract_stl_method_symbols
                 # under [types].templates, not this general path.
                 if _is_stdlib_internal(mangled_name, demangled_name)
+                    continue
+                end
+
+                # Not in the PE export directory ⇒ not API, whatever nm says.
+                # This is the screen that keeps mingw's statically-linked CRT
+                # out: snprintf and friends are defined globals in the COFF
+                # symbol table and absent from the export directory, so nothing
+                # can reach them through the library — GetProcAddress consults
+                # only that directory. Wrapping one produced a thunk the JIT
+                # could not resolve, and the failure hung the run.
+                if exported !== nothing && !(mangled_name in exported)
                     continue
                 end
 

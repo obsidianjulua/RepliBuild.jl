@@ -38,8 +38,91 @@ Whether `dlsym` finds `sym` through `handle`. A `C_NULL` handle is
 a slice at `llvmcall` time. A real handle scopes the lookup to that library
 and its `DT_NEEDED` chain.
 """
-_symbol_resolves_via(handle::Ptr{Cvoid}, sym::AbstractString) =
-    ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), handle, sym) != C_NULL
+function _symbol_resolves_via(handle::Ptr{Cvoid}, sym::AbstractString)
+    # `dlsym` is a POSIX libdl export. Windows has no such symbol in the
+    # process, so the raw ccall raised `could not load symbol "dlsym"` rather
+    # than answering — which took the whole pre-flight down on the one platform
+    # whose answer differs from the caller's assumption. Libdl is the portable
+    # spelling of the same lookup.
+    if handle != C_NULL
+        return Libdl.dlsym(handle, sym; throw_error = false) !== nothing
+    end
+
+    # A null handle is RTLD_DEFAULT: every globally-loaded library in this
+    # process. Windows has no RTLD_DEFAULT — GetProcAddress always takes a
+    # module — so the loaded-module list stands in for it. Only the `stray`
+    # diagnostic below uses this arm, and only for symbols already known to be
+    # missing, so walking the list costs nothing in the common path.
+    @static if Sys.iswindows()
+        for m in Libdl.dllist()
+            h = Libdl.dlopen(m, Libdl.RTLD_LAZY; throw_error = false)
+            h === nothing && continue
+            Libdl.dlsym(h, sym; throw_error = false) === nothing || return true
+        end
+        return false
+    else
+        return ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, sym) != C_NULL
+    end
+end
+
+"""
+    _lto_unresolved_symbols(lto_ll, lib_path) -> Vector{String}
+
+Symbols the monolithic LTO module `declare`s that nothing reachable from
+`lib_path` can supply. Empty ⇒ the module is safe to hand to `Base.llvmcall`.
+
+Monolithic LTO embeds the WHOLE post-LTO module in the wrapper and llvmcall's
+it, so every symbol that module declares has to resolve in the consumer's
+process the first time a function referencing it is materialised. On ELF they
+do: the C runtime is a shared libc, its symbols are in the process, and this
+question never had to be asked.
+
+PE does not work that way. mingw links its C runtime statically into every DLL,
+so a helper like `snprintf` is a defined symbol in the binary's COFF table and
+absent from its export directory — nothing in the process can hand ORC an
+address for it. ORC then prints
+
+    JIT session error: Symbols not found: [ snprintf ]
+
+and DEADLOCKS rather than raising, which is why this must be answered before
+the wrapper is written and not discovered at the call site.
+
+`_tier1_preflight!` asks exactly this question for per-function slices. The
+monolithic path never had an equivalent.
+"""
+function _lto_unresolved_symbols(lto_ll::String, lib_path::String)::Vector{String}
+    isfile(lto_ll) || return String[]
+
+    declared = Set{String}()
+    for line in eachline(lto_ll)
+        startswith(line, "declare") || continue
+        m = match(r"@\"?([A-Za-z0-9_.\$]+)\"?\s*\(", line)
+        m === nothing && continue
+        name = String(m.captures[1])
+        # Intrinsics are lowered by the backend and never looked up.
+        startswith(name, "llvm.") && continue
+        push!(declared, name)
+    end
+    isempty(declared) && return String[]
+
+    # RTLD_LOCAL and closed again: the same reasoning as _tier1_preflight!.
+    # Loading it globally would leak this library's exports into every later
+    # wrap in the session and verify the next package against symbols its
+    # consumer will not have.
+    handle = try
+        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+    catch
+        return String[]   # cannot verify ⇒ do not demote
+    end
+    try
+        return sort!(filter(s -> !_symbol_resolves_via(handle, s), collect(declared)))
+    finally
+        try
+            Libdl.dlclose(handle)
+        catch
+        end
+    end
+end
 
 """
     _slice_path_expr(mangled) -> String

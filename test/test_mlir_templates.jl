@@ -822,7 +822,15 @@ end
         ll = read(llpath, String); rm(llpath, force=true)
         @test occursin(r"invoke[^\n]*%\d+\(ptr", ll)
         @test occursin("landingpad", ll)
-        @test occursin("__gxx_personality_v0", ll)
+        # The personality's NAME is target-dependent: Itanium unwinding calls it
+        # __gxx_personality_v0, mingw-w64 x86-64 unwinds with SEH and calls it
+        # __gxx_personality_seh0, and the Windows C++ runtime exports only the
+        # latter. Asserting the literal pinned the Linux spelling and failed on
+        # correct Windows output. MLIRNative.CXX_PERSONALITY is the one place
+        # that fact is written down — and test_cxx_personality.jl separately
+        # pins that the dialect's C++ agrees with it, so naming it here is not
+        # circular.
+        @test occursin(RepliBuild.MLIRNative.CXX_PERSONALITY, ll)
         @test occursin("jlcs_catch_current_exception", ll)
 
         # JIT-execute against the fixture (libJLCS supplies the EH runtime
