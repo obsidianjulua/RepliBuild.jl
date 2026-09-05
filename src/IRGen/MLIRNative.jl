@@ -27,7 +27,13 @@ export take_diagnostics
 # that link against the static MLIRCAPIIR library
 import ..SRC_DIR
 import SHA
-const libJLCS_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS.so")
+import Libdl
+
+# `Libdl.dlext` rather than a literal "so". CMake names this target by the host
+# convention, and on mingw that is `libJLCS.dll` — the `lib` prefix is kept, only
+# the extension changes — so a hardcoded ".so" pointed at a file that the build
+# had just successfully produced under a different name.
+const libJLCS_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
 const libJLCS = libJLCS_path  # Alias for convenience
 
 # Check if JLCS library exists
@@ -40,8 +46,9 @@ function check_library()
             cd src/mlir
             ./build.sh
 
-        Only Linux Compatible.
-        No Windows support planned.
+        Needs LLVM/MLIR 21+ from one install. On Windows, build it from an
+        MSYS2 CLANG64 shell — that is the x86_64-w64-windows-gnu environment
+        matching Julia's own mingw build, and the only MSYS2 repo shipping MLIR.
         """)
     end
 end

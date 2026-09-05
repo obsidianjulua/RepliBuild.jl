@@ -1,3 +1,9 @@
+// M_PI is not standard C or C++ — it is an X/Open extension. glibc exposes it
+// from <cmath> regardless, which is why this fixture built on Linux with no
+// define; the UCRT gates it behind _USE_MATH_DEFINES. The macro must precede
+// EVERY include that can reach <math.h>, hence above the project header too.
+// Inert on glibc.
+#define _USE_MATH_DEFINES
 #include "shapes.h"
 #include <cmath>
 

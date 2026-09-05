@@ -92,16 +92,28 @@ echo ""
 echo "Building dialect library..."
 cmake --build . -j$(nproc)
 
-# Verify build
-if [ -f "libJLCS.so" ]; then
+# Verify build.
+#
+# CMake names the target by host convention: libJLCS.so on Linux, libJLCS.dylib
+# on macOS, and libJLCS.dll under mingw (the `lib` prefix is kept, only the
+# extension changes). Checking for ".so" unconditionally reported
+# "ERROR: not found" after a build that had just linked the library correctly —
+# a false failure on the one platform being brought up.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) JLCS_LIB="libJLCS.dll"   ;;
+    Darwin)               JLCS_LIB="libJLCS.dylib" ;;
+    *)                    JLCS_LIB="libJLCS.so"    ;;
+esac
+
+if [ -f "$JLCS_LIB" ]; then
     echo ""
     echo "=============================================="
     echo " Build Complete!"
     echo "=============================================="
-    echo "Library: $(pwd)/libJLCS.so"
-    # -L: libJLCS.so is a symlink to libJLCS.so.<soname>, and du on the link
-    # itself reports 0.
-    echo "Size: $(du -Lh libJLCS.so | cut -f1)"
+    echo "Library: $(pwd)/$JLCS_LIB"
+    # -L: on Linux libJLCS.so is a symlink to libJLCS.so.<soname>, and du on the
+    # link itself reports 0.
+    echo "Size: $(du -Lh "$JLCS_LIB" | cut -f1)"
     echo ""
     echo "To test from Julia:"
     echo "  cd $(dirname $(dirname $SCRIPT_DIR))"
@@ -112,6 +124,6 @@ if [ -f "libJLCS.so" ]; then
     echo "=============================================="
 else
     echo ""
-    echo "ERROR: libJLCS.so not found after build"
+    echo "ERROR: $JLCS_LIB not found after build"
     exit 1
 fi
