@@ -182,7 +182,7 @@ if MLIR_AVAILABLE
         end
 
         @testset "VTable thunks AOT pipeline" begin
-            lib_path = joinpath(@__DIR__, "julia", "libstress_test.so")
+            lib_path = joinpath(@__DIR__, "julia", "libstress_test." * Libdl.dlext)
             metadata_path = joinpath(@__DIR__, "julia", "compilation_metadata.json")
 
             @test isfile(lib_path)
@@ -191,7 +191,7 @@ if MLIR_AVAILABLE
             ctx = MLIRNative.create_context()
             try
                 vtable_info = DWARFParser.parse_vtables(lib_path)
-                metadata = JSON.parsefile(metadata_path)
+                metadata = JSON.parsefile(metadata_path; use_mmap=false)
                 ir_source = JLCSIRGenerator.generate_jlcs_ir(vtable_info, metadata)
                 @test !isempty(ir_source)
 
@@ -221,14 +221,19 @@ if MLIR_AVAILABLE
                 #
                 # So link what the thunks actually reference, the way
                 # Builder/ThunkBuilder.jl does: clang++ for the C++ runtime, the
-                # library under test, and libJLCS. Correct on Linux too — it was
-                # only ever getting away with the looser link there.
+                # library under test, and libJLCS. The `-l:` NEEDED has no
+                # SONAME, so without `$ORIGIN` RUNPATH `dlopen` of the thunks
+                # library cannot find the sibling even after
+                # `dlopen(abspath(lib_path))`.
                 cc      = RepliBuild.LLVMEnvironment.get_tool("clang++")
                 lib_dir = joinpath(@__DIR__, "julia")
                 jlcs    = RepliBuild.MLIRNative.libJLCS
                 thunks_so = joinpath(lib_dir, "libstress_test_thunks." * Libdl.dlext)
+                origin_rpath = "-Wl,-rpath,\$ORIGIN"
+                jlcs_rpath = "-Wl,-rpath," * dirname(jlcs)
                 run(`$cc -shared -o $thunks_so $thunks_obj
-                     -L$lib_dir -l:$(basename(lib_path)) $jlcs`)
+                     -L$lib_dir -l:$(basename(lib_path)) $jlcs
+                     $origin_rpath -Wl,-rpath,$lib_dir $jlcs_rpath`)
                 @test isfile(thunks_so)
 
                 main_lib = Libdl.dlopen(abspath(lib_path), Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
