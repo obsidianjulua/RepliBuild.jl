@@ -5,6 +5,7 @@
 module EnvironmentDoctor
 
 import ..SRC_DIR
+using Libdl
 
 export check_environment, ToolchainStatus, ToolStatus
 
@@ -28,7 +29,7 @@ struct ToolchainStatus
     tools::Vector{ToolStatus}
     ready::Bool
     tier1_ready::Bool  # ccall tier (needs clang/llvm)
-    tier2_ready::Bool  # MLIR JIT tier (needs mlir-tblgen, cmake, libJLCS.so)
+    tier2_ready::Bool  # MLIR JIT tier (needs mlir-tblgen, cmake, libJLCS)
 end
 
 # =============================================================================
@@ -143,7 +144,7 @@ end
 function _check_libJLCS()::ToolStatus
     # Check for the compiled MLIR dialect library
     mlir_dir = joinpath(SRC_DIR, "mlir", "build")
-    lib_path = joinpath(mlir_dir, "libJLCS.so")
+    lib_path = joinpath(mlir_dir, "libJLCS." * Libdl.dlext)
     
     if isfile(lib_path)
         return ToolStatus("libJLCS", false, true, lib_path, "", true,

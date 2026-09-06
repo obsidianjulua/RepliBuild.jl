@@ -1,12 +1,14 @@
 # Julia-side (size, alignment) of primitive field types, used to reproduce C
 # struct layouts exactly. Julia lays out isbits struct fields with natural
 # alignment — identical to the C rules for these types on x86_64 SysV.
+const _C_LONG_SA = let n = sizeof(Clong); (n, n) end
+const _C_WCHAR_SA = let n = sizeof(Cwchar_t); (n, n) end
 const _C_PRIM_FIELD_LAYOUT = Dict{String,Tuple{Int,Int}}(
     "Cchar" => (1, 1), "Cuchar" => (1, 1), "Int8" => (1, 1), "UInt8" => (1, 1), "Bool" => (1, 1),
     "Cshort" => (2, 2), "Cushort" => (2, 2), "Int16" => (2, 2), "UInt16" => (2, 2),
     "Cint" => (4, 4), "Cuint" => (4, 4), "Int32" => (4, 4), "UInt32" => (4, 4),
-    "Cfloat" => (4, 4), "Float32" => (4, 4), "Cwchar_t" => (4, 4),
-    "Clong" => (8, 8), "Culong" => (8, 8), "Clonglong" => (8, 8), "Culonglong" => (8, 8),
+    "Cfloat" => (4, 4), "Float32" => (4, 4), "Cwchar_t" => _C_WCHAR_SA,
+    "Clong" => _C_LONG_SA, "Culong" => _C_LONG_SA, "Clonglong" => (8, 8), "Culonglong" => (8, 8),
     "Int64" => (8, 8), "UInt64" => (8, 8), "Cdouble" => (8, 8), "Float64" => (8, 8),
     "Csize_t" => (8, 8), "Cssize_t" => (8, 8), "Cptrdiff_t" => (8, 8),
     "Cintptr_t" => (8, 8), "Cuintptr_t" => (8, 8), "Cstring" => (8, 8),
@@ -1533,7 +1535,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                         _loadable_primitives = Dict(
                             "Cdouble" => ("Cdouble", 8), "Cfloat" => ("Cfloat", 4),
                             "Cint" => ("Cint", 4), "Cuint" => ("Cuint", 4),
-                            "Clong" => ("Clong", 8), "Culong" => ("Culong", 8),
+                            "Clong" => ("Clong", sizeof(Clong)), "Culong" => ("Culong", sizeof(Culong)),
                             "Clonglong" => ("Clonglong", 8), "Culonglong" => ("Culonglong", 8),
                             "Cshort" => ("Cshort", 2), "Cushort" => ("Cushort", 2),
                             "Cchar" => ("Cchar", 1), "Cuchar" => ("Cuchar", 1),

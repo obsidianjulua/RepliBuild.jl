@@ -2,9 +2,14 @@
 # Nested-struct-member ABI trace test (library-free)
 #
 # Traces the C generator through compile → DWARF → wrap → live by-value
-# crossings for structs with struct-typed members. Guards the SysV register
-# classification contract: a 16-byte all-float struct travels in XMM registers;
-# representing it as NTuple{16,UInt8} silently reads/writes integer registers.
+# crossings for structs with struct-typed members.
+#
+# SysV: a 16-byte all-float struct travels in XMM registers; representing it
+# as NTuple{16,UInt8} silently reads/writes integer registers. Win64: size is
+# the only criterion and aggregates never reach XMM — that struct is sret /
+# memory, so a blob can round-trip by accident. `fields_resolved` /
+# `xform_not_blob` are the actual guard on both ABIs; the live round-trips
+# still prove the crossing works.
 # The probe runs in a subprocess so an ABI break can never take down the
 # test session (see also: packed structs are expected to refuse loudly).
 # =============================================================================
@@ -65,7 +70,7 @@ const ABI_TEST_DIR = joinpath(@__DIR__, "abi_nested_test")
 
     @test proc.exitcode == 0
     @test occursin("PROBE_DONE", output)           # probe ran to completion (no abort)
-    for probe_name in ["fields_resolved", "xform_return", "xform_byvalue_arg",
+    for probe_name in ["fields_resolved", "xform_not_blob", "xform_return", "xform_byvalue_arg",
                        "mass_roundtrip", "disc_roundtrip", "poly_memory_class",
                        "nestint_roundtrip", "packed_byvalue_guard",
                        "float_param_loosening", "with_helper"]

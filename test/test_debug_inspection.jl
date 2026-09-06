@@ -8,11 +8,12 @@
 # depend on file order.
 
 using Test
+using Libdl
 using RepliBuild
 
 const D = RepliBuild.Debug
 const VI = joinpath(@__DIR__, "vi_test")
-const VI_SO = joinpath(VI, "julia", "libvi_test.so")
+const VI_SO = joinpath(VI, "julia", "libvi_test." * Libdl.dlext)
 
 @testset "Debug: static inspection" begin
 

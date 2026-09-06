@@ -229,11 +229,18 @@ if MLIR_AVAILABLE
                 lib_dir = joinpath(@__DIR__, "julia")
                 jlcs    = RepliBuild.MLIRNative.libJLCS
                 thunks_so = joinpath(lib_dir, "libstress_test_thunks." * Libdl.dlext)
-                origin_rpath = "-Wl,-rpath,\$ORIGIN"
-                jlcs_rpath = "-Wl,-rpath," * dirname(jlcs)
-                run(`$cc -shared -o $thunks_so $thunks_obj
-                     -L$lib_dir -l:$(basename(lib_path)) $jlcs
-                     $origin_rpath -Wl,-rpath,$lib_dir $jlcs_rpath`)
+                # Match ThunkBuilder: PE has no RUNPATH, sibling DLLs resolve
+                # from the loading module's directory.
+                if Sys.iswindows()
+                    run(`$cc -shared -o $thunks_so $thunks_obj
+                         -L$lib_dir -l:$(basename(lib_path)) $jlcs`)
+                else
+                    origin_rpath = "-Wl,-rpath,\$ORIGIN"
+                    jlcs_rpath = "-Wl,-rpath," * dirname(jlcs)
+                    run(`$cc -shared -o $thunks_so $thunks_obj
+                         -L$lib_dir -l:$(basename(lib_path)) $jlcs
+                         $origin_rpath -Wl,-rpath,$lib_dir $jlcs_rpath`)
+                end
                 @test isfile(thunks_so)
 
                 main_lib = Libdl.dlopen(abspath(lib_path), Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)

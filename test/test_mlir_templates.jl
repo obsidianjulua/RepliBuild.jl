@@ -34,7 +34,7 @@ using RepliBuild.MLIRNative
 
 const TEMPLATES_DIR = joinpath(@__DIR__, "mlir_templates")
 const TEMPLATES_SRC = joinpath(TEMPLATES_DIR, "src", "templates.cpp")
-const TEMPLATES_LIB = joinpath(TEMPLATES_DIR, "libmlir_templates.so")
+const TEMPLATES_LIB = joinpath(TEMPLATES_DIR, "libmlir_templates." * Libdl.dlext)
 
 function build_templates_lib()
     if !isfile(TEMPLATES_SRC)

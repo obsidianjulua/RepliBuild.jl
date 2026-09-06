@@ -15,6 +15,15 @@ let ok = fieldnames(XForm) == (:p, :q) && fieldnames(Mass) == (:m, :c, :i)
             " XForm=", fieldnames(XForm), " Mass=", fieldnames(Mass))
 end
 
+# The SysV XMM bug this test exists to catch: a 16-byte all-float struct
+# emitted as NTuple{16,UInt8}. On Win64 that blob can still round-trip
+# because the aggregate is sret/memory, so this check is the one that
+# cannot pass by accident on either ABI.
+let blob = :_data in fieldnames(XForm) || XForm <: NTuple
+    println("PROBE xform_not_blob: ", blob ? "FAIL" : "PASS",
+            " typeof=", XForm, " fields=", fieldnames(XForm))
+end
+
 # 16B all-float nested struct RETURNED by value (SSE,SSE)
 t = make_xform(1.5f0, 2.5f0, 3.5f0, 4.5f0)
 let ok = approx(t.p.x, 1.5) && approx(t.p.y, 2.5) && approx(t.q.x, 3.5) && approx(t.q.y, 4.5)

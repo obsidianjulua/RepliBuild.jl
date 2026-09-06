@@ -159,6 +159,50 @@ function get_llvm_root(source::Symbol=:auto; config=nothing)
 end
 
 """
+    _resolve_tool_path(spec) -> Union{String,Nothing}
+
+Locate a tool named by `spec`: the path as given, `spec.exe` on Windows, then
+`Sys.which`. A user who follows the "set LLVM_CONFIG=…/llvm-config" error
+(Unix habit, no `.exe`) must not be told the file does not exist.
+"""
+function _resolve_tool_path(spec::AbstractString)::Union{String,Nothing}
+    isempty(spec) && return nothing
+    isfile(spec) && return abspath(spec)
+    if Sys.iswindows() && !endswith(lowercase(spec), ".exe")
+        exe = spec * ".exe"
+        isfile(exe) && return abspath(exe)
+    end
+    w = Sys.which(spec)
+    w !== nothing && isfile(w) && return w
+    return nothing
+end
+
+"""
+    _prefix_from_llvm_config(llvm_config) -> Union{String,Nothing}
+
+Install root of an llvm-config binary. Prefer the Windows path of the binary
+itself: MSYS2 `llvm-config --prefix` often prints `/clang64`, which Julia
+cannot see. `--prefix` is used when that layout check is awkward.
+"""
+function _prefix_from_llvm_config(llvm_config::AbstractString)::Union{String,Nothing}
+    parent = dirname(dirname(abspath(llvm_config)))
+    if isdir(joinpath(parent, "lib")) && isdir(joinpath(parent, "include"))
+        return parent
+    end
+    prefix = try
+        strip(readchomp(`$llvm_config --prefix`))
+    catch
+        ""
+    end
+    if !isempty(prefix) && isdir(joinpath(prefix, "lib")) && isdir(joinpath(prefix, "include"))
+        return prefix
+    end
+    isdir(parent) && return parent
+    !isempty(prefix) && isdir(prefix) && return prefix
+    return nothing
+end
+
+"""
     find_system_llvm() -> Union{String,Nothing}
 
 Search common system paths for LLVM installation.
@@ -170,23 +214,19 @@ function find_system_llvm()
     exe = Sys.iswindows() ? ".exe" : ""
 
     # `LLVM_CONFIG` is what the "LLVM Toolchain not found" error has always told
-    # the user to set, and until now NOTHING read it — the advice was dead, and
-    # a user who followed it got the identical error with no hint that the
-    # variable was ignored. Honour it here rather than inventing a second name:
-    # the message and the mechanism should be one fact, not two.
-    #
-    # It names the llvm-config BINARY (that is what the name means, and what
-    # every autotools build expects), so the root is its bin/'s parent.
+    # the user to set. Honour it here rather than inventing a second name.
     llvm_config_env = get(ENV, "LLVM_CONFIG", "")
     if !isempty(llvm_config_env)
-        if isfile(llvm_config_env)
-            root = dirname(dirname(abspath(llvm_config_env)))
-            if isdir(joinpath(root, "lib")) && isdir(joinpath(root, "include"))
+        resolved = _resolve_tool_path(llvm_config_env)
+        if resolved === nothing
+            @warn "LLVM_CONFIG is set but names no existing file — ignoring it" LLVM_CONFIG=llvm_config_env
+        else
+            root = _prefix_from_llvm_config(resolved)
+            if root === nothing
+                @warn "LLVM_CONFIG is set but its install has no lib/ and include/ — ignoring it" LLVM_CONFIG=llvm_config_env
+            else
                 return root
             end
-            @warn "LLVM_CONFIG is set but its install has no lib/ and include/ — ignoring it" LLVM_CONFIG=llvm_config_env root
-        else
-            @warn "LLVM_CONFIG is set but names no existing file — ignoring it" LLVM_CONFIG=llvm_config_env
         end
     end
 
@@ -236,6 +276,14 @@ function find_system_llvm()
                 end
             end
         end
+    end
+
+    # PATH last: hardcoded MSYS/Unix prefixes win so a JLL llvm-config on PATH
+    # cannot shadow the system toolchain this port targets.
+    which_config = _resolve_tool_path("llvm-config")
+    if which_config !== nothing
+        root = _prefix_from_llvm_config(which_config)
+        root !== nothing && return root
     end
 
     return nothing
@@ -699,7 +747,12 @@ Get linker flags for LLVM libraries.
 """
 function get_link_flags()
     toolchain = get_toolchain()
-    return ["-L$(toolchain.lib_dir)", "-Wl,-rpath,$(toolchain.lib_dir)"]
+    flags = ["-L$(toolchain.lib_dir)"]
+    # PE has no RUNPATH; GNU ld in mingw mode warns and ignores `--rpath`.
+    if !Sys.iswindows()
+        push!(flags, "-Wl,-rpath,$(toolchain.lib_dir)")
+    end
+    return flags
 end
 
 """

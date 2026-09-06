@@ -139,8 +139,42 @@ end
     # ── `long` and its aliases move together ────────────────────────────────
     @testset "every long spelling agrees" begin
         for t in ("long", "unsigned long", "long int", "unsigned long int",
-                  "Clong", "Culong")
+                  "signed long", "signed long int", "Clong", "Culong")
             @test _TU.map_cpp_type(t) == RepliBuild.C_LONG_MLIR
         end
+    end
+
+    # ── DWARF size table and wrapper field layout ride on sizeof, not a
+    #     second hardcoded Linux table. `get_type_size` returning 0 for
+    #     `long int` poisoned packed-detection; `_C_PRIM_FIELD_LAYOUT`
+    #     putting Clong at 8/8 laid Windows structs out wrong. ───────────────
+    @testset "get_type_size follows Clong/Cwchar_t" begin
+        C = RepliBuild.Compiler
+        @test C.get_type_size("long") == sizeof(Clong)
+        @test C.get_type_size("unsigned long") == sizeof(Clong)
+        @test C.get_type_size("long int") == sizeof(Clong)
+        @test C.get_type_size("unsigned long int") == sizeof(Clong)
+        @test C.get_type_size("signed long") == sizeof(Clong)
+        @test C.get_type_size("const long") == sizeof(Clong)
+        @test C.get_type_size("wchar_t") == sizeof(Cwchar_t)
+        @test C.get_type_size("Cwchar_t") == sizeof(Cwchar_t)
+        @test C.get_type_size("long long") == 8
+        @test C.get_type_size("int") == 4
+        @test C.get_type_size("void *") == 8
+    end
+
+    @testset "C_WCHAR_MLIR tracks the platform" begin
+        @test RepliBuild.C_WCHAR_MLIR == (Sys.iswindows() ? "i16" : "i32")
+        @test _mlir_width(RepliBuild.C_WCHAR_MLIR) == sizeof(Cwchar_t)
+        @test _TU.map_cpp_type("wchar_t") == RepliBuild.C_WCHAR_MLIR
+        @test _TU.map_cpp_type("Cwchar_t") == RepliBuild.C_WCHAR_MLIR
+    end
+
+    @testset "wrapper field layout uses host Clong/Cwchar_t" begin
+        layout = RepliBuild.Wrapper._C_PRIM_FIELD_LAYOUT
+        @test layout["Clong"] == (sizeof(Clong), sizeof(Clong))
+        @test layout["Culong"] == (sizeof(Clong), sizeof(Clong))
+        @test layout["Cwchar_t"] == (sizeof(Cwchar_t), sizeof(Cwchar_t))
+        @test layout["Clonglong"] == (8, 8)
     end
 end

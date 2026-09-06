@@ -1681,6 +1681,15 @@ function _probe_compiler(language::Symbol)::Cmd
 end
 
 """
+    _canon_path(path) -> String
+
+Compare paths in one spelling. On Windows `realpath` hands back `\\` and the
+filesystem is case-insensitive, so a Unix-style `startswith(p, root * "/")`
+never matches.
+"""
+_canon_path(p::AbstractString) = Sys.iswindows() ? lowercase(replace(String(p), '\\' => '/')) : String(p)
+
+"""
 Return the resolved absolute paths of `shim_file`'s DIRECT includes that fall
 OUTSIDE `allowed_roots`. Empty ⇒ every shim header came from the project/dep tree.
 A shim header that does not resolve at all (missing) is a compile error, not a
@@ -1698,7 +1707,7 @@ function _shim_headers_out_of_tree(shim_file::String, probe::Cmd,
     #
     # Only the comparison is normalized; `offenders` keeps the real path, since
     # that string is what the error message shows the user.
-    _canon(p) = Sys.iswindows() ? lowercase(replace(p, '\\' => '/')) : p
+    _canon(p) = _canon_path(p)
 
     norm_roots = String[]
     for r in allowed_roots
@@ -2879,7 +2888,13 @@ function as_return_julia_type(c_type::AbstractString, mapped::AbstractString)::S
     return m === nothing ? String(mapped) : "Ptr{$(m.captures[1])}"
 end
 
-# C/C++ → byte size table on x86_64 Linux. Hoisted to module scope.
+# C/C++ → byte size. `long` and `wchar_t` follow the host ABI (Julia's Clong /
+# Cwchar_t); everything else is the same on LP64 and LLP64 x86_64.
+# `get_type_size` feeds packed-detection / `_is_struct_unsafe`. A miss returns
+# 0, which poisons those checks — so DWARF spellings like `long int` have to
+# land in this table, not fall through.
+const _C_LONG_BYTES = sizeof(Clong)
+const _C_WCHAR_BYTES = sizeof(Cwchar_t)
 const _C_TYPE_SIZE_MAP = Dict{String,Int}(
     "void" => 0,
     "bool" => 1, "_Bool" => 1,
@@ -2889,7 +2904,8 @@ const _C_TYPE_SIZE_MAP = Dict{String,Int}(
     "int16_t" => 2, "uint16_t" => 2,
     "int" => 4, "unsigned int" => 4,
     "int32_t" => 4, "uint32_t" => 4,
-    "long" => 8, "unsigned long" => 8,
+    "long" => _C_LONG_BYTES, "unsigned long" => _C_LONG_BYTES,
+    "Clong" => _C_LONG_BYTES, "Culong" => _C_LONG_BYTES,
     "long long" => 8, "unsigned long long" => 8,
     "int64_t" => 8, "uint64_t" => 8,
     "float" => 4,
@@ -2898,24 +2914,49 @@ const _C_TYPE_SIZE_MAP = Dict{String,Int}(
     "size_t" => 8, "ssize_t" => 8,
     "ptrdiff_t" => 8,
     "intptr_t" => 8, "uintptr_t" => 8,
-    "wchar_t" => 4,
+    "wchar_t" => _C_WCHAR_BYTES, "Cwchar_t" => _C_WCHAR_BYTES,
     "__int128" => 16, "__uint128_t" => 16,
 )
+
+"""
+    _c_type_size_key(c_type) -> String
+
+Strip cv-qualifiers and fold DWARF/clang spellings (`long int` → `long`) so
+the size table has one entry per ABI type.
+"""
+function _c_type_size_key(c_type::AbstractString)::String
+    s = replace(strip(String(c_type)), r"\b(const|volatile|mutable)\b\s*" => "")
+    s = strip(replace(s, r"\s+" => " "))
+    s = replace(s, r"\blong int\b" => "long")
+    s = replace(s, r"\bshort int\b" => "short")
+    s = replace(s, r"^signed long$" => "long")
+    s = replace(s, r"^signed short$" => "short")
+    s = replace(s, r"^signed int$" => "int")
+    s = replace(s, r"^signed$" => "int")
+    return s
+end
 
 """
 Get type size in bytes from C/C++ type name.
 """
 function get_type_size(c_type::AbstractString)::Int
-    # Strip cv-qualifiers for lookup
-    stripped = replace(strip(c_type), r"\b(const|volatile|mutable)\b\s*" => "")
-    stripped = strip(stripped)
+    stripped = _c_type_size_key(c_type)
 
-    # Check for pointers/references (always 8 bytes on x86_64)
+    # Pointers/references are word-sized on every x86_64 ABI we target.
     if endswith(stripped, "*") || endswith(stripped, "&")
         return 8
     end
 
     return get(_C_TYPE_SIZE_MAP, stripped, 0)
+end
+
+function _is_gnu_binutils(version_out::AbstractString)::Bool
+    # LLVM's llvm-objdump has printed `compatible with GNU objdump`. A
+    # substring `GNU` accepts that dialect, which `parse_dwarf_dump` cannot
+    # read. GNU binutils identifies itself as `GNU Binutils` (and as a line
+    # starting `GNU objdump` / `GNU readelf`).
+    occursin("GNU Binutils", version_out) ||
+        occursin(r"(?m)^GNU (objdump|readelf)\b", version_out)
 end
 
 """
@@ -2977,7 +3018,7 @@ function _dwarf_dumper()
             ("", 1)
         end
         ec == 0 || continue
-        occursin("GNU", out) || continue   # rejects llvm-objdump / llvm-readelf
+        _is_gnu_binutils(out) || continue   # rejects llvm-objdump / llvm-readelf
 
         # readelf spells it `--debug-dump=info` and lists sections with `-S`;
         # objdump spells the same dump `--dwarf=info`, and sections with `-h`.
@@ -3097,12 +3138,37 @@ is biased toward keeping too much.
 """
 function _is_system_decl_file(path::AbstractString)::Bool
     isempty(path) && return false
-    p = String(path)
+    p = _canon_path(path)
     for pat in ("/usr/include", "/usr/lib/gcc", "/usr/lib/clang", "/usr/lib64/gcc",
-                "/usr/local/include", "/include/c++/", "/lib/clang/", "/lib64/gcc/")
+                "/usr/local/include", "/include/c++/", "/lib/clang/", "/lib64/gcc/",
+                # MSYS2 / WinSDK — after `_canon_path`, backslashes are `/`.
+                # `/include/c++/` already catches libc++ under clang64; these
+                # catch the C library and compiler resource headers that do not
+                # sit under `c++/` or `lib/clang/`.
+                "/clang64/include", "/ucrt64/include", "/mingw64/include",
+                "/mingw32/include", "/program files/llvm/include",
+                "/windows kits/")
         occursin(pat, p) && return true
     end
     return false
+end
+
+"""
+    _dwarf_format_mismatch_error(dumper, binary_path, nbytes) -> String
+
+The empty-parse guard. Interpolating a removed local (`readelf_tool`) used to
+throw `UndefVarError` on this path — hiding the mismatch this exists to name.
+"""
+function _dwarf_format_mismatch_error(dumper, binary_path::AbstractString, nbytes::Integer)::String
+    flag = dumper.dwarf * "info"
+    """
+    DWARF parse produced no functions from a $(round(nbytes / 1024)) KB dump of
+    $(basename(binary_path)).
+    The dump is non-empty, so this is a format mismatch rather than a
+    library without debug info. `parse_dwarf_dump` expects GNU binutils
+    `$flag` output; check that `$(dumper.tool)` is GNU binutils
+    (objdump/readelf) and not a differently-formatted stand-in
+    (llvm-objdump, llvm-readelf, llvm-dwarfdump)."""
 end
 
 """
@@ -3112,29 +3178,10 @@ Returns: (return_types_dict, struct_defs_dict)
   - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
 """
 function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
-    # Parse DWARF debug info
-
-    # GNU readelf, and only GNU readelf. `parse_dwarf_dump` is a readelf-format
-    # parser: it keys every DIE on `<level><offset>: Abbrev Number: N (DW_TAG_*)`,
-    # and the LEVEL is load-bearing — closing DIE contexts on depth is what fixed
-    # the phantom-parameter leak (2026-07-26). llvm-dwarfdump prints neither a
-    # level nor an abbrev number (`0x0000000c: DW_TAG_compile_unit`, depth by
-    # indentation only), so it matches nothing here.
-    #
-    # There WAS an llvm-dwarfdump fallback, commented "(macOS, or when readelf
-    # unavailable)". Both halves were dead:
-    #   * macOS is unreachable — `RepliBuild.__init__` hard-errors on non-Linux.
-    #   * readelf-unavailable ran dwarfdump, parsed **0 functions, 0 structs,
-    #     0 globals, 0 typedefs** out of a valid 1.4 MB dump, and returned exit
-    #     code 0 — so the "Failed to read DWARF info" warning never fired either.
-    #     The build continued, every function fell back to
-    #     `parameters_source: "inferred"`, and the wrapper shipped with guessed
-    #     signatures. Silently.
-    # A fallback that returns empty is worse than no fallback, so: no fallback.
-    #
-    # (`DWARFParser.jl` legitimately uses llvm-dwarfdump — its vtable parser is
-    # written for that dialect. Two dialects, two parsers; neither reads the
-    # other's output.)
+    # GNU binutils format only — `_dwarf_dumper()` picks readelf (ELF) or
+    # objdump (PE). Both print from binutils' dwarf.c; llvm-dwarfdump is a
+    # different dialect and is rejected there. A fallback that returns empty
+    # ships guessed signatures, so: no fallback.
     dumper = _dwarf_dumper()
     dumper === nothing && error(_no_dwarf_dumper_error())
 
@@ -3159,13 +3206,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
     # "this library has no functions", which is how the dead fallback above went
     # unnoticed. Fail here instead of emitting a wrapper of guesses.
     if isempty(return_types) && length(output) > 4096
-        error("""
-            DWARF parse produced no functions from a $(round(length(output)/1024)) KB dump of
-            $(basename(binary_path)).
-            The dump is non-empty, so this is a format mismatch rather than a
-            library without debug info. `parse_dwarf_dump` expects GNU readelf
-            `--debug-dump=info` output; check that `$readelf_tool` is GNU readelf
-            and not a differently-formatted stand-in (llvm-readelf, llvm-dwarfdump).""")
+        error(_dwarf_format_mismatch_error(dumper, binary_path, length(output)))
     end
 
     return (return_types, struct_defs, global_vars, typedefs)

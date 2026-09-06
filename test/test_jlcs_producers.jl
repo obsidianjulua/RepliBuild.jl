@@ -50,7 +50,7 @@ using RepliBuild.DWARFParser
 
 const PROD_DIR = joinpath(@__DIR__, "jlcs_producers")
 const PROD_SRC = joinpath(PROD_DIR, "src", "raii_fixture.cpp")
-const PROD_LIB = joinpath(PROD_DIR, "libraii_fixture.so")
+const PROD_LIB = joinpath(PROD_DIR, "libraii_fixture." * Libdl.dlext)
 
 if !isfile(PROD_LIB) || mtime(PROD_SRC) > mtime(PROD_LIB)
     @info "Building JLCS producer fixture..."

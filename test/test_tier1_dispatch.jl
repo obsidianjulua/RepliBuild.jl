@@ -19,6 +19,7 @@ using Test
 using TOML
 using Pkg
 using SHA
+using Libdl
 using RepliBuild
 
 const FIXTURE = joinpath(@__DIR__, "slice_test")
@@ -233,9 +234,10 @@ end
     end
     # Temp depot first (all writes land there), real depot second so
     # RepliBuild's existing pkgimage is reused instead of rebuilt.
+    pathsep = Sys.iswindows() ? ";" : ":"
     cmd = setenv(`$(Base.julia_cmd()) --startup-file=no -e "using Probe"`,
-                 "JULIA_LOAD_PATH" => "$(joinpath(pkgdir, "Probe")):@stdlib",
-                 "JULIA_DEPOT_PATH" => "$depot:$(first(DEPOT_PATH))",
+                 "JULIA_LOAD_PATH" => "$(joinpath(pkgdir, "Probe"))$(pathsep)@stdlib",
+                 "JULIA_DEPOT_PATH" => "$depot$(pathsep)$(first(DEPOT_PATH))",
                  "HOME" => homedir(), "PATH" => ENV["PATH"])
     proc = run(pipeline(cmd, stdout=devnull, stderr=devnull), wait=false)
     finished = timedwait(() -> process_exited(proc), 120.0) == :ok
@@ -280,7 +282,7 @@ end
     # sources with no promotion pass — which is exactly what every non-RepliBuild
     # build of this library looks like.
     foreign_dir = mktempdir()
-    foreign_so = joinpath(foreign_dir, "libslicetest.so")
+    foreign_so = joinpath(foreign_dir, basename(LIB))
     srcs = readdir(joinpath(FIXTURE, "src"), join=true)
     filter!(f -> endswith(f, ".c"), srcs)
     run(pipeline(`clang -O2 -fPIC -g -shared -I$(joinpath(FIXTURE, "include")) $srcs -o $foreign_so`,
@@ -288,7 +290,10 @@ end
 
     @test isfile(foreign_so)
     # The premise: no promoted symbols here, unlike RepliBuild's own build.
-    @test !occursin("__rb_", read(`nm -D $foreign_so`, String))
+    # `nm -D` is ELF dynsym; PE has none, so `-g` on Windows.
+    nm_cmd = Sys.iswindows() ? `nm -g --defined-only $foreign_so` :
+                               `nm -D --defined-only $foreign_so`
+    @test !occursin("__rb_", read(nm_cmd, String))
 
     # Some slice really does bind a promoted static — otherwise this proves nothing.
     promoted_users = [f for (f, syms) in Slicetest.TIER1_DECLARES
@@ -324,7 +329,7 @@ end
     stage = joinpath(foreign_dir, "stage")
     mkpath(stage)
     cp(joinpath(FIXTURE, "julia", "slices"), joinpath(stage, "slices"))
-    cp(foreign_so, joinpath(stage, "libslicetest.so"), force=true)
+    cp(foreign_so, joinpath(stage, basename(LIB)), force=true)
     cp(WRAPPER, joinpath(stage, "Slicetest.jl"))
     write(driver, """
         include(joinpath(raw"$stage", "Slicetest.jl"))

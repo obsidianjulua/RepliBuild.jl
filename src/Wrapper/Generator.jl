@@ -658,7 +658,7 @@ function generate_basic_module(config::RepliBuildConfig, lib_path::String,
     # LIBRARY MANAGEMENT
     # =============================================================================
 
-    const _LIB_PATH = raw"$(abspath(lib_path))"
+    const _LIB_PATH = $(repr(abspath(lib_path)))
     const _LIB = Ref{Ptr{Nothing}}(C_NULL)
     const _LOAD_ERRORS = String[]
 

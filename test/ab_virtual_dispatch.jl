@@ -18,6 +18,7 @@
 
 using Dates
 using SHA
+using Libdl
 
 const LABEL = length(ARGS) >= 1 ? ARGS[1] :
     error("usage: ab_virtual_dispatch.jl <baseline|patched>")
@@ -73,7 +74,7 @@ function wrap_one(pkg::String)
     jdir = joinpath(dir, "julia")
     isfile(toml) || return (:skip, "no replibuild.toml")
     isdir(jdir)  || return (:skip, "no julia/ — never built")
-    any(endswith(f, ".so") for f in readdir(jdir)) || return (:skip, "no .so in julia/")
+    any(endswith(f, "." * Libdl.dlext) for f in readdir(jdir)) || return (:skip, "no library in julia/")
 
     with_restored_julia_dir(jdir) do
         t0 = time()

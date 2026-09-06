@@ -55,8 +55,19 @@ reads 32 — the silent kind of wrong, wrong values rather than a crash.
 const C_LONG_MLIR = Sys.iswindows() ? "i32" : "i64"
 
 """
-    INTERNAL_TYPE_BLOCKLIST,
-    C_LONG_MLIR
+    C_WCHAR_MLIR
+
+The MLIR integer type for C's `wchar_t`: `i16` on Windows, `i32` elsewhere.
+
+Win64 `wchar_t` is UTF-16 (2 bytes); Unix is UTF-32 (4 bytes). Julia's
+`Cwchar_t` already follows the host, so the wrapper side is right for free.
+The IRGen producers and the DWARF size table have to match it the same way
+`C_LONG_MLIR` matches `Clong`.
+"""
+const C_WCHAR_MLIR = Sys.iswindows() ? "i16" : "i32"
+
+"""
+    INTERNAL_TYPE_BLOCKLIST
 
 Compiler and libc internals that leak through DWARF and must never reach a
 generated artifact — not a wrapper's type declarations, not its export list,

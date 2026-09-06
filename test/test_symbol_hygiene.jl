@@ -28,6 +28,7 @@
 # fixture-level end-to-end assertions live in mi_test/vi_test verify.jl.
 
 using Test
+using Libdl
 import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON itself
 
 @testset "Symbol hygiene" begin
@@ -120,7 +121,7 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
             # When the fixture IS built, the vendored list must still describe
             # it — otherwise the file above could drift into fiction and this
             # testset would keep passing against a snapshot of nothing.
-            so = joinpath(@__DIR__, fixture, "julia", "lib$(fixture).so")
+            so = joinpath(@__DIR__, fixture, "julia", "lib$(fixture)." * Libdl.dlext)
             if isfile(so)
                 live = String[]
                 for line in split(read(`nm -g --defined-only $so`, String), '\n')

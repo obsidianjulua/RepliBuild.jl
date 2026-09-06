@@ -843,6 +843,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     struct_chunks = String[]
     union_accessor_defs = ""  # Deferred union accessors (emitted after all struct defs)
     blob_setters_emitted = false  # gates the one module-level `setproperties`
+    # Seeded inside the struct-emission block. Must exist even when DWARF
+    # reports zero types (hello_world): function signatures still gate
+    # parameter annotations on this set.
+    defined_struct_names = Set{String}()
 
     # Emit forward declarations for:
     # 1. Truly opaque types (no DWARF definition) — as mutable struct
@@ -1483,7 +1487,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         _loadable_primitives = Dict(
                             "Cdouble" => ("Cdouble", 8), "Cfloat" => ("Cfloat", 4),
                             "Cint" => ("Cint", 4), "Cuint" => ("Cuint", 4),
-                            "Clong" => ("Clong", 8), "Culong" => ("Culong", 8),
+                            "Clong" => ("Clong", sizeof(Clong)), "Culong" => ("Culong", sizeof(Culong)),
                             "Clonglong" => ("Clonglong", 8), "Culonglong" => ("Culonglong", 8),
                             "Cshort" => ("Cshort", 2), "Cushort" => ("Cushort", 2),
                             "Cchar" => ("Cchar", 1), "Cuchar" => ("Cuchar", 1),

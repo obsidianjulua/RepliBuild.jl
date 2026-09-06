@@ -13,6 +13,7 @@
 
 using Test
 using JSON
+using Libdl
 import RepliBuild
 
 const SCRIPT_DIR = @__DIR__
@@ -61,7 +62,7 @@ using .MiTest
 
     # ── 2. DWARFParser path + type_info base table ──────────────────────────
     @testset "DWARFParser offsets + type_info emission" begin
-        so_path = joinpath(SCRIPT_DIR, "julia", "libmi_test.so")
+        so_path = joinpath(SCRIPT_DIR, "julia", "libmi_test." * Libdl.dlext)
         @test isfile(so_path)
         vtinfo = RepliBuild.DWARFParser.parse_vtables(so_path)
         @test haskey(vtinfo.classes, "Derived")
@@ -161,7 +162,7 @@ using .MiTest
     # explicit upcast, both exercised above.
     @testset "Adjustor thunks excluded from the API" begin
         # The fixture must still PRODUCE thunks, or the rest is vacuous.
-        nm_out = read(`nm -g --defined-only $(joinpath(SCRIPT_DIR, "julia", "libmi_test.so"))`, String)
+        nm_out = read(`nm -g --defined-only $(joinpath(SCRIPT_DIR, "julia", "libmi_test." * Libdl.dlext))`, String)
         @test occursin("_ZThn16_", nm_out)
 
         thunky(s) = startswith(s, "_ZTh") || startswith(s, "_ZTv") || startswith(s, "_ZTc")

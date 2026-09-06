@@ -8,6 +8,7 @@ module ConfigurationManager
 using TOML
 using Dates
 using UUIDs
+using Libdl
 
 # =============================================================================
 # IMMUTABLE CONFIGURATION STRUCTS
@@ -1087,8 +1088,10 @@ function get_library_name(c::RepliBuildConfig)::String
         return c.binary.output_name
     end
 
-    # Auto-generate: lib<project_name>.so (Linux-only: ELF shared object / static archive)
-    suffix = c.binary.type == :static ? ".a" : ".so"
+    # Auto-generate: lib<project_name>.<dlext> (`.so` / `.dylib` / `.dll`).
+    # LoadLibrary does not care about the extension, but every verify script
+    # and Hub consumer that looks for the built library does.
+    suffix = c.binary.type == :static ? ".a" : "." * Libdl.dlext
     return "lib" * c.project.name * suffix
 end
 

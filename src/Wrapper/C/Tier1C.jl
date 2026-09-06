@@ -532,8 +532,15 @@ function _tier1_registry_chunk(emitted::Vector{String},
     the ccall body, which is always correct.
     \"\"\"
     function _slice_symbols_resolve(syms)
+        # Against the library this wrapper actually loaded, not the whole
+        # process. POSIX RTLD_DEFAULT is not a thing on Windows — looking up
+        # the `dlsym` symbol itself raised rather than answering, on every
+        # Tier-1 call. Libdl.dlsym on LIB_HANDLE is GetProcAddress on PE and
+        # the library-scoped lookup on ELF, matching the wrap-time pre-flight.
+        h = LIB_HANDLE[]
+        h == C_NULL && return false
         for s in syms
-            ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, s) == C_NULL && return false
+            Libdl.dlsym(h, s; throw_error = false) === nothing && return false
         end
         return true
     end

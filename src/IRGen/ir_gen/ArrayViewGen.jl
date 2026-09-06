@@ -30,6 +30,7 @@ module ArrayViewGen
 import ...INTERNAL_TYPE_BLOCKLIST
 # `long` is 32 bits on Windows, 64 on Unix — see the constant's docstring.
 import ...C_LONG_MLIR
+import ...C_WCHAR_MLIR
 
 export generate_array_view_thunks
 
@@ -38,6 +39,7 @@ const _AV_ELEM_MLIR = Dict{String,String}(
     "float" => "f32", "double" => "f64",
     "int" => "i32", "unsigned int" => "i32", "int32_t" => "i32", "uint32_t" => "i32",
     "long" => C_LONG_MLIR, "unsigned long" => C_LONG_MLIR,
+    "wchar_t" => C_WCHAR_MLIR,
     "int64_t" => "i64", "uint64_t" => "i64",
     "long long" => "i64", "unsigned long long" => "i64", "size_t" => "i64",
     "short" => "i16", "unsigned short" => "i16", "int16_t" => "i16", "uint16_t" => "i16",

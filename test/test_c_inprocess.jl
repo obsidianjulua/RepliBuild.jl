@@ -7,6 +7,7 @@
 # toolchain (run under devtests.jl, not the lightweight CI runtests.jl).
 
 using Test
+using Libdl
 using RepliBuild
 using TOML
 
@@ -50,7 +51,7 @@ end
         root = mktempdir()
         toml, name = _c_inprocess_toml(root; opt_level="0", fallback=false)
         RepliBuild.build(toml)
-        so = joinpath(root, "julia", "lib$(name).so")
+        so = joinpath(root, "julia", "lib$(name)." * Libdl.dlext)
         @test isfile(so)
         @test _has_dwarf(so)
     end
@@ -60,7 +61,7 @@ end
         toml, name = _c_inprocess_toml(root; opt_level="2", fallback=false)
         RepliBuild.build(toml)
         RepliBuild.wrap(toml)
-        so = joinpath(root, "julia", "lib$(name).so")
+        so = joinpath(root, "julia", "lib$(name)." * Libdl.dlext)
         @test isfile(so)
         @test _has_dwarf(so)
     end
@@ -83,7 +84,7 @@ end
         root = mktempdir()
         toml, name = _c_inprocess_toml(root; opt_level="2", fallback=true)
         RepliBuild.build(toml)
-        so = joinpath(root, "julia", "lib$(name).so")
+        so = joinpath(root, "julia", "lib$(name)." * Libdl.dlext)
         @test isfile(so)
         @test _has_dwarf(so)
     end

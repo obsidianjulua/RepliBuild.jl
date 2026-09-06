@@ -4,6 +4,7 @@ module TypeUtils
 # what the wrapper emits on the other side of the thunk. See the constant's
 # docstring in RepliBuild.jl.
 import ...C_LONG_MLIR
+import ...C_WCHAR_MLIR
 
 export map_cpp_type, get_llvm_signature, get_stl_container_size
 
@@ -26,8 +27,11 @@ function map_cpp_type(type_str::String)
     # on both platforms.
     elseif type_str == "long" || type_str == "unsigned long" ||
            type_str == "long int" || type_str == "unsigned long int" ||
+           type_str == "signed long" || type_str == "signed long int" ||
            type_str == "Clong" || type_str == "Culong"
         return C_LONG_MLIR
+    elseif type_str == "wchar_t" || type_str == "Cwchar_t"
+        return C_WCHAR_MLIR
     elseif type_str == "long long" || type_str == "int64_t" || type_str == "int64" || type_str == "size_t" || type_str == "Csize_t" || type_str == "uint64_t" || type_str == "uint64" || type_str == "unsigned long long"
         return "i64"
     elseif type_str == "float" || type_str == "float32" || type_str == "Cfloat"

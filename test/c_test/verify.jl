@@ -3,6 +3,7 @@
 # Exercises: discover → build → wrap → register → use → call → unregister → clean
 
 using Test
+using Libdl
 using RepliBuild
 
 const C_TEST_DIR = @__DIR__
@@ -39,7 +40,7 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
     @testset "build" begin
         lib = RepliBuild.build(toml)
         @test isfile(lib)
-        @test endswith(lib, ".so") || endswith(lib, ".dylib")
+        @test endswith(lib, "." * Libdl.dlext)
         println("  ✓ build → $lib")
     end
 
@@ -65,7 +66,7 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         # path, which is what the pre-flight exists to guarantee.
         lto_syms = RepliBuild.Wrapper._lto_unresolved_symbols(
             joinpath(dirname(wrapper), "c_test_lto.ll"),
-            joinpath(dirname(wrapper), "libc_test.so"))
+            joinpath(dirname(wrapper), "libc_test." * Libdl.dlext))
         # The generator always emits BOTH call paths and chooses at load time on
         # `!isempty(LTO_IR)`, so the presence of the llvmcall text says nothing
         # about which one runs. What the pre-flight actually controls — and so

@@ -15,13 +15,14 @@
 # corpus is vendored; see test/gen_receiver_corpus.jl.
 
 import JSON
+using Libdl
 
 const FIXTURES = ("mi_test", "vi_test")
 const OUT = joinpath(@__DIR__, "fixtures", "thunk_symbols.json")
 
 out = Dict{String,Any}()
 for f in FIXTURES
-    so = joinpath(@__DIR__, f, "julia", "lib$(f).so")
+    so = joinpath(@__DIR__, f, "julia", "lib$(f)." * Libdl.dlext)
     isfile(so) || error("fixture not built: $so\nRun test/devtests.jl first.")
     syms = String[]
     for line in split(read(`nm -g --defined-only $so`, String), '\n')

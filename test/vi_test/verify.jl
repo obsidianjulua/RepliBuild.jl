@@ -19,6 +19,7 @@
 
 using Test
 using JSON
+using Libdl
 import RepliBuild
 
 const SCRIPT_DIR = @__DIR__
@@ -54,7 +55,7 @@ using .ViTest
 
     # ── 2. DWARFParser + type_info vbase table ──────────────────────────────
     @testset "DWARFParser + type_info emission" begin
-        so_path = joinpath(SCRIPT_DIR, "julia", "libvi_test.so")
+        so_path = joinpath(SCRIPT_DIR, "julia", "libvi_test." * Libdl.dlext)
         vt = RepliBuild.DWARFParser.parse_vtables(so_path)
         ci = vt.classes["Left"]
         @test ci.base_classes == ["VBase"]
@@ -138,7 +139,7 @@ using .ViTest
     # exercised above.
     @testset "Adjustor thunks excluded from the API" begin
         # The fixture must still PRODUCE both forms, or the rest is vacuous.
-        nm_out = read(`nm -g --defined-only $(joinpath(SCRIPT_DIR, "julia", "libvi_test.so"))`, String)
+        nm_out = read(`nm -g --defined-only $(joinpath(SCRIPT_DIR, "julia", "libvi_test." * Libdl.dlext))`, String)
         @test occursin("_ZThn16_", nm_out)
         @test occursin("_ZTv0_n", nm_out)
 

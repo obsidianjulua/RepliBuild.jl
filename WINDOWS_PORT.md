@@ -281,7 +281,6 @@ marks build trees `ReadOnly + ReparsePoint` and `rm` fails with `EACCES`.
 
 ### Open
 
-- **#6** above — `test_abi_nested.jl` still asserts SysV XMM classification.
 - **`libunwind: pc not in table`** aborts the `devtests.jl` parent process after
   the callback fixture, in some runs, before the last two sections. Zero test
   failures in every run — every assertion that executes passes — and it does not
@@ -289,11 +288,16 @@ marks build trees `ReadOnly + ReparsePoint` and `rm` fails with `EACCES`.
   parent's build/wrap/spawn sequence is replayed on its own. It needs prior
   in-parent JIT activity, which points at SEH unwind-table registration for
   ORC-JIT'd frames on COFF rather than at anything in the fixture.
-- `get_library_name` hardcodes `.so` on every platform. Harmless — `LoadLibrary`
-  does not care about the extension — but it is why a Windows build produces
-  `libstl_test.so`.
-- `test_tier1_dispatch.jl:237-238` uses a Unix `:` separator for
-  `JULIA_LOAD_PATH`/`JULIA_DEPOT_PATH`. Tier 1 is quarantined.
+
+Closed after the 2026-09-05 grok review, before Hub: `_C_TYPE_SIZE_MAP` /
+`_C_PRIM_FIELD_LAYOUT` / `get_type_size("long int")` follow `sizeof(Clong)`
+and `sizeof(Cwchar_t)`; `_is_system_decl_file` matches MSYS2/WinSDK after
+path canon; empty-DWARF guard names `dumper.tool` not `$readelf_tool`;
+GNU identity is `GNU Binutils` not substring `GNU`; `get_library_name`
+uses `Libdl.dlext`; wrap_basic uses `repr`; LLVM_CONFIG probes `.exe` and
+PATH; thunks drop rpath on PE and link libJLCS; fixture verify scripts look
+for `.dll`; `test_abi_nested` pins `xform_not_blob` so a Win64 sret blob
+cannot pass by accident; Tier-1 `JULIA_LOAD_PATH` uses `;` on Windows.
 
 ---
 

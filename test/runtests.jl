@@ -241,6 +241,13 @@ include(joinpath(@__DIR__, "test_c_bucket_sysroot.jl"))
 
 include(joinpath(@__DIR__, "test_llp64_widths.jl"))
 
+# ── Host-format leftovers the Windows port still had open (no toolchain) ─────
+# Library extension, system-header provenance on MSYS2/WinSDK paths, GNU
+# binutils identity (not a `GNU` substring), the empty-DWARF diagnostic, wrap_basic
+# path escaping, and LLVM_CONFIG without `.exe`.
+
+include(joinpath(@__DIR__, "test_windows_port.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

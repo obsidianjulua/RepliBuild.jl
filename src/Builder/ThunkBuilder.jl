@@ -114,9 +114,21 @@ function build_aot_thunks(config, library_path)
         # RUNPATH entries are searched in order, so `$ORIGIN` wins when the
         # sibling exists — matching the wrapper — and the absolute path stays as
         # the fallback for a thunks library used where it was built.
+        # ELF can leave thunks undefined and bind them at dlopen via
+        # RTLD_GLOBAL. PE cannot: every symbol in a DLL must resolve at link
+        # time, so the main library AND libJLCS have to be named here.
         link_args = ["-shared", "-fPIC", "-o", thunks_so, thunks_obj,
-                     "-L", lib_dir, "-l:$lib_name",
-                     "-Wl,-rpath,\$ORIGIN", "-Wl,-rpath,$lib_dir"]
+                     "-L", lib_dir, "-l:$lib_name"]
+        jlcs = MLIRNative.libJLCS
+        isfile(jlcs) && push!(link_args, jlcs)
+        if !Sys.iswindows()
+            # `$ORIGIN` FIRST, build directory second — see the RUNPATH
+            # comment above. Meaningless on PE (DLL search is the loading
+            # module's directory, then PATH); sibling DLLs in julia/ still
+            # resolve, which is the vendoring rule `$ORIGIN` provides on ELF.
+            push!(link_args, "-Wl,-rpath,\$ORIGIN", "-Wl,-rpath,$lib_dir")
+            isfile(jlcs) && push!(link_args, "-Wl,-rpath," * dirname(jlcs))
+        end
         (output, exitcode) = BuildBridge.execute(linker, link_args)
         if exitcode != 0
             error("Failed to link thunks.o: $output")

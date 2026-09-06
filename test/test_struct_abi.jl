@@ -55,7 +55,7 @@ using RepliBuild.DWARFParser
 
 const ABI_DIR = joinpath(@__DIR__, "struct_abi")
 const ABI_SRC = joinpath(ABI_DIR, "src", "abi_fixture.cpp")
-const ABI_LIB = joinpath(ABI_DIR, "libabi_fixture.so")
+const ABI_LIB = joinpath(ABI_DIR, "libabi_fixture." * Libdl.dlext)
 
 if !isfile(ABI_LIB) || mtime(ABI_SRC) > mtime(ABI_LIB)
     run(`$CLANGXX -shared -fPIC -O1 -o $ABI_LIB $ABI_SRC`)
