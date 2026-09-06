@@ -125,4 +125,58 @@ const LE = RepliBuild.LLVMEnvironment
             @test any(contains(f, "rpath") for f in flags)
         end
     end
+
+    # ── AOT thunks must bind to the ONE libJLCS ──────────────────────────────
+    #
+    # A thunk that catches a C++ exception calls `jlcs_catch_current_exception`,
+    # which writes into libJLCS's own `jlcs_exception_buffer`;
+    # `_check_pending_exception` reads it back by ccall'ing into
+    # `MLIRNative.libJLCS`. One buffer, or the exception is swallowed.
+    #
+    # ELF held that by RUNPATH. PE has none, so the loader — which searches the
+    # loading module's directory and PATH, and libJLCS is in neither — could not
+    # open the thunks DLL at all: `The specified module could not be found`,
+    # naming the module it DID find rather than the dependency it did not.
+    # Both halves are one requirement: open libJLCS, by its absolute path,
+    # first. Vendoring a copy beside the thunks would satisfy the loader and
+    # break the buffer, so the test is the ordering, not the presence.
+    @testset "AOT thunks open libJLCS before the thunks library" begin
+        @test isdefined(RepliBuild.JITManager, :open_thunks_library)
+
+        jm = read(joinpath(RepliBuild.SRC_DIR, "IRGen", "JITManager.jl"), String)
+        i = findfirst("function open_thunks_library", jm)
+        @test i !== nothing
+        body = jm[first(i):end]
+        body = body[1:first(something(findfirst("\nend\n", body), (lastindex(body),)))]
+
+        at_jlcs = findfirst("MLIRNative.libJLCS", body)
+        at_thunks = findfirst("dlopen(thunks_path", body)
+        @test at_jlcs !== nothing
+        @test at_thunks !== nothing
+        # Ordering IS the fix: libJLCS is already in the process when the
+        # loader resolves the thunks library's import table.
+        @test first(at_jlcs) < first(at_thunks)
+
+        # Neither generator may go around it. A bare `dlopen` of the thunks
+        # path is the regression, and it fails only on PE and only at load.
+        for gen in (joinpath("Cpp", "GeneratorCpp.jl"), joinpath("C", "GeneratorC.jl"))
+            src = read(joinpath(RepliBuild.SRC_DIR, "Wrapper", gen), String)
+            @test !occursin("Libdl.dlopen(THUNKS_LIBRARY_PATH", src)
+            @test occursin("open_thunks_library(THUNKS_LIBRARY_PATH)", src)
+        end
+
+        # And the failure has to name libJLCS, not just the file that opened.
+        mktempdir() do dir
+            missing_thunks = joinpath(dir, "libnope_thunks." * Libdl.dlext)
+            err = try
+                RepliBuild.JITManager.open_thunks_library(missing_thunks)
+                nothing
+            catch e
+                sprint(showerror, e)
+            end
+            @test err !== nothing
+            @test occursin("libJLCS", err)
+            @test occursin("jlcs_catch_current_exception", err)
+        end
+    end
 end

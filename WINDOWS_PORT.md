@@ -171,6 +171,19 @@ Ingest and MLIR-Templates figures come from runs that got past it and from
 running those two files directly. Every run so far reports **zero** test
 failures — every assertion that executes, passes.
 
+**MLIR AOT works on PE as of the `libJLCS` load-order fix recorded under
+"Found during the port" below.** Branch `windows-aot-thunks-libjlcs`;
+`runtests.jl` is 31 testsets, 1126 assertions, exit 0. Verified end to end, not
+just "the DLL opens": a `[compile] aot_thunks = true` C++ package builds its
+thunks (`libhello_world_thunks.dll`, 16.5 KB), the wrapper's
+`_assert_aot_thunks_present` passes against the PE export table, the module
+loads, `dispatch_tier` reports `tier2` for all three functions, and the calls
+return correct values. The exception path was proved separately, because it is
+the half a load-only test cannot see: a C++ `std::runtime_error` thrown across
+an AOT thunk arrives in Julia as
+`RepliBuild.JITManager.CxxException("C++ exception: negative input: -7")` —
+message intact, which is only true while one libJLCS holds one buffer.
+
 | # | State | Notes |
 |---|---|---|
 | 1 | done | Gate admits Windows. macOS still refused — the AAPCS64 classifier really is unbuilt. |
@@ -256,6 +269,42 @@ languages together.
 **PE binds every symbol at link time.** ELF lets a `.so` carry undefined symbols
 and resolves them at `dlopen` through `RTLD_GLOBAL`. Thunk libraries therefore
 need the full link — main library and `libJLCS` both named.
+
+**…and that link is what stopped MLIR AOT.** Naming `libJLCS` on the link line
+turns it into a PE *import*, and the import table is resolved by the loader, not
+by us. `libJLCS.dll` lives in RepliBuild's own source tree
+(`src/mlir/build/`), which is not the loading module's directory and is not on
+`PATH` — the two places the Windows loader looks. So every AOT thunks library
+failed to open, and the message was `could not load library
+"…_thunks.dll" / The specified module could not be found`: it names the module
+that WAS found and not the dependency that was not, so it reads as a missing
+thunks library while the thunks library is sitting right there next to the
+wrapper. ELF never showed this because `-Wl,-rpath,$(dirname libJLCS)` is in the
+link line — and that push is inside the `!Sys.iswindows()` branch, because PE has
+no RUNPATH.
+
+Measured on hello_world: `libhello_world_thunks.dll` imports exactly **one**
+symbol from `libJLCS.dll` — `jlcs_catch_current_exception` — plus
+`libhello_world.dll` and `libc++.dll`. The sibling and libc++ both resolve
+(Julia's `dlopen` passes `LOAD_WITH_ALTERED_SEARCH_PATH`, so the thunks DLL's own
+directory is searched, and CLANG64 is on `PATH`). Pre-loading `libJLCS.dll`
+alone, by absolute path, makes the thunks library open; pre-loading the main
+library alone does not.
+
+**Do not fix this by vendoring `libJLCS.dll` next to the thunks.** It would
+satisfy the loader and silently break exceptions. `jlcs_catch_current_exception`
+writes the message into libJLCS's *own* `jlcs_exception_buffer`, and
+`_check_pending_exception` reads it back by ccall'ing `jlcs_has_pending_exception`
+in `MLIRNative.libJLCS`. A second copy in the process is a second buffer: the
+thunk writes one, Julia reads the other, and every C++ exception crossing a thunk
+disappears. The JIT path holds the same invariant by another route — it registers
+those four symbols out of `MLIRNative.libJLCS` by hand. So the fix is ordering,
+not placement: `JITManager.open_thunks_library` opens the libJLCS that
+`MLIRNative` names, by absolute path, *before* the thunks library, and both
+generators route through it instead of calling `Libdl.dlopen` on the thunks path.
+Guarded by `test_windows_port.jl` — the guard asserts the ordering and that
+neither generator emits a bare `dlopen`, and both halves were negative-tested by
+reintroducing the bug.
 
 **`FILE` is `struct _iobuf` here.** `INTERNAL_TYPE_BLOCKLIST` named only glibc's
 `_IO_FILE` family, so the screen caught nothing on Windows and `_iobuf` was
