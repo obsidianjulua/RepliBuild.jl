@@ -28,7 +28,9 @@ Details and examples for each key: [Edit the TOML](config.md).
 
 | What you see | What to do |
 |--------------|------------|
-| `RepliBuild supports Linux only` | It does. ELF / DWARF / `nm`. |
+| `RepliBuild supports Linux and Windows` | It does. macOS is refused because the AAPCS64 ABI classifier is unbuilt, not because it is untested. |
+| Windows: every C file fails on its first system `#include` | The Clang JLL has no headers of its own. Install MSYS2 CLANG64, or set `REPLIBUILD_C_SYSROOT`. |
+| Windows: `The specified module could not be found` opening a thunks `.dll` | The missing module is `libJLCS.dll`, not the thunks library. Build the dialect. |
 | C++ wrap fails, C works | [Install](install.md): system LLVM/MLIR 21+, then `cd src/mlir && ./build.sh` |
 | Fresh clone, C++ path looks "regressed" | No `src/mlir/build/libJLCS.so` yet. Build the dialect. |
 | `Configuration file not found` | Run `discover` first, or pass the path to the TOML. |

@@ -488,7 +488,7 @@ TableGen-defined dialect for ABI marshalling (`src/mlir/JLCSOps.td`, `Types.td`)
 - `test/devtests.jl` — Full integration (requires LLVM/Clang)
 - **ONE SUITE OWNS EACH FILE, and it is enforced (2026-08-26).** The wiring guard's only rule was "included by *a* suite", which a file sitting in BOTH satisfies. `test_registry.jl` did exactly that: no suite owned it, it ran twice for anyone running both, and the tree gave no answer to "is this a CI test or a toolchain test?" — the same ambiguity that lets a toolchain dependency drift into CI unnoticed. It is **runtests-owned** now; verified toolchain-free by running it with clang hidden from `PATH` (6/6 — it is registry/cache mechanics over `REPLIBUILD_HOME` → tempdir plus `discover`, which scans and writes a TOML and never invokes a compiler). `runtests.jl` asserts the two suites are **disjoint**, with a `SHARED` dict for a deliberate exception (empty today) so an overlap has to be someone's decision rather than nobody's accident. Negative-checked by re-adding the include: the guard names the file.
 - **THE VERSION IS ONE NUMBER (2026-08-26).** `Project.toml` and `const VERSION` were two independent literals with nothing reconciling them. `VERSION` is now **derived** — `VersionNumber(TOML.parsefile(_PROJECT_TOML)["version"])` with an `include_dependency` so a Project.toml edit invalidates the precompile cache (without it the old number stays baked in the `.ji`). Not cosmetic: `VERSION` feeds `_generator_fingerprint`, which gates the registry build cache, so a wrong one serves a **stale-codegen wrapper** instead of rebuilding — and it is stamped into every wrapper as `BUILD_GENERATOR`. Guarded in `runtests.jl` by three checks: it equals the TOML, it equals `pkgversion(RepliBuild)` (an independent read through Julia's own resolution — agreement means the file the module read and the file Julia loaded are the same one), and the source still contains the derivation rather than a re-introduced literal. Proven by bumping Project.toml and watching `VERSION` follow with no source edit.
-  **Note the LOCAL version and the REGISTERED version are different questions.** General has RepliBuild through **3.3.3** (verified 2026-08-30 by reading `R/RepliBuild/Versions.toml` out of `~/.julia/registries/General.tar.gz` — do that rather than trusting this line). **3.3.2 was released locally and never registered; it is permanently skipped**, and 3.3.3 got in anyway via the `Override AutoMerge: package author approved` label on [General#166096](https://github.com/JuliaRegistries/General/pull/166096). So the skip is spent, not outstanding: **3.3.4 follows 3.3.3 directly and needs no override.** The general rule stands — a locally-released version that is never registered leaves a permanent hole, and the next registration after one needs the author-approved label.
+  **Note the LOCAL version and the REGISTERED version are different questions.** General has RepliBuild through **3.3.4** (verified 2026-09-05 by reading `R/RepliBuild/Versions.toml` out of `~/.julia/registries/General.tar.gz` — do that rather than trusting this line). **3.3.2 was released locally and never registered; it is permanently skipped**, and 3.3.3 got in anyway via the `Override AutoMerge: package author approved` label on [General#166096](https://github.com/JuliaRegistries/General/pull/166096). That skip is spent, and 3.3.4 registered normally after it — so **4.0.0 follows 3.3.4 directly and needs no override.** The general rule stands — a locally-released version that is never registered leaves a permanent hole, and the next registration after one needs the author-approved label.
 - Real-world: Lua 5.4.6, SQLite, Duktape, cJSON, pugixml
 - Specialized: `test_mlir_templates.jl` (JLCS dialect: CStructs, RAII, vcall, sret), `test_jlcs_invariants.jl` (dialect arity/liveness probes), `test_struct_abi.jl` (devtests §12: nested-c_struct segfault, create_jit pre-flight guard, SysV small-struct ABI vs a real clang++ callee), `test_multilib_jit.jl` (devtests §13: two wrappers, one session, per-library engines), `test_static_promotion.jl` (devtests §7b: `__rb_*` promotion decisions, dynsym, dlsym↔API single-copy coherence, wrapper exclusion — over `slice_test/`), `test_slicer.jl` (devtests §7c: declarations-only slices, hazards/refusals, declared-symbol contract + M3 pre-flight demotion, live llvmcall coherence both directions, cache, lua at scale), `test_tier1_dispatch.jl` (devtests §7d, 64 asserts: the generated wrapper in mixed-tier mode — `_SLICE_*` const + `llvmcall` emission, varargs/setjmp staying ccall, `TIER1_FUNCTIONS` surface, both coherence directions, `[wrap.tier1]` knob parsing, slices as precompile dependencies, **mangled-keyed slice constants** (`st_collide_`/`st__collide`) and **no orphan slices on disk** (`st_name`)), `test_jlcs_producers.jl` (devtests §11: scope-RAII + array-view producers executing through the real MLIR JIT), `test_registry.jl`, `test_ingest.jl`
 - **`devtests.jl` IS GREEN END TO END AGAIN (2026-08-26): exit 0, 0 failures, runs through §16.** Both standing reds closed, and neither was a product bug. Re-verify with a full run before trusting this line.
@@ -629,8 +629,14 @@ were all written while it was only inferable, and they are cheaper than they rea
   and cannot catch a mismatch — and that trick is unavailable here, since a Win64
   callee cannot be loaded on Linux. The oracle is clang lowering the same signatures
   for `x86_64-w64-windows-gnu`. **It catches an encoded rule that disagrees with
-  clang; it does NOT prove the lowering runs correctly on Windows.** Until a Windows
-  host exists the Win64 path stays unproven in the way that matters.
+  clang; it does NOT prove the lowering runs correctly on Windows.**
+  **THE BEHAVIOURAL HALF IS NOW PROVEN — v4.0.0, 2026-09-05.** A native mingw
+  host runs the whole pipeline: `devtests.jl` reports zero failures with MI
+  43/43, VI 40/40, STL 28/28 and MLIR Templates 87/87, and MLIR AOT thunks
+  execute with C++ exceptions crossing them intact. So the specification test
+  and a real Win64 host now agree. Keep the distinction in mind anyway — the
+  spec test is what runs in Linux CI, and it is still the only thing checking
+  the Win64 rules there.
   Four pinned divergences from SysV, three of them silent: size is the only criterion
   (1/2/4/8 in a register, everything else indirect, *including* the 9–16 byte band
   SysV splits across two registers); aggregates never reach XMM (`{float,float}` is
@@ -699,11 +705,123 @@ at runtime from `@__DIR__`.
 
 ## System Requirements
 
-**Dual-LLVM reality** (re-verified live **2026-08-29** — `julia 1.12.7 / libllvm 18.1.7`, system LLVM/clang **22.1.8**, dialect artifact `libJLCS.so.22.1`; Project.toml and `RepliBuild.VERSION` both **3.3.4** as of the 2026-08-30 release, no drift — and they cannot drift now that `VERSION` is derived. Prior reading 2026-07-26 recorded julia 1.12.6 and version 3.1.0 — both had moved without this block following, so **re-read the versions rather than trusting this sentence**; it has gone stale once already. Originally 2026-06-13: system LLVM/MLIR **22.1.6** — dialect clean-rebuilt + tests green against it, see CHANGELOG v2.5.8). The two buckets do NOT share an LLVM — this is deliberate, not a misconfiguration:
+**RepliBuild runs on Linux AND Windows as of v4.0.0 (2026-09-05)** — see the Windows section below before assuming anything in this file is ELF-shaped. macOS stays refused at load, for a built reason: the AAPCS64 classifier does not exist.
+
+**Dual-LLVM reality** (re-verified live **2026-08-29** — `julia 1.12.7 / libllvm 18.1.7`, system LLVM/clang **22.1.8**, dialect artifact `libJLCS.so.22.1`; Project.toml and `RepliBuild.VERSION` both **4.0.0** as of the 2026-09-05 release, no drift — and they cannot drift now that `VERSION` is derived. Prior reading 2026-07-26 recorded julia 1.12.6 and version 3.1.0 — both had moved without this block following, so **re-read the versions rather than trusting this sentence**; it has gone stale once already. Originally 2026-06-13: system LLVM/MLIR **22.1.6** — dialect clean-rebuilt + tests green against it, see CHANGELOG v2.5.8). The two buckets do NOT share an LLVM — this is deliberate, not a misconfiguration:
 - **Julia 1.10+** (developed on 1.12.7; note `Base.llvmcall` arg-count semantics changed in 1.12).
 - **C bucket needs NO external LLVM.** link/opt/assemble run in-process on Julia's resident libLLVM (18.1.7), version-matched to the JLL clang (`Clang_unified_jll`) that emits the IR. That version-lock is the whole point — no DWARF-dropping skew.
 - **C++ / Tier 2 needs a system LLVM+MLIR install (21+, 22.1.8 here)** for the JLCS dialect (`libJLCS.so`) and the external thunk pipeline. Final `.ll → .so` codegen also shells to system `clang++`. The dialect is a build artifact (`src/mlir/build/`, gitignored) pinned to the installed MLIR's minor SONAME — rebuild it (`cd src/mlir && ./build.sh`) after any system MLIR upgrade; patch bumps within a minor (e.g. 22.1.5→22.1.6) need no source change.
 - **CMake 3.20+ and mlir-tblgen** — Tier 2 (dialect build) only.
+
+### Windows (`x86_64-w64-windows-gnu`, MSYS2 CLANG64) — ported v4.0.0, 2026-09-05
+
+Native mingw host build. **Not MSVC, not a cross-compile.** CLANG64 specifically:
+it matches Julia's own mingw build (so a wrapper DLL shares the process C++ ABI)
+and is the only MSYS2 repo carrying MLIR — which ships **22.1.8**, matching the
+Linux reference, so there is no version skew to work around. `WINDOWS_PORT.md`
+has the setup and the full findings; these are the ones that bite a code change.
+
+- **TWO DWARF DUMPERS, SPLIT BY CONTAINER — NOT BY DIALECT.** `_dwarf_dumper()`
+  returns GNU `readelf` on Linux and GNU `objdump` on Windows. Both print from
+  binutils' `dwarf.c`, so `objdump --dwarf=X` and `readelf --debug-dump=X` are
+  byte-identical (verified 193/193 DIE lines on a real PE DLL) and
+  `parse_dwarf_dump` needs no second dialect. **Do not "port" this to
+  llvm-dwarfdump** — that IS a different dialect, and the readelf-format parser
+  would need the rewrite this avoids. The flag spellings differ
+  (`--dwarf=`/`-h` vs `--debug-dump=`/`-S`), which is why the dumper is a
+  NamedTuple carrying its own flags rather than a tool name.
+- **`_is_gnu_binutils` is load-bearing, not defensive.** In a CLANG64 shell
+  `objdump` on PATH IS `llvm-objdump`, whose output has no DIE level and no
+  abbrev number. Accepting it does not fail loudly — it parses **zero functions
+  and ships inferred signatures**, the silent-guess class. Identity is the
+  string `GNU Binutils`; `GNU` as a substring matches llvm-objdump's own
+  "compatible with GNU objdump".
+- **THE PE EXPORT DIRECTORY IS THE API; `nm` IS NOT.** mingw links the CRT,
+  startup code and unwinder **statically into every DLL**, so `nm -g
+  --defined-only` reports `snprintf`/`memcpy`/`atexit` exactly like the
+  library's own functions — and RepliBuild wrapped them. On ELF that code lives
+  in a shared libc and is only *referenced*, so nm's answer and the API have
+  always been the same list and nothing had to tell them apart. All three sites
+  read `objdump -p` on PE. `GetProcAddress` consults only that directory, so it
+  is the strongest available authority. `nm -D` on a PE is a hard error, not an
+  empty answer. Measured: c_test 115 nm / 28 exports, stl_test 691/513.
+- **The C bucket needs a sysroot on Windows.** `Clang_unified_jll` already
+  targets `x86_64-w64-windows-gnu` — the triple was never the problem — but it
+  is a bare compiler artifact with no headers and no CRT. `_c_bucket_sysroot()`
+  finds CLANG64 (`REPLIBUILD_C_SYSROOT` → on-PATH clang's prefix → `MSYS2_ROOT`),
+  accepting a candidate only if it holds `include/math.h`, since an MSYS2 install
+  carries empty `ucrt64/`/`mingw64/` trees. Linking also needs
+  `-rtlib=compiler-rt`: clang's mingw driver defaults to libgcc, which CLANG64
+  does not ship at all. Asked of the sysroot, not the platform — UCRT64/MINGW64
+  are GCC environments where libgcc is correct.
+- **libc++ is not libstdc++, and the STL path assumed libstdc++ three ways.**
+  (a) `_LIBCPP_HIDE_FROM_ABI` mangles an ABI tag in AFTER the name —
+  `size[abi:nqe220108]() const` — and every `_classify_stl_method` test is a
+  `startswith(sig, "size(")`, so every tagged member was dropped.
+  (b) `_normalize_stl_type` matched `basic_string` with a bare `startswith`, so
+  a nested helper's `~__annotation_guard()` was recorded as the string's
+  destructor (`EXCEPTION_ACCESS_VIOLATION` in `__is_long`); `$`-anchored now.
+  (c) The same macro expands to `exclude_from_explicit_instantiation`, so
+  `template class std::map<int,int>;` emits **nothing** for those members and
+  there is no macro to switch it off. The generated TU carries a never-called
+  function naming each member, `if constexpr`-guarded so ONE body covers
+  vector/string/map/set/deque/list, syntax-checked before it is trusted.
+- **ORC DEADLOCKS on an unresolved symbol; it does not raise.** Same class the
+  Tier-1 slice pre-flight exists for, but the **monolithic LTO path had no
+  pre-flight at all** — `mathkit.c` calls `snprintf`/`sqrt`, neither exported by
+  anything in a Windows process, and the run hung. `_lto_unresolved_symbols`
+  asks first and demotes the whole path to ccall. `_symbol_resolves_via` had to
+  be fixed before that was reachable: it called `ccall(:dlsym, …)` and **there
+  is no `dlsym` symbol in a Windows process**.
+- **mingw unwinds with SEH** — `__gxx_personality_seh0`, and the Windows C++
+  runtime exports only that. The name is `MLIRNative.CXX_PERSONALITY`, one place,
+  pinned across the Julia/C++ boundary by `test_cxx_personality.jl`. Do not
+  hardcode `__gxx_personality_v0` in a test.
+- **LLP64: `long` is 4 bytes here, 8 on Unix64** — the one integer the word size
+  does not settle. Wrapper got it right for free via `Clong`; the IRGen producers
+  hardcoded `i64` in two hand-filled tables, and a tier disagreement raises
+  nothing — the thunk reads a different number of bytes than the caller wrote.
+  One fact now, `C_LONG_MLIR` (and `C_WCHAR_MLIR`), at package level for the same
+  reason `INTERNAL_TYPE_BLOCKLIST` is. `test_llp64_widths.jl` asserts the
+  **invariant** (the two tiers agree), not the constant.
+- **AOT thunks: ONE libJLCS, or exceptions vanish.** PE binds every symbol at
+  link time, so a thunks DLL *imports* `jlcs_catch_current_exception` — and the
+  loader searches only the loading module's directory and `PATH`, neither of
+  which holds `libJLCS.dll`. **Do not fix that by vendoring a copy beside the
+  thunks**: `jlcs_catch_current_exception` writes into libJLCS's own
+  `jlcs_exception_buffer` and `_check_pending_exception` reads
+  `MLIRNative.libJLCS`, so two copies is two buffers and every C++ exception
+  crossing a thunk is swallowed. The fix is ORDERING —
+  `JITManager.open_thunks_library` opens libJLCS by absolute path first, and
+  both generators route through it. The error message is the trap: `The
+  specified module could not be found` names the module that WAS found, so it
+  reads as a missing thunks library. ELF hid this behind RUNPATH, which is
+  pushed inside a `!Sys.iswindows()` branch because PE has none.
+- **`FILE` is `struct _iobuf`** under the UCRT. `INTERNAL_TYPE_BLOCKLIST` named
+  only the glibc spellings, so the screen caught nothing and `_iobuf` was
+  declared and **exported into the wrapper's API**.
+- **Windows paths are not string literals** — `C:\Users` reaches a parser as
+  `\U`. Use `repr()` for paths baked into generated Julia and `TOML.print` for
+  TOML; hand-quoting made every generated wrapper on Windows fail to parse.
+- **A live mmap blocks deletion.** `JSON.parsefile` defaults to `use_mmap=true`
+  and Julia drops the mapping at GC, so `clean()` failed on a tree RepliBuild had
+  just built — and the file left behind was `compilation_metadata.json`, not the
+  `.dll` anyone would suspect. Free on POSIX.
+- **`_canon_path` is HOST-CONDITIONAL on purpose** (identity off Windows: a
+  backslash is a legal POSIX filename character and POSIX paths are
+  case-sensitive). A test that states one host's answer instead of the invariant
+  goes red on the other — `test_windows_port.jl` did exactly that and was red on
+  Linux while green on Windows. Drive the pattern list with pre-canonicalised
+  spellings so it runs everywhere; assert canonicalisation as
+  `== Sys.iswindows()`.
+- **Open on Windows:** `libunwind: pc not in table` aborts the `devtests.jl`
+  parent after the callback fixture in some runs (zero test failures in every
+  run; needs prior in-parent JIT activity, so it points at SEH unwind-table
+  registration for ORC-JIT'd frames on COFF). `test_abi_nested.jl` still states
+  the SysV XMM expectation — latent, it passes today. **PE inverts the export
+  model** (`dllexport` opt-in vs ELF exporting by default), which is a design
+  problem for `__rb_*` static promotion — deferred, since that is quarantined
+  Tier 1 and no shipped package takes it.
 
 **System LLVM/MLIR 22.1.6 → 22.1.8 bump, worked 2026-07-26 (the reference run for the next one):**
 - **A patch bump inside a minor needs nothing.** SONAMEs stayed `libMLIR.so.22.1`/`libLLVM.so.22.1`, so the 22.1.6-built `libJLCS.so` kept resolving and passed the whole Tier-2 sweep BEFORE any rebuild (invariants 10/10, templates 87/87, producers 26/26, struct-ABI 15/15). Rebuilt anyway (`rm -rf build && ./build.sh`, backing the working `.so` up first) — **clean, zero warnings, zero deprecations**, identical results after. Artifact 21661560 → 21657440 bytes.

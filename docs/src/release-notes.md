@@ -4,7 +4,21 @@ The full, dated history is
 [`CHANGELOG.md`](https://github.com/obsidianjulua/RepliBuild.jl/blob/main/CHANGELOG.md)
 in the repository. This page is what a user of the current release should know.
 
-Current version is **v3.3.4**.
+Current version is **v4.0.0**.
+
+## Upgrading to v4.0.0
+
+- **Windows is supported.** `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64) —
+  not MSVC. See [Install](install.md). macOS is still refused at load, because
+  the AAPCS64 ABI classifier is not built.
+- **C bitflag enums are integer aliases, not `@enum`s.** This appears when you
+  **regenerate** a wrapper; existing ones are unchanged until then. An enum whose
+  members are a mask now emits `const Flags = Cuint` plus named constants, so
+  `A | B` works and can be passed. Detection is conservative — 59 of 544 enums
+  across the shipped Hub wrappers reclassify — but if you had been matching on an
+  enum instance, or printing one and expecting its name, that is what changed.
+  `Ptr{Flags}`, `ccall` arguments typed `Flags`, and `export` all behave as
+  before.
 
 ## What still matters from the 3.x line
 
@@ -23,6 +37,16 @@ Calling code written against older generated APIs may need these updates:
   config in version control anyway.
 - **Vendored wrappers resolve their `.so` sibling-first**, so a copy in `lib/`
   stays bound to the `.so` next to it.
+
+## v4.0.0 (2026-09-05)
+
+RepliBuild runs on Windows: all three tiers, including the JLCS dialect as
+`libJLCS.dll` and MLIR AOT thunks with C++ exceptions crossing them intact. The
+DWARF path swaps GNU `readelf` for GNU `objdump` on PE rather than growing a
+second parser; symbol extraction reads the PE export directory, because mingw
+links the CRT statically into every DLL and `nm` cannot tell it from the
+library's own API. C bitflag enums stop being closed `@enum`s. Linux behaviour
+is unchanged.
 
 ## v3.3.4 (2026-08-30)
 

@@ -156,4 +156,5 @@ engine registered if you depend on it:
   artifacts, or `scaffold_package` so the consumer builds locally. The `.jl` is
   platform-independent apart from the binary it binds.
 - Strip nothing. The DWARF in the `.so` is read at load.
-- Linux only, same as RepliBuild.
+- Linux and Windows, same as RepliBuild. The vendored binary is `.so` or
+  `.dll`; the `.jl` is the same either way.

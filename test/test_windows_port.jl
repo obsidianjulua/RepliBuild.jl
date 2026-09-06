@@ -32,7 +32,16 @@ const LE = RepliBuild.LLVMEnvironment
         end
     end
 
-    @testset "_is_system_decl_file sees toolchain headers on this host" begin
+    # Two facts here, and only one of them is host-independent. Asserting both
+    # unconditionally is what made this file red on Linux while passing on
+    # Windows — the reverse of the vacuous-green class, but the same cause: a
+    # test that states one host's answer instead of the invariant.
+    #
+    # The PATTERN LIST is a plain substring set and can be driven on any host,
+    # provided the input is spelled the way `_canon_path` would leave it —
+    # forward slashes, lowercased. So a Linux CI run still guards the MSYS2 and
+    # WinSDK entries.
+    @testset "_is_system_decl_file pattern list (host-independent)" begin
         @test C._is_system_decl_file("/usr/include/stdio.h")
         @test C._is_system_decl_file("/usr/lib/clang/18/include/stddef.h")
         @test C._is_system_decl_file("/include/c++/v1/vector")
@@ -40,11 +49,28 @@ const LE = RepliBuild.LLVMEnvironment
         @test !C._is_system_decl_file("/home/foo/proj/include/foo.h")
         @test !C._is_system_decl_file("C:/Projects/RepliBuild.jl/test/c_test/include/mathkit.h")
 
-        @test C._is_system_decl_file("C:\\msys64\\clang64\\include\\stdio.h")
-        @test C._is_system_decl_file("C:/msys64/clang64/include/c++/v1/vector")
-        @test C._is_system_decl_file("C:/msys64/ucrt64/include/stdio.h")
-        @test C._is_system_decl_file("C:/Program Files/LLVM/include/stddef.h")
-        @test C._is_system_decl_file("C:/Program Files (x86)/Windows Kits/10/Include/10.0.22621.0/ucrt/stdio.h")
+        # The Windows entries, pre-canonicalised.
+        @test C._is_system_decl_file("c:/msys64/clang64/include/stdio.h")
+        @test C._is_system_decl_file("c:/msys64/clang64/include/c++/v1/vector")
+        @test C._is_system_decl_file("c:/msys64/ucrt64/include/stdio.h")
+        @test C._is_system_decl_file("c:/msys64/mingw64/include/stdio.h")
+        @test C._is_system_decl_file("c:/program files/llvm/include/stddef.h")
+        @test C._is_system_decl_file("c:/program files (x86)/windows kits/10/include/ucrt/stdio.h")
+    end
+
+    # The CANONICALISATION is host-conditional on purpose: `_canon_path` is the
+    # identity off Windows, because a backslash is a legal character in a POSIX
+    # filename and POSIX paths are case-sensitive — normalising either would
+    # misclassify real project files. So the real-world spellings match only on
+    # Windows, and the Linux arm pins that as deliberate rather than skipping it.
+    @testset "_is_system_decl_file canonicalises host path spellings" begin
+        real_world = ("C:\\msys64\\clang64\\include\\stdio.h",
+                      "C:/Program Files/LLVM/include/stddef.h",
+                      "C:/Program Files (x86)/Windows Kits/10/Include/10.0.22621.0/ucrt/stdio.h")
+        for p in real_world
+            @test C._is_system_decl_file(p) == Sys.iswindows()
+        end
+        @test C._canon_path("A\\B") == (Sys.iswindows() ? "a/b" : "A\\B")
     end
 
     @testset "GNU binutils identity is not a GNU substring" begin

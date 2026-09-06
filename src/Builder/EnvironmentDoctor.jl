@@ -164,8 +164,10 @@ function _install_instructions()::String
 
       $(BOLD)Ubuntu/Debian:$(RESET)  wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 21
       $(BOLD)Arch Linux:$(RESET)     yay -S llvm-minimal-git mlir-minimal-git
-      $(BOLD)macOS:$(RESET)          brew install llvm@21
       $(BOLD)Fedora/RHEL:$(RESET)    sudo dnf install llvm21-devel mlir21-devel clang21-devel
+      $(BOLD)Windows:$(RESET)        in an MSYS2 CLANG64 shell,
+                      pacman -S --needed mingw-w64-clang-x86_64-toolchain \\
+                                         mingw-w64-clang-x86_64-mlir
 
     $(DIM)After installation, ensure llvm-config and clang++ are in your PATH.$(RESET)"""
 end
@@ -235,7 +237,8 @@ $(found_llvm)
 To install the required toolchain:
   Ubuntu/Debian: wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh $(MIN_LLVM_VERSION)
   Arch Linux:    yay -S llvm-minimal-git mlir-minimal-git
-  macOS:         brew install llvm@$(MIN_LLVM_VERSION)"""
+  Windows:       pacman -S mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir
+                 (MSYS2 CLANG64 shell)"""
         throw(ErrorException(error_msg))
     end
 

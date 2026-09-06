@@ -90,9 +90,13 @@ the thing, or leaks, or wraps an empty struct. The symptom → key table is in
 
 ## Requirements
 
-- **Linux only.** ELF `.so`, DWARF, GNU `nm`.
+- **Linux or Windows.** Linux is ELF `.so`; Windows is PE `.dll` under
+  `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64), not MSVC. Both read DWARF
+  through GNU binutils. macOS is refused at load — the AAPCS64 ABI classifier
+  is not built.
 - **Julia 1.10+** (developed on 1.12).
-- **C libraries: nothing else.** Clang ships as a JLL; link/optimize/assemble
-  run on Julia's own libLLVM.
+- **C libraries: nothing else on Linux.** Clang ships as a JLL;
+  link/optimize/assemble run on Julia's own libLLVM. On Windows that JLL borrows
+  the MSYS2 CLANG64 sysroot for its headers and CRT.
 - **C++ libraries:** system LLVM/MLIR 21+, CMake 3.20+, and `cd src/mlir && ./build.sh`
   once. See [Install](install.md).

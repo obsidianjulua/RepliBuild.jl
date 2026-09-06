@@ -2,6 +2,378 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## v4.0.0 (2026-09-05)
+
+**RepliBuild runs on Windows.** Target is `x86_64-w64-windows-gnu` — mingw under
+MSYS2 CLANG64, a native host build, not a cross-compile from Linux and not MSVC.
+All three tiers are live: the C bucket compiles and links, the JLCS dialect
+builds and loads as `libJLCS.dll`, and MLIR AOT thunks work with C++ exceptions
+crossing them intact.
+
+Major for two reasons. The supported-platform set changed — the load-time gate
+now admits two kernels instead of one, and `check_environment` answers for both.
+And one generated-wrapper API changed shape: a C bitflag enum is emitted as an
+integer alias rather than a closed `@enum`, so regenerating a wrapper changes how
+its mask-shaped enums construct and print — 59 of the 544 `@enum`s across the
+shipped Hub wrappers, concentrated in imgui.
+
+Linux behaviour is unchanged. Every platform fix is either conditional on the
+host or a correctness fix that was latent here — the SysV path is bit-identical,
+and `runtests.jl` is green on the Linux reference host.
+
+### The port found more than the punch list predicted
+
+`WINDOWS_PORT.md` listed six blockers before the work started. Two of the six
+were wrong, and most of the actual work was in things it did not name at all.
+That document now records the outcome rather than the plan; the sections below
+are the summary.
+
+Wrong prediction #1: **there was no MLIR version skew.** The punch list expected
+MSYS2 to ship MLIR 21.1.8 against the reference host's 22.1.8 and called that
+"the first compile error in `src/mlir/build.sh`". MSYS2 CLANG64 ships 22.1.8.
+The dialect compiled with two benign warnings and nothing else.
+
+Wrong prediction #2: **the DWARF parser did not need replacing**, and routing PE
+through `llvm-dwarfdump` — the prescription — would have been the harder path.
+See below.
+
+### DWARF on PE: swap the tool, keep the parser (2026-09-05)
+
+`Compiler.parse_dwarf_dump` reads GNU readelf output and nothing else, and
+readelf is an ELF-only reader. The obvious fix was to route PE through
+`DWARFParser.jl`, which speaks llvm-dwarfdump — the portable dialect.
+
+That was backwards. GNU `objdump` is BFD-based, reads `pei-x86-64`, and shares
+binutils' `dwarf.c` printer with readelf: `objdump --dwarf=X` and
+`readelf --debug-dump=X` are the same code emitting the same text. Verified
+against a real PE DLL — **193/193 identical DIE lines** and an identical
+`rawline` table. So the container was the blocker, not the debug info, and the
+readelf-dialect parser is untouched. llvm-dwarfdump is a genuinely different
+dialect; taking it would have required the parser rewrite this avoids.
+
+`_dwarf_dumper()` picks readelf on Linux and objdump on Windows, and **requires
+the candidate to identify as GNU binutils**. That is load-bearing rather than
+defensive: in an MSYS2 CLANG64 shell, `objdump` on `PATH` *is* `llvm-objdump`,
+whose output has no DIE level and no abbrev number. Accepting it would not fail
+loudly — it would parse zero functions and ship a wrapper of inferred
+signatures, which is the exact silent-guess failure the llvm-dwarfdump fallback
+was deleted for. Identity is the string `GNU Binutils`, not a `GNU` substring:
+llvm-objdump's own `--version` says "compatible with GNU objdump".
+
+`ingest()` no longer refuses a `.dll` for its container either. Its DWARF
+presence check ran `readelf -S` and reported "No DWARF debug info found —
+rebuild upstream with `-g`", which on a mingw DLL is actively wrong: the DWARF
+is there and readable, and rebuilding fixes nothing. The three outcomes —
+binutils missing, container unreadable, ELF without `.debug_info` — are now
+three separate errors.
+
+### PE exports are the API (2026-09-05)
+
+One root fact behind four defects: **mingw links its C runtime, startup code and
+unwinder statically into every DLL**. So `nm -g --defined-only` reports
+`snprintf`, `memcpy`, `atexit`, `fprintf` and `abort` exactly like the library's
+own functions. On ELF that code lives in a shared libc and is only *referenced*,
+so nm's answer and the library's API have always been the same list and nothing
+ever had to tell them apart.
+
+RepliBuild generated a wrapper for `snprintf` as an exported function of the
+fixture library. All three symbol sites now read the **PE export directory**
+(`objdump -p`), which is the strongest available authority: `GetProcAddress`
+consults only that directory, so a symbol outside it cannot be reached through
+the library even in principle.
+
+Measured: c_test **115 nm symbols / 28 exports**, mi_test 133/43, vi_test
+142/56, stl_test 691/513 — and zero CRT symbols in any export table.
+
+The punch list named two `nm -D` sites and both were broken (`nm -D` on a PE is
+not an empty answer but a hard error, *"File format has no dynamic symbol
+table"*). The site that actually broke builds was a third one it did not list,
+`extract_symbols_from_binary`. `nm` is kept where its `T`/`W`/`D` column is
+needed — the export directory does not say whether a name is a function or a
+global — and screened against the export set.
+
+### ORC deadlocks on an unresolved symbol; it does not raise (2026-09-05)
+
+The monolithic LTO path embeds the whole post-LTO module and `Base.llvmcall`s
+it, so every symbol that module declares must resolve in the consumer's process
+at first call. c_test's `mathkit.c` calls `snprintf` and `sqrt`; neither is
+exported by anything in a Windows process. ORC printed
+`JIT session error: Symbols not found: [ snprintf ]` and then **hung**.
+
+That path had no pre-flight at all, though `_tier1_preflight!` has done exactly
+this for per-function slices all along. `_lto_unresolved_symbols` now asks
+before the wrapper is written and demotes the whole path to `ccall`, which is
+always correct — only the zero-cost path is lost.
+
+`_symbol_resolves_via` is what made the pre-flight reachable: it called
+`ccall(:dlsym, …)`, and there is no `dlsym` symbol in a Windows process, so the
+raw ccall raised "could not load symbol" instead of answering. `Libdl` is the
+portable spelling, and the `RTLD_DEFAULT` arm walks the loaded-module list since
+Windows has no null-handle lookup.
+
+### libc++ is not libstdc++, three separate ways (2026-09-05)
+
+CLANG64 ships libc++, and the STL extraction path assumed libstdc++ in three
+places.
+
+**ABI tags.** Nearly every inline member is `_LIBCPP_HIDE_FROM_ABI`, which
+mangles a tag in *after* the name — `size[abi:nqe220108]() const`. Every test in
+`_classify_stl_method` is a `startswith(sig, "size(")`, so every tagged member
+was dropped: `std::vector<int>` came out of a real build with **one** method,
+the destructor, which survived only because its test is on the leading `~`.
+
+**A bare `startswith` on `basic_string`.** libc++'s nested helpers normalised to
+the string itself, and dedup keeps the first match per method name — so
+`~__annotation_guard()` was recorded as the string's destructor and the real
+`~basic_string()` never got in. The symptom was an `EXCEPTION_ACCESS_VIOLATION`
+inside `__is_long`. Now `$`-anchored, like the vector and map branches always
+were.
+
+**Explicit instantiation emits nothing.** `_LIBCPP_HIDE_FROM_ABI` also expands
+to `exclude_from_explicit_instantiation`, so `template class std::map<int,int>;`
+puts none of those members in the binary — they exist only where some TU
+odr-uses them. There is no macro to switch it off; `__config` gates the
+attribute on `__has_attribute`. The generated instantiation TU now carries a
+never-called function per container whose only job is to name each member.
+Every touch is guarded by `if constexpr` on whether the expression is valid at
+all, so **one generic body covers vector, string, map, set, deque and list** —
+`std::list` has no `operator[]`, `std::vector` no `key_type`, `std::map` no
+`push_back`, and each drops out. The TU is syntax-checked before it is trusted
+and falls back to the bare instantiations, so nothing that builds today can
+regress.
+
+stl_test went from 3/4 with access violations to **28/28**; extraction from 12
+methods to 51.
+
+### The C bucket had no libc (2026-09-05)
+
+`.c` goes through `Clang_unified_jll`'s clang so its IR is version-locked to
+Julia's resident libLLVM. That JLL already targets `x86_64-w64-windows-gnu` —
+the triple was never the problem — but it is a bare compiler artifact with no
+headers and no CRT, and its `InstalledDir` is a Julia artifact directory with
+nothing to fall back to. Every C file died on its first system `#include`.
+
+`_c_bucket_sysroot()` finds the MSYS2 CLANG64 prefix — `REPLIBUILD_C_SYSROOT`,
+then the on-`PATH` clang's own prefix, then `MSYS2_ROOT` — accepting a candidate
+only if it really holds `include/math.h`, since an MSYS2 install carries empty
+`ucrt64/` and `mingw64/` trees that would otherwise be picked. A caller's own
+`--sysroot` wins.
+
+Linking needed a second fact: clang's mingw driver defaults to `-rtlib=libgcc`,
+and CLANG64 is a compiler-rt/libc++/libunwind environment carrying no libgcc at
+all. MSYS2's own clang is configured with `CLANG_DEFAULT_RTLIB=compiler-rt`; the
+JLL is not and cannot be, so it is told here — asked of the sysroot rather than
+the platform, since UCRT64 and MINGW64 are GCC environments where libgcc is
+present and correct.
+
+### MLIR AOT thunks: a load-order problem that read as a missing file (2026-09-05)
+
+**PE binds every symbol at link time.** ELF lets a `.so` carry undefined symbols
+and resolve them at `dlopen` through `RTLD_GLOBAL`; a thunks library on PE needs
+the full link, naming both the main library and `libJLCS`.
+
+And that link is what stopped AOT. Naming `libJLCS` turns it into a PE *import*,
+resolved by the loader — which searches the loading module's directory and
+`PATH`. `libJLCS.dll` lives in RepliBuild's own source tree, which is neither.
+So every AOT thunks library failed to *open*, with `The specified module could
+not be found`: a message naming the module that **was** found and not the
+dependency that was not, so it reads as a missing thunks library while the
+thunks library is sitting right there next to the wrapper. ELF never showed this
+because `-Wl,-rpath` is in the link line — inside the `!Sys.iswindows()` branch,
+because PE has no RUNPATH.
+
+**The fix is ordering, not placement.** Vendoring a copy of `libJLCS.dll` beside
+the thunks would satisfy the loader and silently break exceptions:
+`jlcs_catch_current_exception` writes the message into libJLCS's *own*
+`jlcs_exception_buffer`, and `_check_pending_exception` reads it back by
+ccall'ing into `MLIRNative.libJLCS`. Two copies in one process is two buffers —
+the thunk writes one, Julia reads the other, and every C++ exception crossing a
+thunk disappears. `JITManager.open_thunks_library` opens the libJLCS that
+`MLIRNative` names, by absolute path, *before* the thunks library, and both
+generators route through it. The JIT path holds the same invariant by another
+route, registering those symbols out of `MLIRNative.libJLCS` by hand.
+
+Measured on hello_world: `libhello_world_thunks.dll` (16.5 KB) imports exactly
+**one** symbol from `libJLCS.dll` — `jlcs_catch_current_exception`. Verified end
+to end rather than "the DLL opens": thunks build, `_assert_aot_thunks_present`
+passes against the PE export table, `dispatch_tier` reports `tier2` for all
+three functions, calls return correct values, and a C++ `std::runtime_error`
+thrown across a thunk arrives in Julia as
+`CxxException("C++ exception: negative input: -7")` — message intact, which is
+only true while one libJLCS holds one buffer.
+
+### mingw unwinds with SEH (2026-09-05)
+
+The personality function is `__gxx_personality_seh0`, not `__gxx_personality_v0`,
+and the Windows C++ runtime exports only the former. The name was written down
+twice in C++ (`JLCSPasses.cpp`, `JLCSCAPIWrappers.cpp`) and needed a third in
+Julia. It is now `MLIRNative.CXX_PERSONALITY`, with `test_cxx_personality.jl`
+pinning the two languages together — `test_mlir_templates.jl` had hardcoded the
+Linux spelling, so correct Windows output failed the test.
+
+### LLP64: two tiers disagreed about `long`, with nothing comparing them (2026-09-05)
+
+C's `long` is 32 bits on Win64 and 64 on every Unix64 target — the one integer
+whose width the word size does not settle. `Wrapper` got this right for free by
+emitting Julia's `Clong`; the IRGen producers hardcoded `i64` in two separate
+hand-filled tables (`TypeUtils.map_cpp_type`, `ArrayViewGen._AV_ELEM_MLIR`).
+
+A disagreement raises no error anywhere. Tier 3 would say 4 bytes while the
+Tier 2 MLIR thunk says 8, the thunk reads a different number of bytes than the
+caller wrote, and the value is silently wrong. The width is one fact now,
+`C_LONG_MLIR`, at package level for the same reason `INTERNAL_TYPE_BLOCKLIST` is
+there: both sides of the tier boundary need it. `C_WCHAR_MLIR` follows for
+`wchar_t` (UTF-16 on Windows, UTF-32 elsewhere), and the DWARF size table
+follows `sizeof(Clong)`/`sizeof(Cwchar_t)` rather than restating them.
+
+`test_llp64_widths.jl` asserts the **invariant**, not the constant: for every
+spelling both tiers know, the two tiers agree on the width. That also catches the
+next type added to one table and not the other, on whichever platform CI runs.
+Negative-tested by reintroducing the bug — it names both offending types and
+their byte widths.
+
+### Windows paths are not string literals (2026-09-05)
+
+`C:\Users` reaches a parser as `\U`. One bug class, three homes: both wrapper
+generators baked `LIBRARY_PATH` into generated Julia by hand-quoting, so **every
+generated wrapper on Windows failed to parse**; `ingest()` hand-rolled its TOML,
+a second and disagreeing derivation of what `save_config` already did correctly;
+and 11 test sites interpolated tempdirs into TOML. Now `repr()` and `TOML.print`.
+
+### Smaller platform assumptions, each of which cost a session (2026-09-05)
+
+- `FILE` is `struct _iobuf` under the UCRT, not `struct _IO_FILE`.
+  `INTERNAL_TYPE_BLOCKLIST` named only the glibc spellings, so the screen caught
+  nothing: a `FILE**` parameter came out as `Ptr{Ptr{_iobuf}}` and `_iobuf` was
+  declared and **exported into the wrapper's API surface**. The UCRT locale and
+  multibyte internals were added beside the glibc entries they mirror.
+- `LLVM_CONFIG` was named in the "toolchain not found" error and read **nowhere**
+  — following the advice changed nothing. Now honoured, and probed with `.exe`.
+- Toolchain discovery looked for extensionless binaries, so a complete Windows
+  install reported zero tools; llvm-config probing missed `.exe` and fell back to
+  a hardcoded `"20.1.2jl"` *silently*, so a coherent LLVM 22 toolchain reported
+  20 and warned about every tool in it.
+- `PATH` was assembled with a Unix `:`, which does not fail loudly on Windows —
+  it yields one unparseable entry and the prepended bin dir is simply absent.
+- The shim-header collision guard compared with a hardcoded `/`, so the
+  containment test never matched and the guard flagged the correctly-vendored
+  header — failing the build for the packages it exists to protect.
+- Generated `__init__` did `cglobal(:stdout)`, which is a glibc data symbol and
+  not a symbol at all under the UCRT (a macro over `__acrt_iob_func`). Being in
+  `__init__`, it took the whole module down. Now `@static`-branched and
+  best-effort.
+- `JSON.parsefile` defaults to `use_mmap=true` and Julia drops the mapping only
+  at GC, so `clean()` failed on a tree RepliBuild had just built — and the file
+  left behind was `compilation_metadata.json`, not the `.dll` anyone would have
+  suspected. Free on POSIX, where a mapped file still unlinks.
+- CMake names the dialect by host convention, so the build produced
+  `libJLCS.dll` while `build.sh` verified `[ -f libJLCS.so ]` and printed
+  "ERROR: not found" **after successfully linking it**. Both sites now follow the
+  host; `MLIRNative` uses `Libdl.dlext`.
+- `M_PI` is an X/Open extension. glibc exposes it from `<cmath>` anyway; the UCRT
+  gates it behind `_USE_MATH_DEFINES`, so two stress-test fixtures failed to
+  compile and took devtests' first testset with them.
+
+### C bitflag enums are integer aliases, not closed `@enum`s (2026-09-02)
+
+**This is the breaking change for existing wrappers**, and it needs a regenerate
+to appear.
+
+C spells two different things with one keyword. `enum { RED, GREEN, BLUE }` is a
+closed set of alternatives and is exactly a Julia `@enum`. `enum { NULLTERM =
+1<<0, STABLE = 1<<1, COMPOSE = 1<<3 }` is an **algebra** — callers OR members
+together and pass a value that is not itself a member. Every enum took the first
+shape, so the second could not be called at all: utf8proc's documented way to
+request NFC is `NULLTERM|STABLE|COMPOSE == 11`, and `utf8proc_option_t(11)` threw
+`ArgumentError: invalid value for Enum`. Reported from the Hub.
+
+A bitflag enum now emits an integer alias plus named constants:
+
+```julia
+const utf8proc_option_t = Cuint
+const UTF8PROC_NULLTERM = utf8proc_option_t(1)
+```
+
+Chosen over widening the call sites because **nothing else has to change**:
+`Ptr{<name>}` resolves through the alias, a `ccall` argument typed `<name>`
+resolves to the integer, and the alias and every member still reach `export`.
+`|`, `&` and `~` become Julia's own. The cost, accepted: members print as
+integers, and two masks over one underlying type are one Julia type.
+
+Detection is the whole risk — a false positive strips a real enumeration of its
+type and its named printing, a false negative just leaves the old behaviour — so
+four rules are all required: at least three distinct single-bit members, no
+contiguous runs, every value spelled only in declared bits, no negatives. The
+fourth is bit **density**, and it is the one that earns its place: without it
+libstdc++'s `_Ios_Seekdir` — `{0, 1, 2, 65536}`, beg/cur/end plus a sentinel —
+passes every other test. A mask allocates consecutive bits; an enumeration that
+happens to land on powers of two does not. Flags starting high are fine
+(`ImGuiTabBarFlagsPrivate` occupies bits 20–22); gaps disqualify, offsets do not.
+
+Blast radius measured over all **544 `@enum`s in the shipped Hub wrappers**, not
+estimated: **59 reclassify, 485 unchanged** — the density rule is what took that
+from 64 to 59. Every one of the 59 is a real mask: `ImGuiWindowFlags`,
+`ma_sound_flags`, `mz_zip_flags`, `ggml_tensor_flag`, `chartype_t`,
+`HUF_flags_e`. imgui carries most of them; existing wrappers keep their closed
+`@enum`s until regenerated.
+
+### A Windows-authored test was red on Linux (2026-09-05)
+
+`test_windows_port.jl` asserted that `_is_system_decl_file` recognises MSYS2 and
+WinSDK headers — spelled the way a Windows host writes them, `C:\msys64\…` and
+`C:/Program Files/…`. `_canon_path` is deliberately the identity off Windows,
+because a backslash is a legal character in a POSIX filename and POSIX paths are
+case-sensitive, so three of those assertions could only ever pass on Windows.
+The file was written on the port host and never run here.
+
+Split into the two facts it was conflating. The **pattern list** is a plain
+substring set and is now driven on every host with pre-canonicalised spellings,
+so a Linux run still guards the Windows entries. The **canonicalisation** is
+asserted as `== Sys.iswindows()`, which pins the host-conditionality as
+deliberate instead of skipping it. 54/54 either way.
+
+Same class as the vacuous-green failures this project keeps finding, rotated:
+a test that states one host's answer rather than the invariant.
+
+### Verified
+
+**Windows** (`x86_64-w64-windows-gnu`, MSYS2 CLANG64, MLIR 22.1.8, Julia
+1.12.7), measured on the port host: `runtests.jl` 31 testsets, exit 0.
+`devtests.jl` reports **zero test failures** — Pipeline 12/12, Stress Test 4/4,
+MI 43/43, VI 40/40, STL 28/28, c_test 72/72, C Abomination 15/15, Callbacks 3/3,
+Ingest 8/8, MLIR Templates 87/87. The dialect builds and loads as
+`src/mlir/build/libJLCS.dll` (46 MB).
+
+Read that as "no fixture fails", not "one run printed all of it": the unwind
+abort in **Open** below truncates some runs, so the last two figures come from
+runs that got past it and from running those files directly.
+
+**Linux** (reference host, current tree): `runtests.jl` **31 testsets, 1127
+assertions, exit 0**. The SysV path is unchanged — `kHostAbi` selects SysV on
+Linux and both rule sets always compile, so the inactive one cannot rot.
+
+### Open
+
+- **`libunwind: pc not in table`** aborts the `devtests.jl` parent process after
+  the callback fixture, in some runs, before the last two sections. Zero test
+  failures in every run — every assertion that executes passes — and it does not
+  reproduce standalone (callback verify 3/3 over repeated runs) nor when the
+  parent's build/wrap/spawn sequence is replayed on its own. It needs prior
+  in-parent JIT activity, which points at SEH unwind-table registration for
+  ORC-JIT'd frames on COFF rather than at anything in the fixture.
+- **`test_abi_nested.jl` still states the SysV expectation** — a 16-byte all-float
+  struct in XMM. On Win64 that inverts to sret. Latent: it passes today, and
+  `xform_not_blob` is pinned so a Win64 sret blob cannot pass by accident.
+- **PE inverts the export model** — `dllexport` is opt-in where ELF exports by
+  default — which is a design problem for `__rb_*` static promotion. That is
+  Tier 1, which is quarantined and which no shipped package takes, so it is
+  deferred rather than solved.
+- **macOS stays refused, for a real reason rather than an untested one.** The
+  AAPCS64 classifier is unbuilt: `JLCSPasses.cpp` carries SysV and Win64 only and
+  `#error`s on non-x86-64, so an arm64 Mach-O host has no struct-passing rules to
+  apply. The specification half is provable from Linux today with the same
+  clang-as-oracle method used for Win64.
+
 ## v3.3.4 (2026-08-30)
 
 Patch, and mostly guards that were not guarding. A build-identity check that

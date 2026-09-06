@@ -78,12 +78,36 @@ lists every key, what discovery cannot infer, and a symptom → key index.
 
 ## Requirements
 
-- **Linux only.** ELF `.so`, DWARF, GNU `nm`.
+- **Linux or Windows.** Linux is ELF `.so`; Windows is PE `.dll` under
+  `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64) — not MSVC. Both read DWARF
+  through GNU binutils. macOS is refused at load: the AAPCS64 ABI classifier is
+  not built, so arm64 Mach-O has no struct-passing rules to apply.
 - **Julia 1.10+** (developed on 1.12).
-- **C libraries: nothing else.** Clang ships as a JLL.
+- **C libraries: nothing else on Linux.** Clang ships as a JLL, and
+  link/optimize/assemble run on Julia's own libLLVM.
 - **C++ libraries:** system LLVM/MLIR 21+, then `cd src/mlir && ./build.sh`.
 
 `RepliBuild.check_environment()` reports which of those this machine has.
+
+### Windows
+
+Use the **MSYS2 CLANG64** environment specifically — it is the
+`x86_64-w64-windows-gnu` target that matches Julia's own mingw build, and the
+only MSYS2 repo shipping MLIR.
+
+```
+pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir \
+                   mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja git
+```
+
+Set `git config --global core.autocrlf false` before cloning — CRLF corrupts
+`src/mlir/build.sh`, which then fails as `$'\r': command not found`.
+
+The C bucket compiles through the Clang JLL, which carries no headers or CRT of
+its own, so it borrows the CLANG64 sysroot. That is found automatically from the
+on-`PATH` clang; `REPLIBUILD_C_SYSROOT` overrides it.
+
+[WINDOWS_PORT.md](WINDOWS_PORT.md) has the full setup and what the port found.
 
 ## Documentation
 
