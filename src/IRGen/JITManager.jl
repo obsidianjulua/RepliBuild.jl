@@ -461,6 +461,64 @@ end
 end
 
 """
+    open_thunks_library(thunks_path) -> Ptr{Cvoid}
+
+Open an AOT thunks library, with libJLCS loaded first.
+
+**The thunks library and `MLIRNative` have to reach the SAME libJLCS.** A thunk
+that catches a C++ exception calls `jlcs_catch_current_exception`, which writes
+the message into libJLCS's own `jlcs_exception_buffer`; `_check_pending_exception`
+reads it back by ccall'ing `jlcs_has_pending_exception` in `MLIRNative.libJLCS`.
+Two copies of libJLCS in one process means the thunk writes one buffer and Julia
+reads the other, so every C++ exception crossing a thunk is silently swallowed —
+which is why this pre-loads the existing library rather than letting a sibling
+copy be vendored next to the thunks. The JIT path holds the same invariant by a
+different route: it registers those four symbols out of `MLIRNative.libJLCS` by
+hand (`initialize_global_jit`, "Register exception handling helper symbols").
+
+On ELF the AOT path held it for free. `ld` records a RUNPATH naming libJLCS's
+directory, so the loader binds to that exact file. **PE has no RUNPATH.** The
+Windows loader searches the loading module's directory and `PATH`; libJLCS lives
+in RepliBuild's own source tree, which is neither — so the thunks DLL did not
+fail to *bind*, it failed to *open*, with `The specified module could not be
+found`. That message names the module that was found and not the dependency that
+was not, so it reads as a missing thunks library while the thunks library is
+sitting right there.
+
+Opening libJLCS by absolute path first satisfies both halves: the loader resolves
+the import against an already-loaded module by name, and that module is the one
+`MLIRNative` ccalls. Idempotent, and on ELF a no-op that names the file the
+RUNPATH already resolved to.
+"""
+function open_thunks_library(thunks_path::AbstractString)
+    jlcs = MLIRNative.libJLCS
+    jlcs_state = if !isfile(jlcs)
+        "MISSING — build the dialect with src/mlir/build.sh"
+    else
+        try
+            Libdl.dlopen(jlcs, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+            "loaded"
+        catch e
+            "present but would not open: " * sprint(showerror, e)
+        end
+    end
+
+    try
+        return Libdl.dlopen(thunks_path, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+    catch e
+        error("""
+        AOT thunks library failed to open:
+          $thunks_path
+          $(sprint(showerror, e))
+
+        Its thunks import `jlcs_catch_current_exception` from libJLCS, which must
+        therefore load first:
+          $jlcs
+          $jlcs_state""")
+    end
+end
+
+"""
     resolve_thunk!(slot, handle, name, missing) -> Ptr{Cvoid}
 
 Resolve one AOT thunk into `slot` at module init, recording a miss in `missing`

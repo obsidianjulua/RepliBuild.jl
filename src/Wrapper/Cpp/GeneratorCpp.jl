@@ -3524,7 +3524,10 @@ $_preload_snippet            # Load main library explicitly to ensure symbols ar
 
             # Load AOT thunks library if it was successfully generated
             if !isempty(THUNKS_LIBRARY_PATH) && isfile(THUNKS_LIBRARY_PATH)
-                THUNKS_HANDLE[] = Libdl.dlopen(THUNKS_LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+                # Not a bare `dlopen`: the thunks import `jlcs_catch_current_exception`
+                # from libJLCS, which has to be the same copy `MLIRNative` ccalls and
+                # is on no loader search path on PE. See `open_thunks_library`.
+                THUNKS_HANDLE[] = RepliBuild.JITManager.open_thunks_library(THUNKS_LIBRARY_PATH)
             elseif $requires_jit
                 @warn "AOT Thunks library not found, but advanced FFI features are required. These features will fail at runtime."
             end
