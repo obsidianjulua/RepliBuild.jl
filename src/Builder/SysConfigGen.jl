@@ -231,6 +231,30 @@ const _SOURCE_EXTS = (".c", ".cpp", ".cc", ".cxx")
 
 _has_ext(path, exts) = lowercase(splitext(path)[2]) in exts
 
+# EVERY PATH THIS MODULE COMPARES, SPLITS OR STORES IS '/'-SEPARATED. The compile
+# lines come out of compile_commands.json, which cmake always writes with forward
+# slashes, and every pattern here is written against that spelling —
+# `_is_cmake_internal`, `_capture_rel`, `_collapse_excludes`, `toml_fragment`'s
+# `config_rel * "/"`. `walkdir`/`relpath`/`abspath` answer in the HOST separator,
+# so on Windows the two spellings never meet and every comparison silently says
+# "no": a real generated TU was classified as try_compile scratch and dropped
+# from `[compile] source_files`, cmake's own CompilerIdC probe was NOT dropped,
+# `_build_include_roots` and `_translate_includes` both returned empty, and
+# `_rel_source` handed absolute paths downstream. None of it raised.
+#
+# HOST-CONDITIONAL on purpose, the same reason `Compiler._canon_path` is: a
+# backslash is a legal character in a POSIX filename, so rewriting one off
+# Windows would corrupt a real name.
+_posix(p::AbstractString) = Sys.iswindows() ? replace(String(p), '\\' => '/') : String(p)
+
+# `joinpath`, but always '/'-separated (see `_posix`) and keeping joinpath's
+# empty-prefix behaviour: `cmake_probe` defaults `clone_rel` to `""`, and
+# `"" * "/" * "lib"` is an ABSOLUTE path, which is not what a clone-relative
+# name means. Used wherever the result is matched against a '/'-joined prefix
+# downstream, which `joinpath` would spell natively on one side only.
+_join_rel(a::AbstractString, b::AbstractString) =
+    isempty(a) ? String(b) : string(a, "/", b)
+
 # cmake writes its own scaffolding into the build tree: compiler-identification
 # probe sources under CMakeFiles/, and whatever FetchContent pulled into _deps/.
 # Both match the extension whitelist below, and neither is ours to capture.
@@ -242,7 +266,7 @@ function _walk_generated(build_dir::String)
     headers, sources = String[], String[]
     for (root, _, files) in walkdir(build_dir)
         for f in files
-            rel = relpath(joinpath(root, f), build_dir)
+            rel = _posix(relpath(joinpath(root, f), build_dir))
             _is_cmake_internal(rel) && continue
             _has_ext(f, _HEADER_EXTS) && push!(headers, rel)
             _has_ext(f, _SOURCE_EXTS) && push!(sources, rel)
@@ -309,7 +333,7 @@ function _rel_source(file::String, source_dir::String, build_dir::String,
     if startswith(file, source_dir * "/")
         return file[length(source_dir)+2:end]
     elseif startswith(file, build_dir * "/")
-        return joinpath(config_rel, _capture_rel(file[length(build_dir)+2:end], roots))
+        return _join_rel(config_rel, _capture_rel(file[length(build_dir)+2:end], roots))
     end
     return file
 end
@@ -346,13 +370,13 @@ function _translate_includes(sig::Vector{String}, source_dir::String,
                              clone_rel::String)
     out = String[]
     for dir in _include_dirs(sig)
-        ad = rstrip(abspath(dir), '/')
+        ad = rstrip(_posix(abspath(dir)), '/')
         mapped = if ad == build_dir || startswith(ad, build_dir * "/")
             config_rel                      # generated headers travel with the package
         elseif ad == source_dir
             ""                              # the clone root; the resolver adds this
         elseif startswith(ad, source_dir * "/")
-            joinpath(clone_rel, ad[length(source_dir)+2:end])
+            _join_rel(clone_rel, ad[length(source_dir)+2:end])
         else
             continue                        # system / external dep, not ours to pin
         end
@@ -374,7 +398,7 @@ end
 function _build_include_roots(dirs, build_dir::String)
     roots = String[]
     for d in dirs
-        ad = rstrip(abspath(d), '/')
+        ad = rstrip(_posix(abspath(d)), '/')
         r = if ad == build_dir
             ""
         elseif startswith(ad, build_dir * "/")
@@ -393,13 +417,10 @@ end
 # no evidence about the include form, so it degrades to the historical basename
 # rather than to a new wrong answer.
 #
-# Both sides are '/'-separated, which this module has assumed since it was
-# written (`_is_cmake_internal`, `_rel_source`). On Windows the roots come from
-# compile_commands.json, which cmake normalizes to '/', while `rel` comes from
-# `walkdir` + `relpath`, which does not — so no root matches and every file takes
-# the basename branch, i.e. exactly the pre-2026-09-06 behaviour. Safe, not
-# right; a fix belongs in `_walk_generated` and must be `Sys.iswindows()`-keyed,
-# since a backslash is a legal character in a POSIX filename.
+# Both sides are '/'-separated — see `_posix`, which is where that is now made
+# true on Windows rather than assumed. Until 2026-09-07 `rel` reached here in the
+# host separator while the roots came '/'-spelled out of compile_commands.json,
+# so no root ever matched and every file silently took the basename branch.
 function _capture_rel(rel::String, roots::Vector{String})
     for r in roots
         isempty(r) && return rel
@@ -414,7 +435,7 @@ function _tree_sources(source_dir::String)
         filter!(d -> d != ".git", dirs)
         for f in files
             _has_ext(f, _SOURCE_EXTS) || continue
-            push!(out, relpath(joinpath(root, f), source_dir))
+            push!(out, _posix(relpath(joinpath(root, f), source_dir)))
         end
     end
     return sort!(out)
@@ -469,7 +490,7 @@ function cmake_probe(source_dir::String;
                      clone_rel::String="",
                      use_llvm_env::Bool=true)
 
-    source_dir = String(rstrip(abspath(source_dir), '/'))
+    source_dir = String(rstrip(_posix(abspath(source_dir)), '/'))
     isdir(source_dir) || error("cmake_probe: source dir not found: $source_dir")
     isfile(joinpath(source_dir, "CMakeLists.txt")) ||
         error("cmake_probe: no CMakeLists.txt in $source_dir — not a cmake project. " *
@@ -477,7 +498,7 @@ function cmake_probe(source_dir::String;
 
     isempty(name) && (name = basename(source_dir))
     isempty(build_dir) && (build_dir = mktempdir(; prefix="rbcapture_$(name)_"))
-    build_dir = String(rstrip(abspath(build_dir), '/'))
+    build_dir = String(rstrip(_posix(abspath(build_dir)), '/'))
     ispath(build_dir) && rm(build_dir; recursive=true, force=true)
     mkpath(build_dir)
 
@@ -518,7 +539,7 @@ function cmake_probe(source_dir::String;
             tgt = _target_of(e, eargs)
             isempty(tgt) && (tgt = "unknown")
             sig = _flag_signature(eargs)
-            afile = abspath(file)
+            afile = _posix(abspath(file))
             startswith(afile, build_dir * "/") &&
                 push!(compiled_gen, afile[length(build_dir)+2:end])
             # Union across every target, not just main_target: a generated header
@@ -667,7 +688,7 @@ function capture_config(probe::CMakeProbe, out_dir::String;
         println(io, "points at. Under `layout=:auto` they keep the include form upstream")
         println(io, "compiles with, so `-I` on this directory resolves them unchanged.\n")
         for w in written
-            println(io, "- `$(relpath(w, out_dir))`")
+            println(io, "- `$(_posix(relpath(w, out_dir)))`")
         end
         if !isempty(probe.scratch_sources)
             println(io, "\n## Skipped — generated, but no target compiles them\n")
@@ -734,7 +755,14 @@ function _collapse_excludes(compiled::Vector{String}, uncompiled::Vector{String}
         while true
             push!(live, d)
             isempty(d) && break
-            d = dirname(d)
+            # `dirname` is idempotent at a filesystem root — "/" on POSIX,
+            # "C:\\" on Windows — so `isempty` alone only terminates for a
+            # RELATIVE path. Everything here is meant to be relative; when a
+            # caller upstream failed to relativize, this spun the CPU forever
+            # instead of saying so. Stop at the fixed point either way.
+            parent = dirname(d)
+            parent == d && break
+            d = parent
         end
     end
 

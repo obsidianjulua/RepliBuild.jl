@@ -4,6 +4,150 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### First Windows run of the 2026-09-06 Linux work — and the port leftovers it surfaced (2026-09-07)
+
+`julia 1.12.7`, MSYS2 CLANG64, system LLVM/MLIR **22.1.8**, `libJLCS.dll` present.
+The STL half of that work was already correct here; the SysConfigGen half was
+not, and nothing about it raised.
+
+**SysConfigGen compared '/' paths against '\' ones and said no to every one.**
+`capture_config`'s new classification and layout are the first code in that
+module to *depend* on the path spelling rather than merely tolerate it, and its
+two sources disagree on Windows: `compile_commands.json`, which cmake always
+writes '/'-separated, and `walkdir`/`relpath`/`abspath`, which answer in the
+host separator. Every comparison silently returned false.
+
+- **The real generated TU was classified as try_compile scratch and dropped.**
+  `compiled_gen` is keyed on the build-relative path off the compile line
+  ('/'), `gen_sources` on the walk ('\'), so the set difference put *every*
+  generated source in `scratch_sources`. On the cmake fixture `gen_table.c` —
+  which the target compiles — was skipped by the capture and left out of
+  `[compile] source_files`. The library would have linked without it.
+- **`_is_cmake_internal` matched nothing**, so cmake's own
+  `CMakeFiles/<ver>/CompilerIdC/CMakeCCompilerId.c` reached the classifier.
+- **`_build_include_roots` and `_translate_includes` returned empty.**
+  `abspath` spells the separator natively on one side of a `startswith` whose
+  other side is '/'-joined. `include_roots` came out `[""]` instead of
+  `["include", ""]`, so `:auto` collapsed to the build-tree layout and a header
+  included as `<fixt/fixt_config.h>` landed where `-Iconfig` cannot resolve it
+  — precisely the defect the layout work exists to fix.
+- **`_rel_source` returned absolute paths, and that HUNG the process.**
+  `_collapse_excludes` walks `dirname` until it is `""`, but `dirname` is
+  idempotent at a filesystem root — `"C:\\"`, and `"/"` on POSIX — so the loop
+  only ever terminated for a relative path. The suite spun a core with no
+  output and no error. It now stops at the fixed point whatever it is handed,
+  which closes the latent POSIX case with it.
+
+Fixed at ONE seam rather than a branch per site: `_posix` normalizes wherever a
+host path enters the module, and is `Sys.iswindows()`-keyed for the same reason
+`Compiler._canon_path` is — a backslash is a legal POSIX filename character.
+`_rel_source` and `_translate_includes` join through `_join_rel` rather than
+`joinpath`, since their results are matched against `config_rel * "/"`
+downstream — and `_join_rel` keeps `joinpath`'s empty-prefix behaviour
+deliberately: `cmake_probe` defaults `clone_rel` to `""`, where a bare
+`a * "/" * b` yields an ABSOLUTE path. Windows
+now returns the Linux answers exactly on the cmake fixture: `generated_sources`
+`["gen_table.c"]`, `scratch_sources` `["PROBE_TEST/ltest.c"]`, `include_roots`
+`["include", ""]`, target files `["a.c", "b.c", "config/gen_table.c"]`.
+`test_sysconfiggen.jl` **61/61**, the same count as Linux.
+
+**The STL force-ctor fix is right on Windows; its assertions were libstdc++'s
+spelling of it.** libc++ emits standalone `vector[abi:nqe220108]()` /
+`map[abi:nqe220108]()` at `-O2` and `extract_stl_method_symbols` binds exactly
+one constructor per container, the default one — the fix works as built. What
+was red is the `-O2` emission probe: three `nm` regexes written without libc++'s
+inline namespace (`std::__1::`) or its `_LIBCPP_HIDE_FROM_ABI` tag, and two
+`full_signature` equalities against the untagged spelling. Restated as
+invariants — optional inline namespace, optional `[abi:...]`, tag stripped
+before comparing which ctor bound. Same lesson as `_canon_path`: a test that
+states one host's answer instead of the invariant goes red on the other for a
+correct build.
+
+`_classify_stl_method`'s iterator guard had that shape in the CODE, not the
+test: libc++ spells vector's iterator `__wrap_iter`, which `r"iterator"i` does
+not match, so Windows bound `erase`/`insert` overloads Linux drops. Benign
+today — only `CppMap.delete!` reads an `erase` thunk, and map's libc++ iterator
+is `__map_iterator`, which the old guard does catch (verified against a real
+`-O2` build, not assumed) — but the hosts now bind the same set instead of
+resting on that. `test_stl_extract.jl` **56/56**.
+
+**`[wrap.macros]` produced nothing on Windows, because `visibility("default")`
+is not how PE exports.** Found by taking SysConfigGen past its own tests: a
+pcre2 harvested and built entirely on Windows came out with **14 shims defined
+by `nm -g` and 0 in the export directory**, which is the list the wrapper reads
+on PE — so every `PCRE2_*` constant was missing from the module and 23 of the
+package's 24 failures were `UndefVarError: PCRE2_CASELESS` and friends.
+Reduced: `visibility("default")` and `__declspec(dllexport)` both DEFINE a
+symbol in a PE, and only the second exports it. The shim TU now carries
+`RB_SHIM_EXPORT`, keyed on `_WIN32` — the compiler's target decides, not the
+host running RepliBuild — with the ELF spelling unchanged (it is load-bearing
+there for `-fvisibility=hidden` projects like box2d3).
+
+That fix alone would have been a worse bug than the one it closed. **A
+`dllexport` anywhere turns mingw's auto-export off for the WHOLE image**, so
+adding ours to a library that exports nothing explicitly ERASES its API:
+measured on a two-function probe DLL, the export table went from
+`{lib_a, lib_b, shim}` to `{shim}` — the wrapper would then emit the constants
+and nothing else, with no error anywhere. `create_library` now asks
+`_pe_export_intent` whether anything OTHER than a shim is `dllexport`ed,
+reading it off the IR (LLVM prints the linkage beside the symbol name, so one
+pass answers it, and it works on the LTO path where a filename test would not).
+When ours are the only explicit exports it hands back `-Wl,--export-all-symbols`
+— which is exactly what the auto-export default expands to, CRT still excluded
+by ld's own list, so the link produces the set it always would have.
+
+Measured both shapes on Windows:
+- pcre2 (exports explicitly, via `PCRE2_EXP_DECL`) — export table **78 API +
+  14 shims, zero CRT**; no `--export-all-symbols`, so its chosen surface is
+  untouched. `packages/pcre2/test.jl` went **39 pass / 8 fail / 16 error →
+  76 / 1 / 0**, the one remaining failure being the suite's own
+  `endswith(lib, "libpcre2.so")`, i.e. Linux's file extension.
+- a library exporting nothing of its own — all three symbols exported and all
+  three wrapped, including the shim.
+
+Guarded twice, both toolchain-free: the emission split in
+`test_c_generator_policies.jl` (including a count, so one un-marked shim is a
+failure rather than one silently missing constant), and `_pe_export_intent`'s
+three decisions in `test_windows_port.jl`.
+
+**Two port leftovers, both `/dev/null`-class, both older than this work:**
+
+- **`test_win64_abi.jl` skipped on the only host that can execute the rules it
+  pins.** Its oracle probe ran `clang --target=... -o /dev/null`, and `run` does
+  not go through a shell, so clang got the literal path and resolved it as
+  `\dev\null`. The probe concluded a CLANG64 clang "cannot target
+  x86_64-w64-windows-gnu" — its own host — and the file `@test_skip`ped.
+  Writing to a real temp file instead: **95/95 on Windows**, up from one skip.
+  The table encoded on Linux as a specification is now checked against clang on
+  a machine that can run it.
+- **`test_jlcs_invariants.jl` §D ran `nm -D` on a PE**, which is a hard error
+  ("File format has no dynamic symbol table"), not an empty answer — the same
+  fact the port already recorded for the wrapper's three export sites, at a
+  fourth site nobody converted. Nor is there anything for it to find: PE binds
+  every symbol at link time, so a DLL still carrying an unresolved
+  `mlir::jlcs::` reference cannot link. The RTLD_NOW probe above it is the whole
+  check on Windows and is the stronger half. **16/16**, was 16 + 1 error.
+
+**Still red on Windows, and NOT from this work — each confirmed identical at
+`ddd2d7f` (the commit before the pull), fixtures and all:**
+
+- `test_struct_abi` **28/2** — §A wants `!llvm.struct<packed (i64)>` in emitted
+  IR; §C's B3 `{long,long,long}` trace returns `(0x8_00000007, 0xFFFFFFFF_00000009, 4)`
+  where it wants `(7, 8, 9)`. The bit pattern is three 32-bit values read as
+  64-bit, so this smells like the LLP64 `long` split the port already named —
+  but the fixture is hand-written MLIR at `i64`, so it is a lowering question,
+  not a width table one. Byte-identical at baseline.
+- `test_c_inprocess` **9/1** — the `[link] fallback = true` escape hatch writes
+  `#dbg_declare(...)` into `*_opt.ll` and the tool it then shells to rejects it
+  (`expected instruction opcode`). Debug-record vs intrinsic textual IR across
+  the two-LLVM boundary; the in-process path (the default) is green.
+- `test_debug_inspection` **47/1** — "object capture round trip".
+- `callback_test/test_exceptions.jl` aborts standalone with `0xC00000FF`, and
+  `devtests.jl` still dies at `libunwind: pc not in table` after §4 with zero
+  test failures. Same known SEH/COFF unwind-registration class already recorded
+  under **Open on Windows**; running each remaining section in its own process
+  is the way around it, and all of them were run that way for this entry.
+
 ### `capture_config` tells try_compile scratch from library code, and keeps a generated header's include form (2026-09-06)
 
 Two defects in `SysConfigGen.capture_config`, both surfaced harvesting

@@ -192,14 +192,24 @@ end
         @test isempty(badcfg.wrap.cstring_owned)
     end
 
-    @testset "macro shims: default visibility" begin
+    @testset "macro shims: exported on both object formats" begin
         files = RepliBuild.Compiler.generate_macro_shims(cfg, String[])
         @test length(files) == 1
         shim_txt = read(files[1], String)
-        # Both macros forced into the export table (nm -g is the wrapper's
-        # symbol source; -fvisibility=hidden would otherwise drop them)
-        @test occursin("__attribute__((used, visibility(\"default\"))) int replibuild_shim_SYNTH_OK()", shim_txt)
-        @test occursin("__attribute__((used, visibility(\"default\"))) int replibuild_shim_synth_init(void* arg0, int arg1)", shim_txt)
+        # One shim, two mechanisms, because the formats disagree about what
+        # export MEANS. ELF exports by default and wants visibility("default")
+        # only to survive -fvisibility=hidden (box2d3); PE exports nothing
+        # unless asked and treats visibility() as inert, so a merely-defined
+        # shim never reaches _pe_exported_names — the list the wrapper reads on
+        # Windows — and the constant silently disappears from the module.
+        @test occursin("#if defined(_WIN32)", shim_txt)
+        @test occursin("#  define RB_SHIM_EXPORT __attribute__((used)) __declspec(dllexport)", shim_txt)
+        @test occursin("#  define RB_SHIM_EXPORT __attribute__((used, visibility(\"default\")))", shim_txt)
+        @test occursin("RB_SHIM_EXPORT int replibuild_shim_SYNTH_OK()", shim_txt)
+        @test occursin("RB_SHIM_EXPORT int replibuild_shim_synth_init(void* arg0, int arg1)", shim_txt)
+        # EVERY shim carries it, not just the two named above: one shim missing
+        # the marker is one constant missing from the wrapper, with no error.
+        @test count("RB_SHIM_EXPORT", shim_txt) == 2 + length(cfg.wrap.macros)
         # Value macro emits the bare name; function-like macro forwards args
         @test occursin("return SYNTH_OK;", shim_txt)
         @test occursin("return synth_init(arg0, arg1);", shim_txt)

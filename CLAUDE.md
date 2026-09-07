@@ -751,6 +751,25 @@ has the setup and the full findings; these are the ones that bite a code change.
   read `objdump -p` on PE. `GetProcAddress` consults only that directory, so it
   is the strongest available authority. `nm -D` on a PE is a hard error, not an
   empty answer. Measured: c_test 115 nm / 28 exports, stl_test 691/513.
+- **GETTING INTO THAT DIRECTORY IS OPT-IN, AND `visibility("default")` IS NOT
+  HOW.** Both it and `__declspec(dllexport)` DEFINE the symbol in a PE; only
+  the second exports it. `[wrap.macros]` shims carried the ELF spelling alone,
+  so on Hub pcre2 all 14 were defined by `nm -g` and 0 were in the export
+  directory — every constant silently absent from the module. `RB_SHIM_EXPORT`
+  in `generate_macro_shims` now emits both, keyed on `_WIN32` (the COMPILER's
+  target decides, not the host). Keep the ELF branch: it is load-bearing for
+  `-fvisibility=hidden` projects like box2d3.
+- **...AND ONE `dllexport` TURNS AUTO-EXPORT OFF FOR THE WHOLE IMAGE.** mingw
+  exports everything (minus the CRT, by ld's own exclusion list) only while
+  NOTHING is explicitly exported, so adding a `dllexport`ed shim to a library
+  that exports nothing of its own ERASES its API — a two-function probe DLL
+  goes from `{lib_a, lib_b, shim}` to `{shim}`, and the wrapper then emits the
+  constants and nothing else, with no error. `create_library` asks
+  `_pe_export_intent` whether anything but a shim is exported and hands back
+  `-Wl,--export-all-symbols` only when ours are the only ones — that flag IS
+  the auto-export default, so it reproduces the same set rather than inventing
+  one. Never pass it unconditionally: a library that exports deliberately
+  (pcre2's `PCRE2_EXP_DECL`) would publish every internal symbol instead.
 - **The C bucket needs a sysroot on Windows.** `Clang_unified_jll` already
   targets `x86_64-w64-windows-gnu` — the triple was never the problem — but it
   is a bare compiler artifact with no headers and no CRT. `_c_bucket_sysroot()`
@@ -820,12 +839,47 @@ has the setup and the full findings; these are the ones that bite a code change.
   Linux while green on Windows. Drive the pattern list with pre-canonicalised
   spellings so it runs everywhere; assert canonicalisation as
   `== Sys.iswindows()`.
+- **EVERY PATH IN `SysConfigGen` IS '/'-SEPARATED, and `_posix` is where that
+  is made true.** The module compares two path sources that disagree on
+  Windows: `compile_commands.json`, which cmake always writes with forward
+  slashes, and `walkdir`/`relpath`/`abspath`, which answer in the host
+  separator. Every pattern in the file — `_is_cmake_internal`, `_capture_rel`,
+  `_collapse_excludes`, `toml_fragment`'s `config_rel * "/"` — is written
+  against the '/' spelling, so before the seam existed each comparison silently
+  returned false and **a real generated TU was classified as try_compile
+  scratch and dropped from `[compile] source_files`**. Normalize at the point a
+  host path ENTERS the module, never at the comparison; join with `"/"` rather
+  than `joinpath` for anything matched downstream. `Sys.iswindows()`-keyed for
+  the same reason `_canon_path` is. Related: `dirname` is idempotent at a
+  filesystem root, so a `while` that walks to `""` only terminates on a
+  RELATIVE path — `_collapse_excludes` spun a core when handed an absolute one.
+- **`/dev/null` is not a path on Windows.** `run` does not go through a shell,
+  so a tool receives the literal string and resolves it as `\dev\null`.
+  `test_win64_abi.jl`'s oracle probe used it and concluded that a CLANG64 clang
+  cannot target `x86_64-w64-windows-gnu` — its own host — so the one test that
+  pins the Win64 ABI table `@test_skip`ped on the only machine able to check
+  it (95/95 once it writes to a temp file instead). Grep for `/dev/null` in
+  anything reached by `run`; `devnull` as a *stream* redirect is fine.
 - **Open on Windows:** `libunwind: pc not in table` aborts the `devtests.jl`
   parent after the callback fixture in some runs (zero test failures in every
   run; needs prior in-parent JIT activity, so it points at SEH unwind-table
-  registration for ORC-JIT'd frames on COFF). `test_abi_nested.jl` still states
-  the SysV XMM expectation — latent, it passes today. **PE inverts the export
-  model** (`dllexport` opt-in vs ELF exporting by default), which is a design
+  registration for ORC-JIT'd frames on COFF). Run each remaining section in its
+  own process to get past it — `callback_test/test_exceptions.jl` standalone
+  aborts the same way (`0xC00000FF`), which places the fault in that fixture's
+  JIT/EH activity rather than in the suite driver. `test_abi_nested.jl` still
+  states the SysV XMM expectation — latent, it passes today (14/14).
+  `test_struct_abi` is **28/2**: §A wants `!llvm.struct<packed (i64)>` in the
+  emitted IR, and §C's B3 `{long,long,long}` try_call trace returns three
+  32-bit values read as 64-bit (`0x8_00000007`, …) instead of `(7, 8, 9)` — the
+  fixture is hand-written MLIR at `i64`, so it is a lowering question, not a
+  width-table one. `test_c_inprocess` is **9/1**: only the `[link] fallback =
+  true` escape hatch, which writes `#dbg_declare(...)` into `*_opt.ll` and then
+  shells to a tool that rejects it (`expected instruction opcode`) — the
+  in-process default path is green. `test_debug_inspection` is **47/1**
+  ("object capture round trip"). All four verified identical at `ddd2d7f`, so
+  none of them came from the 2026-09-06 SysConfigGen/STL work. **PE inverts the
+  export model** (`dllexport` opt-in vs ELF exporting by default): handled for
+  `[wrap.macros]` shims (see the two export bullets above), still a design
   problem for `__rb_*` static promotion — deferred, since that is quarantined
   Tier 1 and no shipped package takes it.
 

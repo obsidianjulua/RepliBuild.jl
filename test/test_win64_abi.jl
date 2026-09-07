@@ -32,7 +32,13 @@ const CAN_TARGET_WIN = CLANG === nothing ? false : try
     mktempdir() do d
         p = joinpath(d, "probe.c")
         write(p, "int f(void){return 0;}\n")
-        success(`$CLANG --target=$TRIPLE -S -emit-llvm -o /dev/null $p`)
+        # A real output file, not /dev/null: `run` does not go through a
+        # shell, so clang receives the literal path and resolves it on
+        # Windows as `\dev\null`, which is not a directory. The probe then
+        # reported that a CLANG64 clang "cannot target x86_64-w64-windows-gnu"
+        # — its own host — and this file, the one test that pins the Win64
+        # rules, skipped on the only machine that can execute them.
+        success(`$CLANG --target=$TRIPLE -S -emit-llvm -o $(joinpath(d, "probe.ll")) $p`)
     end
 catch
     false
