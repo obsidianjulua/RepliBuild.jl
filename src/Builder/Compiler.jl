@@ -508,9 +508,10 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
     if isempty(compile_fingerprint) && is_cache_enabled(config)
         compile_fingerprint = compute_compile_fingerprint(config)
     end
+    file_fp = _file_compile_fingerprint(compile_fingerprint, cpp_file)
 
     # Check if recompilation needed
-    if !needs_recompile(cpp_file, ir_file, is_cache_enabled(config), compile_fingerprint)
+    if !needs_recompile(cpp_file, ir_file, is_cache_enabled(config), file_fp)
         return (ir_file, true, 0)  # Cache hit
     end
 
@@ -529,6 +530,7 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
     cmd_args = vcat(
         ["-S", "-emit-llvm"],  # Emit LLVM IR
         base_flags,
+        _template_tu_compile_flags(cpp_file),
         ["-I$dir" for dir in get_include_dirs(config)],
         ["-D$k=$v" for (k, v) in config.compile.defines],
         ["-o", ir_file, cpp_file]
@@ -548,7 +550,7 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
     if success
         # Stamp the fingerprint that produced this IR so a later flag/define/
         # include/compiler change invalidates it (not just a source-mtime change).
-        write_compile_key(ir_file, compile_fingerprint)
+        write_compile_key(ir_file, file_fp)
     end
     return (ir_file, success, exitcode)
 end
@@ -601,7 +603,8 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
         end
         owner[ir_file] = cpp_file
 
-        if needs_recompile(cpp_file, ir_file, is_cache_enabled(config), compile_fingerprint)
+        if needs_recompile(cpp_file, ir_file, is_cache_enabled(config),
+                           _file_compile_fingerprint(compile_fingerprint, cpp_file))
             push!(files_to_compile, cpp_file)
         else
             cached_files += 1
@@ -1466,6 +1469,9 @@ namespace replibuild_force {
 
 // A T& for any T, including types that are not default-constructible. Never
 // evaluated: every caller below sits in a function that is never called.
+// Used for METHOD ARGUMENTS (value_type, key_type), not for constructing the
+// container itself — that is `T c;` in the force body, which is also what
+// puts a standalone default ctor in the .so (see _template_force_body).
 template <class T> T& ref() { return *reinterpret_cast<T*>(1); }
 
 // Runs `f(c)` only if that is a valid expression. The discarded branch of an
@@ -1522,11 +1528,16 @@ const _TEMPLATE_FORCE_EXPRS = [
 One never-called function per instantiated container, touching every member in
 `_classify_stl_method`'s vocabulary.
 
-`used` keeps it through dead-code removal of an unreferenced static — without it
-the function can be dropped before codegen, and dropping it drops the odr-use
-along with the symbols this whole mechanism exists to produce. The anonymous
-namespace keeps it out of the DLL's export table, and so out of the symbol sweep
-and the wrapper's API surface.
+Default-constructs `T c` rather than taking `T&`. `template class T;` does not
+emit the header-inline default ctor as a standalone symbol, and the Julia
+factory calls `T()` with no extra args — so a force body that never names
+`T t;` leaves `create_std_map_*` memset-zeroing a live `std::map`.
+
+`used` keeps the function through dead-code removal of an unreferenced static.
+The anonymous namespace keeps it out of the DLL's export table. `-fno-inline`
+on this generated TU (see `_template_tu_compile_flags`) is what stops the
+ctor being inlined *into* this function at `-O2`; `noinline` on the function
+alone is not enough — clang still inlines `vector()` into a noinline caller.
 """
 function _template_force_body(instantiation_type::String, index::Int)::String
     io = IOBuffer()
@@ -1534,13 +1545,39 @@ function _template_force_body(instantiation_type::String, index::Int)::String
     println(io, "#if defined(__GNUC__) || defined(__clang__)")
     println(io, "__attribute__((used))")
     println(io, "#endif")
-    println(io, "void replibuild_force_$(index)($(instantiation_type)& c) {")
+    println(io, "void replibuild_force_$(index)() {")
+    println(io, "    $instantiation_type c;")
     for expr in _TEMPLATE_FORCE_EXPRS
         println(io, "    RB_TOUCH($expr);")
     end
     println(io, "}")
     println(io, "}  // namespace")
     return String(take!(io))
+end
+
+"Generated instantiation TU (`replibuild_templates.cpp`), not a library source."
+_is_template_instantiation_tu(cpp_file::AbstractString)::Bool =
+    basename(cpp_file) == "replibuild_templates.cpp"
+
+"""
+Extra flags for the generated instantiation TU only.
+
+`-fno-inline` is load-bearing at `-O2`: a `T c;` in the force body still
+inlines `vector()` into that function unless inlining is off for the TU.
+clang 22 ignores `-fkeep-inline-functions`. This is not a per-file flag on
+library sources — it applies only to the file RepliBuild generated.
+"""
+function _template_tu_compile_flags(cpp_file::AbstractString)::Vector{String}
+    _is_template_instantiation_tu(cpp_file) ? ["-fno-inline"] : String[]
+end
+
+"Per-file compile fingerprint: the templates TU carries extra flags the others do not."
+function _file_compile_fingerprint(config_fp::String, cpp_file::AbstractString)::String
+    isempty(config_fp) && return config_fp
+    if _is_template_instantiation_tu(cpp_file)
+        return string(hash((config_fp, "template-tu-fno-inline-v1")), base=16)
+    end
+    return config_fp
 end
 
 "Write the instantiation TU. `force` adds the odr-use block; without it this is the bare form."
@@ -1971,10 +2008,12 @@ function _classify_stl_method(method_sig::String, container_type::String="")::Un
     # strips these tags for the same reason.
     sig = replace(sig, r"\[abi:[^\]]*\]" => "")
 
-    # Constructor: ClassName(...)  or ClassName()
-    # The method_sig is just the part after "::", e.g., "vector()" or "basic_string(char const*)"
-    # Check if it looks like a constructor (starts with the class name part)
-    if occursin(r"^(vector|basic_string|map|unordered_map|set|deque|list)\(", sig)
+    # Default constructor only: ClassName(). Allocator/copy/size overloads
+    # (`vector(allocator const&)`, `map(less const&, allocator const&)`) are
+    # real symbols and used to classify as constructor too — but the Julia
+    # factory calls T() with no extra args, so binding any of those is a
+    # one-argument invoke of a two-argument callee. Empty parens only.
+    if occursin(r"^(vector|basic_string|map|unordered_map|set|deque|list)\(\s*\)", sig)
         return ("constructor", false)
     end
 
@@ -2004,8 +2043,11 @@ function _classify_stl_method(method_sig::String, container_type::String="")::Un
     elseif startswith(sig, "empty(")
         return ("empty", true)
     elseif startswith(sig, "begin(")
+        # unordered_map::begin(size_type) is the bucket API, not iterator begin().
+        occursin(r"^begin\(\s*\)", replace(sig, r"\s+const$" => "")) || return nothing
         return ("begin", is_const)
     elseif startswith(sig, "end(")
+        occursin(r"^end\(\s*\)", replace(sig, r"\s+const$" => "")) || return nothing
         return ("end_", is_const)
     elseif startswith(sig, "c_str(")
         return ("c_str", true)
@@ -2022,8 +2064,15 @@ function _classify_stl_method(method_sig::String, container_type::String="")::Un
     elseif startswith(sig, "pop_back(")
         return ("pop_back", false)
     elseif startswith(sig, "erase(")
+        # Iterator overloads take a tree/node iterator, not a key. CppMap.delete!
+        # passes a pointer to K. Binding erase(iterator) is a heap smash
+        # (_Rb_tree_rebalance_for_erase). The paren-aware split made these
+        # visible; they used to be dropped because `std::_Rb_tree_iterator`
+        # stole the class/method `::`.
+        occursin(r"iterator"i, sig) && return nothing
         return ("erase", false)
     elseif startswith(sig, "insert(")
+        occursin(r"iterator"i, sig) && return nothing
         return ("insert", false)
     elseif startswith(sig, "find(")
         return ("find", is_const)
@@ -2035,6 +2084,49 @@ function _classify_stl_method(method_sig::String, container_type::String="")::Un
     end
 
     return nothing
+end
+
+"""
+    _stl_split_class_method(demangled) -> (class, method_sig) or nothing
+
+Split a demangled `Class::method(args)` on the last `::` that is still the
+class/method boundary: angle-bracket depth 0 AND parenthesis depth 0.
+
+A scan that only tracks `<>` takes the last `::` in the whole string, so
+constructor arguments like `std::allocator<int>` steal the split:
+
+    std::vector<int, std::allocator<int> >::vector(std::allocator<int> const&)
+                                            last :: was here ↑ inside the args
+    class  = "std::vector<…>::vector(std"
+    method = "allocator<int> const&)"     # dropped: not in the template set
+
+`size()` and `push_back(int&&)` have no `::` in the args, so they happened
+to work. Empty-paren `vector()` also worked — which is why the default ctor
+was the only constructor extract ever stored, when it was in the .so at all.
+"""
+function _stl_split_class_method(demangled::AbstractString)::Union{Tuple{String,String}, Nothing}
+    angle = 0
+    paren = 0
+    last_sep = -1
+    for i in eachindex(demangled)
+        c = demangled[i]
+        if c == '<'
+            angle += 1
+        elseif c == '>'
+            angle -= 1
+        elseif c == '('
+            paren += 1
+        elseif c == ')'
+            paren -= 1
+        elseif angle == 0 && paren == 0 && c == ':' &&
+               i < lastindex(demangled) && demangled[nextind(demangled, i)] == ':'
+            last_sep = i
+        end
+    end
+    last_sep > 0 || return nothing
+    # last_sep is the first ':' of `::`. Class ends the character before;
+    # method_sig starts after both colons. Demangled names are ASCII.
+    return (String(demangled[1:last_sep-1]), String(demangled[last_sep+2:end]))
 end
 
 """
@@ -2103,29 +2195,11 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
         # Only consider T (text) and W (weak) symbols
         sym_type in ("T", "W", "t", "w") || continue
 
-        # Match pattern: ContainerType::MethodSignature
-        # Need bracket-aware split on "::" - find the last "::" that separates class from method
-        # For "std::vector<int, std::allocator<int>>::push_back(int const&)"
-        # We want: class = "std::vector<int, std::allocator<int>>", method = "push_back(int const&)"
-
-        # Find "::" separators that are NOT inside angle brackets
-        depth = 0
-        last_sep = -1
-        for i in eachindex(demangled)
-            c = demangled[i]
-            if c == '<'
-                depth += 1
-            elseif c == '>'
-                depth -= 1
-            elseif depth == 0 && c == ':' && i < lastindex(demangled) && demangled[nextind(demangled, i)] == ':'
-                last_sep = i
-            end
-        end
-
-        last_sep > 0 || continue
-
-        container_full = demangled[1:last_sep-1]
-        method_sig = demangled[last_sep+2:end]
+        # Match pattern: ContainerType::MethodSignature. Paren-aware: see
+        # `_stl_split_class_method` — a `<>`-only scan walks into ctor args.
+        class_method = _stl_split_class_method(demangled)
+        class_method === nothing && continue
+        container_full, method_sig = class_method
 
         # Normalize the container type
         container_normalized = _normalize_stl_type(container_full)

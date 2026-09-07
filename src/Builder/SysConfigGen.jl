@@ -16,6 +16,8 @@
 # So this reads a build system rather than running one, and yields three things:
 #
 #   1. the generated headers (and configure-time generated sources) to check in,
+#      laid out under the same -I roots upstream compiles against, and with
+#      try_compile probe scratch told apart from real generated library code,
 #   2. the exact -D / -I set upstream uses, for [compile],
 #   3. a mechanical answer to the Hub's admission question — "does every source
 #      compile under one flag set?" — from compile_commands.json instead of by
@@ -98,6 +100,11 @@ The result of a configure-only cmake run over an upstream source tree.
 - `cmake_args::Vector{String}` — the arguments the probe was run with
 - `generated_headers::Vector{String}` — build-dir-relative generated headers
 - `generated_sources::Vector{String}` — build-dir-relative generated `.c`/`.cpp`
+  that a configured target actually compiles
+- `scratch_sources::Vector{String}` — build-dir-relative generated `.c`/`.cpp`
+  that **no** configured target compiles
+- `include_roots::Vector{String}` — build-dir-relative `-I` dirs inside the build
+  tree, longest first; `""` is the build dir itself
 - `targets::Vector{CMakeTarget}` — every library target cmake configured
 - `tree_sources::Vector{String}` — every `.c`/`.cpp` in the checkout
 - `cmake_version::String`
@@ -107,6 +114,23 @@ A project routinely configures the *same* sources into several targets — share
 static, and a compat shim is the common trio. That is not per-file flag
 divergence and must not be read as one, so uniformity is judged per target (see
 [`uniform`](@ref)) and [`main_target`](@ref) picks the one to build from.
+
+`generated_sources` and `scratch_sources` are split on one mechanical test —
+does any target in `compile_commands.json` compile the file — because a configure
+step emits both kinds into the same tree and they must never be confused. cmake's
+`try_compile` writes its probe source into the build tree and compiles it out of
+band, so it is generated, it is a `.c`, and it has its own `main()`; capturing it
+as library code and listing it in `[compile] source_files` plants a `main` symbol
+in the shared object. `check_c_source_compiles` uses `CMakeFiles/CMakeTmp/` (which
+[`_is_cmake_internal`](@ref) already drops), but a hand-rolled `try_compile` with
+its own bindir — SUNDIALS' `POSIX_TIMER_TEST/ltest.c` — lands in plain sight.
+
+The split needs `compile_commands.json`; without it (a generator that does not
+emit one) there is no evidence, so nothing is classified and `scratch_sources` is
+empty rather than guessed. Note the test is *uncompiled*, not *scratch*: a
+generated `.c` that upstream `#include`s rather than compiles also lands in
+`scratch_sources`, which is why [`capture_config`](@ref) reports what it skipped
+and takes `capture_scratch=true` to override.
 """
 struct CMakeProbe
     name::String
@@ -115,6 +139,8 @@ struct CMakeProbe
     cmake_args::Vector{String}
     generated_headers::Vector{String}
     generated_sources::Vector{String}
+    scratch_sources::Vector{String}
+    include_roots::Vector{String}
     targets::Vector{CMakeTarget}
     tree_sources::Vector{String}
     cmake_version::String
@@ -170,6 +196,13 @@ function Base.show(io::IO, p::CMakeProbe)
                 "$(length(p.generated_sources)) source(s)")
     for f in vcat(p.generated_headers, p.generated_sources)
         println(io, "               $f")
+    end
+    if !isempty(p.scratch_sources)
+        println(io, "  Scratch:   $(length(p.scratch_sources)) generated source(s) " *
+                    "no target compiles — not captured")
+        for f in p.scratch_sources
+            println(io, "               $f")
+        end
     end
     mt = main_target(p)
     println(io, "  Targets:   $(length(p.targets))")
@@ -266,22 +299,26 @@ end
 # exclude list can be matched against clone-relative paths) or a generated one
 # living in the scratch build tree — which will travel with the package once
 # captured, so it is named relative to the package's config dir instead.
-function _rel_source(file::String, source_dir::String, build_dir::String, config_rel::String)
+#
+# The generated case shares `_capture_rel` with `capture_config` rather than
+# re-deriving a basename: `[compile] source_files` names the file at the path the
+# capture actually wrote it to, and one derivation is the only way those two
+# cannot drift into naming a file that isn't there.
+function _rel_source(file::String, source_dir::String, build_dir::String,
+                     config_rel::String, roots::Vector{String})
     if startswith(file, source_dir * "/")
         return file[length(source_dir)+2:end]
     elseif startswith(file, build_dir * "/")
-        return joinpath(config_rel, basename(file))
+        return joinpath(config_rel, _capture_rel(file[length(build_dir)+2:end], roots))
     end
     return file
 end
 
-# -I dirs point at absolute paths inside the checkout or the scratch build tree.
-# The build-tree ones are exactly the generated headers we are about to capture,
-# so they become the package's config dir; the source ones become clone-relative
-# so they survive a fresh clone at a different path.
-function _translate_includes(sig::Vector{String}, source_dir::String,
-                             build_dir::String, config_rel::String,
-                             clone_rel::String)
+# Every -I / -isystem directory in a flag signature, in order. One derivation,
+# because two consumers read it for different reasons — the TOML's include_dirs
+# and the layout the captured headers have to be written in — and a header
+# captured relative to a root the compile line never mentions is unreachable.
+function _include_dirs(sig::Vector{String})
     out = String[]
     i = 1
     while i <= length(sig)
@@ -295,7 +332,20 @@ function _translate_includes(sig::Vector{String}, source_dir::String,
             ""
         end
         i += 1
-        isempty(dir) && continue
+        isempty(dir) || push!(out, dir)
+    end
+    return out
+end
+
+# -I dirs point at absolute paths inside the checkout or the scratch build tree.
+# The build-tree ones are exactly the generated headers we are about to capture,
+# so they become the package's config dir; the source ones become clone-relative
+# so they survive a fresh clone at a different path.
+function _translate_includes(sig::Vector{String}, source_dir::String,
+                             build_dir::String, config_rel::String,
+                             clone_rel::String)
+    out = String[]
+    for dir in _include_dirs(sig)
         ad = rstrip(abspath(dir), '/')
         mapped = if ad == build_dir || startswith(ad, build_dir * "/")
             config_rel                      # generated headers travel with the package
@@ -309,6 +359,53 @@ function _translate_includes(sig::Vector{String}, source_dir::String,
         !isempty(mapped) && mapped ∉ out && push!(out, mapped)
     end
     return out
+end
+
+# The build-tree -I dirs, build-dir-relative, longest first. These are the roots
+# a generated header's include FORM is relative to: upstream passes
+# `-I<build>/include` and writes `#include <sundials/sundials_config.h>`, so the
+# header captured out of `<build>/include/sundials/` has to keep the `sundials/`
+# level or `-Iconfig` resolves nothing. Longest first because a build tree
+# routinely carries both `-I<build>/include` and `-I<build>`, and only the
+# deepest matching root reproduces the spelling the sources use.
+#
+# `""` denotes the build dir itself and is therefore always last — it matches
+# everything, so it must only be reached once the real roots have been tried.
+function _build_include_roots(dirs, build_dir::String)
+    roots = String[]
+    for d in dirs
+        ad = rstrip(abspath(d), '/')
+        r = if ad == build_dir
+            ""
+        elseif startswith(ad, build_dir * "/")
+            ad[length(build_dir)+2:end]
+        else
+            continue
+        end
+        r ∉ roots && push!(roots, r)
+    end
+    sort!(roots; by = r -> (-length(r), r))
+    return roots
+end
+
+# Where a captured file goes, relative to the package's config dir: its path
+# under the deepest include root that contains it. With no matching root there is
+# no evidence about the include form, so it degrades to the historical basename
+# rather than to a new wrong answer.
+#
+# Both sides are '/'-separated, which this module has assumed since it was
+# written (`_is_cmake_internal`, `_rel_source`). On Windows the roots come from
+# compile_commands.json, which cmake normalizes to '/', while `rel` comes from
+# `walkdir` + `relpath`, which does not — so no root matches and every file takes
+# the basename branch, i.e. exactly the pre-2026-09-06 behaviour. Safe, not
+# right; a fix belongs in `_walk_generated` and must be `Sys.iswindows()`-keyed,
+# since a backslash is a legal character in a POSIX filename.
+function _capture_rel(rel::String, roots::Vector{String})
+    for r in roots
+        isempty(r) && return rel
+        startswith(rel, r * "/") && return rel[length(r)+2:end]
+    end
+    return basename(rel)
 end
 
 function _tree_sources(source_dir::String)
@@ -407,7 +504,9 @@ function cmake_probe(source_dir::String;
 
     # ── read back the intended compilation, grouped by target ─────────────
     ccpath = joinpath(build_dir, "compile_commands.json")
-    by_target = Dict{String,Vector{Tuple{String,Vector{String}}}}()  # target => [(file, sig)]
+    raw = Tuple{String,String,Vector{String}}[]   # (target, abs file, flag signature)
+    compiled_gen = Set{String}()                  # build-dir-relative TUs some target compiles
+    inc_roots = String[]
     if isfile(ccpath)
         # use_mmap=false: a live mmap blocks deletion on Windows and is released
         # only at GC — and this one maps a file inside the cmake build tree that
@@ -418,10 +517,37 @@ function cmake_probe(source_dir::String;
             eargs = _entry_args(e)
             tgt = _target_of(e, eargs)
             isempty(tgt) && (tgt = "unknown")
-            rel = _rel_source(abspath(file), source_dir, build_dir, config_rel)
-            push!(get!(by_target, tgt, Tuple{String,Vector{String}}[]),
-                  (rel, _flag_signature(eargs)))
+            sig = _flag_signature(eargs)
+            afile = abspath(file)
+            startswith(afile, build_dir * "/") &&
+                push!(compiled_gen, afile[length(build_dir)+2:end])
+            # Union across every target, not just main_target: a generated header
+            # can be reachable only from another target's include path, and it is
+            # still the include form that decides where the file has to land.
+            for r in _build_include_roots(_include_dirs(sig), build_dir)
+                r ∉ inc_roots && push!(inc_roots, r)
+            end
+            push!(raw, (tgt, afile, sig))
         end
+    end
+    sort!(inc_roots; by = r -> (-length(r), r))
+
+    # Naming a generated TU needs the complete root set, so it happens after the
+    # scan rather than inside it — a root discovered by a later entry still has
+    # to govern an earlier file's path.
+    by_target = Dict{String,Vector{Tuple{String,Vector{String}}}}()  # target => [(file, sig)]
+    for (tgt, afile, sig) in raw
+        push!(get!(by_target, tgt, Tuple{String,Vector{String}}[]),
+              (_rel_source(afile, source_dir, build_dir, config_rel, inc_roots), sig))
+    end
+
+    # No compile_commands means no evidence about which generated sources are
+    # library code, so classify nothing rather than guess — dropping a real
+    # source would fail the build far from here.
+    scratch = String[]
+    if !isempty(by_target)
+        scratch     = filter(s -> s ∉ compiled_gen, gen_sources)
+        gen_sources = filter(s -> s ∈ compiled_gen, gen_sources)
     end
 
     targets = CMakeTarget[]
@@ -441,7 +567,8 @@ function cmake_probe(source_dir::String;
     sort!(targets; by = t -> (-length(t.files), t.name))
 
     return CMakeProbe(name, source_dir, build_dir, cmake_args,
-                      headers, gen_sources, targets, _tree_sources(source_dir),
+                      headers, gen_sources, scratch, inc_roots,
+                      targets, _tree_sources(source_dir),
                       cmake_version, now())
 end
 
@@ -450,15 +577,34 @@ end
 # ============================================================================
 
 """
-    capture_config(probe::CMakeProbe, out_dir; sources=true, flatten=true) -> Vector{String}
+    capture_config(probe::CMakeProbe, out_dir; sources=true, layout=:auto,
+                   capture_scratch=false) -> Vector{String}
 
 Copy the probe's generated headers (and, with `sources=true`, its generated
 `.c`/`.cpp`) into `out_dir`, and write a `SYSCONFIG.md` recording exactly how they
 were produced. Returns the paths written.
 
-`flatten=true` drops the build-tree directory structure, which is what a single
-`include_dirs` entry expects. Set it to `false` when two generated headers share
-a basename, or when a header is included as `<subdir/name.h>`.
+`probe.scratch_sources` — generated sources no configured target compiles, which
+is overwhelmingly cmake `try_compile` probe scratch carrying its own `main()` —
+are **not** captured. Pass `capture_scratch=true` for the rare generated `.c` that
+upstream `#include`s rather than compiles; SYSCONFIG.md always lists what was
+skipped, so the decision is visible rather than silent.
+
+`layout` decides where each captured file lands under `out_dir`:
+
+- `:auto` (default) — under the deepest build-tree `-I` root that contains it, so
+  the package reproduces the include form upstream compiles with. A header
+  generated into `<build>/include/foo/cfg.h` with `-I<build>/include` on the
+  compile line is included as `<foo/cfg.h>`, so it is written to
+  `out_dir/foo/cfg.h` and resolves under a single `-Iout_dir`. A build tree that
+  generates everything at its root — the common case, and pcre2's — reduces
+  exactly to basenames.
+- `:flat` — basenames only, regardless of include form.
+- `:build_tree` — the raw build-dir-relative path.
+
+Two sources landing on one destination is a hard error under every layout: the
+`force=true` copy would otherwise ship one file under another's name, and a
+config header is not something to get silently wrong.
 
 The copied files are **build artifacts checked into the package on purpose**,
 and they pin the package to this machine's feature detection at this upstream
@@ -467,10 +613,17 @@ the cmake arguments so a version bump can regenerate and diff: a changed
 `SIZEOF_*` or a vanished `USE_*` is real news, not noise.
 """
 function capture_config(probe::CMakeProbe, out_dir::String;
-                        sources::Bool=true, flatten::Bool=true)
+                        sources::Bool=true, layout::Symbol=:auto,
+                        capture_scratch::Bool=false)
+    layout in (:auto, :flat, :build_tree) ||
+        error("capture_config: layout must be :auto, :flat or :build_tree, got :$layout")
+
     out_dir = abspath(out_dir)
     picked = copy(probe.generated_headers)
-    sources && append!(picked, probe.generated_sources)
+    if sources
+        append!(picked, probe.generated_sources)
+        capture_scratch && append!(picked, probe.scratch_sources)
+    end
 
     if isempty(picked)
         @warn """
@@ -484,13 +637,19 @@ function capture_config(probe::CMakeProbe, out_dir::String;
 
     mkpath(out_dir)
     written = String[]
+    claimed = Dict{String,String}()   # dst => the rel that got there first
     for rel in picked
-        dst = flatten ? joinpath(out_dir, basename(rel)) : joinpath(out_dir, rel)
-        if flatten && dst in written
-            @warn "capture_config: basename collision on '$(basename(rel))' — " *
-                  "re-run with flatten=false"
+        sub = layout === :flat       ? basename(rel) :
+              layout === :build_tree ? rel :
+                                       _capture_rel(rel, probe.include_roots)
+        dst = joinpath(out_dir, sub)
+        if haskey(claimed, dst)
+            error("capture_config: '$(claimed[dst])' and '$rel' both map to " *
+                  "'$sub' under layout=:$layout. Copying would ship one under " *
+                  "the other's name — re-run with layout=:build_tree.")
         end
-        flatten || mkpath(dirname(dst))
+        claimed[dst] = rel
+        mkpath(dirname(dst))
         cp(joinpath(probe.build_dir, rel), dst; force=true)
         chmod(dst, 0o644)
         push!(written, dst)
@@ -502,21 +661,37 @@ function capture_config(probe::CMakeProbe, out_dir::String;
         println(io, "produced by cmake's configure step (`configure_file` over a template), and")
         println(io, "RepliBuild compiles all-sources-minus-excludes under one flag set without")
         println(io, "ever running a configure. So they have to already exist.\n")
-        println(io, "Captured by `RepliBuildTooling.cmake_probe` + `capture_config`.\n")
+        println(io, "Captured by `RepliBuild.SysConfigGen.cmake_probe` + `capture_config`.\n")
         println(io, "## Files\n")
+        println(io, "Paths are relative to this directory, which is the one `include_dirs`")
+        println(io, "points at. Under `layout=:auto` they keep the include form upstream")
+        println(io, "compiles with, so `-I` on this directory resolves them unchanged.\n")
         for w in written
-            println(io, "- `$(basename(w))`")
+            println(io, "- `$(relpath(w, out_dir))`")
+        end
+        if !isempty(probe.scratch_sources)
+            println(io, "\n## Skipped — generated, but no target compiles them\n")
+            println(io, capture_scratch ?
+                "Captured anyway (`capture_scratch=true`); confirm each is real library code." :
+                "Not captured. Overwhelmingly cmake `try_compile` probe scratch, which has")
+            capture_scratch || println(io,
+                "its own `main()` — never add one to `[compile] source_files`.\n")
+            capture_scratch && println(io)
+            for s in probe.scratch_sources
+                println(io, "- `$s`")
+            end
         end
         println(io, "\n## Regenerating (required on any version bump)\n")
         println(io, "```julia")
-        println(io, "using RepliBuildTooling")
+        println(io, "using RepliBuild, RepliBuild.SysConfigGen")
         println(io, "p = cmake_probe(\"<checkout>\";")
         println(io, "                name=\"$(probe.name)\",")
         argl = filter(a -> !startswith(a, "-DCMAKE_") && a != "-DBUILD_SHARED_LIBS=ON",
                       probe.cmake_args)
         println(io, "                args=[", join(map(a -> "\"$a\"", argl),
                                                    ",\n                      "), "])")
-        println(io, "capture_config(p, \"config\")")
+        println(io, "capture_config(p, \"config\"", layout === :auto ? "" : "; layout=:$layout",
+                    capture_scratch ? "; capture_scratch=true" : "", ")")
         println(io, "```\n")
         println(io, "Full cmake argument set used:\n")
         println(io, "```")
@@ -619,7 +794,7 @@ function toml_fragment(probe::CMakeProbe;
     clone_files = filter(f -> !startswith(f, config_rel * "/"), t.files)
     excludes = _collapse_excludes(clone_files, setdiff(probe.tree_sources, clone_files))
 
-    println(io, "# ── proposed by RepliBuildTooling.toml_fragment ─────────────────────────")
+    println(io, "# ── proposed by RepliBuild.SysConfigGen.toml_fragment ───────────────────")
     println(io, "# cmake $(probe.cmake_version), probed $(Dates.format(probe.probed_at, "yyyy-mm-dd")).")
     println(io, "# Target '$(t.name)' [$(t.kind)]: $(length(t.files)) TUs.")
     if uniform(t)

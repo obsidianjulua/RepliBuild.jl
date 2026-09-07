@@ -133,6 +133,12 @@ include(joinpath(@__DIR__, "test_c_generator_policies.jl"))
 
 include(joinpath(@__DIR__, "test_shim_header_guard.jl"))
 
+# ── STL force-TU default ctor + paren-aware Class::method split ──────────────
+# Library-free traces of the two Hub stl wrap defects; optional -O2 emission
+# probe needs clang++ and self-skips without it.
+
+include(joinpath(@__DIR__, "test_stl_extract.jl"))
+
 # ── Git dependency cache is version-aware (local git upstream; needs git) ────
 
 include(joinpath(@__DIR__, "test_dep_cache.jl"))

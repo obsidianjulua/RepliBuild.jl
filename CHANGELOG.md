@@ -2,6 +2,66 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### `capture_config` tells try_compile scratch from library code, and keeps a generated header's include form (2026-09-06)
+
+Two defects in `SysConfigGen.capture_config`, both surfaced harvesting
+SUNDIALS, both structural — reproduced on a hand-written cmake fixture with
+the library out of the picture (`test/test_sysconfiggen.jl`
+§"scratch classification + generated header layout", suite 61/61):
+
+- **cmake `try_compile` scratch was captured as generated library source.**
+  `check_c_source_compiles` hides its probe under `CMakeFiles/CMakeTmp/`,
+  which `_is_cmake_internal` already drops, but a hand-rolled `try_compile`
+  with its own bindir lands in plain sight — SUNDIALS' monotonic-timer probe
+  leaves `POSIX_TIMER_TEST/ltest.c`, six lines with its own `main()`. Added to
+  `[compile] source_files`, as the skill tells authors to do with generated
+  `.c`, it plants a `main` symbol in the shared object. `CMakeProbe` now
+  splits `generated_sources` from `scratch_sources` on one mechanical test —
+  does any target in `compile_commands.json` compile the file — and
+  `capture_config` skips the scratch, recording the skip in `SYSCONFIG.md`.
+  With no `compile_commands.json` there is no evidence, so nothing is
+  classified rather than guessed.
+
+- **Captured paths were flattened to basenames, breaking any library that
+  includes its config header under a subdirectory.** SUNDIALS generates
+  `include/sundials/sundials_config.h` and includes it as
+  `<sundials/sundials_config.h>` at 25 sites, so a flat `config/` with
+  `-Iconfig` resolved nothing. Files are now laid out under the deepest
+  build-tree `-I` root containing them, so the package reproduces the include
+  form upstream compiles with. `flatten::Bool` is replaced by
+  `layout::Symbol` (`:auto` default, `:flat`, `:build_tree`), and two files
+  landing on one destination is now a hard error instead of a `@warn` plus a
+  silent overwrite.
+
+`_rel_source` shares the layout derivation, so `[compile] source_files` names
+generated TUs at the path the capture actually wrote them to. Regression: the
+pcre2 harvest restages **byte-identical** (its build tree generates everything
+at the root, where `:auto` reduces exactly to basenames) and `packages/pcre2`
+`test.jl` is **77/77 from clean**.
+
+### STL default ctors survive `-O2`; `Class::method` split is paren-aware (2026-09-06)
+
+Wrapping a templates-only package at `-O2` (no user TU that named `T t;`)
+left `create_std_map_*` memset-zeroing a live `std::map`. Two defects,
+both in `Compiler.jl`, both gated by `test/test_stl_extract.jl`:
+
+- The generated force TU took `T&` and never default-constructed.
+  `template class T;` does not emit the header-inline default ctor as a
+  standalone symbol, and `noinline` on the force function is not enough —
+  clang still inlines `vector()` *into* that caller at `-O2`. The force
+  body now does `T c;`, and that generated TU alone compiles `-fno-inline`.
+- `extract_stl_method_symbols` split demangled `Class::method(args)` on
+  the last `::` at angle-bracket depth 0, so `std::allocator` in constructor
+  arguments stole the split. The scan is paren-aware now. Only empty-paren
+  `T()` classifies as `constructor` (the factory calls `T()` with no extra
+  args). Iterator `erase` overloads, which the old split happened to drop,
+  are skipped so `CppMap.delete!` keeps `erase(K const&)`.
+
+Hub `packages/stl` rebuilt at `-O2` with its odr-use / `-O0` pin removed:
+`test_deep.jl` **35/35**.
+
 ## v4.0.0 (2026-09-05)
 
 **RepliBuild runs on Windows.** Target is `x86_64-w64-windows-gnu` — mingw under
