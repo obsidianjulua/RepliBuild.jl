@@ -255,6 +255,14 @@ _posix(p::AbstractString) = Sys.iswindows() ? replace(String(p), '\\' => '/') : 
 _join_rel(a::AbstractString, b::AbstractString) =
     isempty(a) ? String(b) : string(a, "/", b)
 
+# The identity of a capture DESTINATION, for the collision guard in
+# `capture_config`. NTFS is case-insensitive, so `Config.h` and `config.h` are
+# one file there while being two distinct strings — the guard would pass and the
+# second `cp` would silently overwrite the first, which is the exact outcome it
+# exists to refuse. Host-conditional for the same reason `_posix` is: two POSIX
+# paths differing only in case really are two files.
+_dst_key(p::AbstractString) = Sys.iswindows() ? lowercase(_posix(p)) : String(p)
+
 # cmake writes its own scaffolding into the build tree: compiler-identification
 # probe sources under CMakeFiles/, and whatever FetchContent pulled into _deps/.
 # Both match the extension whitelist below, and neither is ours to capture.
@@ -331,9 +339,15 @@ end
 function _rel_source(file::String, source_dir::String, build_dir::String,
                      config_rel::String, roots::Vector{String})
     if startswith(file, source_dir * "/")
-        return file[length(source_dir)+2:end]
+        # ncodeunits, NOT length: `length` counts CHARACTERS and indexing is by
+        # BYTE, so one non-ASCII character anywhere in the prefix shifts every
+        # slice in this module by a byte — `C:/Users/José/bld` yields "/gen.c"
+        # for "gen.c", and two of them can land mid-codepoint and throw. The
+        # `startswith(…, prefix * "/")` above guarantees byte ncodeunits+1 is
+        # the separator, so ncodeunits+2 always starts a fresh character.
+        return file[ncodeunits(source_dir)+2:end]
     elseif startswith(file, build_dir * "/")
-        return _join_rel(config_rel, _capture_rel(file[length(build_dir)+2:end], roots))
+        return _join_rel(config_rel, _capture_rel(file[ncodeunits(build_dir)+2:end], roots))
     end
     return file
 end
@@ -376,7 +390,7 @@ function _translate_includes(sig::Vector{String}, source_dir::String,
         elseif ad == source_dir
             ""                              # the clone root; the resolver adds this
         elseif startswith(ad, source_dir * "/")
-            _join_rel(clone_rel, ad[length(source_dir)+2:end])
+            _join_rel(clone_rel, ad[ncodeunits(source_dir)+2:end])
         else
             continue                        # system / external dep, not ours to pin
         end
@@ -402,7 +416,7 @@ function _build_include_roots(dirs, build_dir::String)
         r = if ad == build_dir
             ""
         elseif startswith(ad, build_dir * "/")
-            ad[length(build_dir)+2:end]
+            ad[ncodeunits(build_dir)+2:end]
         else
             continue
         end
@@ -424,7 +438,7 @@ end
 function _capture_rel(rel::String, roots::Vector{String})
     for r in roots
         isempty(r) && return rel
-        startswith(rel, r * "/") && return rel[length(r)+2:end]
+        startswith(rel, r * "/") && return rel[ncodeunits(r)+2:end]
     end
     return basename(rel)
 end
@@ -541,7 +555,7 @@ function cmake_probe(source_dir::String;
             sig = _flag_signature(eargs)
             afile = _posix(abspath(file))
             startswith(afile, build_dir * "/") &&
-                push!(compiled_gen, afile[length(build_dir)+2:end])
+                push!(compiled_gen, afile[ncodeunits(build_dir)+2:end])
             # Union across every target, not just main_target: a generated header
             # can be reachable only from another target's include path, and it is
             # still the include form that decides where the file has to land.
@@ -658,18 +672,20 @@ function capture_config(probe::CMakeProbe, out_dir::String;
 
     mkpath(out_dir)
     written = String[]
-    claimed = Dict{String,String}()   # dst => the rel that got there first
+    # Keyed on the canonical destination — see `_dst_key`.
+    claimed = Dict{String,String}()   # canonical dst => the rel that got there first
     for rel in picked
         sub = layout === :flat       ? basename(rel) :
               layout === :build_tree ? rel :
                                        _capture_rel(rel, probe.include_roots)
         dst = joinpath(out_dir, sub)
-        if haskey(claimed, dst)
-            error("capture_config: '$(claimed[dst])' and '$rel' both map to " *
+        key = _dst_key(dst)
+        if haskey(claimed, key)
+            error("capture_config: '$(claimed[key])' and '$rel' both map to " *
                   "'$sub' under layout=:$layout. Copying would ship one under " *
                   "the other's name — re-run with layout=:build_tree.")
         end
-        claimed[dst] = rel
+        claimed[key] = rel
         mkpath(dirname(dst))
         cp(joinpath(probe.build_dir, rel), dst; force=true)
         chmod(dst, 0o644)

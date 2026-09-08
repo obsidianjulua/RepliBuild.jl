@@ -37,6 +37,11 @@ module Debug
 export debug_root, object_path, mlir_sources, has_object,
        thunks, mlir_body, disassemble, dwarf, walk
 
+# For `_gnu_objdump` only — see `_objdump` below. Debug depends on nothing else
+# in core, and this does not change that: it borrows one tool-discovery answer
+# rather than any build state.
+import ..Compiler
+
 """
     DebugText <: AbstractString
 
@@ -69,7 +74,16 @@ Base.show(io::IO, ::MIME"text/plain", t::DebugText) = print(io, t.text)
 # `objdump`/`llvm-dwarfdump` come from the same binutils/LLVM install the build
 # already requires; they are resolved at call time so a missing tool names
 # itself rather than failing this module's load.
-const _OBJDUMP  = "objdump"
+# GNU binutils specifically. `disassemble` passes `--disassemble=<symbol>`, GNU
+# spelling that llvm-objdump rejects outright ("unknown argument") — and in a
+# CLANG64 shell the bare name IS llvm-objdump, so this resolved to a tool that
+# could not run the command. Memoised because the probe shells out, and
+# resolved at first call rather than at load so a missing tool names itself.
+const _OBJDUMP_RESOLVED = Ref{String}("")
+function _objdump()::String
+    isempty(_OBJDUMP_RESOLVED[]) && (_OBJDUMP_RESOLVED[] = Compiler._gnu_objdump())
+    return _OBJDUMP_RESOLVED[]
+end
 const _DWARFDUMP = "llvm-dwarfdump"
 
 const _CAPTURE_HINT = """
@@ -277,9 +291,9 @@ function disassemble(path::AbstractString; symbol::AbstractString="", source::Bo
     isempty(symbol) || push!(args, "--disassemble=$symbol")
     push!(args, obj)
     out = try
-        read(`$_OBJDUMP $args`, String)
+        read(`$(_objdump()) $args`, String)
     catch e
-        error("`$_OBJDUMP` failed on $obj: $e")
+        error("`$(_objdump())` failed on $obj: $e")
     end
     # objdump prints the requested symbol's header even when it matched nothing,
     # so an unknown name yields a plausible-looking stub. Catch that here rather

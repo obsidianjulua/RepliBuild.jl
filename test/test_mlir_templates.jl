@@ -815,23 +815,23 @@ end
 
         # Emitted LLVM must carry the EH scaffolding: an indirect invoke
         # (callee is an SSA value), a landing pad, and the personality.
+        # Windows SEH cannot host that landing pad in JIT'd code (the handler
+        # RVA is not a valid EXCEPTION_ROUTINE); try_call/vcall lower to a
+        # plain call and libJLCS catches instead. See JlcsJIT.cpp.
         mod_emit = clone_module(mod)
         @test lower_to_llvm(mod_emit)
         llpath = tempname() * ".ll"
         @test emit_llvmir(mod_emit, llpath)
         ll = read(llpath, String); rm(llpath, force=true)
-        @test occursin(r"invoke[^\n]*%\d+\(ptr", ll)
-        @test occursin("landingpad", ll)
-        # The personality's NAME is target-dependent: Itanium unwinding calls it
-        # __gxx_personality_v0, mingw-w64 x86-64 unwinds with SEH and calls it
-        # __gxx_personality_seh0, and the Windows C++ runtime exports only the
-        # latter. Asserting the literal pinned the Linux spelling and failed on
-        # correct Windows output. MLIRNative.CXX_PERSONALITY is the one place
-        # that fact is written down — and test_cxx_personality.jl separately
-        # pins that the dialect's C++ agrees with it, so naming it here is not
-        # circular.
-        @test occursin(RepliBuild.MLIRNative.CXX_PERSONALITY, ll)
-        @test occursin("jlcs_catch_current_exception", ll)
+        if Sys.iswindows()
+            @test occursin("call", ll)
+            @test !occursin("landingpad", ll)
+        else
+            @test occursin(r"invoke[^\n]*%\d+\(ptr", ll)
+            @test occursin("landingpad", ll)
+            @test occursin(RepliBuild.MLIRNative.CXX_PERSONALITY, ll)
+            @test occursin("jlcs_catch_current_exception", ll)
+        end
 
         # JIT-execute against the fixture (libJLCS supplies the EH runtime
         # hooks; libstdc++ personality resolves from the loaded process).

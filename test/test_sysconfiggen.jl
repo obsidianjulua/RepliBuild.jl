@@ -74,6 +74,30 @@ const SCG = RepliBuild.SysConfigGen
     # No root evidence at all degrades to the historical basename, never to a
     # new answer.
     @test SCG._capture_rel("deep/dir/x.h", String[]) == "x.h"
+
+    # Prefix stripping is BYTE indexing, so it must be sized in bytes. `length`
+    # counts CHARACTERS: one non-ASCII character in the prefix shifts every
+    # slice by a byte (`C:/Users/José/bld` returned "/gen.c" for "gen.c") and
+    # two can land mid-codepoint and throw. Not hypothetical on Windows, where
+    # the build tree usually sits under the user profile.
+    let src = "/home/José/src", bld = "/home/José/bld"
+        @test SCG._rel_source("$src/lib/a.c", src, bld, "config", String[]) == "lib/a.c"
+        @test SCG._rel_source("$bld/gen.c", src, bld, "config", String[]) == "config/gen.c"
+        @test SCG._translate_includes(["-I$src/lib"], src, bld, "config", "deps/x") ==
+              ["deps/x/lib"]
+        @test SCG._build_include_roots(["$bld/inc"], bld) == ["inc"]
+        @test SCG._capture_rel("héader/cfg.h", ["héader"]) == "cfg.h"
+    end
+
+    # A capture destination's IDENTITY is the filesystem's, not the string's.
+    # NTFS folds case, so `Config.h` and `config.h` are one file there — keying
+    # the collision guard on the literal path let the second `cp` overwrite the
+    # first, silently, which is what the guard exists to refuse. Asserted as the
+    # invariant (`== Sys.iswindows()`), not as one host's answer.
+    @test (SCG._dst_key("/out/Config.h") == SCG._dst_key("/out/config.h")) ==
+          Sys.iswindows()
+    # Distinct names stay distinct on both.
+    @test SCG._dst_key("/out/a.h") != SCG._dst_key("/out/b.h")
 end
 
 # -- CMake harvest end-to-end, gated on cmake being installed ---------------

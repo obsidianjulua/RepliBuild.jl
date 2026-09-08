@@ -200,6 +200,12 @@ include(joinpath(TEST_DIR, "test_mlir_templates.jl"))
 
 include(joinpath(TEST_DIR, "callback_test", "test_exceptions.jl"))
 
+# ── 5b. JIT unwind after a prior engine was destroyed ────────────────────────
+# Self-contained (tiny clang++ fixture). Pins the Windows COFF bug where
+# RuntimeDyld fed .pdata to __register_frame and teardown poisoned libunwind
+# so the next throw through a live JIT frame aborted with "pc not in table".
+include(joinpath(TEST_DIR, "test_jit_unwind.jl"))
+
 # ── 6. JLCS dialect invariant probes ─────────────────────────────────────────
 # Definitive-trace probes that push specific dialect concerns (op arity
 # invariants, dead-producer ops) through parse → lower → emit and record the

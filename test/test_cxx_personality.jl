@@ -19,6 +19,7 @@
 # behavioural: the point is to catch the two definitions drifting apart.
 
 using Test
+using Libdl
 using RepliBuild
 
 const _SEH = "__gxx_personality_seh0"
@@ -78,5 +79,37 @@ end
         @test occursin("CXX_PERSONALITY", gen)
         # A literal here would silently win over the constant on Windows.
         @test !occursin("@$_V0", gen)
+    end
+
+    @testset "the host's C++ runtime actually exports it" begin
+        # Everything above reads SOURCE, which cannot see two things. A stale
+        # `libJLCS.dll` — a live scenario, not a hypothetical (a worktree with
+        # no rebuild, an MLIR bump) — passes every assertion above while the
+        # loaded dialect emits a different name. And the whole reason this
+        # constant is platform-keyed is that a runtime may not EXPORT the name
+        # we chose; only the runtime can answer that.
+        #
+        # Asked of the C++ runtime, the way JITManager asks it — NOT of
+        # libJLCS's own handle: on PE `dlsym` consults only that module's export
+        # directory, and the personality is supplied by the C++ runtime, so
+        # libJLCS answers UNRESOLVED for every spelling and would prove nothing.
+        candidates = Sys.iswindows() ? ("libc++.dll", "libstdc++-6.dll") :
+                     Sys.isapple()   ? ("libc++.1.dylib", "libc++.dylib") :
+                                       ("libstdc++.so.6", "libstdc++.so")
+        h = nothing
+        for c in candidates
+            h = Libdl.dlopen(c, Libdl.RTLD_LAZY; throw_error=false)
+            h === nothing || break
+        end
+        if h === nothing
+            @info "no C++ runtime among $(join(candidates, ", ")) — skipping the runtime check"
+        else
+            @test Libdl.dlsym(h, Symbol(RepliBuild.MLIRNative.CXX_PERSONALITY);
+                              throw_error=false) !== nothing
+            # Negative control: the OTHER spelling is the one that must be
+            # absent on this host, or the constant is not doing any work.
+            other = RepliBuild.MLIRNative.CXX_PERSONALITY == _SEH ? _V0 : _SEH
+            @test Libdl.dlsym(h, Symbol(other); throw_error=false) === nothing
+        end
     end
 end

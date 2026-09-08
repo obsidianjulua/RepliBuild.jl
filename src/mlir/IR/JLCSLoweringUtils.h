@@ -15,6 +15,13 @@
 namespace mlir {
 namespace jlcs {
 
+// WinEH will not emit .pdata without uwtable. Clang sets async (2).
+inline void setUwtableAsync(LLVM::LLVMFuncOp func) {
+  if (!func.getUwtableKindAttr())
+    func.setUwtableKindAttr(LLVM::UWTableKindAttr::get(
+        func.getContext(), LLVM::uwtable::UWTableKind::Async));
+}
+
 /// Helper function to load a field from a struct by byte offset.
 /// Used for accessing fields in C-ABI structs and ArrayView descriptors.
 ///

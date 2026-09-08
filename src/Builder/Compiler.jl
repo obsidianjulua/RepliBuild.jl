@@ -1317,7 +1317,13 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     # already exports explicitly (pcre2, via PCRE2_EXP_DECL) keeps the surface
     # it chose and the shims simply join it; forcing the flag there would
     # publish every internal symbol instead.
-    if Sys.iswindows()
+    #
+    # Gated on `wrap.macros` before the scan, not just on Windows:
+    # `_pe_export_intent` reads every line of every IR file, and with no macros
+    # configured there is no shim to find — 36 MB of pcre2 IR walked on every
+    # link to conclude nothing. `generate_macro_shims` returns early on the same
+    # emptiness test, so the two cannot disagree about whether a shim exists.
+    if Sys.iswindows() && !isempty(config.wrap.macros)
         intent = _pe_export_intent(files)
         if intent.saw_shim && !intent.saw_foreign_export
             push!(cmd_args, "-Wl,--export-all-symbols")
@@ -3117,6 +3123,46 @@ function _is_gnu_binutils(version_out::AbstractString)::Bool
     occursin("GNU Binutils", version_out) ||
         occursin(r"(?m)^GNU (objdump|readelf)\b", version_out)
 end
+
+"""
+    _gnu_objdump() -> String
+
+A GNU binutils `objdump`, or the bare name when none can be identified.
+
+Separate from `_dwarf_dumper` because that one may legitimately answer
+`readelf` (it does on Linux, where readelf is preferred), and readelf cannot
+disassemble. Same trap underneath, though: `Debug.disassemble` passes
+`--disassemble=<symbol>`, which is GNU spelling that llvm-objdump rejects
+outright (`unknown argument`), and in a CLANG64 shell the bare `objdump` IS
+llvm-objdump. `_is_gnu_binutils` is what actually decides; the GCC-flavoured
+MSYS2 trees are named because that is where a GNU one lives on Windows.
+
+Falls back to the bare name rather than `nothing` so a machine with no objdump
+at all fails by naming the tool, which is what the caller reports.
+"""
+function _gnu_objdump()::String
+    candidates = String[]
+    env_override = get(ENV, "REPLIBUILD_OBJDUMP", "")
+    isempty(env_override) || push!(candidates, env_override)
+    push!(candidates, "objdump")
+    if Sys.iswindows()
+        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
+        for envdir in ("mingw64", "ucrt64", "mingw32")
+            push!(candidates, joinpath(msys_root, envdir, "bin", "objdump.exe"))
+        end
+    end
+    for tool in candidates
+        (out, ec) = try
+            BuildBridge.execute(tool, ["--version"])
+        catch
+            ("", 1)
+        end
+        ec == 0 || continue
+        _is_gnu_binutils(out) && return tool
+    end
+    return "objdump"
+end
+
 
 """
     _dwarf_dumper() -> NamedTuple or nothing

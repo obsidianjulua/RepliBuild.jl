@@ -8,7 +8,6 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Support.h"
-#include "mlir/CAPI/ExecutionEngine.h"
 #include "mlir-c/IR.h"
 #include "mlir-c/BuiltinTypes.h"
 #include "mlir-c/ExecutionEngine.h"
@@ -18,7 +17,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVMIR/Export.h"
 
@@ -31,6 +29,7 @@
 
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
@@ -40,11 +39,14 @@
 #include "llvm/TargetParser/Host.h"
 
 #include "JLCSDialect.h"
+#include "JLCSLoweringUtils.h"
+#include "impl/JlcsJIT.h"
 
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
+#include <string>
 
 using namespace mlir;
 
@@ -221,6 +223,8 @@ static bool moduleTypesAreLLVMCompatible(mlir::ModuleOp modOp) {
 }
 
 extern "C" {
+
+    void jlcs_set_pending_exception(const char *msg);
 
     // --- Dialect & Context Management ---
 
@@ -424,6 +428,7 @@ extern "C" {
                 auto personalityRef = mlir::FlatSymbolRefAttr::get(
                     mod.getContext(), kCxxPersonality);
                 funcOp.setPersonalityAttr(personalityRef);
+                mlir::jlcs::setUwtableAsync(funcOp);
             }
         });
 
@@ -471,51 +476,21 @@ extern "C" {
             return {nullptr};
         }
 
-        // 3. Configure JIT Options
-        mlir::ExecutionEngineOptions options;
-        options.transformer = [optLevel](llvm::Module *m) {
-            return llvm::Error::success();
-        };
-        options.jitCodeGenOptLevel = (llvm::CodeGenOptLevel)optLevel;
-
-        // JIT introspection listeners. MLIR turns BOTH on by default
-        // (ExecutionEngineOptions in mlir/ExecutionEngine/ExecutionEngine.h) —
-        // they are not registered by anything in this file, they arrive with
-        // MLIRExecutionEngine, which CMakeLists links --whole-archive.
-        //
-        //   GDB  — free, no filesystem side effects, and it is what lets gdb
-        //          resolve a thunk by its mangled name and step the generated
-        //          MLIR. Always on.
-        //   perf — writes a jitdump per PROCESS to $JITDUMPDIR/.debug/jit
-        //          (LLVM hardcodes the ".debug/jit" suffix; without JITDUMPDIR
-        //          it lands in $HOME). Nothing rotates or expires it: 718
-        //          directories / 164MB had accumulated unnoticed by 2026-08-08,
-        //          because the default is on and nobody knew. Opt-in now.
-        options.enableGDBNotificationListener = true;
-        options.enablePerfNotificationListener =
-            (std::getenv("REPLIBUILD_JIT_PROFILE") != nullptr);
-
-        // Object cache. `dumpObject` has been a parameter of this function — and
-        // of Julia's create_jit — since the JIT was written, threaded all the
-        // way down and then dropped on the floor here, so the knob read as
-        // supported and did nothing. It is the precondition for
-        // jlcs_dump_object below: MLIR only retains the emitted object if the
-        // cache exists at engine-creation time, and it cannot be turned on
-        // afterwards. Off by default because the cache holds every emitted
-        // object for the engine's lifetime.
-        options.enableObjectDump = dumpObject;
-
-        // 4. Register shared libraries for symbol resolution
+        // 3. Shared libraries for symbol resolution.
         SmallVector<StringRef, 4> libPaths;
         for (int i = 0; i < numLibs; i++) {
             if (sharedLibPaths[i]) {
                 libPaths.push_back(sharedLibPaths[i]);
             }
         }
-        options.sharedLibPaths = libPaths;
 
-        // 5. Create Engine
-        auto engineOrError = mlir::ExecutionEngine::create(modOp, options);
+        // 4. Create the engine. Not mlir::ExecutionEngine::create — that
+        // hardcodes RuntimeDyld + SectionMemoryManager with no hook, and on
+        // COFF that combination never calls RtlAddFunctionTable. JlcsJIT.cpp
+        // owns the LLJIT so Windows can register .pdata. dumpObject still has
+        // to be requested here: the object cache cannot be enabled afterwards.
+        auto engineOrError =
+            jlcsEngineCreate(modOp, optLevel, dumpObject, libPaths);
 
         if (!engineOrError) {
             // takeError() consumes it — an llvm::Error that is neither consumed
@@ -527,11 +502,11 @@ extern "C" {
             return {nullptr};
         }
 
-        return wrap(engineOrError->release());
+        return MlirExecutionEngine{*engineOrError};
     }
 
     void jlcs_destroy_jit(MlirExecutionEngine jit) {
-        mlirExecutionEngineDestroy(jit);
+        jlcsEngineDestroy(static_cast<JlcsExecutionEngine *>(jit.ptr));
     }
 
     // Register `name` -> `addr` for symbol resolution.
@@ -552,9 +527,9 @@ extern "C" {
     // null is how a caller says "there is no engine yet"; it is the honest
     // spelling of what the old code did unconditionally.
     void jlcs_jit_register_symbol(MlirExecutionEngine jit, const char *name, void *addr) {
-        if (unwrap(jit) != nullptr) {
-            mlirExecutionEngineRegisterSymbol(
-                jit, mlirStringRefCreateFromCString(name), addr);
+        if (jit.ptr != nullptr) {
+            jlcsEngineRegisterSymbol(static_cast<JlcsExecutionEngine *>(jit.ptr),
+                                     name, addr);
             return;
         }
         llvm::sys::DynamicLibrary::AddSymbol(name, addr);
@@ -572,11 +547,11 @@ extern "C" {
         if (!path || !*path) {
             return false;
         }
-        mlir::ExecutionEngine *engine = unwrap(jit);
+        auto *engine = static_cast<JlcsExecutionEngine *>(jit.ptr);
         if (!engine) {
             return false;
         }
-        engine->dumpToObjectFile(path);
+        jlcsEngineDumpToObjectFile(engine, path);
         uint64_t size = 0;
         if (llvm::sys::fs::file_size(path, size)) {
             return false;   // non-zero error code: absent or unreadable
@@ -585,14 +560,37 @@ extern "C" {
     }
 
     void *jlcs_jit_lookup(MlirExecutionEngine jit, const char *name) {
-        MlirStringRef nameRef = mlirStringRefCreateFromCString(name);
-        return mlirExecutionEngineLookup(jit, nameRef);
+        auto *engine = static_cast<JlcsExecutionEngine *>(jit.ptr);
+        if (!engine)
+            return nullptr;
+        auto result = jlcsEngineLookup(engine, name);
+        if (!result) {
+            llvm::consumeError(result.takeError());
+            return nullptr;
+        }
+        return *result;
     }
 
     bool jlcs_jit_invoke(MlirExecutionEngine jit, const char *name, void **args) {
-        MlirStringRef funcName = mlirStringRefCreateFromCString(name);
-        MlirLogicalResult res = mlirExecutionEngineInvokePacked(jit, funcName, args);
-        return mlirLogicalResultIsSuccess(res);
+        auto *engine = static_cast<JlcsExecutionEngine *>(jit.ptr);
+        if (!engine)
+            return false;
+        // Match mlirExecutionEngineInvokePacked: prefix _mlir_ciface_, then
+        // invokePacked wraps that as _mlir__mlir_ciface_<name>.
+        std::string ifaceName = std::string("_mlir_ciface_") + name;
+        try {
+            if (llvm::Error err = jlcsEngineInvokePacked(engine, ifaceName, args)) {
+                llvm::consumeError(std::move(err));
+                return false;
+            }
+            return true;
+        } catch (const std::exception &e) {
+            jlcs_set_pending_exception(e.what());
+            return true;
+        } catch (...) {
+            jlcs_set_pending_exception("unknown C++ exception");
+            return true;
+        }
     }
 
     // --- Self-Test: one-shot JIT diagnostic ---
@@ -646,30 +644,67 @@ extern "C" {
             return 3;
         }
 
-        // 6. Create ExecutionEngine
-        mlir::ExecutionEngineOptions opts;
-        opts.jitCodeGenOptLevel = llvm::CodeGenOptLevel::None;
-        opts.transformer = [](llvm::Module *) { return llvm::Error::success(); };
-
-        auto maybeEngine = mlir::ExecutionEngine::create(*mod, opts);
+        // 6. Create the dialect-owned JIT (same path as jlcs_create_jit)
+        auto maybeEngine = jlcsEngineCreate(*mod, /*optLevel=*/0,
+                                            /*dumpObject=*/false, {});
         if (!maybeEngine) {
             llvm::errs() << "[selftest] ExecutionEngine::create failed: "
                          << maybeEngine.takeError() << "\n";
             return 3;
         }
-        auto engine = std::move(*maybeEngine);
+        JlcsExecutionEngine *engine = *maybeEngine;
 
-        // 7. invokePacked — the crash site
+        // 7. invokePacked — the crash site. Direct packed wrapper `_mlir_add`,
+        // same as mlir::ExecutionEngine::invokePacked("add").
         void *argPtrs[] = { &a, &b, result };
-        if (auto err = engine->invokePacked("add", argPtrs)) {
+        if (auto err = jlcsEngineInvokePacked(engine, "add", argPtrs)) {
             llvm::errs() << "[selftest] invokePacked error: " << err << "\n";
+            jlcsEngineDestroy(engine);
             return 4;
         }
+        jlcsEngineDestroy(engine);
 
         return 0;  // success
     }
 
     // --- Exception Handling C API ---
+
+    // Catch C++ exceptions in libJLCS rather than in JIT'd landing pads.
+    // On Windows SEH, an in-JIT EXCEPTION_ROUTINE at an ADDR32NB stub is not
+    // a valid handler (Windows jumps into .xdata and AVs). The throw still
+    // walks JIT frames via RtlAddFunctionTable'd .pdata unwind codes, then
+    // lands here — a real DLL frame with linked unwind info.
+    static void jlcs_guard_catch() {
+        try {
+            throw;
+        } catch (const std::exception& e) {
+            jlcs_set_pending_exception(e.what());
+        } catch (...) {
+            jlcs_set_pending_exception("unknown C++ exception");
+        }
+    }
+
+    int32_t jlcs_guard_i32(int32_t (*fn)(void **), void **args) {
+        try { return fn(args); } catch (...) { jlcs_guard_catch(); return 0; }
+    }
+    int64_t jlcs_guard_i64(int64_t (*fn)(void **), void **args) {
+        try { return fn(args); } catch (...) { jlcs_guard_catch(); return 0; }
+    }
+    float jlcs_guard_f32(float (*fn)(void **), void **args) {
+        try { return fn(args); } catch (...) { jlcs_guard_catch(); return 0; }
+    }
+    double jlcs_guard_f64(double (*fn)(void **), void **args) {
+        try { return fn(args); } catch (...) { jlcs_guard_catch(); return 0; }
+    }
+    void *jlcs_guard_ptr(void *(*fn)(void **), void **args) {
+        try { return fn(args); } catch (...) { jlcs_guard_catch(); return nullptr; }
+    }
+    void jlcs_guard_void(void (*fn)(void **), void **args) {
+        try { fn(args); } catch (...) { jlcs_guard_catch(); }
+    }
+    void jlcs_guard_sret(void (*fn)(void *, void **), void *sret, void **args) {
+        try { fn(sret, args); } catch (...) { jlcs_guard_catch(); }
+    }
 
     void jlcs_set_pending_exception(const char* msg) {
         if (msg) {

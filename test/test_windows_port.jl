@@ -2,10 +2,13 @@
 # test/test_windows_port.jl — host-format leftovers the punch list still named
 # after the Windows gate opened.
 #
-# No toolchain required. These are the silent-wrong or silent-ignore classes
-# a Hub rebuild would otherwise rediscover: library extension, system-header
-# provenance, GNU-vs-LLVM dumper identity, the empty-DWARF diagnostic, path
-# escaping in wrap_basic, and LLVM_CONFIG without `.exe`.
+# No toolchain required — one testset shells out to `objdump --version`, and
+# self-skips its assertion when there is no objdump at all. These are the
+# silent-wrong or silent-ignore classes a Hub rebuild would otherwise
+# rediscover: library extension, system-header provenance, GNU-vs-LLVM dumper
+# identity (and which objdump `Debug` disassembles with), the empty-DWARF
+# diagnostic, path escaping in wrap_basic, LLVM_CONFIG without `.exe`, and
+# whether a shim's dllexport costs the library its auto-export.
 
 using Test
 using Libdl
@@ -80,6 +83,32 @@ const LE = RepliBuild.LLVMEnvironment
         @test !C._is_gnu_binutils("LLVM version 22.1.8\n  compatible with GNU objdump")
         @test !C._is_gnu_binutils("llvm-objdump, compatible with GNU objdump")
         @test !C._is_gnu_binutils("")
+    end
+
+    @testset "the objdump Debug disassembles with is GNU, not llvm-objdump" begin
+        # `Debug.disassemble` passes `--disassemble=<symbol>` — GNU spelling.
+        # llvm-objdump answers `unknown argument` to it, and in a CLANG64 shell
+        # the bare name IS llvm-objdump, so the bare name is not a safe default
+        # here even though `objdump -p` happens to work on both.
+        tool = C._gnu_objdump()
+        @test !isempty(tool)
+        @test occursin("objdump", lowercase(basename(tool)))
+        # Debug must not resolve it independently — one answer, one trap closed.
+        @test RepliBuild.Debug._objdump() == tool
+
+        # Whatever it picked has to PASS the identity test, not merely exist.
+        # Skips only when the machine has no objdump at all, which is the one
+        # case `_gnu_objdump` cannot improve on.
+        out, ec = try
+            RepliBuild.BuildBridge.execute(tool, ["--version"])
+        catch
+            ("", 1)
+        end
+        if ec == 0
+            @test C._is_gnu_binutils(out)
+        else
+            @info "no objdump on this machine — skipping the GNU identity check"
+        end
     end
 
     @testset "empty-DWARF guard names the tool, not readelf_tool" begin
@@ -203,6 +232,35 @@ const LE = RepliBuild.LLVMEnvironment
             @test err !== nothing
             @test occursin("libJLCS", err)
             @test occursin("jlcs_catch_current_exception", err)
+        end
+    end
+
+    @testset "the Windows guard set refuses a width it cannot carry" begin
+        # Windows routes every thunk return through libJLCS's `jlcs_guard_*`,
+        # because an in-JIT landing pad AVs under SEH (JlcsJIT.cpp). That set is
+        # i32/i64/f32/f64/ptr — but `isprimitivetype` also admits Int128, and
+        # Compiler's C type map produces exactly that for `__int128`. The old
+        # `else => jlcs_guard_i64` therefore called a 16-byte return through an
+        # `int64_t (*)(void **)` and truncated it with no error, on Windows only.
+        #
+        # Generating the body is the whole test — the refusal IS the generated
+        # body, so it raises before the null fptr could be called. Windows-only
+        # on purpose: off Windows there is no guard path to refuse anything, and
+        # generating the direct-call body would then invoke that null pointer.
+        if Sys.iswindows()
+            msg = try
+                RepliBuild.JITManager._invoke_call(Ptr{Cvoid}(0), Int128, Ptr{Cvoid}[])
+                nothing
+            catch err
+                sprint(showerror, err)
+            end
+            @test msg !== nothing
+            @test occursin("guard", msg)
+            @test occursin("Int128", msg)
+            # The widths it CAN carry must not have been caught by the same net.
+            @test occursin("jlcs_guard", msg)
+        else
+            @info "not Windows — no guard path exists here to refuse a width"
         end
     end
 
