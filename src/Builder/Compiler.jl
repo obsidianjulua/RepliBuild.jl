@@ -1236,6 +1236,41 @@ end
 # =============================================================================
 
 """
+    _pe_export_intent(ir_files) -> (; saw_shim, saw_foreign_export)
+
+Who, if anyone, asked for an explicit PE export.
+
+On PE a DLL keeps mingw's auto-export only while NOTHING is explicitly
+exported; one `dllexport` anywhere switches the whole image to explicit-only.
+`generate_macro_shims` emits `__declspec(dllexport)` on Windows — it has to, or
+no shim reaches the export directory — which makes RepliBuild capable of
+erasing the API of a library that exports nothing of its own. This is the
+question that decides.
+
+Read off the IR rather than guessed: `dllexport` is a linkage specifier LLVM
+prints on the defining line, beside the symbol name, so one pass settles both
+"is anything exported" and "is it only ours". Covers the LTO path too, where
+every TU has already been merged into one module and a filename test would not.
+"""
+function _pe_export_intent(ir_files::Vector{String})
+    saw_shim = false
+    saw_foreign_export = false
+    for f in ir_files
+        isfile(f) || continue
+        for line in eachline(f)
+            is_shim = occursin("replibuild_shim_", line)
+            is_shim && (saw_shim = true)
+            if occursin("dllexport", line) && !is_shim
+                saw_foreign_export = true
+            end
+            (saw_shim && saw_foreign_export) &&
+                return (; saw_shim, saw_foreign_export)
+        end
+    end
+    return (; saw_shim, saw_foreign_export)
+end
+
+"""
 Create shared library from LLVM IR.
 Returns path to library file.
 """
@@ -1267,6 +1302,27 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     ]
     append!(cmd_args, files)
     append!(cmd_args, ["-o", lib_path])
+
+    # A dllexport ANYWHERE turns mingw's auto-export off for the WHOLE image,
+    # and the macro-shim TU carries one on Windows now. For a library that
+    # exports nothing explicitly and relies on that default, ours alone would
+    # therefore ERASE its API: measured on a two-function probe DLL, the export
+    # table went from {lib_a, lib_b, shim} to {shim}. `--export-all-symbols` is
+    # what the auto-export default expands to, so asking for it back reproduces
+    # exactly the set the link would have produced anyway — the CRT stays out,
+    # excluded by ld's own list, which is the property _pe_exported_names
+    # depends on.
+    #
+    # Only when WE are the ones introducing the dllexport. A library that
+    # already exports explicitly (pcre2, via PCRE2_EXP_DECL) keeps the surface
+    # it chose and the shims simply join it; forcing the flag there would
+    # publish every internal symbol instead.
+    if Sys.iswindows()
+        intent = _pe_export_intent(files)
+        if intent.saw_shim && !intent.saw_foreign_export
+            push!(cmd_args, "-Wl,--export-all-symbols")
+        end
+    end
 
     # Add library search paths
     for dir in config.link.link_dirs
@@ -1851,6 +1907,30 @@ function generate_macro_shims(config::RepliBuildConfig, cpp_files::Vector{String
         end
         println(io, "")
 
+        # A shim has to reach the wrapper's function list, and the two object
+        # formats name DIFFERENT mechanisms for that.
+        #
+        #   ELF — `visibility("default")` is load-bearing: a project built with
+        #   `-fvisibility=hidden` (box2d3) turns every shim local otherwise, and
+        #   the wrapper's `nm -g --defined-only` list loses all of them.
+        #
+        #   PE — export is OPT-IN and `visibility("default")` is INERT for it.
+        #   The shim was defined in the DLL and absent from the export
+        #   directory, which is the list the wrapper reads on Windows
+        #   (_pe_exported_names), so every `[wrap.macros]` entry silently
+        #   vanished from the generated module. Measured on Hub pcre2: 14 shims
+        #   defined by `nm -g`, 0 exported, 0 wrapped.
+        #
+        # Keyed on `_WIN32` rather than `Sys.iswindows()` because it is the
+        # COMPILER's target that decides, not the host running RepliBuild.
+        # `used` survives LTO internalization on both.
+        println(io, "#if defined(_WIN32)")
+        println(io, "#  define RB_SHIM_EXPORT __attribute__((used)) __declspec(dllexport)")
+        println(io, "#else")
+        println(io, "#  define RB_SHIM_EXPORT __attribute__((used, visibility(\"default\")))")
+        println(io, "#endif")
+        println(io, "")
+
         for (macro_name, def) in config.wrap.macros
             ret_type = get(def, "ret", "void")
             args = get(def, "args", String[])
@@ -1864,12 +1944,8 @@ function generate_macro_shims(config::RepliBuildConfig, cpp_files::Vector{String
                 push!(arg_names, pname)
             end
             
-            # Shims must stay in the .so's export table: the wrapper's function
-            # list comes from `nm -g --defined-only`, and projects built with
-            # -fvisibility=hidden (e.g. box2d3) would otherwise turn every shim
-            # local — silently dropping all [wrap.macros]. `used` additionally
-            # survives LTO internalization.
-            sig = "__attribute__((used, visibility(\"default\"))) $ret_type replibuild_shim_$macro_name($(join(param_strs, ", ")))"
+            # RB_SHIM_EXPORT — see the per-format reasoning above the loop.
+            sig = "RB_SHIM_EXPORT $ret_type replibuild_shim_$macro_name($(join(param_strs, ", ")))"
             println(io, "$sig {")
 
             # If "args" key is present → function-like macro, emit MACRO(args...)
@@ -2069,10 +2145,19 @@ function _classify_stl_method(method_sig::String, container_type::String="")::Un
         # (_Rb_tree_rebalance_for_erase). The paren-aware split made these
         # visible; they used to be dropped because `std::_Rb_tree_iterator`
         # stole the class/method `::`.
-        occursin(r"iterator"i, sig) && return nothing
+        #
+        # BOTH standard libraries' spellings, or the guard is Linux-only:
+        # libstdc++ writes `__normal_iterator` / `_Rb_tree_iterator`, libc++
+        # writes vector's as `__wrap_iter` — no "iterator" anywhere in it. map
+        # is caught either way (libc++'s is `__map_iterator`), so only vector
+        # diverged, and only into a thunk nothing currently calls; match both
+        # so the two hosts bind the same set rather than resting on that.
+        (occursin(r"iterator"i, sig) || occursin("__wrap_iter", sig)) && return nothing
         return ("erase", false)
     elseif startswith(sig, "insert(")
-        occursin(r"iterator"i, sig) && return nothing
+        # Same two spellings as erase above — libc++'s vector iterator is
+        # `__wrap_iter`, which `r"iterator"i` does not see.
+        (occursin(r"iterator"i, sig) || occursin("__wrap_iter", sig)) && return nothing
         return ("insert", false)
     elseif startswith(sig, "find(")
         return ("find", is_const)

@@ -314,7 +314,15 @@ end
     # member function mangles as `_ZNK`, so an `_ZN4mlir4jlcs` filter reports 8
     # of the 10 real offenders and silently drops both `ArrayViewType`
     # accessors — one of the two classes this probe exists for.
-    if Sys.which("nm") !== nothing
+    #
+    # ELF only. `nm -D` reads the DYNAMIC symbol table, which a PE does not
+    # have: it is a hard error ("File format has no dynamic symbol table"),
+    # not an empty answer, so on Windows this errored the testset instead of
+    # cross-checking anything. Nor is there anything here to find — PE binds
+    # every symbol at link time, so a DLL still carrying an unresolved
+    # `mlir::jlcs::` reference cannot link at all. The RTLD_NOW probe above is
+    # the whole of this check on Windows, and it is the stronger half.
+    if !Sys.iswindows() && Sys.which("nm") !== nothing
         syms = readlines(`nm -D --undefined-only $lib`)
         undef = filter(s -> occursin("4mlir4jlcs", s), syms)
         isempty(undef) || println("  → undefined jlcs symbols:\n    ",

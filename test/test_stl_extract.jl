@@ -90,6 +90,16 @@ end
     @test C._classify_stl_method(
         "erase(std::__detail::_Node_iterator<std::pair<int const, int>, false, false>)",
         "std::unordered_map<int, int>") === nothing
+    # libc++ spells vector's iterator `__wrap_iter` — no "iterator" in the name,
+    # so a `r"iterator"i` test alone is a guard that only holds on libstdc++.
+    @test C._classify_stl_method(
+        "erase(std::__1::__wrap_iter<int const*>)", "std::vector<int>") === nothing
+    @test C._classify_stl_method(
+        "erase(std::__1::__map_iterator<std::__1::__tree_iterator<int, void*, long long>>)",
+        "std::map<int, int>") === nothing
+    # ...and the key overload, the one CppMap.delete! actually calls, still binds
+    # under either spelling.
+    @test C._classify_stl_method("erase(int const&)", "std::map<int, int>") == ("erase", false)
 
     # Bucket begin/end(size_type) is not iterator begin/end().
     @test C._classify_stl_method("end() const", "std::map<int, int>") == ("end_", true)
@@ -121,6 +131,11 @@ end
 # Negative check from GENERATOR-stl-force-default-ctor.md: a templates-only
 # package at -O2, no user `T t;`, must still have standalone vector() / map()
 # and extract must bind them as constructor.
+
+# `full_signature` keeps the raw demangled text, and on libc++ that carries the
+# ABI tag `_classify_stl_method` strips before it decides anything. The tag is
+# not part of the method's identity, so drop it before asserting which ctor bound.
+_untag(sig::AbstractString) = replace(sig, r"\[abi:[^\]]*\]" => "")
 
 function _clangxx_available()::Bool
     try
@@ -171,9 +186,14 @@ end
 
         nm_out, nm_ec = RepliBuild.BuildBridge.execute("nm", ["-gC", "--defined-only", lib])
         @test nm_ec == 0
-        @test occursin(r"std::vector<int.*::vector\(\)", nm_out)
-        @test occursin(r"std::map<int, int.*::map\(\)", nm_out)
-        @test occursin(r"std::map<int, int.*::~map\(\)", nm_out)
+        # Spelled as an invariant, not as one standard library's answer: libc++
+        # puts an inline namespace on the class (`std::__1::vector`) and mangles
+        # a `_LIBCPP_HIDE_FROM_ABI` tag in after the method name
+        # (`vector[abi:nqe220108]()`), so a libstdc++-shaped literal goes red on
+        # Windows for a build that is in fact correct.
+        @test occursin(r"std::(?:__\w+::)?vector<int.*::vector(?:\[abi:[^\]]*\])?\(\)", nm_out)
+        @test occursin(r"std::(?:__\w+::)?map<int, int.*::map(?:\[abi:[^\]]*\])?\(\)", nm_out)
+        @test occursin(r"std::(?:__\w+::)?map<int, int.*::~map(?:\[abi:[^\]]*\])?\(\)", nm_out)
 
         methods = C.extract_stl_method_symbols(lib, ["std::vector<int>", "std::map<int, int>"])
         @test haskey(methods, "std::vector<int>")
@@ -181,11 +201,11 @@ end
 
         vctors = [m for m in methods["std::vector<int>"] if m["method"] == "constructor"]
         @test length(vctors) == 1
-        @test vctors[1]["full_signature"] == "vector()"
+        @test _untag(vctors[1]["full_signature"]) == "vector()"
 
         mctors = [m for m in methods["std::map<int, int>"] if m["method"] == "constructor"]
         @test length(mctors) == 1
-        @test mctors[1]["full_signature"] == "map()"
+        @test _untag(mctors[1]["full_signature"]) == "map()"
 
         @test any(m -> m["method"] == "destructor", methods["std::map<int, int>"])
     end

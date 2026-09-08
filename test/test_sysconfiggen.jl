@@ -217,7 +217,10 @@ else
 
         out = mktempdir()
         written = SCG.capture_config(probe, out)
-        rel = sort(map(w -> relpath(w, out), written))
+        # `written` are real filesystem paths, so they come back in the host
+        # separator; the layout under test is the '/'-spelled one. Assert the
+        # layout, not the host's punctuation.
+        rel = sort(map(w -> SCG._posix(relpath(w, out)), written))
 
         # (2) Layout: nested where the include form is nested, flat where it is
         # flat, in the same capture.

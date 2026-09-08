@@ -205,4 +205,47 @@ const LE = RepliBuild.LLVMEnvironment
             @test occursin("jlcs_catch_current_exception", err)
         end
     end
+
+    @testset "a shim's dllexport must not cost the library its auto-export" begin
+        # PE keeps mingw's auto-export only while NOTHING is explicitly
+        # exported; one `dllexport` anywhere flips the whole image to
+        # explicit-only. The macro shims now carry one (they must — see
+        # generate_macro_shims), so a library that exports nothing of its own
+        # needs `--export-all-symbols` handed back or its entire API leaves the
+        # export directory, which is the list the wrapper reads on Windows.
+        # Measured on a two-function probe DLL: {lib_a, lib_b, shim} → {shim}.
+        #
+        # `_pe_export_intent` is the decision and it reads IR text, so drive it
+        # with IR text — no compiler, and the assertions hold on either host.
+        mktempdir() do dir
+            shim = joinpath(dir, "shim.ll")
+            write(shim, "define dllexport i32 @replibuild_shim_X() {\n  ret i32 8\n}\n")
+            plain = joinpath(dir, "plain.ll")
+            write(plain, "define i32 @lib_a() {\n  ret i32 1\n}\n")
+            explicit = joinpath(dir, "explicit.ll")
+            write(explicit, "define dso_local dllexport ptr @pcre2_code_copy_8(ptr %0) {\n  ret ptr %0\n}\n")
+
+            # Ours is the only export → auto-export has to be restored.
+            i1 = C._pe_export_intent([plain, shim])
+            @test i1.saw_shim
+            @test !i1.saw_foreign_export
+
+            # The library exports on its own account → leave the surface it
+            # chose alone; forcing the flag would publish every internal.
+            i2 = C._pe_export_intent([explicit, shim])
+            @test i2.saw_shim
+            @test i2.saw_foreign_export
+
+            # No shims → nothing introduced, nothing to decide.
+            i3 = C._pe_export_intent([plain])
+            @test !i3.saw_shim
+            @test !i3.saw_foreign_export
+
+            # A dllexport on the shim's own line is OURS, not the library's —
+            # the whole point of matching per line rather than per file.
+            i4 = C._pe_export_intent([shim])
+            @test i4.saw_shim
+            @test !i4.saw_foreign_export
+        end
+    end
 end
