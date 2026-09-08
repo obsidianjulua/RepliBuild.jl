@@ -2,10 +2,13 @@
 # test/test_windows_port.jl — host-format leftovers the punch list still named
 # after the Windows gate opened.
 #
-# No toolchain required. These are the silent-wrong or silent-ignore classes
-# a Hub rebuild would otherwise rediscover: library extension, system-header
-# provenance, GNU-vs-LLVM dumper identity, the empty-DWARF diagnostic, path
-# escaping in wrap_basic, and LLVM_CONFIG without `.exe`.
+# No toolchain required — one testset shells out to `objdump --version`, and
+# self-skips its assertion when there is no objdump at all. These are the
+# silent-wrong or silent-ignore classes a Hub rebuild would otherwise
+# rediscover: library extension, system-header provenance, GNU-vs-LLVM dumper
+# identity (and which objdump `Debug` disassembles with), the empty-DWARF
+# diagnostic, path escaping in wrap_basic, LLVM_CONFIG without `.exe`, and
+# whether a shim's dllexport costs the library its auto-export.
 
 using Test
 using Libdl

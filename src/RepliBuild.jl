@@ -141,9 +141,11 @@ include("Wrapper/Cpp/STLWrappers.jl")
 # ThunkBuilder: bridge between Builder and IRGen (needs Wrapper.is_c_lto_safe)
 include("Builder/ThunkBuilder.jl")
 
-# Debug: static inspection of what the JIT emitted. Depends on nothing above —
-# it reads artifacts off disk — so it loads last and can be used against a
-# package this process never built.
+# Debug: static inspection of what the JIT emitted. It reads artifacts off disk,
+# so it loads last and can be used against a package this process never built.
+# Its one upward reference is `Compiler._gnu_objdump` — a tool-discovery answer,
+# not build state — which keeps that property: see Debug's `_objdump`, and the
+# llvm-objdump trap it exists to avoid.
 include("Debug/Debug.jl")
 
 # Import submodules for internal use

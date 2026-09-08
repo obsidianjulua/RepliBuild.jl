@@ -1317,7 +1317,13 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     # already exports explicitly (pcre2, via PCRE2_EXP_DECL) keeps the surface
     # it chose and the shims simply join it; forcing the flag there would
     # publish every internal symbol instead.
-    if Sys.iswindows()
+    #
+    # Gated on `wrap.macros` before the scan, not just on Windows:
+    # `_pe_export_intent` reads every line of every IR file, and with no macros
+    # configured there is no shim to find — 36 MB of pcre2 IR walked on every
+    # link to conclude nothing. `generate_macro_shims` returns early on the same
+    # emptiness test, so the two cannot disagree about whether a shim exists.
+    if Sys.iswindows() && !isempty(config.wrap.macros)
         intent = _pe_export_intent(files)
         if intent.saw_shim && !intent.saw_foreign_export
             push!(cmd_args, "-Wl,--export-all-symbols")
