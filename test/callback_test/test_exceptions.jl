@@ -16,8 +16,36 @@ JITManager = Base.get_extension(CallbackTest, :JITManager)
 # Access JITManager through RepliBuild
 using RepliBuild
 JM = RepliBuild.JITManager
+using RepliBuild.MLIRNative
 
 @testset "C++ Exception Handling" begin
+    # Prior JIT teardown used to poison process-wide unwind: RuntimeDyld
+    # fed COFF .pdata to libunwind's __register_frame, then
+    # __deregister_frame on destroy. The next throw through a live JIT
+    # frame then died with "libunwind: pc not in table". Standalone this
+    # file did not reproduce because nothing had been destroyed yet.
+    @testset "prior JIT teardown does not poison unwind" begin
+        ctx = create_context()
+        try
+            ir = """
+            module {
+              func.func @add(%a: i32, %b: i32) -> i32
+                  attributes {llvm.emit_c_interface} {
+                %r = arith.addi %a, %b : i32
+                return %r : i32
+              }
+            }
+            """
+            mod = parse_module(ctx, ir)
+            @test lower_to_llvm(mod)
+            jit = create_jit(mod)
+            @test jit != C_NULL
+            destroy_jit(jit)
+        finally
+            destroy_context(ctx)
+        end
+    end
+
     @testset "noexcept functions stay on ccall (fast path)" begin
         # safe_multiply is noexcept — should use ccall, not JIT
         @test CallbackTest.safe_multiply(3, 4) == 12

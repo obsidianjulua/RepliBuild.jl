@@ -183,9 +183,38 @@ at compile time (ccall requires a concrete type, not a TypeVar).
     end
     if isprimitivetype(T)
         # Scalar return: T ciface(void** args_ptr) — direct return
+        if Sys.iswindows()
+            # Catch in libJLCS; in-JIT landing pads AV under SEH (see JlcsJIT.cpp).
+            g = if T <: AbstractFloat && sizeof(T) == 4
+                :jlcs_guard_f32
+            elseif T <: AbstractFloat
+                :jlcs_guard_f64
+            elseif T <: Ptr
+                :jlcs_guard_ptr
+            elseif sizeof(T) <= 4
+                :jlcs_guard_i32
+            else
+                :jlcs_guard_i64
+            end
+            lib = MLIRNative.libJLCS
+            return :(ccall(($(QuoteNode(g)), $lib), $T,
+                           (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, inner_ptrs))
+        end
         return :(ccall(fptr, $T, (Ptr{Ptr{Cvoid}},), inner_ptrs))
     else
         # Struct return: void ciface(T* sret, void** args_ptr) — sret convention
+        if Sys.iswindows()
+            lib = MLIRNative.libJLCS
+            return quote
+                ret_buf = Ref{$T}()
+                GC.@preserve ret_buf begin
+                    ccall((:jlcs_guard_sret, $lib), Cvoid,
+                          (Ptr{Cvoid}, Ptr{$T}, Ptr{Ptr{Cvoid}}),
+                          fptr, ret_buf, inner_ptrs)
+                end
+                ret_buf[]
+            end
+        end
         return quote
             ret_buf = Ref{$T}()
             GC.@preserve ret_buf begin
@@ -325,7 +354,10 @@ end
         $(setup...)
         inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
         GC.@preserve $(preserve_args...) inner_ptrs begin
-            ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+            $(Sys.iswindows() ?
+                :(ccall((:jlcs_guard_void, $(MLIRNative.libJLCS)), Cvoid,
+                        (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, inner_ptrs)) :
+                :(ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)))
         end
         _check_pending_exception()
         return nothing

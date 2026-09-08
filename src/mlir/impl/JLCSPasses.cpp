@@ -230,8 +230,13 @@ struct VirtualCallOpLowering : public ConversionPattern {
         callOperands.push_back(adjustedThis);
         callOperands.append(args.begin() + 1, args.end());
 
-        if (!vcallOp.getMayThrow()) {
+        if (!vcallOp.getMayThrow()
+#ifdef _WIN32
+            || true
+#endif
+        ) {
             // Plain indirect call — the pre-existing lowering, unchanged.
+            // Windows: no in-JIT landing pad; see TryCallOpLowering.
             auto callOp = LLVM::CallOp::create(rewriter, loc, calleeType, callOperands);
 
             if (vcallOp.getResult()) {
@@ -264,6 +269,7 @@ struct VirtualCallOpLowering : public ConversionPattern {
         if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
             llvmFunc.setPersonalityAttr(
                 FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
+            setUwtableAsync(llvmFunc);
         } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
             funcOp->setAttr("llvm.personality",
                 FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
@@ -1071,6 +1077,34 @@ struct TryCallOpLowering : public ConversionPattern {
 
         retargetCallee(rewriter, moduleOp, calleeAttr.getValue(), shape, callResultTypes);
 
+#ifdef _WIN32
+        // In-JIT landing pads need a Win64 EXCEPTION_ROUTINE at an RVA in the
+        // JIT image. RuntimeDyld's ADDR32NB stub for __gxx_personality_seh0
+        // is not a valid SEH handler: Windows jumps into .xdata and AVs in a
+        // nested-exception loop. Catch in libJLCS (jlcs_guard_*) instead.
+        // This call still gets .pdata unwind codes so the throw can walk out.
+        auto callOp = LLVM::CallOp::create(rewriter, loc, callResultTypes,
+            calleeAttr.getValue(), ValueRange(coercedArgs));
+        if (auto argAttrs = byValArgAttrs(rewriter, shape))
+            callOp.setArgAttrsAttr(argAttrs);
+        if (needsSret) {
+            Value result = LLVM::LoadOp::create(rewriter, loc, sretStructType, sretSlot);
+            rewriter.replaceOp(op, result);
+        } else if (!resultTypeVec.empty()) {
+            if (coercedRetType) {
+                Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, coercedRetType, one);
+                LLVM::StoreOp::create(rewriter, loc, callOp.getResult(), slot);
+                Value result = LLVM::LoadOp::create(rewriter, loc, origRetStructType, slot);
+                rewriter.replaceOp(op, result);
+            } else {
+                rewriter.replaceOp(op, callOp.getResults());
+            }
+        } else {
+            rewriter.eraseOp(op);
+        }
+        return success();
+#endif
+
         // --- Ensure EH helper functions are declared ---
 
         // __gxx_personality_v0
@@ -1097,6 +1131,7 @@ struct TryCallOpLowering : public ConversionPattern {
         // Must handle both func.func (pre-lowering) and llvm.func (post-lowering)
         if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
             llvmFunc.setPersonalityAttr(FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
+            setUwtableAsync(llvmFunc);
         } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
             // Set as a generic attribute that FuncToLLVM will carry through
             funcOp->setAttr("llvm.personality",
@@ -1259,8 +1294,13 @@ struct DestructorCallOpLowering : public ConversionPattern {
         auto calleeAttr = dtorOp.getCalleeAttr();
         Value objPtr = adaptor.getObjPtr();
 
-        if (!dtorOp.getMayThrow()) {
-            // Direct call to the destructor symbol — void return, single arg
+        if (!dtorOp.getMayThrow()
+#ifdef _WIN32
+            || true
+#endif
+        ) {
+            // Direct call to the destructor symbol — void return, single arg.
+            // Windows: no in-JIT landing pad; see TryCallOpLowering.
             LLVM::CallOp::create(rewriter,
                 loc, TypeRange(), calleeAttr.getValue(), ValueRange({objPtr}));
 
@@ -1292,6 +1332,7 @@ struct DestructorCallOpLowering : public ConversionPattern {
         if (auto llvmFunc = op->getParentOfType<LLVM::LLVMFuncOp>()) {
             llvmFunc.setPersonalityAttr(
                 FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
+            setUwtableAsync(llvmFunc);
         } else if (auto funcOp = op->getParentOfType<func::FuncOp>()) {
             funcOp->setAttr("llvm.personality",
                 FlatSymbolRefAttr::get(rewriter.getContext(), kCxxPersonality));
@@ -1628,6 +1669,7 @@ struct LowerJLCSToLLVMPass
                 auto personalityRef = FlatSymbolRefAttr::get(
                     &getContext(), kCxxPersonality);
                 funcOp.setPersonalityAttr(personalityRef);
+                setUwtableAsync(funcOp);
             }
         });
     }
