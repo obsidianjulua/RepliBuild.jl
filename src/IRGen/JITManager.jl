@@ -185,16 +185,36 @@ at compile time (ccall requires a concrete type, not a TypeVar).
         # Scalar return: T ciface(void** args_ptr) — direct return
         if Sys.iswindows()
             # Catch in libJLCS; in-JIT landing pads AV under SEH (see JlcsJIT.cpp).
+            # Every width the guard set can actually carry, and NOTHING ELSE.
+            # `isprimitivetype` admits more than i32/i64/f32/f64/ptr — Compiler's
+            # C map turns `__int128`/`__uint128_t` into Int128/UInt128 at 16
+            # bytes — and the old `else => jlcs_guard_i64` called such a return
+            # through an `int64_t (*)(void **)` and TRUNCATED it, silently, on
+            # Windows only: Linux calls the thunk directly and returns all 128
+            # bits. A width this set cannot express has to say so.
             g = if T <: AbstractFloat && sizeof(T) == 4
                 :jlcs_guard_f32
-            elseif T <: AbstractFloat
+            elseif T <: AbstractFloat && sizeof(T) == 8
                 :jlcs_guard_f64
             elseif T <: Ptr
                 :jlcs_guard_ptr
             elseif sizeof(T) <= 4
                 :jlcs_guard_i32
-            else
+            elseif sizeof(T) == 8
                 :jlcs_guard_i64
+            else
+                nothing
+            end
+            if g === nothing
+                msg = "JIT invoke: the Windows guard set has no form for a " *
+                      "$(sizeof(T))-byte $T return. Windows routes every thunk " *
+                      "call through libJLCS's jlcs_guard_* so the frame that " *
+                      "catches is C++ — an in-JIT landing pad AVs under SEH, see " *
+                      "JlcsJIT.cpp — and that set is i32/i64/f32/f64/ptr. Falling " *
+                      "back to jlcs_guard_i64 would truncate this silently and " *
+                      "disagree with Linux, which calls the thunk directly. Add a " *
+                      "guard of this width to JLCSCAPIWrappers.cpp."
+                return :(error($msg))
             end
             lib = MLIRNative.libJLCS
             return :(ccall(($(QuoteNode(g)), $lib), $T,
@@ -755,20 +775,23 @@ function initialize_global_jit(binary_path::String)
             # the personality is `__gxx_personality_seh0` there, which is why
             # the symbol comes from CXX_PERSONALITY rather than a literal.
             cxxrt_handle = C_NULL
+            # Hoisted out of the `try` so the diagnostic below can name what was
+            # actually attempted.
+            cxxrt_candidates = if Sys.iswindows()
+                ("libc++.dll", "libstdc++-6.dll")
+            elseif Sys.isapple()
+                ("libc++.1.dylib", "libc++.dylib")
+            else
+                ("libstdc++.so.6", "libstdc++.so")
+            end
             try
-                candidates = if Sys.iswindows()
-                    ("libc++.dll", "libstdc++-6.dll")
-                elseif Sys.isapple()
-                    ("libc++.1.dylib", "libc++.dylib")
-                else
-                    ("libstdc++.so.6", "libstdc++.so")
-                end
-                for cand in candidates
+                for cand in cxxrt_candidates
                     cxxrt_handle = something(
                         Libdl.dlopen(cand, Libdl.RTLD_LAZY, throw_error=false), C_NULL)
                     cxxrt_handle == C_NULL || break
                 end
             catch; end
+            unresolved_eh = String[]
             for sym in (Symbol(CXX_PERSONALITY), :__cxa_begin_catch, :__cxa_end_catch)
                 ptr = C_NULL
                 if cxxrt_handle != C_NULL
@@ -780,8 +803,25 @@ function initialize_global_jit(binary_path::String)
                 end
                 if ptr != C_NULL
                     MLIRNative.register_symbol_global(string(sym), ptr)
+                else
+                    push!(unresolved_eh, string(sym))
                 end
             end
+            # A skipped registration used to be silent, and silence is the worst
+            # possible response here: ORC DEADLOCKS on an unresolved symbol
+            # rather than raising — the same class the Tier-1 slice pre-flight
+            # and `_lto_unresolved_symbols` exist for — so the next thunk that
+            # references one of these hangs the process with nothing said. Name
+            # it while there is still something to read. The cause is almost
+            # always a C++ runtime this list does not know, or a personality
+            # spelling the installed runtime does not export.
+            isempty(unresolved_eh) || @warn(
+                "JIT: C++ EH symbols unresolved. A thunk that needs one will HANG " *
+                "rather than fail — ORC does not raise on an unresolved symbol.",
+                missing_symbols = join(unresolved_eh, ", "),
+                runtimes_tried  = join(cxxrt_candidates, ", "),
+                runtime_opened  = cxxrt_handle == C_NULL ? "none" : "yes",
+                personality     = CXX_PERSONALITY)
 
             # 3. Load thunk manifest (dead-thunk elimination)
             # If the wrapper wrote a manifest of which function thunks it actually

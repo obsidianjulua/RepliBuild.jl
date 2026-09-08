@@ -235,6 +235,35 @@ const LE = RepliBuild.LLVMEnvironment
         end
     end
 
+    @testset "the Windows guard set refuses a width it cannot carry" begin
+        # Windows routes every thunk return through libJLCS's `jlcs_guard_*`,
+        # because an in-JIT landing pad AVs under SEH (JlcsJIT.cpp). That set is
+        # i32/i64/f32/f64/ptr — but `isprimitivetype` also admits Int128, and
+        # Compiler's C type map produces exactly that for `__int128`. The old
+        # `else => jlcs_guard_i64` therefore called a 16-byte return through an
+        # `int64_t (*)(void **)` and truncated it with no error, on Windows only.
+        #
+        # Generating the body is the whole test — the refusal IS the generated
+        # body, so it raises before the null fptr could be called. Windows-only
+        # on purpose: off Windows there is no guard path to refuse anything, and
+        # generating the direct-call body would then invoke that null pointer.
+        if Sys.iswindows()
+            msg = try
+                RepliBuild.JITManager._invoke_call(Ptr{Cvoid}(0), Int128, Ptr{Cvoid}[])
+                nothing
+            catch err
+                sprint(showerror, err)
+            end
+            @test msg !== nothing
+            @test occursin("guard", msg)
+            @test occursin("Int128", msg)
+            # The widths it CAN carry must not have been caught by the same net.
+            @test occursin("jlcs_guard", msg)
+        else
+            @info "not Windows — no guard path exists here to refuse a width"
+        end
+    end
+
     @testset "a shim's dllexport must not cost the library its auto-export" begin
         # PE keeps mingw's auto-export only while NOTHING is explicitly
         # exported; one `dllexport` anywhere flips the whole image to

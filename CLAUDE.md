@@ -810,9 +810,15 @@ has the setup and the full findings; these are the ones that bite a code change.
   be fixed before that was reachable: it called `ccall(:dlsym, …)` and **there
   is no `dlsym` symbol in a Windows process**.
 - **mingw unwinds with SEH** — `__gxx_personality_seh0`, and the Windows C++
-  runtime exports only that. The name is `MLIRNative.CXX_PERSONALITY`, one place,
-  pinned across the Julia/C++ boundary by `test_cxx_personality.jl`. Do not
-  hardcode `__gxx_personality_v0` in a test.
+  runtime exports only that (measured: `libc++.dll` and `libstdc++-6.dll` both
+  export `seh0` and neither exports `v0`). The name is ONE FACT in THREE
+  spellings — `kCxxPersonality` in `JLCSPasses.cpp` and in
+  `JLCSCAPIWrappers.cpp`, and `MLIRNative.CXX_PERSONALITY` on the Julia side —
+  which `test_cxx_personality.jl` holds equal, forbids any emission site from
+  hardcoding, and now also asks the RUNTIME to confirm, because everything else
+  it checks is source text and a stale `libJLCS.dll` passes all of it. Change
+  one spelling, change all three. Do not hardcode `__gxx_personality_v0` in a
+  test.
 - **LLP64: `long` is 4 bytes here, 8 on Unix64** — the one integer the word size
   does not settle. Wrapper got it right for free via `Clong`; the IRGen producers
   hardcoded `i64` in two hand-filled tables, and a tier disagreement raises
