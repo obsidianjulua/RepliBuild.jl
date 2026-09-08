@@ -163,15 +163,31 @@ const VI_SO = joinpath(VI, "julia", "libvi_test." * Libdl.dlext)
         rm(objdir; recursive=true, force=true)
         @test !D.has_object(VI)
 
-        # Fresh process with capture on. `timeout -s KILL` because a wedged
-        # julia ignores SIGTERM and this suite must not hang on it.
+        # Fresh process with capture on, killed rather than waited on forever:
+        # a wedged julia ignores SIGTERM and this suite must not hang on it.
+        #
+        # The kill is done FROM JULIA, not by wrapping the command in GNU
+        # `timeout`. On Windows that name resolves to System32's timeout.exe,
+        # which PAUSES for N seconds instead of running a command — it answered
+        # `ERROR: Invalid value for timeout (/T) specified`, the child never
+        # ran, and this testset failed for a reason with nothing to do with
+        # object capture. `kill` is TerminateProcess there and SIGKILL on Unix,
+        # so the "cannot be ignored" property the wrapper was chosen for holds
+        # on both.
         script = joinpath(VI, "verify.jl")
-        cmd = `timeout -s KILL 170 julia --project=$(dirname(@__DIR__)) $script`
+        cmd = `julia --project=$(dirname(@__DIR__)) $script`
         # addenv, NOT setenv: setenv REPLACES the environment, which strips PATH
         # and the depot and fails the child for reasons that look nothing like
         # the thing under test.
-        ok = success(pipeline(addenv(cmd, "REPLIBUILD_JIT_OBJDUMP" => "1"),
-                              stdout=devnull, stderr=devnull))
+        proc = run(pipeline(addenv(cmd, "REPLIBUILD_JIT_OBJDUMP" => "1"),
+                            stdout=devnull, stderr=devnull); wait=false)
+        killer = Timer(_ -> process_running(proc) && kill(proc, Base.SIGKILL), 170)
+        try
+            wait(proc)
+        finally
+            close(killer)
+        end
+        ok = success(proc)
         @test ok
 
         if ok
@@ -203,7 +219,13 @@ const VI_SO = joinpath(VI, "julia", "libvi_test." * Libdl.dlext)
             info = D.dwarf(VI; section="info")
             @test occursin("DW_AT_producer\t(\"MLIR\")", info)
             @test occursin(".mlir", info)
-            @test occursin(joinpath(VI, ".debug", "mlir"), info)   # comp_dir is absolute
+            # comp_dir is absolute. llvm-dwarfdump prints DW_AT_comp_dir as a C
+            # string LITERAL, so on Windows every separator arrives doubled
+            # (`DW_AT_comp_dir ("C:\Projects\...")`) and a native-spelling
+            # match finds nothing. Unescape first; identity off Windows, where
+            # a backslash is not a separator and must not be touched.
+            info_paths = Sys.iswindows() ? replace(info, "\\\\" => "\\") : info
+            @test occursin(joinpath(VI, ".debug", "mlir"), info_paths)
 
             # `.debug_info` holds the compile unit and NOTHING else — no
             # DW_TAG_subprogram, no variable DIEs. That is what LineTablesOnly

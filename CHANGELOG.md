@@ -128,20 +128,63 @@ three decisions in `test_windows_port.jl`.
   `mlir::jlcs::` reference cannot link. The RTLD_NOW probe above it is the whole
   check on Windows and is the stronger half. **16/16**, was 16 + 1 error.
 
+### Three more tests that stated Linux's answer, and the objdump behind one of them (2026-09-07)
+
+Each was red on Windows for a reason unrelated to what it tests, and each was
+already red before the pull.
+
+**`test_struct_abi` 28/2 → 30/30. Both failures were `long`.** §A's synthetic
+metadata declared a member `c_type = "long"` and asserted
+`!llvm.struct<packed (i64)>`; the generator emitted `packed (i32)`, which is
+CORRECT — `C_LONG_MLIR` is `i32` under LLP64. §C's C fixture was
+`typedef struct { long a, b, c; } B3;`, so 12 bytes on Windows, while the
+hand-written MLIR beside it said `!llvm.struct<(i64, i64, i64)>` and the Julia
+side read `NTuple{3,Int64}` — `b3_make(7, 8, 9)` came back
+`(0x8_00000007, 0xFFFFFFFF_00000009, 4)`, three 32-bit values read as 64-bit.
+The shape under test is MEMORY-class-by-sret, not the width of a `long`, so the
+fixture and its metadata now say `long long` (8 bytes on both hosts) and every
+trace describes one struct again. `test_llp64_widths.jl` owns the width
+question and is 68/68 precisely because it asserts the invariant instead.
+
+**`test_debug_inspection` 47/1 → 66/66, and 24 assertions that were never
+reached now run.** Three defects stacked:
+
+- The testset shelled to `` `timeout -s KILL 170 julia …` ``. On Windows that
+  name resolves to System32's `timeout.exe`, which PAUSES rather than running a
+  command (`ERROR: Invalid value for timeout (/T) specified`), so the child
+  never ran and everything behind `if ok` was skipped. The kill is done from
+  Julia now — `kill(proc, SIGKILL)` is TerminateProcess on Windows, so the
+  "cannot be ignored" property the wrapper was chosen for still holds.
+- With the child running, `Debug.disassemble` failed: it hardcoded `objdump`
+  and passes `--disassemble=<symbol>`, GNU spelling that llvm-objdump rejects
+  outright — and **in a CLANG64 shell the bare name IS llvm-objdump**, the trap
+  `_dwarf_dumper` already exists for, at a site nobody had converted. New
+  `Compiler._gnu_objdump()` screens with `_is_gnu_binutils` and knows MSYS2's
+  GCC-flavoured trees; `Debug` resolves through it (memoised) rather than
+  keeping a second answer. Kept separate from `_dwarf_dumper` on purpose: that
+  one may legitimately return `readelf`, which cannot disassemble.
+- Then `DW_AT_comp_dir`: llvm-dwarfdump prints it as a C string LITERAL, so on
+  Windows every separator arrives doubled and a native-spelling `occursin`
+  found nothing. Unescaped before matching, identity off Windows.
+
+Guarded in `test_windows_port.jl`: `_gnu_objdump` must return an objdump that
+PASSES `_is_gnu_binutils`, and `Debug._objdump()` must be the same answer.
+
 **Still red on Windows, and NOT from this work — each confirmed identical at
 `ddd2d7f` (the commit before the pull), fixtures and all:**
 
-- `test_struct_abi` **28/2** — §A wants `!llvm.struct<packed (i64)>` in emitted
-  IR; §C's B3 `{long,long,long}` trace returns `(0x8_00000007, 0xFFFFFFFF_00000009, 4)`
-  where it wants `(7, 8, 9)`. The bit pattern is three 32-bit values read as
-  64-bit, so this smells like the LLP64 `long` split the port already named —
-  but the fixture is hand-written MLIR at `i64`, so it is a lowering question,
-  not a width table one. Byte-identical at baseline.
-- `test_c_inprocess` **9/1** — the `[link] fallback = true` escape hatch writes
-  `#dbg_declare(...)` into `*_opt.ll` and the tool it then shells to rejects it
-  (`expected instruction opcode`). Debug-record vs intrinsic textual IR across
-  the two-LLVM boundary; the in-process path (the default) is green.
-- `test_debug_inspection` **47/1** — "object capture round trip".
+- `test_c_inprocess` **9/1** — and, unlike the rest of this entry, **NOT a
+  Windows property**. The `[link] fallback = true` escape hatch runs the
+  EXTERNAL optimizer, and system LLVM 22.1.8 writes debug RECORDS into textual
+  IR (`#dbg_declare(ptr %2, !15, …)` — reproduced directly with `opt -O2 -S`);
+  the `Clang_unified_jll` 18.1.7 that links the C bucket cannot parse that
+  syntax and answers `expected instruction opcode`. That is version skew across
+  the documented two-LLVM split, not an object format, so it should reproduce
+  on Linux with the same pair — unverified there. The default in-process path
+  is green.
+- `test_struct_abi` and `test_debug_inspection` were on this list and are
+  **fixed above** — both turned out to be tests stating Linux's answer, not
+  library defects.
 - `callback_test/test_exceptions.jl` aborts standalone with `0xC00000FF`, and
   `devtests.jl` still dies at `libunwind: pc not in table` after §4 with zero
   test failures. Same known SEH/COFF unwind-registration class already recorded

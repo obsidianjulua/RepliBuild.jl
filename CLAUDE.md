@@ -741,7 +741,18 @@ has the setup and the full findings; these are the ones that bite a code change.
   abbrev number. Accepting it does not fail loudly — it parses **zero functions
   and ships inferred signatures**, the silent-guess class. Identity is the
   string `GNU Binutils`; `GNU` as a substring matches llvm-objdump's own
-  "compatible with GNU objdump".
+  "compatible with GNU objdump". **The same trap bit `Debug.disassemble`**,
+  which kept its own hardcoded `objdump` and passes `--disassemble=<symbol>` —
+  GNU spelling that llvm-objdump answers `unknown argument` to.
+  `Compiler._gnu_objdump()` is the resolver for anything that needs a GNU
+  **objdump** specifically; `_dwarf_dumper` cannot stand in, because it may
+  legitimately return `readelf`, which does not disassemble. Two answers to one
+  question is how this class comes back.
+- **`llvm-dwarfdump` PRINTS STRING ATTRIBUTES AS C LITERALS.** On Windows
+  `DW_AT_comp_dir` reads `("C:\Projects\...")` with every separator doubled,
+  so matching a native path against dumper output finds nothing. Unescape
+  before comparing, `Sys.iswindows()`-keyed — off Windows a backslash is not a
+  separator and must not be touched.
 - **THE PE EXPORT DIRECTORY IS THE API; `nm` IS NOT.** mingw links the CRT,
   startup code and unwinder **statically into every DLL**, so `nm -g
   --defined-only` reports `snprintf`/`memcpy`/`atexit` exactly like the
@@ -868,16 +879,15 @@ has the setup and the full findings; these are the ones that bite a code change.
   aborts the same way (`0xC00000FF`), which places the fault in that fixture's
   JIT/EH activity rather than in the suite driver. `test_abi_nested.jl` still
   states the SysV XMM expectation — latent, it passes today (14/14).
-  `test_struct_abi` is **28/2**: §A wants `!llvm.struct<packed (i64)>` in the
-  emitted IR, and §C's B3 `{long,long,long}` try_call trace returns three
-  32-bit values read as 64-bit (`0x8_00000007`, …) instead of `(7, 8, 9)` — the
-  fixture is hand-written MLIR at `i64`, so it is a lowering question, not a
-  width-table one. `test_c_inprocess` is **9/1**: only the `[link] fallback =
-  true` escape hatch, which writes `#dbg_declare(...)` into `*_opt.ll` and then
-  shells to a tool that rejects it (`expected instruction opcode`) — the
-  in-process default path is green. `test_debug_inspection` is **47/1**
-  ("object capture round trip"). All four verified identical at `ddd2d7f`, so
-  none of them came from the 2026-09-06 SysConfigGen/STL work. **PE inverts the
+  `test_c_inprocess` is **9/1**, and is the one item here that is NOT a Windows
+  property: only the `[link] fallback = true` escape hatch, where the EXTERNAL
+  optimizer (system LLVM 22) writes debug records into textual IR and the
+  `Clang_unified_jll` 18 that links the C bucket cannot parse them
+  (`expected instruction opcode`). Version skew across the documented two-LLVM
+  split, so expect it on Linux with the same pair. The in-process default is
+  green. `test_struct_abi` and `test_debug_inspection` were on this list and
+  are FIXED — both were tests stating Linux's answer (`long` under LLP64; GNU
+  `timeout` and GNU `objdump`), each checked against `ddd2d7f` first. **PE inverts the
   export model** (`dllexport` opt-in vs ELF exporting by default): handled for
   `[wrap.macros]` shims (see the two export bullets above), still a design
   problem for `__rb_*` static promotion — deferred, since that is quarantined

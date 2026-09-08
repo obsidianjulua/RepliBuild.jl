@@ -69,7 +69,12 @@ const JLCS = RepliBuild.MLIRNative.libJLCS
     vtinfo = DWARFParser.VtableInfo(Dict{String,DWARFParser.ClassInfo}(),
                                     Dict{String,UInt64}(), Dict{String,UInt64}())
     inner = Dict{String,Any}("kind" => "struct", "byte_size" => "0x8",
-        "members" => [Dict{String,Any}("name" => "x", "c_type" => "long", "size" => 8, "offset" => 0)])
+        # `long long`, not `long`: the member's WIDTH is incidental here (the
+        # claim is that the packed member is inlined as an LLVM literal rather
+        # than alias-referenced), and `long` is 4 bytes under LLP64, so a
+        # hardcoded i64 asserted Linux's answer and went red on Windows against
+        # a correct `!llvm.struct<packed (i32)>`.
+        "members" => [Dict{String,Any}("name" => "x", "c_type" => "long long", "size" => 8, "offset" => 0)])
     outer = Dict{String,Any}("kind" => "struct", "byte_size" => "0x18",
         "members" => [Dict{String,Any}("name" => "a", "c_type" => "Inner", "size" => 8, "offset" => 0),
                       Dict{String,Any}("name" => "b", "c_type" => "int", "size" => 4, "offset" => 8)])
@@ -280,8 +285,10 @@ end
         end
     end
 
-    # B3 {long,long,long}: 24B MEMORY class — the sret path must stay intact
-    # (this is the xml_parse_result shape that already worked).
+    # B3 {long long x3}: 24B MEMORY class — the sret path must stay intact
+    # (this is the xml_parse_result shape that already worked). `long long` so
+    # the fixture, the hand-written MLIR above (i64) and the NTuple{3,Int64}
+    # below describe ONE struct on both hosts; see abi_fixture.cpp.
     let fp = ciface("b3_make")
         a = Ref(Int64(7)); b = Ref(Int64(8)); c = Ref(Int64(9))
         GC.@preserve a b c begin
@@ -331,8 +338,8 @@ end
                       mem("b", "int", 16, 4), mem("f1", "bool", 20, 1),
                       mem("f2", "bool", 21, 1), mem("f3", "bool", 22, 1)])
     b3 = Dict{String,Any}("kind" => "struct", "byte_size" => "0x18",
-        "members" => [mem("a", "long", 0, 8), mem("b", "long", 8, 8),
-                      mem("c", "long", 16, 8)])
+        "members" => [mem("a", "long long", 0, 8), mem("b", "long long", 8, 8),
+                      mem("c", "long long", 16, 8)])
     fn(name, ret, params) = Dict{String,Any}(
         "mangled" => name, "name" => name, "demangled" => "$(name)()",
         "return_type" => Dict{String,Any}("c_type" => ret, "size" => 0, "julia_type" => "Any"),
@@ -342,8 +349,8 @@ end
     metadata = Dict{String,Any}("language" => "c",
         "struct_definitions" => Dict{String,Any}("Gap" => gap, "B3" => b3),
         "functions" => Any[fn("gap_make", "Gap", ["int", "void*", "int"]),
-                           fn("gap_probe", "long", ["Gap"]),
-                           fn("b3_sum", "long", ["B3"])])
+                           fn("gap_probe", "long long", ["Gap"]),
+                           fn("b3_sum", "long long", ["B3"])])
 
     ir = JLCSIRGenerator.generate_jlcs_ir(vtinfo, metadata)
     # B3 has no interior padding (sum == byte_size) so it is "packed" by the

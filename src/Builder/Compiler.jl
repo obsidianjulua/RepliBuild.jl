@@ -3119,6 +3119,46 @@ function _is_gnu_binutils(version_out::AbstractString)::Bool
 end
 
 """
+    _gnu_objdump() -> String
+
+A GNU binutils `objdump`, or the bare name when none can be identified.
+
+Separate from `_dwarf_dumper` because that one may legitimately answer
+`readelf` (it does on Linux, where readelf is preferred), and readelf cannot
+disassemble. Same trap underneath, though: `Debug.disassemble` passes
+`--disassemble=<symbol>`, which is GNU spelling that llvm-objdump rejects
+outright (`unknown argument`), and in a CLANG64 shell the bare `objdump` IS
+llvm-objdump. `_is_gnu_binutils` is what actually decides; the GCC-flavoured
+MSYS2 trees are named because that is where a GNU one lives on Windows.
+
+Falls back to the bare name rather than `nothing` so a machine with no objdump
+at all fails by naming the tool, which is what the caller reports.
+"""
+function _gnu_objdump()::String
+    candidates = String[]
+    env_override = get(ENV, "REPLIBUILD_OBJDUMP", "")
+    isempty(env_override) || push!(candidates, env_override)
+    push!(candidates, "objdump")
+    if Sys.iswindows()
+        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
+        for envdir in ("mingw64", "ucrt64", "mingw32")
+            push!(candidates, joinpath(msys_root, envdir, "bin", "objdump.exe"))
+        end
+    end
+    for tool in candidates
+        (out, ec) = try
+            BuildBridge.execute(tool, ["--version"])
+        catch
+            ("", 1)
+        end
+        ec == 0 || continue
+        _is_gnu_binutils(out) && return tool
+    end
+    return "objdump"
+end
+
+
+"""
     _dwarf_dumper() -> NamedTuple or nothing
 
 The GNU binutils program used to dump DWARF, plus how it spells its flags.
