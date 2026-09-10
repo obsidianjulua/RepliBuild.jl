@@ -272,6 +272,14 @@ include(joinpath(@__DIR__, "test_llvm_tool_table.jl"))
 
 include(joinpath(@__DIR__, "test_llvm_prefix_search.jl"))
 
+# ── Toolchain advice has one source (no toolchain) ───────────────────────────
+# The LLVM floor was stated three times and the install lines four; build.sh
+# alone carried two Arch spellings and three Ubuntu ones, including a
+# `mlir-21-dev` next to a `${LLVM_MIN_MAJOR}` interpolation. This asserts one
+# definition each — not that the advice is right, which no test can know.
+
+include(joinpath(@__DIR__, "test_toolchain_advice.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

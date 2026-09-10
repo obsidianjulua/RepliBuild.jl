@@ -8,6 +8,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 
+# The LLVM floor is DERIVED, not restated. It used to be `LLVM_MIN_MAJOR=21`
+# here and `const MIN_LLVM_VERSION = 21` in Julia — two copies of one fact, and
+# a third implicit one in the prefix ladder, which is how that ladder ended up
+# probing LLVM 20 down to 15 against a minimum of 21.
+#
+# No fallback literal on failure: a default here would silently become the
+# second copy again the moment the grep stopped matching.
+LLVM_ENV_JL="${SCRIPT_DIR}/../Builder/LLVMEnvironment.jl"
+LLVM_MIN_MAJOR="$(sed -n 's/^const MIN_LLVM_VERSION = \([0-9][0-9]*\).*/\1/p' "$LLVM_ENV_JL" 2>/dev/null | head -1)"
+if [ -z "$LLVM_MIN_MAJOR" ]; then
+    echo "ERROR: could not read MIN_LLVM_VERSION from:"
+    echo "  $LLVM_ENV_JL"
+    echo
+    echo "That constant is the single definition of the LLVM floor, and this"
+    echo "script derives it rather than keeping a second copy. If the constant"
+    echo "moved, fix the path above — do NOT hardcode the number back in."
+    exit 1
+fi
+
+# One install hint, used by every failure path below. There were four before
+# (two spellings of the Arch line, three of the Ubuntu line), and they
+# disagreed with each other and with the Julia-side advice.
+# Keep these three lines in step with `_LLVM_ADVICE` in
+# src/Builder/EnvironmentDoctor.jl — test_toolchain_advice.jl asserts it.
+install_hint() {
+    echo "  Arch:          yay -S llvm mlir"
+    echo "  Debian/Ubuntu: wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh ${LLVM_MIN_MAJOR}"
+    echo "  Fedora:        dnf install llvm-devel mlir-devel clang-devel"
+    echo
+    echo "  Full diagnostics, including the C path and DWARF tools:"
+    echo "    julia --project=\"${SCRIPT_DIR}/../..\" -e 'using RepliBuild; RepliBuild.check_environment()'"
+}
+
 echo "=============================================="
 echo " Building JLCS MLIR Dialect (Production)"
 echo "=============================================="
@@ -16,8 +49,8 @@ echo "=============================================="
 echo -n "Checking for MLIR installation... "
 if ! command -v mlir-tblgen &> /dev/null; then
     echo "✗"
-    echo "ERROR: mlir-tblgen not found"
-    echo "Install MLIR: yay -S mlir (Arch) or apt install mlir-21-dev (Ubuntu)"
+    echo "ERROR: mlir-tblgen not found — the JLCS dialect cannot be built"
+    install_hint
     exit 1
 fi
 echo "✓"
@@ -31,16 +64,16 @@ fi
 LLVM_VERSION=$(llvm-config --version)
 echo "✓ (version $LLVM_VERSION)"
 
-# The dialect needs LLVM/MLIR 21+. Without this gate a too-old toolchain fails
-# somewhere inside CMake or the TableGen run, and the error names a missing
-# header or an unknown CMake target rather than the version — Debian/Ubuntu ship
-# 14-18 as the default `llvm-config`, so this is the common case, not the rare one.
-LLVM_MIN_MAJOR=21
+# The dialect needs LLVM/MLIR ${LLVM_MIN_MAJOR}+ (derived at the top of this
+# file). Without this gate a too-old toolchain fails somewhere inside CMake or
+# the TableGen run, and the error names a missing header or an unknown CMake
+# target rather than the version — Debian/Ubuntu ship 14-18 as the default
+# `llvm-config`, so this is the common case, not the rare one.
 LLVM_MAJOR=${LLVM_VERSION%%.*}
 if ! [ "$LLVM_MAJOR" -ge "$LLVM_MIN_MAJOR" ] 2>/dev/null; then
     echo "ERROR: LLVM $LLVM_VERSION is too old — the JLCS dialect needs ${LLVM_MIN_MAJOR}+"
-    echo "  Arch:   yay -S llvm mlir"
-    echo "  Ubuntu: apt install llvm-${LLVM_MIN_MAJOR}-dev mlir-${LLVM_MIN_MAJOR}-dev"
+    install_hint
+    echo
     echo "  Then point this script at it, e.g.:"
     echo "    PATH=/usr/lib/llvm-${LLVM_MIN_MAJOR}/bin:\$PATH ./build.sh"
     exit 1
@@ -67,8 +100,8 @@ echo "MLIR CMake: $MLIR_DIR"
 if [ ! -d "$MLIR_DIR" ]; then
     echo "ERROR: MLIR CMake package not found at $MLIR_DIR"
     echo "  llvm-config points at $(llvm-config --prefix), which has no lib/cmake/mlir."
-    echo "  MLIR is packaged separately from LLVM on most distros — install it"
-    echo "  (Arch: yay -S mlir, Ubuntu: apt install mlir-${LLVM_MIN_MAJOR}-dev)."
+    echo "  MLIR is packaged separately from LLVM on most distros — install it:"
+    install_hint
     exit 1
 fi
 
