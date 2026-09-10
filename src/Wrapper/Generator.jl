@@ -999,19 +999,17 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
 
     _write_wrapper(output_file, wrapper_content, module_name)
 
-    # Write thunk manifest for dead-thunk elimination.
-    # JITManager reads this to skip generating MLIR thunks for functions
-    # that are dispatched via ccall (Tier 1) and never need a thunk.
-    if needed_thunks !== nothing
-        manifest = Dict{String,Any}(
-            "function_thunks" => sort!(collect(needed_thunks)),
-            "version" => 1
-        )
-        manifest_path = joinpath(output_dir, "thunk_manifest.json")
-        open(manifest_path, "w") do io
-            JSON.print(io, manifest, 2)
-        end
-    end
+    # Thunk manifest for dead-thunk elimination — read by JITManager to skip
+    # generating MLIR thunks for functions dispatched via ccall, and by
+    # ThunkBuilder at build time to know what to emit AOT.
+    #
+    # Written by `_write_thunk_manifest` inside the C++ generator, NOT here.
+    # It has to land before that generator's AOT assert, because the assert is
+    # what a stale manifest trips — writing it here, after the generator
+    # returned, meant a failed assert left the stale file in place and the next
+    # build read it again. One writer, and it is the one on the early side of
+    # the refusal. Nothing to do on the C path: it derives no thunk set
+    # (`needed_thunks === nothing`) and never had a manifest.
 
     println("  wrap: $(basename(output_file))")
 

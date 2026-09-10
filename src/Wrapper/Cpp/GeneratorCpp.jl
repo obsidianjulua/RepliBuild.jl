@@ -3607,8 +3607,23 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # library what it defines before shipping call sites that assume it — a slot
     # resolving to C_NULL is a hard error on first call, found by a user rather
     # than by the build.
-    config.compile.aot_thunks &&
-        _assert_aot_thunks_present(_funcs, aot_fptr_taken, thunks_lib_path)
+    #
+    # THE MANIFEST IS WRITTEN FIRST, AND THAT ORDER IS THE WHOLE FIX. AOT reads
+    # `thunk_manifest.json` to decide what to emit (ThunkBuilder), and only wrap
+    # can compute that set — so when the assert threw before the write, a package
+    # whose manifest was absent or stale could never converge: AOT emitted
+    # nothing, wrap demanded N, wrap died, the manifest stayed stale, and the
+    # next build read the same stale file. The old message said "rebuild so AOT
+    # sees the same symbols", which was unreachable advice — rebuilding re-read
+    # the file wrap had refused to update. Recording what wrap needs is not the
+    # same act as certifying the library provides it; doing the first
+    # unconditionally makes the second reachable on the next build.
+    if config.compile.aot_thunks
+        manifest_note = _write_thunk_manifest(get_output_path(config),
+                                              needed_function_thunks)
+        _assert_aot_thunks_present(_funcs, aot_fptr_taken, thunks_lib_path;
+                                   manifest_note = manifest_note)
+    end
 
     export_statement = _export_statement(all_exports,
                                          _enums * _structs * union_accessor_defs *

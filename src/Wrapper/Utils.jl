@@ -1045,6 +1045,48 @@ function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,Str
 end
 
 """
+    _write_thunk_manifest(output_dir, needed) -> String
+
+Record the thunk set wrap decided on, and describe how it moved.
+
+`ThunkBuilder.build_aot_thunks` reads this file at BUILD time to know which
+thunks to emit; only wrap can compute the set. So the write has to happen even
+on the run that then refuses to ship the wrapper — otherwise the next build
+re-reads a stale file and reproduces the same refusal forever. Returns a note
+for that refusal to quote, empty when the set was already correct on disk.
+"""
+function _write_thunk_manifest(output_dir::AbstractString, needed)
+    needed === nothing && return ""
+    wanted = sort!(collect(needed))
+    path = joinpath(output_dir, "thunk_manifest.json")
+
+    previous = if isfile(path)
+        try
+            sort!(collect(String.(get(JSON.parsefile(path; use_mmap=false),
+                                      "function_thunks", String[]))))
+        catch
+            nothing   # unreadable counts as "moved" — rewrite it
+        end
+    else
+        String[]
+    end
+
+    mkpath(output_dir)
+    open(path, "w") do io
+        JSON.print(io, Dict{String,Any}("function_thunks" => wanted, "version" => 1), 2)
+    end
+
+    previous == wanted && return ""
+    had = previous === nothing ? "unreadable" : string(length(previous))
+    return """
+    The thunk manifest has been UPDATED ($had → $(length(wanted)) symbol(s)):
+      $path
+    AOT reads that file, so this run's refusal is expected on a package whose
+    manifest was absent or stale. Re-run build() and then wrap() — the second
+    pass emits the thunks this wrapper binds."""
+end
+
+"""
     _assert_aot_thunks_present(func_text, taken, thunks_lib_path)
 
 Refuse to ship a wrapper that binds AOT thunks the thunks library does not
@@ -1070,7 +1112,8 @@ when an export TU instantiated more header-inline methods
 """
 function _assert_aot_thunks_present(func_text::AbstractString,
                                     taken::Dict{String,String},
-                                    thunks_lib_path::AbstractString)
+                                    thunks_lib_path::AbstractString;
+                                    manifest_note::AbstractString="")
     slots = _aot_thunk_slot_names(func_text, taken)
     isempty(slots) && return nothing
 
@@ -1122,9 +1165,12 @@ function _assert_aot_thunks_present(func_text::AbstractString,
     sets. Wrap's set is the one the emitted call sites use, so these would resolve
     to C_NULL and raise on first call. Typical cause: header-inline or template
     methods that only became symbols in a TU compiled after AOT ran.
+    $(isempty(manifest_note) ? """
 
-    Rebuild so AOT sees the same symbols, or set `[compile] aot_thunks = false`
-    for this package to take the JIT dispatch path.""")
+    The manifest already named these symbols, so AOT saw them and still did not
+    emit them — this is a real disagreement, not a stale-manifest bootstrap.
+    Check that the symbols exist in the main library, or set
+    `[compile] aot_thunks = false` to take the JIT dispatch path.""" : manifest_note)""")
 end
 
 """
