@@ -661,7 +661,22 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
 
         # Load config
         config = ConfigurationManager.load_config(toml_path)
-        config = DependencyResolver.resolve_dependencies(config)
+        # Dependency resolution is a BUILD concern, and wrap() compiles nothing.
+        # What `resolve_dependencies` contributes — dep sources, link dirs, link
+        # libs, dep include dirs — is read on the wrap path by exactly one
+        # consumer: `wrap_with_clang`'s `config.compile.include_dirs`
+        # (Wrapper/Generator.jl:849), which returns at its own `isempty(headers)`
+        # guard before reading it. So on the default `wrap("replibuild.toml")`
+        # every merge was computed and then read by nothing, while the resolver
+        # ran a `git rev-parse`, a pin verification that can FETCH, and a full
+        # `walkdir` of the clone collecting every .c/.cpp into `extra_sources`.
+        # Worse, an absent clone takes the `!isdir(dep_path)` branch and CLONES
+        # FROM THE NETWORK — so wrapping a prebuilt `.so` on a fresh checkout
+        # reached upstream to build a config the wrapper never looked at.
+        # Keyed on `headers`, which is the actual data dependency.
+        if !isempty(headers)
+            config = DependencyResolver.resolve_dependencies(config)
+        end
 
         # Find library
         output_dir = ConfigurationManager.get_output_path(config)

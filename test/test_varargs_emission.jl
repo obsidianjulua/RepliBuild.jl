@@ -146,7 +146,7 @@ end
     @test !any(ex -> ex isa Expr && ex.head in (:error, :incomplete), parsed.args)
 end
 
-# A dropped duplicate is sometimes correct (a D1/D2 destructor pair) and
+# A dropped duplicate is sometimes correct (a D0/D1/D2 destructor variant) and
 # sometimes a distinct C++ entry point going unreachable (an ::Any-collapsed
 # overload). The count alone cannot tell those apart, so the message names the
 # symbols.
@@ -173,12 +173,38 @@ end
     msg = join([string(r.message) for r in logs], "\n")
     @test occursin("_ZN5ImGui8TreeNodeEPKcPKcz", msg)   # the one that vanished
     @test occursin("_ZN5ImGui8TreeNodeEPKvPKcz", msg)   # what shadowed it
-    @test occursin("Unreachable now", msg)
+    @test occursin("UNREACHABLE", msg)
+    # TreeNode must be classified as SIGNAL, not filed under the benign bucket:
+    # two genuinely different C++ entry points collapsed by ::Any widening.
+    @test occursin("1 distinct C++ entry point(s) collapsed", msg)
+    @test !occursin("destructor/alias variant", msg)
 
     @test U._chunk_mangled_symbol(a) == "_ZN5ImGui8TreeNodeEPKcPKcz"
     @test U._chunk_mangled_symbol("no docstring here") == "<unknown symbol>"
     # Varargs chunks carry no "Mangled symbol:" line; the @ccall names it
     @test U._chunk_mangled_symbol("""ptr = @ccall LIBRARY_PATH.var"fmt_msg"(f::Cstring;)::Cstring""") == "fmt_msg"
+
+    # The other half of the partition. D0/D1/D2 are the deleting /
+    # complete-object / base-object variants of ONE destructor: distinct symbols,
+    # one Julia method by construction. llamacpp drops 210 of these against 24
+    # real collapses, so failing to bucket them buries the 24 that matter.
+    @test U._dtor_variant_group("_ZN4ggml3cpu17extra_buffer_typeD2Ev") == "_ZN4ggml3cpu17extra_buffer_type"
+    @test U._dtor_variant_group("_ZN4ggml3cpu17extra_buffer_typeD0Ev") ==
+          U._dtor_variant_group("_ZN4ggml3cpu17extra_buffer_typeD2Ev")
+    @test U._dtor_variant_group("_ZN4FooD2Ev") != U._dtor_variant_group("_ZN4BarD0Ev")
+    # A real overload must never be grouped away as a destructor
+    @test U._dtor_variant_group("_ZN17llm_graph_context10build_attnEP22llm_graph_input_attn_kP11ggml_tensorfi") === nothing
+
+    d0 = mk("_ZN9time_measD0Ev", "function time_meas_destroy(a::Any)\n    nothing\nend")
+    d2 = mk("_ZN9time_measD2Ev", "function time_meas_destroy(a::Any)\n    nothing\nend")
+    dlogs, dkept = Test.collect_test_logs() do
+        U._dedup_method_chunks([d0, d2])
+    end
+    @test length(dkept) == 1
+    dmsg = join([string(r.message) for r in dlogs], "\n")
+    @test occursin("1 destructor/alias variant(s)", dmsg)
+    # …and it must NOT be reported as a lost entry point
+    @test !occursin("distinct C++ entry point(s) collapsed", dmsg)
 end
 
 # A parameter TYPE may contain commas. Splitting the argument list on every

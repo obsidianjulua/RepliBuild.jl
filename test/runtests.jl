@@ -254,6 +254,15 @@ include(joinpath(@__DIR__, "test_llp64_widths.jl"))
 
 include(joinpath(@__DIR__, "test_windows_port.jl"))
 
+# ── LLVM tool table probes only what get_tool looks up (no toolchain) ────────
+# A 51-name probe at init listed clang-format, mlir-*, FileCheck, clang-20 —
+# none of which get_tool or execute ever asked for. BuildBridge.execute
+# falls back to the bare command when the table misses, so the prune is
+# safe; this file pins the list and that fallback, including that the two
+# discover_llvm_tools functions no longer share a name.
+
+include(joinpath(@__DIR__, "test_llvm_tool_table.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

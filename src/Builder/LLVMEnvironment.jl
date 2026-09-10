@@ -292,8 +292,11 @@ end
 """
     discover_llvm_tools(llvm_root::String, source::String="intree") -> Dict{String,String}
 
-Discover all LLVM/Clang tools in the toolchain.
-Returns a dictionary mapping tool names to absolute paths.
+Probe the LLVM install for the tools `get_tool` actually serves.
+Returns a dict of bare name → absolute path. Missing names are omitted;
+callers that need a tool this table does not probe go through PATH
+(`BuildBridge.execute` falls back to the bare command when the lookup
+misses). cmake/nm/pkg-config are not LLVM tools and are not listed here.
 
 # Arguments
 - `llvm_root`: Root directory of LLVM installation
@@ -309,45 +312,15 @@ function discover_llvm_tools(llvm_root::String, source::String="intree")
         return tools
     end
 
-    # Essential LLVM tools
+    # Probe only names `get_tool` / `BuildBridge.execute` look up from this
+    # dict. llvm-link/opt/llc/llvm-dis and friends are invoked as backticks
+    # or via `resolve_tool` (a separate PATH/C-bucket resolver); cmake/nm/
+    # pkg-config are not LLVM tools. Versioned names (`clang-20`) go stale
+    # the moment the box upgrades — `execute` already falls back to the
+    # bare command when the table misses, so they are omitted.
     essential_tools = [
-        # Clang/LLVM compilers
-        "clang", "clang++", "clang-20",
-
-        # LLVM core tools
-        "llvm-config", "llvm-link", "llvm-as", "llvm-dis",
-        "opt", "llc", "lli",
-
-        # Analysis and inspection
-        "llvm-nm", "llvm-objdump", "llvm-ar", "llvm-ranlib",
-        "llvm-readobj", "llvm-readelf", "llvm-dwarfdump",
-        "llvm-symbolizer", "llvm-size", "llvm-strings",
-
-        # Optimization and transformation
-        "llvm-extract", "llvm-split", "llvm-reduce",
-        "llvm-stress", "llvm-opt-report",
-
-        # Linking and libraries
-        "lld", "ld.lld", "ld64.lld", "lld-link",
-        "llvm-lto", "llvm-lto2",
-
-        # Code coverage and profiling
-        "llvm-cov", "llvm-profdata", "llvm-profgen",
-
-        # Clang tools
-        "clang-format", "clang-tidy", "clang-check",
-        "clang-query", "clangd", "clang-scan-deps",
-        "clang-repl", "clang-refactor",
-
-        # Debugging and sanitizers
-        "llvm-debuginfod", "llvm-debuginfod-find",
-
-        # MLIR tools (if available)
-        "mlir-opt", "mlir-translate", "mlir-tblgen",
-
-        # Miscellaneous
-        "FileCheck", "count", "not",
-        "dsymutil", "bugpoint"
+        "clang", "clang++",
+        "llvm-as", "llvm-config",
     ]
 
     # Windows tools are `clang++.exe`, not `clang++`. The KEY stays the bare name
@@ -511,7 +484,9 @@ Warns on mismatch to surface potential IR incompatibilities from mixed-version t
 """
 function check_tool_version_coherence(tools::Dict{String,String}, expected_major::Int)
     expected_major <= 0 && return
-    critical_tools = ["clang", "clang++", "llvm-link", "opt", "llc", "llvm-as"]
+    # Only names this dict actually holds after `discover_llvm_tools`.
+    # llvm-link/opt/llc are PATH/`resolve_tool` tools, not table entries.
+    critical_tools = ["clang", "clang++", "llvm-as"]
     for tool_name in critical_tools
         tool_path = get(tools, tool_name, "")
         isempty(tool_path) && continue
@@ -868,8 +843,8 @@ function verify_toolchain()
     toolchain = get_toolchain()
     all_ok = true
 
-    # Check essential tools
-    essential = ["clang++", "llvm-config", "llvm-link", "opt", "llc"]
+    # Check essential tools — the ones `get_tool` actually serves.
+    essential = ["clang", "clang++", "llvm-as", "llvm-config"]
 
     for tool in essential
         if has_tool(tool)

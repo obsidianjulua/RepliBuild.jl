@@ -116,10 +116,14 @@ function command_exists(name::String)
 end
 
 """
-Discover LLVM/Clang toolchain from LLVMEnvironment
-Returns Dict of tool_name => path
+    resolve_required_tools(required_tools) -> Dict{String,String}
+
+Filter LLVMEnvironment's discovered tools to `required_tools`, falling
+back to PATH when the toolchain table has no entry. Consumes
+`LLVMEnvironment.discover_llvm_tools` via `get_tool`; it is not a second
+discovery implementation.
 """
-function discover_llvm_tools(required_tools::Vector{String}=["clang", "clang++", "llvm-config"])
+function resolve_required_tools(required_tools::Vector{String}=["clang", "clang++", "llvm-config"])
     tools = Dict{String,String}()
 
     # Use LLVMEnvironment's toolchain
@@ -315,7 +319,7 @@ export
     # Tool discovery
     find_executable,
     command_exists,
-    discover_llvm_tools,
+    resolve_required_tools,
 
     # Compiler error handling
     analyze_compiler_error,

@@ -1651,6 +1651,23 @@ function _method_sig_keys(chunk::AbstractString)
 end
 
 """
+    _dtor_variant_group(mangled) -> Union{String,Nothing}
+
+The class prefix of an Itanium destructor symbol (`_ZN4ggml3cpu17extra_buffer_typeD2Ev`
+→ `_ZN4ggml3cpu17extra_buffer_type`), or `nothing` if this is not one.
+
+D0/D1/D2 are the deleting / complete-object / base-object variants of ONE
+destructor. They are distinct symbols with distinct addresses, so the dedup
+sees them as distinct C++ entry points — but they collapse to one Julia method
+by construction, and dropping the extras is exactly right. Grouping them out
+is what lets the drop report name the cases that are NOT expected.
+"""
+function _dtor_variant_group(mangled::AbstractString)
+    m = match(r"^(.*?)D[0-2]Ev$", mangled)
+    m === nothing ? nothing : m.captures[1]
+end
+
+"""
     _dedup_method_chunks(chunks) -> Vector{String}
 
 Drop emitted chunks whose every `function` signature is redefined by a LATER
@@ -1682,19 +1699,44 @@ function _dedup_method_chunks(chunks::Vector{String})
     end
     if !isempty(dropped)
         # Naming the losers is the point. The count alone cannot distinguish a
-        # D1/D2 destructor pair — where dropping one is exactly right — from an
-        # ::Any-collapsed overload pair, where a DISTINCT C++ entry point became
-        # unreachable and only the symbol names show it (imgui's
+        # destructor-variant drop — where dropping the extras is exactly right —
+        # from an ::Any-collapsed overload pair, where a DISTINCT C++ entry point
+        # became unreachable and only the symbol names show it (imgui's
         # `TreeNode(const char*, const char*, ...)` losing to the `void const*`
         # form: same `(Any, Any)` signature, different function).
-        shown = first(dropped, 12)
-        # Same symbol on both sides means one C++ entry point emitted two
-        # chunks (the D1/D2 destructor pair aliasing to one definition) — a
-        # correct drop, and naming the shadower twice would only read as noise.
-        detail = join([lost == kept ? "$sig ⟵ $lost" : "$sig ⟵ $lost (shadowed by $kept)"
-                       for (sig, lost, kept) in shown], ", ")
-        more = length(dropped) > 12 ? " … (+$(length(dropped) - 12) more)" : ""
-        @info "wrap: dropped $(length(dropped)) duplicate method definition(s) — identical Julia name+signature from distinct C++ symbols; last definition kept (precompilation-safe). Unreachable now: $detail$more"
+        #
+        # But naming all of them in one line does not survive contact with a real
+        # C++ library: llamacpp drops 234, and 12 mangled-symbol pairs joined with
+        # ", " is a multi-kilobyte single line that the terminal wraps into an
+        # unreadable block — the four `build_attn` collapses that actually matter
+        # are buried among destructor variants. So: partition first, name only the
+        # class that carries signal, one entry per line.
+        #
+        # Two benign shapes. Same symbol on both sides means one C++ entry point
+        # emitted two chunks. Different D0/D1/D2 variants of one class are the
+        # Itanium destructor set — distinct symbols, one Julia method by
+        # construction (see `_dtor_variant_group`).
+        benign(lost, kept) = lost == kept ||
+            (let g = _dtor_variant_group(lost)
+                 g !== nothing && g == _dtor_variant_group(kept)
+             end)
+        collapsed = [d for d in dropped if !benign(d[2], d[3])]
+        n_benign = length(dropped) - length(collapsed)
+
+        io = IOBuffer()
+        print(io, "wrap: dropped $(length(dropped)) duplicate method definition(s) — ",
+                  "identical Julia name+signature from distinct C++ symbols; ",
+                  "last definition kept (precompilation-safe).")
+        n_benign > 0 && print(io, "\n  $n_benign destructor/alias variant(s) — expected, one Julia method by construction.")
+        if !isempty(collapsed)
+            print(io, "\n  $(length(collapsed)) distinct C++ entry point(s) collapsed to one Julia signature — ",
+                      "these are now UNREACHABLE:")
+            for (sig, lost, kept) in first(collapsed, 6)
+                print(io, "\n    ", sig, "\n      lost ", lost, "\n      kept ", kept)
+            end
+            length(collapsed) > 6 && print(io, "\n    … +$(length(collapsed) - 6) more")
+        end
+        @info String(take!(io))
     end
     return chunks[keep]
 end

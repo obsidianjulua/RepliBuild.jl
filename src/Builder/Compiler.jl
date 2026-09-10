@@ -5161,6 +5161,22 @@ function parse_dwarf_dump(output::AbstractString;
     # Every extracted signature must match the DIE tree it came from.
     check_param_arity!(return_types, die_param_counts)
 
+    # Children indexed by parent offset, built ONCE. The inheritance and
+    # template-param lookups below are per-struct questions ("which DIEs name me
+    # as parent?") that were each answered by rescanning all of `type_refs` —
+    # `aggregates × DIEs × 2`, quadratic in the binary. Measured on Hub curl:
+    # 196841 DIEs, 6594 aggregates, 415s to parse, of which nearly all was two
+    # scans that found NOTHING — curl is C, so it has zero DW_TAG_inheritance and
+    # zero template params. Every C library paid the full bill to build two empty
+    # arrays. 415s → 3.5s with this index, byte-identical output.
+    children_by_parent = Dict{Any,Vector{Any}}()
+    for (_, die) in type_refs
+        isa(die, Dict) || continue
+        parent = get(die, "parent", nothing)
+        parent === nothing && continue
+        push!(get!(() -> Any[], children_by_parent, parent), die)
+    end
+
     # Extract struct definitions with member information
     struct_defs = Dict{String,Dict{String,Any}}()
     for (offset, type_info) in type_refs
@@ -5230,9 +5246,8 @@ function parse_dwarf_dump(output::AbstractString;
 
                     # Add inheritance information if available
                     base_classes = []
-                    for (inh_offset, inh_info) in type_refs
-                        if isa(inh_info, Dict) && get(inh_info, "kind", nothing) == "inheritance" &&
-                           get(inh_info, "parent", nothing) == offset
+                    for inh_info in get(children_by_parent, offset, ())
+                        if isa(inh_info, Dict) && get(inh_info, "kind", nothing) == "inheritance"
                             base_type_ref = get(inh_info, "base_type", nothing)
                             if !isnothing(base_type_ref)
                                 base_type = resolve_type(base_type_ref, type_refs)
@@ -5264,8 +5279,8 @@ function parse_dwarf_dump(output::AbstractString;
 
                     # Add template parameters if available
                     template_params = []
-                    for (tmpl_offset, tmpl_info) in type_refs
-                        if isa(tmpl_info, Dict) && get(tmpl_info, "parent", nothing) == offset
+                    for tmpl_info in get(children_by_parent, offset, ())
+                        if isa(tmpl_info, Dict)
                             if get(tmpl_info, "kind", nothing) == "template_type"
                                 type_ref = get(tmpl_info, "type", nothing)
                                 param_type = !isnothing(type_ref) ? resolve_type(type_ref, type_refs) : "Any"
