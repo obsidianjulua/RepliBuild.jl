@@ -159,6 +159,82 @@ function get_llvm_root(source::Symbol=:auto; config=nothing)
 end
 
 """
+The LLVM major version Tier 2 requires.
+
+CANONICAL. `EnvironmentDoctor` imports this rather than declaring its own — it
+used to hold a second copy, and the versioned probe names next to it
+(`"llvm-config-21"`) were string literals that could not follow it anyway.
+`src/mlir/build.sh` necessarily holds a third copy in shell; keep it in step by
+hand.
+"""
+const MIN_LLVM_VERSION = 21
+
+"""
+Ceiling for the generated `/usr/lib/llvm-N` probe list on Debian-style layouts.
+
+Nothing breaks when LLVM passes it — an Arch-style `/usr` prefix and an explicit
+`LLVM_CONFIG` are both found without any versioned path — the generated list
+just stops naming new versions. Raise it when that becomes the common case.
+"""
+const MAX_PROBED_LLVM_VERSION = 30
+
+"""
+    _llvm_major_of(llvm_config_path) -> Int
+
+Major version an install reports, or 0 if it cannot be asked. Used to gate a
+candidate prefix; a prefix that cannot answer is not a usable install.
+"""
+function _llvm_major_of(llvm_config_path::AbstractString)::Int
+    out = try
+        read(pipeline(`$llvm_config_path --version`, stderr=devnull), String)
+    catch
+        return 0
+    end
+    m = match(r"^\s*(\d+)", out)
+    m === nothing ? 0 : parse(Int, m.captures[1])
+end
+
+"""
+    _best_llvm_prefix(search_paths, exe) -> Union{String,Nothing}
+
+The NEWEST prefix in `search_paths` that is a complete LLVM install meeting
+`MIN_LLVM_VERSION`, or `nothing`.
+
+Split out as a testability seam — the same reason `parse_dwarf_dump` is one:
+the decision can then be driven over fabricated prefixes, with no LLVM
+installed and no dependence on what this box happens to have.
+
+**Two defects it replaces, both in the loop this came from.** It returned on the
+FIRST prefix carrying `clang++` + `llvm-config`, with no version check at all —
+so on a Debian box whose default `/usr` LLVM is too old, that was the answer and
+the versioned tree holding a supported one was never reached. And a prefix
+that answers `--version` with something unparseable now scores 0 and is skipped,
+rather than being accepted as a working install.
+"""
+function _best_llvm_prefix(search_paths, exe::AbstractString)::Union{String,Nothing}
+    best_prefix = nothing
+    best_major  = 0
+    for prefix in search_paths
+        bin_dir = joinpath(prefix, "bin")
+        isdir(bin_dir) || continue
+
+        clang_path = joinpath(bin_dir, "clang++" * exe)
+        llvm_config_path = joinpath(bin_dir, "llvm-config" * exe)
+        (isfile(clang_path) && isfile(llvm_config_path)) || continue
+
+        # A prefix without lib/ and include/ is a driver, not an install.
+        (isdir(joinpath(prefix, "lib")) && isdir(joinpath(prefix, "include"))) || continue
+
+        major = _llvm_major_of(llvm_config_path)
+        major >= MIN_LLVM_VERSION || continue
+        if major > best_major
+            best_prefix, best_major = prefix, major
+        end
+    end
+    return best_prefix
+end
+
+"""
     _resolve_tool_path(spec) -> Union{String,Nothing}
 
 Locate a tool named by `spec`: the path as given, `spec.exe` on Windows, then
@@ -246,37 +322,20 @@ function find_system_llvm()
             "C:/Program Files/LLVM",
         ]
     else
-        [
-            "/usr",
-            "/usr/local",
-            "/opt/llvm",
-            "/usr/lib/llvm-20",
-            "/usr/lib/llvm-19",
-            "/usr/lib/llvm-18",
-            "/usr/lib/llvm-17",
-            "/usr/lib/llvm-16",
-            "/usr/lib/llvm-15",
-        ]
+        # Distro layouts, then Debian/Ubuntu's versioned trees generated from the
+        # SUPPORTED RANGE rather than listed by hand.
+        #
+        # The hand-written list this replaces ran `llvm-20` down to `llvm-15` —
+        # every entry BELOW the 21 minimum, and 21+ absent entirely. So on a
+        # Debian box with LLVM 22 at /usr/lib/llvm-22 the search walked straight
+        # past the only usable install, and if it hit llvm-20 the caller got a
+        # failure deep inside CMake naming a missing header instead of "too old".
+        vcat(["/usr", "/usr/local", "/opt/llvm"],
+             ["/usr/lib/llvm-$v" for v in MAX_PROBED_LLVM_VERSION:-1:MIN_LLVM_VERSION])
     end
 
-    for prefix in search_paths
-        # Check for clang++ and llvm-config in bin directory
-        bin_dir = joinpath(prefix, "bin")
-        if isdir(bin_dir)
-            clang_path = joinpath(bin_dir, "clang++" * exe)
-            llvm_config_path = joinpath(bin_dir, "llvm-config" * exe)
-
-            if isfile(clang_path) && isfile(llvm_config_path)
-                # Verify it's a working LLVM by checking lib and include dirs
-                lib_dir = joinpath(prefix, "lib")
-                include_dir = joinpath(prefix, "include")
-
-                if isdir(lib_dir) && isdir(include_dir)
-                    return prefix
-                end
-            end
-        end
-    end
+    best_prefix = _best_llvm_prefix(search_paths, exe)
+    best_prefix === nothing || return best_prefix
 
     # PATH last: hardcoded MSYS/Unix prefixes win so a JLL llvm-config on PATH
     # cannot shadow the system toolchain this port targets.

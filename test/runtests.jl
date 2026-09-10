@@ -263,6 +263,15 @@ include(joinpath(@__DIR__, "test_windows_port.jl"))
 
 include(joinpath(@__DIR__, "test_llvm_tool_table.jl"))
 
+# ── LLVM prefix search: version gating and newest-wins (no toolchain) ────────
+# The hand-written prefix ladder ran /usr/lib/llvm-20 down to -15 — every entry
+# below the 21 minimum, 21+ absent — and the loop version-checked nothing, so
+# the first prefix carrying clang++/llvm-config won regardless of how old it
+# was. Driven over fabricated prefixes, so it asserts the rule rather than
+# whatever this machine has installed.
+
+include(joinpath(@__DIR__, "test_llvm_prefix_search.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

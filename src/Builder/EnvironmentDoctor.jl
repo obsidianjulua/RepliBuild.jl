@@ -130,7 +130,11 @@ end
 _parse_major_version(v::String)::Int =
     (m = match(r"^(\d+)", v)) === nothing ? 0 : parse(Int, m.captures[1])
 
-const MIN_LLVM_VERSION = 21
+# Imported, not redeclared. This module used to hold its own `= 21`, which made
+# three copies of the same fact across the package (here, LLVMEnvironment's
+# search ladder, and build.sh) that drifted independently — the ladder ended up
+# probing 20 down to 15, entirely below a minimum it did not share.
+import ..LLVMEnvironment: MIN_LLVM_VERSION
 
 # One source for the versioned probe names. These used to be string literals
 # ("llvm-config-21") that drifted from MIN_LLVM_VERSION the moment it moved.

@@ -3256,7 +3256,15 @@ function _no_dwarf_dumper_error()
         yield zero parsed functions and a wrapper full of guessed signatures.
 
         Install GNU binutils:   pacman -S mingw-w64-x86_64-binutils
-        Or point at one:        REPLIBUILD_OBJDUMP=/path/to/objdump.exe"""
+        Or point at one:        REPLIBUILD_OBJDUMP=/path/to/objdump.exe
+
+        That is the MINGW64 package on purpose, and it is the fix even though
+        you are in a CLANG64 shell: MSYS2 ships GNU binutils only in the
+        GCC-flavoured trees, and both resolvers look for
+        `$(get(ENV, "MSYS2_ROOT", "C:/msys64"))/{mingw64,ucrt64,mingw32}/bin/objdump.exe`
+        by absolute path, so PATH and the active MSYSTEM do not matter. Do NOT
+        "correct" this to a mingw-w64-clang-x86_64-* package — CLANG64's
+        objdump is llvm-objdump, which is the thing being rejected."""
     else
         """
         GNU readelf/objdump not found — DWARF extraction cannot run.
