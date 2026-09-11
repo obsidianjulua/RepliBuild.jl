@@ -181,13 +181,33 @@ function compute_project_hash(config::RepliBuildConfig)::String
         end
     end
 
-    # Hash include directory contents (header files)
+    # Hash include directory contents (header files), RECURSIVELY.
+    #
+    # `readdir` alone covered only the top level of each include dir, so editing
+    # a header one directory down left the project hash unchanged and the build
+    # reported "project unchanged" against modified sources. That is not an edge
+    # case: `include/<lib>/<lib>.h` is the normal C layout — SUNDIALS generates
+    # exactly `include/sundials/sundials_config.h` — so the headers most likely
+    # to matter were the ones least likely to be seen.
+    #
+    # Cost is bounded in practice: a resolved dependency puts its whole clone on
+    # the include path, and the largest in the Hub (curl) is ~4400 files with
+    # 254 headers. `.git` is skipped because it never feeds the compiler, and
+    # build/cache dirs because hashing our own outputs would make the hash
+    # depend on the build it is supposed to gate.
     for inc_dir in get_include_dirs(config)
-        if isdir(inc_dir)
-            for f in readdir(inc_dir; join=true)
-                if isfile(f) && any(endswith(f, ext) for ext in [".h", ".hpp", ".hxx", ".hh"])
-                    h = hash(read(f), h)
-                end
+        isdir(inc_dir) || continue
+        for (root, dirs, files) in walkdir(inc_dir)
+            filter!(d -> !(d in (".git", "build", ".replibuild_cache")), dirs)
+            sort!(dirs)                       # deterministic descent
+            for f in sort(files)
+                any(endswith(f, ext) for ext in (".h", ".hpp", ".hxx", ".hh")) || continue
+                path = joinpath(root, f)
+                isfile(path) || continue
+                # Path as well as content: renaming a header, or swapping the
+                # contents of two, changes what the compiler sees.
+                h = hash(relpath(path, inc_dir), h)
+                h = hash(read(path), h)
             end
         end
     end

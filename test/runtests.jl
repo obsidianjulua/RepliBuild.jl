@@ -280,6 +280,14 @@ include(joinpath(@__DIR__, "test_llvm_prefix_search.jl"))
 
 include(joinpath(@__DIR__, "test_toolchain_advice.jl"))
 
+# ── Project cache key covers what the compiler reads (no toolchain) ──────────
+# The include-dir walk was `readdir`, top level only, so a header one directory
+# down could be edited freely while the build reported "project unchanged"
+# against modified sources — and `include/<lib>/<lib>.h` is the ordinary C
+# layout. Also pins what must stay OUT: .git, build/, cache dirs, non-headers.
+
+include(joinpath(@__DIR__, "test_project_hash.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.
