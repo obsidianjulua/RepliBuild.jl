@@ -419,3 +419,58 @@ end
     @test length(ci_files)  > 5
     @test length(dev_files) > 5
 end
+
+# ── Every test import is declared, so `Pkg.test()` works ─────────────────────
+# `Pkg.test` builds an environment from [deps] plus the [targets] test extras.
+# A test file importing anything outside that set loads fine under
+# `julia --project=. test/runtests.jl` — the package's own deps are direct there
+# — and dies under `Pkg.test()`, which is how CI invokes it. That is exactly
+# what happened: test_struct_layout.jl imports Logging, which was neither a dep
+# nor an extra, so `Pkg.test()` ran 21 testsets and then errored with
+# "Package Logging not found in current path" while the same suite was green
+# the way it gets run by hand.
+#
+# Checking the declaration rather than shelling out to Pkg.test keeps this cheap
+# and keeps the failure legible: it names the package and the file.
+
+@testset "Test imports are declared for Pkg.test" begin
+    proj = TOML.parsefile(joinpath(dirname(@__DIR__), "Project.toml"))
+    deps   = Set(keys(get(proj, "deps", Dict{String,Any}())))
+    extras = Set(keys(get(proj, "extras", Dict{String,Any}())))
+    target = Set(get(get(proj, "targets", Dict{String,Any}()), "test", String[]))
+
+    # An extra that is not in the test target is not in the test environment.
+    @test issubset(target, extras)
+
+    available = union(deps, target, Set(["RepliBuild"]))
+
+    test_files = filter(f -> startswith(f, "test_") && endswith(f, ".jl"),
+                        readdir(@__DIR__))
+    @test length(test_files) > 10
+
+    undeclared = Dict{String,Vector{String}}()
+    for f in test_files
+        for line in eachline(joinpath(@__DIR__, f))
+            m = match(r"^\s*(?:using|import)\s+([A-Za-z][A-Za-z0-9_]*)", line)
+            m === nothing && continue
+            pkg = m.captures[1]
+            # `using .Foo` / submodules of the package under test are not deps.
+            (pkg in available || startswith(pkg, "RepliBuild")) && continue
+            push!(get!(() -> String[], undeclared, pkg), f)
+        end
+    end
+
+    isempty(undeclared) || @warn "Imported by tests but absent from [deps] and [targets].test — Pkg.test() will fail" undeclared
+    @test isempty(undeclared)
+
+    # The scan must actually be finding imports, or the assert above is vacuous
+    # — the same "asserting into an empty loop" failure this suite guards
+    # elsewhere.
+    seen = Set{String}()
+    for f in test_files, line in eachline(joinpath(@__DIR__, f))
+        m = match(r"^\s*(?:using|import)\s+([A-Za-z][A-Za-z0-9_]*)", line)
+        m === nothing || push!(seen, m.captures[1])
+    end
+    @test "Test" in seen
+    @test length(seen) >= 5
+end
