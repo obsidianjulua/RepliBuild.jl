@@ -248,7 +248,9 @@ function _extract!(mod, target_name::String)
         if name in reached_fns
             LLVM.API.LLVMFunctionDeleteBody(f)  # C++ deleteBody: safe, sets external
             if LLVM.API.LLVMHasPersonalityFn(f) != 0
-                LLVM.API.LLVMSetPersonalityFn2(f, C_NULL)
+                # LLVM 20 folded the Extra `*2` NULL-tolerant setter into
+                # `LLVMSetPersonalityFn`. LLVM.jl picks the right one.
+                LLVM.personality!(f, nothing)
             end
         else
             LLVM.linkage!(f, LLVM.API.LLVMInternalLinkage)
@@ -263,7 +265,9 @@ function _extract!(mod, target_name::String)
             # internal constant, embedded as-is
         elseif name in reached_gvs
             if !LLVM.isdeclaration(gv)
-                LLVM.API.LLVMSetInitializer2(gv, C_NULL)
+                # Same LLVM 20 fold as personality: Extra `LLVMSetInitializer2`
+                # is not in LLVM.API when Julia's libLLVM is 20+.
+                LLVM.initializer!(gv, nothing)
             end
             LLVM.linkage!(gv, LLVM.API.LLVMExternalLinkage)
         elseif !LLVM.isdeclaration(gv)
