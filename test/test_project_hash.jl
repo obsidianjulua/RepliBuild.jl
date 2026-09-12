@@ -23,6 +23,10 @@ const C  = RepliBuild.Compiler
 const CM = RepliBuild.ConfigurationManager
 
 # Minimal project: one TU, one include dir, caching on.
+# TOML strings treat `\U` as a unicode escape; a Windows `C:\Users\...`
+# path is therefore not a valid scalar. Forward slashes are.
+toml_path(p) = replace(p, '\\' => '/')
+
 function scratch_project(dir)
     mkpath(joinpath(dir, "src"))
     mkpath(joinpath(dir, "include"))
@@ -30,11 +34,11 @@ function scratch_project(dir)
     write(joinpath(dir, "replibuild.toml"), """
     [project]
     name = "probe"
-    root = "$(replace(dir, "\\\\" => "/"))"
+    root = "$(toml_path(dir))"
 
     [compile]
-    source_files = ["$(replace(joinpath(dir, "src", "main.c"), "\\\\" => "/"))"]
-    include_dirs = ["$(replace(joinpath(dir, "include"), "\\\\" => "/"))"]
+    source_files = ["$(toml_path(joinpath(dir, "src", "main.c")))"]
+    include_dirs = ["$(toml_path(joinpath(dir, "include")))"]
 
     [cache]
     enabled = true

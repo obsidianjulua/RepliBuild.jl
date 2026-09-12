@@ -39,11 +39,12 @@ const _DOCTOR   = RepliBuild.EnvironmentDoctor
         # And the derivation actually yields the Julia value on this checkout —
         # a regex that silently stops matching would otherwise go unnoticed
         # until someone's build failed with an empty floor.
-        derived = readchomp(pipeline(`sed -n 's/^const MIN_LLVM_VERSION = \([0-9][0-9]*\).*/\1/p'
-                                      $(joinpath(dirname(_BUILD_SH), "..", "Builder", "LLVMEnvironment.jl"))`,
-                                     `head -1`))
-        @test !isempty(derived)
-        @test parse(Int, derived) == RepliBuild.LLVMEnvironment.MIN_LLVM_VERSION
+        # Same pattern build.sh's sed uses; Julia so the suite does not need
+        # sed/head (Windows).
+        env_jl = read(joinpath(dirname(_BUILD_SH), "..", "Builder", "LLVMEnvironment.jl"), String)
+        m = match(r"^const MIN_LLVM_VERSION = ([0-9][0-9]*)"m, env_jl)
+        @test m !== nothing
+        @test parse(Int, m.captures[1]) == RepliBuild.LLVMEnvironment.MIN_LLVM_VERSION
     end
 
     @testset "no hardcoded package versions in build.sh" begin
@@ -78,10 +79,11 @@ const _DOCTOR   = RepliBuild.EnvironmentDoctor
     end
 
     @testset "shell hint and Julia advice agree" begin
-        # The doctor's advice is the reference; build.sh must not invent its own
-        # spelling of the same instruction. Compared on package sets rather than
-        # whole lines, so formatting/padding differences do not fail the test.
-        advice = join(_DOCTOR._LLVM_ADVICE, "\n")
+        # The Unix doctor copy is the reference for build.sh; compared on
+        # package sets rather than whole lines, so formatting/padding
+        # differences do not fail the test. `_LLVM_ADVICE` itself is the
+        # platform pick (MSYS2 on Windows) and is checked separately.
+        unix_advice = join(_DOCTOR._LLVM_ADVICE_UNIX, "\n")
 
         pkgs(text, pat) = Set(m.captures[1] for m in eachmatch(pat, text))
         arch_pat = r"yay -S ([a-z0-9 .+-]+)"
@@ -89,19 +91,28 @@ const _DOCTOR   = RepliBuild.EnvironmentDoctor
 
         for (label, pat) in (("Arch", arch_pat), ("Fedora", fed_pat))
             sh_set = pkgs(sh, pat)
-            jl_set = pkgs(advice, pat)
+            jl_set = pkgs(unix_advice, pat)
             @test !isempty(sh_set)
             @test !isempty(jl_set)
             @test Set(split(strip(only(sh_set)))) == Set(split(strip(only(jl_set)))) ||
-                  error("$label install line differs between build.sh and EnvironmentBuild advice:\n" *
+                  error("$label install line differs between build.sh and EnvironmentDoctor Unix advice:\n" *
                         "  build.sh: $(only(sh_set))\n  doctor:   $(only(jl_set))")
         end
 
         # The Debian/Ubuntu line is version-bearing on both sides; assert they
-        # name the same installer, and that the doctor's carries the floor.
+        # name the same installer, and that the Unix doctor copy carries the floor.
         @test occursin("apt.llvm.org/llvm.sh", sh)
-        @test occursin("apt.llvm.org/llvm.sh", advice)
-        @test occursin(string(RepliBuild.LLVMEnvironment.MIN_LLVM_VERSION), advice)
+        @test occursin("apt.llvm.org/llvm.sh", unix_advice)
+        @test occursin(string(RepliBuild.LLVMEnvironment.MIN_LLVM_VERSION), unix_advice)
+
+        advice = join(_DOCTOR._LLVM_ADVICE, "\n")
+        if Sys.iswindows()
+            @test occursin("pacman -S", advice)
+            @test occursin("mingw-w64-clang-x86_64-mlir", advice)
+            @test _DOCTOR._LLVM_ADVICE === _DOCTOR._LLVM_ADVICE_WINDOWS
+        else
+            @test _DOCTOR._LLVM_ADVICE === _DOCTOR._LLVM_ADVICE_UNIX
+        end
     end
 
     @testset "the floor has one definition in Julia" begin

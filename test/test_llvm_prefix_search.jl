@@ -16,16 +16,25 @@ using RepliBuild
 
 const L = RepliBuild.LLVMEnvironment
 
+# `_best_llvm_prefix` concatenates this onto `clang++` and `llvm-config`.
+# Production passes `.exe` on Windows. Tests cannot emit a PE, so Windows
+# uses `.cmd`, which Julia's Cmd can run; Unix keeps a shebang script.
+const EXE = Sys.iswindows() ? ".cmd" : ""
+
 # A prefix that looks like a real LLVM install and reports `major` from its
 # llvm-config. `nothing` writes an llvm-config that answers garbage.
 function fake_prefix(root, name, major)
     p = joinpath(root, name)
     mkpath(joinpath(p, "bin")); mkpath(joinpath(p, "lib")); mkpath(joinpath(p, "include"))
-    cfg = joinpath(p, "bin", "llvm-config")
+    cfg = joinpath(p, "bin", "llvm-config" * EXE)
     body = major === nothing ? "not a version" : "$(major).1.8"
-    write(cfg, "#!/bin/sh\necho '$body'\n")
-    chmod(cfg, 0o755)
-    touch(joinpath(p, "bin", "clang++"))
+    if Sys.iswindows()
+        write(cfg, "@echo off\r\necho $body\r\n")
+    else
+        write(cfg, "#!/bin/sh\necho '$body'\n")
+        chmod(cfg, 0o755)
+    end
+    touch(joinpath(p, "bin", "clang++" * EXE))
     return p
 end
 
@@ -33,19 +42,19 @@ end
 
     @testset "_llvm_major_of" begin
         mktempdir() do d
-            @test L._llvm_major_of(joinpath(fake_prefix(d, "v22", 22), "bin", "llvm-config")) == 22
-            @test L._llvm_major_of(joinpath(fake_prefix(d, "v14", 14), "bin", "llvm-config")) == 14
+            @test L._llvm_major_of(joinpath(fake_prefix(d, "v22", 22), "bin", "llvm-config" * EXE)) == 22
+            @test L._llvm_major_of(joinpath(fake_prefix(d, "v14", 14), "bin", "llvm-config" * EXE)) == 14
             # Unparseable and missing both score 0 — "cannot be asked" is not
             # "is fine", which is how an unusable prefix used to get accepted.
-            @test L._llvm_major_of(joinpath(fake_prefix(d, "junk", nothing), "bin", "llvm-config")) == 0
-            @test L._llvm_major_of(joinpath(d, "nope", "llvm-config")) == 0
+            @test L._llvm_major_of(joinpath(fake_prefix(d, "junk", nothing), "bin", "llvm-config" * EXE)) == 0
+            @test L._llvm_major_of(joinpath(d, "nope", "llvm-config" * EXE)) == 0
         end
     end
 
     @testset "below the minimum is refused" begin
         mktempdir() do d
             old = fake_prefix(d, "old", L.MIN_LLVM_VERSION - 1)
-            @test L._best_llvm_prefix([old], "") === nothing
+            @test L._best_llvm_prefix([old], EXE) === nothing
         end
     end
 
@@ -55,8 +64,8 @@ end
             # a newer one after it. The old loop returned the first hit.
             older = fake_prefix(d, "llvm-21", L.MIN_LLVM_VERSION)
             newer = fake_prefix(d, "llvm-22", L.MIN_LLVM_VERSION + 1)
-            @test L._best_llvm_prefix([older, newer], "") == newer
-            @test L._best_llvm_prefix([newer, older], "") == newer
+            @test L._best_llvm_prefix([older, newer], EXE) == newer
+            @test L._best_llvm_prefix([newer, older], EXE) == newer
         end
     end
 
@@ -64,7 +73,7 @@ end
         mktempdir() do d
             usr  = fake_prefix(d, "usr", 14)                        # distro default
             good = fake_prefix(d, "usr-lib-llvm-22", L.MIN_LLVM_VERSION + 1)
-            @test L._best_llvm_prefix([usr, good], "") == good      # was `usr`
+            @test L._best_llvm_prefix([usr, good], EXE) == good      # was `usr`
         end
     end
 
@@ -74,14 +83,14 @@ end
 
             no_lib = fake_prefix(d, "nolib", L.MIN_LLVM_VERSION)
             rm(joinpath(no_lib, "lib"); recursive=true)
-            @test L._best_llvm_prefix([no_lib], "") === nothing
+            @test L._best_llvm_prefix([no_lib], EXE) === nothing
 
             no_clang = fake_prefix(d, "noclang", L.MIN_LLVM_VERSION)
-            rm(joinpath(no_clang, "bin", "clang++"))
-            @test L._best_llvm_prefix([no_clang], "") === nothing
+            rm(joinpath(no_clang, "bin", "clang++" * EXE))
+            @test L._best_llvm_prefix([no_clang], EXE) === nothing
 
-            @test L._best_llvm_prefix([no_lib, no_clang, ok], "") == ok
-            @test L._best_llvm_prefix(String[], "") === nothing
+            @test L._best_llvm_prefix([no_lib, no_clang, ok], EXE) == ok
+            @test L._best_llvm_prefix(String[], EXE) === nothing
         end
     end
 

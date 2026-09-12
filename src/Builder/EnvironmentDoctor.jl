@@ -319,13 +319,21 @@ end
 # PROBES — C++ / Tier 2
 # =============================================================================
 
-const _LLVM_ADVICE = Sys.iswindows() ?
-    ["In an MSYS2 CLANG64 shell:",
-     "  pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir"] :
-    ["  Arch:          yay -S llvm mlir",
-     "  Debian/Ubuntu: wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh $(MIN_LLVM_VERSION)",
-     "  Fedora:        dnf install llvm-devel mlir-devel clang-devel",
-     "Tier 2 only — the C path needs none of this."]
+# Unix lines are the ones `src/mlir/build.sh` must stay in step with
+# (`test_toolchain_advice.jl`). Windows is a different installer; the
+# doctor picks the platform set, but the Unix copy stays named so the
+# test can compare it to the shell script on any OS.
+const _LLVM_ADVICE_UNIX = [
+    "  Arch:          yay -S llvm mlir",
+    "  Debian/Ubuntu: wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh $(MIN_LLVM_VERSION)",
+    "  Fedora:        dnf install llvm-devel mlir-devel clang-devel",
+    "Tier 2 only — the C path needs none of this.",
+]
+const _LLVM_ADVICE_WINDOWS = [
+    "In an MSYS2 CLANG64 shell:",
+    "  pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir",
+]
+const _LLVM_ADVICE = Sys.iswindows() ? _LLVM_ADVICE_WINDOWS : _LLVM_ADVICE_UNIX
 
 function _check_llvm_config()::ToolStatus
     for name in _versioned("llvm-config")
