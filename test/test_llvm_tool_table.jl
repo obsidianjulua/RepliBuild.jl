@@ -73,6 +73,20 @@ end
         end
     end
 
+    @testset "C-bucket bin is version-matched or absent" begin
+        # A PATH llvm-link at a *newer* major is not a match. Returning it
+        # used to send C fallback IR through LLVM 22 opt and fail inside
+        # JLL clang 20 with "unterminated attribute group".
+        bin = RepliBuild.LLVMEnvironment.c_toolchain_bin_dir()
+        if bin === nothing
+            @test bin === nothing
+        else
+            link = RepliBuild.LLVMEnvironment._resolve_tool_path(joinpath(bin, "llvm-link"))
+            @test link !== nothing
+            @test RepliBuild.LLVMEnvironment._llvm_tool_major(link) == Base.libllvm_version.major
+        end
+    end
+
     @testset "the two discovery functions no longer share a name" begin
         @test isdefined(RepliBuild.LLVMEnvironment, :discover_llvm_tools)
         @test isdefined(RepliBuild.BuildBridge, :resolve_required_tools)

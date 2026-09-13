@@ -712,6 +712,16 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
                   "Set `[link] fallback = true` in replibuild.toml to use external llvm-link.")
         end
     else
+        # C fallback must not pick PATH's LLVM 22 opt against JLL clang 20 IR —
+        # that parse-fails inside create_library as "unterminated attribute
+        # group" on `nocreateundeforpoison`, which does not name the versions.
+        if config.wrap.language == :c && LLVMEnvironment.c_toolchain_bin_dir() === nothing
+            major = Base.libllvm_version.major
+            error("C `[link] fallback = true` needs llvm-link/opt at Julia's " *
+                  "libLLVM $major, not a different major on PATH. Default C is " *
+                  "in-process (`fallback = false`). To use the hatch, set " *
+                  "REPLIBUILD_LLVM_C_BIN to a matching bin.")
+        end
         llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
         (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
 

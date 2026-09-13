@@ -961,20 +961,45 @@ end
 # language is the natural dispatch axis. See `project_per_language_toolchain_routing`.
 
 """
+    _llvm_tool_major(tool_path) -> Int
+
+Major version `opt`/`llvm-link`/`llvm-config` report, or 0 if unreadable.
+`llvm-config --version` is a bare `22.1.8`; `opt --version` buries it in a
+banner (`LLVM version 22.1.8`). One regex covers both.
+"""
+function _llvm_tool_major(tool_path::AbstractString)::Int
+    out = try
+        read(pipeline(`$tool_path --version`, stderr=devnull), String)
+    catch
+        return 0
+    end
+    m = match(r"(?m)^\s*(?:LLVM version\s+)?(\d+)", out)
+    m === nothing && (m = match(r"LLVM version\s+(\d+)", out))
+    m === nothing ? 0 : parse(Int, m.captures[1])
+end
+
+"""
     c_toolchain_bin_dir() -> Union{String,Nothing}
 
 Locate the LLVM-bin directory whose `llvm-link`/`opt`/`llvm-dis` should be
 used for C source. The match must track Julia's internal libLLVM major
 version (`Base.libllvm_version`); a mismatched llvm-link silently drops
 debug records it doesn't recognize, erasing DWARF in the linked IR and
-breaking wrapper generation.
+breaking wrapper generation. On Windows the failure is louder: PATH's
+MSYS2 `opt` is LLVM 22 while Julia 1.13's JLL clang is 20, and clang then
+dies on `nocreateundeforpoison` (`unterminated attribute group`) instead
+of naming a version.
 
 Search order:
 
 1. `REPLIBUILD_LLVM_C_BIN` env var (explicit override)
 2. Version-matched parallel install for `Base.libllvm_version.major`,
    tried in `llvmNN/bin` (Arch) then `llvm-NN/bin` (Debian/Ubuntu) form.
-3. `nothing` (caller falls back to system PATH; warning)
+   Windows looks for `llvm-link.exe` in those dirs too.
+3. `Sys.which("llvm-link")` only if that binary's major equals
+   `Base.libllvm_version.major` — a PATH hit of a *newer* toolchain is
+   not a match, it is the defect.
+4. `nothing` (no version-matched bin; caller must not use PATH)
 """
 function c_toolchain_bin_dir()
     env_override = get(ENV, "REPLIBUILD_LLVM_C_BIN", "")
@@ -983,9 +1008,11 @@ function c_toolchain_bin_dir()
     end
     major = Base.libllvm_version.major
     for candidate in ("/usr/lib/llvm$(major)/bin", "/usr/lib/llvm-$(major)/bin")
-        if isfile(joinpath(candidate, "llvm-link"))
-            return candidate
-        end
+        _resolve_tool_path(joinpath(candidate, "llvm-link")) === nothing || return candidate
+    end
+    which_link = _resolve_tool_path("llvm-link")
+    if which_link !== nothing && _llvm_tool_major(which_link) == major
+        return dirname(which_link)
     end
     return nothing
 end
@@ -1008,14 +1035,16 @@ function resolve_tool(name::String, language::Symbol=:cpp)::String
     if language === :c
         bin = c_toolchain_bin_dir()
         if bin !== nothing
-            candidate = joinpath(bin, name)
-            isfile(candidate) && return candidate
+            candidate = _resolve_tool_path(joinpath(bin, name))
+            candidate !== nothing && return candidate
         elseif !_C_TOOLCHAIN_WARNED[]
             _C_TOOLCHAIN_WARNED[] = true
             major = Base.libllvm_version.major
-            @warn "LLVM C-bucket bin not found (looked for /usr/lib/llvm$(major)/bin). " *
-                  "Falling back to system PATH; bitcode may be incompatible with " *
-                  "Julia's internal libLLVM $(major). Install Arch `llvm$(major)` or set REPLIBUILD_LLVM_C_BIN."
+            @warn "LLVM C-bucket bin not found (looked for /usr/lib/llvm$(major)/bin " *
+                  "and a PATH llvm-link at libLLVM $major). The C default is " *
+                  "in-process libLLVM (`[link] fallback = false`). A PATH opt at a " *
+                  "different major emits IR the JLL clang cannot parse. " *
+                  "Set REPLIBUILD_LLVM_C_BIN to a matching bin, or leave fallback off."
         end
     end
     return name

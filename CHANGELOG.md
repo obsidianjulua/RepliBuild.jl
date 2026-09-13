@@ -4,6 +4,21 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### C-bucket external hatch must not use a newer PATH opt (2026-09-13)
+
+`[link] fallback = true` for C used to take PATH's `llvm-link`/`opt` when
+`/usr/lib/llvm20/bin` was absent. On Windows that is MSYS2 LLVM **22** against
+Julia 1.13's JLL clang **20**. `opt` wrote IR that `create_library` then
+handed to clang 20, which died on `nocreateundeforpoison` (`unterminated
+attribute group`) — a parse error, not a version error. Default C
+(`fallback = false`, in-process libLLVM 20) was already fine.
+
+`c_toolchain_bin_dir` now accepts a PATH `llvm-link` only if its major equals
+`Base.libllvm_version.major`, and looks for `.exe`. A C fallback with no
+matched bin is a hard error naming the hatch, not a clang parse. The
+devtests hatch case `@test_skip`s when the bin is absent, so the rest of
+the suite still runs.
+
 ### First Windows run of the 2026-09-06 Linux work — and the port leftovers it surfaced (2026-09-07)
 
 `julia 1.12.7`, MSYS2 CLANG64, system LLVM/MLIR **22.1.8**, `libJLCS.dll` present.

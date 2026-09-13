@@ -81,11 +81,19 @@ end
     end
 
     @testset "external escape hatch (fallback=true) still builds with DWARF" begin
-        root = mktempdir()
-        toml, name = _c_inprocess_toml(root; opt_level="2", fallback=true)
-        RepliBuild.build(toml)
-        so = joinpath(root, "julia", "lib$(name)." * Libdl.dlext)
-        @test isfile(so)
-        @test _has_dwarf(so)
+        # PATH's MSYS2 opt is LLVM 22; Julia 1.13's JLL clang is 20. Feeding
+        # that hatch the unmatched binary parse-fails in create_library as
+        # "unterminated attribute group" — not a version error. Skip when
+        # there is no bin at libLLVM's major; Linux with llvm20 still runs it.
+        if RepliBuild.LLVMEnvironment.c_toolchain_bin_dir() === nothing
+            @test_skip "no llvm-link/opt at libLLVM $(Base.libllvm_version.major); set REPLIBUILD_LLVM_C_BIN"
+        else
+            root = mktempdir()
+            toml, name = _c_inprocess_toml(root; opt_level="2", fallback=true)
+            RepliBuild.build(toml)
+            so = joinpath(root, "julia", "lib$(name)." * Libdl.dlext)
+            @test isfile(so)
+            @test _has_dwarf(so)
+        end
     end
 end
