@@ -413,7 +413,16 @@ extern "C" {
 #else
         static constexpr const char *kCxxPersonality = "__gxx_personality_v0";
 #endif
+        // Two INDEPENDENT jobs; see the matching walk in JLCSPasses.cpp for the
+        // full reasoning. uwtable goes on every AOT thunk with a body whether or
+        // not it has a landing pad — it is what lets a throw unwind OUT of the
+        // thunk to libJLCS's jlcs_guard_*, so gating it on hasInvoke tied the
+        // catch path to an invoke that Windows never emits. personality stays
+        // gated, because only an invoke requires one.
         mod.walk([&](mlir::LLVM::LLVMFuncOp funcOp) {
+            if (!funcOp.isExternal())
+                mlir::jlcs::setUwtableAsync(funcOp);
+
             bool hasInvoke = false;
             funcOp.walk([&](mlir::LLVM::InvokeOp) { hasInvoke = true; });
             if (hasInvoke && !funcOp.getPersonalityAttr()) {
@@ -428,7 +437,6 @@ extern "C" {
                 auto personalityRef = mlir::FlatSymbolRefAttr::get(
                     mod.getContext(), kCxxPersonality);
                 funcOp.setPersonalityAttr(personalityRef);
-                mlir::jlcs::setUwtableAsync(funcOp);
             }
         });
 

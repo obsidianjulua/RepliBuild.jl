@@ -1658,18 +1658,42 @@ struct LowerJLCSToLLVMPass
                 std::move(patterns))))
             signalPassFailure();
 
-        // Post-conversion fixup: set personality function on any llvm.func
-        // that contains llvm.invoke ops (needed for landing pads).
-        // This runs after func.func → llvm.func conversion, so personality
-        // can be properly set on the LLVM function.
+        // Post-conversion fixup, two INDEPENDENT jobs. Runs after
+        // func.func → llvm.func conversion, so both attributes can be set on
+        // the LLVM function.
+        //
+        // 1. uwtable, on EVERY thunk with a body. It used to be set only inside
+        //    the three may_throw lowerings, i.e. as a side effect of emitting a
+        //    landing pad — but an unwind table is what lets a throw LEAVE this
+        //    frame at all, which is a separate question from who catches it.
+        //    Windows already proves they are separate: it lowers every
+        //    may_throw to a plain call and catches in libJLCS's jlcs_guard_*,
+        //    with .pdata the only reason the throw can reach that frame.
+        //    Hoisting it also restores gdb `bt` through non-throwing thunks
+        //    (backtraces need CFI; stepping does not — that is .debug_line).
+        //
+        //    NOT sufficient on its own to replace the landing pads here. On
+        //    Linux, JITManager calls the thunk DIRECTLY — the jlcs_guard_*
+        //    wrapper is Sys.iswindows()-gated (JITManager.jl) — so there is no
+        //    C++ frame between Julia and the thunk to catch. Deleting the
+        //    landing pads with only this in place unwinds past Julia frames
+        //    into std::terminate (measured: SIGABRT, "terminate called after
+        //    throwing an instance of 'std::runtime_error'"). Un-gating the
+        //    guard call path is the prerequisite for that cleanup.
+        //
+        // 2. personality, only where a landing pad actually exists. An invoke
+        //    is what requires one; attaching a personality the host runtime may
+        //    not export is how the seh0/v0 split bites.
         getOperation().walk([&](LLVM::LLVMFuncOp funcOp) {
+            if (!funcOp.isExternal())
+                setUwtableAsync(funcOp);
+
             bool hasInvoke = false;
             funcOp.walk([&](LLVM::InvokeOp) { hasInvoke = true; });
             if (hasInvoke && !funcOp.getPersonalityAttr()) {
                 auto personalityRef = FlatSymbolRefAttr::get(
                     &getContext(), kCxxPersonality);
                 funcOp.setPersonalityAttr(personalityRef);
-                setUwtableAsync(funcOp);
             }
         });
     }
