@@ -494,7 +494,7 @@ TableGen-defined dialect for ABI marshalling (`src/mlir/JLCSOps.td`, `Types.td`)
 - `test/devtests.jl` — Full integration (requires LLVM/Clang)
 - **ONE SUITE OWNS EACH FILE, and it is enforced (2026-08-26).** The wiring guard's only rule was "included by *a* suite", which a file sitting in BOTH satisfies. `test_registry.jl` did exactly that: no suite owned it, it ran twice for anyone running both, and the tree gave no answer to "is this a CI test or a toolchain test?" — the same ambiguity that lets a toolchain dependency drift into CI unnoticed. It is **runtests-owned** now; verified toolchain-free by running it with clang hidden from `PATH` (6/6 — it is registry/cache mechanics over `REPLIBUILD_HOME` → tempdir plus `discover`, which scans and writes a TOML and never invokes a compiler). `runtests.jl` asserts the two suites are **disjoint**, with a `SHARED` dict for a deliberate exception (empty today) so an overlap has to be someone's decision rather than nobody's accident. Negative-checked by re-adding the include: the guard names the file.
 - **THE VERSION IS ONE NUMBER (2026-08-26).** `Project.toml` and `const VERSION` were two independent literals with nothing reconciling them. `VERSION` is now **derived** — `VersionNumber(TOML.parsefile(_PROJECT_TOML)["version"])` with an `include_dependency` so a Project.toml edit invalidates the precompile cache (without it the old number stays baked in the `.ji`). Not cosmetic: `VERSION` feeds `_generator_fingerprint`, which gates the registry build cache, so a wrong one serves a **stale-codegen wrapper** instead of rebuilding — and it is stamped into every wrapper as `BUILD_GENERATOR`. Guarded in `runtests.jl` by three checks: it equals the TOML, it equals `pkgversion(RepliBuild)` (an independent read through Julia's own resolution — agreement means the file the module read and the file Julia loaded are the same one), and the source still contains the derivation rather than a re-introduced literal. Proven by bumping Project.toml and watching `VERSION` follow with no source edit.
-  **Note the LOCAL version and the REGISTERED version are different questions.** General has RepliBuild through **3.3.4** (verified 2026-09-05 by reading `R/RepliBuild/Versions.toml` out of `~/.julia/registries/General.tar.gz` — do that rather than trusting this line). **3.3.2 was released locally and never registered; it is permanently skipped**, and 3.3.3 got in anyway via the `Override AutoMerge: package author approved` label on [General#166096](https://github.com/JuliaRegistries/General/pull/166096). That skip is spent, and 3.3.4 registered normally after it — so **4.0.0 follows 3.3.4 directly and needs no override.** The general rule stands — a locally-released version that is never registered leaves a permanent hole, and the next registration after one needs the author-approved label.
+  **Note the LOCAL version and the REGISTERED version are different questions.** General has RepliBuild through **4.0.0** (re-verified 2026-09-13 by reading `R/RepliBuild/Versions.toml` out of `~/.julia/registries/General.tar.gz` — **do that rather than trusting this line**; it had gone stale at 3.3.4 once already, and the registry tarball itself has an mtime worth checking). **3.3.2 was released locally and never registered; it is permanently skipped** — the version list runs `… 3.3.0 3.3.1 3.3.3 3.3.4 4.0.0`, with no 3.3.2. It got past that hole via the `Override AutoMerge: package author approved` label on [General#166096](https://github.com/JuliaRegistries/General/pull/166096); that skip is spent, 3.3.4 and 4.0.0 both registered normally after it, so **4.0.1 follows 4.0.0 directly and needs no override.** The general rule stands — a locally-released version that is never registered leaves a permanent hole, and the next registration after one needs the author-approved label.
 - Real-world: Lua 5.4.6, SQLite, Duktape, cJSON, pugixml
 - Specialized: `test_mlir_templates.jl` (JLCS dialect: CStructs, RAII, vcall, sret), `test_jlcs_invariants.jl` (dialect arity/liveness probes), `test_struct_abi.jl` (devtests §12: nested-c_struct segfault, create_jit pre-flight guard, SysV small-struct ABI vs a real clang++ callee), `test_multilib_jit.jl` (devtests §13: two wrappers, one session, per-library engines), `test_static_promotion.jl` (devtests §7b: `__rb_*` promotion decisions, dynsym, dlsym↔API single-copy coherence, wrapper exclusion — over `slice_test/`), `test_slicer.jl` (devtests §7c: declarations-only slices, hazards/refusals, declared-symbol contract + M3 pre-flight demotion, live llvmcall coherence both directions, cache, lua at scale), `test_tier1_dispatch.jl` (devtests §7d, 64 asserts: the generated wrapper in mixed-tier mode — `_SLICE_*` const + `llvmcall` emission, varargs/setjmp staying ccall, `TIER1_FUNCTIONS` surface, both coherence directions, `[wrap.tier1]` knob parsing, slices as precompile dependencies, **mangled-keyed slice constants** (`st_collide_`/`st__collide`) and **no orphan slices on disk** (`st_name`)), `test_jlcs_producers.jl` (devtests §11: scope-RAII + array-view producers executing through the real MLIR JIT), `test_registry.jl`, `test_ingest.jl`
 - **`devtests.jl` IS GREEN END TO END AGAIN (2026-08-26): exit 0, 0 failures, runs through §16.** Both standing reds closed, and neither was a product bug. Re-verify with a full run before trusting this line.
@@ -724,8 +724,9 @@ at runtime from `@__DIR__`.
 Native mingw host build. **Not MSVC, not a cross-compile.** CLANG64 specifically:
 it matches Julia's own mingw build (so a wrapper DLL shares the process C++ ABI)
 and is the only MSYS2 repo carrying MLIR — which ships **22.1.8**, matching the
-Linux reference, so there is no version skew to work around. `WINDOWS_PORT.md`
-has the setup and the full findings; these are the ones that bite a code change.
+Linux reference, so there is no version skew to work around.
+`docs/updates/WINDOWS_PORT.md` has the setup and the full findings; these are
+the ones that bite a code change.
 
 - **TWO DWARF DUMPERS, SPLIT BY CONTAINER — NOT BY DIALECT.** `_dwarf_dumper()`
   returns GNU `readelf` on Linux and GNU `objdump` on Windows. Both print from
@@ -877,20 +878,45 @@ has the setup and the full findings; these are the ones that bite a code change.
   pins the Win64 ABI table `@test_skip`ped on the only machine able to check
   it (95/95 once it writes to a temp file instead). Grep for `/dev/null` in
   anything reached by `run`; `devnull` as a *stream* redirect is fine.
-- **Open on Windows:** `libunwind: pc not in table` aborts the `devtests.jl`
-  parent after the callback fixture in some runs (zero test failures in every
-  run; needs prior in-parent JIT activity, so it points at SEH unwind-table
-  registration for ORC-JIT'd frames on COFF). Run each remaining section in its
-  own process to get past it — `callback_test/test_exceptions.jl` standalone
-  aborts the same way (`0xC00000FF`), which places the fault in that fixture's
-  JIT/EH activity rather than in the suite driver. `test_abi_nested.jl` still
+- ~~**Open on Windows:** `libunwind: pc not in table` aborts the `devtests.jl`
+  parent after the callback fixture~~ — **RESOLVED by `f99e07f` (2026-09-07),
+  and this entry was stale for exactly that reason: it was last touched by
+  `cf7fb10` on 2026-09-05, two days BEFORE the fix.** The diagnosis recorded
+  here was right (SEH unwind-table registration for ORC-JIT'd frames on COFF);
+  what it lacked was the mechanism. `RuntimeDyldCOFFX86_64` finds `.pdata` and
+  hands it to `registerEHFrames` → `__register_frame`, which is the ELF DWARF
+  path; COFF x86-64 needs `RtlAddFunctionTable` over RUNTIME_FUNCTION entries.
+  Feeding `.pdata` to libunwind and then `__deregister_frame` on teardown
+  **poisons process-wide unwind**, which is why it needed prior in-parent JIT
+  activity and would not reproduce standalone. The dialect owns the LLJIT now
+  (`JlcsJIT.cpp`) because `ExecutionEngineOptions` has no object-linking-layer
+  hook; `Win64SEHMemoryManager::registerEHFrames` calls `RtlAddFunctionTable`
+  and deliberately does **not** call the parent (`__register_frame` is the
+  poison), with `RtlDeleteFunctionTable` on teardown. Confirmed both ways on
+  2026-09-13: statically, the override is complete; empirically, `devtests.jl`
+  passes on Windows — the suite that used to abort is the test.
+  **Do not re-derive this from the note above; check `git log -S` on the symptom
+  before believing any "Open on Windows" line here.** `test_abi_nested.jl` still
   states the SysV XMM expectation — latent, it passes today (14/14).
-  `test_c_inprocess` is **9/1**, and is the one item here that is NOT a Windows
-  property: only the `[link] fallback = true` escape hatch, where the EXTERNAL
-  optimizer (system LLVM 22) writes debug records into textual IR and the
-  `Clang_unified_jll` 18 that links the C bucket cannot parse them
-  (`expected instruction opcode`). Version skew across the documented two-LLVM
-  split, so expect it on Linux with the same pair. The in-process default is
+  ~~`test_c_inprocess` is **9/1**~~ — **RESOLVED by `9576839` (2026-09-13), and
+  two of the three facts in the old entry were already wrong when written.** It
+  is not clang **18**, it is clang **20** (the JLL moved with Julia 1.13), and
+  the error is not `expected instruction opcode`, it is `nocreateundeforpoison`
+  → `unterminated attribute group`. The mechanism was right: `[link] fallback =
+  true` for C took PATH's `llvm-link`/`opt` when `/usr/lib/llvm<major>/bin` was
+  absent, which on Windows is MSYS2 LLVM 22 against the JLL clang, and
+  `create_library` then fails on a parse error that names no version.
+  `c_toolchain_bin_dir` now accepts a PATH `llvm-link` **only** if its major
+  equals `Base.libllvm_version.major` (and looks for `.exe`); a C fallback with
+  no matched bin is a hard error naming the hatch, and the devtests hatch case
+  `@test_skip`s rather than `exit`ing. Measured 2026-09-13 on **both** hosts:
+  Linux **11/11 with 0 skips** (hatch genuinely exercised — Arch `llvm20` is
+  installed, so the bin is version-matched) and Windows **9 pass + 1 skip**.
+  The count differs by exactly the two asserts the skipped testset contains,
+  which is how you know both branches are live rather than one being vacuous.
+  **The old "expect it on Linux with the same pair" prediction is falsified** —
+  Linux passes *because* a matching bin exists, which is the condition the fix
+  keys on. The in-process default is
   green. `test_struct_abi` and `test_debug_inspection` were on this list and
   are FIXED — both were tests stating Linux's answer (`long` under LLP64; GNU
   `timeout` and GNU `objdump`), each checked against `ddd2d7f` first. **PE inverts the

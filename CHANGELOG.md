@@ -4,6 +4,14 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.0.1 (2026-09-13)
+
+**Julia 1.13 / libLLVM 20 stability.** 4.0.0 shipped against Julia 1.12 and
+libLLVM 18; 1.13 moved the bundled LLVM to 20, which broke the Slicer's
+LLVMExtra calls, exposed a toolchain-discovery ladder that version-checked
+nothing, and turned the C external hatch into a cross-major parse failure.
+`Pkg.test()` also did not run at all. No API changes.
+
 ### C-bucket external hatch must not use a newer PATH opt (2026-09-13)
 
 `[link] fallback = true` for C used to take PATH's `llvm-link`/`opt` when
@@ -18,6 +26,162 @@ attribute group`) — a parse error, not a version error. Default C
 matched bin is a hard error naming the hatch, not a clang parse. The
 devtests hatch case `@test_skip`s when the bin is absent, so the rest of
 the suite still runs.
+
+### Unwind tables stop being a side effect of the landing pad (2026-09-13)
+
+`setUwtableAsync` was called only inside the three `may_throw` lowerings, so a
+thunk got an unwind table only if it also got a landing pad. Those are separate
+questions: the table is what lets a throw *leave* the frame, which is prior to
+who catches it. Windows proves the split — it lowers every `may_throw` to a
+plain call and catches in libJLCS's `jlcs_guard_*`, reaching that frame only
+because `.pdata` exists — yet on Windows `hasInvoke` is permanently false, so
+the call never fired there at all.
+
+The post-conversion walk in `JLCSPasses.cpp` and the matching one in
+`JLCSCAPIWrappers.cpp` (AOT) now stamp `uwtable` on every `llvm.func` with a
+body (`!isExternal()`), independently of the personality attribute, which stays
+gated on an actual invoke. Restores gdb `bt` through non-throwing thunks;
+stepping was never affected (that is `.debug_line`).
+
+**The landing pads are NOT removable on top of this, and that was measured.**
+`jlcs_guard_*` is reached through a `Sys.iswindows()`-gated path in
+`JITManager`; on Linux Julia calls the thunk directly, so no C++ frame exists
+to catch in and the in-thunk landing pad is the only catcher. Deleting them
+with uwtable in place aborts — `terminate called after throwing an instance of
+'std::runtime_error'`, SIGABRT. Un-gating the guard call path is the
+prerequisite for that cleanup, and it puts a C++ frame in every Tier-2 call.
+
+### Windows: three new CI tests made runnable on PE (2026-09-12)
+
+`Pkg.test()` died on Windows in files that landed with Unix fixtures while the
+same suite was green on Linux — three independent instances of "the assertion
+is true of the Unix spelling of the fact". The fake `llvm-config` was a shebang
+script, so `_llvm_major_of` always scored 0 and newest-wins never saw a usable
+prefix (Windows now emits `.cmd` shims; Unix keeps the shebang). Toolchain
+advice shelled to `sed`/`head` and compared Arch/Fedora/Debian lines against
+`_LLVM_ADVICE`, which on Windows is the MSYS2 pacman stanza (the doctor now
+names Unix and Windows copies separately). Project-hash scratch TOMLs wrote
+`C:\Users\...` into a quoted string, and TOML reads `\U` as a unicode escape,
+so every testset errored before hashing anything. `Pkg.test()` exit 0 on
+Julia 1.13.0, Windows.
+
+### Slicer: use LLVM.jl setters that exist on libLLVM 20 (2026-09-12)
+
+Julia 1.13 ships libLLVM 20, where LLVMExtra's `LLVMSetInitializer2` and
+`LLVMSetPersonalityFn2` were folded into the upstream C API. LLVM.jl 9.13 puts
+those Extra names on `LLVM.API` only for older libLLVM, so on 20 they are
+simply missing — zlib wrap hit it on the first reached global with
+`UndefVarError: LLVMSetInitializer2`. Now calls `LLVM.initializer!` /
+`LLVM.personality!`, which already pick the right symbol per version. Verified
+on Julia 1.13.0 with Hub `test_deep.jl` 271/271.
+
+### `Pkg.test()` actually runs now (2026-09-10)
+
+The suite was green under `julia --project=. test/runtests.jl` and **failed
+under `Pkg.test()`** — which is how CI invokes it. `Pkg.test()` builds an
+environment from `[deps]` plus the `[targets]` test extras, and
+`test_struct_layout.jl` imports `Logging`, which was in neither. It ran 21
+testsets and died with "Package Logging not found in current path". Nothing in
+the tree said which invocation was authoritative.
+
+`Logging` added to `[extras]` and `[targets].test`. Guarded in `runtests.jl`:
+every `using`/`import` in `test/*.jl` must name something in `[deps]`, the test
+target, or the package itself, and every `[targets].test` entry must exist in
+`[extras]`. It checks the *declaration* rather than shelling to `Pkg.test`,
+which keeps it cheap and names both the package and the importing file. Two
+guards against asserting into an empty loop: the scan must find `Test` and at
+least five distinct imports.
+
+### Project hash walks include dirs recursively (2026-09-10)
+
+The include-dir walk was `readdir`, top level only, so a header one directory
+down could be edited freely while the build reported "project unchanged"
+against modified sources. `include/<lib>/<lib>.h` is the ordinary C layout —
+SUNDIALS generates exactly `include/sundials/sundials_config.h` — so the
+headers most likely to matter were the ones least likely to be seen. Now
+`walkdir`, with the path hashed alongside the bytes so a rename (or two headers
+swapping contents) is not invisible, and sorted descent so the key cannot
+depend on enumeration order.
+
+Recorded because the originally *reported* bug was not the one that existed: a
+source edit does invalidate the project cache, verified twice. The earlier
+symptom was `build()` having saved its hash inside the same process whose
+`wrap()` then threw on the AOT assert — so the next run's "project unchanged"
+was correct, and the `rm .replibuild_cache/project_hash` in that session was
+cargo-cult. Seeding the thunk manifest was what actually unblocked it.
+
+### LLVM prefix search: gate on version, prefer newest (2026-09-10)
+
+The C prefix ladder listed `/usr/lib/llvm-20` down to `-15` — every entry
+*below* the 21 minimum, with 21+ absent entirely — so a Debian box with LLVM 22
+at `/usr/lib/llvm-22` had its only usable install walked straight past.
+Auditing that turned up a worse defect underneath: **the loop version-checked
+nothing.** It returned the first prefix carrying `clang++` and `llvm-config`,
+so where the distro default `/usr` LLVM is too old, that was the answer, and
+the failure surfaced later inside CMake naming a missing header instead of here
+naming a version.
+
+The list is now generated from `MIN_LLVM_VERSION..MAX_PROBED_LLVM_VERSION`, and
+selection picks the newest candidate that *meets* the minimum. A prefix whose
+`llvm-config` answers something unparseable scores 0 and is skipped rather than
+accepted. `MIN_LLVM_VERSION` moved to `LLVMEnvironment` (loads first) with
+`EnvironmentDoctor` importing it instead of declaring its own `= 21` — three
+copies of that fact is how the ladder drifted below a minimum it did not share.
+
+### Toolchain advice: one floor, one install hint (2026-09-10)
+
+Removes the last copy of the LLVM floor, `LLVM_MIN_MAJOR=21` in
+`src/mlir/build.sh`, which now **derives** it by reading `const
+MIN_LLVM_VERSION` out of `LLVMEnvironment.jl`. No fallback literal when that
+read fails — a default is exactly how the second copy comes back — so it errors
+naming the file instead. Also removes a reassignment further down that was
+silently clobbering the derived value with 21 again.
+
+`build.sh` carried four install hints that disagreed: two spellings of the Arch
+line, three of the Ubuntu line, one with `mlir-21-dev` hardcoded next to a
+`${LLVM_MIN_MAJOR}` interpolation in the same file. Collapsed to one
+`install_hint()` used by all three failure paths, matching the doctor's
+`_LLVM_ADVICE`. `test_toolchain_advice.jl` (20 asserts, wired) holds the
+invariant: `build.sh` must derive rather than restate the floor, pin no package
+version, define exactly one hint with no package-manager line outside it, and
+its Arch/Fedora package sets must equal the doctor's.
+
+### Quadratic DWARF parse, a `wrap()` network reach, and the drop report (2026-09-09)
+
+`parse_dwarf_dump` answered two per-struct questions ("which DIEs name me as
+parent?") by rescanning all of `type_refs` each time — aggregates × DIEs × 2,
+quadratic in the binary. Hub curl: 196,841 DIEs, 6,594 aggregates, 415s, and
+nearly all of it two scans that found **nothing**, since curl is C and has zero
+`DW_TAG_inheritance` and zero template params. Every C library paid the full
+bill to build two empty arrays. One O(N) parent index up front:
+
+```
+liblua      203K lines     7.11s ->  1.35s
+libcurl     873K lines   414.8s  ->  3.43s
+llamacpp   5.02M lines              17.6s   (264MB dump, 71697 fns)
+```
+
+Byte-identical output, verified by SHA over sorted `struct_defs` on lua, curl,
+and on tinyxml2/pugixml which carry real inheritance (8 and 10 structs with
+`base_classes`).
+
+### AOT bootstrap deadlock, and a doctor that certified untested tiers (2026-09-10)
+
+A fresh C++ package with `aot_thunks = true` could not converge. AOT reads
+`thunk_manifest.json` at BUILD to decide what to emit; only `wrap` can compute
+that set — and wrap's `_assert_aot_thunks_present` threw **before** the manifest
+write. So AOT emitted nothing, wrap demanded N, wrap died, the manifest stayed
+stale, and the next build read the same stale file. The error's own advice
+("rebuild so AOT sees the same symbols") was unreachable, because rebuilding
+re-read the file wrap had refused to update.
+
+Recording what wrap needs is not the same act as certifying the library
+provides it. `_write_thunk_manifest` now runs first and returns a note the
+refusal quotes, so the cycle converges in two passes with no hand-editing:
+pass 1 refuses and updates 0 → 5, pass 2 builds clean. Verified on Hub
+`hello_world` from a hand-reset empty manifest. One writer now — Generator.jl's
+duplicate write is gone, since a write on the far side of the refusal is
+exactly the one that never happened.
 
 ### First Windows run of the 2026-09-06 Linux work — and the port leftovers it surfaced (2026-09-07)
 
