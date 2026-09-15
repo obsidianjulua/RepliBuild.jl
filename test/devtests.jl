@@ -235,6 +235,21 @@ include(joinpath(TEST_DIR, "test_jlcs_invariants.jl"))
 
 include(joinpath(TEST_DIR, "test_win64_abi.jl"))
 
+# ── 6c. Wrap-surface reachability guard ──────────────────────────────────────
+# Metadata is correlated against `nm -g` (the full symbol table); the generated
+# wrapper resolves through `dlsym`, i.e. `nm -D`. Nothing checked that the two
+# agree, and `-fvisibility=hidden` × `[link] promote_statics` is what makes them
+# disagree — hidden reads as "internal", promotion renames the definition to
+# `__rb_*`, and a library whose export macro is a bare `extern` (lua's LUA_API)
+# has its whole API renamed out of the wrap surface by a build that succeeded.
+#
+# Placed here with the other cheap probes, and for the same reason §6b is: it
+# needs only the JLL clang and `nm` — no JIT, no libJLCS, no system LLVM, no
+# built fixture — and a failing top-level testset aborts everything after it, so
+# cheap checks must not sit downstream of heavy ones.
+
+include(joinpath(TEST_DIR, "test_wrap_surface_guard.jl"))
+
 # ── 7. C-bucket in-process libLLVM pipeline ──────────────────────────────────
 # Traces the C link/opt path through Julia's resident libLLVM (default) and the
 # external escape hatch ([link] fallback = true), asserting DWARF survives each

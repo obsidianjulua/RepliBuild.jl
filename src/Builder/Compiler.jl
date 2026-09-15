@@ -27,6 +27,7 @@ export compile_to_ir, link_optimize_ir, create_library, create_executable, compi
        # Compiler utilities
        needs_recompile, compile_single_to_ir,
        generate_template_instantiations, generate_macro_shims,
+       verify_wrap_surface,
        extract_stl_method_symbols, extract_symbols_from_binary,
        extract_mangled_name, extract_dwarf_return_types,
        extract_function_name, extract_class_name,
@@ -1918,6 +1919,149 @@ function verify_shim_headers(config::RepliBuildConfig, shim_file::String)
 end
 
 """
+    verify_wrap_surface(config, binary_path, metadata_path)
+
+Guard: every function the wrapper is about to emit must be resolvable in the built
+library's **dynamic** symbol table, under the exact symbol name the wrapper will
+`ccall`.
+
+**The wrap surface and the runtime surface come from two different symbol tables and
+nothing has ever checked that they agree.** `extract_compilation_metadata` correlates
+DWARF against `extract_symbols_from_binary`, which reads `nm -g` — the full `.symtab`.
+The generated wrapper resolves through `dlsym`, which sees only `.dynsym`
+(`extract_symbols_nm` uses `nm -D` for exactly this reason). A symbol present in one
+and absent from the other is wrapped, documented, exported — and fails at the first
+call. Today the two agree everywhere; the check is cheap and the disagreement is
+silent, which is the whole argument for asserting it.
+
+**`promote_statics` is what makes them disagree.** It treats hidden visibility as
+"internal" (`_promote_statics_libllvm`: `needs_promotion` tests linkage OR
+hidden/protected visibility) and renames such definitions to `__rb_<lib>_<name>`,
+which by design drops them from the wrap surface — DWARF still names the original, so
+the renamed symbol has no DWARF match. That is correct while `hidden` means what the
+library's author meant by it.
+
+Compile with `-fvisibility=hidden` and it stops meaning that. Every function the
+library did not annotate `visibility("default")` goes hidden — **including public API
+whose export macro is a bare `extern`**, which is lua's `LUA_API` and is common. Then
+promotion renames the entire API to `__rb_*` and the wrapper generates nothing, from a
+build that succeeded and warned about nothing. Reproduced 2026-09-15 on a library-free
+three-function fixture through the JLL clang: `annotated_public` (carrying
+`__attribute__((visibility("default")))`) survives under its own name; `bare_extern_public`
+and `uses_helper` both come back as `__rb_fix_*`. The first of those is API.
+
+`test_cache_invalidation.jl` records the same interaction from the other side —
+"`internal_helper` under that flag is external-linkage-and-hidden (the LUAI_FUNC
+shape), so static promotion re-exports it as `__rb_cachetest_internal_helper` … assert
+names, never export counts, on anything downstream of promotion." **This guard asserts
+names.** The one count it reads is the degenerate zero.
+
+Two rules, neither carrying a threshold:
+
+  * **R1 — collapse.** The wrap surface is empty while promotion renamed symbols. That
+    is the failure above, observed rather than inferred: something was compiled, and
+    all of it left under a different name.
+  * **R2 — reachability.** Every wrappable function appears in the dynamic table under
+    its `mangled` name. Measured across all 31 built Hub packages 2026-09-15 —
+    **0 offenders**, including every C++ package (constructor clones and weak template
+    instantiations are all present in `.dynsym`), so a non-empty offender list is news
+    rather than noise.
+
+Runs BEFORE `save_project_hash`: a build that fails this must not leave a cache marker
+claiming it succeeded, or the next run skips straight past the failure.
+"""
+function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
+                             metadata_path::Union{Nothing,String})
+    config.binary.type == :executable && return
+    (isnothing(metadata_path) && return); isfile(metadata_path) || return
+    isfile(binary_path) || return
+
+    metadata = try
+        JSON.parsefile(metadata_path; use_mmap=false)
+    catch e
+        @debug "wrap-surface guard: metadata unreadable" exception=e
+        return
+    end
+    functions = get(metadata, "functions", nothing)
+    functions isa Vector || return
+
+    # `dlsym` sees the dynamic table on ELF; a PE has none, and the export directory
+    # is the equivalent authority there (`_pe_exported_names` returns nothing off PE).
+    pe_exports = _pe_exported_names(binary_path)
+    reachable = if pe_exports === nothing
+        (out, rc) = BuildBridge.execute("nm", ["-D", "--defined-only", binary_path])
+        rc == 0 || return   # cannot ask the question ⇒ assert nothing
+        names = Set{String}()
+        for line in split(out, '\n')
+            parts = split(strip(line))
+            length(parts) >= 3 && push!(names, String(parts[3]))
+        end
+        names
+    else
+        pe_exports
+    end
+    isempty(reachable) && return
+
+    promoted_count = count(startswith(s, "__rb_") for s in reachable)
+
+    # R1 — the degenerate case, and the only place a count is read.
+    if isempty(functions) && promoted_count > 0
+        error("""
+        RepliBuild: the wrappable surface of $(basename(binary_path)) is EMPTY.
+
+        The library built and exports $(length(reachable)) dynamic symbols, but
+        $(promoted_count) of them are `__rb_*` promoted internals and NOT ONE function
+        survived with a name DWARF can match. The wrapper would be generated with no
+        functions at all.
+
+        This is what `-fvisibility=hidden` does to a library whose export macro is a
+        bare `extern` (lua's `LUA_API` is the type case): every unannotated function
+        goes hidden, `[link] promote_statics` reads hidden as internal, and the whole
+        API is renamed away.
+
+        Fix in the package replibuild.toml:
+          • drop `-fvisibility=hidden` from [compile] flags, or
+          • set `[link] promote_statics = false` to stop the renaming (this also
+            disables Tier-1 slicing, which is off by default anyway), or
+          • if upstream really does annotate its exports, check that the annotation
+            reached this TU — a missing -D can turn FOO_API into a bare `extern`.
+        """)
+    end
+
+    # R2 — names, never counts.
+    offenders = String[]
+    for f in functions
+        f isa Dict || continue
+        sym = get(f, "mangled", "")
+        isempty(sym) && (sym = get(f, "name", ""))
+        isempty(sym) && continue
+        sym in reachable || push!(offenders, sym)
+    end
+    isempty(offenders) && return
+
+    shown = first(offenders, 12)
+    more  = length(offenders) - length(shown)
+    error("""
+    RepliBuild: $(length(offenders)) wrappable function(s) are NOT reachable in
+    $(basename(binary_path)).
+
+    These names were correlated against DWARF and would be emitted as `ccall` targets,
+    but `dlsym` cannot resolve them — they are in the full symbol table and absent from
+    the dynamic one. Every call would fail at runtime with an unresolved symbol, and
+    the wrapper gives no sign of it at generation time.
+
+    $(join(["    → " * o for o in shown], "\n"))$(more > 0 ? "\n    … and $more more" : "")
+
+    The usual cause is hidden visibility reaching functions that are public API — see
+    the `-fvisibility=hidden` × `promote_statics` interaction in this function's
+    docstring. Check in the package replibuild.toml:
+      • [compile] flags for `-fvisibility=hidden` or a `-D` that turns upstream's
+        export macro into a bare `extern`;
+      • [link] promote_statics, which renames hidden definitions to `__rb_*`.
+    """)
+end
+
+"""
 Generate a C/C++ shim file to instantiate requested macros as typed functions
 so they appear in the DWARF metadata and can be wrapped.
 """
@@ -2427,6 +2571,12 @@ function compile_project(config::RepliBuildConfig)
 
     # Step 4: Extract and save compilation metadata
     metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
+
+    # Guard: the functions metadata says are wrappable must actually be reachable
+    # through the dynamic symbol table the generated wrapper will dlsym against.
+    # BEFORE save_project_hash — a build that fails this must not leave a cache
+    # marker claiming it succeeded.
+    verify_wrap_surface(config, binary_path, metadata_path)
 
     # Step 5: Save project hash for future cache hits
     save_project_hash(config)
