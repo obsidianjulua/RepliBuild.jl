@@ -250,6 +250,15 @@ include(joinpath(TEST_DIR, "test_win64_abi.jl"))
 
 include(joinpath(TEST_DIR, "test_wrap_surface_guard.jl"))
 
+# ── 6d. Per-library export-visibility probe ──────────────────────────────────
+# The other half of §6c: before setting `-fvisibility=hidden` for a package, ask
+# whether that package's library annotates its exports. Compile its real sources
+# under its real flags with the flag added and read visibility off the IR — the
+# compiler resolves the export macro, so nothing parses a header. Same cheap-probe
+# placement rationale as §6b/§6c.
+
+include(joinpath(TEST_DIR, "test_visibility_probe.jl"))
+
 # ── 7. C-bucket in-process libLLVM pipeline ──────────────────────────────────
 # Traces the C link/opt path through Julia's resident libLLVM (default) and the
 # external escape hatch ([link] fallback = true), asserting DWARF survives each
