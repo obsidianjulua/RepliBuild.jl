@@ -39,7 +39,24 @@ struct DiscoveryConfig
     parse_ast::Bool
 end
 
-"""Nested struct for [compile] section"""
+"""
+Nested struct for [compile] section.
+
+`visibility` is `:default` (unchanged behaviour) or `:hidden` — the declared form of
+`-fvisibility=hidden`. It lives in the config rather than in `flags` because it is not
+an ordinary flag: it decides **what the generated wrapper's API is**. Under `:hidden`
+every definition the library did not annotate `visibility("default")` stops reaching
+`.dynsym`, so the wrap surface narrows to the set upstream declared public — free and
+exact for a library that annotates, and total erasure for one that does not
+(`Compiler.verify_wrap_surface` refuses that build; `VisibilityProbe.visibility_probe`
+answers which kind a package is BEFORE anyone sets this).
+
+Consumed by `get_compile_flags`, deliberately: that is what
+`compute_compile_fingerprint` hashes, so flipping this key invalidates the per-file IR
+cache. Appending the flag further downstream — beside the `-g` in
+`compile_single_to_ir`, say — would leave the fingerprint blind to it and happily serve
+stale IR built under the other visibility.
+"""
 struct CompileConfig
     source_files::Vector{String}  # Can be empty (auto-discovered)
     include_dirs::Vector{String}  # Can be empty (auto-discovered)
@@ -47,6 +64,7 @@ struct CompileConfig
     defines::Dict{String,String}
     parallel::Bool
     aot_thunks::Bool
+    visibility::Symbol            # :default | :hidden
 end
 
 """Nested struct for [link] section"""
@@ -333,14 +351,48 @@ end
 """Parse [compile] section"""
 function parse_compile_config(data::Dict)::CompileConfig
     compile = get(data, "compile", Dict())
+    flags = get(compile, "flags", ["-std=c++17", "-fPIC"])
+
+    raw_vis = get(compile, "visibility", "default")
+    vis = Symbol(lowercase(string(raw_vis)))
+    vis in (:default, :hidden) || error("""
+    RepliBuild: [compile] visibility = "$(raw_vis)" is not a valid value.
+
+    Expected "default" (every external definition reaches the dynamic symbol table,
+    the historical behaviour) or "hidden" (only definitions the library annotated
+    `visibility("default")` do).
+
+    Run `RepliBuild.VisibilityProbe.visibility_probe("<this toml>")` before choosing
+    "hidden" — on a library that does not annotate its exports it erases the whole
+    API, and the build is refused rather than shipped.
+    """)
+
+    # ONE spelling wins, or the config lies about what it built. A raw
+    # `-fvisibility=` in `flags` is the legacy form and still works; it is only a
+    # contradiction when the key ALSO asks for something, and then it is genuinely
+    # ambiguous which the author meant.
+    raw = findfirst(f -> startswith(f, "-fvisibility="), flags)
+    if raw !== nothing && vis === :hidden && flags[raw] != "-fvisibility=hidden"
+        error("""
+        RepliBuild: [compile] visibility and [compile] flags disagree.
+
+            visibility = "hidden"
+            flags      = [… "$(flags[raw])" …]
+
+        Which of the two is meant to decide the library's exported surface is
+        undecidable here, and getting it wrong silently changes the wrapper's API.
+        Drop the `-fvisibility=` entry from flags and let the key decide.
+        """)
+    end
 
     return CompileConfig(
         get(compile, "source_files", String[]),
         get(compile, "include_dirs", String[]),
-        get(compile, "flags", ["-std=c++17", "-fPIC"]),
+        flags,
         get(compile, "defines", Dict{String,String}()),
         get(compile, "parallel", true),
-        get(compile, "aot_thunks", false)
+        get(compile, "aot_thunks", false),
+        vis
     )
 end
 
@@ -750,7 +802,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         ProjectConfig(project_name, project_root, uuid4()),
         PathsConfig("src", "include", "julia", "build", ".replibuild_cache"),
         DiscoveryConfig(true, true, 10, ["build", ".git", ".cache"], true),
-        CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false),
+        CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false, :default),
         LinkConfig("2", false, String[], String[], false, true),
         BinaryConfig(:shared, "", false),
         WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], Dict{String,String}(), false, Tier1Config(false, String[], 64, false)),
@@ -811,6 +863,13 @@ function save_config(config::RepliBuildConfig)
     # auto-enable logic (C+LTO → aot_thunks=true) work on reload.
     if config.compile.aot_thunks
         compile_dict["aot_thunks"] = true
+    end
+    # Same rule for visibility: `:default` is the absent-key behaviour, so writing
+    # it would bloat every generated TOML with a no-op. Writing `"hidden"` is NOT
+    # optional though — dropping it on a round trip would silently restore the
+    # library's internals to the wrapper's API.
+    if config.compile.visibility !== :default
+        compile_dict["visibility"] = String(config.compile.visibility)
     end
     # Only save if non-empty
     if !isempty(config.compile.source_files)
@@ -986,7 +1045,8 @@ function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{
         new_flags,  # Updated
         config.compile.defines,
         config.compile.parallel,
-        config.compile.aot_thunks
+        config.compile.aot_thunks,
+        config.compile.visibility
     )
 
     return RepliBuildConfig(
@@ -1009,7 +1069,8 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
         config.compile.flags,
         config.compile.defines,
         config.compile.parallel,
-        config.compile.aot_thunks
+        config.compile.aot_thunks,
+        config.compile.visibility
     )
 
     return RepliBuildConfig(
@@ -1032,7 +1093,8 @@ function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String
         config.compile.flags,
         config.compile.defines,
         config.compile.parallel,
-        config.compile.aot_thunks
+        config.compile.aot_thunks,
+        config.compile.visibility
     )
 
     return RepliBuildConfig(
@@ -1057,7 +1119,8 @@ function with_discovery_results(config::RepliBuildConfig;
         config.compile.flags,
         config.compile.defines,
         config.compile.parallel,
-        config.compile.aot_thunks
+        config.compile.aot_thunks,
+        config.compile.visibility
     )
 
     return RepliBuildConfig(
@@ -1116,8 +1179,24 @@ get_source_files(c::RepliBuildConfig) = c.compile.source_files
 """Get all include directories (from config)"""
 get_include_dirs(c::RepliBuildConfig) = c.compile.include_dirs
 
-"""Get compiler flags"""
-get_compile_flags(c::RepliBuildConfig) = c.compile.flags
+"""
+The flags every translation unit is compiled with — `[compile] flags` plus whatever
+the typed keys above them resolve to.
+
+`visibility = "hidden"` is folded in HERE rather than at the compile call, because
+this is the list `compute_compile_fingerprint` hashes: fold it in later and flipping
+the key leaves the per-file IR cache valid, so the next build serves IR compiled under
+the other visibility and the wrapper's API silently belongs to the previous setting.
+
+Idempotent against the legacy spelling — a package carrying `-fvisibility=hidden` in
+`flags` directly (argon2, box2d3 and zstd all predate the key) gets one flag, not two.
+"""
+function get_compile_flags(c::RepliBuildConfig)
+    flags = c.compile.flags
+    c.compile.visibility === :hidden || return flags
+    any(f -> startswith(f, "-fvisibility="), flags) && return flags
+    return vcat(flags, "-fvisibility=hidden")
+end
 
 """Should run parallel compilation?"""
 is_parallel_enabled(c::RepliBuildConfig) = c.compile.parallel

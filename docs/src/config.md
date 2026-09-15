@@ -70,7 +70,7 @@ things or is wrong.
 | keeps headers somewhere other than `<root>`, `<root>/include`, `<root>/src` | `[compile] include_dirs` | Compile failure, or a TU silently missing declarations |
 | needs `-lm`, `-lpthread`, `-ldl` | `[link] link_libraries` | Loads fine; Tier-1 slices demote, or a symbol is missing at first use |
 | is configured by its build system through `-D` | `[compile] flags` / `[compile] defines` | One TU fails to compile, or a feature is silently off |
-| builds with `-fvisibility=hidden` | Nothing extra for macros (handled); mind `[compile] flags` parity with upstream | Exports missing from `nm -g` |
+| annotates its exports and you want internals out of the wrapper | `[compile] visibility = "hidden"` — **after** running the probe (§2.12) | Without it the wrapper carries every internal symbol as public API |
 | is C and you want cross-language inlining | `[wrap.tier1] enable = true` | Everything stays Tier 3 `ccall` (correct, just not inlined) |
 | must be reproducible | `commit` on the dependency | A moved tag silently changes what you compiled |
 
@@ -348,6 +348,74 @@ It must be a full 40-hex object name — abbreviated SHAs are rejected at config
 load, because they are ambiguous against future history. A mismatch after
 clone/checkout is a **hard error**, not a warning.
 
+### 2.12 Export visibility — what the wrapper's API *is*
+
+By default RepliBuild wraps every function that reaches the library's dynamic
+symbol table. For most C libraries that is far more than the API: internal
+helpers linked across translation units are externally visible too, and the
+generated module exports them beside the functions you meant to call. pcre2 ships
+27 `_pcre2_*` internals that way; zstd, 201.
+
+A library can already tell you which is which. Most annotate their public
+functions — `__attribute__((visibility("default")))`, usually behind an export
+macro like `PCRE2_EXPORT` or `B2_API` — precisely so a `-fvisibility=hidden`
+build exports the API and hides the rest. Turning that on gives you the author's
+own answer, computed by the compiler:
+
+```toml
+[compile]
+visibility = "hidden"     # default: "default"
+```
+
+!!! danger "Probe before you set this. On a library that does not annotate, it erases the API."
+
+    `-fvisibility=hidden` hides every definition the library did not annotate —
+    **including public API whose export macro is a bare `extern`**, which is what
+    lua's `LUA_API` is. `[link] promote_statics` then reads hidden as "internal"
+    and renames the whole surface to `__rb_*`, and the wrapper generates nothing.
+
+    Measured on cjson: adding the flag takes it from 92 wrapped functions to
+    `dwarf: 0 functions`, with all 118 dynamic symbols renamed.
+
+    RepliBuild refuses that build rather than shipping it (§5), but a refusal is
+    a late and expensive way to learn a fact about a library. Ask first:
+
+    ```julia
+    julia> RepliBuild.VisibilityProbe.visibility_probe("packages/pcre2/replibuild.toml")
+    VisibilityReport: pcre2
+      sources compiled   : 29/29
+      external defs      : 105
+      library annotated  : 78  (74.3%)
+      macro shims        : 14  (always annotated — excluded from the verdict)
+      verdict            : annotated
+      wrapped today      : 119
+        retained         : 92
+        DROPPED          : 27
+    ```
+
+    The probe compiles your sources under your flags with the flag added and reads
+    visibility off the IR — no header parsing, no guessing. **Read the dropped list
+    before setting the key**: those are functions the wrapper carries today, and the
+    probe cannot tell an internal you are glad to lose from a public function
+    upstream forgot to annotate.
+
+**The verdict belongs to the configuration, not to the library.** Export macros are
+routinely gated behind a define — cJSON's `CJSON_PUBLIC` expands to the visibility
+attribute only when `CJSON_API_VISIBILITY` is defined, and to a bare `type`
+otherwise. cjson measures 0 of 92 annotated purely because its `flags` omit that
+`-D`. Adding it flips the answer. Re-run the probe on a version bump and after any
+change to `flags` or `defines`.
+
+Two mechanical notes:
+
+- The key is honoured through `get_compile_flags`, which is what the compile
+  fingerprint hashes, so flipping it correctly invalidates the per-file IR cache.
+- A raw `-fvisibility=hidden` in `[compile] flags` is the older spelling and still
+  works — it is just undocumented and unvalidated. Setting *both* is fine when they
+  agree (you get one flag); setting the key to `"hidden"` while `flags` asks for a
+  different visibility is a **hard error**, because which one decides the library's
+  API is not something RepliBuild should guess.
+
 ---
 
 ## 3. Section reference
@@ -400,9 +468,11 @@ Types are TOML types. "Default" is what the parser uses when the key is
 | `source_files` | Vector{String} | `[]` (auto-discovered) | Explicit list; validated to exist at load |
 | `include_dirs` | Vector{String} | `[]` (auto-discovered) | Passed as `-I`; relative to the TOML's directory |
 | `aot_thunks` | Bool | `false` | Pre-compile Tier-2 thunks into `<name>_thunks.so`; needs `libJLCS.so` |
+| `visibility` | `"default"` \| `"hidden"` *(preserved)* | `"default"` | `"hidden"` narrows the wrapper's API to what the library annotates. **Probe first — §2.12.** Any other value is a hard error |
 
-Changing `flags`, `defines`, or `include_dirs` correctly invalidates the per-file
-IR cache — it is keyed on a compile fingerprint as well as source `mtime`.
+Changing `flags`, `defines`, `include_dirs` or `visibility` correctly invalidates
+the per-file IR cache — it is keyed on a compile fingerprint as well as source
+`mtime`.
 
 ### `[link]`
 
@@ -629,10 +699,17 @@ afternoon.
   `optimization_level` outside `0/1/2/3/s/z`; an unknown `[workflow] stages`
   entry; an invalid `binary.type` / `wrap.style` / `llvm.toolchain` /
   `types.strictness` value reaching validation.
+- `[compile] visibility` set to anything but `"default"` or `"hidden"`, or set to
+  `"hidden"` while `[compile] flags` carries a `-fvisibility=` asking for something
+  else — which of the two decides the library's API is not guessable (§2.12).
 
 **Hard error later in the pipeline**
 
 - A resolved dependency HEAD that disagrees with the declared `commit`.
+- A built library whose wrappable functions are not reachable in its dynamic
+  symbol table, or whose wrappable surface is empty — the `visibility = "hidden"`
+  hazard in §2.12. Checked before the build's cache marker is written, so a
+  refused build does not read as cached-and-fine on the next run.
 - A macro shim `#include` that resolved outside the project/dependency tree.
 - A vararg overload naming a type outside the allowed set (§2.3).
 - A wrapper whose `ccall` signatures would name an undeclared type — refused
@@ -781,5 +858,7 @@ Symptom → key, including build and cache failures, lives on
 | Variadic function only takes fixed args | §2.3 |
 | Memory grows on string-returning calls | §2.4 |
 | Tests/examples leaked into the wrapper | §2.6 |
+| Wrapper exports the library's internal helpers | §2.12 |
+| Build refused: "wrappable surface … is EMPTY" / "NOT reachable" | §2.12 — `visibility = "hidden"` on a library that does not annotate |
 | Missing header / missing `-D` | §2.7, §2.9 |
 | Setting does nothing | §5 — typos are silent |

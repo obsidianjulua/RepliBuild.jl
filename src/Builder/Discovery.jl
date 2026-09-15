@@ -64,6 +64,12 @@ const PRESERVED_TOML_KEYS = [
     ("wrap", "cstring_owned"),
     ("wrap", "tier1"),
     ("link", "promote_statics"),
+    # Discovery scans a source tree; nothing in a source tree says whether the
+    # library annotates its exports (only a compile under -fvisibility=hidden does,
+    # which is what VisibilityProbe is for). So this is user intent and a forced
+    # re-discovery would otherwise silently reset the package's API surface to the
+    # historical default — the stl_test `[types].templates` class exactly.
+    ("compile", "visibility"),
 ]
 
 """
@@ -572,7 +578,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         default_flags,                           # flags
         Dict{String,String}(),                   # defines
         true,                                    # parallel
-        false                                    # aot_thunks
+        false,                                   # aot_thunks
+        :default                                 # visibility
     )
 
     link_config = ConfigurationManager.LinkConfig(
