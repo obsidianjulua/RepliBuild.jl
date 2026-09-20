@@ -36,6 +36,7 @@ destroying your intent. The preserved set is:
 | `[wrap]` | `macros` |
 | `[wrap]` | `shim_headers` |
 | `[wrap]` | `cstring_owned` |
+| `[wrap]` | `exclude_symbols` |
 | `[wrap]` | `tier1` |
 | `[link]` | `promote_statics` |
 
@@ -65,6 +66,7 @@ things or is wrong.
 | exposes API through preprocessor macros | `[wrap.macros.*]` + `[wrap] shim_headers` | The macro simply does not exist in the wrapper — no error |
 | has variadic functions worth calling with arguments | `[wrap.varargs]` | Only the zero-variadic base wrapper is generated |
 | returns malloc'd `char*` | `[wrap.cstring_owned]` | Every call leaks the C buffer |
+| links generated or vendored C++ you don't want wrapped | `[wrap] exclude_symbols` | Thousands of non-API symbols wrap; reaching for `-fvisibility=hidden` instead can erase the whole API |
 | defines its public "def" structs header-only | `-fstandalone-debug` in `[compile] flags` | Structs wrap to **empty** Julia structs |
 | ships tests/examples/backends in the same repo | `exclude` on the dependency | Unrelated sources compile in and pollute the DWARF |
 | keeps headers somewhere other than `<root>`, `<root>/include`, `<root>/src` | `[compile] include_dirs` | Compile failure, or a TU silently missing declarations |
@@ -416,6 +418,59 @@ Two mechanical notes:
   different visibility is a **hard error**, because which one decides the library's
   API is not something RepliBuild should guess.
 
+### 2.13 `exclude_symbols` — trimming a surface without touching visibility
+
+§2.12 narrows the API with the compiler. That works when upstream annotates its
+exports, and it is all-or-nothing when it doesn't. `[wrap] exclude_symbols` is
+the other lever: name the symbols that should not reach the wrapper, and leave
+visibility alone.
+
+```toml
+[wrap]
+exclude_symbols = ["matmul_*", "vk::*"]
+```
+
+Reach for it when the library links code that is **compiled in but is not API** —
+generated translation units, vendored C++, an embedded resource blob. The case
+this was built for is Hub llamacpp with ggml's Vulkan backend enabled: 136
+generated TUs whose entire contents are SPIR-V byte arrays (1,958
+`matmul_*_data`/`_len` globals in the largest one alone), plus the `vk::*Error`
+class hierarchy out of `vulkan.hpp` — vtables and thunks included. None of it is
+callable API, and the generator has no opinion about that: it wraps what `nm`
+reports.
+
+**Entries are anchored globs, not regexes.** `*` and `?` are the wildcards;
+every other metacharacter is a literal. That is deliberate — you write these
+against `nm` output, where `(`, `)`, `+`, `.`, `<` and `[` are ordinary symbol
+text (`operator+`, `f(int const&)`, `std::vector<int>`) and a literal `*` never
+appears. Under regex rules `operator+` would mean "one or more `operator`" and
+match nothing, silently.
+
+Anchoring means a pattern matches a **whole** symbol name, so use a trailing `*`
+for a prefix. `vk` will not take out `vkontakte_init`, and on llamacpp
+`ggml_backend_vk_*` drops seven functions while correctly leaving
+`ggml_backend_is_vk` alone.
+
+A function matches on any of its `name`, `demangled` or `mangled` spelling —
+which one you can actually see depends on the symbol. Globals match on name.
+
+**A pattern that matches nothing is a hard error.** It means the symbol was
+renamed or dropped upstream, or the glob is mistyped; either way the filter is
+not doing what its author thinks, and a wrapper that quietly regrows a surface
+someone deliberately cut is the failure this is meant to prevent. Same reasoning
+as `proven_at` in `[wrap.varargs]`. Filtering away *every* function is refused
+too.
+
+Applied at **wrap** time: changing the filter and re-running `wrap()` costs no
+recompile, and `compilation_metadata.json` keeps the full unfiltered picture that
+RepliBuildTooling's `api_surface` reads.
+
+> **Prefer this to `-fvisibility=hidden` when the goal is "hide these symbols"
+> rather than "adopt upstream's export policy".** The flag is conditional on an
+> export macro being *active*, not merely present — see §2.12 and the llamacpp
+> note: `GGML_API` expands to a visibility attribute only under `-DGGML_SHARED`,
+> and without it the flag hid `llama_decode` along with the shader blobs.
+
 ---
 
 ## 3. Section reference
@@ -509,6 +564,7 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 | `module_name` | String | `""` → CamelCase of the project name | |
 | `use_clang_jl` | Bool | `true` | `false` skips AST extraction (DWARF-only path) |
 | `shim_headers` | Vector{String} | `[]` | Headers the macro-shim TU includes *(preserved)* |
+| `exclude_symbols` | Vector{String} | `[]` | Anchored globs for symbols to keep out of the wrapper; see §2.13 *(preserved)* |
 | `dag` | Bool | `false` | Export DAG type-graph diffs to `<project>/dag/` |
 | `style` | String | `"clang"` | `"clang"`, `"basic"`, `"none"`; validated, but **not currently dispatched on** — the basic symbol-only generator is selected by *missing* `compilation_metadata.json`, not by this key |
 

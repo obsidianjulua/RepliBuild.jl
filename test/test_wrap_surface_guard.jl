@@ -171,11 +171,34 @@ dynsym(so) = Set(String(p[3]) for p in
                 @test C.verify_wrap_surface(cfg, healthy,
                                             joinpath(dir, "absent.json")) === nothing
                 @test C.verify_wrap_surface(cfg, joinpath(dir, "absent.so"), md) === nothing
-                # Metadata with no functions and no promoted symbols is not a collapse.
+            end
+
+            # R1 used to require `promoted_count > 0`, and this file asserted the
+            # complement: "metadata with no functions and no promoted symbols is
+            # not a collapse". That exemption was the hole. `-fvisibility=hidden`
+            # with `promote_statics` OFF hides an API without renaming anything,
+            # so promoted_count is 0 — and llamacpp went through on exactly that
+            # path, linking 101 MB with its whole API hidden (GGML_API is a bare
+            # `extern` unless GGML_SHARED is defined) and wrapping zero functions
+            # at exit code 0.
+            #
+            # The contract is now the empty surface itself, whatever caused it: a
+            # library that exports symbols but yields no wrappable function cannot
+            # produce a usable wrapper, and saying so at build time is the whole
+            # point of this guard.
+            @testset "R1 — empty surface is refused without promotion too" begin
                 plain = build_fixture(dir; hidden=false, promote=false)
                 if plain !== nothing
-                    @test C.verify_wrap_surface(cfg, plain,
-                                                write_metadata(dir, String[])) === nothing
+                    err = try
+                        C.verify_wrap_surface(cfg, plain, write_metadata(dir, String[])); nothing
+                    catch e; e end
+                    @test err isa ErrorException
+                    msg = sprint(showerror, err)
+                    @test occursin("EMPTY", msg)
+                    # Advice must match the cause: nothing was renamed here, so the
+                    # promotion fix would be a wrong lead.
+                    @test !occursin("promote_statics = false", msg)
+                    @test occursin("_SHARED", msg) || occursin("inert", msg)
                 end
             end
         end

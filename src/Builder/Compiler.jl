@@ -2005,26 +2005,62 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     promoted_count = count(startswith(s, "__rb_") for s in reachable)
 
     # R1 — the degenerate case, and the only place a count is read.
-    if isempty(functions) && promoted_count > 0
-        error("""
-        RepliBuild: the wrappable surface of $(basename(binary_path)) is EMPTY.
-
-        The library built and exports $(length(reachable)) dynamic symbols, but
-        $(promoted_count) of them are `__rb_*` promoted internals and NOT ONE function
-        survived with a name DWARF can match. The wrapper would be generated with no
-        functions at all.
-
-        This is what `-fvisibility=hidden` does to a library whose export macro is a
-        bare `extern` (lua's `LUA_API` is the type case): every unannotated function
-        goes hidden, `[link] promote_statics` reads hidden as internal, and the whole
-        API is renamed away.
+    #
+    # This used to require `promoted_count > 0`, on the theory that promotion was
+    # how a surface collapsed. That made the check VACUOUS for the commoner
+    # shape: `-fvisibility=hidden` with `promote_statics` OFF hides the API
+    # without renaming anything, so `promoted_count` is 0, `functions` is empty,
+    # and R2 below — which only inspects functions that exist — asserts nothing
+    # about an empty vector. llamacpp went through here with its entire API
+    # hidden (GGML_API is a bare `extern` unless GGML_SHARED is defined), linked
+    # 101 MB, wrapped zero functions, and exited 0.
+    #
+    # So the trigger is the empty surface itself. Promotion only selects which
+    # advice to give.
+    if isempty(functions)
+        cause = promoted_count > 0 ? """
+        $(promoted_count) of those symbols are `__rb_*` promoted internals, so the
+        API was RENAMED away: `-fvisibility=hidden` made every unannotated function
+        hidden, and `[link] promote_statics` reads hidden as internal. lua's
+        `LUA_API` is the type case.
 
         Fix in the package replibuild.toml:
           • drop `-fvisibility=hidden` from [compile] flags, or
           • set `[link] promote_statics = false` to stop the renaming (this also
             disables Tier-1 slicing, which is off by default anyway), or
           • if upstream really does annotate its exports, check that the annotation
-            reached this TU — a missing -D can turn FOO_API into a bare `extern`.
+            reached this TU — a missing -D can turn FOO_API into a bare `extern`.""" : """
+        Nothing was renamed — the API is simply not in the dynamic table. With
+        `-fvisibility=hidden` in [compile] flags, that means upstream's export
+        macro is INERT in this build. Annotations like GGML_API / LLAMA_API /
+        LUA_API expand to `__attribute__((visibility("default")))` only inside an
+        `#ifdef` on a matching *_SHARED define; undefined, they are a bare
+        `extern` and the flag hides them.
+
+        Confirm which you have before changing anything — the annotation being
+        present in the header proves nothing:
+          echo '#include "<public header>"' | clang++ -E -x c++ <your -D flags> -I<inc> - | grep '<a known function>'
+        A live annotation shows __attribute__((visibility("default"))) on that
+        line; an inert one shows the bare declaration.
+
+        Fix in the package replibuild.toml:
+          • add the defines that activate the macro (e.g. -DGGML_SHARED,
+            -DLLAMA_SHARED), or
+          • drop `-fvisibility=hidden` from [compile] flags.
+
+        If you reached for the flag to keep generated or vendored symbols OUT of
+        the wrapper, `[wrap] exclude_symbols` does that directly and without
+        touching visibility."""
+
+        error("""
+        RepliBuild: the wrappable surface of $(basename(binary_path)) is EMPTY.
+
+        The library built and exports $(length(reachable)) dynamic symbols, but NOT
+        ONE function survived with a name DWARF can match. The wrapper would be
+        generated with no functions at all, and would fail at the first call site
+        with UndefVarError rather than here.
+
+        $cause
         """)
     end
 

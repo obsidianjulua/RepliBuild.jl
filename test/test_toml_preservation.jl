@@ -32,6 +32,7 @@ const DISC = RepliBuild.Discovery
 
         [wrap]
         shim_headers = ["demo.h"]
+        exclude_symbols = ["matmul_*", "vk::*"]
 
         [wrap.cstring_owned]
         demo_print = "demo_free"
@@ -44,6 +45,10 @@ const DISC = RepliBuild.Discovery
         @test kept[("types", "templates")] == ["std::vector<int>"]
         @test kept[("types", "template_headers")] == ["<vector>"]
         @test kept[("wrap", "shim_headers")] == ["demo.h"]
+        # Which symbols are NOT API is a judgement a source scan cannot re-derive.
+        # Losing it on force=true is worse than losing most keys here: the wrapper
+        # still generates, it just silently regrows the surface someone cut.
+        @test kept[("wrap", "exclude_symbols")] == ["matmul_*", "vk::*"]
         @test kept[("wrap", "cstring_owned")] == Dict("demo_print" => "demo_free")
         @test haskey(kept, ("wrap", "varargs"))
         # Non-whitelisted keys are NOT preserved (regeneration owns them)

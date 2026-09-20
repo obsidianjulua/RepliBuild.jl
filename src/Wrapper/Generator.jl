@@ -609,6 +609,35 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
         return nothing
     end
 
+    # [wrap] exclude_symbols applies here too. This is the degraded no-metadata
+    # path, but a filter that works on one wrap path and is silently inert on
+    # the other is worse than no filter: the config reads as honoured and the
+    # excluded symbols come back.
+    if !isempty(config.wrap.exclude_symbols)
+        (matches, hit) = _glob_matcher(config.wrap.exclude_symbols)
+        before = length(symbols)
+        symbols = filter(s -> !(matches(s.name) || matches(s.demangled_name) ||
+                                matches(s.julia_name)), symbols)
+        unmatched = [p for p in config.wrap.exclude_symbols if hit[p] == 0]
+        if !isempty(unmatched)
+            error("""
+            [wrap] exclude_symbols: $(length(unmatched)) pattern(s) matched nothing:
+              $(join(unmatched, "\n  "))
+
+            Patterns are anchored globs (* and ?), not regexes — a pattern must
+            match a whole symbol name, so use "foo_*" to match a prefix. Check
+            what is present with:
+              nm -D --defined-only $(library_path) | c++filt""")
+        end
+        if isempty(symbols)
+            error("""
+            [wrap] exclude_symbols removed all $before symbol(s) — the wrapper
+            would be empty. Check for an over-broad glob such as "*".""")
+        end
+        println("  filter: dropped $(before - length(symbols)) symbol(s) via " *
+                "$(length(config.wrap.exclude_symbols)) pattern(s)")
+    end
+
     # Filter functions and data
     functions = filter(s -> s.symbol_type == :function, symbols)
     data_symbols = filter(s -> s.symbol_type == :data, symbols)
@@ -896,6 +925,67 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
 
     if !haskey(metadata, "functions")
         error("Invalid metadata: missing 'functions' key")
+    end
+
+    # Backstop for `wrap()` run on its own. The real diagnosis lives in
+    # Compiler.verify_wrap_surface (R1), which runs during build() and can still
+    # see the binary's dynamic table; this only catches metadata that was already
+    # empty on disk — a stale artifact from a build that predates that guard, or
+    # one whose binary has since been replaced.
+    if isempty(metadata["functions"])
+        error("""
+        No functions in compilation metadata — the wrapper would be empty.
+
+        $(metadata_file)
+        reports function_count = 0.
+
+        Re-run RepliBuild.build() and read its error: the wrap-surface guard
+        there inspects the binary itself and will say WHY the surface collapsed
+        (almost always `-fvisibility=hidden` against an inert export macro).""")
+    end
+
+    # [wrap] exclude_symbols — drop symbols the wrapper should not contain.
+    # Before the module generators or dag_diff see the metadata, so an excluded
+    # symbol produces neither a binding nor a thunk site.
+    if !isempty(config.wrap.exclude_symbols)
+        filt = _apply_symbol_filter!(metadata, config.wrap.exclude_symbols)
+
+        # A pattern that matches nothing is the stale-filter failure: the symbol
+        # it named was renamed, or the glob was mistyped, and either way the
+        # user believes something is being excluded that is not. Silence here
+        # means the wrapper quietly regrows a surface someone deliberately cut.
+        if !isempty(filt.unmatched)
+            error("""
+            [wrap] exclude_symbols: $(length(filt.unmatched)) pattern(s) matched nothing:
+              $(join(filt.unmatched, "\n  "))
+
+            Every pattern must match at least one exported function or global.
+            A pattern that matches nothing is either stale — the symbol was
+            renamed or dropped upstream — or mistyped, and in both cases the
+            filter is not doing what its author thinks.
+
+            These are globs (* and ?), NOT regexes, and they are anchored: a
+            pattern must match a WHOLE symbol name. To match a prefix, end it
+            with * (e.g. "matmul_*", not "matmul_").
+
+            Check the names actually present:
+              nm -D --defined-only $(library_path) | c++filt
+
+            Then fix or remove the pattern.""")
+        end
+
+        if isempty(metadata["functions"])
+            error("""
+            [wrap] exclude_symbols removed every function — the wrapper would be empty.
+
+            $(length(config.wrap.exclude_symbols)) pattern(s) dropped all
+            $(filt.functions_dropped) function(s) from the metadata. The filter
+            is meant to trim a surface, not erase it; check for an over-broad
+            glob such as "*" or a bare "*_*".""")
+        end
+
+        println("  filter: dropped $(filt.functions_dropped) function(s), " *
+                "$(filt.globals_dropped) global(s) via $(length(config.wrap.exclude_symbols)) pattern(s)")
     end
 
     functions = metadata["functions"]

@@ -155,6 +155,118 @@ function _collect_defined!(out::Set{String}, ex)
 end
 
 """
+    _glob_to_regex(pattern) -> Regex
+
+Compile one `[wrap] exclude_symbols` glob into an anchored `Regex`.
+
+`*` and `?` are the wildcards; EVERY other regex metacharacter is escaped.
+That escaping is the point. These patterns are written by reading `nm` output,
+where a literal `*` never appears in a symbol but `(`, `)`, `+`, `.` and `[`
+appear constantly — `operator+`, `foo(int const&)`, `std::vector<int>`. Treating
+the input as a regex would silently reinterpret those: `operator+` would compile
+to "one or more `operator`" and match nothing, and the user would see an empty
+filter with no error to read. Anchored at both ends so a pattern names a whole
+symbol, not a substring of one — `vk` must not take out `vkontakte_init`.
+"""
+function _glob_to_regex(pattern::AbstractString)::Regex
+    io = IOBuffer()
+    print(io, '^')
+    for c in pattern
+        if c == '*'
+            print(io, ".*")
+        elseif c == '?'
+            print(io, '.')
+        elseif c in ('.', '^', '$', '|', '(', ')', '[', ']', '{', '}', '+', '\\', '/', '-', '&', '!', '<', '>', '#', '=', ':', ',', '~', '@', '%', '"', '\'', '`', ' ')
+            print(io, '\\', c)
+        else
+            print(io, c)
+        end
+    end
+    print(io, '$')
+    return Regex(String(take!(io)))
+end
+
+"""
+    _glob_matcher(patterns) -> (matches, hit)
+
+Compile `patterns` once and return a `matches(name)::Bool` predicate plus the
+per-pattern hit counter it updates. Shared by the two wrap paths so both spell
+"does this symbol match" identically and both can report stale patterns.
+
+`matches` tests EVERY pattern rather than short-circuiting on the first hit:
+the counter has to be complete for the unmatched-pattern check downstream to
+mean anything, and stopping early would let a pattern look stale purely because
+a broader one happened to be listed before it.
+"""
+function _glob_matcher(patterns::Vector{String})
+    regexes = [(p, _glob_to_regex(p)) for p in patterns]
+    hit = Dict{String,Int}(p => 0 for p in patterns)
+    matches = function (name)
+        name isa AbstractString || return false
+        matched = false
+        for (p, re) in regexes
+            if occursin(re, name)
+                hit[p] += 1
+                matched = true
+            end
+        end
+        return matched
+    end
+    return (matches, hit)
+end
+
+"""
+    _apply_symbol_filter!(metadata, patterns) -> NamedTuple
+
+Drop every function and global whose name matches an `exclude_symbols` glob,
+MUTATING `metadata` in place so that every downstream consumer — both module
+generators and `DAGDiff.dag_diff` — sees the same reduced surface and no thunk
+site is emitted for a symbol the wrapper will not contain.
+
+A function matches on any of its three spellings (`name`, `demangled`,
+`mangled`), because which one a user can actually see depends on the symbol:
+a C function is all three at once, while a C++ method is legible only demangled
+and addressable only mangled.
+
+Returns `(functions_dropped, globals_dropped, unmatched)`. `unmatched` is the
+caller's problem to report — a pattern matching nothing is the stale-filter
+failure and is treated as an error there, not silently tolerated here.
+"""
+function _apply_symbol_filter!(metadata::Dict{String,Any}, patterns::Vector{String})
+    isempty(patterns) && return (functions_dropped=0, globals_dropped=0, unmatched=String[])
+
+    (_matches, hit) = _glob_matcher(patterns)
+
+    functions = get(metadata, "functions", nothing)
+    fdropped = 0
+    if functions isa Vector
+        kept = similar(functions, 0)
+        for f in functions
+            drop = f isa Dict && (_matches(get(f, "name", nothing)) ||
+                                  _matches(get(f, "demangled", nothing)) ||
+                                  _matches(get(f, "mangled", nothing)))
+            drop ? (fdropped += 1) : push!(kept, f)
+        end
+        metadata["functions"] = kept
+        metadata["function_count"] = length(kept)
+    end
+
+    globals = get(metadata, "globals", nothing)
+    gdropped = 0
+    if globals isa Dict
+        for k in collect(keys(globals))
+            if _matches(k)
+                delete!(globals, k)
+                gdropped += 1
+            end
+        end
+    end
+
+    unmatched = [p for p in patterns if hit[p] == 0]
+    return (functions_dropped=fdropped, globals_dropped=gdropped, unmatched=unmatched)
+end
+
+"""
     _exported_names(module_body) -> Vector{String}
 
 Every name the emitted module body EXPORTS, read off the parsed source.

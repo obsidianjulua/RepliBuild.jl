@@ -894,6 +894,7 @@ function toml_fragment(probe::CMakeProbe;
     else
         println(io, "# shim_headers = [...]   # the public header(s) users include")
     end
+    println(io, "# exclude_symbols = [\"foo_*\"]  # anchored globs; symbols to keep OUT of the wrapper")
 
     return String(take!(io))
 end

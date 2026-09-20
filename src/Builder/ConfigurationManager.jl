@@ -134,6 +134,17 @@ struct WrapConfig
     varargs_proven_at::String
     macros::Dict{String,Dict{String,Any}}
     shim_headers::Vector{String}
+    # Glob patterns for symbols to keep OUT of the wrapper, matched against a
+    # function's name/demangled/mangled spelling and against global names.
+    # The wrapper's surface is otherwise "every exported symbol", which is the
+    # wrong set for any library that links in generated or vendored C++: the
+    # only other lever is -fvisibility=hidden, and that is a blunt instrument
+    # that depends on upstream having annotated its API *and* on the annotation
+    # macro being active (see llamacpp's GGML_SHARED note in the Hub).
+    # Applied at WRAP time, not build time — so changing the filter re-wraps
+    # without recompiling, and compilation_metadata.json keeps the full
+    # unfiltered picture that RepliBuildTooling's introspection reads.
+    exclude_symbols::Vector{String}
     cstring_owned::Dict{String,String}  # func => free symbol for malloc'd char* returns
     dag::Bool  # Export DAG diff graphs to <project>/dag/
     tier1::Tier1Config
@@ -498,6 +509,19 @@ function parse_wrap_config(data::Dict)::WrapConfig
 
     shim_headers = get(wrap, "shim_headers", String[])
 
+    # [wrap] exclude_symbols = ["matmul_*", "vk::*"]
+    # Entries are globs (* and ?), not regexes — a symbol list is written by
+    # hand against `nm` output, where a literal `*` never appears but `(`, `+`
+    # and `.` all do, so regex syntax would make the common case need escaping.
+    exclude_symbols = String[]
+    for pat in get(wrap, "exclude_symbols", String[])
+        if pat isa AbstractString && !isempty(strip(String(pat)))
+            push!(exclude_symbols, String(pat))
+        else
+            @warn "[wrap] exclude_symbols: entries must be non-empty strings; ignoring $(repr(pat))"
+        end
+    end
+
     # Parse owned char* returns: [wrap.cstring_owned] func = "free_symbol".
     # The wrapper copies the returned string then frees the C buffer through
     # the named library symbol (ownership isn't visible in DWARF).
@@ -532,6 +556,7 @@ function parse_wrap_config(data::Dict)::WrapConfig
         varargs_proven_at,
         macros,
         shim_headers,
+        exclude_symbols,
         cstring_owned,
         get(wrap, "dag", false),
         tier1
@@ -805,7 +830,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false, :default),
         LinkConfig("2", false, String[], String[], false, true),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], Dict{String,String}(), false, Tier1Config(false, String[], 64, false)),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], String[], Dict{String,String}(), false, Tier1Config(false, String[], 64, false)),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -938,6 +963,9 @@ function save_config(config::RepliBuildConfig)
     end
     if !isempty(config.wrap.shim_headers)
         wrap_dict["shim_headers"] = config.wrap.shim_headers
+    end
+    if !isempty(config.wrap.exclude_symbols)
+        wrap_dict["exclude_symbols"] = config.wrap.exclude_symbols
     end
     if !isempty(config.wrap.cstring_owned)
         wrap_dict["cstring_owned"] = config.wrap.cstring_owned

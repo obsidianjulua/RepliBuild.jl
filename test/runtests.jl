@@ -216,6 +216,11 @@ include(joinpath(@__DIR__, "test_symbol_hygiene.jl"))
 
 include(joinpath(@__DIR__, "test_config_surface.jl"))
 
+# ── [wrap] exclude_symbols — bounding the wrapper surface ────────────────────
+# Glob compilation, the metadata filter, stale-pattern reporting, and config
+# round-trip. Pure Julia: no toolchain, no binary.
+include(joinpath(@__DIR__, "test_exclude_symbols.jl"))
+
 # ── JSON.parsefile must not memory-map (no toolchain) ────────────────────────
 # A leaked mmap is free on POSIX, where a mapped file still unlinks, and fatal
 # on Windows, where it blocks deleting the file. `clean()` failed on a build
