@@ -403,7 +403,8 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
         config.compile.flags,
         config.compile.defines,
         config.compile.parallel,
-        config.compile.aot_thunks
+        config.compile.aot_thunks,
+        config.compile.visibility
     )
     
     new_link = ConfigurationManager.LinkConfig(

@@ -124,6 +124,15 @@ include(joinpath(@__DIR__, "test_varargs_emission.jl"))
 
 include(joinpath(@__DIR__, "test_toml_preservation.jl"))
 
+# ── [compile] visibility: the declared form of -fvisibility=hidden (no toolchain)
+# Parsed, validated, consumed through get_compile_flags so it reaches the compile
+# fingerprint, serialized, and preserved across a forced re-discovery. Each of
+# those fails SILENTLY if it regresses — a key that does not reach the fingerprint
+# serves IR built under the other visibility, and a key dropped on a round trip
+# restores the library's internals to the wrapper's API.
+
+include(joinpath(@__DIR__, "test_compile_visibility.jl"))
+
 # ── C-generator policy regressions: cstring_owned, macro-shim visibility,
 #    blob param trap, bitfield byte-span (no toolchain required) ──────────────
 
