@@ -1361,9 +1361,32 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         end
     end
 
-    # Add library search paths
+    # Add library search paths — AND an rpath for each.
+    #
+    # `-L` alone answers "where do I find this at LINK time" and says nothing
+    # about load time. For a distro library on the default search path that gap
+    # never shows; for a library built by another Hub package it is the whole
+    # problem, and it fails in the worst possible way — silently, against the
+    # wrong copy.
+    #
+    # Measured: link a .so against packages/glfw/julia/libglfw.so with
+    # `-L<dir> -lglfw` and the recorded DT_NEEDED is the bare `libglfw.so`
+    # (RepliBuild's output carries no SONAME), so `ldd` resolves it to
+    # /usr/lib/libglfw.so — the distro copy, not the one just linked. The build
+    # succeeds, the symbols match, and the process ends up with two copies of a
+    # library whose state is process-global.
+    #
+    # So every directory named for linking is also named for loading. `$ORIGIN`
+    # comes first so a vendored `lib/` directory (the examples/ layout) resolves
+    # siblings without an absolute path; RepliBuild already bakes absolute paths
+    # into the wrapper's LIBRARY_PATH, so the rest are consistent with that.
+    if !isempty(config.link.link_dirs) && !Sys.iswindows()
+        push!(cmd_args, "-Wl,-rpath,\$ORIGIN")
+    end
     for dir in config.link.link_dirs
         push!(cmd_args, "-L$dir")
+        # PE has no RUNPATH; mingw's ld warns and ignores -rpath.
+        Sys.iswindows() || push!(cmd_args, "-Wl,-rpath,$(abspath(dir))")
     end
 
     # Add link libraries
