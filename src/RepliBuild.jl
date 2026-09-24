@@ -160,7 +160,6 @@ using .Compiler
 using .DWARFParser
 using .MLIRNative
 using .JLCSIRGenerator
-using .DAGDiff
 using .JITManager
 using .Wrapper
 using .STLWrappers
@@ -184,7 +183,7 @@ export use, register, unregister, list_registry, search, scaffold_package
 
 # --- Submodules (direct access) ---
 export Compiler, Wrapper, Discovery, ConfigurationManager, DWARFParser,
-       JLCSIRGenerator, DAGDiff, MLIRNative, STLWrappers,
+       JLCSIRGenerator, MLIRNative, STLWrappers,
        LLVMEnvironment, BuildBridge, ASTWalker, JITManager, ClangJLBridge,
        DependencyResolver, EnvironmentDoctor, PackageRegistry, Debug
 

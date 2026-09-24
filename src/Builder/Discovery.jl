@@ -68,6 +68,16 @@ const PRESERVED_TOML_KEYS = [
     # re-discovery is worse than losing most keys here, because the wrapper
     # still generates: it just quietly regrows the surface someone cut.
     ("wrap", "exclude_symbols"),
+    # Same class as exclude_symbols and worse to lose silently: the package
+    # opted into emitting only reachable types BECAUSE the full DWARF set does
+    # not load. A forced re-discovery that resets this regenerates a wrapper
+    # that is broken in a way the build never reports.
+    ("wrap", "surface_types_only"),
+    ("wrap", "surface_types_extra"),
+    # Which headers the Clang.jl walk starts from. Discovery scans a source
+    # tree and cannot know which of its headers are the PUBLIC API; losing this
+    # silently re-enables the walk-everything default.
+    ("wrap", "headers"),
     ("wrap", "tier1"),
     ("link", "promote_statics"),
     # Discovery scans a source tree; nothing in a source tree says whether the
@@ -614,8 +624,10 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         Dict{String,Dict{String,Any}}(),         # macros
         String[],                                # shim_headers
         String[],                                # exclude_symbols
+        false,                                   # surface_types_only (opt-in)
+        String[],                                # surface_types_extra
+        String[],                                # headers (empty = auto-discover)
         Dict{String,String}(),                   # cstring_owned
-        false,                                   # dag
         ConfigurationManager.Tier1Config(false, String[], 64, false)  # tier1 (opt-in)
     )
 

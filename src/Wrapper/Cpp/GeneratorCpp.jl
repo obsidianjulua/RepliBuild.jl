@@ -145,8 +145,7 @@ end
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
-                                      thunks_lib_path::String="";
-                                      dag_result=nothing)
+                                      thunks_lib_path::String="")
 
     # Track exported symbols
     exports = String[]
@@ -571,6 +570,25 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
 
+        # Across-enum dedup. Within one @enum the loop below already drops
+        # repeated names and values; nothing was watching for the SAME member
+        # set arriving twice under two type names.
+        #
+        # DWARF records a std::map/unordered_map's member typedefs — `key_type`,
+        # `value_type`, `mapped_type` — as separate enum types carrying the
+        # underlying enum's enumerators verbatim. Emitting both means the later
+        # `@enum` rebinds every member name, and Julia permits that silently:
+        # after onednn's module loaded, `dnnl_f32` was a `key_type` rather than a
+        # `dnnl_data_type_t`, and every ccall expecting the latter raised
+        # `MethodError: Cannot convert an object of type key_type`. The module
+        # parses, loads, and passes a smoke test that never passes a data type —
+        # onednn's 15/15 did exactly that.
+        #
+        # Identical member sets mean it IS the same enum under another spelling,
+        # so alias it. That keeps `key_type` resolvable for anything that
+        # references the typedef, without touching the member bindings.
+        emitted_enum_sigs = Dict{Vector{Pair{String,Any}},String}()
+
         for enum_key in sort(collect(enum_types))
             # Sanitize so the emitted `@enum` name matches every field/param
             # reference (those already route through _sanitize_cpp_type_name) and
@@ -602,6 +620,30 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     push!(seen_names, name)
                     push!(members, name => get(enumerator, "value", 0))
                 end
+
+                # Same member set already emitted under another name? Alias it
+                # rather than re-binding every member. Sorting makes the
+                # signature order-independent; `sort(collect(enum_types))` puts
+                # `dnnl_data_type_t` ahead of `key_type` here, but relying on
+                # alphabetical luck for which name wins is not a plan, so the
+                # first emitted name is simply the canonical one.
+                enum_sig = sort(members, by=first)
+                if haskey(emitted_enum_sigs, enum_sig)
+                    canonical = emitted_enum_sigs[enum_sig]
+                    if canonical != enum_name
+                        push!(enum_chunks, """
+                        # $enum_name is $canonical under a different DWARF spelling
+                        # (a std::map member typedef carries its key/value enum's
+                        # enumerators). Aliased rather than re-emitted: a second
+                        # `@enum` would rebind every member name to this type and
+                        # break ccalls expecting $canonical.
+                        const $enum_name = $canonical
+
+                        """)
+                    end
+                    continue
+                end
+                emitted_enum_sigs[enum_sig] = enum_name
 
                 if _is_bitflag_enum(last.(members))
                     push!(enum_chunks, _bitflag_enum_chunk(enum_name, julia_underlying, members))
@@ -2227,10 +2269,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # TIERED DISPATCH DECISION
         # =========================================================
 
-        # Determine if we should use MLIR or ccall
-        # DAG diff augments: catches transitive layout mismatches and
-        # by-value parameter drift that per-function heuristics miss.
-        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs) || DAGDiff.needs_dag_thunk(mangled, dag_result)
+        # Determine if we should use MLIR or ccall.
+        # Tier 2 is decided by is_ccall_safe alone.
+        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs)
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])

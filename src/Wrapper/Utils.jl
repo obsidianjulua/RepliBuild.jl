@@ -219,9 +219,9 @@ end
     _apply_symbol_filter!(metadata, patterns) -> NamedTuple
 
 Drop every function and global whose name matches an `exclude_symbols` glob,
-MUTATING `metadata` in place so that every downstream consumer — both module
-generators and `DAGDiff.dag_diff` — sees the same reduced surface and no thunk
-site is emitted for a symbol the wrapper will not contain.
+MUTATING `metadata` in place so that both module generators see the same
+reduced surface and no thunk site is emitted for a symbol the wrapper will not
+contain.
 
 A function matches on any of its three spellings (`name`, `demangled`,
 `mangled`), because which one a user can actually see depends on the symbol:
@@ -264,6 +264,241 @@ function _apply_symbol_filter!(metadata::Dict{String,Any}, patterns::Vector{Stri
 
     unmatched = [p for p in patterns if hit[p] == 0]
     return (functions_dropped=fdropped, globals_dropped=gdropped, unmatched=unmatched)
+end
+
+"""
+    _surface_type_keys(metadata) -> Set{String}
+
+Every `struct_definitions` key REACHABLE from the wrap surface: each function's
+return type, parameter types and receiver `class`, plus the type of every
+global, then their members transitively.
+
+Resolution is deliberately over-inclusive. A spelling is matched whole (`Ptr{X}`
+is itself a key for some template spellings) AND every identifier token inside
+it is tried, both bare and under the `__enum__` prefix the enum records use.
+Over-inclusion costs a few unused structs in the module; under-inclusion drops
+API silently, and only one of those is recoverable by the person reading the
+generated source.
+
+Seeding from `class` is not decorative: a C++ method records its receiver there
+rather than as a parameter, so without it `std::vector<int>` is unreachable from
+its own methods. Measured on the Hub — box2d3 41.8% -> 80.4% reachable, glfw
+49.3% -> 90.4% — purely from adding that one seed.
+"""
+function _surface_type_keys(metadata::Dict{String,Any};
+                            runtime_defined::Union{Set{String},Nothing}=nothing)::Set{String}
+    return _surface_type_keys_impl(metadata, runtime_defined)
+end
+
+"""
+    _runtime_defined_names(library_path) -> Union{Set{String},Nothing}
+
+Every symbol the loader can actually resolve in `library_path`, or `nothing`
+when that cannot be determined. PE's export directory answers this on Windows;
+`nm -D` reads ELF's dynamic symbol table elsewhere, and is a hard ERROR rather
+than an empty answer on PE — hence the split.
+
+`nothing` and an empty set mean different things and callers must not conflate
+them: `nothing` is "could not look", which has to fail safe, while an empty set
+is a real answer about a library that exports nothing.
+"""
+function _runtime_defined_names(library_path::AbstractString)
+    isfile(library_path) || return nothing
+    pe = _pe_exported_names(library_path)
+    pe === nothing || return pe
+    (out, code) = try
+        BuildBridge.execute("nm", ["-D", "--defined-only", library_path])
+    catch
+        return nothing
+    end
+    code == 0 || return nothing
+    names = Set{String}()
+    for line in eachsplit(out, '\n')
+        parts = split(strip(line))
+        isempty(parts) || push!(names, String(parts[end]))
+    end
+    return names
+end
+
+function _surface_type_keys_impl(metadata::Dict{String,Any},
+                                 runtime_defined::Union{Set{String},Nothing})::Set{String}
+    structs = get(metadata, "struct_definitions", nothing)
+    structs isa Dict || return Set{String}()
+    keyset = Set{String}(string(k) for k in keys(structs))
+
+    resolve = function (spelling)
+        out = String[]
+        spelling === nothing && return out
+        s = string(spelling)
+        isempty(s) && return out
+        s in keyset && push!(out, s)
+        ("__enum__" * s) in keyset && push!(out, "__enum__" * s)
+        for m in eachmatch(r"[A-Za-z_][A-Za-z0-9_:]*", s)
+            t = m.match
+            t in keyset && push!(out, t)
+            ("__enum__" * t) in keyset && push!(out, "__enum__" * t)
+        end
+        return out
+    end
+
+    seed = Set{String}()
+    functions = get(metadata, "functions", nothing)
+    if functions isa Vector
+        for f in functions
+            f isa Dict || continue
+            rt = get(f, "return_type", nothing)
+            if rt isa Dict
+                for k in ("julia_type", "c_type"), r in resolve(get(rt, k, nothing))
+                    push!(seed, r)
+                end
+            end
+            params = get(f, "parameters", nothing)
+            if params isa Vector
+                for p in params
+                    p isa Dict || continue
+                    for k in ("julia_type", "c_type"), r in resolve(get(p, k, nothing))
+                        push!(seed, r)
+                    end
+                end
+            end
+            for r in resolve(get(f, "class", nothing))
+                push!(seed, r)
+            end
+        end
+    end
+
+    # Globals are a real part of the surface — box2d binds all 16 of its
+    # `b2_defaultFilter`-style globals, and dropping `b2Filter` would break
+    # them — but only when the loader can actually resolve the symbol.
+    #
+    # onednn records 332 globals and ZERO of them are in the .so's dynamic
+    # symbol table: they are nGEN/gemmstone internals hidden by
+    # -fvisibility=hidden. Seeding from those pulled 58 extra types into the
+    # module, including the `Pipe` enum whose `const Integer = Pipe(3)` alias
+    # is the `Base.Integer` shadowing failure. So this gate is not a tidiness
+    # measure; it is what makes the filter fix that bug.
+    #
+    # `runtime_defined === nothing` means we could not look (no library on
+    # disk, nm unavailable, PE without an export directory). Fail SAFE there by
+    # seeding from every global — over-inclusion costs unused types, while
+    # guessing "not bindable" would drop a type the wrapper still emits.
+    globals = get(metadata, "globals", nothing)
+    if globals isa Dict
+        for (gname, g) in globals
+            g isa Dict || continue
+            if runtime_defined !== nothing && !(string(gname) in runtime_defined)
+                continue
+            end
+            for k in ("julia_type", "c_type", "type"), r in resolve(get(g, k, nothing))
+                push!(seed, r)
+            end
+        end
+    end
+
+    reach = copy(seed)
+    work = collect(seed)
+    while !isempty(work)
+        k = pop!(work)
+        info = get(structs, k, nothing)
+        info isa Dict || continue
+        members = get(info, "members", nothing)
+        members isa Vector || continue
+        for mem in members
+            mem isa Dict || continue
+            for mk in ("julia_type", "c_type"), r in resolve(get(mem, mk, nothing))
+                if !(r in reach)
+                    push!(reach, r)
+                    push!(work, r)
+                end
+            end
+        end
+    end
+    return reach
+end
+
+"""
+    _drop_unresolvable_globals!(metadata, runtime_defined) -> Int
+
+Remove every global the loader cannot resolve, MUTATING `metadata` so neither
+generator emits an accessor for it. Returns how many were dropped.
+
+Unconditional, and not behind `surface_types_only`, because this is not a policy
+choice about how much surface to expose: an accessor for a symbol absent from
+the library's dynamic symbol table is a guaranteed failure at the call site.
+onednn emitted 656 such functions — two thirds of its wrapper — failing two
+different ways depending on whether the type survived alongside the name:
+
+    PHILOX_M4x32_0()  ->  could not load symbol "PHILOX_M4x32_0"
+    CatalogLMR()      ->  UndefVarError: array_gemmstone_kcatalog_Entry_2UL
+
+Measured across the Hub, the packages this touches are the ones where it is
+obviously right — llamacpp's 4099 ggml-vulkan shader byte arrays and onednn's
+332 nGEN internals, none of which are in their `.so` at all — while box2d
+(16/16), curl (95/95) and pcre2 (31/31) lose nothing.
+
+Filtering happens in the METADATA rather than at the two emission sites
+(GeneratorC.jl:1930, GeneratorCpp.jl:1790) on purpose: one guard both
+generators sit behind cannot develop the disagreement that a duplicated gate
+can, which is the phantom-`this` failure shape.
+
+`runtime_defined === nothing` means the symbol table could not be read (PE
+without an export directory, no library on disk, nm unavailable). That FAILS
+SAFE by dropping nothing — a global wrongly kept is one broken accessor, a
+global wrongly dropped is missing API.
+"""
+function _drop_unresolvable_globals!(metadata::Dict{String,Any},
+                                     runtime_defined::Union{Set{String},Nothing})::Int
+    runtime_defined === nothing && return 0
+    globals = get(metadata, "globals", nothing)
+    globals isa Dict || return 0
+    dropped = 0
+    for k in collect(keys(globals))
+        if !(string(k) in runtime_defined)
+            delete!(globals, k)
+            dropped += 1
+        end
+    end
+    return dropped
+end
+
+"""
+    _apply_surface_type_filter!(metadata, extra_patterns) -> NamedTuple
+
+Reduce `struct_definitions` to the wrap surface, MUTATING `metadata` in place so
+every downstream consumer sees the same type set.
+
+`extra_patterns` are globs for types to keep regardless. They exist for the class
+reachability structurally cannot see: a `function_ptr(int)*` member erases its
+signature types, so a callback-only struct is invisible, and a function returning
+plain `int` never names its error enum. md4c is both at once — 36 types, 2
+reachable, and it ships 231/231 on the other 34.
+
+Returns `(kept, dropped, unmatched)`. `unmatched` is the caller's problem to
+report, same contract as `_apply_symbol_filter!`.
+"""
+function _apply_surface_type_filter!(metadata::Dict{String,Any}, extra_patterns::Vector{String};
+                                     runtime_defined::Union{Set{String},Nothing}=nothing)
+    structs = get(metadata, "struct_definitions", nothing)
+    structs isa Dict || return (kept=0, dropped=0, unmatched=String[])
+
+    reach = _surface_type_keys(metadata; runtime_defined=runtime_defined)
+    (matches, hit) = _glob_matcher(extra_patterns)
+
+    dropped = 0
+    for k in collect(keys(structs))
+        ks = string(k)
+        # An extra pattern is matched against the key as written AND against the
+        # bare name, so `MD_*_DETAIL` catches an enum recorded as
+        # `__enum__MD_..._DETAIL` without the author needing to know the prefix.
+        bare = startswith(ks, "__enum__") ? ks[9:end] : ks
+        if !(ks in reach) && !matches(ks) && !matches(bare)
+            delete!(structs, k)
+            dropped += 1
+        end
+    end
+
+    unmatched = [p for p in extra_patterns if hit[p] == 0]
+    return (kept=length(structs), dropped=dropped, unmatched=unmatched)
 end
 
 """
@@ -1206,7 +1441,7 @@ define.
 
 **The thunk set is derived twice and the two derivations can disagree.** AOT runs
 at BUILD, from `compilation_metadata.json` via `JLCSIRGenerator`; wrap runs later
-and takes a thunk for every method `is_ccall_safe` rejects or `DAGDiff` marks.
+and takes a thunk for every method `is_ccall_safe` rejects.
 A header-inline method that only became a symbol because some later TU emitted it
 can appear in wrap's list and be absent from AOT's. Nothing reconciled them, so
 the wrapper emitted `invoke_aot_ptr` sites whose slots resolve to `C_NULL`, and

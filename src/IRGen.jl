@@ -1,7 +1,6 @@
-# IRGen.jl — MLIR/JIT: native bindings, IR generation, JIT execution, DAG diff
+# IRGen.jl — MLIR/JIT: native bindings, IR generation, JIT execution
 
 include("IRGen/MLIRNative.jl")
 include("IRGen/JLCSIRGenerator.jl")
-include("IRGen/DAGDiff.jl")
 include("IRGen/JITManager.jl")
 include("IRGen/Slicer.jl")

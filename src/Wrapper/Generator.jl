@@ -16,7 +16,11 @@ otherwise falls back to basic symbol-only extraction with conservative types.
 # Arguments
 - `config`: RepliBuildConfig with wrapper settings
 - `library_path`: Path to compiled library (.so, .dylib, .dll)
-- `headers`: Optional header files (currently unused, reserved for future)
+- `headers`: Header files the Clang.jl walk starts from. NOT unused — this is
+  what scopes that walk; empty means "discover every header at the top level of
+  every include dir", which is the right default only when the include dir is
+  the API. Overrides `[wrap] headers`, which is the same setting from a
+  manifest. Inert when `use_clang_jl = false`.
 - `generate_tests`: Generate test file (default: false, TODO)
 - `generate_docs`: Include comprehensive documentation (default: true)
 
@@ -945,7 +949,7 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     end
 
     # [wrap] exclude_symbols — drop symbols the wrapper should not contain.
-    # Before the module generators or dag_diff see the metadata, so an excluded
+    # Before the module generators see the metadata, so an excluded
     # symbol produces neither a binding nor a thunk site.
     if !isempty(config.wrap.exclude_symbols)
         filt = _apply_symbol_filter!(metadata, config.wrap.exclude_symbols)
@@ -988,6 +992,78 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
                 "$(filt.globals_dropped) global(s) via $(length(config.wrap.exclude_symbols)) pattern(s)")
     end
 
+    # What the loader can actually resolve in this library. Shared by the two
+    # filters below; `nothing` means "could not look" and both fail safe on it.
+    runtime_defined = _runtime_defined_names(library_path)
+
+    # Globals absent from the dynamic symbol table get NO accessor. Not behind
+    # surface_types_only — an accessor for a symbol that is not there is a
+    # guaranteed failure at the call site, never a policy choice. See
+    # `_drop_unresolvable_globals!`.
+    let g_dropped = _drop_unresolvable_globals!(metadata, runtime_defined)
+        if g_dropped > 0
+            remaining = length(get(metadata, "globals", Dict()))
+            @info "wrap: $g_dropped global(s) dropped — not in the library's " *
+                  "dynamic symbol table, so an accessor could not have resolved " *
+                  "($remaining kept)"
+        end
+    end
+
+    # [wrap] surface_types_only — emit only the types the wrap surface reaches.
+    # AFTER exclude_symbols on purpose: a dropped symbol must not seed the walk,
+    # so cutting the function surface also cuts the type surface it pulled in.
+    # Also after the global drop above, so an unresolvable global cannot seed a
+    # type either.
+    if config.wrap.surface_types_only
+        before = length(get(metadata, "struct_definitions", Dict()))
+        tf = _apply_surface_type_filter!(metadata, config.wrap.surface_types_extra;
+                                         runtime_defined=runtime_defined)
+
+        # Same stale-filter contract as exclude_symbols: a keep-pattern naming
+        # nothing means the type was renamed or the glob mistyped, and the
+        # author believes something is being preserved that is not. That one is
+        # worse than a stale exclude — this list exists precisely to hold on to
+        # types reachability cannot see, so a silent miss DROPS API.
+        if !isempty(tf.unmatched)
+            error("""
+            [wrap] surface_types_extra: $(length(tf.unmatched)) pattern(s) matched nothing:
+              $(join(tf.unmatched, "\n  "))
+
+            Every pattern must match at least one type in struct_definitions.
+            This list is the hatch for types the reachability walk cannot see —
+            callback-only structs, constant-only enums — so a pattern that
+            matches nothing is not harmless: the type it was meant to keep is
+            being dropped right now.
+
+            These are globs (* and ?), NOT regexes, and they are anchored. They
+            match both the raw key and its bare name, so an enum recorded as
+            `__enum__Foo` is matched by `Foo`.
+
+            Check the names actually present:
+              python3 -c "import json,sys; print('\\n'.join(sorted(json.load(open(sys.argv[1]))['struct_definitions'])))" \\
+                $(joinpath(dirname(library_path), "compilation_metadata.json"))
+
+            Then fix or remove the pattern.""")
+        end
+
+        if tf.kept == 0 && before > 0
+            error("""
+            [wrap] surface_types_only removed every type — the wrapper would have
+            no structs or enums at all.
+
+            $(before) type(s) went in and none was reachable from any exported
+            function's return type, parameters or receiver class. That is a
+            reachability failure, not a trim: check that the metadata actually
+            carries functions (an empty or symbol-filtered `functions` list
+            reaches nothing), or set surface_types_only = false.""")
+        end
+
+        println("  surface types: kept $(tf.kept) of $(before) type(s), " *
+                "dropped $(tf.dropped)" *
+                (isempty(config.wrap.surface_types_extra) ? "" :
+                 " (with $(length(config.wrap.surface_types_extra)) keep-pattern(s))"))
+    end
+
     functions = metadata["functions"]
 
     # Extract supplementary types from headers (enums, unused types, etc.)
@@ -995,6 +1071,61 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     # use_clang_jl = false skips AST-based extraction (DWARF-only path)
     include_dirs = get(metadata, "include_dirs", String[])
     empty_header_types = Dict("enums" => Dict(), "constants" => Dict(), "typedefs" => Dict(), "structs" => String[])
+
+    # [wrap] headers scopes the Clang.jl walk. Without it the `else` branch
+    # below discovers every header at the top level of every `-I` the build
+    # used — fine when the include dir IS the API, catastrophic when `src/`,
+    # `third_party/`, ngen and the OpenCL headers share that path. onednn's
+    # first wrap spent 16 minutes in libclang and emitted Level Zero and
+    # gpu/intel internals on top of the DWARF it already had.
+    #
+    # The walk still resolves `#include`s through the full include_dirs; only
+    # its STARTING SET narrows. That is the difference between scoping the pass
+    # and `use_clang_jl = false`, which discards it entirely — along with the
+    # macros and constant-only enums that exist nowhere else.
+    #
+    # An explicit `headers=` argument to wrap() still wins, so a one-off call
+    # can override the manifest.
+    if isempty(headers) && !isempty(config.wrap.headers)
+        resolved = String[]
+        unresolved = String[]
+        roots = String[config.project.root]
+        append!(roots, include_dirs)
+        for h in config.wrap.headers
+            hit = nothing
+            if isabspath(h) && isfile(h)
+                hit = h
+            else
+                for r in roots
+                    cand = joinpath(r, h)
+                    if isfile(cand)
+                        hit = cand
+                        break
+                    end
+                end
+            end
+            hit === nothing ? push!(unresolved, h) : push!(resolved, abspath(hit))
+        end
+        if !isempty(unresolved)
+            error("""
+            [wrap] headers: $(length(unresolved)) entry/entries resolved to no file:
+              $(join(unresolved, "\n  "))
+
+            Each entry is tried as an absolute path, then relative to the project
+            root, then against each of the build's include dirs — i.e. the
+            spelling you would put in a `#include`. A header that resolves to
+            nothing means the walk silently starts from fewer files than
+            intended, which is indistinguishable from a successful pass.
+
+            Include dirs searched:
+              $(isempty(include_dirs) ? "(none)" : join(include_dirs, "\n  "))
+
+            Fix the spelling, or add the directory to [compile] include_dirs.""")
+        end
+        headers = resolved
+        println("  header walk: scoped to $(length(headers)) header(s) from [wrap] headers")
+    end
+
     header_types = if !config.wrap.use_clang_jl
         empty_header_types
     elseif !isempty(headers)
@@ -1062,24 +1193,14 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     module_name = get_module_name(config)
 
     (wrapper_content, needed_thunks) = if registry.language == :c
-        # C path: no DAG — Julia's internal LLVM handles C ABI correctly.
+        # C path: Julia's internal LLVM handles the C ABI.
         # All dispatch goes through is_c_lto_safe() heuristics alone.
         (generate_introspective_module_c(config, library_path, metadata,
                                          module_name, registry, generate_docs, thunks_lib_path), nothing)
     else
-        # C++ path: DAG catches transitive layout drift that per-function heuristics miss
-        dag_result = DAGDiff.dag_diff(metadata)
-
-        if config.wrap.dag
-            dag_dir = joinpath(config.project.root, "dag")
-            mkpath(dag_dir)
-            DAGDiff.render_html(dag_result, joinpath(dag_dir, "index.html"))
-            DAGDiff.export_dot(dag_result, joinpath(dag_dir, "diff.dot"))
-        end
-
+        # C++ path: Tier 2 is decided by is_ccall_safe alone.
         generate_introspective_module_cpp(config, library_path, metadata,
-                                          module_name, registry, generate_docs, thunks_lib_path;
-                                          dag_result=dag_result)
+                                          module_name, registry, generate_docs, thunks_lib_path)
     end
 
     # Write to file

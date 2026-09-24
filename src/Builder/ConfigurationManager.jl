@@ -145,8 +145,51 @@ struct WrapConfig
     # without recompiling, and compilation_metadata.json keeps the full
     # unfiltered picture that RepliBuildTooling's introspection reads.
     exclude_symbols::Vector{String}
+    # Emit only the types REACHABLE from the wrap surface — every exported
+    # function's return type, parameter types and receiver class, then their
+    # members transitively — instead of every type DWARF happens to carry.
+    #
+    # The two are wildly different for any C++ library that compiles vendored
+    # internals into the same .so: onednn's DWARF has 2974 struct_definitions
+    # and 79 are reachable (2.7%), the rest being `dnnl::impl` and nGEN GPU-JIT
+    # types the C API never names. That is not merely a 13 MB module instead of
+    # a 596 KB one — those internals are what BREAK it (`const Integer =
+    # Pipe(3)` shadowing `Base.Integer`, duplicate `_` fields on nGEN
+    # instruction structs), so the wrapper does not load at all.
+    #
+    # OPT-IN, and it must stay opt-in. Measured across all 32 Hub packages with
+    # metadata on disk: the filter is safe for onednn (37→33) and box2d (95%),
+    # and destroys md4c (36→2). md4c's whole API is SAX callbacks, and a
+    # `function_ptr(int)*` member erases its signature types, so every
+    # `MD_*_DETAIL` struct a user needs to WRITE a callback is invisible to
+    # reachability. "Always keep enums" does not rescue that class either — it
+    # would re-admit onednn's `Pipe`, which is the shadowing failure above.
+    surface_types_only::Bool
+    # Globs for types to keep even when unreachable. The hatch for exactly the
+    # md4c class: constant-only enums (a function returning plain `int` never
+    # names its error enum) and callback-only structs.
+    surface_types_extra::Vector{String}
+    # Which headers the Clang.jl walk STARTS from. Empty = auto-discover, which
+    # means every header at the top level of every `-I` the build used.
+    #
+    # That default is fine for a library whose include dir is its API and
+    # catastrophic for one that puts `src/`, `third_party/`, ngen and the
+    # OpenCL headers on the same path: onednn's first wrap spent 16 minutes in
+    # libclang and pulled in Level Zero and gpu/intel internals, on top of the
+    # DWARF it already had from the compiled TUs. The only lever then available
+    # was `use_clang_jl = false`, which throws away the whole header pass —
+    # including the macros and constant-only enums that exist NOWHERE else.
+    #
+    # Naming the public headers keeps that pass and scopes it. `include_dirs` is
+    # still passed to libclang, so the named headers' own `#include`s resolve
+    # normally; what changes is where the walk begins, not what it can reach.
+    #
+    # Entries may be absolute, relative to the project root, or a subpath that
+    # resolves against one of the build's include dirs (the spelling you would
+    # put in a `#include`). A header that resolves to nothing is a hard error —
+    # silently walking zero headers looks identical to a successful pass.
+    headers::Vector{String}
     cstring_owned::Dict{String,String}  # func => free symbol for malloc'd char* returns
-    dag::Bool  # Export DAG diff graphs to <project>/dag/
     tier1::Tier1Config
 end
 
@@ -522,6 +565,40 @@ function parse_wrap_config(data::Dict)::WrapConfig
         end
     end
 
+    # [wrap] surface_types_only = true / surface_types_extra = ["MD_*_DETAIL"]
+    # Same glob dialect as exclude_symbols, and for the same reason.
+    surface_types_only = get(wrap, "surface_types_only", false)
+    if !(surface_types_only isa Bool)
+        @warn "[wrap] surface_types_only must be true or false; ignoring $(repr(surface_types_only))"
+        surface_types_only = false
+    end
+    surface_types_extra = String[]
+    for pat in get(wrap, "surface_types_extra", String[])
+        if pat isa AbstractString && !isempty(strip(String(pat)))
+            push!(surface_types_extra, String(pat))
+        else
+            @warn "[wrap] surface_types_extra: entries must be non-empty strings; ignoring $(repr(pat))"
+        end
+    end
+    if !isempty(surface_types_extra) && !surface_types_only
+        @warn "[wrap] surface_types_extra is set but surface_types_only is false — " *
+              "nothing is being filtered, so the keep-list has no effect."
+    end
+
+    # [wrap] headers = ["oneapi/dnnl/dnnl.h"] — scope the Clang.jl walk.
+    wrap_headers = String[]
+    for h in get(wrap, "headers", String[])
+        if h isa AbstractString && !isempty(strip(String(h)))
+            push!(wrap_headers, String(h))
+        else
+            @warn "[wrap] headers: entries must be non-empty strings; ignoring $(repr(h))"
+        end
+    end
+    if !isempty(wrap_headers) && !get(wrap, "use_clang_jl", true)
+        @warn "[wrap] headers is set but use_clang_jl = false — the header walk " *
+              "is off entirely, so the list has no effect. Drop one or the other."
+    end
+
     # Parse owned char* returns: [wrap.cstring_owned] func = "free_symbol".
     # The wrapper copies the returned string then frees the C buffer through
     # the named library symbol (ownership isn't visible in DWARF).
@@ -546,6 +623,11 @@ function parse_wrap_config(data::Dict)::WrapConfig
         get(tier1_raw, "allow_setjmp", false),
     )
 
+    # A stale key must not vanish quietly. The value is not stored.
+    if haskey(wrap, "dag")
+        @warn "[wrap] dag was removed along with DAGDiff; the key is ignored"
+    end
+
     return WrapConfig(
         get(wrap, "enabled", true),
         wrap_style,
@@ -557,8 +639,10 @@ function parse_wrap_config(data::Dict)::WrapConfig
         macros,
         shim_headers,
         exclude_symbols,
+        surface_types_only,
+        surface_types_extra,
+        wrap_headers,
         cstring_owned,
-        get(wrap, "dag", false),
         tier1
     )
 end
@@ -830,7 +914,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false, :default),
         LinkConfig("2", false, String[], String[], false, true),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], String[], Dict{String,String}(), false, Tier1Config(false, String[], 64, false)),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], String[], false, String[], String[], Dict{String,String}(), Tier1Config(false, String[], 64, false)),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -967,11 +1051,17 @@ function save_config(config::RepliBuildConfig)
     if !isempty(config.wrap.exclude_symbols)
         wrap_dict["exclude_symbols"] = config.wrap.exclude_symbols
     end
+    if config.wrap.surface_types_only
+        wrap_dict["surface_types_only"] = config.wrap.surface_types_only
+    end
+    if !isempty(config.wrap.surface_types_extra)
+        wrap_dict["surface_types_extra"] = config.wrap.surface_types_extra
+    end
+    if !isempty(config.wrap.headers)
+        wrap_dict["headers"] = config.wrap.headers
+    end
     if !isempty(config.wrap.cstring_owned)
         wrap_dict["cstring_owned"] = config.wrap.cstring_owned
-    end
-    if config.wrap.dag
-        wrap_dict["dag"] = true
     end
     if config.wrap.tier1.enable
         tier1_dict = Dict{String,Any}("enable" => true)

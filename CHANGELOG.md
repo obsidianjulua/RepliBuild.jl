@@ -4,6 +4,109 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+**Bounding the wrap surface.** A wrapper used to be whatever `nm` and DWARF
+reported. For libraries that compile vendored internals into the same `.so`, that
+made wrappers that did not load, or that exported symbols the loader could not
+resolve. This release adds guards that refuse those builds, and knobs that narrow
+the surface on purpose.
+
+### DAGDiff removed (2026-09-23)
+
+`src/IRGen/DAGDiff.jl` is gone. Wrap consulted it in one decision, OR'd with
+`is_ccall_safe`, and Build never called it. A static audit on 2026-09-23 over
+all 10 C++ Hub packages (4,733 functions) found it flagging 28 functions
+(fmt 24, pugixml 3, llamacpp 1). All 28 are already sent to Tier 2 by
+`is_ccall_safe`, so 0 are flagged only by DAGDiff. That matches the 2026-08-08
+audit (3 → 0). `is_ccall_safe` already sends every non-noexcept mangled C++
+function to Tier 2. The Julia-side layout models natural alignment without the
+generator's explicit `_pad_N`/`_pad_tail` fields, so ~93% of its ~24.6k
+reported mismatches are gaps the emitted struct already corrects: the diff
+compares DWARF against a layout the generator never emits.
+`DAGDiffResult.lowering_order` is computed and read by nothing. The
+`<project>/dag/` HTML/DOT renderer went with the module. `[wrap] dag` now warns
+and is ignored.
+
+### Enumerator named `_` no longer empties the module (2026-09-20)
+
+oneDNN spells enumerators literally `_`. `_sanitize_cpp_type_name` collapsed and
+trimmed that to `""`, and `_assert_wrapper_parses` refused a 271k-line wrapper
+over two enumerators. All-underscore names now sanitize to `c__` in **both**
+sanitizers. Plain `_` would parse, but Julia treats it as write-only, so the
+member could never be referenced. The C sanitizer previously renamed such a
+member to `_UnknownType`. C++ keeps `""` as the empty-name sentinel its callers
+rely on. `test/test_enum_underscore_name.jl`.
+
+### Identical enums alias instead of rebinding members (2026-09-20)
+
+DWARF records `std::map` member typedefs (`key_type`, `value_type`) as separate
+enums carrying the underlying enum's enumerators. The second `@enum` silently
+rebound every member, so every ccall taking the real enum raised
+`MethodError: Cannot convert … key_type` — while onednn's deep test stayed
+green. An enum whose member set is identical to one already emitted is now
+emitted as `const Alias = Canonical`, in both generators.
+`test/test_enum_alias_collision.jl`.
+
+### `[wrap] surface_types_only`, and unresolvable globals dropped (2026-09-20)
+
+`surface_types_only = true` emits only the types reachable from exported
+functions, method receivers (`class`) and globals present in the dynamic symbol
+table. On onednn that is 79 of 2974 types, and it is what makes the module load:
+internal nGEN types shadowed `Base.Integer` and emitted duplicate fields. The
+option is **opt-in**. A reachability walk cannot see types used only through
+function-pointer members (md4c) or constant-only enums (argon2), so
+`surface_types_extra` (anchored globs) retains them. A pattern that matches
+nothing is a hard error.
+
+Independently and unconditionally, `_drop_unresolvable_globals!` now removes
+globals absent from the dynamic symbol table before either generator runs. An
+accessor for such a global could only fail at the call site. That was 656 of
+onednn's 1006 functions, and every one of llamacpp's 4099 globals.
+`test/test_surface_types.jl`.
+
+### `[link] link_dirs` emits an rpath (2026-09-20)
+
+`-L` answers where a library is at link time, not at load time. Linking against
+another Hub package's `.so` recorded a bare `DT_NEEDED` that resolved to the
+distro copy at runtime, so the process held two copies of process-global state.
+Each `link_dirs` entry now also emits `-Wl,-rpath`, with `$ORIGIN` first. This
+is skipped on Windows, where PE has no RUNPATH.
+
+### `[wrap] exclude_symbols` (2026-09-20)
+
+Anchored globs (`*`, `?`; every other character is literal, so `operator+`
+means itself) matched against a function's name, demangled name and mangled
+name, and against globals. They apply at wrap time on both wrap paths, so
+changing the filter re-wraps without recompiling, and `compilation_metadata.json`
+keeps the full picture. A pattern that matches nothing is a hard error (a stale
+filter), as is filtering away every function. `test/test_exclude_symbols.jl`.
+
+### `[compile] visibility` and `VisibilityProbe` (2026-09-15)
+
+`-fvisibility=hidden` narrows the API to what a library annotates. For a library
+that does not annotate its exports, or whose export macro is conditional and
+inactive, it erases the whole API. `RepliBuild.VisibilityProbe.visibility_probe(toml)`
+compiles the package's sources with the flag and reads visibility off the IR, so
+you can measure before choosing. RepliBuild's own macro shims are excluded from
+the verdict; counting them read lua as annotated. The verdict is per
+configuration: cJSON annotates only with `CJSON_API_VISIBILITY` defined.
+`[compile] visibility = "hidden"` is the declared form. It goes through
+`get_compile_flags`, so it invalidates the IR cache. It also honours the legacy
+raw flag, refuses a contradiction between the two, and survives
+`discover(force=true)`. `test/test_visibility_probe.jl`,
+`test/test_compile_visibility.jl`.
+
+### Wrappable functions must be reachable at runtime (2026-09-15)
+
+Metadata is correlated against `nm -g`, while the wrapper resolves through the
+dynamic table (`nm -D` / PE exports). `verify_wrap_surface` runs before the
+project hash is saved. It refuses an empty surface (R1) and any wrappable
+function missing from the dynamic table under its mangled name (R2). Across 31
+Hub packages R2 finds no offenders, which is what justifies a hard error. R1
+originally applied only when static promotion had renamed symbols. That missed
+the more common path — `-fvisibility=hidden` with promotion off, which is how
+llamacpp shipped a zero-function wrapper — and it now fires on any empty
+surface. `test/test_wrap_surface_guard.jl`.
+
 ## v4.0.1 (2026-09-13)
 
 **Julia 1.13 / libLLVM 20 stability.** 4.0.0 shipped against Julia 1.12 and

@@ -152,10 +152,6 @@ include(joinpath(@__DIR__, "test_stl_extract.jl"))
 
 include(joinpath(@__DIR__, "test_dep_cache.jl"))
 
-# ── DAGDiff module tests (synthetic metadata, no C++ toolchain required) ─────
-
-include(joinpath(@__DIR__, "dag_test", "test_dag_diff.jl"))
-
 # ── Wrapper type-binding guard (no toolchain required) ───────────────────────
 # A type used in a foreign-call signature but never declared by the module is
 # an UndefVarError at include time — the whole wrapper dies, not one function.
@@ -198,6 +194,27 @@ include(joinpath(@__DIR__, "test_cstring_policy.jl"))
 
 include(joinpath(@__DIR__, "test_introspection.jl"))
 
+# ── Enumerator named `_` (no toolchain) ──────────────────────────────────────
+# `enum class inner_blk_t { _, _4a, … }` is legal C++ and DWARF records the `_`
+# faithfully. `_sanitize_cpp_type_name` collapsed it to "_" and rstrip'd it to
+# EMPTY, emitting `@enum inner_blk_t::Cint begin` + ` = 0` — a syntax error
+# that cost onednn's whole 271k-line wrapper (2026-09-20). The C sanitizer had
+# an empty guard and the C++ one did not. Repairing it to `_` is not enough:
+# Julia's all-underscore identifiers are write-only, so the value-0 member — the
+# C++ default — would be unreferenceable.
+
+include(joinpath(@__DIR__, "test_enum_underscore_name.jl"))
+
+# ── Two enums, one member set (no toolchain) ─────────────────────────────────
+# DWARF records a std::map's `key_type`/`value_type`/`mapped_type` typedefs as
+# separate enums carrying the real enum's enumerators. Both were emitted, the
+# later `@enum` rebound every member, and Julia allowed it silently — onednn's
+# `dnnl_f32` became a `key_type`, so every ccall taking `dnnl_data_type_t`
+# raised MethodError while the module loaded and its suite stayed 15/15
+# (2026-09-20). Identical member sets are now aliased, not re-emitted.
+
+include(joinpath(@__DIR__, "test_enum_alias_collision.jl"))
+
 # ── Symbol hygiene (no toolchain) ────────────────────────────────────────────
 # Itanium thunk symbols (`_ZTh`/`_ZTv`/`_ZTc`) have no DWARF subprogram, so
 # their "class" is inferred as the demangler's phrase ("non-virtual thunk to
@@ -220,6 +237,15 @@ include(joinpath(@__DIR__, "test_config_surface.jl"))
 # Glob compilation, the metadata filter, stale-pattern reporting, and config
 # round-trip. Pure Julia: no toolchain, no binary.
 include(joinpath(@__DIR__, "test_exclude_symbols.jl"))
+
+# ── [wrap] surface_types_only — bounding the wrapper TYPE surface ────────────
+# The other half of the same question. exclude_symbols bounds which functions
+# the wrapper binds; this bounds which types it defines, and for a C++ library
+# with vendored internals those diverge wildly — onednn's DWARF carries 2974
+# types and its API reaches 79. The excess is not bloat, it is what breaks the
+# module at `include`. Opt-in, because md4c's reachable set is genuinely 2 of
+# 36: callback signatures erase their types and it ships 231/231 on the rest.
+include(joinpath(@__DIR__, "test_surface_types.jl"))
 
 # ── JSON.parsefile must not memory-map (no toolchain) ────────────────────────
 # A leaked mmap is free on POSIX, where a mapped file still unlinks, and fatal

@@ -104,8 +104,6 @@ Choosing *between* the two direct tiers is a second, C-only step. `is_c_lto_safe
    - Packed struct parameters → Tier 2
 4. **Exception safety** — Per-function `is_noexcept` flag from DWARF. If absent (function may throw) and the module's `may_throw` setting is on, the function routes through `jlcs.try_call` rather than `ccall`.
 
-For struct-graph cases where pairwise heuristics miss transitive layout mismatches (a non-packed struct that *contains* a packed struct, for example), `src/IRGen/DAGDiff.jl` performs a structural type-graph diff to surface bad cases and produces a topo-sorted lowering order for multi-type thunks.
-
 Functions routed to Tier 2 are further divided between JIT dispatch (`JITManager.invoke()`) and AOT thunks (`ccall` to `_thunks.so`), controlled by the `aot_thunks` config flag.
 
 ### Idiomatic wrapper generation
@@ -239,12 +237,6 @@ Transforms parsed DWARF metadata (`VtableInfo`) into MLIR source text in the JLC
 3. **Function thunks:** `func.func @mangled_thunk` wrappers carrying `llvm.emit_c_interface` — filtered by `needed_symbols` (the wrapper's thunk manifest, i.e. dead-thunk elimination). Each body unpacks `%args_ptr` (ciface convention), emits `jlcs.marshal_arg` for packed-struct parameters, `jlcs.scope` copy-construct/destruct brackets for non-trivial by-value class parameters, `jlcs.ffe_call` / `jlcs.try_call` (per-function noexcept routing) or `jlcs.vcall` (virtual instance methods with scalar/pointer signatures), and `jlcs.marshal_ret` for packed-struct returns
 4. **STL container thunks:** Accessor thunks for detected STL containers (size, data, push_back, etc.)
 5. **Array-view thunks:** rank-1 strided accessors for fixed-size primitive array members
-
-## DAGDiff
-
-**Source:** `src/IRGen/DAGDiff.jl`
-
-Structural type-graph diff used by tier selection and IR generation when a struct may contain other structs whose layouts disagree between Julia and C++. The pairwise check in `is_ccall_safe()` catches direct packed-vs-aligned mismatches; `DAGDiff` catches the transitive cases — a non-packed struct that contains a packed struct as a field, a struct chain through a typedef alias, etc. It outputs a topo-sorted lowering order so that the MLIR thunks for dependent types are emitted in the right sequence.
 
 ## Slicer
 

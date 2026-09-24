@@ -81,9 +81,9 @@ counts as consuming `[ingest] library`.
 
 Without this the guard demands a reservation for every field reached through an
 alias — `Compiler.ingest_library` and `Wrapper.TypeRegistry` both open that way.
-Note the bare-name shortcut is NOT an acceptable substitute: the only `.style` in
-`src/` outside ConfigurationManager is `tooltip.style`, inside a JavaScript string
-literal in DAGDiff, and it would have marked the inert `[wrap] style` live.
+Note the bare-name shortcut is NOT an acceptable substitute: a `.style` that is
+not a config-field read — historically a JavaScript `tooltip.style` string
+literal — would have marked the inert `[wrap] style` live.
 """
 function _alias_vars(text::AbstractString, sec::AbstractString)
     unique(m.captures[1] for m in
@@ -253,6 +253,36 @@ end
             n_pre  = length(collect(eachmatch(r"function __init__\(\)\n\$_preload_snippet", t)))
             @test n_init > 0
             @test n_pre == n_init
+        end
+    end
+
+    @testset "[wrap] dag was removed and warns" begin
+        mktempdir() do dir
+            stale = joinpath(dir, "stale.toml")
+            write(stale, """
+            [project]
+            name = "staledag"
+            root = "$(escape_string(dir))"
+
+            [wrap]
+            language = "cpp"
+            dag = true
+            """)
+            cfg = @test_logs (:warn, r"\[wrap\] dag was removed along with DAGDiff; the key is ignored") CFG.load_config(stale)
+            @test !hasproperty(cfg.wrap, :dag)
+            @test cfg.wrap.language == :cpp
+
+            # Absent key stays silent. Warning on every config would be the bug.
+            quiet = joinpath(dir, "quiet.toml")
+            write(quiet, """
+            [project]
+            name = "nodag"
+            root = "$(escape_string(dir))"
+
+            [wrap]
+            language = "cpp"
+            """)
+            @test_logs CFG.load_config(quiet)
         end
     end
 end

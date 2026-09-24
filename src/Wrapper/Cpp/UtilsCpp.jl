@@ -28,7 +28,40 @@ function _sanitize_cpp_type_name(name::AbstractString)::String
     # call-site (struct definitions, field types, function parameters, …)
     # produces identical identifiers for the same C++ type.
     s = replace(s, r"_+" => "_")
+    # A C++ name that is ALL underscores survives every replacement above as a
+    # single "_", which the rstrip below then empties. oneDNN spells the zero
+    # enumerator of both `enum class inner_blk_t { _, _4a, … }` and
+    # `block_dim_t { _, _A, … }` literally `_` (src/common/tag_traits.hpp), and
+    # `_` is a perfectly legal C++ identifier, so DWARF records it faithfully.
+    # The empty string then reached an identifier position and the emitted
+    # module was a syntax error — `@enum inner_blk_t::Cint begin` followed by
+    # ` = 0` — which `_assert_wrapper_parses` refuses, killing a 271k-line
+    # wrapper over two enumerators.
+    #
+    # `_` is NOT a usable repair. Julia parses `@enum T _ = 0` and evaluates it,
+    # but all-underscore identifiers are WRITE-ONLY — "their values cannot be
+    # used in expressions" — so the enumerator could never be referenced. Here
+    # that is value 0, the C++ default (`inner_blk_t{}`), and a member nobody
+    # can name is barely better than the dropped member this must not become.
+    # Escape it with the same `c_` prefix the keyword and Base-collision
+    # branches below use; `c__` reads back, round-trips through `T(0)` and
+    # shows up in `instances()`.
+    #
+    # `_sanitize_c_type_name` (Wrapper/C/UtilsC.jl) guards the empty case and
+    # this one did not — the same two-generators-one-guard split as the
+    # namespace phantom-`this` bug. Both are fixed; keep them in step.
+    #
+    # Note the asymmetry that REMAINS on purpose: C returns "_UnknownType" for a
+    # genuinely empty name, C++ still returns "". Do not "fix" that to match —
+    # callers here use empty as a SENTINEL. GeneratorCpp.jl:2390 reads
+    # `isempty(inner_safe) ? "Ptr{Cvoid}" : "$wrapper_kw{$inner_safe}"`, so a
+    # non-empty placeholder would emit `Ptr{_UnknownType}` where `Ptr{Cvoid}`
+    # is meant; GeneratorCpp.jl:1553 gates on it too. All-underscore is a
+    # distinct case from empty, which is why it is repaired here and empty is
+    # left alone.
+    was_all_underscore = !isempty(s) && all(==('_'), s)
     s = String(rstrip(s, '_'))
+    was_all_underscore && (s = "c__")
     if !isempty(s) && isdigit(s[1])
         s = "_" * s
     end

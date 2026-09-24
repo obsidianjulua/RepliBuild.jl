@@ -1302,10 +1302,86 @@ function _pe_export_intent(ir_files::Vector{String})
 end
 
 """
-Create shared library from LLVM IR.
-Returns path to library file.
+    _is_source_location_exhaustion(output) -> Bool
+
+True when clang refused the translation unit because its `SourceLocation` space
+ran out. Matched on the diagnostic rather than on a size threshold: the budget
+is consumed by DEBUG LOCATIONS, not bytes, so two modules of the same size can
+land either side of it depending on how much `-g` detail they carry. A
+threshold would be a guess; this is the compiler's own answer.
 """
-function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{String}}, lib_name::String="")
+function _is_source_location_exhaustion(output::AbstractString)::Bool
+    return occursin("ran out of source locations", output) ||
+           occursin("translation unit is too large", output)
+end
+
+"""
+    _compile_ir_to_objects(config, ir_files, compiler) -> Vector{String}
+
+Compile each IR module to its own object file, in parallel. Each `clang -c` is
+a separate process with a fresh `SourceManager`, which is the entire point —
+the source-location budget resets per file.
+
+Objects land beside the IR under `build/obj/` and are reused when newer than
+their input, so a re-link after an unrelated change does not recompile all of
+them. A failure names the file rather than the whole batch.
+"""
+function _compile_ir_to_objects(config::RepliBuildConfig, ir_files::Vector{String},
+                                compiler::String)::Vector{String}
+    obj_dir = joinpath(get_build_path(config), "obj")
+    mkpath(obj_dir)
+
+    objs = [joinpath(obj_dir, string(basename(f), ".o")) for f in ir_files]
+    todo = [i for i in eachindex(ir_files)
+            if !isfile(objs[i]) || mtime(objs[i]) < mtime(ir_files[i])]
+
+    if isempty(todo)
+        println("  objects: $(length(objs)) up to date")
+        return objs
+    end
+    println("  objects: compiling $(length(todo)) of $(length(objs)) " *
+            "(reusing $(length(objs) - length(todo)))")
+
+    failures = Tuple{String,String}[]
+    lk = ReentrantLock()
+    done = Threads.Atomic{Int}(0)
+    # One process per input, bounded by the thread count. These are external
+    # processes, so the concurrency that matters is how many clangs are resident
+    # at once — each carries a whole module's debug info.
+    asyncmap(todo; ntasks=max(1, Sys.CPU_THREADS)) do i
+        (out, code) = _clang_for_c_bucket(compiler, ["-c", "-fPIC", ir_files[i], "-o", objs[i]])
+        n = Threads.atomic_add!(done, 1) + 1
+        if code != 0
+            lock(lk) do
+                push!(failures, (ir_files[i], out))
+            end
+        elseif n % 100 == 0 || n == length(todo)
+            println("  objects: $n/$(length(todo))")
+        end
+        nothing
+    end
+
+    if !isempty(failures)
+        (f, out) = first(failures)
+        error("""
+        Per-TU object compilation failed for $(length(failures)) of $(length(todo)) file(s).
+        First failure: $f
+        $(join(last(split(out, '\n'), 20), "\n"))""")
+    end
+    return objs
+end
+
+"""
+Create shared library from LLVM IR. Returns path to the library file.
+
+`per_tu_ir` is the UNMERGED per-translation-unit IR list, used only if clang
+refuses the (usually merged) `ir_files` for running out of source locations —
+see the fallback inside. Callers that already hold that list should pass it;
+without it the fallback cannot run, because splitting a merged module is not
+possible after the fact.
+"""
+function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{String}},
+                        lib_name::String=""; per_tu_ir::Vector{String}=String[])
     # Create shared library
 
     # Normalize to vector
@@ -1326,13 +1402,19 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     mkpath(output_dir)
     lib_path = joinpath(output_dir, lib_name)
 
-    # Compile IR to shared library
-    cmd_args = [
+    # Compile IR to shared library.
+    #
+    # `cmd_tail` is everything after the inputs, kept separate because the
+    # inputs can be swapped for per-TU objects on the source-location fallback
+    # below and every other flag must be identical across both attempts.
+    cmd_head = [
         "-shared",  # Create shared library
         "-fPIC",    # Position independent code
     ]
+    cmd_tail = ["-o", lib_path]
+    cmd_args = copy(cmd_head)
     append!(cmd_args, files)
-    append!(cmd_args, ["-o", lib_path])
+    append!(cmd_args, cmd_tail)
 
     # A dllexport ANYWHERE turns mingw's auto-export off for the WHOLE image,
     # and the macro-shim TU carries one on Windows now. For a library that
@@ -1357,7 +1439,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     if Sys.iswindows() && !isempty(config.wrap.macros)
         intent = _pe_export_intent(files)
         if intent.saw_shim && !intent.saw_foreign_export
-            push!(cmd_args, "-Wl,--export-all-symbols")
+            push!(cmd_tail, "-Wl,--export-all-symbols")
         end
     end
 
@@ -1381,21 +1463,65 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     # siblings without an absolute path; RepliBuild already bakes absolute paths
     # into the wrapper's LIBRARY_PATH, so the rest are consistent with that.
     if !isempty(config.link.link_dirs) && !Sys.iswindows()
-        push!(cmd_args, "-Wl,-rpath,\$ORIGIN")
+        push!(cmd_tail, "-Wl,-rpath,\$ORIGIN")
     end
     for dir in config.link.link_dirs
-        push!(cmd_args, "-L$dir")
+        push!(cmd_tail, "-L$dir")
         # PE has no RUNPATH; mingw's ld warns and ignores -rpath.
-        Sys.iswindows() || push!(cmd_args, "-Wl,-rpath,$(abspath(dir))")
+        Sys.iswindows() || push!(cmd_tail, "-Wl,-rpath,$(abspath(dir))")
     end
 
     # Add link libraries
     for lib in config.link.link_libraries
-        push!(cmd_args, "-l$lib")
+        push!(cmd_tail, "-l$lib")
     end
 
     compiler = config.wrap.language == :c ? "clang" : "clang++"
+    cmd_args = vcat(cmd_head, files, cmd_tail)
     (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
+
+    # ── Source-location fallback ─────────────────────────────────────────────
+    # Clang re-parses the linked module as ONE translation unit and allocates a
+    # `SourceLocation` per debug location. That counter is a 32-bit offset, so a
+    # merged `-g -fstandalone-debug` module big enough exhausts it:
+    #
+    #   fatal error: translation unit is too large for Clang to process:
+    #   ran out of source locations
+    #
+    # Hub onednn hits it at 3.9 GB of linked IR / 21.4M metadata records; the
+    # same path ships llamacpp at 519 MB. It is NOT a parallelism limit — the
+    # 779 TUs already compiled to IR across every thread — it is one process's
+    # budget for source locations.
+    #
+    # So give each input its own process, which resets that budget: `clang -c`
+    # per IR file, then link the objects. Passing the IR VECTOR to one
+    # `clang -shared` is not a fix and must not be mistaken for one — that is
+    # what the call above already does when llvm-link declines to merge, and it
+    # is still a single SourceManager.
+    #
+    # Debug info is kept. Stripping it to make the module fit would produce a
+    # .so the wrapper cannot read, which is the wrong trade at any size.
+    if exitcode != 0 && _is_source_location_exhaustion(output)
+        # Prefer the unmerged per-TU list when the caller supplied one: `files`
+        # here is usually the single merged module, and splitting THAT is not
+        # possible — the whole point is to never hand clang the merge.
+        split_inputs = !isempty(per_tu_ir) ? per_tu_ir : files
+        if length(split_inputs) <= 1
+            error("""
+            Library creation failed: clang ran out of source locations, and there
+            is no per-translation-unit IR to fall back to.
+
+            The merged module is too large for one clang process to parse, and
+            splitting requires the unmerged .ll files. compile_project passes
+            them as `per_tu_ir`; a direct create_library call must do the same.
+            $output""")
+        end
+        @info "link: clang ran out of source locations on the merged module — " *
+              "recompiling $(length(split_inputs)) translation unit(s) separately"
+        objs = _compile_ir_to_objects(config, split_inputs, compiler)
+        cmd_args = vcat(cmd_head, objs, cmd_tail)
+        (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
+    end
 
     if exitcode != 0
         error("Library creation failed: $output")
@@ -2625,7 +2751,11 @@ function compile_project(config::RepliBuildConfig)
     binary_path = if config.binary.type == :executable
         create_executable(config, linked_ir, config.project.name)
     else
-        create_library(config, linked_ir)
+        # `ir_files` is handed along as the per-TU fallback. link_optimize_ir
+        # normally returns ONE merged module, and when that module is too big
+        # for clang's SourceLocation space the only way through is to give each
+        # translation unit its own process — which needs the unmerged list.
+        create_library(config, linked_ir; per_tu_ir=ir_files)
     end
 
     # Step 4: Extract and save compilation metadata

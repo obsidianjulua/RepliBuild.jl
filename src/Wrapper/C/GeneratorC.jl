@@ -637,6 +637,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
         """)
 
+        # Across-enum dedup — the C mirror of GeneratorCpp.jl's. The loop below
+        # drops repeated names and values WITHIN one enum; nothing watched for
+        # the same member set arriving twice under two type names. A later
+        # `@enum` rebinds every member, silently, and the module still loads:
+        # onednn's `dnnl_f32` became a `key_type` (a std::map member typedef)
+        # instead of a `dnnl_data_type_t`, so every ccall expecting the real
+        # type raised MethodError. A C typedef'd enum can collide the same way,
+        # and the two generators diverging on one decision is the failure this
+        # codebase keeps re-learning.
+        emitted_enum_sigs = Dict{Vector{Pair{String,Any}},String}()
+
         for enum_key in sort(collect(enum_types))
             enum_name = replace(enum_key, "__enum__" => "")
             enum_info = dwarf_structs[enum_key]
@@ -665,6 +676,25 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     push!(seen_names, name)
                     push!(members, name => get(enumerator, "value", 0))
                 end
+
+                # Same member set already emitted under another name? Alias it,
+                # do not re-bind every member. See the note at the loop head.
+                enum_sig = sort(members, by=first)
+                if haskey(emitted_enum_sigs, enum_sig)
+                    canonical = emitted_enum_sigs[enum_sig]
+                    if canonical != enum_name
+                        push!(enum_chunks, """
+                        # $enum_name is $canonical under a different DWARF spelling.
+                        # Aliased rather than re-emitted: a second `@enum` would
+                        # rebind every member name to this type and break ccalls
+                        # expecting $canonical.
+                        const $enum_name = $canonical
+
+                        """)
+                    end
+                    continue
+                end
+                emitted_enum_sigs[enum_sig] = enum_name
 
                 if _is_bitflag_enum(last.(members))
                     push!(enum_chunks, _bitflag_enum_chunk(enum_name, julia_underlying, members))

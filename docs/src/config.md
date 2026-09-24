@@ -37,6 +37,8 @@ destroying your intent. The preserved set is:
 | `[wrap]` | `shim_headers` |
 | `[wrap]` | `cstring_owned` |
 | `[wrap]` | `exclude_symbols` |
+| `[wrap]` | `surface_types_only` |
+| `[wrap]` | `surface_types_extra` |
 | `[wrap]` | `tier1` |
 | `[link]` | `promote_statics` |
 
@@ -67,6 +69,7 @@ things or is wrong.
 | has variadic functions worth calling with arguments | `[wrap.varargs]` | Only the zero-variadic base wrapper is generated |
 | returns malloc'd `char*` | `[wrap.cstring_owned]` | Every call leaks the C buffer |
 | links generated or vendored C++ you don't want wrapped | `[wrap] exclude_symbols` | Thousands of non-API symbols wrap; reaching for `-fvisibility=hidden` instead can erase the whole API |
+| compiles vendored internals whose TYPES land in DWARF | `[wrap] surface_types_only` | Every internal type is emitted; onednn's 2900 unreachable ones shadow `Base.Integer` and emit duplicate fields, so the module fails at `include` |
 | defines its public "def" structs header-only | `-fstandalone-debug` in `[compile] flags` | Structs wrap to **empty** Julia structs |
 | ships tests/examples/backends in the same repo | `exclude` on the dependency | Unrelated sources compile in and pollute the DWARF |
 | keeps headers somewhere other than `<root>`, `<root>/include`, `<root>/src` | `[compile] include_dirs` | Compile failure, or a TU silently missing declarations |
@@ -471,6 +474,75 @@ RepliBuildTooling's `api_surface` reads.
 > note: `GGML_API` expands to a visibility attribute only under `-DGGML_SHARED`,
 > and without it the flag hid `llama_decode` along with the shader blobs.
 
+### 2.14 `surface_types_only` — the same question, asked about types
+
+§2.13 bounds which **functions** the wrapper binds. This bounds which **types**
+it defines, and the two diverge badly for any C++ library that compiles vendored
+internals into the same `.so`.
+
+```toml
+[wrap]
+surface_types_only = true
+surface_types_extra = ["MD_*_DETAIL", "ErrCodes"]   # see the hatch below
+```
+
+On, the generator emits only the types **reachable from the wrap surface** —
+every exported function's return type, parameter types and receiver `class`, the
+type of every bindable global, then their members transitively. Off (the
+default), it emits every type DWARF carries.
+
+Hub onednn measures the gap: **2974 types recorded, 79 reachable (2.7%)**. The
+other ~2900 are `dnnl::impl` and nGEN GPU-JIT internals the C API never names.
+
+**This is not a size optimisation.** Those internals are what *break* the module:
+an nGEN enumerator spelled `Integer` emits `const Integer = Pipe(3)`, which
+shadows `Base.Integer` and invalidates 522 generated `v::Integer` signatures, and
+nGEN instruction structs emit duplicate `_` fields. The wrapper parses and then
+dies at `include`. A 13 MB module became 596 KB — and went from not loading to
+loading.
+
+**Globals are gated on the dynamic symbol table, not on metadata.** A global is a
+legitimate seed — Hub box2d binds all 16 of its `b2_defaultFilter`-style globals
+and would lose `b2Filter` without it — but only when the loader can actually
+resolve the name. onednn records 332 globals and **zero** are in its `.so`'s
+dynsym; they are internals hidden by `-fvisibility=hidden`. Seeding from those
+pulled in 58 extra types, `Pipe` among them, which is to say it preserved the
+very bug this is meant to fix. When the symbol table cannot be read at all
+(no library on disk, PE without an export directory), the walk **fails safe** and
+seeds from every global: over-inclusion costs unused types, while guessing
+"unbindable" would drop types the wrapper still emits.
+
+**`surface_types_extra` is the hatch for what reachability structurally cannot
+see**, and it is why this key is opt-in rather than the default. Two blind spots:
+
+- **Callback-only structs.** A `function_ptr(int)*` member erases its signature
+  types, so every struct a user needs in order to *write* the callback is
+  invisible. Hub md4c is entirely this shape — 36 types, reachable set **2** —
+  and it ships 231/231 tests against the other 34.
+- **Constant-only enums.** A function returning plain `int` never names its error
+  enum, so `argon2`'s `Argon2_ErrorCodes` is unreachable by construction.
+
+Patterns are the same anchored globs as `exclude_symbols`, matched against both
+the raw key and the bare name, so `ErrCodes` catches a record keyed
+`__enum__ErrCodes`. **A keep-pattern that matches nothing is a hard error** —
+sharper than the `exclude_symbols` rule, because this list exists to *retain*
+types, so a silent miss is dropping API right now.
+
+> **Turn this on when the module fails to `include`, not because the wrapper
+> feels large.** The default is off deliberately: measured across every Hub
+> package, the filter keeps 95% of box2d and 2.7% of onednn, and would gut md4c.
+
+**Related, and not configurable: globals absent from the dynamic symbol table
+never get an accessor.** That one is unconditional, because an accessor for a
+symbol which is not in the library is a guaranteed failure at the call site
+rather than a question of how much surface to expose. It is why onednn's wrapper
+went from 1006 functions to 342 while keeping all 217 of its C API: 656 of those
+functions were accessors for internals hidden by `-fvisibility=hidden`, failing
+as `could not load symbol` or — where the type had also been filtered out —
+`UndefVarError`. llamacpp is the same shape at larger scale (0 of 4099 globals
+resolvable), while box2d, curl and pcre2 lose nothing. When the symbol table
+cannot be read the drop is skipped entirely, same fail-safe as above.
+
 ---
 
 ## 3. Section reference
@@ -565,7 +637,8 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 | `use_clang_jl` | Bool | `true` | `false` skips AST extraction (DWARF-only path) |
 | `shim_headers` | Vector{String} | `[]` | Headers the macro-shim TU includes *(preserved)* |
 | `exclude_symbols` | Vector{String} | `[]` | Anchored globs for symbols to keep out of the wrapper; see §2.13 *(preserved)* |
-| `dag` | Bool | `false` | Export DAG type-graph diffs to `<project>/dag/` |
+| `surface_types_only` | Bool | `false` | Emit only types reachable from the wrap surface instead of every type in DWARF; see §2.14 *(preserved)* |
+| `surface_types_extra` | Vector{String} | `[]` | Anchored globs for types to keep even when unreachable — callback-only structs, constant-only enums. A pattern matching nothing is an error *(preserved)* |
 | `style` | String | `"clang"` | `"clang"`, `"basic"`, `"none"`; validated, but **not currently dispatched on** — the basic symbol-only generator is selected by *missing* `compilation_metadata.json`, not by this key |
 
 ### `[wrap.varargs]` *(preserved)*
