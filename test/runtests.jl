@@ -226,6 +226,15 @@ include(joinpath(@__DIR__, "test_enum_alias_collision.jl"))
 
 include(joinpath(@__DIR__, "test_function_name_derivation.jl"))
 
+# ── Name and class of local entities and decltype returns (no toolchain) ─────
+# The build cut a demangled name at its first `(`. For a lambda that is the
+# enclosing function's parameter list, so fmt's write_fixed lambdas took
+# write_fixed's name and 10 of them became unreachable. imgui's static lambda
+# invokers took a real struct's class and gained a phantom `this`. A
+# `decltype (…)` return type left name and class empty (2026-09-24).
+
+include(joinpath(@__DIR__, "test_local_entity_names.jl"))
+
 # ── Symbol hygiene (no toolchain) ────────────────────────────────────────────
 # Itanium thunk symbols (`_ZTh`/`_ZTv`/`_ZTc`) have no DWARF subprogram, so
 # their "class" is inferred as the demangler's phrase ("non-virtual thunk to

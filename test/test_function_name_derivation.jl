@@ -54,8 +54,9 @@ const FMT_LAMBDA_NAME = "write_padded<char, (fmt::v12::align)1, fmt::v12::basic_
 const FMT_LAMBDA_MANGLED = "_ZN3fmt3v126detail12write_paddedIcLNS0_5alignE1ENS0_14basic_appenderIcEERZNS1_10write_charIcS5_EET0_S7_T_RKNS0_12format_specsEEUlS5_E_EET1_SE_SB_mmOT2_"
 # The name the fixed derivation gives it. Pinned: consumers call this.
 const FMT_LAMBDA_JL = "fmt_v12_detail_write_padded_char_fmt_v12_align1_fmt_v12_basic_appender_char_fmt_v12_detail_write_char_char_fmt_v12_basic_appender_char_fmt_v12_basic_appender_char_char_fmt_v12_format_specs_constref_lambda_fmt_v12_basic_appender_char_1_ref"
-# Name "" and class "" in the metadata; the build's return-type strip
-# (`_qualified_name_parts`) does not survive `decltype ({parm#1}(0))`.
+# Name "" and class "" in the metadata until 2026-09-24, when the build's
+# derivation learned to skip `decltype ({parm#1}(0))` (test_local_entity_names.jl).
+# The fallback it drives here stays, as the net for any other empty name.
 const FMT_DECLTYPE_MANGLED = "_ZN3fmt3v129loc_value5visitINS0_6detail10loc_writerIcEEEEDTclfp_Li0EEEOT_"
 const FMT_DECLTYPE_DEMANGLED = "decltype ({parm#1}(0)) fmt::v12::loc_value::visit<fmt::v12::detail::loc_writer<char> >(fmt::v12::detail::loc_writer<char>&&)"
 

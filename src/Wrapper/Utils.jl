@@ -80,8 +80,9 @@ consumers call these names. What is new is that the function is total:
   unreachable.
 - **Never empty.** The name falls back to the mangled symbol, which is unique,
   and is already the spelling a function gets when demangling fails. 8 fmt
-  functions returning `decltype ({parm#1}(0))` arrive from the build with name
-  `""`. They were emitted as `function (this::Any, vis::Any)`, an anonymous
+  functions returning `decltype ({parm#1}(0))` arrived from the build with name
+  `""` until `_param_list_paren` (Builder/Compiler.jl) fixed that at the source.
+  They were emitted as `function (this::Any, vis::Any)`, an anonymous
   function. That is valid syntax, so no guard fired, and it binds nothing.
   All-underscore names become `c__`, the escape both type sanitizers use.
 - A leading character that cannot start an identifier gets a `_` prefix. A

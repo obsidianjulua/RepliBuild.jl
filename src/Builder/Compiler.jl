@@ -6064,14 +6064,125 @@ function _find_toplevel_paren(s::String)::Int
     return 0
 end
 
+# First '(' at or after byte index `from` that is outside `<>` and `{}`. Angle
+# depth is unclamped, exactly as in `_find_toplevel_paren`, so `operator<` hides
+# every later '(' here too. Braces are what `{lambda(int)#1}` needs.
+function _next_toplevel_paren(s::String, from::Int)::Int
+    angle = 0
+    brace = 0
+    i = from
+    n = lastindex(s)
+    while i <= n
+        c = s[i]
+        if c == '<'
+            angle += 1
+        elseif c == '>'
+            angle -= 1
+        elseif c == '{'
+            brace += 1
+        elseif c == '}'
+            brace = max(0, brace - 1)
+        elseif c == '(' && angle == 0 && brace == 0
+            return i
+        end
+        i = nextind(s, i)
+    end
+    return 0
+end
+
+# The ')' closing the '(' at `open`, counting parens only (demangler output
+# balances them; it does not balance `<>`). 0 if unbalanced.
+function _matching_paren(s::String, open::Int)::Int
+    depth = 0
+    i = open
+    n = lastindex(s)
+    while i <= n
+        c = s[i]
+        if c == '('
+            depth += 1
+        elseif c == ')'
+            depth -= 1
+            depth == 0 && return i
+        end
+        i = nextind(s, i)
+    end
+    return 0
+end
+
+# What GNU prints between an enclosing function's `)` and the `::` of a local
+# entity: its cv- and ref-qualifiers (`A::f() const &::{lambda()#1}`).
+const _LOCAL_SCOPE_TAIL = r"^(?:\s*(?:const|volatile|restrict|&&|&))*::"
+
+"""
+    _param_list_paren(demangled) -> (open, local)
+
+`open` is the byte index of the `(` that opens the function's OWN parameter
+list, 0 if there is none. `local` is the `(` of the outermost enclosing
+function when the symbol is a local entity, else 0.
+
+`_find_toplevel_paren` (the first `(` outside `<>`) is that paren except where
+the GNU demangler puts a paren group in front of it at depth 0. Two shapes
+occur, and both are skipped:
+
+  * **A `decltype (…)` return type.** `decltype ({parm#1}(0))
+    fmt::v12::loc_value::visit<…>(…)` cut at the decltype's `(` gave the prefix
+    `"decltype "`, and the return-type strip left name and class `""`.
+  * **A parenthesized scope**, i.e. a group followed by cv/ref qualifiers and
+    `::`. A local entity's enclosing function
+    (`write_fixed<…>(…)::{lambda(…)#3}::operator()(…) const`) is one, and cutting
+    there gave every lambda in `write_fixed` that function's name and scope, so
+    they collapsed onto one Julia name. `(anonymous namespace)::` is the other.
+
+After a skipped group the search resumes past it, ignoring the `(` inside
+`{lambda(…)#N}`. `operator()`'s own `()` is part of its name, so what decides
+there is the group after it. The name still cuts at `operator(`, which is the
+spelling every `operator()` already has (name `"operator"`).
+
+Every other shape gets the first candidate back unchanged: a group followed by
+anything else, no later `(`, unbalanced parens, and `operator<`'s open `<`
+(0, as before). The first candidate is `_find_toplevel_paren`'s answer, except
+that a `(` inside `{…}` does not count. Only a name with a `{…}` scope before
+any paren can tell the two apart (a namespace-scope lambda,
+`f::{lambda()#1}::operator()() const`). Hub names depend on that answer.
+"""
+function _param_list_paren(s::String)::Tuple{Int,Int}
+    first_open = _next_toplevel_paren(s, firstindex(s))
+    open = first_open
+    local_open = 0
+    while open != 0
+        close = _matching_paren(s, open)
+        close == 0 && break
+        group_end = close
+        if close == nextind(s, open) &&
+           occursin(r"(?:^|[^\w])operator$", SubString(s, 1, prevind(s, open)))
+            after = nextind(s, close)
+            (after <= lastindex(s) && s[after] == '(') || return (open, local_open)
+            group_end = _matching_paren(s, after)
+            group_end == 0 && break
+        end
+        if occursin(r"(?:^|[^\w])decltype\s*$", SubString(s, 1, prevind(s, open)))
+            resume = nextind(s, group_end)
+        else
+            m = match(_LOCAL_SCOPE_TAIL, SubString(s, nextind(s, group_end)))
+            m === nothing && return (open, local_open)
+            if local_open == 0 && SubString(s, open, close) != "(anonymous namespace)"
+                local_open = open
+            end
+            resume = nextind(s, group_end) + ncodeunits(m.match)
+        end
+        open = _next_toplevel_paren(s, resume)
+    end
+    return (first_open, 0)
+end
+
 """
 Return the function-name prefix of a demangled signature, i.e. the portion before
-the first top-level '('.  For `"Calculator::compute(int)"` this is `"Calculator::compute"`;
-for `"sum_vector(std::vector<int>)"` this is `"sum_vector"`.
+its own parameter list (see [`_param_list_paren`]).  For `"Calculator::compute(int)"`
+this is `"Calculator::compute"`; for `"sum_vector(std::vector<int>)"` this is `"sum_vector"`.
 """
 function _name_prefix(demangled::String)::String
-    p = _find_toplevel_paren(demangled)
-    return p == 0 ? demangled : demangled[1:p-1]
+    p, _ = _param_list_paren(demangled)
+    return p == 0 ? demangled : demangled[1:prevind(demangled, p)]
 end
 
 """
@@ -6082,8 +6193,9 @@ Drop a leading return type from a demangled function-name prefix:
 
 Itanium mangles a function **template's** return type into the symbol, so the
 demangler prints it — ordinary functions carry none. The return type ends at the
-last space outside `<>`/`()`, which is enough even when it is itself qualified
-(`std::enable_if<std::is_integral<unsigned int>::value, bool>::type`).
+last space outside `<>`/`()`/`{}`, which is enough even when it is itself qualified
+(`std::enable_if<std::is_integral<unsigned int>::value, bool>::type`), or is a
+`decltype (…)`. `{}` is for `{unnamed type#1}`.
 
 A **conversion operator** is the only C++ name that legitimately contains a
 top-level space (`operator bool`, `operator void (*)(…)`, `operator new`), and
@@ -6098,9 +6210,9 @@ function _strip_return_type(prefix::AbstractString)::String
     n = lastindex(prefix)
     while i <= n
         c = prefix[i]
-        if c == '<' || c == '('
+        if c == '<' || c == '(' || c == '{'
             depth += 1
-        elseif c == '>' || c == ')'
+        elseif c == '>' || c == ')' || c == '}'
             depth = max(0, depth - 1)
         elseif depth == 0 && c == ' '
             cut = i
@@ -6136,9 +6248,25 @@ in the Hub until 2026-08-13:
     synthesized `this` and every argument shifted one register — the silent
     direction. Measured: **62 methods gained a receiver, 0 lost one** across
     box2d (4), llamacpp (48), pugixml (8), tinyxml2 (2).
+
+A **local entity** keeps its enclosing function's signature in the scope, as
+the demangler prints it (`class` is the demangler's prefix):
+`"fmt::v12::detail::write_fixed<…>(…)::{lambda(fmt::v12::basic_appender<char>)#3}::operator()(…) const"`
+→ class `"fmt::v12::detail::write_fixed<…>(…)::{lambda(fmt::v12::basic_appender<char>)#3}"`,
+name `"operator"`. Only the outermost name can carry a return type
+(`void foo()::Bar::baz<int>()`), and the enclosing function's qualifiers
+(`A::f() const::…`) contain a depth-0 space, so the strip is applied to the part
+before the enclosing function's `(` only. See [`_param_list_paren`] for the
+`decltype` return type and the local-entity cut.
 """
 function _qualified_name_parts(demangled::AbstractString)::Vector{String}
-    prefix = _strip_return_type(_name_prefix(String(demangled)))
+    s = String(demangled)
+    open, local_open = _param_list_paren(s)
+    prefix = if local_open == 0
+        _strip_return_type(open == 0 ? s : s[1:prevind(s, open)])
+    else
+        _strip_return_type(s[1:prevind(s, local_open)]) * s[local_open:prevind(s, open)]
+    end
     out = String[]
     depth = 0
     start = firstindex(prefix)
@@ -6146,9 +6274,9 @@ function _qualified_name_parts(demangled::AbstractString)::Vector{String}
     n = lastindex(prefix)
     while i <= n
         c = prefix[i]
-        if c == '<' || c == '('
+        if c == '<' || c == '(' || c == '{'
             depth += 1
-        elseif c == '>' || c == ')'
+        elseif c == '>' || c == ')' || c == '}'
             depth = max(0, depth - 1)
         elseif depth == 0 && c == ':' && i < n && prefix[nextind(prefix, i)] == ':'
             push!(out, String(prefix[start:prevind(prefix, i)]))

@@ -4,6 +4,60 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Local entities and `decltype` returns get their own name and class (2026-09-24)
+
+The build's `_qualified_name_parts` cut a demangled name at its first `(` outside
+`<>`. Two GNU demangler shapes put a paren group in front of the function's own
+parameter list, and both lost the real name. This closes the "still open" item
+from v4.1.0 below.
+
+- **Lambdas took the enclosing function's name.** In
+  `fmt::v12::detail::write_fixed<…>(…)::{lambda(…)#3}::operator()(…) const` the
+  cut fell on `write_fixed`'s parameter list. The call operator got name
+  `write_fixed<…>` and class `fmt::v12::detail`, so lambdas #1 and #3 shared one
+  Julia name and dispatch signature. Wrap reported 12 distinct entry points
+  collapsed, and 10 of them were these lambdas. The survivors became extra
+  methods on the real `write_fixed`, `write_int` and `do_write_float` functions.
+  Class is now the demangler's prefix, enclosing signature included
+  (`…write_fixed<…>(…)::{lambda(…)#3}`). The name is `operator`, which is the
+  spelling every `operator()` already has.
+- **imgui's lambda invokers gained a phantom `this`.** imgui_demo converts two
+  lambdas to function pointers. Their static `__invoke` got class
+  `ExampleDualListBox` and `ExampleAssetsBrowser`, which are real structs, so
+  both receiver gates added a `this`. The shipped wrapper passes three arguments
+  to `__invoke(self, idx)`, each one slot off. These are demo classes, not the
+  ImGui API. The class is now the closure type, which is not a struct, and both
+  gates say no. The imgui wrapper changes on its next rebuild.
+- **A `decltype (…)` return type emptied the name.** `decltype ({parm#1}(0))
+  fmt::v12::loc_value::visit<…>(…)` was cut at the decltype's `(`, which left
+  `"decltype "`, and the return-type strip removed the rest. 8 fmt `visit`
+  methods had name `""`, class `""` and `is_method` false. The wrapper named
+  them by mangled symbol (v4.1.0). They are now
+  `fmt_v12_loc_value_visit_fmt_v12_detail_loc_writer_char` and its siblings.
+- **The fix.** `_param_list_paren` starts from the old answer. It skips a group
+  that belongs to a `decltype`, or that is followed by cv/ref qualifiers and
+  `::` (a local entity's enclosing function, or `(anonymous namespace)`). It
+  ignores the `(` inside `{lambda(…)#N}`. Every other shape gets the old answer
+  back. The return type is stripped from the outermost name only, because
+  `A::f() const::Local::g()` has a depth-0 space that is not one. `_name_prefix`
+  uses it too, so `is_method` agrees with the class. `parse_parameters`, the
+  fallback when DWARF has no parameters, still takes the first group. DWARF
+  supplies the parameters for all 47 functions below.
+- **Only these functions moved.** The old and new derivations were run over
+  every function in all 33 Hub packages' metadata. 47 changed (fmt 45, imgui
+  2), all of them one of these two shapes. Both receiver gates agree on all
+  3,087 method rows the new derivation produces. fmt was rebuilt twice from
+  identical scratch copies, once with HEAD's derivation and once with the fix.
+  The metadata differs only in `name`, `class` and `is_method` of those 45
+  functions. Unreachable entry points went from 12 to 2. The wrapper gains 45
+  names and loses 12: the 8 mangled fallbacks, plus 4 names that only a
+  misnamed lambda carried (`write_ptr<…>` and `for_each_codepoint<…>`, whose
+  real functions are not exported). Both wrappers load. The 2 collisions left
+  are `detail::buffer<char>::data()` and its `const` overload, which differ only
+  in the constness of `this`.
+
+`test/test_local_entity_names.jl`.
+
 ## v4.1.0 (2026-09-24)
 
 **Bounding the wrap surface.** A wrapper used to be whatever `nm` and DWARF

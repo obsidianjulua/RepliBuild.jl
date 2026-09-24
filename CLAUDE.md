@@ -265,8 +265,12 @@ the test named when you touch the area.
 ### DWARF extraction
 
 - **`class` is the demangler's prefix, not a scope.** Both `class` and name come from
-  `_qualified_name_parts`: strip the return type (template functions mangle it in;
+  `_qualified_name_parts`: cut at the function's own parameter list
+  (`_param_list_paren`, which skips a `decltype (…)` return and a local entity's
+  enclosing `f(…)::`), strip the return type (template functions mangle it in;
   bail on `operator`), then split on `::` at depth 0 (template args contain `::`).
+  A lambda's class therefore carries its enclosing signature, and its name is
+  `operator`, like every `operator()`. (`test_local_entity_names.jl`.)
 - Readelf DIE context must close on depth (`Abbrev Number: 0`). Signatures are snapshot
   with `copy`. Parameters must be **direct children** of the subprogram.
   `check_param_arity!` hard-errors on an over-count, since that would emit a wrong
@@ -485,12 +489,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
   returns (typed correctly but emitted as ABI-trap stubs), 5 mpack by-value aggregate
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage.
-- **`_qualified_name_parts` mis-splits local entities.** A lambda's
-  `…::{lambda(…)#N}::operator()` loses that tail, so 10 fmt `write_fixed`
-  lambdas share one name and dedup reports them unreachable. A
-  `decltype ({parm#1}(0))` return type empties the name (8 fmt functions; the
-  wrapper falls back to the mangled symbol). This is computed at build time:
-  verify a fix with a rebuild.
 - The `exit(0)` sites listed under Testing rules.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 
