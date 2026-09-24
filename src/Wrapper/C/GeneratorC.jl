@@ -2127,20 +2127,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # =========================================================
         if is_vararg
             # Sanitize function name for Julia (same logic as below)
-            va_julia_name = func_name
-            va_julia_name = replace(va_julia_name, "::" => "_")
-            va_julia_name = replace(va_julia_name, "<" => "_")
-            va_julia_name = replace(va_julia_name, ">" => "_")
-            va_julia_name = replace(va_julia_name, "," => "_")
-            va_julia_name = replace(va_julia_name, " " => "_")
-            va_julia_name = replace(va_julia_name, "(" => "_")
-            va_julia_name = replace(va_julia_name, ")" => "")
-            va_julia_name = replace(va_julia_name, "&" => "ref")
-            va_julia_name = replace(va_julia_name, "[" => "_")
-            va_julia_name = replace(va_julia_name, "]" => "")
-            va_julia_name = replace(va_julia_name, ":" => "_")
-            va_julia_name = replace(va_julia_name, r"_+" => "_")
-            va_julia_name = String(rstrip(va_julia_name, '_'))
+            va_julia_name = _julia_function_name(func_name, mangled)
 
             overloads = get(config.wrap.varargs_overloads, func_name, Vector{Vector{String}}())
             if isempty(overloads)
@@ -2307,29 +2294,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
         end
 
-        # Julia function name (avoid conflicts and sanitize)
-        julia_name = func_name
-
-        # Sanitize function name - remove invalid characters
-        julia_name = replace(julia_name, "::" => "_")
-        julia_name = replace(julia_name, "<" => "_")
-        julia_name = replace(julia_name, ">" => "_")
-        julia_name = replace(julia_name, "," => "_")
-        julia_name = replace(julia_name, " " => "_")
-        julia_name = replace(julia_name, "+" => "plus")
-        julia_name = replace(julia_name, "=" => "assign")
-        julia_name = replace(julia_name, "-" => "minus")
-        julia_name = replace(julia_name, "*" => "mul")
-        julia_name = replace(julia_name, "/" => "div")
-        julia_name = replace(julia_name, "(" => "_")
-        julia_name = replace(julia_name, ")" => "")
-        julia_name = replace(julia_name, "&" => "ref")
-        julia_name = replace(julia_name, "[" => "_")
-        julia_name = replace(julia_name, "]" => "")
-        julia_name = replace(julia_name, ":" => "_")
-        julia_name = replace(julia_name, r"_+" => "_")  # collapse consecutive underscores
-        julia_name = replace(julia_name, r"^replibuild_shim_" => "") # Remove macro shim prefix
-        julia_name = String(rstrip(julia_name, '_'))
+        # Julia function name. Shared with GeneratorCpp — see
+        # `_julia_function_name` (Wrapper/Utils.jl). The C copy of this list had
+        # already drifted from the C++ one (no `@`, no `~`).
+        julia_name = _julia_function_name(func_name, mangled)
 
         # Build function signature using ergonomic Julia types
         param_sig_parts = String[]

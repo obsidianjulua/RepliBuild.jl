@@ -309,6 +309,12 @@ the test named when you touch the area.
   sibling on every tier. (`test_cstring_policy.jl`.)
 - Blob structs get `setproperty`/`setproperties` built in the same loop as the getters.
   `with()` forwards to them.
+- **Function names come from `_julia_function_name` only.** That covers both
+  generators, both varargs paths, and GeneratorCpp's proxy and deleter
+  references. It is total: a catch-all after the curated list, an empty name
+  falls back to the mangled symbol, and a reserved word gets a `_` suffix.
+  Never inline a replace-list again. The curated part is frozen, because
+  consumers call those names. (`test_function_name_derivation.jl`.)
 - Enums with identical member sets emit as `const Alias = Canonical`, not a second
   `@enum`. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
   `""` stays an empty-name sentinel; do not harden it.
@@ -476,6 +482,12 @@ check before claiming portability again; reading `.gitignore` does not settle it
   returns (typed correctly but emitted as ABI-trap stubs), 5 mpack by-value aggregate
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage.
+- **`_qualified_name_parts` mis-splits local entities.** A lambda's
+  `…::{lambda(…)#N}::operator()` loses that tail, so 10 fmt `write_fixed`
+  lambdas share one name and dedup reports them unreachable. A
+  `decltype ({parm#1}(0))` return type empties the name (8 fmt functions; the
+  wrapper falls back to the mangled symbol). This is computed at build time:
+  verify a fix with a rebuild.
 - The `exit(0)` sites listed under Testing rules.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 

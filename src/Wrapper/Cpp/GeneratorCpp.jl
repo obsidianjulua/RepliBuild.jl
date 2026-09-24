@@ -479,21 +479,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         push!(get!(class_methods, safe_cls, Any[]), func)
     end
 
-    # Helper: sanitize a raw function name to the Julia identifier used in wrappers
-    function _sanitize_julia_fn(name::String)::String
-        n = replace(name, "~"  => "destroy_")
-        n = replace(n, "::" => "_")
-        n = replace(n, "<"  => "_")
-        n = replace(n, ">"  => "_")
-        n = replace(n, ","  => "_")
-        n = replace(n, " "  => "_")
-        n = replace(n, "+"  => "plus")
-        n = replace(n, "="  => "assign")
-        n = replace(n, "-"  => "minus")
-        n = replace(n, "*"  => "mul")
-        n = replace(n, "/"  => "div")
-        return n
-    end
+    # Helper: sanitize a raw function name to the Julia identifier used in wrappers.
+    # Proxies and deleters REFERENCE names the main loop defines, so this must be
+    # the main loop's derivation, not a shorter copy of its list.
+    _sanitize_julia_fn(name::String)::String = _julia_function_name(name)
 
     # Determine which classes get full idiomatic wrappers.
     # Eligibility: has ≥1 factory function (pointer-returning) AND a resolvable deleter.
@@ -2348,21 +2337,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             if is_method && !isempty(class_name)
                 va_julia_name = "$(class_name)_$(func_name)"
             end
-            va_julia_name = replace(va_julia_name, "~" => "destroy_")
-            va_julia_name = replace(va_julia_name, "::" => "_")
-            va_julia_name = replace(va_julia_name, "<" => "_")
-            va_julia_name = replace(va_julia_name, ">" => "_")
-            va_julia_name = replace(va_julia_name, "," => "_")
-            va_julia_name = replace(va_julia_name, " " => "_")
-            va_julia_name = replace(va_julia_name, "(" => "_")
-            va_julia_name = replace(va_julia_name, ")" => "")
-            va_julia_name = replace(va_julia_name, "&" => "ref")
-            va_julia_name = replace(va_julia_name, "[" => "_")
-            va_julia_name = replace(va_julia_name, "]" => "")
-            va_julia_name = replace(va_julia_name, ":" => "_")
-            va_julia_name = replace(va_julia_name, "@" => "_")
-            va_julia_name = replace(va_julia_name, r"_+" => "_")
-            va_julia_name = String(rstrip(va_julia_name, '_'))
+            va_julia_name = _julia_function_name(va_julia_name, mangled)
 
             overloads = get(config.wrap.varargs_overloads, func_name, Vector{Vector{String}}())
             if isempty(overloads)
@@ -2465,28 +2440,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             julia_name = "$(class_name)_$(func_name)"
         end
 
-        # Sanitize function name - remove invalid characters
-        julia_name = replace(julia_name, "~" => "destroy_")  # Destructor
-        julia_name = replace(julia_name, "::" => "_")
-        julia_name = replace(julia_name, "<" => "_")
-        julia_name = replace(julia_name, ">" => "_")
-        julia_name = replace(julia_name, "," => "_")
-        julia_name = replace(julia_name, " " => "_")
-        julia_name = replace(julia_name, "+" => "plus")
-        julia_name = replace(julia_name, "=" => "assign")
-        julia_name = replace(julia_name, "-" => "minus")
-        julia_name = replace(julia_name, "*" => "mul")
-        julia_name = replace(julia_name, "/" => "div")
-        julia_name = replace(julia_name, "(" => "_")
-        julia_name = replace(julia_name, ")" => "")
-        julia_name = replace(julia_name, "&" => "ref")
-        julia_name = replace(julia_name, "[" => "_")
-        julia_name = replace(julia_name, "]" => "")
-        julia_name = replace(julia_name, ":" => "_")
-        julia_name = replace(julia_name, "@" => "_")  # ELF symbol versioning
-        julia_name = replace(julia_name, r"_+" => "_")  # collapse consecutive underscores
-        julia_name = replace(julia_name, r"^replibuild_shim_" => "") # Remove macro shim prefix
-        julia_name = String(rstrip(julia_name, '_'))
+        # One derivation for every function name in both generators — see
+        # `_julia_function_name` (Wrapper/Utils.jl).
+        julia_name = _julia_function_name(julia_name, mangled)
 
         # Build function signature using ergonomic Julia types.
         #

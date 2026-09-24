@@ -10,6 +10,49 @@ made wrappers that did not load, or that exported symbols the loader could not
 resolve. This release adds guards that refuse those builds, and knobs that narrow
 the surface on purpose.
 
+### Function names are one derivation, and total (2026-09-24)
+
+fmt 12.1 instantiates `detail::write_padded` on a lambda's closure type. The
+GNU demangler spells that type `…::{lambda(fmt::v12::basic_appender<char>)#1}&>`.
+The function-name replace-list had no catch-all, so `{`, `}` and `#` reached 58
+definitions, and `_assert_wrapper_parses` refused the module. The Hub's fmt had
+no `Fmt.jl` at all, with or without DAGDiff. This is the function-name spelling
+of a failure class already fixed for types: DWARF's `(lambda at file.cpp:L:C)`
+type spelling broke the llama.cpp wrapper in the same way (2026-08).
+
+- **One derivation.** The list existed as four inline copies (C and C++, main
+  and varargs), plus a shorter fifth one in GeneratorCpp for the names that
+  proxies and deleters reference. The copies had drifted: C had no `@` or `~`,
+  and the varargs paths had no `+ = - * /`. All five now call
+  `_julia_function_name` (`Wrapper/Utils.jl`). It keeps the old list, then turns
+  any character `Base.is_id_char` rejects into `_`. The lambda number survives,
+  so distinct lambdas keep distinct names. `%`, `^` and `|` become `mod`, `xor`
+  and `or`, because `_` would collapse all three onto `operator()`'s name.
+- **Empty names were silent.** 8 fmt functions return `decltype ({parm#1}(0))`
+  and arrive from the build with the name `""`. They were emitted as
+  `function (this::Any, vis::Any)`. That is an anonymous function: valid syntax,
+  so nothing refused it, and it binds nothing. They now take the mangled
+  symbol, which is the name demangle failures already get. All-underscore names
+  become `c__`. The 29 reserved words (`end`, `local`, …) get a `_` suffix. The
+  parser is the reference here, not `Base.isidentifier`, which returns `true`
+  for "end" on 1.13. Contextual words (`type`, `in`, `where`) are legal function
+  names and stay as they are.
+- **No shipped name changed.** The old and new derivations were run over every
+  function in the metadata of all 33 Hub packages (11,670 functions, 74 of them
+  varargs). Every name that was a valid identifier comes out byte-identical. No
+  new name is invalid, and no names merged. Re-wrapped pugixml, box2d and lua
+  are byte-identical apart from the timestamp and the baked path. fmt now wraps
+  (12,202 lines) and loads. Its 362 "unbound export" drops are gone: they were
+  an artifact of the body not parsing.
+- **Still open, and not a sanitizer issue.** The build's `_qualified_name_parts`
+  cuts the `…::{lambda(…)#N}::operator()` tail off a lambda's call operator. As
+  a result, 10 fmt `write_fixed` lambdas share one name, and
+  `_dedup_method_chunks` reports them as unreachable. The same function also
+  produces the empty names. Verifying a fix there needs a rebuild, not a
+  re-wrap.
+
+`test/test_function_name_derivation.jl`.
+
 ### DAGDiff removed (2026-09-23)
 
 `src/IRGen/DAGDiff.jl` is gone. Wrap consulted it in one decision, OR'd with

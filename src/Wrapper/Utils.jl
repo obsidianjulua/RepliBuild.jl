@@ -34,6 +34,103 @@ function _escape_keyword(name::String)::String
     return name
 end
 
+# Words the parser refuses in a function-name position (`function end(x)` is a
+# syntax error). Measured on 1.13 by parsing `function <w>(x) 1 end` per word.
+# Deliberately NOT `_JULIA_KEYWORDS`: that set also holds contextual words
+# (`type`, `in`, `where`, `abstract`, `and`, …) that ARE legal function names,
+# so escaping them would rename functions that wrap correctly today. And not
+# `Base.isidentifier`, which answers `true` for "end" on 1.13.
+const _JULIA_RESERVED_WORDS = Set([
+    "baremodule", "begin", "break", "catch", "const", "continue", "do",
+    "else", "elseif", "end", "export", "false", "finally", "for",
+    "function", "global", "if", "import", "let", "local", "macro",
+    "module", "quote", "return", "struct", "true", "try", "using", "while",
+])
+
+"""
+    _julia_function_name(raw, mangled = "") -> String
+
+The Julia function name for a C/C++ function spelled `raw` (`Class_method` for
+a C++ method). This is the ONE derivation. Both generators, both of their
+varargs paths, and GeneratorCpp's proxy/deleter references call it. Before, it
+was four inline copies and a fifth local helper, each with a slightly different
+list. A reference spelled differently from its definition is an
+`UndefVarError` on first call.
+
+The curated replacements are the old list, verbatim and in the same order, so
+a name that was already a valid identifier comes out byte-identical. Hub
+consumers call these names. What is new is that the function is total:
+
+- **Catch-all.** After the curated pass, any character the parser does not
+  accept inside an identifier becomes `_`. The test is `Base.is_id_char`, the
+  parser's own predicate. That is why `!` and Unicode letters survive, as they
+  did before. The curated list is only a list, and the demangler emits
+  spellings nobody put on it. fmt 12.1 instantiates `write_padded` on a
+  lambda's closure type, which GNU demangles as
+  `…::{lambda(fmt::v12::basic_appender<char>)#1}&>`. `{`, `}` and `#` reached 58
+  definitions, and `_assert_wrapper_parses` refused the whole module. This is
+  the function-name spelling of the class `_sanitize_cpp_type_name` already
+  closed for DWARF's type spelling `(lambda at file.cpp:L:C)`. The lambda
+  number survives (`…_lambda_…_1_ref` vs `…_2_ref`), so distinct lambdas keep
+  distinct names.
+- **`%` `^` `|` get words** (`mod`, `xor`, `or`), following `+ → plus`. As `_`,
+  `operator%`, `operator^` and `operator|` would all collapse onto
+  `operator()`'s `Class_operator`. Same name plus same dispatch signature is
+  deduplicated to one method (`_dedup_method_chunks`), so the others would be
+  unreachable.
+- **Never empty.** The name falls back to the mangled symbol, which is unique,
+  and is already the spelling a function gets when demangling fails. 8 fmt
+  functions returning `decltype ({parm#1}(0))` arrive from the build with name
+  `""`. They were emitted as `function (this::Any, vis::Any)`, an anonymous
+  function. That is valid syntax, so no guard fired, and it binds nothing.
+  All-underscore names become `c__`, the escape both type sanitizers use.
+- A leading character that cannot start an identifier gets a `_` prefix. A
+  reserved word gets a `_` suffix (`_JULIA_RESERVED_WORDS`).
+
+Not injective in general, on purpose. C++ overloads share one name, and Julia
+dispatches on argument types. The `_+` collapse, the trailing-`_` rstrip and
+`<`/`>` → `_` already merge distinct spellings in shipped wrappers, and changing
+them would rename working APIs. A collision on name and dispatch signature is
+reported by `_dedup_method_chunks`. Anything keyed per symbol uses `mangled`
+(`_slice_const_name!`, `_aot_fptr_const_name!`).
+"""
+function _julia_function_name(raw::AbstractString, mangled::AbstractString = "")::String
+    n = String(raw)
+    n = replace(n, "~"  => "destroy_")   # destructor
+    n = replace(n, "::" => "_")
+    n = replace(n, "<"  => "_")
+    n = replace(n, ">"  => "_")
+    n = replace(n, ","  => "_")
+    n = replace(n, " "  => "_")
+    n = replace(n, "+"  => "plus")
+    n = replace(n, "="  => "assign")
+    n = replace(n, "-"  => "minus")
+    n = replace(n, "*"  => "mul")
+    n = replace(n, "/"  => "div")
+    n = replace(n, "("  => "_")
+    n = replace(n, ")"  => "")
+    n = replace(n, "&"  => "ref")
+    n = replace(n, "["  => "_")
+    n = replace(n, "]"  => "")
+    n = replace(n, ":"  => "_")
+    n = replace(n, "@"  => "_")          # ELF symbol versioning
+    n = replace(n, "%"  => "mod")
+    n = replace(n, "^"  => "xor")
+    n = replace(n, "|"  => "or")
+    n = map(c -> Base.is_id_char(c) ? c : '_', n)
+    n = replace(n, r"_+" => "_")         # collapse consecutive underscores
+    n = replace(n, r"^replibuild_shim_" => "")   # macro shim prefix
+    was_all_underscore = !isempty(n) && all(==('_'), n)
+    n = String(rstrip(n, '_'))
+    if isempty(n)
+        fallback = (isempty(mangled) || mangled == raw) ? "" : _julia_function_name(mangled)
+        n = (was_all_underscore || isempty(fallback)) ? "c__" : fallback
+    end
+    Base.is_id_start_char(first(n)) || (n = "_" * n)
+    n in _JULIA_RESERVED_WORDS && (n *= "_")
+    return n
+end
+
 """
     _base_shadowing(names) -> Vector{String}
 

@@ -558,7 +558,8 @@ function _assert_wrapper_parses(wrapper_content::AbstractString, module_name::Ab
 
             This is an emitter bug, not a configuration problem — some C++ spelling \
             reached an identifier position without being sanitized. Fix the emitter \
-            (see _sanitize_cpp_type_name / _sanitize_c_type_name), not the library.
+            (see _sanitize_cpp_type_name / _sanitize_c_type_name for types, \
+            _julia_function_name for function names), not the library.
             """)
     end
 

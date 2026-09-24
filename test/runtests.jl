@@ -215,6 +215,17 @@ include(joinpath(@__DIR__, "test_enum_underscore_name.jl"))
 
 include(joinpath(@__DIR__, "test_enum_alias_collision.jl"))
 
+# ── Function names: one derivation, total (no toolchain) ─────────────────────
+# fmt instantiates a template on a lambda's closure type, which GNU demangles as
+# `…::{lambda(fmt::v12::basic_appender<char>)#1}&>`. The function-name
+# replace-list had no catch-all, so `{`/`}`/`#` reached 58 definitions and
+# `_assert_wrapper_parses` refused the whole module (2026-09-23). The same wrap
+# emitted 8 empty names as `function (this, vis)`, anonymous functions that
+# parse and bind nothing. The list was four inline copies plus a fifth; it is
+# now `_julia_function_name`, driven here through both generators.
+
+include(joinpath(@__DIR__, "test_function_name_derivation.jl"))
+
 # ── Symbol hygiene (no toolchain) ────────────────────────────────────────────
 # Itanium thunk symbols (`_ZTh`/`_ZTv`/`_ZTc`) have no DWARF subprogram, so
 # their "class" is inferred as the demangler's phrase ("non-virtual thunk to
