@@ -370,8 +370,11 @@ the test named when you touch the area.
 
 `RepliBuild.VERSION` is derived from `Project.toml`; never reintroduce a literal. It
 feeds the fingerprint and `BUILD_GENERATOR`. To check what is registered in General,
-read `R/RepliBuild/Versions.toml` from `~/.julia/registries/General.tar.gz`. 3.3.2 is
-a permanent hole there. Registration is manual and outward-facing, so ask first.
+read `R/RepliBuild/Versions.toml` from the tarball that `path =` in
+`~/.julia/registries/General.toml` names. That is `General.tar.zst` now, read with
+`tar --zstd`. A leftover `General.tar.gz` beside it is stale and lacks recent
+versions. 3.3.2 is a permanent hole there. Registration is manual and
+outward-facing, so ask first.
 
 ## Debugging Tier 2 thunks
 

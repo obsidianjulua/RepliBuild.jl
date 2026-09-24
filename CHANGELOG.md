@@ -4,11 +4,18 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.1.0 (2026-09-24)
+
 **Bounding the wrap surface.** A wrapper used to be whatever `nm` and DWARF
 reported. For libraries that compile vendored internals into the same `.so`, that
 made wrappers that did not load, or that exported symbols the loader could not
 resolve. This release adds guards that refuse those builds, and knobs that narrow
 the surface on purpose.
+
+API changes. `RepliBuild.DAGDiff` is removed; it was exported. `[wrap] dag` is
+now ignored with a warning. New keys, all opt-in: `[compile] visibility`,
+`[wrap] exclude_symbols`, `[wrap] surface_types_only` and
+`surface_types_extra`. `[link] link_dirs` now emits an rpath as well as `-L`.
 
 ### Function names are one derivation, and total (2026-09-24)
 
@@ -68,6 +75,26 @@ compares DWARF against a layout the generator never emits.
 `DAGDiffResult.lowering_order` is computed and read by nothing. The
 `<project>/dag/` HTML/DOT renderer went with the module. `[wrap] dag` now warns
 and is ignored.
+
+### Linking a module too large for one clang process (2026-09-21)
+
+`create_library` hands clang the linked module as one translation unit. Clang
+gives every debug location a `SourceLocation` in a 32-bit offset space, and
+Hub onednn's merged `-g -fstandalone-debug` module (3.9 GB of linked IR, 21.4M
+metadata records) runs out of them: `translation unit is too large for Clang
+to process: ran out of source locations`. This is one process's budget, not a
+parallelism limit. Passing clang the IR vector instead is no fix, because that
+is still a single `SourceManager`.
+
+On that diagnostic, each per-TU IR file is now compiled to its own object in
+parallel, under `build/obj/`. Objects newer than their input are reused. The
+objects are then linked with the same flags. The trigger is the diagnostic,
+not a size threshold, because the budget is spent by debug locations, not
+bytes. Debug info is kept: stripping it would produce a `.so` the wrapper
+cannot read. `compile_project` passes the unmerged list as `per_tu_ir`. A
+direct `create_library` call without that list errors, since a merged module
+cannot be split after the fact. No CI test covers this path; onednn's build is
+the integration test.
 
 ### Enumerator named `_` no longer empties the module (2026-09-20)
 
