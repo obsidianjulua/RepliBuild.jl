@@ -4,6 +4,16 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Wrap-surface fixture reads the PE export directory (2026-09-24)
+
+`test/test_wrap_surface_guard.jl`'s oracle ran `nm -D --defined-only`. That is
+ELF's dynamic symbol table, and on a PE image GNU `nm` exits 1 with "File
+format has no dynamic symbol table" — the same fact the guard itself already
+handles by reading the export directory. The fixture check threw before any
+assertion, which aborted `devtests.jl` after a green prefix. `dynsym` now
+asks `_pe_exported_names` on Windows and `nm -D` elsewhere, so the oracle and
+the guard read one table.
+
 ### Local entities and `decltype` returns get their own name and class (2026-09-24)
 
 The build's `_qualified_name_parts` cut a demangled name at its first `(` outside

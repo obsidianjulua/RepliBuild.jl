@@ -1,9 +1,12 @@
 # test_wrap_surface_guard.jl — `Compiler.verify_wrap_surface`
 #
 # The guard asserts that every function metadata calls wrappable is reachable through
-# the DYNAMIC symbol table the generated wrapper will dlsym against. Two tables feed
-# the pipeline — `nm -g` for metadata, `nm -D` for the wrapper — and nothing checked
-# that they agree.
+# what the generated wrapper will dlsym against. Two tables feed the pipeline —
+# `nm -g` for metadata, and the dynamic table for the wrapper — and nothing checked
+# that they agree. On ELF that dynamic table is `nm -D`. PE has none: `nm -D` exits
+# with "File format has no dynamic symbol table", and the export directory is the
+# same question. `dynsym` below asks whichever one this host actually has, which is
+# also what `verify_wrap_surface` consults.
 #
 # The failure this exists for is `-fvisibility=hidden` × `[link] promote_statics`:
 # hidden visibility is how a library marks internals, promotion renames hidden
@@ -17,7 +20,8 @@
 # trap that strands the slice_test suites.
 #
 # Needs the JLL clang (always present — it is a dependency, not a system toolchain)
-# and `nm`, which the build path already requires.
+# and `nm`. On Windows the oracle also needs GNU objdump, which the build path
+# already requires for the export directory.
 
 using Test
 using RepliBuild
@@ -95,9 +99,21 @@ function fixture_config(dir::String; binary_type::Symbol=:shared)
     return CM.load_config(toml)
 end
 
-dynsym(so) = Set(String(p[3]) for p in
-                 (split(strip(l)) for l in split(read(`nm -D --defined-only $so`, String), '\n'))
-                 if length(p) >= 3)
+"""
+Names a wrapper can resolve at runtime.
+
+ELF's dynamic symbol table (`nm -D`). On PE that command is a hard error, and
+the export directory — `_pe_exported_names`, the same call `verify_wrap_surface`
+makes — is the list `dlsym` will actually see. Using it here is what keeps this
+oracle from going green on a fixture the guard is no longer reading.
+"""
+function dynsym(so::String)
+    pe = C._pe_exported_names(so)
+    pe !== nothing && return pe
+    Set(String(p[3]) for p in
+        (split(strip(l)) for l in split(read(`nm -D --defined-only $so`, String), '\n'))
+        if length(p) >= 3)
+end
 
 @testset "verify_wrap_surface" begin
     mktempdir() do dir
