@@ -34,3 +34,7 @@ jobs:
       - uses: JuliaRegistries/TagBot@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Tags are pushed over SSH with a write deploy key. GitHub refuses
+          # GITHUB_TOKEN any ref whose workflow files differ from main's, and
+          # every release commit's do, so the token alone can never tag.
+          ssh: ${{ secrets.TAGBOT_SSH }}
