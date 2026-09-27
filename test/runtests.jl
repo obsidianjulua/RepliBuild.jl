@@ -364,6 +364,13 @@ include(joinpath(@__DIR__, "test_noexcept_routing.jl"))
 
 include(joinpath(@__DIR__, "test_by_value_crossing.jl"))
 
+# ── Packed C++ structs hold the C layout (no toolchain) ─────────────────────
+# `__attribute__((packed))` / `#pragma pack`: the wrapper proves each struct's
+# Julia layout against DWARF (blob when it cannot), the thunk reads Julia's
+# value at DWARF offsets, StructGen gives the classifier a packed body.
+
+include(joinpath(@__DIR__, "test_packed_layout.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

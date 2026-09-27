@@ -438,11 +438,13 @@ but never the wrong size. `sum > dwarf_size` used to fall through with no
 filler at all and silently ship the oversized body; it now degrades too.
 """
 function _dwarf_padded_members(name::String, info::Any, member_types::Vector{String},
-                               all_structs, dwarf_size::Int)
+                               all_structs, dwarf_size::Int; packed::Bool=false,
+                               report::Bool=true)
     members = get(info, "members", [])
     (dwarf_size > 0 && length(members) == length(member_types)) || return nothing
 
     why(msg) = begin
+        report || return nothing
         if !(name in _LAYOUT_WARNED)
             push!(_LAYOUT_WARNED, name)
             @debug "Struct `$name` cannot be modelled field-by-field in MLIR ($msg); " *
@@ -468,8 +470,9 @@ function _dwarf_padded_members(name::String, info::Any, member_types::Vector{Str
             cur = off
         end
         # LLVM bumps each element to its own alignment. If that moves the member
-        # off the offset DWARF recorded, this body cannot model the struct.
-        _align_to(cur, malign) == off ||
+        # off the offset DWARF recorded, this body cannot model the struct —
+        # unless the body is packed, where nothing moves.
+        packed || _align_to(cur, malign) == off ||
             return why("member `$(get(m, "name", "#$i"))` needs align $malign but sits at offset $off")
         push!(out, i)
         struct_align = max(struct_align, malign)
@@ -480,8 +483,8 @@ function _dwarf_padded_members(name::String, info::Any, member_types::Vector{Str
 
     cur < dwarf_size && push!(out, "!llvm.array<$(dwarf_size - cur) x i8>")
     # LLVM rounds the struct up to its own alignment; a C struct's size is always
-    # a multiple of it, so this has to be a no-op.
-    _align_to(dwarf_size, struct_align) == dwarf_size ||
+    # a multiple of it, so this has to be a no-op. A packed body has alignment 1.
+    packed || _align_to(dwarf_size, struct_align) == dwarf_size ||
         return why("byte_size $dwarf_size is not a multiple of the struct alignment $struct_align")
     return out
 end
@@ -527,7 +530,35 @@ function _apply_dwarf_layout(name::String, info::Any, emit::Vector{String},
                              measure::Vector{String}, all_structs,
                              dwarf_size::Int, is_packed::Bool)
     (is_packed || dwarf_size <= 0) && return emit
-    plan = _dwarf_padded_members(name, info, measure, all_structs, dwarf_size)
+    # Quiet first attempt: a struct the packed body below models exactly is not
+    # an "opaque region" and must not be reported as one.
+    plan = _dwarf_padded_members(name, info, measure, all_structs, dwarf_size; report=false)
+    plan === nothing && return nothing
+    return String[p isa Int ? emit[p] : p for p in plan]
+end
+
+"""
+    _packed_dwarf_layout(name, info, emit, measure, all_structs, dwarf_size)
+        -> Union{Vector{String}, Nothing}
+
+The body for a struct whose members natural alignment cannot put on their DWARF
+offsets: `__attribute__((packed))` or `#pragma pack` with padding, like
+`#pragma pack(2) { char; int; double; }` (offsets 0, 2, 6). Laid out as a PACKED
+body with explicit pad arrays, every member sits exactly where C put it.
+
+These used to become `!llvm.array<N x i8>`. As a nested member that is the same
+thing (size N, alignment 1), but by value an array is not a struct: the SysV
+classifier never saw the misaligned field that makes clang pass the struct in
+memory (byval / sret), so it went in as an array value and came back as
+garbage. A packed struct shows the classifier that field.
+
+`nothing` for what no body can model — overlapping members, an unmeasurable
+type, members past `byte_size` — which keeps the byte region.
+"""
+function _packed_dwarf_layout(name::String, info::Any, emit::Vector{String},
+                              measure::Vector{String}, all_structs, dwarf_size::Int)
+    dwarf_size <= 0 && return nothing
+    plan = _dwarf_padded_members(name, info, measure, all_structs, dwarf_size; packed=true)
     plan === nothing && return nothing
     return String[p isa Int ? emit[p] : p for p in plan]
 end
@@ -568,7 +599,12 @@ function get_struct_definition_string(name::String, info::Any, all_structs=nothi
     # must not be nested inside an !llvm.struct body.
     (emit, measure) = _sized_member_types(name, info, all_structs; alias_form=true)
     laid_out = _apply_dwarf_layout(name, info, emit, measure, all_structs, dwarf_size, is_packed)
-    laid_out === nothing && return "!llvm.array<$(dwarf_size) x i8>"
+    body_packed = false
+    if laid_out === nothing
+        laid_out = _packed_dwarf_layout(name, info, emit, measure, all_structs, dwarf_size)
+        laid_out === nothing && return "!llvm.array<$(dwarf_size) x i8>"
+        body_packed = true
+    end
     member_types = laid_out
 
     if is_packed
@@ -587,7 +623,7 @@ function get_struct_definition_string(name::String, info::Any, all_structs=nothi
         if isempty(member_types)
              return "!llvm.struct<\"$(name)\", opaque>"
         else
-             return "!llvm.struct<\"$(name)\", ($(join(member_types, ", ")))>"
+             return "!llvm.struct<\"$(name)\", $(body_packed ? "packed " : "")($(join(member_types, ", ")))>"
         end
     end
 end
@@ -624,17 +660,22 @@ function get_llvm_equivalent_type_string(name::String, info::Any, all_structs=no
     end
 
     is_packed = is_struct_packed(info)
-    packed_attr = is_packed ? "packed " : ""
 
     (emit, measure) = _sized_member_types(name, info, all_structs; alias_form=false)
     laid_out = _apply_dwarf_layout(name, info, emit, measure, all_structs, dwarf_size, is_packed)
-    laid_out === nothing && return "!llvm.array<$(dwarf_size) x i8>"
+    body_packed = false
+    if laid_out === nothing
+        laid_out = _packed_dwarf_layout(name, info, emit, measure, all_structs, dwarf_size)
+        laid_out === nothing && return "!llvm.array<$(dwarf_size) x i8>"
+        body_packed = true
+    end
     member_types = laid_out
 
     if isempty(member_types)
          return "!llvm.struct<\"$(name)\", opaque>" # Fallback
     else
          # Return a literal struct (no name)
+         packed_attr = (is_packed || body_packed) ? "packed " : ""
          return "!llvm.struct<$(packed_attr)($(join(member_types, ", "))) >"
     end
 end
@@ -658,13 +699,20 @@ function get_llvm_aligned_type_string(name::String, info::Any, all_structs=nothi
 
     (emit, measure) = _sized_member_types(name, info, all_structs; alias_form=false)
     laid_out = _apply_dwarf_layout(name, info, emit, measure, all_structs, dwarf_size, is_packed)
-    laid_out === nothing && return "!llvm.array<$(dwarf_size) x i8>"
+    body_packed = false
+    if laid_out === nothing
+        laid_out = _packed_dwarf_layout(name, info, emit, measure, all_structs, dwarf_size)
+        laid_out === nothing && return "!llvm.array<$(dwarf_size) x i8>"
+        body_packed = true
+    end
     member_types = laid_out
 
     if isempty(member_types)
          return "!llvm.struct<\"$(name)\", opaque>"
     else
-         return "!llvm.struct<($(join(member_types, ", "))) >"
+         # No natural layout exists for a packed-only body; the aligned spelling
+         # of it IS the packed one.
+         return "!llvm.struct<$(body_packed ? "packed " : "")($(join(member_types, ", "))) >"
     end
 end
 

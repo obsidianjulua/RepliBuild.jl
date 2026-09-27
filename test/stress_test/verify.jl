@@ -307,6 +307,21 @@ if MLIR_AVAILABLE
         @test StressTest.geom_ticket_make(42).n == 42
     end
 
+    @testset "StressTest: packed structs hold the C layout" begin
+        # 5 and 14 bytes, like C — not the natural 8 and 16.
+        @test sizeof(StressTest.Packed) == 5
+        @test sizeof(StressTest.Pack2) == 14
+        p = StressTest.geom_packed_make(5)
+        @test (Int(p.c), p.i) == (5, 6)
+        @test StressTest.geom_packed_sum(p) == 11.0
+        q = StressTest.geom_pack2_make(5)
+        @test (Int(q.c), q.i, q.d) == (5, 6, 5.5)
+        @test StressTest.geom_pack2_sum(q) == 16.5
+        # Reads through a pointer into C memory: where natural alignment was wrong.
+        t = Ptr{StressTest.Packed}(StressTest.geom_packed_table())
+        @test [unsafe_load(t, k).i for k in 1:3] == [10, 20, 30]
+    end
+
     @testset "StressTest: RAII Dialect" begin
         @testset "Parse ctor_call / dtor_call IR" begin
             ctx = create_context()

@@ -4,6 +4,56 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Packed C++ structs hold the C layout (2026-09-27)
+
+`__attribute__((packed))` and `#pragma pack` structs (audit F24) were worse than the
+audit recorded ("pointer access only"). On a fixture of 12 calls, 7 were wrong.
+
+- **GeneratorCpp emitted fields at natural alignment.** A packed `{char; int}` came
+  out 8 bytes with the int at 4 (C: 5 bytes, int at 1). The thunk converted between
+  that layout and the C one, so by-value calls worked. Everything else read the wrong
+  bytes: pointers into C memory (`unsafe_load` of a C array), arrays Julia wrote for
+  C, and any struct embedding one (`Holder { Pk; double }` was 24 bytes, C has 16).
+- **A `#pragma pack(2)` struct has padding**, so StructGen did not treat it as
+  packed. Natural alignment could not place its members, and it degraded to
+  `!llvm.array<14 x i8>`. The SysV classifier never saw a struct, so it was broken
+  by value in both directions.
+- **The thunk read Julia's value at offsets guessed from `min(size, 8)`**
+  (`get_julia_offsets`). That guess is also wrong for an ordinary padding-free struct
+  with a byte array: `{char; char[3]; int}` was read at 0, 3, 8 instead of 0, 1, 4.
+
+What changed:
+
+- **GeneratorCpp proves each struct's Julia layout against DWARF.**
+  `_prove_julia_layout` applies GeneratorC's exact-or-opaque rule to the fields it
+  would emit. When those fields cannot reproduce the C layout, it emits the C-layout
+  byte blob with offset accessors instead.
+- **The thunk reads Julia's value at DWARF offsets**, and a truly packed return goes
+  back as the packed value.
+- **StructGen gives a struct natural alignment cannot place a packed body with
+  explicit pads.** The classifier then sees the misaligned field and picks MEMORY,
+  as clang does.
+- **Blob accessors now cover struct and union members with plain names.** They
+  used to require a template or scoped spelling.
+
+The proof also found a pre-existing bug. A struct embedding a **named** union stored
+it as a pointer, because named unions are `mutable struct`, so the struct was the
+wrong size. box2d `b2ClipVertex` (16 bytes against 12) and `b2ManifoldPoint`, and one
+fmt specs struct, are now C-layout blobs with every member readable. box2d's verifier
+passes 15/15 on the re-wrap.
+
+Measured:
+
+- **Thunks.** Unchanged for all Hub metadata: no Hub package passes a truly packed
+  struct by value.
+- **StructGen.** 14 structs (llamacpp 2, onednn 12) get a packed body instead of an
+  opaque array. Both have the same size and alignment; onednn's verifier passes
+  141/141.
+- **Re-wrap A/B.** box2d changes 2 structs and fmt 1; clipper2, msdfgen, pugixml,
+  stl, tinyxml2 and onednn are identical.
+- **Tests.** `test_packed_layout.jl` (CI, verbatim clang 22 readelf; each part goes
+  red with its function neutered) and stress_test "packed structs hold the C layout".
+
 ### By-value records the thunk could not type (2026-09-27)
 
 A by-value parameter or return whose record had no entry in `struct_definitions`

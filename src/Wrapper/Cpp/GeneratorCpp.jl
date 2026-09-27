@@ -143,6 +143,57 @@ function _cpp_this_param(class_name::AbstractString, func_name::AbstractString,
 end
 
 """
+    _julia_field_layout(t, jl_layouts, jl_mutable) -> Union{Tuple{Int,Int},Nothing}
+
+`(sizeof, alignment)` Julia gives a struct FIELD of emitted type `t`, or `nothing`
+when it is not known here. Primitives come from GeneratorC's table
+(`_C_PRIM_FIELD_LAYOUT`, same module), so both generators measure a field the
+same way. A `mutable struct` field is a reference: pointer-sized, whatever the
+type's own size.
+"""
+function _julia_field_layout(t::AbstractString, jl_layouts, jl_mutable)
+    t = String(strip(t))
+    haskey(_C_PRIM_FIELD_LAYOUT, t) && return _C_PRIM_FIELD_LAYOUT[t]
+    (startswith(t, "Ptr{") || t == "Cstring") && return (8, 8)
+    t in jl_mutable && return (8, 8)
+    haskey(jl_layouts, t) && return jl_layouts[t]
+    m = match(r"^NTuple\{(\d+),\s*(.+)\}$", t)
+    if m !== nothing
+        el = _julia_field_layout(String(m.captures[2]), jl_layouts, jl_mutable)
+        el === nothing && return nothing
+        return (parse(Int, m.captures[1]) * el[1], el[2])
+    end
+    return nothing
+end
+
+"""
+    _prove_julia_layout(plan, byte_size, jl_layouts, jl_mutable)
+        -> Union{Tuple{Int,Int},Symbol}
+
+`plan` is the field list a struct would be emitted with, in order: `(julia type,
+DWARF offset)` for a member, `(julia type, nothing)` for a pad. Returns the
+struct's Julia `(sizeof, alignment)` when every member lands on its DWARF offset
+and the struct on `byte_size`; `:mismatch` when Julia's layout provably differs;
+`:unknown` when some field cannot be measured here, and the caller keeps its
+previous behaviour.
+"""
+function _prove_julia_layout(plan, byte_size::Int, jl_layouts, jl_mutable)
+    cur = 0
+    maxal = 1
+    for (t, off) in plan
+        lay = _julia_field_layout(t, jl_layouts, jl_mutable)
+        lay === nothing && return :unknown
+        (sz, al) = lay
+        cur = _align_up(cur, al)
+        off !== nothing && cur != off && return :mismatch
+        cur += sz
+        maxal = max(maxal, al)
+    end
+    total = _align_up(cur, maxal)
+    return total == byte_size ? (total, maxal) : :mismatch
+end
+
+"""
     _record_name_as_emitted(julia_type, records) -> String
 
 The name a signature must use for a record or enum the module emits. A C++ type
@@ -1218,6 +1269,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
         end
         blob_struct_names = Set{String}()  # Track which structs became byte-blobs
+        # Julia (sizeof, alignment) of every type emitted so far, as a FIELD, for
+        # `_prove_julia_layout`: proven-exact structs, blobs, anonymous unions and
+        # enums. Named unions are `mutable` and embed as a pointer.
+        jl_layouts = Dict{String,Tuple{Int,Int}}()
+        jl_mutable = Set{String}()
+        for (ek, einfo) in dwarf_structs
+            startswith(String(ek), "__enum__") || continue
+            ejt = String(get(einfo, "julia_type", "Cint"))
+            haskey(_C_PRIM_FIELD_LAYOUT, ejt) || continue
+            jl_layouts[_sanitize_cpp_type_name(String(ek)[9:end])] = _C_PRIM_FIELD_LAYOUT[ejt]
+        end
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
@@ -1290,6 +1352,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     # union still works.
                     anon_union = get(struct_info, "anonymous", false) == true
                     union_head = anon_union ? "struct" : "mutable struct"
+                    # As a FIELD: the anonymous one is its bytes, the named one a reference.
+                    anon_union ? (jl_layouts[julia_struct_name] = (byte_size, 1)) :
+                                 push!(jl_mutable, julia_struct_name)
 
                     push!(struct_chunks, """
                     # C union: $struct_name (size $byte_size bytes)
@@ -1553,9 +1618,118 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                          parse(Int, string(byte_size_str)[3:end], base=16) :
                          parse(Int, string(byte_size_str)))
 
+                    # The Julia field type a member is emitted as. One function for
+                    # the layout proof below and for the emission loop, so the proof
+                    # checks exactly the fields that get written.
+                    _member_field_type = function (member)
+                        julia_type = get(member, "julia_type", "Any")
+                    # Sanitize member types that reference other structs with template syntax
+                    # Only sanitize custom struct names, not built-in Julia types like NTuple
+                    sanitized_type = julia_type
+
+                    # Don't sanitize built-in Julia types (NTuple, Ptr{Cint}, etc.)
+                    builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Cdouble", "Cfloat", "Clong", "Culong", "Cshort", "Cushort", "Cchar", "Cuchar", "Culonglong", "Clonglong", "Cvoid", "Csize_t", "Cptrdiff_t", "Cssize_t", "Cwchar_t", "Cstring", "Bool", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Int128", "UInt128", "Float32", "Float64", "ComplexF32", "ComplexF64"]
+                    is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
+
+                    if !is_builtin || occursin(r"[<>]", julia_type)
+                        if occursin(r"Ptr\{[^}]+\}", julia_type)
+                            # Extract type from Ptr{Type} for custom struct references
+                            type_match = match(r"Ptr\{([^}]+)\}", julia_type)
+                            if !isnothing(type_match)
+                                inner_type = String(type_match.captures[1])
+                                # Only sanitize if inner type is a custom struct (contains template chars)
+                                if occursin(r"[<>]", inner_type)
+                                    if _is_stl_internal_type(inner_type)
+                                        # STL-internal inner type: use Ptr{Cvoid} — never defined
+                                        sanitized_type = "Ptr{Cvoid}"
+                                    else
+                                        sanitized_inner = _sanitize_cpp_type_name(inner_type)
+                                        sanitized_type = "Ptr{$sanitized_inner}"
+                                    end
+                                end
+                            end
+                        elseif occursin(r"[<>]", julia_type)
+                            # Direct custom struct reference with template syntax
+                            if _is_stl_internal_type(julia_type)
+                                m_size = get(member, "size", 0)
+                                sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
+                            else
+                                sanitized_type = _sanitize_cpp_type_name(julia_type)
+                            end
+                        end
+
+                        # If the (now-sanitized) type refers to an STL-internal type that
+                        # will be filtered out during struct generation, fall back to a byte
+                        # buffer so the embedding struct remains valid Julia syntax.
+                        if sanitized_type == julia_type && _is_stl_internal_type(julia_type)
+                            m_size = get(member, "size", 0)
+                            if m_size > 0
+                                sanitized_type = "NTuple{$m_size, UInt8}"
+                            else
+                                # Size unknown; use Ptr{Cvoid} as a same-width placeholder
+                                sanitized_type = "Ptr{Cvoid}"
+                            end
+                        end
+                    end
+
+                    # If the field is Ptr{X} and X hasn't been defined yet,
+                    # substitute Ptr{Cvoid} to avoid UndefVarError (same ABI size).
+                    sanitized_type = _resolve_forward_ptr(sanitized_type, defined_struct_names)
+
+                    # Same hazard for a BARE field type, and worse. `Ptr{X}` at
+                    # least has a fixed width; a bare `x::T` needs T to exist at
+                    # struct-definition time, so one undeclared name raises
+                    # UndefVarError and takes the whole module with it. Structs
+                    # skipped above as STL-internal or blocklisted never enter
+                    # `defined_struct_names`, yet a field can still reference
+                    # them: llama.cpp's `_Sp_alloc_shared_tag` had
+                    # `_M_a::Ref_allocator_void` (from `const allocator<void>&`,
+                    # '&' → "Ref" at line ~906) — declared nowhere, used once,
+                    # and all 98k lines failed to load.
+                    # Degrade to the member's DWARF size as a byte region so the
+                    # containing struct keeps its exact layout; fall back to
+                    # pointer width only when the size is unknown. Emission is
+                    # topological, so "not yet defined" here means "cannot be
+                    # used", not "defined later".
+                    if !any(startswith(sanitized_type, bt) for bt in builtin_types) &&
+                       !(sanitized_type in defined_struct_names)
+                        m_size = get(member, "size", 0)
+                        sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
+                    end
+                        return sanitized_type
+                    end
+
+                    # Exact or opaque, never approximate — GeneratorC's
+                    # `_resolve_exact_layout`, applied to the fields this struct
+                    # would be emitted with. The field path puts `_pad_N` bytes in
+                    # front of each member and trusts Julia to land it on its DWARF
+                    # offset; natural alignment moves it anyway whenever C did not
+                    # align it (`__attribute__((packed))`, `#pragma pack`). A packed
+                    # `{char; int}` came out 8 bytes with the int at 4 instead of 5
+                    # bytes with it at 1, so every read through a pointer, and every
+                    # struct embedding it, was wrong. When the fields provably
+                    # cannot reproduce the C layout, the byte blob below can.
+                    field_plan = Tuple{String,Union{Int,Nothing}}[]
+                    let cur = 0
+                        for member in members
+                            ov = get(member, "offset", "0x0")      # parsed as the emission loop does
+                            off = isnothing(ov) ? 0 : parse(Int, ov)
+                            off > cur && push!(field_plan, ("NTuple{$(off - cur), UInt8}", nothing))
+                            off > cur && (cur = off)
+                            push!(field_plan, (String(_member_field_type(member)), off))
+                            cur += get(member, "size", 0)
+                        end
+                        byte_size > cur && push!(field_plan, ("NTuple{$(byte_size - cur), UInt8}", nothing))
+                    end
+                    layout_proof = _prove_julia_layout(field_plan, byte_size, jl_layouts, jl_mutable)
+                    if layout_proof === :mismatch && byte_size > 0 && !isempty(members)
+                        has_unresolvable = true
+                    end
+
                     if has_unresolvable && byte_size > 0
                         member_count = length(members)
                         push!(blob_struct_names, julia_struct_name)
+                        jl_layouts[julia_struct_name] = (byte_size, 1)
                         push!(struct_chunks, """
                         # C++ struct: $struct_name ($member_count members, byte blob for ABI safety)
                         struct $julia_struct_name
@@ -1641,7 +1815,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     continue
                                 end
                                 m_sanitized = _sanitize_cpp_type_name(m_c_type)
-                                if !isempty(m_sanitized) && m_sanitized != m_c_type
+                                # Any record member the module emits. This used to
+                                # require a spelling sanitization changes (a template
+                                # or scoped name), which was all this blob path met
+                                # while it only served members of unknown size. A
+                                # layout Julia cannot reproduce (`_prove_julia_layout`)
+                                # lands here too, and its `b2Vec2` or named-union
+                                # members had no accessor at all.
+                                if !isempty(m_sanitized) && m_sanitized in defined_struct_names
                                     # Find the nested struct's byte_size using best_dwarf_key map
                                     nested_info = nothing
                                     best_key = get(best_dwarf_key, m_sanitized, nothing)
@@ -1747,79 +1928,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         sanitized_name = replace(member_name, '$' => '_')
                         sanitized_name = make_cpp_identifier(sanitized_name)
 
-                        # Sanitize member types that reference other structs with template syntax
-                        # Only sanitize custom struct names, not built-in Julia types like NTuple
-                        sanitized_type = julia_type
-
-                        # Don't sanitize built-in Julia types (NTuple, Ptr{Cint}, etc.)
-                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Cdouble", "Cfloat", "Clong", "Culong", "Cshort", "Cushort", "Cchar", "Cuchar", "Culonglong", "Clonglong", "Cvoid", "Csize_t", "Cptrdiff_t", "Cssize_t", "Cwchar_t", "Cstring", "Bool", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Float32", "Float64"]
-                        is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
-
-                        if !is_builtin || occursin(r"[<>]", julia_type)
-                            if occursin(r"Ptr\{[^}]+\}", julia_type)
-                                # Extract type from Ptr{Type} for custom struct references
-                                type_match = match(r"Ptr\{([^}]+)\}", julia_type)
-                                if !isnothing(type_match)
-                                    inner_type = String(type_match.captures[1])
-                                    # Only sanitize if inner type is a custom struct (contains template chars)
-                                    if occursin(r"[<>]", inner_type)
-                                        if _is_stl_internal_type(inner_type)
-                                            # STL-internal inner type: use Ptr{Cvoid} — never defined
-                                            sanitized_type = "Ptr{Cvoid}"
-                                        else
-                                            sanitized_inner = _sanitize_cpp_type_name(inner_type)
-                                            sanitized_type = "Ptr{$sanitized_inner}"
-                                        end
-                                    end
-                                end
-                            elseif occursin(r"[<>]", julia_type)
-                                # Direct custom struct reference with template syntax
-                                if _is_stl_internal_type(julia_type)
-                                    m_size = get(member, "size", 0)
-                                    sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
-                                else
-                                    sanitized_type = _sanitize_cpp_type_name(julia_type)
-                                end
-                            end
-
-                            # If the (now-sanitized) type refers to an STL-internal type that
-                            # will be filtered out during struct generation, fall back to a byte
-                            # buffer so the embedding struct remains valid Julia syntax.
-                            if sanitized_type == julia_type && _is_stl_internal_type(julia_type)
-                                m_size = get(member, "size", 0)
-                                if m_size > 0
-                                    sanitized_type = "NTuple{$m_size, UInt8}"
-                                else
-                                    # Size unknown; use Ptr{Cvoid} as a same-width placeholder
-                                    sanitized_type = "Ptr{Cvoid}"
-                                end
-                            end
-                        end
-
-                        # If the field is Ptr{X} and X hasn't been defined yet,
-                        # substitute Ptr{Cvoid} to avoid UndefVarError (same ABI size).
-                        sanitized_type = _resolve_forward_ptr(sanitized_type, defined_struct_names)
-
-                        # Same hazard for a BARE field type, and worse. `Ptr{X}` at
-                        # least has a fixed width; a bare `x::T` needs T to exist at
-                        # struct-definition time, so one undeclared name raises
-                        # UndefVarError and takes the whole module with it. Structs
-                        # skipped above as STL-internal or blocklisted never enter
-                        # `defined_struct_names`, yet a field can still reference
-                        # them: llama.cpp's `_Sp_alloc_shared_tag` had
-                        # `_M_a::Ref_allocator_void` (from `const allocator<void>&`,
-                        # '&' → "Ref" at line ~906) — declared nowhere, used once,
-                        # and all 98k lines failed to load.
-                        # Degrade to the member's DWARF size as a byte region so the
-                        # containing struct keeps its exact layout; fall back to
-                        # pointer width only when the size is unknown. Emission is
-                        # topological, so "not yet defined" here means "cannot be
-                        # used", not "defined later".
-                        if !any(startswith(sanitized_type, bt) for bt in builtin_types) &&
-                           !(sanitized_type in defined_struct_names)
-                            m_size = get(member, "size", 0)
-                            sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
-                        end
+                        sanitized_type = _member_field_type(member)
 
                         push!(struct_chunks, "    $sanitized_name::$sanitized_type\n")
                         
@@ -1835,6 +1944,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         pad_size = byte_size - current_offset
                         push!(struct_chunks, "    _pad_tail::NTuple{$(pad_size), UInt8}\n")
                     end
+                    layout_proof isa Tuple && (jl_layouts[julia_struct_name] = layout_proof)
 
                     push!(struct_chunks, """
                     end

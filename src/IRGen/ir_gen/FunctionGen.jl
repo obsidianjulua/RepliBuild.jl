@@ -270,6 +270,23 @@ function _scope_suffixes(name::AbstractString)::Vector{String}
 end
 
 """
+    _dwarf_member_offsets(info) -> Vector{Int}
+
+Each member's DWARF byte offset, falling back to `StructGen.get_julia_offsets`
+only when a member has none recorded.
+"""
+function _dwarf_member_offsets(info)
+    members = get(info, "members", [])
+    offs = Int[]
+    for m in members
+        o = get(m, "offset", nothing)
+        o === nothing && return StructGen.get_julia_offsets(info)
+        push!(offs, o isa Integer ? Int(o) : _parse_byte_size(string(o)))
+    end
+    return offs
+end
+
+"""
     _byte_blob_type(byte_size) -> String
 
 Generate a packed MLIR struct type of exactly `byte_size` bytes.
@@ -492,11 +509,24 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 # For packed structs, use LLVM packed type for external decl/ffe_call
                 if StructGen.is_struct_packed(structs[lookup_key])
                     ret_type = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
-                    is_packed_ret = true
-                    ret_packed_type = ret_type
-                    ret_aligned_type = StructGen.get_llvm_aligned_type_string(s_name, structs[lookup_key], structs)
                     ret_struct_info = structs[lookup_key]
-                    ret_num_members = length(get(ret_struct_info, "members", []))
+                    aligned = StructGen.get_llvm_aligned_type_string(s_name, ret_struct_info, structs)
+                    lay = StructGen._mlir_layout(aligned, structs)
+                    c_size = try _parse_byte_size(string(get(ret_struct_info, "byte_size", "0"))) catch; 0 end
+                    if lay !== nothing && lay[1] == c_size
+                        # Padding-free and naturally aligned: the two spellings
+                        # are one layout, and the aligned one is what this
+                        # thunk has always returned.
+                        is_packed_ret = true
+                        ret_packed_type = ret_type
+                        ret_aligned_type = aligned
+                        ret_num_members = length(get(ret_struct_info, "members", []))
+                    end
+                    # Otherwise the natural layout is NOT the C layout (a
+                    # misaligned member: `__attribute__((packed))`). The wrapper
+                    # holds the C layout, so the packed value goes back as it
+                    # is; re-laying it out wrote an 8-byte `{char; int}` into
+                    # a 5-byte Julia value.
                 else
                     # Check if the struct has members that can't be sized correctly in MLIR.
                     # When members are template types with size=0, get_struct_definition_string
@@ -644,11 +674,17 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
 
             if is_packed_struct
-                # Layout mismatch: Julia passes aligned struct pointer, C++ expects packed struct by value.
                 # Emit jlcs.marshal_arg op — the MLIR lowering pass handles the field-by-field reconstruction.
                 llvm_t = mlir_t  # Already the LLVM packed type
 
-                offsets = StructGen.get_julia_offsets(struct_info)
+                # Where each member sits in the JULIA value behind the slot. The
+                # wrapper emits every struct at its C layout — fields proven to
+                # land on the DWARF offsets, or a byte blob when they cannot
+                # (GeneratorCpp `_prove_julia_layout`) — so those are the DWARF
+                # offsets. `get_julia_offsets` guessed them from `min(size, 8)`
+                # alignment, which put a packed `{char; int}`'s int at 4 and a
+                # `char data[3]` member at 3.
+                offsets = _dwarf_member_offsets(struct_info)
                 members = get(struct_info, "members", [])
                 member_types_strs = [map_cpp_type(get(m, "c_type", "void*")) for m in members]
 

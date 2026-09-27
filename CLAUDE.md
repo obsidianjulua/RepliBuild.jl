@@ -357,9 +357,18 @@ the test named when you touch the area.
   (`test_struct_abi.jl`: only a system-clang callee catches a mismatch, because
   self-JIT'd callees share the bug. `gap_probe` is the discriminating case.)
 - **Emitted struct size must equal DWARF `byte_size`.** StructGen lays members out at
-  DWARF offsets with explicit padding (`_apply_dwarf_layout`). A struct that cannot be
-  laid out degrades to an opaque `byte_size` region with a warning — never to the wrong
-  size, which smashes the sret buffer. (`test_struct_layout.jl`.)
+  DWARF offsets with explicit padding (`_apply_dwarf_layout`). When natural alignment
+  cannot place them (packed, `#pragma pack`), the body is PACKED with explicit pads
+  (`_packed_dwarf_layout`), so the classifier sees the misaligned field. Only what no
+  body can model (overlaps, unmeasurable members) degrades to an opaque `byte_size`
+  region — never to the wrong size, which smashes the sret buffer.
+  (`test_struct_layout.jl`, `test_packed_layout.jl`.)
+- **The Julia struct IS the C layout.** GeneratorCpp proves each struct's fields
+  against DWARF (`_prove_julia_layout`) and emits a C-layout byte blob when they
+  cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk
+  reads a Julia value at DWARF offsets (`_dwarf_member_offsets`), never at offsets
+  derived from alignment rules. A named union is `mutable`, so it embeds as a pointer;
+  any struct holding one is a blob.
 - `!jlcs.c_struct` must never appear inside an `!llvm.struct` body; inline the literal.
 - **A by-value record crosses a thunk with its layout, as nothing, by address, or not
   at all.** Nothing means an empty class, which SysV gives no class. By address means

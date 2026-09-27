@@ -60,6 +60,20 @@ std::size_t name_length(std::string_view s);
 // the object through the register holding `n` — a SIGSEGV for n = 42.
 struct Ticket { int n; ~Ticket(); };
 Ticket ticket_make(int n);
+
+// Packed layouts. `Packed` is 5 bytes with `i` at offset 1; `Pack2` is
+// `#pragma pack(2)`, 14 bytes at 0/2/6. Both were emitted at natural alignment
+// (8 and 16 bytes), so pointer reads were garbage, and `Pack2` was an opaque
+// byte array to the thunk, broken by value too.
+struct Packed { char c; int i; } __attribute__((packed));
+#pragma pack(push, 2)
+struct Pack2 { char c; int i; double d; };
+#pragma pack(pop)
+Packed packed_make(int a);
+double packed_sum(Packed p);
+Pack2 pack2_make(int a);
+double pack2_sum(Pack2 p);
+const Packed *packed_table();          // {1,10}, {2,20}, {3,30}
 }
 
 extern "C" {

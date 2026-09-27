@@ -35,3 +35,9 @@ geom::Cell<double> geom::cell_doubled(Cell<double> c) { return Cell<double>{c.v 
 std::size_t geom::name_length(std::string_view s) { return s.size(); }
 geom::Ticket::~Ticket() {}
 geom::Ticket geom::ticket_make(int n) { return Ticket{n}; }
+geom::Packed geom::packed_make(int a) { Packed p; p.c = (char)a; p.i = a + 1; return p; }
+double geom::packed_sum(Packed p) { return p.c + p.i; }
+geom::Pack2 geom::pack2_make(int a) { Pack2 p; p.c = (char)a; p.i = a + 1; p.d = a + 0.5; return p; }
+double geom::pack2_sum(Pack2 p) { return p.c + p.i + p.d; }
+static geom::Packed packed_rows[3] = {{1, 10}, {2, 20}, {3, 30}};
+const geom::Packed *geom::packed_table() { return packed_rows; }
