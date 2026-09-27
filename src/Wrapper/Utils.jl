@@ -2320,6 +2320,45 @@ function _dedup_method_chunks(chunks::Vector{String})
     return chunks[keep]
 end
 
+"""
+    _x87_crossings(func) -> Vector{String}
+
+What `func` passes or returns BY VALUE as `long double` (x86-64: the 80-bit x87
+type, in a 16-byte slot), one phrase each; empty when nothing does.
+
+There is no Julia type for it and no `ccall` shape. A return comes back in the
+x87 register `ST0`, where `ccall` never looks: the return mapper's
+`NTuple{2, UInt64}` read RAX:RDX and handed back garbage that looked like data
+(F5b). A parameter is X87 class, passed in memory; the parameter mapper's `Any`
+was refused only by making the whole wrapper refuse to write. Both generators
+turn such a function into a trap, so it is loud and the rest of the module
+loads. A `long double*` is an ordinary pointer and is not reported.
+"""
+function _x87_crossings(func)
+    norm(t) = strip(replace(String(t), r"^(?:(?:const|volatile)\s+)+" => "",
+                                       r"(?:\s+(?:const|volatile))+$" => ""))
+    out = String[]
+    for p in get(func, "parameters", [])
+        norm(get(p, "c_type", "")) == "long double" &&
+            push!(out, "takes `long double` $(get(p, "name", "")) by value")
+    end
+    norm(get(get(func, "return_type", Dict()), "c_type", "")) == "long double" &&
+        push!(out, "returns `long double`")
+    return out
+end
+
+"""
+    _x87_trap_body(julia_name, crossings) -> String
+
+The body of the trap `_x87_crossings` calls for, shared by both generators.
+"""
+_x87_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name'. It $(join(crossings, " and ")). " *
+        "`long double` is the 80-bit x87 type: Julia has no equivalent, and ccall " *
+        "cannot return it (x87 register ST0) or pass it (x87 memory class). Keep it " *
+        "out with [wrap] exclude_symbols, or wrap a `double`-typed shim.") * ")\n"
+
 # A chunk whose function body only raises one of the generators' refusal
 # errors: GeneratorC's "ABI Safety Trap" / "FFI Safety Trap" stubs and
 # GeneratorCpp's untypable by-value record trap.

@@ -572,6 +572,22 @@ Contents of the .debug_info section:
         @test BVW._record_name_as_emitted("Pair", Set{String}()) == "Pair"   # not a record here
     end
 
+    @testset "long double is a trap in both generators" begin
+        f = Dict{String,Any}("parameters" => [Dict{String,Any}("name" => "x", "c_type" => "const long double"),
+                                              Dict{String,Any}("name" => "p", "c_type" => "long double*")],
+                             "return_type" => Dict{String,Any}("c_type" => "long double"))
+        @test BVW._x87_crossings(f) == ["takes `long double` x by value", "returns `long double`"]
+        @test isempty(BVW._x87_crossings(Dict{String,Any}("parameters" => [],
+                                                          "return_type" => Dict{String,Any}("c_type" => "double"))))
+        body = "function g(x::Any)\n" * BVW._x87_trap_body("g", ["returns `long double`"]) * "end\n"
+        ex = Meta.parse(body)
+        @test ex isa Expr && ex.head === :function            # the stub parses
+        @test BVW._is_trap_chunk(body)                         # and loses a dedup to a callable
+        @test occursin("x87", body) && occursin("exclude_symbols", body)
+        # Tier 2 reaches the same verdict through the record predicate.
+        @test BVF.by_value_crossing("long double", Dict(), Dict()) == (:opaque, nothing)
+    end
+
     @testset "method dedup prefers a callable over a trap" begin
         callable = "\"\"\"\n- Mangled symbol: `_ZN4pugi8xml_node5childEPKc`\n\"\"\"\nfunction pugi_xml_node_child(this::Any, name::Any)\n    return 1\nend\n"
         trap = "\"\"\"\n- Mangled symbol: `_ZN4pugi8xml_node5childESt17basic_string_view`\n\"\"\"\nfunction pugi_xml_node_child(this::Any, name::Any)\n    Base.error(\"ABI Safety Trap: cannot call 'pugi_xml_node_child'\")\nend\n"

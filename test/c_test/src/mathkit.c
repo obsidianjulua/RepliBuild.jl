@@ -202,3 +202,6 @@ void read_wide_bits(WideBits s, unsigned *tag, unsigned *data, unsigned *flag) {
     *data = s.data;
     *flag = s.flag;
 }
+
+long double lerp_ld(double a, double b, double t) { return (long double)a + ((long double)b - a) * t; }
+double ld_half(long double x) { return (double)(x / 2); }

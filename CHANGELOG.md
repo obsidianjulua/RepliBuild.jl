@@ -4,6 +4,26 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### `long double` is an ABI trap, both directions (2026-09-27)
+
+`long double` on x86-64 is the 80-bit x87 type. Julia has no type for it, and
+`ccall` has no shape for it. A return comes back in the x87 register `ST0`, where
+`ccall` never looks; the return mapper's `NTuple{2, UInt64}` read RAX:RDX and returned
+plausible garbage (audit F5b). A parameter is X87 class, passed in memory; the
+parameter mapper's `Any` was only caught by the Any-argument guard, which refused to
+write the whole wrapper until the symbol was excluded (F5a).
+
+- Both generators now emit such a function as an **ABI Safety Trap** that names
+  what it crosses and how to keep it out (`_x87_crossings`, one predicate for both).
+  The wrapper writes and loads, and every other function works. Tier-2 thunks
+  already refuse it (`by_value_crossing` → `:opaque`).
+- A `long double*` is an ordinary pointer and is unaffected.
+- Tests: `test_by_value_crossing.jl` "long double is a trap in both generators", and
+  `c_test` (`lerp_ld`, `ld_half`; devtests).
+- Not built: a thunk could take the value in and out through `f80`
+  (`fpext`/`fptrunc` against `Float64`) for C++, which already has Tier 2. The C
+  bucket has no thunks, so there it stays a trap.
+
 ### Packed C++ structs hold the C layout (2026-09-27)
 
 `__attribute__((packed))` and `#pragma pack` structs (audit F24) were worse than the

@@ -3167,7 +3167,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         is_unknown_return = julia_return_type == "_UnsafeUnknown" ||
                             is_unnameable_agg_return
 
-        if has_unknown_param || is_unknown_return
+        x87 = _x87_crossings(func)
+        if !isempty(x87)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_x87_trap_body(julia_name, x87))end
+
+            """
+        elseif has_unknown_param || is_unknown_return
             func_def = """
             $doc_comment
             function $julia_name($param_sig)

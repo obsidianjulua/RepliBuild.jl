@@ -2796,7 +2796,15 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
         is_unknown_return = julia_return_type == "_UnsafeUnknown"
 
-        if !isempty(blob_abi_offenders)
+        x87 = _x87_crossings(func)
+        if !isempty(x87)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_x87_trap_body(julia_name, x87))end
+
+            """
+        elseif !isempty(blob_abi_offenders)
             offender_list = join(blob_abi_offenders, "; ")
             func_def = """
             $doc_comment

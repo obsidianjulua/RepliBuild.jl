@@ -117,6 +117,17 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test M.apply_op(M.OP_DIV, Int32(12), Int32(4)) == Int32(3)
         println("  ✓ scalar arithmetic")
 
+        # ── long double: no Julia type, no ccall shape ──────────────
+        # The return comes back in x87 ST0, which ccall never reads (the
+        # `NTuple{2,UInt64}` it was mapped to held garbage); the parameter is
+        # passed in memory as X87 class. Both are an ABI trap, loudly, and the
+        # rest of this module is callable (every other test here).
+        for f in (() -> M.lerp_ld(0.0, 10.0, 0.5), () -> M.ld_half(1.0))
+            err = try f(); nothing catch e; e end
+            @test err isa ErrorException && occursin("ABI Safety Trap", err.msg)
+        end
+        println("  ✓ long double traps")
+
         # ── Point2D ─────────────────────────────────────────────────
         P = M.Point2D
         a = P(1.0, 2.0)
