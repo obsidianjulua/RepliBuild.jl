@@ -10,6 +10,8 @@ const _C_PRIM_FIELD_LAYOUT = Dict{String,Tuple{Int,Int}}(
     "Cfloat" => (4, 4), "Float32" => (4, 4), "Cwchar_t" => _C_WCHAR_SA,
     "Clong" => _C_LONG_SA, "Culong" => _C_LONG_SA, "Clonglong" => (8, 8), "Culonglong" => (8, 8),
     "Int64" => (8, 8), "UInt64" => (8, 8), "Cdouble" => (8, 8), "Float64" => (8, 8),
+    "Int128" => (16, 16), "UInt128" => (16, 16),
+    "ComplexF32" => (8, 4), "ComplexF64" => (16, 8),
     "Csize_t" => (8, 8), "Cssize_t" => (8, 8), "Cptrdiff_t" => (8, 8),
     "Cintptr_t" => (8, 8), "Cuintptr_t" => (8, 8), "Cstring" => (8, 8),
 )
@@ -850,7 +852,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                      "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                                      "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
                                      "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
-                                     "Cstring", "Float32", "Float64", "Any", "Nothing"])
+                                     "Cstring", "Float32", "Float64", "ComplexF32", "ComplexF64",
+                                     "Int128", "UInt128", "Any", "Nothing"])
 
                 # Extract the base type by stripping known container prefixes
                 base_ref = julia_type
@@ -892,7 +895,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                           "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                           "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
                           "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
-                          "Cstring", "Float32", "Float64", "Any", "Nothing"])
+                          "Cstring", "Float32", "Float64", "ComplexF32", "ComplexF64",
+                                     "Int128", "UInt128", "Any", "Nothing"])
     for func in functions
         all_types = String[]
         for param in get(func, "parameters", [])
@@ -1818,7 +1822,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                         sanitized_type = julia_type
 
                         # Don't sanitize built-in Julia types (NTuple, Ptr{Cint}, etc.)
-                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Cdouble", "Cfloat", "Clong", "Culong", "Cshort", "Cushort", "Cchar", "Cuchar", "Culonglong", "Clonglong", "Cvoid", "Csize_t", "Cptrdiff_t", "Cssize_t", "Cwchar_t", "Cstring", "Bool", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Float32", "Float64"]
+                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Cdouble", "Cfloat", "Clong", "Culong", "Cshort", "Cushort", "Cchar", "Cuchar", "Culonglong", "Clonglong", "Cvoid", "Csize_t", "Cptrdiff_t", "Cssize_t", "Cwchar_t", "Cstring", "Bool", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Int128", "UInt128", "Float32", "Float64", "ComplexF32", "ComplexF64"]
                         is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
 
                         if !is_builtin || occursin(r"[<>]", julia_type)

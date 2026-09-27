@@ -790,7 +790,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                      "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                                      "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
                                      "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
-                                     "Cstring", "Float32", "Float64", "Any", "Nothing"])
+                                     "Cstring", "Float32", "Float64", "ComplexF32", "ComplexF64",
+                                     "Int128", "UInt128", "Any", "Nothing"])
 
                 # Extract the base type by stripping known container prefixes
                 base_ref = julia_type
@@ -832,7 +833,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                           "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                           "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
                           "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
-                          "Cstring", "Float32", "Float64", "Any", "Nothing"])
+                          "Cstring", "Float32", "Float64", "ComplexF32", "ComplexF64",
+                                     "Int128", "UInt128", "Any", "Nothing"])
     for func in functions
         all_types = String[]
         for param in get(func, "parameters", [])

@@ -26,6 +26,19 @@ import ..INTERNAL_TYPE_BLOCKLIST
 import ..Compiler: _pe_exported_names
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
+# Julia types a foreign signature may name without the generator declaring them.
+# `Int128` / `UInt128` / `ComplexF32` / `ComplexF64` are in Base. Emitting
+# `struct Int128 end` for `__int128` shadows Base and every call with a real
+# `Int128` misses the method. Both generators consult this one set.
+const _FOREIGN_BUILTIN_TYPES = Set{String}([
+    "Cvoid", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Clong", "Culong",
+    "Cshort", "Cushort", "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool",
+    "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64",
+    "UInt128", "Int128", "Csize_t", "Clonglong", "Culonglong", "Cptrdiff_t",
+    "Cssize_t", "Cwchar_t", "Cstring", "Float32", "Float64",
+    "ComplexF32", "ComplexF64", "Any", "Nothing",
+])
+
 """Escape a name if it's a Julia keyword, using var\"...\" syntax."""
 function _escape_keyword(name::String)::String
     if name in _JULIA_KEYWORDS
@@ -707,6 +720,7 @@ const _JULIA_BUILTIN_TYPES = Set([
     "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
     "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
     "Cstring", "Float32", "Float64", "Any", "Nothing", "Cintptr_t", "Cuintptr_t",
+    "Int128", "UInt128", "ComplexF32", "ComplexF64",
 ])
 
 # Type constructors that legitimately appear in a ccall type position but are

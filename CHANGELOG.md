@@ -13,6 +13,10 @@ the line the harness names.
   byte size now rewrites that to `complex float` (8) or `complex double` (16)
   before the Julia map, so a wrapper is no longer refused because every complex
   argument was `Any`.
+- **`__int128` no longer shadows `Base.Int128`.** The type map already said
+  `Int128`; the generator then emitted `struct Int128 end` because that name
+  was not in its builtin set. `Int128`, `UInt128`, `ComplexF32` and `ComplexF64`
+  are builtins. A call with a real `Int128` reaches the ccall.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 
