@@ -1233,6 +1233,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 kind = get(struct_info, "kind", "struct")
                 
                 # SPECIAL HANDLING FOR UNIONS
+                #
+                # A `mutable struct` is a reference when it is a field, so a
+                # union member embedded that way is a pointer: `{union; double}`
+                # becomes 24 bytes instead of 16 and the double is read back as
+                # 0. Anonymous unions exist only to be embedded. Emit them as an
+                # immutable byte region of the DWARF size, which Julia inlines.
+                # Named unions stay mutable: they are passed by value, and the
+                # accessors need `pointer_from_objref`.
                 if kind == "union"
                     byte_size_str = get(struct_info, "byte_size", "0x0")
                     byte_size = parse(Int, byte_size_str)
@@ -1247,9 +1255,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         if byte_size == 0; byte_size = 8; end # Panic fallback
                     end
 
+                    # Anonymous → immutable, so a parent struct inlines the bytes.
+                    # Named → mutable, so `pointer_from_objref` on a by-value
+                    # union still works.
+                    anon_union = get(struct_info, "anonymous", false) == true
+                    union_head = anon_union ? "struct" : "mutable struct"
+
                     push!(struct_chunks, """
                     # C union: $struct_name (size $byte_size bytes)
-                    mutable struct $julia_struct_name
+                    $union_head $julia_struct_name
                         data::NTuple{$byte_size, UInt8}
                     end
                     $julia_struct_name() = $julia_struct_name(ntuple(i -> 0x00, $byte_size))
@@ -1322,15 +1336,23 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             continue
                         end
 
+                        # Immutable unions have no object identity to store through.
+                        # Read and write a `Ref` of the byte tuple instead.
+                        _get_body = anon_union ?
+                            "r = Ref(u.data)\n    return GC.@preserve r unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(r)))" :
+                            "return unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(u)))"
+                        _set_body = anon_union ?
+                            "r = Ref(u.data)\n    GC.@preserve r unsafe_store!(Ptr{$m_julia_type}(pointer_from_objref(r)), v)\n    return $julia_struct_name(r[])" :
+                            "unsafe_store!(Ptr{$m_julia_type}(pointer_from_objref(u)), v)"
                         union_accessor_defs *= """
                         \"\"\"Get union member `$m_name` as `$m_julia_type` from `$julia_struct_name`.\"\"\"
                         function get_$(safe_m_name)(u::$julia_struct_name)::$m_julia_type
-                            return unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(u)))
+                            $_get_body
                         end
 
                         \"\"\"Set union member `$m_name` as `$m_julia_type` in `$julia_struct_name`.\"\"\"
                         function set_$(safe_m_name)!(u::$julia_struct_name, v::$m_julia_type)
-                            unsafe_store!(Ptr{$m_julia_type}(pointer_from_objref(u)), v)
+                            $_set_body
                         end
 
                         """

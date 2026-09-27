@@ -45,6 +45,8 @@ the line the harness names.
   not record it, so out-of-line instance methods keep their receiver.
 - **Global constructors are emitted.** `T::T` was skipped because the bare
   name equals the class; `ns::T::T` was not. The name is `T_T`.
+- **Anonymous C++ unions are immutable byte regions**, so a parent struct
+  inlines them instead of storing a pointer.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 
