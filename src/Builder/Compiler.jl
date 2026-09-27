@@ -3438,9 +3438,10 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         return "Ptr{Cvoid}"
     end
 
-    # Handle reference types (T&)
+    # Handle reference types (T& and T&&: both are an address at the ABI level —
+    # stripping one `&` from `T&&` gave `Ref{Ref{T}}`)
     if endswith(c_type, "&")
-        base_type = strip(replace(c_type, r"&$" => ""))
+        base_type = strip(replace(c_type, r"&&?$" => ""))
         base_type = replace(base_type, r"\bconst\b" => "")
         base_type = replace(base_type, r"\bvolatile\b" => "")
         base_type = strip(base_type)
@@ -4108,6 +4109,20 @@ function parse_dwarf_dump(output::AbstractString;
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
                 type_refs[current_type_offset] = Dict{String,Any}("kind" => "reference", "target" => nothing)
+                offset_to_kind[current_type_offset] = :reference
+            end
+        end
+
+        # `T&&` (DW_TAG_rvalue_reference_type). An address at the ABI level, exactly
+        # like `T&`, and it resolves to `T&&` so every mapper sees a reference. It
+        # was unmodelled, so a move constructor's `T&&` parameter resolved to
+        # "unknown": `Any` in the signature, and an untyped slot in the thunk.
+        # `contains(line, "DW_TAG_reference_type")` above does not match this tag.
+        if contains(line, "DW_TAG_rvalue_reference_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "rvalue_reference", "target" => nothing)
                 offset_to_kind[current_type_offset] = :reference
             end
         end
@@ -5051,6 +5066,8 @@ function parse_dwarf_dump(output::AbstractString;
                 return "const " * target_type
             elseif kind == "reference"
                 return target_type * "&"
+            elseif kind == "rvalue_reference"
+                return target_type * "&&"
             end
         end
 
@@ -5975,8 +5992,13 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # Merge DWARF return types and parameters into function metadata (overrides inference)
     for func in functions
         mangled = func["mangled"]
-        if haskey(dwarf_return_types, mangled)
-            dwarf_info = dwarf_return_types[mangled]
+        # Constructors and destructors are keyed differently on the two sides:
+        # the symbol table carries C1/C2/C3 and D0/D1/D2, and clang writes the
+        # unified C4/D4 into DW_AT_linkage_name. See `_structor_dwarf_key`.
+        dwarf_key = haskey(dwarf_return_types, mangled) ? mangled :
+                    _structor_dwarf_key(mangled, dwarf_return_types)
+        if dwarf_key !== nothing
+            dwarf_info = dwarf_return_types[dwarf_key]
 
             # Merge return type (only the return type fields, not parameters)
             func["return_type"] = Dict(
@@ -6113,6 +6135,35 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     )
 
     return metadata
+end
+
+"""
+    _structor_dwarf_key(mangled, dwarf_table) -> Union{String,Nothing}
+
+The DWARF key for a constructor or destructor SYMBOL, or `nothing`.
+
+The symbol table has the Itanium variants: `C1`/`C2`/`C3` (complete, base,
+allocating) and `D0`/`D1`/`D2` (deleting, complete, base). clang writes the
+unified `C4`/`D4` spelling into `DW_AT_linkage_name`, one DIE for every variant.
+The exact-name join therefore missed EVERY constructor and destructor. Their
+signatures fell back to `parse_parameters` on the demangled string, where a
+by-value struct is only a name. msdfgen's `LinearSegment(Vector2, Vector2,
+EdgeColor)` took `Any` arguments and stored garbage points.
+
+Each marker position in the symbol is tried, and only a rewrite DWARF actually
+has is accepted. A marker-shaped substring inside an identifier cannot produce a
+real key. Exactly one hit is required. More than one is refused as ambiguous
+rather than guessed.
+"""
+function _structor_dwarf_key(mangled::AbstractString, dwarf_table::AbstractDict)
+    startswith(mangled, "_Z") || return nothing
+    hits = String[]
+    for m in eachmatch(r"(C[123]|D[012])(?=[EIB])", mangled)
+        unified = m.match[1] == 'C' ? "C4" : "D4"
+        key = mangled[1:prevind(mangled, m.offset)] * unified * mangled[m.offset+2:end]
+        haskey(dwarf_table, key) && push!(hits, key)
+    end
+    return length(hits) == 1 ? hits[1] : nothing
 end
 
 """
@@ -6809,9 +6860,9 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         end
     end
 
-    # Handle references (for non-struct types)
+    # Handle references (for non-struct types). `T&&` is one reference, not two.
     if endswith(cpp_type, "&")
-        base = strip(cpp_type[1:end-1])
+        base = strip(replace(cpp_type, r"&&?$" => ""))
         return "Ref{$(cpp_to_julia_type(base, struct_names, enum_names))}"
     end
 

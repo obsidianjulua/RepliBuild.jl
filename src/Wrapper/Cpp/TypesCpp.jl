@@ -414,9 +414,9 @@ function infer_cpp_type(registry::TypeRegistry, cpp_type::String; context::Strin
         return "Ptr{$julia_base}"
     end
 
-    # Parse reference types: T& or T &
+    # Parse reference types: T&, T & and T&& (an rvalue reference is still one address)
     if endswith(clean_type, "&")
-        base_type = strip(replace(clean_type, r"&$" => ""))
+        base_type = strip(replace(clean_type, r"&&?$" => ""))
         ref_context = context == "" ? "reference base type" : "$context (reference to $base_type)"
         julia_base = infer_cpp_type(registry, String(base_type); context=ref_context)
         return "Ref{$julia_base}"

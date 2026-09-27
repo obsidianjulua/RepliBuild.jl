@@ -260,6 +260,28 @@ if MLIR_AVAILABLE
 
     # ── RAII Dialect ──────────────────────────────────────────────────────
 
+    @testset "StressTest: constructor by-value struct arguments" begin
+        # DWARF names a constructor with the unified C4 linkage name and the symbol
+        # table has C1/C2, so the exact-name join missed EVERY constructor. The
+        # signature was then guessed from the demangled string, where `Point2D` is
+        # only a name: both arguments became `Any` and the thunk stored garbage
+        # (msdfgen's `LinearSegment(Vector2, Vector2, EdgeColor)`, 2026-09-26).
+        meta = RepliBuild.JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"); use_mmap=false)
+        ctor = first(f for f in meta["functions"] if occursin("geom9Segment2DC", f["mangled"]))
+        @test ctor["parameters_source"] == "dwarf"
+        @test [(p["name"], p["c_type"]) for p in ctor["parameters"]] ==
+              [("this", "Segment2D*"), ("from", "Point2D"), ("to", "Point2D")]
+
+        seg = zeros(Float64, 4)                      # geom::Segment2D { Point2D a, b; }
+        GC.@preserve seg begin
+            StressTest.geom_Segment2D_Segment2D(Ptr{StressTest.Segment2D}(pointer(seg)),
+                                                StressTest.Point2D(1.0, 2.0),
+                                                StressTest.Point2D(4.0, 6.0))
+            @test seg == [1.0, 2.0, 4.0, 6.0]
+            @test StressTest.geom_Segment2D_length2(Ptr{StressTest.Segment2D}(pointer(seg))) == 25.0
+        end
+    end
+
     @testset "StressTest: RAII Dialect" begin
         @testset "Parse ctor_call / dtor_call IR" begin
             ctx = create_context()

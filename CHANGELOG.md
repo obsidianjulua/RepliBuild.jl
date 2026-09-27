@@ -4,6 +4,38 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
+
+- **Every constructor and destructor missed its DWARF.** clang writes the unified
+  `C4`/`D4` spelling into `DW_AT_linkage_name`, while the symbol table carries the
+  Itanium variants `C1`/`C2`/`C3` and `D0`/`D1`/`D2`. The exact-name join in
+  `extract_compilation_metadata` never matched. Every structor was
+  `parameters_source: inferred` from the demangled string, where a by-value struct
+  is only a name, so it was typed `Any`. msdfgen's
+  `LinearSegment(Vector2, Vector2, EdgeColor)` stored `p0=(1,3)` and garbage.
+  `_structor_dwarf_key` now rewrites the symbol's marker to C4/D4 and accepts it
+  only when DWARF has exactly that key. Measured on 8 Hub C++ packages rebuilt from
+  scratch copies: all 559 structor symbols now come from DWARF (they had 0), with
+  real parameter names and `this`. Verifiers are unchanged (tinyxml2 11, pugixml
+  13, box2d 15, clipper2 233, stl 35, imgui 202). msdfgen's two `@test_broken` pins
+  for this and the next item turned into unexpected passes, and are now plain tests.
+- The `int` return some template-class destructors were given, from
+  `infer_return_type` splitting the class on a `::` inside `<>`, disappears with
+  this: destructors take `void` from DWARF.
+- **`T&&` was unmodelled.** `DW_TAG_rvalue_reference_type` had no `type_refs` entry,
+  so every move constructor's parameter resolved to `"unknown"`. The string mappers
+  (`dwarf_type_to_julia`, `cpp_to_julia_type`, `TypesCpp.infer_cpp_type`) stripped a
+  single `&`, which turned `T&&` into `Ref{Ref{T}}`. It now resolves to `T&&` and
+  maps to one `Ref{T}`; it is an address at the ABI level, exactly like `T&`.
+- Tests: `test_dwarf_attribution.jl` "rvalue references are references" (verbatim
+  readelf), `test_symbol_hygiene.jl` for the C4/D4 key rewrite (all six variants, a
+  template class, and refusal of an ambiguous pair), and a `geom::Segment2D(Point2D,
+  Point2D)` constructor in the `stress_test` fixture, checked by metadata source and
+  by the values it stores. The fixture test goes red with the join neutered.
+- Found while doing this, not changed: GeneratorCpp skips a constructor when its
+  bare name equals its **qualified** class, which only happens at global scope. So
+  `ns::T::T` is emitted and `T::T` is not (logged in CLAUDE.md open problems).
+
 ### A throwing C++ function can no longer take the ccall path by sharing a name (2026-09-26)
 
 Tier 3 (`ccall`) has no landing pad. A C++ exception thrown through it runs

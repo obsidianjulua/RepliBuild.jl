@@ -22,3 +22,9 @@ extern "C" {
     double get_perimeter(const Shape* s) { return s->perimeter(); }
     void delete_shape(Shape* s) { delete s; }
 }
+
+geom::Segment2D::Segment2D(Point2D from, Point2D to) : a(from), b(to) {}
+double geom::Segment2D::length2() const {
+    double dx = b.x - a.x, dy = b.y - a.y;
+    return dx * dx + dy * dy;
+}

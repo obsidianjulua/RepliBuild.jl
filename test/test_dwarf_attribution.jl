@@ -388,6 +388,48 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test !any(x -> occursin("unknown", x[2]), vcat(p("sum_r"), p("vv"), p("qd")))
     end
 
+    @testset "rvalue references are references" begin
+        # Verbatim readelf (clang 22, -g -O0) of:
+        #   struct W { int n; };  int consume(W&& w);
+        # DW_TAG_rvalue_reference_type was unmodelled — every `T&&` parameter
+        # (every move constructor) resolved to "unknown" → `Any`. The
+        # demangled-string mapper stripped ONE `&` and produced `Ref{Ref{…}}`.
+        dump = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : (indexed string: 0x0): clang version 22.1.8
+         <1><23>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <2b>   DW_AT_linkage_name: (indexed string: 0x3): _Z7consumeO1W
+            <2c>   DW_AT_name        : (indexed string: 0x4): consume
+            <2f>   DW_AT_type        : <0x3f>
+         <2><33>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <37>   DW_AT_name        : (indexed string: 0x6): w
+            <3a>   DW_AT_type        : <0x43>
+         <2><3e>: Abbrev Number: 0
+         <1><3f>: Abbrev Number: 4 (DW_TAG_base_type)
+            <40>   DW_AT_name        : (indexed string: 0x5): int
+            <41>   DW_AT_byte_size   : 4
+         <1><43>: Abbrev Number: 5 (DW_TAG_rvalue_reference_type)
+            <44>   DW_AT_type        : <0x48>
+         <1><48>: Abbrev Number: 6 (DW_TAG_structure_type)
+            <4a>   DW_AT_name        : (indexed string: 0x8): W
+            <4b>   DW_AT_byte_size   : 4
+         <2><4e>: Abbrev Number: 7 (DW_TAG_member)
+            <4f>   DW_AT_name        : (indexed string: 0x7): n
+            <50>   DW_AT_type        : <0x3f>
+            <56>   DW_AT_data_member_location: 0
+         <2><57>: Abbrev Number: 0
+         <1><58>: Abbrev Number: 0
+        """
+        rt, _, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
+        @test [(x["name"], x["c_type"], x["julia_type"]) for x in rt["_Z7consumeO1W"]["parameters"]] ==
+              [("w", "W&&", "Ref{W}")]
+        # Both string mappers: one reference, never a reference to a reference.
+        @test DWARF_COMPILER.cpp_to_julia_type("W&&", Set(["W"])) == "Ref{W}"
+        @test DWARF_COMPILER.cpp_to_julia_type("int&&") == "Ref{Cint}"
+        @test DWARF_COMPILER.dwarf_type_to_julia("int&&") == "Ref{Cint}"
+        @test !occursin("Ref{Ref", DWARF_COMPILER.dwarf_type_to_julia("double&&"))
+    end
+
     # ── The arity guard ─────────────────────────────────────────────────────
 
     @testset "arity guard rejects phantom parameters" begin
