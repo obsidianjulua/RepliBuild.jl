@@ -2320,7 +2320,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         # Determine if we should use MLIR or ccall.
         # Tier 2 is decided by is_ccall_safe alone.
-        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs)
+        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs; record_abi=record_abi)
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])

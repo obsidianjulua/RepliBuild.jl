@@ -51,6 +51,43 @@ What changed:
   `p::Pair` meant `Base.Pair`, and box2d's `b2Contact::AddType(…, b2Shape::Type,
   b2Shape::Type)` was annotated `::Type`.
 
+### Non-trivial records by value (2026-09-27)
+
+A class with a user destructor or copy constructor is non-trivial for the purposes
+of calls. Itanium passes it as a pointer to a caller-owned temporary and returns it
+through a hidden sret pointer, at every size. Only parameters of a class with an
+emitted destructor were handled. `Owner make_owner(int)`, a 4-byte class, was read
+from EAX while the callee stored the object through the register holding the `int`:
+SIGSEGV. Above 16 bytes the size-based classifier picks sret anyway, which is why
+this went unseen.
+
+- A `pass: reference` return is lowered through an sret slot the thunk owns. The
+  slot is the first argument, before `this`.
+- A `pass: reference` parameter that has a layout and no destructor to run is passed
+  by address. `invoke` already holds a private copy of the bytes.
+- `is_ccall_safe` keeps any function with such a record by value off Tier 3.
+- A `pass: reference` record with no layout is still passed by address as a
+  parameter (the caller supplies a pointer to a real object). As a return it is a trap.
+
+Measured, for both entries:
+
+- **Thunks.** Old and new generator on current Hub metadata give 2,875
+  byte-identical thunks across box2d, imgui, llamacpp, stl and hello_world. The
+  changed thunks (fmt 219, msdfgen 43, pugixml 8, clipper2 3, onednn 2, tinyxml2 1)
+  are all a by-value record or qualified enum that was `!llvm.ptr`. Trapped: pugixml
+  22, and fmt 55, a count taken from pre-C4/D4 metadata.
+- **Hub verifiers** against the new thunks, without a rebuild: pugixml 13/13,
+  tinyxml2 11/11, msdfgen 24 + 1 broken (unchanged), onednn 141/141.
+- **Re-wrap A/B.** Wrappers are identical except box2d `AddType`, pugixml's 22 dedup
+  winners and fmt's traps.
+- **What reaches a Hub package when.** JIT-mode packages get the layout and enum fixes
+  at load, because thunks are generated from metadata. Traps and the name fixes need
+  a re-wrap. Empty and non-trivial records need `record_abi`, so a **rebuild**.
+- **Tests.** `test_by_value_crossing.jl` (CI, verbatim clang 22 readelf; each part
+  goes red with its function neutered) and stress_test "by-value records without a
+  scalar spelling". That second test fails with the old verdict (`unit_scaled` →
+  12804, `cell_doubled` → 6.9e-310).
+
 ### The 2026-09-26 audit, continued
 
 Silent-wrong and crash fixes from the re-verification harness. Each one is

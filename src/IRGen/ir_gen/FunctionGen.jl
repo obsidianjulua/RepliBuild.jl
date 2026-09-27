@@ -96,6 +96,30 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi)
 end
 
 """
+    record_passes_by_reference(c_type, key, record_abi) -> Bool
+
+Whether DWARF says the record `c_type` names (table key `key`, when it has a
+layout) is non-trivial for the purposes of calls: `DW_CC_pass_by_reference`. The
+Itanium ABI then passes it as a pointer to a caller-owned temporary and returns
+it through a hidden sret pointer, whatever its size — a 4-byte class with a
+destructor is not returned in EAX. `false` when the facts are absent (metadata
+from before `record_abi`, or a C record), which keeps the size-based path.
+"""
+function record_passes_by_reference(c_type::AbstractString, key, record_abi)::Bool
+    t = strip(String(c_type))
+    t = replace(t, r"^(?:(?:const|volatile)\s+)+" => "")
+    t = String(replace(t, r"(?:\s+(?:const|volatile))+$" => ""))
+    cands = key === nothing ? _scope_suffixes(t) : vcat(String(key), _scope_suffixes(t))
+    for cand in cands
+        facts = get(record_abi, cand, nothing)
+        facts === nothing && continue
+        get(facts, "conflict", false) == true && return false
+        return get(facts, "pass", nothing) == "reference"
+    end
+    return false
+end
+
+"""
     thunk_crossings(func, structs, record_abi) -> NamedTuple
 
 The per-function answer both generators act on: `params` (one
@@ -372,6 +396,19 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             elseif kind === :indirect
                 mlir_t = "!llvm.ptr"   # Itanium: the callee takes the object's address
             end
+            # Laid out, non-trivial for calls, and no destructor to run: the
+            # callee still takes a POINTER. `invoke` already put a private copy
+            # of the bytes behind the slot (`Ref(arg)`), so that address is the
+            # temporary. Passed in registers, the callee read the object's first
+            # eightbyte as its address.
+            by_address = kind === :layout && lookup_key !== nothing &&
+                         !haskey(class_raii, strip(replace(t, r"\bconst\b" => ""))) &&
+                         record_passes_by_reference(t, rec_key, record_abi)
+            if by_address
+                param_load[pi] = (type = "!llvm.ptr", packed = false, info = nothing, address = true)
+                push!(arg_types, "!llvm.ptr")
+                continue
+            end
             if lookup_key !== nothing
                 # Scope-RAII takes precedence over both by-value marshalling
                 # paths: a class with an emitted destructor is non-trivial
@@ -397,7 +434,8 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
 
             param_load[pi] = (type = mlir_t, packed = is_packed_param,
-                              info = lookup_key === nothing ? nothing : structs[lookup_key])
+                              info = lookup_key === nothing ? nothing : structs[lookup_key],
+                              address = false)
             push!(arg_types, mlir_t)
         end
         has_raii = any(!isnothing, raii_specs)
@@ -498,14 +536,41 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
         end
 
+        # A record that is non-trivial for the purposes of calls comes back
+        # through a hidden pointer — Itanium puts it FIRST, before `this` — and
+        # the callee returns void, at every size. The size-based classifier
+        # only agrees above 16 bytes (MEMORY class); below that it read EAX
+        # while the callee stored the object through whatever the first
+        # argument register held. The thunk owns the slot and returns the
+        # bytes, exactly as for a MEMORY-class return.
+        ret_sret = ret_kind === :layout && ret_type != "" &&
+                   record_passes_by_reference(ret_c_type, ret_key, record_abi)
+        sret_slot_type = is_packed_ret ? ret_packed_type : ret_type
+
         # External declaration uses the actual C type (packed for packed structs)
-        ext_ret_type = ret_type
+        ext_ret_type = ret_sret ? "" : ret_type
         ext_mlir_ret = ext_ret_type == "" || ext_ret_type == "!llvm.void" ? "" : "-> $ext_ret_type"
 
         # Thunk returns aligned type so Julia can read it correctly
         thunk_ret_type = is_packed_ret ? ret_aligned_type : ret_type
         thunk_mlir_ret = thunk_ret_type == "" || thunk_ret_type == "!llvm.void" ? "" : "-> $thunk_ret_type"
-        func_ret = ret_type == "" || ret_type == "!llvm.void" ? "" : ret_type
+        func_ret = ret_sret || ret_type == "" || ret_type == "!llvm.void" ? "" : ret_type
+        ret_sret && pushfirst!(arg_types, "!llvm.ptr")
+
+        # The epilogue after a call that returns nothing: plain `return`, or
+        # the sret slot read back (and re-laid-out when the C layout is packed).
+        emit_void_epilogue = function ()
+            if !ret_sret
+                println(io, "  return")
+            elseif is_packed_ret
+                println(io, "  %sret_val = llvm.load %sret_slot : !llvm.ptr -> $(sret_slot_type)")
+                println(io, "  %ret_aligned = jlcs.marshal_ret %sret_val { numMembers = $(ret_num_members) : i64 } : ($(ret_packed_type)) -> $(ret_aligned_type)")
+                println(io, "  return %ret_aligned : $(ret_aligned_type)")
+            else
+                println(io, "  %sret_val = llvm.load %sret_slot : !llvm.ptr -> $(sret_slot_type)")
+                println(io, "  return %sret_val : $(sret_slot_type)")
+            end
+        end
 
         # 1. External Declaration (Real C++ Symbol)
         # Use real mangled name so JIT can link to it
@@ -515,6 +580,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # Append _thunk suffix to avoid collision
         # Add llvm.emit_c_interface to generate _mlir_ciface_ wrapper for invokePacked
         println(io, "func.func @$(mangled)_thunk(%args_ptr: !llvm.ptr) $(thunk_mlir_ret) attributes { llvm.emit_c_interface } {")
+        if ret_sret
+            println(io, "  %sret_one = llvm.mlir.constant(1 : i64) : i64")
+            println(io, "  %sret_slot = llvm.alloca %sret_one x $(sret_slot_type) : (i64) -> !llvm.ptr")
+        end
 
         # Scope-RAII entry allocas: one caller-owned temporary per non-trivial
         # by-value param, plus (for non-void calls) a slot the call result
@@ -526,7 +595,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 isnothing(spec) && continue
                 println(io, "  %raii_tmp_$(pi) = llvm.alloca %raii_one x !llvm.array<$(spec.size) x i8> : (i64) -> !llvm.ptr")
             end
-            raii_ret_slot_type = is_packed_ret ? ret_packed_type : func_ret
+            raii_ret_slot_type = ret_sret ? "" : (is_packed_ret ? ret_packed_type : func_ret)
             if raii_ret_slot_type != ""
                 println(io, "  %raii_retslot = llvm.alloca %raii_one x $(raii_ret_slot_type) : (i64) -> !llvm.ptr")
             end
@@ -561,6 +630,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             slot_off = 8 * (i - 1)
             println(io, "  %val_ptr_$(i) = \"jlcs.get_field\"(%args_ptr) {fieldOffset = $(slot_off) : i64} : (!llvm.ptr) -> !llvm.ptr")
 
+            if load.address
+                push!(call_args, "%val_ptr_$(i)")   # the slot IS the temporary's address
+                continue
+            end
+
             if !isnothing(raii_specs[i])
                 # Non-trivial by-value param: the temporary is copy-constructed
                 # inside the jlcs.scope (emitted at the call site below); here we
@@ -591,6 +665,9 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             push!(call_args, arg_value_name)
         end
 
+        # The hidden return pointer is the first argument (declared above).
+        ret_sret && pushfirst!(call_args, "%sret_slot")
+
         # Determine whether to use jlcs.try_call (exception-safe) or jlcs.ffe_call
         # Per-function noexcept: if the function is marked noexcept, use ffe_call even when may_throw is set
         func_is_noexcept = get(func, "is_noexcept", false)
@@ -606,7 +683,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # picks the invoke+landing-pad lowering (same sentinel-continue EH
         # model as try_call).
         vc = get(vcall_info, mangled, nothing)
-        use_vcall = vc !== nothing && is_method && !has_raii && !is_packed_ret &&
+        use_vcall = vc !== nothing && is_method && !has_raii && !is_packed_ret && !ret_sret &&
                     !isempty(call_args) &&
                     !occursin("struct", func_ret) &&
                     !any(t -> occursin("struct", t) || occursin("array", t), arg_types)
@@ -636,7 +713,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # the landing pad it had. (DWARF marks none of these noexcept, so in
         # practice C++ destructor thunks land on the EH path.)
         is_destructor = occursin("~", String(get(func, "demangled", "")))
-        use_dtor_call = is_destructor && !has_raii && !use_vcall &&
+        use_dtor_call = is_destructor && !has_raii && !use_vcall && !ret_sret &&
                         func_ret == "" && length(call_args) == 1 &&
                         length(arg_types) == 1 && arg_types[1] == "!llvm.ptr"
         dtor_attrs = use_try_call ? " { may_throw }" : ""
@@ -675,7 +752,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             println(io, "    jlcs.yield")
             println(io, "  }")
             if func_ret == ""
-                println(io, "  return")
+                emit_void_epilogue()
             elseif is_packed_ret
                 println(io, "  %ret_packed = llvm.load %raii_retslot : !llvm.ptr -> $(ret_packed_type)")
                 println(io, "  %ret_aligned = jlcs.marshal_ret %ret_packed { numMembers = $(ret_num_members) : i64 } : ($(ret_packed_type)) -> $(ret_aligned_type)")
@@ -693,7 +770,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
              else
                  println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
              end
-             println(io, "  return")
+             emit_void_epilogue()
         elseif is_packed_ret
              # Packed struct return: call returns packed type, marshal to aligned for Julia
              println(io, "  %ret_packed = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(ret_packed_type)")

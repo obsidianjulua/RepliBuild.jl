@@ -531,6 +531,34 @@ Contents of the .debug_info section:
         # Qualified enum: its integer, not a pointer.
         ir = gen(fn("_Z3colN2ns5ColorE", ["ns::Color"], "ns::Color"))
         @test decl(ir, "_Z3colN2ns5ColorE") == "func.func private @_Z3colN2ns5ColorE(i32) -> i32"
+
+        # A 4-byte class with a destructor comes back through a hidden pointer,
+        # FIRST, and the callee returns void. Read from EAX, the callee stored
+        # the object through the int argument's register (a SIGSEGV at 42).
+        ir = gen(fn("_ZN2ee10make_ownerEi", ["int"], "Owner"))
+        @test decl(ir, "_ZN2ee10make_ownerEi") == "func.func private @_ZN2ee10make_ownerEi(!llvm.ptr, i32)"
+        @test occursin(r"%sret_slot = llvm\.alloca %sret_one x \S", ir)
+        @test occursin(r"jlcs\.try_call %sret_slot, %val_1 \{ callee = @_ZN2ee10make_ownerEi \}", ir)
+        @test occursin(r"llvm\.load %sret_slot", ir)
+
+        # Laid out, non-trivial, no destructor to run: the callee takes the
+        # address of a temporary, and the slot already holds a private copy.
+        ir = gen(fn("_ZN2ee9handle_idENS_6HandleE", ["Handle"], "int"))
+        @test decl(ir, "_ZN2ee9handle_idENS_6HandleE") == "func.func private @_ZN2ee9handle_idENS_6HandleE(!llvm.ptr) -> i32"
+        @test occursin(r"jlcs\.try_call %val_ptr_1 \{", ir)
+        @test !occursin("llvm.load %val_ptr_1", ir)
+
+        # Without record_abi (old metadata) both keep the size-based path.
+        ir0 = BVF.generate_function_thunks([fn("_ZN2ee10make_ownerEi", ["int"], "Owner")], structs; may_throw = true)
+        @test !occursin("%sret_slot", ir0)
+    end
+
+    @testset "a pass-by-reference record never takes Tier 3" begin
+        nx(params, ret) = merge(fn("_ZN2ee1fEv", params, ret), Dict{String,Any}("is_noexcept" => true))
+        @test BVW.is_ccall_safe(nx(["int"], "int"), structs; record_abi = ra)
+        @test !BVW.is_ccall_safe(nx(["int"], "Owner"), structs; record_abi = ra)
+        @test !BVW.is_ccall_safe(nx(["Handle"], "int"), structs; record_abi = ra)
+        @test BVW.is_ccall_safe(nx(["const Handle&"], "int"), structs; record_abi = ra)
     end
 
     @testset "_record_name_as_emitted: Base-colliding record names" begin

@@ -33,3 +33,5 @@ int geom::unit_scaled(Unit, int x, Unit, int y) { return x * 10 + y; }
 geom::Unit geom::unit_make(int) { return Unit{}; }
 geom::Cell<double> geom::cell_doubled(Cell<double> c) { return Cell<double>{c.v * 2}; }
 std::size_t geom::name_length(std::string_view s) { return s.size(); }
+geom::Ticket::~Ticket() {}
+geom::Ticket geom::ticket_make(int n) { return Ticket{n}; }

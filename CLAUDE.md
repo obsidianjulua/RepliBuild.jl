@@ -363,7 +363,8 @@ the test named when you touch the area.
 - `!jlcs.c_struct` must never appear inside an `!llvm.struct` body; inline the literal.
 - **A by-value record crosses a thunk with its layout, as nothing, by address, or not
   at all.** Nothing means an empty class, which SysV gives no class. By address means
-  DWARF `DW_CC_pass_by_reference`,. Not at all means an ABI trap on the Julia side.
+  DWARF `DW_CC_pass_by_reference`, and such a return goes through an sret slot, first
+  argument, before `this`. Not at all means an ABI trap on the Julia side.
   `FunctionGen.by_value_crossing` is the one verdict; the thunk generator and
   GeneratorCpp both act on it. `record_abi` in metadata carries the DWARF facts. A
   record must never fall to `!llvm.ptr`: that is how empty classes, declared-only

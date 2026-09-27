@@ -301,6 +301,10 @@ if MLIR_AVAILABLE
         @test err isa ErrorException
         @test occursin("ABI Safety Trap", sprint(showerror, err))
         @test occursin("string_view", sprint(showerror, err))
+
+        # DW_CC_pass_by_reference: returned through an sret slot the thunk owns.
+        @test meta["record_abi"]["Ticket"]["pass"] == "reference"
+        @test StressTest.geom_ticket_make(42).n == 42
     end
 
     @testset "StressTest: RAII Dialect" begin

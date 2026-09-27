@@ -54,6 +54,12 @@ Unit unit_make(int x);
 template <typename T> struct Cell { T v; };
 Cell<double> cell_doubled(Cell<double> c);
 std::size_t name_length(std::string_view s);
+
+// Non-trivial for the purposes of calls (a user destructor): returned through a
+// hidden pointer at ANY size. The thunk read it from EAX, and the callee stored
+// the object through the register holding `n` — a SIGSEGV for n = 42.
+struct Ticket { int n; ~Ticket(); };
+Ticket ticket_make(int n);
 }
 
 extern "C" {
