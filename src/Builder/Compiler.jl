@@ -55,7 +55,7 @@ recompiles only that file; a flag/define/include change busts the whole set
 (correct — they affect every translation unit).
 """
 function compute_compile_fingerprint(config::RepliBuildConfig)::String
-    h = hash("replibuild-compile-fingerprint-v1")
+    h = hash("replibuild-compile-fingerprint-v2")
     for f in get_compile_flags(config)
         h = hash(f, h)
     end
@@ -63,8 +63,26 @@ function compute_compile_fingerprint(config::RepliBuildConfig)::String
         h = hash(k, h)
         h = hash(v, h)
     end
+    # Header *contents*, not just the -I path. The per-file cache otherwise
+    # serves IR compiled against the previous header: `needs_recompile` only
+    # compares the source file's mtime, and a nested `include/<lib>/<lib>.h`
+    # edit does not touch that file. The project hash already notices the
+    # edit and refuses the "project unchanged" fast path; without this, the
+    # file cache then links the old IR anyway.
     for d in get_include_dirs(config)
         h = hash(d, h)   # -I path affects header resolution, independent of mtime
+        isdir(d) || continue
+        for (root, dirs, files) in walkdir(d)
+            filter!(x -> !(x in (".git", "build", ".replibuild_cache")), dirs)
+            sort!(dirs)
+            for f in sort(files)
+                any(endswith(f, ext) for ext in (".h", ".hpp", ".hxx", ".hh")) || continue
+                path = joinpath(root, f)
+                isfile(path) || continue
+                h = hash(relpath(path, d), h)
+                h = hash(read(path), h)
+            end
+        end
     end
     # Compiler identity: the C path emits via the JLL clang pinned to
     # Base.libllvm_version, so a Julia/LLVM bump must invalidate. Target triple

@@ -24,6 +24,15 @@ the line the harness names.
 - **The C-bucket clang pipe no longer deadlocks** on more than ~64 KiB of
   diagnostics. Output is drained into an `IOBuffer` while the process runs.
 - **A local dependency compiles `.c` files.** It already compiled `.cpp`.
+- **`register` / `use` keep the project.** A relative `root` is resolved against
+  the TOML file, not the caller's cwd, and `register` copies that project's
+  relative include dirs and sources next to the stored TOML. `use()` of a
+  package with `root = "."` no longer clones dependencies into the caller's
+  directory or compiles against `/usr/include`. The registry build cache hashes
+  include directories recursively. The per-file IR cache's compile fingerprint
+  hashes those headers too, so a nested header edit is not linked from the
+  previous IR. The wrapper file is loaded under `get_module_name`
+  (`vec2d` → `Vec2d.jl`), not `titlecase`.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 

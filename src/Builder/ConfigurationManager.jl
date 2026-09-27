@@ -360,6 +360,15 @@ function parse_project_config(data::Dict, toml_path::String)::ProjectConfig
 
     name = get(project, "name", default_name)
     root = get(project, "root", default_root)
+    # A relative root is relative to the TOML file, not to the process cwd.
+    # `root = "."` used to mean "wherever `use()` happened to be called", so a
+    # registered package cloned its dependencies into the caller's directory
+    # and compiled against whatever headers that directory happened to have.
+    if !isabspath(root)
+        root = normpath(abspath(joinpath(dirname(abspath(toml_path)), root)))
+        # This Julia keeps the trailing separator on `abspath(joinpath(dir, "."))`.
+        root == "/" || (root = String(rstrip(root, ['/', '\\'])))
+    end
 
     # Parse or generate UUID
     uuid = if haskey(project, "uuid")

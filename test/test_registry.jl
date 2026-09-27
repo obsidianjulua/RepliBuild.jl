@@ -504,4 +504,59 @@ end
     end
 end
 
+@testset "registry cache and wrapper filename" begin
+    @testset "nested headers change hash_config" begin
+        mktempdir() do dir
+            inc = joinpath(dir, "include", "vecx")
+            mkpath(inc)
+            write(joinpath(inc, "cfg.h"), "#define VECX_SCALE 2\n")
+            write(joinpath(dir, "replibuild.toml"), """
+            [project]
+            name = "vecx"
+            root = "$(replace(dir, '\\' => '/'))"
+            [compile]
+            source_files = []
+            include_dirs = ["$(replace(joinpath(dir, "include"), '\\' => '/'))"]
+            [wrap]
+            language = "c"
+            """)
+            cfg = CM.load_config(joinpath(dir, "replibuild.toml"))
+            h1 = PR.hash_config(cfg)
+            write(joinpath(inc, "cfg.h"), "#define VECX_SCALE 3\n")
+            @test PR.hash_config(cfg) != h1
+        end
+    end
+
+    @testset "wrapper filename follows get_module_name" begin
+        mktempdir() do dir
+            write(joinpath(dir, "replibuild.toml"), """
+            [project]
+            name = "vec2d"
+            root = "$(replace(dir, '\\' => '/'))"
+            [compile]
+            source_files = []
+            [wrap]
+            language = "c"
+            """)
+            cfg = CM.load_config(joinpath(dir, "replibuild.toml"))
+            @test CM.get_module_name(cfg) == "Vec2d"
+            @test CM.get_module_name(cfg) * ".jl" != "Vec2D.jl"
+        end
+    end
+
+    @testset "relative root is the TOML's directory" begin
+        mktempdir() do dir
+            write(joinpath(dir, "replibuild.toml"), """
+            [project]
+            name = "relroot"
+            root = "."
+            [compile]
+            source_files = []
+            """)
+            cfg = CM.load_config(joinpath(dir, "replibuild.toml"))
+            @test cfg.project.root == abspath(dir)
+        end
+    end
+end
+
 println("\n✓ All registry tests passed")
