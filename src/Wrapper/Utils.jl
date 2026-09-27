@@ -1106,6 +1106,17 @@ is a custom struct type that has not been defined yet. This avoids
 (all pointers are the same size).
 """
 function _resolve_forward_ptr(julia_type::AbstractString, defined_names::Set{String})::String
+    # `NTuple{10, Ptr{XMLNode}}` names XMLNode the same way `Ptr{XMLNode}` does.
+    # Julia resolves that name when the struct is defined, so an array of
+    # pointers emitted before its pointee is an UndefVarError, not a soft edge.
+    if startswith(julia_type, "NTuple{")
+        inner = peel_container_arg(julia_type)
+        inner === nothing && return julia_type
+        n = match(r"^NTuple\{(\d+)", julia_type)
+        n === nothing && return julia_type
+        resolved = _resolve_forward_ptr(inner, defined_names)
+        return "NTuple{$(n.captures[1]), $(resolved)}"
+    end
     m = match(r"^Ptr\{(.+)\}$", julia_type)
     isnothing(m) && return julia_type
     inner = m.captures[1]

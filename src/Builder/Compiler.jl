@@ -5190,6 +5190,13 @@ function parse_dwarf_dump(output::AbstractString;
     current_fn_is_declaration = false
     current_fn_has_code = false
     current_fn_saw_object_pointer = false
+    # `DW_AT_inline` marks the abstract definition of an inline method. It has
+    # the signature and (for an instance method) `DW_AT_object_pointer`, but no
+    # `low_pc` — the concrete copy carries the code and only
+    # `DW_AT_abstract_origin`. Recording "no object pointer" from that concrete
+    # copy would mark every inline instance method static.
+    current_fn_is_inline = false
+    current_fn_is_concrete = false
 
     # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
     # resolved back to the declaration that owns the mangled name via
@@ -5245,8 +5252,10 @@ function parse_dwarf_dump(output::AbstractString;
 
             # Definition only. A later declaration of the same key must not
             # erase the answer, and a declaration must not invent `false`.
-            if !current_fn_is_declaration &&
-               (current_fn_has_code || current_fn_saw_object_pointer)
+            # An inline method's abstract DIE (`DW_AT_inline`, no low_pc) is
+            # that definition; the concrete `DW_AT_abstract_origin` copy is not.
+            if !current_fn_is_declaration && !current_fn_is_concrete &&
+               (current_fn_has_code || current_fn_saw_object_pointer || current_fn_is_inline)
                 return_types[function_key]["has_object_pointer"] = current_fn_saw_object_pointer
             end
         end
@@ -5255,6 +5264,8 @@ function parse_dwarf_dump(output::AbstractString;
         current_fn_is_declaration = false
         current_fn_has_code = false
         current_fn_saw_object_pointer = false
+        current_fn_is_inline = false
+        current_fn_is_concrete = false
         current_function_name = nothing
         current_function_linkage = nothing
         current_function_level = nothing
@@ -5368,6 +5379,8 @@ function parse_dwarf_dump(output::AbstractString;
                 current_fn_is_declaration = false
                 current_fn_has_code = false
                 current_fn_saw_object_pointer = false
+                current_fn_is_inline = false
+                current_fn_is_concrete = false
                 current_subroutine_offset = nothing  # Reset subroutine context when entering function
 
                 # RESET VARIABLE CONTEXT to prevent leakage
@@ -5532,6 +5545,12 @@ function parse_dwarf_dump(output::AbstractString;
                                    contains(line, "DW_AT_high_pc") ||
                                    contains(line, "DW_AT_ranges"))
             current_fn_has_code = true
+        end
+        if in_function_context && contains(line, "DW_AT_inline")
+            current_fn_is_inline = true
+        end
+        if in_function_context && contains(line, "DW_AT_abstract_origin")
+            current_fn_is_concrete = true
         end
 
         if contains(line, "DW_AT_linkage_name") && in_function_context

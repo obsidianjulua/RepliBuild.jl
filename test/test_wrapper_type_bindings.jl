@@ -155,6 +155,10 @@ end
     @test WU._resolve_forward_ptr("Ptr{Ptr{_IO_FILE}}", Set{String}()) == "Ptr{Ptr{Cvoid}}"
     @test WU._resolve_forward_ptr("Ptr{_IO_FILE}", Set{String}()) == "Ptr{Cvoid}"
     @test WU._resolve_forward_ptr("Ptr{Known}", Set(["Known"])) == "Ptr{Known}"
+    # An array of pointers names the pointee too. Undefined → Cvoid; defined → kept.
+    @test WU._resolve_forward_ptr("NTuple{10, Ptr{XMLNode}}", Set{String}()) == "NTuple{10, Ptr{Cvoid}}"
+    @test WU._resolve_forward_ptr("NTuple{10, Ptr{XMLNode}}", Set(["XMLNode"])) == "NTuple{10, Ptr{XMLNode}}"
+    @test WU._resolve_forward_ptr("NTuple{4, Ptr{Ptr{Later}}}", Set{String}()) == "NTuple{4, Ptr{Ptr{Cvoid}}}"
 end
 
 # ── One prior generation kept beside a regenerated wrapper ───────────────────

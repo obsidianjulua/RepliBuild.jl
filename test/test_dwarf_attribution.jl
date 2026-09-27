@@ -501,6 +501,51 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test rt["_ZN4Calc5twiceEi"]["has_object_pointer"] == false
         @test rt["_ZN4Calc5scaleEi"]["has_object_pointer"] == true
         @test !haskey(rt["_ZN4Calc9decl_onlyEv"], "has_object_pointer")
+
+        # Inline static: the abstract DIE has the signature and no
+        # object pointer; the concrete copy has the code and only
+        # abstract_origin. The concrete copy must not be what we record.
+        inline = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : clang
+         <1><20>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <21>   DW_AT_linkage_name: _ZN7msdfgen6createEii
+            <22>   DW_AT_name        : create
+            <23>   DW_AT_declaration : 1
+         <1><30>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <31>   DW_AT_specification: <0x20>
+            <32>   DW_AT_inline      : 1
+         <2><33>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <34>   DW_AT_name        : p0
+            <35>   DW_AT_type        : <0x60>
+         <2><36>: Abbrev Number: 0
+         <1><40>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <41>   DW_AT_low_pc      : 0x2000
+            <42>   DW_AT_high_pc     : 0x2010
+            <43>   DW_AT_abstract_origin: <0x30>
+         <1><50>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <51>   DW_AT_linkage_name: _ZN7msdfgen5scaleEi
+            <52>   DW_AT_name        : scale
+            <53>   DW_AT_declaration : 1
+         <1><54>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <55>   DW_AT_specification: <0x50>
+            <56>   DW_AT_inline      : 1
+            <57>   DW_AT_object_pointer: <0x58>
+         <2><58>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <59>   DW_AT_name        : this
+            <5a>   DW_AT_type        : <0x60>
+         <2><5b>: Abbrev Number: 0
+         <1><5c>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <5d>   DW_AT_low_pc      : 0x2100
+            <5e>   DW_AT_abstract_origin: <0x54>
+         <1><60>: Abbrev Number: 4 (DW_TAG_base_type)
+            <61>   DW_AT_name        : int
+            <62>   DW_AT_byte_size   : 4
+         <1><70>: Abbrev Number: 0
+        """
+        irt, _, _, _ = DWARF_COMPILER.parse_dwarf_dump(inline)
+        @test irt["_ZN7msdfgen6createEii"]["has_object_pointer"] == false
+        @test irt["_ZN7msdfgen5scaleEi"]["has_object_pointer"] == true
     end
 
     # ── The arity guard ─────────────────────────────────────────────────────

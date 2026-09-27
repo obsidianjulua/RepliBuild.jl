@@ -1061,12 +1061,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     elseif startswith(julia_type, "NTuple{")
                         inner = peel_container_arg(julia_type)
                         if inner !== nothing
-                            # `NTuple{4, Ptr{Later}}` names Later only through a
-                            # pointer. A hard dependency would demand Later's
-                            # full layout first; the pointer does not.
+                            # `NTuple{N, Ptr{Later}}` does not need Later's layout (a
+                            # pointer is pointer-wide) but Julia still evaluates
+                            # the name while defining the struct. Order Later
+                            # first. A cycle is rewritten to `Ptr{Cvoid}` by
+                            # `_resolve_forward_ptr`.
                             if startswith(inner, "Ptr{")
                                 dep_type = unwrap_foreign_type(inner)
-                                is_soft = true
                             else
                                 dep_type = unwrap_foreign_type(inner)
                             end

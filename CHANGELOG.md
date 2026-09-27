@@ -4,6 +4,18 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Inline static methods, and arrays of pointers (2026-09-27)
+
+- An inline static method's signature lives on the abstract DIE (`DW_AT_inline`,
+  no `low_pc`, no `DW_AT_object_pointer`). The concrete copy only has
+  `DW_AT_abstract_origin` and the code. The object-pointer fact was read from
+  neither, so the wrapper invented a `this` (`EdgeSegment::create`). The abstract
+  DIE is now the definition that records it. The concrete copy is not, so an
+  inline instance method stays an instance method.
+- `NTuple{N, Ptr{T}}` is ordered before `T`, because Julia resolves `T` when the
+  struct is defined. If that order is impossible, the field becomes
+  `NTuple{N, Ptr{Cvoid}}` instead of failing to load (`DynArray<XMLNode*, 10>`).
+
 ### `long double` is an ABI trap, both directions (2026-09-27)
 
 `long double` on x86-64 is the 80-bit x87 type. Julia has no type for it, and
