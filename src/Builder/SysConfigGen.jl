@@ -67,9 +67,11 @@ One cmake library target and the flags it compiles its sources under.
 - `name::String` — cmake target name (e.g. `pcre2-8-shared`)
 - `kind::Symbol` — `:shared` or `:static`, inferred from the defines
 - `files::Vector{String}` — its TUs, source-relative (generated ones config-relative)
-- `defines::Vector{String}` — `-D` flags
+- `defines::Vector{String}` — `-D` flags, shell quotes stripped
 - `include_dirs::Vector{String}` — `-I` dirs, package-relative where possible
 - `flag_sets::Int` — distinct flag sets *within* this target; 1 is the healthy case
+- `extra_flags::Vector{String}` — the rest of the dominant flag set (`-std=`,
+  `-fvisibility=…`), not `-D` and not `-I`
 
 `kind` is read off `<target>_EXPORTS`, which cmake defines only when building a
 shared or module library — a more reliable tell than the target's name, but only
@@ -86,6 +88,7 @@ struct CMakeTarget
     defines::Vector{String}
     include_dirs::Vector{String}
     flag_sets::Int
+    extra_flags::Vector{String}
 end
 
 """
@@ -283,13 +286,58 @@ function _walk_generated(build_dir::String)
     return sort!(headers), sort!(sources)
 end
 
+# cmake's `command` string keeps the shell quotes (`-DMSDFGEN_PUBLIC=""`).
+# A whitespace split then leaves the quote characters in the token, and
+# `toml_fragment` interpolates them into a basic string that does not parse.
+# Drop a surrounding pair and any remaining `"` — an empty quoted value is
+# `-DNAME=`, which is the flag cmake meant.
+function _unquote_cmake_arg(s::AbstractString)::String
+    t = String(strip(s))
+    if ncodeunits(t) >= 2 && ((startswith(t, "\"") && endswith(t, "\"")) ||
+                              (startswith(t, "'") && endswith(t, "'")))
+        t = t[2:end-1]
+    end
+    return replace(t, "\"" => "")
+end
+
 # One compile_commands entry carries the file, the directory it is compiled in,
 # and either a `command` string or a pre-split `arguments` array.
 function _entry_args(entry::Dict)
-    haskey(entry, "arguments") && return String.(entry["arguments"])
-    # cmake does not emit embedded quotes for the flags we read, so a whitespace
-    # split is sufficient here.
-    return String.(filter(!isempty, split(strip(entry["command"]), r"\s+")))
+    raw = if haskey(entry, "arguments")
+        String.(entry["arguments"])
+    else
+        String.(filter(!isempty, split(strip(get(entry, "command", "")), r"\s+")))
+    end
+    return String[_unquote_cmake_arg(a) for a in raw]
+end
+
+# Flags worth proposing that are neither a define nor an include. `-include`
+# and a bare `-I` consume the following argument.
+function _extra_compile_flags(sig::Vector{String})::Vector{String}
+    out = String[]
+    skip = false
+    for a in sig
+        if skip
+            skip = false
+            continue
+        end
+        if a in ("-include", "-imacros", "-I", "-isystem", "-isysroot")
+            skip = true
+            continue
+        end
+        startswith(a, "-D") && continue
+        startswith(a, "-I") && continue
+        startswith(a, "-isystem") && continue
+        startswith(a, "-isysroot") && continue
+        push!(out, a)
+    end
+    return out
+end
+
+# A TOML basic string. `escape_string` covers `"` and `\` (and control
+# characters); TOML.print only accepts a table, so it cannot do this.
+function _toml_basic(s)::String
+    return "\"" * escape_string(String(s)) * "\""
 end
 
 # cmake writes objects to `CMakeFiles/<target>.dir/<path>.o`, which is the only
@@ -597,7 +645,7 @@ function cmake_probe(source_dir::String;
         push!(targets, CMakeTarget(
             tname, kind, sort!(unique(first.(entries))), defs,
             _translate_includes(main_sig, source_dir, build_dir, config_rel, clone_rel),
-            length(sigs)))
+            length(sigs), _extra_compile_flags(main_sig)))
     end
     sort!(targets; by = t -> (-length(t.files), t.name))
 
@@ -858,20 +906,28 @@ function toml_fragment(probe::CMakeProbe;
     if !isempty(excludes)
         println(io, "# exclude: every .c/.cpp in the tree this target never compiles.")
         println(io, "# Substring-matched on the clone-relative path; verify each entry.")
-        println(io, "exclude = [", join(map(e -> "\"$e\"", excludes), ", "), "]")
+        println(io, "exclude = [", join(_toml_basic.(excludes), ", "), "]")
         println(io)
     end
 
     println(io, "[compile]")
-    println(io, "flags = [", join(map(f -> "\"$f\"", vcat(["-O2", "-fPIC"], t.defines)), ", "), "]")
+    # Upstream's own `-O` / `-fPIC` win. Everything else in the dominant flag
+    # set (`-std=c99`, `-fvisibility=hidden`) is part of the compile, not a
+    # define, and dropping it builds a different library.
+    flags = String[]
+    any(f -> startswith(f, "-O"), t.extra_flags) || push!(flags, "-O2")
+    any(f -> f == "-fPIC" || f == "-fpic", t.extra_flags) || push!(flags, "-fPIC")
+    append!(flags, t.extra_flags)
+    append!(flags, t.defines)
+    println(io, "flags = [", join(_toml_basic.(flags), ", "), "]")
     println(io, "parallel = true")
     if !isempty(t.include_dirs)
-        println(io, "include_dirs = [", join(map(d -> "\"$d\"", t.include_dirs), ", "), "]")
+        println(io, "include_dirs = [", join(_toml_basic.(t.include_dirs), ", "), "]")
     end
     if !isempty(gen_files)
         println(io, "# Configure-time generated source(s), captured into $config_rel/.")
         println(io, "# The resolver only walks the clone, so these are added by hand.")
-        println(io, "source_files = [", join(map(f -> "\"$f\"", gen_files), ", "), "]")
+        println(io, "source_files = [", join(_toml_basic.(gen_files), ", "), "]")
     end
     println(io)
 
@@ -879,7 +935,7 @@ function toml_fragment(probe::CMakeProbe;
     println(io, "enable_lto = false")
     println(io, "optimization_level = \"2\"")
     if !isempty(link_libraries)
-        println(io, "link_libraries = [", join(map(l -> "\"$l\"", link_libraries), ", "), "]")
+        println(io, "link_libraries = [", join(_toml_basic.(link_libraries), ", "), "]")
     end
     println(io)
 
@@ -890,7 +946,7 @@ function toml_fragment(probe::CMakeProbe;
     println(io, "[wrap]")
     println(io, "language = \"$language\"")
     if !isempty(shim_headers)
-        println(io, "shim_headers = [", join(map(h -> "\"$h\"", shim_headers), ", "), "]")
+        println(io, "shim_headers = [", join(_toml_basic.(shim_headers), ", "), "]")
     else
         println(io, "# shim_headers = [...]   # the public header(s) users include")
     end

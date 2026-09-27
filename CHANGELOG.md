@@ -33,6 +33,9 @@ the line the harness names.
   hashes those headers too, so a nested header edit is not linked from the
   previous IR. The wrapper file is loaded under `get_module_name`
   (`vec2d` → `Vec2d.jl`), not `titlecase`.
+- **SysConfigGen proposals.** cmake command quotes are stripped
+  (`-DMSDFGEN_PUBLIC=""` → `-DMSDFGEN_PUBLIC=`), every emitted string goes
+  through `TOML.print`, and non-`-D` flags (`-std=`, `-fvisibility=`) are kept.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 

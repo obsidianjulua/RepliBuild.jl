@@ -14,6 +14,8 @@
 
 using Test
 using RepliBuild
+using Dates
+using TOML
 
 const SCG = RepliBuild.SysConfigGen
 
@@ -26,6 +28,24 @@ const SCG = RepliBuild.SysConfigGen
                              "-o", "CMakeFiles/x.dir/a.c.o", "-c", "src/a.c"])
     @test sig == ["-DFOO=1", "-I/inc", "-O2"]
     @test SCG._flag_signature(["cc", "-DA", "-o", "b.o", "-c", "b.cpp"]) == ["-DA"]
+
+    # Shell quotes in cmake's `command` string are not part of the flag.
+    @test SCG._entry_args(Dict("command" => "cc -DMSDFGEN_PUBLIC=\"\" -O2")) ==
+          ["cc", "-DMSDFGEN_PUBLIC=", "-O2"]
+    @test SCG._extra_compile_flags(["-O2", "-fPIC", "-std=c99", "-fvisibility=hidden",
+                                    "-DXML_ENABLE_VISIBILITY=1", "-I/inc"]) ==
+          ["-O2", "-fPIC", "-std=c99", "-fvisibility=hidden"]
+
+    t = SCG.CMakeTarget("expat", :shared, ["lib/xmlparse.c"],
+                        ["-DXML_ENABLE_VISIBILITY=1"], ["config"], 1,
+                        ["-std=c99", "-fvisibility=hidden"])
+    p = SCG.CMakeProbe("expat", "/s", "/b", String[], String[], String[], String[],
+                       String[], SCG.CMakeTarget[t], ["lib/xmlparse.c", "lib/other.c"],
+                       "3.28.0", now())
+    frag = SCG.toml_fragment(p; language="c")
+    @test occursin("-std=c99", frag)
+    @test occursin("-fvisibility=hidden", frag)
+    @test TOML.parse(frag) isa Dict
 
     # Target extraction, from the `output` field and from -o as a fallback.
     @test SCG._target_of(Dict("output" => "CMakeFiles/mylib.dir/src/a.c.o"), String[]) == "mylib"
