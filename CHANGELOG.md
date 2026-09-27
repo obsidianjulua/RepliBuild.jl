@@ -47,6 +47,10 @@ the line the harness names.
   name equals the class; `ns::T::T` was not. The name is `T_T`.
 - **Anonymous C++ unions are immutable byte regions**, so a parent struct
   inlines them instead of storing a pointer.
+- **A float-array member records its size.** `float v[3]` had member size 0,
+  so the return path treated the struct as unsizable and emitted an integer
+  byte blob. The callee returns that struct in XMM; the blob was read from
+  general-purpose registers.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 

@@ -5796,6 +5796,29 @@ function parse_dwarf_dump(output::AbstractString;
                                         0
                                     end
                                 end
+                            elseif isa(mt, Dict) && get(mt, "kind", "") == "array"
+                                # `float v[3]` carries no byte_size of its own.
+                                # A size of 0 made the return path treat the
+                                # struct as unsizable and emit an integer byte
+                                # blob, so the callee's XMM return was read as
+                                # GPRs.
+                                dims = get(mt, "dimensions", Int[])
+                                elem_ref = get(mt, "element_type", nothing)
+                                elem_c = isnothing(elem_ref) ? "" : resolve_type(elem_ref, type_refs)
+                                es = get_type_size(elem_c)
+                                if es > 0 && !isempty(dims)
+                                    m_size = es * prod(Int.(dims))
+                                end
+                            end
+                        end
+                        if m_size == 0
+                            am = match(r"^(.+?)((?:\[\d+\])+)$", c_type)
+                            if am !== nothing
+                                es = get_type_size(strip(String(am.captures[1])))
+                                dims = [parse(Int, d.captures[1]) for d in eachmatch(r"\[(\d+)\]", String(am.captures[2]))]
+                                if es > 0 && !isempty(dims)
+                                    m_size = es * prod(dims)
+                                end
                             end
                         end
                         member_resolved = Dict(
