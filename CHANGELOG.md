@@ -23,6 +23,7 @@ the line the harness names.
   on the pointee, which may not be declared yet).
 - **The C-bucket clang pipe no longer deadlocks** on more than ~64 KiB of
   diagnostics. Output is drained into an `IOBuffer` while the process runs.
+- **A local dependency compiles `.c` files.** It already compiled `.cpp`.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 
