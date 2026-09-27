@@ -348,6 +348,14 @@ include(joinpath(@__DIR__, "test_toolchain_advice.jl"))
 
 include(joinpath(@__DIR__, "test_project_hash.jl"))
 
+# ── noexcept routing: a bare name is a candidate, `nounwind` is the proof ────
+# A C++ throw through a Tier-3 ccall aborts the process. The routing used to
+# trust a regex that returns BARE names, so `B::get` rode along with
+# `A::get() noexcept` (and `noexcept(false)` matched too). The IR's `nounwind`
+# on the mangled definition now has to agree. Pure text, no toolchain.
+
+include(joinpath(@__DIR__, "test_noexcept_routing.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

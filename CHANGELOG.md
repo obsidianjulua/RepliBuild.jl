@@ -4,6 +4,48 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A throwing C++ function can no longer take the ccall path by sharing a name (2026-09-26)
+
+Tier 3 (`ccall`) has no landing pad. A C++ exception thrown through it runs
+`std::terminate` and the process dies (`terminate called after throwing …`, exit 134).
+So a C++ function may take Tier 3 only if no exception can leave it. That was decided
+by `_scan_noexcept_functions`, a regex over the sources that returns **bare** names.
+Every function with one of those names was marked noexcept, so:
+
+- `B::get(int)`, which throws, rode along with `A::get() const noexcept`;
+- every constructor of a class with a `noexcept` move constructor was "noexcept",
+  including the ones that validate and throw;
+- `noexcept(false)` matched the regex too.
+
+**Hub fmt shipped eight of these**: `fmt::file::file(path, flags)`,
+`fmt::buffered_file::buffered_file(path, mode)`, `fmt::file::dup2(int)` (its
+`dup2(int, std::error_code&) noexcept` overload supplied the name),
+`fmt::ostream::ostream`, and their ABI-tagged twins. Re-wrapped from the Hub's current
+metadata, `dup2(-1)` aborted with `std::system_error`. After the fix it raises
+`CxxException` and the process lives.
+
+- A name is now only a **candidate**. The proof is LLVM's `nounwind` on the function's
+  own mangled definition in the IR the binary is linked from (`_nounwind_definitions`;
+  clang stamps it on every `noexcept` definition). A definition that can unwind is
+  never `nounwind`, so every false positive above is gone.
+- Deliberately **not** widened: `nounwind` alone would also move every function the
+  optimizer proved non-throwing to Tier 3. Tried on the Hub, that surfaced Tier-3
+  emitter gaps the thunks tolerate: box2d `b2Contact::AddType`'s nested enum `Type`,
+  and fmt `buffer<char>`'s constructor with an inferred `Any` parameter. Both were
+  refused loudly by the wrapper guards, but that is a separate change. With the
+  intersection, the routing can only lose Tier-3 functions, never gain them.
+- The DWARF pass no longer sets `is_noexcept` whenever a function-level line contains
+  the substring "noexcept", and the demangled-name substring check is gone. With no IR
+  (ingest), nothing is noexcept, so all C++ goes to Tier 2.
+- Measured on 8 Hub C++ packages rebuilt from scratch copies: only fmt's routing
+  changed, where exactly those 8 functions left Tier 3 and none entered it. Verifiers
+  are unchanged: tinyxml2 11, pugixml 13, box2d 15, clipper2 233, stl 35, imgui 202,
+  msdfgen 21 plus 3 pinned broken.
+- Tests: `test_noexcept_routing.jl` (CI; the rule tests go red with the name-only rule
+  swapped back in by exact signature). The `callback_test` fixture gains
+  `collide::{Quiet,Loud}::value` and `collide::checked() noexcept(false)`, asserted by
+  tier and by a real throw in a subprocess, because a regression is an abort.
+
 ### `restrict`, `volatile` and `_Atomic` resolve; `Any` can no longer reach a ccall argument (2026-09-26)
 
 The DWARF parser had no entry for `DW_TAG_restrict_type`, `DW_TAG_volatile_type` or

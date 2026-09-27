@@ -2758,8 +2758,11 @@ function compile_project(config::RepliBuildConfig)
         create_library(config, linked_ir; per_tu_ir=ir_files)
     end
 
-    # Step 4: Extract and save compilation metadata
-    metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
+    # Step 4: Extract and save compilation metadata. `nounwind` is read off the
+    # exact module(s) the binary was linked from — the one merged module, or the
+    # per-TU list when llvm-link declined to merge.
+    nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+    metadata_path = save_compilation_metadata(config, cpp_files, binary_path; nounwind=nounwind)
 
     # Guard: the functions metadata says are wrappable must actually be reachable
     # through the dynamic symbol table the generated wrapper will dlsym against.
@@ -2894,12 +2897,10 @@ end
 """
     _scan_noexcept_functions(source_files, include_dirs) -> Set{String}
 
-Scan C++ source and header files for function declarations containing the
-`noexcept` specifier.  Returns the set of function names that are noexcept.
-
-DWARF doesn't emit a DW_AT_noexcept attribute, so we detect it from source.
-We look for patterns like `func_name(...) noexcept` in both source files
-and any headers found in include directories.
+BARE names that appear with a `noexcept` specifier in the sources and the top level
+of the include dirs. A candidate set only: see `_nounwind_definitions` for why a
+name alone must never route a function, and `extract_compilation_metadata` for the
+intersection that does.
 """
 function _scan_noexcept_functions(source_files::Vector{String},
                                   include_dirs)::Set{String}
@@ -2917,8 +2918,9 @@ function _scan_noexcept_functions(source_files::Vector{String},
         end
     end
 
-    # Regex: function_name followed by ( ... ) and then noexcept
-    # Handles multi-line by joining continuation lines
+    # Regex: function_name followed by ( ... ) and then noexcept. It also matches
+    # `noexcept(false)` and knows nothing about scope, which is why its answer is
+    # only a CANDIDATE, confirmed per mangled symbol by `_nounwind_definitions`.
     noexcept_re = r"(\w+)\s*\([^)]*\)\s*(?:const\s*)?noexcept\b"
 
     for filepath in files_to_scan
@@ -2934,6 +2936,71 @@ function _scan_noexcept_functions(source_files::Vector{String},
     end
 
     return noexcept_names
+end
+
+"""
+    _nounwind_definitions(ir_files) -> Set{String}
+
+Symbols DEFINED in `ir_files` whose LLVM function attributes include `nounwind`.
+This is what decides whether a C++ function may be called through a plain
+`ccall` (Tier 3) instead of an exception-catching thunk (Tier 2).
+
+`nounwind` is the compiler's own answer to the question the router asks: can an
+exception leave this function? clang stamps it on every definition declared
+`noexcept` (a throw inside one calls `std::terminate` in the callee, as C++
+requires, so the call site sees no unwind whichever tier calls it). It also
+stamps it on definitions the optimizer PROVES cannot unwind. Either way a plain
+`ccall` is exactly as safe as the thunk. It is read from the linked, optimized
+module that becomes the `.so`, keyed on the mangled name, so it describes the
+code that actually runs.
+
+It confirms `_scan_noexcept_functions`, which on its own did the routing. That
+scan regex-matches `name(...) noexcept` in source text and returns BARE names.
+Every function sharing a bare name with a noexcept one (`B::get` vs
+`A::get() const noexcept`, every constructor of a class with a `noexcept` move
+constructor, anything named `size`/`what`/`swap`) was then routed to Tier 3. The regex also matched `noexcept(false)`. A throw through such
+a `ccall` has no landing pad, so the process aborted (exit 134). Found by the
+2026-09-26 audit.
+"""
+function _nounwind_definitions(ir_files)::Set{String}
+    unquote(n) = startswith(n, "\"") ?
+        replace(n[2:end-1], r"\\([0-9A-Fa-f]{2})" => h -> string(Char(parse(UInt8, h[2:3], base=16)))) : n
+    has_nounwind(attrs) = occursin(r"(?:^|\s)nounwind(?:\s|$)", attrs)
+
+    group_nounwind = Dict{String,Bool}()
+    defs = Tuple{String,String}[]     # (symbol, text after the parameter list)
+    for f in ir_files
+        isfile(f) || continue
+        for line in eachline(f)
+            if startswith(line, "define ")
+                m = match(r"@(\"(?:[^\"\\]|\\.)*\"|[-a-zA-Z$._][-a-zA-Z$._0-9]*)\(", line)
+                m === nothing && continue
+                # Skip to the parameter list's closing paren: parameter attributes
+                # carry parens of their own (`dereferenceable(8)`, `align(16)`),
+                # and function attributes only follow the whole list.
+                i = m.offset + ncodeunits(m.match)
+                depth = 1
+                while i <= ncodeunits(line) && depth > 0
+                    c = codeunit(line, i)
+                    c == UInt8('(') && (depth += 1)
+                    c == UInt8(')') && (depth -= 1)
+                    i += 1
+                end
+                push!(defs, (unquote(String(m.captures[1])), line[i:end]))
+            elseif startswith(line, "attributes #")
+                g = match(r"^attributes (#\d+) = \{(.*)\}", line)
+                g === nothing || (group_nounwind[g.captures[1]] = has_nounwind(g.captures[2]))
+            end
+        end
+    end
+
+    out = Set{String}()
+    for (name, tail) in defs
+        if has_nounwind(tail) || any(r -> get(group_nounwind, r.match, false), eachmatch(r"#\d+", tail))
+            push!(out, name)
+        end
+    end
+    return out
 end
 
 # =============================================================================
@@ -5377,19 +5444,9 @@ function parse_dwarf_dump(output::AbstractString;
             end
         end
 
-        # Extract noexcept specification
-        # DWARF5+: DW_AT_noexcept (or inferred from demangled name)
-        # GCC/Clang may also use DW_AT_calling_convention or encode in type
-        if (contains(line, "DW_AT_noexcept") || contains(line, "noexcept")) && in_function_context
-            if !isnothing(current_function_offset)
-                if !haskey(type_refs, current_function_offset)
-                    type_refs[current_function_offset] = Dict{String,Any}()
-                end
-                if isa(type_refs[current_function_offset], Dict)
-                    type_refs[current_function_offset]["is_noexcept"] = true
-                end
-            end
-        end
+        # (noexcept is NOT read from DWARF: there is no DW_AT_noexcept, and a
+        # substring match on "noexcept" here flagged any function whose name
+        # contained it. Unwinding is decided from the IR — `_nounwind_definitions`.)
 
         # Extract virtuality
         # Example: <60>   DW_AT_virtuality  : 1 (virtual)
@@ -5892,7 +5949,8 @@ Extract compilation metadata from source files and binary.
 This is the core of automatic wrapper generation!
 """
 function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
-                                      binary_path::String)::Dict{String,Any}
+                                      binary_path::String;
+                                      nounwind::Union{Nothing,Set{String}}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
@@ -5931,8 +5989,6 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             # Merge is_vararg
             func["is_vararg"] = get(dwarf_info, "is_vararg", false)
 
-            # Merge is_noexcept from DWARF info or demangled name
-            func["is_noexcept"] = get(dwarf_info, "is_noexcept", false)
 
             # Merge parameters if available from DWARF (at function level, not in return_type)
             if haskey(dwarf_info, "parameters") && !isempty(dwarf_info["parameters"])
@@ -5945,23 +6001,30 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             func["return_type_source"] = "inferred"
             func["parameters_source"] = "inferred"
             func["is_vararg"] = false
-            # Detect noexcept from demangled name as fallback
-            demangled = get(func, "demangled", "")
-            func["is_noexcept"] = occursin("noexcept", demangled)
         end
     end
 
-    # Detect noexcept from source files (DWARF doesn't emit DW_AT_noexcept).
-    # Scan source + header files for function declarations with 'noexcept' specifier.
-    if config.wrap.language != :c
-        noexcept_names = _scan_noexcept_functions(source_files, get_include_dirs(config))
-        for func in functions
-            name = get(func, "name", "")
-            if name in noexcept_names && !get(func, "is_noexcept", false)
-                func["is_noexcept"] = true
-            end
-        end
-    end
+    # "Can an exception leave this function?" — the question the tier router asks
+    # (DispatchLogic.is_ccall_safe) and the thunk generator asks (FunctionGen:
+    # try_call vs call). A function counts as noexcept only when BOTH:
+    #
+    #   * its bare name was declared `noexcept` somewhere in the sources — the
+    #     candidate set (`_scan_noexcept_functions`), and
+    #   * its own mangled DEFINITION is `nounwind` in the IR the binary was linked
+    #     from (`_nounwind_definitions`) — the proof.
+    #
+    # The proof removes every false positive of the name scan: a bare-name
+    # collision, `noexcept(false)`, a throwing constructor of a class with a
+    # noexcept move constructor. A definition that can unwind is never `nounwind`.
+    # The candidate set keeps the routing from GROWING: `nounwind` alone would also
+    # send every function the optimizer merely proved non-throwing to Tier 3, and
+    # the Tier-3 emitter has type gaps the thunks tolerate (box2d `AddType`'s
+    # nested enum, fmt's inferred constructor signatures). Widening is a separate
+    # change, after those gaps are closed. No IR (ingest mode) means nothing is
+    # noexcept, so all C++ goes to Tier 2, the router's documented safe default.
+    candidates = config.wrap.language == :c ? Set{String}() :
+                 _scan_noexcept_functions(source_files, get_include_dirs(config))
+    _mark_noexcept!(functions, candidates, nounwind)
 
     # Build type registry (basic types + inferred types)
     type_registry = build_type_registry(functions)
@@ -6050,6 +6113,25 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     )
 
     return metadata
+end
+
+"""
+    _mark_noexcept!(functions, candidates, nounwind)
+
+Set `is_noexcept` on every function: `true` only when its bare `name` is a
+`noexcept` candidate from the sources AND its `mangled` definition is `nounwind`
+in the IR. `nounwind === nothing` (no IR, i.e. ingest) marks nothing, which sends
+all C++ to Tier 2. The reasoning is in `extract_compilation_metadata`, and the
+test is `test_noexcept_routing.jl`.
+"""
+function _mark_noexcept!(functions, candidates::Set{String},
+                         nounwind::Union{Nothing,Set{String}})
+    for func in functions
+        func["is_noexcept"] = nounwind !== nothing &&
+                              get(func, "name", "") in candidates &&
+                              get(func, "mangled", "") in nounwind
+    end
+    return functions
 end
 
 """
@@ -6787,9 +6869,10 @@ Save compilation metadata to JSON file next to binary.
 This enables automatic wrapper generation!
 """
 function save_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
-                                   binary_path::String)::String
+                                   binary_path::String;
+                                   nounwind::Union{Nothing,Set{String}}=nothing)::String
     # Extract metadata
-    metadata = extract_compilation_metadata(config, source_files, binary_path)
+    metadata = extract_compilation_metadata(config, source_files, binary_path; nounwind=nounwind)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their

@@ -210,7 +210,12 @@ If you are asked to work on it:
   `Wrapper/Utils.jl` holds the shared derivations. `Wrapper/Rust/` is experimental
   (`extern "C"` + `#[repr(C)]` only).
 - `Wrapper/DispatchLogic.jl` — tier selection. Any C++ function not `noexcept` goes to
-  Tier 2. `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
+  Tier 2, and **noexcept means a declared-noexcept bare name (candidate) AND a
+  `nounwind` mangled definition in the linked IR** (`_mark_noexcept!`). Never route on
+  a name alone: a throw through a Tier-3 ccall aborts the process
+  (`test_noexcept_routing.jl`, `callback_test` "bare-name noexcept collision"). A
+  `nounwind`-only widening would expose Tier-3 emitter gaps (see CHANGELOG
+  2026-09-26). `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
   DWARF against natural alignment, not the emitted struct with its `_pad_N`. A layout
   check must model what the generator emits.
 - `IRGen/JLCSIRGenerator.jl` + `ir_gen/` (`FunctionGen`, `StructGen`, `ArrayViewGen`) —
