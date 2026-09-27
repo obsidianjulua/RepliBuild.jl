@@ -470,9 +470,12 @@ end
     end
     """, "M") === nothing
 
-    # `Any` in the ARGUMENT tuple is also legitimate — it is the return
-    # position alone that is wrong. The classic-form pattern anchors on the
-    # element right after the (name, lib) pair for exactly this reason.
+    # `Any` in the ARGUMENT tuple is NOT this guard's concern — it is just as
+    # wrong (a boxed jl_value_t* reaches C; see the next testset), but that is
+    # `_assert_no_any_ccall_argument`'s job. This one must stay anchored on the
+    # element right after the (name, lib) pair, i.e. the return position only.
+    # (This comment called argument-position `Any` "legitimate" until
+    # 2026-09-26; that belief is how cglm's 58 `restrict` functions shipped.)
     @test W._assert_no_any_ccall_return(
         "function h(x)::Cint\n    return ccall((:h, LIBRARY_PATH), Cint, (Any,), x)\nend\n",
         "M") === nothing
@@ -489,6 +492,104 @@ end
     # Reachable from the real write path, or it prevents nothing.
     @test occursin("_assert_no_any_ccall_return",
                    read(joinpath(@__DIR__, "..", "src", "Wrapper", "Generator.jl"), String))
+end
+
+# The argument-side twin. `Any` in a foreign-call ARGUMENT position passes the
+# Julia object itself: a `Ptr{Cint}` arrives boxed, a `Vector{Cint}` as its array
+# header. No crash — the callee computes on Julia's object layout and returns a
+# plausible wrong number. It reached the argument tuple through an unresolved
+# parameter type (`c_type` "unknown"): `T *restrict` did exactly that, because
+# the restrict DIE was unmodelled, and Hub cglm shipped 58 such functions.
+@testset "Foreign call must not take Any" begin
+    W = RepliBuild.Wrapper
+    offenders(src) = W._any_foreign_call_arguments(src)
+    refused(src) = try
+        W._assert_no_any_ccall_argument(src, "M"); ""
+    catch e
+        sprint(showerror, e)
+    end
+
+    # Must-flag shapes -----------------------------------------------------
+    # The cglm shape, verbatim: Tier-3 ccall with an `Any` element.
+    cglm = """
+    function glmc_mat4_make(src::Any, dest::Any)::Cvoid
+        ccall((:glmc_mat4_make, LIBRARY_PATH), Cvoid, (Any, Ptr{Cvoid},), src, dest)
+    end
+    """
+    @test offenders(cglm) == [("glmc_mat4_make", "ccall")]
+    err = refused(cglm)
+    @test occursin("glmc_mat4_make", err)
+    @test occursin("jl_value_t", err)
+    @test occursin("unknown", err)            # names where to look in the metadata
+    @test occursin("exclude_symbols", err)    # and the escape hatch
+
+    # The Tier-1 kernel carries the same tuple twice: the ccall it splices in
+    # output mode, and the llvmcall Tuple{…}. Both are foreign calls.
+    kernel = raw"""
+    @generated function _TIER1_f(src::Any, p::Ptr{Cvoid})
+        if ccall(:jl_generating_output, Cint, ()) == 1
+            return :(ccall((:f, LIBRARY_PATH), Cvoid, (Any, Ptr{Cvoid},), src, p))
+        end
+        ir = read(_SLICE_f, String)
+        return :(Base.llvmcall(($ir, "f"), Cvoid, Tuple{Any, Ptr{Cvoid}}, src, p))
+    end
+    """
+    @test Set(last.(offenders(kernel))) == Set(["ccall", "llvmcall"])
+
+    # A return type with commas in it — where a `[^,]+` text pattern stops.
+    @test offenders("""
+    function g(x)
+        ccall((:g, LIBRARY_PATH), NTuple{2, UInt64}, (Any, Cint), x, 1)
+    end
+    """) == [("g", "ccall")]
+
+    # @ccall FIXED arguments come from DWARF, so they are checked.
+    @test offenders("""
+    function v(x)
+        @ccall LIBRARY_PATH.var"v"(x::Any; va_1::Cint)::Cint
+    end
+    """) == [("v", "@ccall")]
+
+    # Must-not-flag shapes -------------------------------------------------
+    # `::Any` in the Julia signature with typed foreign-call arguments: what
+    # every generated function looks like.
+    @test isempty(offenders("""
+    function f(x::Any, y::Any)::Cint
+        return ccall((:f, LIBRARY_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), x, y)
+    end
+    """))
+    # The VARIADIC `Any` is the user's own `[wrap.varargs]` declaration (Hub lua
+    # formats an object address through `lua_pushfstring(L, "%p", …)`), not a
+    # derived type.
+    @test isempty(offenders("""
+    function lua_pushfstring_Any(L::Any, fmt::Any, va_1::Any)
+        ptr = @ccall LIBRARY_PATH.var"lua_pushfstring"(L::Ptr{lua_State}, fmt::Ptr{UInt8}; va_1::Any)::Cstring
+    end
+    """))
+    # `Any` as a RETURN type is the sibling guard's, not this one's.
+    @test isempty(offenders("function r()\n    ccall((:r, LIBRARY_PATH), Any, (Cint,), 1)\nend\n"))
+    # JIT dispatch is not a foreign call.
+    @test isempty(offenders("""
+    function t(x::Any)
+        return RepliBuild.JITManager.invoke("_mlir_ciface_t_thunk", Cint, x)
+    end
+    """))
+    @test W._assert_no_any_ccall_argument("function f()\nend\n", "M") === nothing
+
+    # Reachable from the real write path, or it prevents nothing.
+    src = read(joinpath(@__DIR__, "..", "src", "Wrapper", "Generator.jl"), String)
+    loadable = match(r"function _assert_wrapper_loadable\(.*?\nend\n"s, src)
+    @test loadable !== nothing && occursin("_assert_no_any_ccall_argument(", loadable.match)
+end
+
+@testset "container peel does not stop at the first brace" begin
+    W = RepliBuild.Wrapper
+    @test W.peel_container_arg("NTuple{4, Ptr{Later}}") == "Ptr{Later}"
+    @test W.unwrap_foreign_type("NTuple{4, Ptr{Later}}") == "Later"
+    @test W.unwrap_foreign_type("Ptr{Ptr{Later}}") == "Later"
+    @test W.peel_container_arg("Int128") === nothing
+    @test "Int128" in W._FOREIGN_BUILTIN_TYPES
+    @test "ComplexF64" in W._FOREIGN_BUILTIN_TYPES
 end
 
 end  # testset

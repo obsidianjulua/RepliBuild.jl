@@ -26,6 +26,83 @@ import ..INTERNAL_TYPE_BLOCKLIST
 import ..Compiler: _pe_exported_names
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
+# Julia types a foreign signature may name without the generator declaring them.
+# `Int128` / `UInt128` / `ComplexF32` / `ComplexF64` are in Base. Emitting
+# `struct Int128 end` for `__int128` shadows Base and every call with a real
+# `Int128` misses the method. Both generators consult this one set.
+const _FOREIGN_BUILTIN_TYPES = Set{String}([
+    "Cvoid", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Clong", "Culong",
+    "Cshort", "Cushort", "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool",
+    "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64",
+    "UInt128", "Int128", "Csize_t", "Clonglong", "Culonglong", "Cptrdiff_t",
+    "Cssize_t", "Cwchar_t", "Cstring", "Float32", "Float64",
+    "ComplexF32", "ComplexF64", "Any", "Nothing",
+])
+
+# Index of the `}` that closes the `{` at `open_at`, or 0 if the braces do not
+# balance. Byte-oriented: these spellings are ASCII.
+function _brace_close(s::AbstractString, open_at::Int)::Int
+    depth = 0
+    i = open_at
+    n = lastindex(s)
+    while i <= n
+        c = s[i]
+        if c == '{'
+            depth += 1
+        elseif c == '}'
+            depth -= 1
+            depth == 0 && return i
+        end
+        i = nextind(s, i)
+    end
+    return 0
+end
+
+"""
+    peel_container_arg(spelling) -> Union{String,Nothing}
+
+The type argument of a `Ptr{T}`, `Ref{T}`, or `NTuple{N, T}` that is the whole
+string, matched on braces. `NTuple{4, Ptr{Later}}` yields `Ptr{Later}`. A
+`[^}]` scan of the same spelling stops at the inner `}` and invents a type
+named `Ptr{Later`.
+"""
+function peel_container_arg(spelling::AbstractString)::Union{String,Nothing}
+    s = String(strip(spelling))
+    prefix = if startswith(s, "NTuple{")
+        "NTuple{"
+    elseif startswith(s, "Ptr{")
+        "Ptr{"
+    elseif startswith(s, "Ref{")
+        "Ref{"
+    else
+        return nothing
+    end
+    open_at = ncodeunits(prefix)          # '{' — these prefixes are ASCII
+    close_at = _brace_close(s, open_at)
+    (close_at == 0 || close_at != lastindex(s)) && return nothing
+    payload = s[nextind(s, open_at):prevind(s, close_at)]
+    if prefix == "NTuple{"
+        m = match(r"^\d+\s*,\s*(.*)$"s, payload)
+        return m === nothing ? nothing : String(strip(m.captures[1]))
+    end
+    return String(strip(payload))
+end
+
+"""
+    unwrap_foreign_type(spelling) -> String
+
+Peel `Ptr` / `Ref` / `NTuple` until a bare name remains.
+`NTuple{4, Ptr{Later}}` → `Later`.
+"""
+function unwrap_foreign_type(spelling::AbstractString)::String
+    s = String(strip(spelling))
+    while true
+        inner = peel_container_arg(s)
+        inner === nothing && return s
+        s = inner
+    end
+end
+
 """Escape a name if it's a Julia keyword, using var\"...\" syntax."""
 function _escape_keyword(name::String)::String
     if name in _JULIA_KEYWORDS
@@ -707,6 +784,7 @@ const _JULIA_BUILTIN_TYPES = Set([
     "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
     "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
     "Cstring", "Float32", "Float64", "Any", "Nothing", "Cintptr_t", "Cuintptr_t",
+    "Int128", "UInt128", "ComplexF32", "ComplexF64",
 ])
 
 # Type constructors that legitimately appear in a ccall type position but are
@@ -2171,7 +2249,17 @@ function _dedup_method_chunks(chunks::Vector{String})
     # Which chunk claimed each signature, so a drop can name what shadowed it.
     claimed_by = Dict{String,String}()
     dropped = Tuple{String,String,String}[]   # (signature, dropped symbol, kept symbol)
-    for i in length(chunks):-1:1
+    # A trap stub (a function the generator refuses to call, see
+    # `_is_trap_chunk`) never claims a signature ahead of a callable definition,
+    # wherever the two sit. pugixml's `child(const char*)` and
+    # `child(std::string_view)` both become `(this::Any, arg::Any)`; the
+    # string_view one is last and is a trap, and last-definition-wins would make
+    # the working overload unreachable for a function that cannot be called
+    # anyway. Callables are claimed first, traps only fill what is left; among
+    # callables, and among traps, the last definition still wins.
+    order = vcat([i for i in length(chunks):-1:1 if !_is_trap_chunk(chunks[i])],
+                 [i for i in length(chunks):-1:1 if _is_trap_chunk(chunks[i])])
+    for i in order
         ks = _method_sig_keys(chunks[i])
         isempty(ks) && continue
         if all(k -> k in seen, ks)
@@ -2231,6 +2319,51 @@ function _dedup_method_chunks(chunks::Vector{String})
     end
     return chunks[keep]
 end
+
+"""
+    _x87_crossings(func) -> Vector{String}
+
+What `func` passes or returns BY VALUE as `long double` (x86-64: the 80-bit x87
+type, in a 16-byte slot), one phrase each; empty when nothing does.
+
+There is no Julia type for it and no `ccall` shape. A return comes back in the
+x87 register `ST0`, where `ccall` never looks: the return mapper's
+`NTuple{2, UInt64}` read RAX:RDX and handed back garbage that looked like data
+(F5b). A parameter is X87 class, passed in memory; the parameter mapper's `Any`
+was refused only by making the whole wrapper refuse to write. Both generators
+turn such a function into a trap, so it is loud and the rest of the module
+loads. A `long double*` is an ordinary pointer and is not reported.
+"""
+function _x87_crossings(func)
+    norm(t) = strip(replace(String(t), r"^(?:(?:const|volatile)\s+)+" => "",
+                                       r"(?:\s+(?:const|volatile))+$" => ""))
+    out = String[]
+    for p in get(func, "parameters", [])
+        norm(get(p, "c_type", "")) == "long double" &&
+            push!(out, "takes `long double` $(get(p, "name", "")) by value")
+    end
+    norm(get(get(func, "return_type", Dict()), "c_type", "")) == "long double" &&
+        push!(out, "returns `long double`")
+    return out
+end
+
+"""
+    _x87_trap_body(julia_name, crossings) -> String
+
+The body of the trap `_x87_crossings` calls for, shared by both generators.
+"""
+_x87_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name'. It $(join(crossings, " and ")). " *
+        "`long double` is the 80-bit x87 type: Julia has no equivalent, and ccall " *
+        "cannot return it (x87 register ST0) or pass it (x87 memory class). Keep it " *
+        "out with [wrap] exclude_symbols, or wrap a `double`-typed shim.") * ")\n"
+
+# A chunk whose function body only raises one of the generators' refusal
+# errors: GeneratorC's "ABI Safety Trap" / "FFI Safety Trap" stubs and
+# GeneratorCpp's untypable by-value record trap.
+_is_trap_chunk(chunk::AbstractString) =
+    occursin(r"Base\.error\(\"(?:\"\"\s*)?(?:ABI|FFI) Safety Trap", chunk)
 
 # The mangled symbol a chunk was generated from, as recorded in its own
 # docstring ("- Mangled symbol: `_ZN…`"). Read back off the emitted text rather

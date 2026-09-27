@@ -55,7 +55,7 @@ recompiles only that file; a flag/define/include change busts the whole set
 (correct — they affect every translation unit).
 """
 function compute_compile_fingerprint(config::RepliBuildConfig)::String
-    h = hash("replibuild-compile-fingerprint-v1")
+    h = hash("replibuild-compile-fingerprint-v2")
     for f in get_compile_flags(config)
         h = hash(f, h)
     end
@@ -63,8 +63,26 @@ function compute_compile_fingerprint(config::RepliBuildConfig)::String
         h = hash(k, h)
         h = hash(v, h)
     end
+    # Header *contents*, not just the -I path. The per-file cache otherwise
+    # serves IR compiled against the previous header: `needs_recompile` only
+    # compares the source file's mtime, and a nested `include/<lib>/<lib>.h`
+    # edit does not touch that file. The project hash already notices the
+    # edit and refuses the "project unchanged" fast path; without this, the
+    # file cache then links the old IR anyway.
     for d in get_include_dirs(config)
         h = hash(d, h)   # -I path affects header resolution, independent of mtime
+        isdir(d) || continue
+        for (root, dirs, files) in walkdir(d)
+            filter!(x -> !(x in (".git", "build", ".replibuild_cache")), dirs)
+            sort!(dirs)
+            for f in sort(files)
+                any(endswith(f, ext) for ext in (".h", ".hpp", ".hxx", ".hh")) || continue
+                path = joinpath(root, f)
+                isfile(path) || continue
+                h = hash(relpath(path, d), h)
+                h = hash(read(path), h)
+            end
+        end
     end
     # Compiler identity: the C path emits via the JLL clang pinned to
     # Base.libllvm_version, so a Julia/LLVM bump must invalidate. Target triple
@@ -505,13 +523,16 @@ function _clang_for_c_bucket(compiler::String, cmd_args)
         isempty(rtlib)   || push!(extra, "-rtlib=$rtlib")
         cmd = ignorestatus(`$(clang_cmd) $extra $cmd_args`)
 
-        out_pipe = Pipe()
-        err_pipe = Pipe()
-        process = run(pipeline(cmd, stdout = out_pipe, stderr = err_pipe))
-        close(out_pipe.in)
-        close(err_pipe.in)
+        # `Pipe()` plus a read after `run` deadlocks once the child writes more
+        # than the OS pipe buffer (~64 KiB): the child blocks on write, the
+        # parent blocks on the child's exit, and nobody drains. `IOBuffer`
+        # through `pipeline` is drained while the process runs — the same shape
+        # `BuildBridge._run_command_impl` already uses.
+        out_buf = IOBuffer()
+        err_buf = IOBuffer()
+        process = run(pipeline(cmd, stdout = out_buf, stderr = err_buf))
 
-        return (String(read(out_pipe)) * "\n" * String(read(err_pipe)),
+        return (String(take!(out_buf)) * "\n" * String(take!(err_buf)),
                 process.exitcode)
     catch
         return BuildBridge.execute(compiler, cmd_args)
@@ -2758,8 +2779,11 @@ function compile_project(config::RepliBuildConfig)
         create_library(config, linked_ir; per_tu_ir=ir_files)
     end
 
-    # Step 4: Extract and save compilation metadata
-    metadata_path = save_compilation_metadata(config, cpp_files, binary_path)
+    # Step 4: Extract and save compilation metadata. `nounwind` is read off the
+    # exact module(s) the binary was linked from — the one merged module, or the
+    # per-TU list when llvm-link declined to merge.
+    nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+    metadata_path = save_compilation_metadata(config, cpp_files, binary_path; nounwind=nounwind)
 
     # Guard: the functions metadata says are wrappable must actually be reachable
     # through the dynamic symbol table the generated wrapper will dlsym against.
@@ -2894,12 +2918,10 @@ end
 """
     _scan_noexcept_functions(source_files, include_dirs) -> Set{String}
 
-Scan C++ source and header files for function declarations containing the
-`noexcept` specifier.  Returns the set of function names that are noexcept.
-
-DWARF doesn't emit a DW_AT_noexcept attribute, so we detect it from source.
-We look for patterns like `func_name(...) noexcept` in both source files
-and any headers found in include directories.
+BARE names that appear with a `noexcept` specifier in the sources and the top level
+of the include dirs. A candidate set only: see `_nounwind_definitions` for why a
+name alone must never route a function, and `extract_compilation_metadata` for the
+intersection that does.
 """
 function _scan_noexcept_functions(source_files::Vector{String},
                                   include_dirs)::Set{String}
@@ -2917,8 +2939,9 @@ function _scan_noexcept_functions(source_files::Vector{String},
         end
     end
 
-    # Regex: function_name followed by ( ... ) and then noexcept
-    # Handles multi-line by joining continuation lines
+    # Regex: function_name followed by ( ... ) and then noexcept. It also matches
+    # `noexcept(false)` and knows nothing about scope, which is why its answer is
+    # only a CANDIDATE, confirmed per mangled symbol by `_nounwind_definitions`.
     noexcept_re = r"(\w+)\s*\([^)]*\)\s*(?:const\s*)?noexcept\b"
 
     for filepath in files_to_scan
@@ -2934,6 +2957,71 @@ function _scan_noexcept_functions(source_files::Vector{String},
     end
 
     return noexcept_names
+end
+
+"""
+    _nounwind_definitions(ir_files) -> Set{String}
+
+Symbols DEFINED in `ir_files` whose LLVM function attributes include `nounwind`.
+This is what decides whether a C++ function may be called through a plain
+`ccall` (Tier 3) instead of an exception-catching thunk (Tier 2).
+
+`nounwind` is the compiler's own answer to the question the router asks: can an
+exception leave this function? clang stamps it on every definition declared
+`noexcept` (a throw inside one calls `std::terminate` in the callee, as C++
+requires, so the call site sees no unwind whichever tier calls it). It also
+stamps it on definitions the optimizer PROVES cannot unwind. Either way a plain
+`ccall` is exactly as safe as the thunk. It is read from the linked, optimized
+module that becomes the `.so`, keyed on the mangled name, so it describes the
+code that actually runs.
+
+It confirms `_scan_noexcept_functions`, which on its own did the routing. That
+scan regex-matches `name(...) noexcept` in source text and returns BARE names.
+Every function sharing a bare name with a noexcept one (`B::get` vs
+`A::get() const noexcept`, every constructor of a class with a `noexcept` move
+constructor, anything named `size`/`what`/`swap`) was then routed to Tier 3. The regex also matched `noexcept(false)`. A throw through such
+a `ccall` has no landing pad, so the process aborted (exit 134). Found by the
+2026-09-26 audit.
+"""
+function _nounwind_definitions(ir_files)::Set{String}
+    unquote(n) = startswith(n, "\"") ?
+        replace(n[2:end-1], r"\\([0-9A-Fa-f]{2})" => h -> string(Char(parse(UInt8, h[2:3], base=16)))) : n
+    has_nounwind(attrs) = occursin(r"(?:^|\s)nounwind(?:\s|$)", attrs)
+
+    group_nounwind = Dict{String,Bool}()
+    defs = Tuple{String,String}[]     # (symbol, text after the parameter list)
+    for f in ir_files
+        isfile(f) || continue
+        for line in eachline(f)
+            if startswith(line, "define ")
+                m = match(r"@(\"(?:[^\"\\]|\\.)*\"|[-a-zA-Z$._][-a-zA-Z$._0-9]*)\(", line)
+                m === nothing && continue
+                # Skip to the parameter list's closing paren: parameter attributes
+                # carry parens of their own (`dereferenceable(8)`, `align(16)`),
+                # and function attributes only follow the whole list.
+                i = m.offset + ncodeunits(m.match)
+                depth = 1
+                while i <= ncodeunits(line) && depth > 0
+                    c = codeunit(line, i)
+                    c == UInt8('(') && (depth += 1)
+                    c == UInt8(')') && (depth -= 1)
+                    i += 1
+                end
+                push!(defs, (unquote(String(m.captures[1])), line[i:end]))
+            elseif startswith(line, "attributes #")
+                g = match(r"^attributes (#\d+) = \{(.*)\}", line)
+                g === nothing || (group_nounwind[g.captures[1]] = has_nounwind(g.captures[2]))
+            end
+        end
+    end
+
+    out = Set{String}()
+    for (name, tail) in defs
+        if has_nounwind(tail) || any(r -> get(group_nounwind, r.match, false), eachmatch(r"#\d+", tail))
+            push!(out, name)
+        end
+    end
+    return out
 end
 
 # =============================================================================
@@ -3322,7 +3410,26 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
     "complex double" => "ComplexF64",
     "float _Complex" => "ComplexF32",
     "double _Complex" => "ComplexF64",
+    # DWARF spells every width `complex`; `_complex_base_name` rewrites it
+    # to one of these before the lookup.
+    "complex float" => "ComplexF32",
+    "complex double" => "ComplexF64",
+    "complex long double" => "ComplexF64",
 )
+
+"""
+    _complex_base_name(nbytes) -> String
+
+DWARF names every C `_Complex` width `complex`. The byte size is the element
+width doubled: 8 is `float`, 16 is `double`, 32 is `long double`. An unknown
+size stays `complex`, which maps to `Any` and is refused rather than guessed.
+"""
+function _complex_base_name(nbytes::Int)::String
+    nbytes == 8 && return "complex float"
+    nbytes == 16 && return "complex double"
+    nbytes == 32 && return "complex long double"
+    return "complex"
+end
 
 """
 Comprehensive C/C++ type to Julia type mapping.
@@ -3371,9 +3478,10 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         return "Ptr{Cvoid}"
     end
 
-    # Handle reference types (T&)
+    # Handle reference types (T& and T&&: both are an address at the ABI level —
+    # stripping one `&` from `T&&` gave `Ref{Ref{T}}`)
     if endswith(c_type, "&")
-        base_type = strip(replace(c_type, r"&$" => ""))
+        base_type = strip(replace(c_type, r"&&?$" => ""))
         base_type = replace(base_type, r"\bconst\b" => "")
         base_type = replace(base_type, r"\bvolatile\b" => "")
         base_type = strip(base_type)
@@ -3755,11 +3863,12 @@ end
 
 """
 Extract return types and struct definitions from DWARF debug info.
-Returns: (return_types_dict, struct_defs_dict)
+Returns: (return_types, struct_defs, global_vars, typedef_table, record_abi)
   - return_types: Dict{mangled_name => {c_type, julia_type, size}}
   - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
+  - record_abi: Dict{record_name => {byte_size, pass, empty}} for by-value records
 """
-function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
+function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
     # GNU binutils format only — `_dwarf_dumper()` picks readelf (ELF) or
     # objdump (PE). Both print from binutils' dwarf.c; llvm-dwarfdump is a
     # different dialect and is rejected there. A fallback that returns empty
@@ -3781,7 +3890,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         Vector{Dict{Int,String}}()
     end
 
-    (return_types, struct_defs, global_vars, typedefs) = parse_dwarf_dump(output; file_tables=file_tables)
+    (return_types, struct_defs, global_vars, typedefs, record_abi) = parse_dwarf_dump(output; file_tables=file_tables)
 
     # A non-empty dump that yields nothing is a dialect or format mismatch, not
     # a library without debug info — and it is indistinguishable downstream from
@@ -3791,7 +3900,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         error(_dwarf_format_mismatch_error(dumper, binary_path, length(output)))
     end
 
-    return (return_types, struct_defs, global_vars, typedefs)
+    return (return_types, struct_defs, global_vars, typedefs, record_abi)
 end
 
 """
@@ -3861,7 +3970,7 @@ function check_param_arity!(return_types::Dict{String,Dict{String,Any}}, die_par
 end
 
 """
-    parse_dwarf_dump(output) -> (return_types, struct_defs, global_vars, typedef_table)
+    parse_dwarf_dump(output) -> (return_types, struct_defs, global_vars, typedef_table, record_abi)
 
 Parse a GNU `readelf --debug-dump=info` dump into the type/signature tables.
 
@@ -3876,7 +3985,7 @@ does — the filter simply does not run, and parsing behaves exactly as before.
 """
 function parse_dwarf_dump(output::AbstractString;
                           file_tables::Vector{Dict{Int,String}}=Vector{Dict{Int,String}}()
-                         )::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
+                         )::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
     # Which CU we are inside, 1-based; readelf emits line programs and DIEs in the
     # same section order, so the Nth "Compilation Unit @ offset" uses the Nth table.
     cu_index = 0
@@ -3888,6 +3997,7 @@ function parse_dwarf_dump(output::AbstractString;
     current_function = nothing
     current_linkage_name = nothing
     type_refs = Dict{String,Any}()  # offset => type_name (String) or type_info (Dict)
+    base_byte_size = Dict{String,Int}()  # base-type offset => DW_AT_byte_size
 
     # First pass: Build type reference table
     # We need to handle: base types, pointer types, const types, reference types
@@ -4042,6 +4152,51 @@ function parse_dwarf_dump(output::AbstractString;
                 current_type_offset = "0x" * offset_match.captures[1]
                 type_refs[current_type_offset] = Dict{String,Any}("kind" => "reference", "target" => nothing)
                 offset_to_kind[current_type_offset] = :reference
+            end
+        end
+
+        # `T&&` (DW_TAG_rvalue_reference_type). An address at the ABI level, exactly
+        # like `T&`, and it resolves to `T&&` so every mapper sees a reference. It
+        # was unmodelled, so a move constructor's `T&&` parameter resolved to
+        # "unknown": `Any` in the signature, and an untyped slot in the thunk.
+        # `contains(line, "DW_TAG_reference_type")` above does not match this tag.
+        if contains(line, "DW_TAG_rvalue_reference_type")
+            offset_match = match(r"<\d+><([^>]+)>", line)
+            if !isnothing(offset_match)
+                current_type_offset = "0x" * offset_match.captures[1]
+                type_refs[current_type_offset] = Dict{String,Any}("kind" => "rvalue_reference", "target" => nothing)
+                offset_to_kind[current_type_offset] = :reference
+            end
+        end
+
+        # Qualifiers that change nothing at the call boundary: `restrict`,
+        # `volatile`, `_Atomic`. Each is its own DIE in the type chain
+        # (`a: restrict → pointer → const → int`), exactly like `const`, and
+        # each is resolved straight through to its target (see resolve_type).
+        #
+        # Without an entry here the DIE has no `type_refs` slot at all, so
+        # `resolve_type` answers "unknown" for everything behind it. For
+        # `restrict` that is the PARAMETER itself — the qualifier sits on the
+        # pointer — so `int *restrict a` mapped to `Any`, and `Any` in a ccall
+        # argument tuple passes a boxed `jl_value_t*`: the callee read Julia's
+        # object header as its array. Silent garbage on Tier 3, and
+        # `Malformed llvmcall` on Tier 1. Hub cglm shipped 58 of these
+        # (`glmc_mat4_make(const float *__restrict src, …)`).
+        #
+        # `_Atomic T` is transparent only for scalars ≤ 8 bytes, which is where
+        # x86-64 gives it T's size and alignment. An `_Atomic` struct can be
+        # padded larger than T; its enclosing layout still comes out right,
+        # because member offsets and `byte_size` are read from DWARF, not
+        # recomputed from the member types.
+        let qm = match(r"\(DW_TAG_(restrict|volatile|atomic)_type\)", line)
+            if !isnothing(qm)
+                offset_match = match(r"<\d+><([^>]+)>", line)
+                if !isnothing(offset_match)
+                    current_type_offset = "0x" * offset_match.captures[1]
+                    type_refs[current_type_offset] = Dict{String,Any}(
+                        "kind" => String(qm.captures[1]), "target" => nothing)
+                    offset_to_kind[current_type_offset] = :qualifier
+                end
             end
         end
 
@@ -4302,7 +4457,12 @@ function parse_dwarf_dump(output::AbstractString;
                 
                 if !isempty(type_name)
                     if offset_to_kind[tag_offset] == :base
-                        # Base types are stored as simple strings
+                        # Base types are stored as simple strings. DWARF names
+                        # every `_Complex` width `complex`; the byte size (which
+                        # may already have been seen) is what distinguishes them.
+                        if type_name == "complex"
+                            type_name = _complex_base_name(get(base_byte_size, tag_offset, 0))
+                        end
                         type_refs[tag_offset] = type_name
                     elseif offset_to_kind[tag_offset] in [:struct, :class, :enum, :typedef, :template_type, :template_value, :namespace]
                         # These types are dicts - update the name field
@@ -4323,13 +4483,13 @@ function parse_dwarf_dump(output::AbstractString;
         # Example: <9f7>   DW_AT_type        : <0x41>
         if contains(line, "DW_AT_type") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :enum, :array, :subroutine, :typedef, :template_type, :template_value, :inheritance]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :qualifier, :enum, :array, :subroutine, :typedef, :template_type, :template_value, :inheritance]
                 type_match = match(r"<(0x[^>]+)>", line)
                 if !isnothing(type_match)
                     target_offset = String(type_match.captures[1])  # Convert SubString to String
                     if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
-                        # Pointer/const/reference: target
-                        if offset_to_kind[tag_offset] in [:pointer, :const, :reference]
+                        # Pointer/const/reference/qualifier: target
+                        if offset_to_kind[tag_offset] in [:pointer, :const, :reference, :qualifier]
                             type_refs[tag_offset]["target"] = target_offset
                         # Enum: underlying type
                         elseif offset_to_kind[tag_offset] == :enum
@@ -4416,10 +4576,24 @@ function parse_dwarf_dump(output::AbstractString;
             end
         end
 
-        # Extract DW_AT_byte_size for enums, structs, classes, and unions
+        # Extract DW_AT_byte_size for enums, structs, classes, unions, and base types.
+        # A base type named `complex` is both `_Complex float` (8) and
+        # `_Complex double` (16); the name alone cannot tell them apart, so the
+        # size is recorded and the stored name is rewritten once both are known.
         if contains(line, "DW_AT_byte_size") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :base
+                size_match = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
+                if !isnothing(size_match)
+                    val_str = size_match.captures[1]
+                    nbytes = startswith(val_str, "0x") ?
+                             parse(Int, val_str[3:end], base=16) : parse(Int, val_str)
+                    base_byte_size[tag_offset] = nbytes
+                    if get(type_refs, tag_offset, "") == "complex"
+                        type_refs[tag_offset] = _complex_base_name(nbytes)
+                    end
+                end
+            elseif haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union]
                 # Match value after colon
                 size_match = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
                 if !isnothing(size_match)
@@ -4433,6 +4607,23 @@ function parse_dwarf_dump(output::AbstractString;
                         end
                     end
                 end
+            end
+        end
+
+        # DW_AT_calling_convention on a record DIE is clang's own answer to "is
+        # this type trivial for the purposes of calls": 5 (DW_CC_pass_by_value)
+        # travels in registers or on the stack like a C struct, 4
+        # (DW_CC_pass_by_reference) travels as a pointer to a caller-owned
+        # temporary. Readelf spells it `DW_AT_calling_convention: 5	(pass by
+        # value)`. C records carry none. The same attribute on a subprogram means
+        # something else, so only a record DIE records it.
+        if contains(line, "DW_AT_calling_convention") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) in (:struct, :class) &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                ccm = match(r"DW_AT_calling_convention\s*:?\s*(\d+)", line)
+                ccm === nothing ||
+                    (type_refs[tag_offset]["calling_convention"] = parse(Int, ccm.captures[1]))
             end
         end
 
@@ -4929,6 +5120,15 @@ function parse_dwarf_dump(output::AbstractString;
 
             target = get(type_info, "target", nothing)
 
+            # restrict / volatile / _Atomic: transparent. The qualifier carries no
+            # ABI information, and spelling it into the type string would hand every
+            # downstream mapper a prefix only some of them strip. A qualifier DIE
+            # with no DW_AT_type qualifies `void` (`volatile void *`), exactly as a
+            # pointer DIE with none points at it.
+            if kind in ("restrict", "volatile", "atomic")
+                return isnothing(target) ? "void" : resolve_type(target, type_refs, visited)
+            end
+
             if isnothing(target)
                 # Pointer/const/reference without target (shouldn't happen but handle it)
                 return kind == "pointer" ? "void*" : "unknown"
@@ -4944,6 +5144,8 @@ function parse_dwarf_dump(output::AbstractString;
                 return "const " * target_type
             elseif kind == "reference"
                 return target_type * "&"
+            elseif kind == "rvalue_reference"
+                return target_type * "&&"
             end
         end
 
@@ -4979,6 +5181,15 @@ function parse_dwarf_dump(output::AbstractString;
     # tree, which is a silent wrong-call bug, so it fails loudly.
     formal_params_in_die = 0
     die_param_counts = Dict{String,Int}()  # function key => DIE-tree arity
+
+    # `DW_AT_object_pointer` exists only on a definition DIE of an instance
+    # method. A declaration of the same method does not carry it, so absence
+    # there must NOT be read as "static" — that would strip `this` from every
+    # out-of-line method. A definition with code and no object pointer is a
+    # static member (or a free function). Recorded only from such a definition.
+    current_fn_is_declaration = false
+    current_fn_has_code = false
+    current_fn_saw_object_pointer = false
 
     # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
     # resolved back to the declaration that owns the mangled name via
@@ -5031,9 +5242,19 @@ function parse_dwarf_dump(output::AbstractString;
                 # definition DIE.
                 return_types[function_key]["parameters"] = params
             end
+
+            # Definition only. A later declaration of the same key must not
+            # erase the answer, and a declaration must not invent `false`.
+            if !current_fn_is_declaration &&
+               (current_fn_has_code || current_fn_saw_object_pointer)
+                return_types[function_key]["has_object_pointer"] = current_fn_saw_object_pointer
+            end
         end
 
         current_function_offset = nothing
+        current_fn_is_declaration = false
+        current_fn_has_code = false
+        current_fn_saw_object_pointer = false
         current_function_name = nothing
         current_function_linkage = nothing
         current_function_level = nothing
@@ -5144,6 +5365,9 @@ function parse_dwarf_dump(output::AbstractString;
                 function_processed = false  # Reset flag for new function
                 params_for_this_function = []  # Reset for the new function
                 formal_params_in_die = 0
+                current_fn_is_declaration = false
+                current_fn_has_code = false
+                current_fn_saw_object_pointer = false
                 current_subroutine_offset = nothing  # Reset subroutine context when entering function
 
                 # RESET VARIABLE CONTEXT to prevent leakage
@@ -5294,6 +5518,22 @@ function parse_dwarf_dump(output::AbstractString;
 
         # Extract linkage name (mangled name for C++ functions)
         # Example: <5c>   DW_AT_linkage_name: (indexed string: 0x8): _ZN10Calculator5powerEdd
+        # Definition vs declaration, for the object-pointer fact below.
+        # `low_pc` / `ranges` / `high_pc` mean this DIE has a body. Clang puts
+        # `DW_AT_object_pointer` on that body for an instance method and omits
+        # it for a static member.
+        if in_function_context && contains(line, "DW_AT_declaration")
+            current_fn_is_declaration = true
+        end
+        if in_function_context && contains(line, "DW_AT_object_pointer")
+            current_fn_saw_object_pointer = true
+        end
+        if in_function_context && (contains(line, "DW_AT_low_pc") ||
+                                   contains(line, "DW_AT_high_pc") ||
+                                   contains(line, "DW_AT_ranges"))
+            current_fn_has_code = true
+        end
+
         if contains(line, "DW_AT_linkage_name") && in_function_context
             # Extract just the mangled name after the last colon
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
@@ -5337,19 +5577,9 @@ function parse_dwarf_dump(output::AbstractString;
             end
         end
 
-        # Extract noexcept specification
-        # DWARF5+: DW_AT_noexcept (or inferred from demangled name)
-        # GCC/Clang may also use DW_AT_calling_convention or encode in type
-        if (contains(line, "DW_AT_noexcept") || contains(line, "noexcept")) && in_function_context
-            if !isnothing(current_function_offset)
-                if !haskey(type_refs, current_function_offset)
-                    type_refs[current_function_offset] = Dict{String,Any}()
-                end
-                if isa(type_refs[current_function_offset], Dict)
-                    type_refs[current_function_offset]["is_noexcept"] = true
-                end
-            end
-        end
+        # (noexcept is NOT read from DWARF: there is no DW_AT_noexcept, and a
+        # substring match on "noexcept" here flagged any function whose name
+        # contained it. Unwinding is decided from the IR — `_nounwind_definitions`.)
 
         # Extract virtuality
         # Example: <60>   DW_AT_virtuality  : 1 (virtual)
@@ -5556,10 +5786,28 @@ function parse_dwarf_dump(output::AbstractString;
 
     # Extract struct definitions with member information
     struct_defs = Dict{String,Dict{String,Any}}()
+    record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
     for (offset, type_info) in type_refs
         if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class", "union"]
             struct_name = get(type_info, "name", "unknown")
             if struct_name != "unknown" && struct_name != "unknown_struct" && struct_name != "unknown_class" && struct_name != "unknown_union"
+                # Every named DEFINITION (a declaration has no byte_size), before
+                # any provenance or member filter: calling a function that takes
+                # `std::string_view` by value needs the ABI facts of a type the
+                # API tables below deliberately leave out.
+                if haskey(type_info, "byte_size")
+                    has_base = any(d -> isa(d, Dict) && get(d, "kind", nothing) == "inheritance",
+                                   get(children_by_parent, offset, ()))
+                    _merge_record_facts!(record_facts, String(struct_name), Dict{String,Any}(
+                        "byte_size" => type_info["byte_size"],
+                        "pass" => _record_pass_convention(get(type_info, "calling_convention", nothing)),
+                        # No data member and no base: the record has no bytes a
+                        # callee reads. A union is never counted, and a class
+                        # with virtuals has its `_vptr` member.
+                        "empty" => type_info["kind"] != "union" &&
+                                   isempty(get(type_info, "members", [])) && !has_base))
+                end
+
                 # Resolve member types to Julia types
                 resolved_members = []
                 for member in get(type_info, "members", [])
@@ -5583,6 +5831,29 @@ function parse_dwarf_dump(output::AbstractString;
                                     catch
                                         0
                                     end
+                                end
+                            elseif isa(mt, Dict) && get(mt, "kind", "") == "array"
+                                # `float v[3]` carries no byte_size of its own.
+                                # A size of 0 made the return path treat the
+                                # struct as unsizable and emit an integer byte
+                                # blob, so the callee's XMM return was read as
+                                # GPRs.
+                                dims = get(mt, "dimensions", Int[])
+                                elem_ref = get(mt, "element_type", nothing)
+                                elem_c = isnothing(elem_ref) ? "" : resolve_type(elem_ref, type_refs)
+                                es = get_type_size(elem_c)
+                                if es > 0 && !isempty(dims)
+                                    m_size = es * prod(Int.(dims))
+                                end
+                            end
+                        end
+                        if m_size == 0
+                            am = match(r"^(.+?)((?:\[\d+\])+)$", c_type)
+                            if am !== nothing
+                                es = get_type_size(strip(String(am.captures[1])))
+                                dims = [parse(Int, d.captures[1]) for d in eachmatch(r"\[(\d+)\]", String(am.captures[2]))]
+                                if es > 0 && !isempty(dims)
+                                    m_size = es * prod(dims)
                                 end
                             end
                         end
@@ -5843,8 +6114,70 @@ function parse_dwarf_dump(output::AbstractString;
         end
     end
 
+    # ABI facts for every record a function takes or returns BY VALUE. The
+    # Tier-2 thunk needs them for exactly the records `struct_defs` cannot
+    # describe: an empty class (no members, so no entry), a filtered toolchain
+    # type (`std::string_view`), a record only ever declared here (constructor
+    # homing). See `FunctionGen.by_value_crossing`, which is the consumer.
+    record_abi = Dict{String,Dict{String,Any}}()
+    for (_, info) in return_types
+        isa(info, Dict) || continue
+        for t in Iterators.flatten(((get(info, "c_type", ""),),
+                                    (get(p, "c_type", "") for p in get(info, "parameters", []))))
+            name = _by_value_record_name(String(t))
+            name === nothing && continue
+            facts = get(record_facts, name, nothing)
+            facts === nothing || (record_abi[name] = facts)
+        end
+    end
 
-    return (return_types, struct_defs, global_vars, typedef_table)
+    return (return_types, struct_defs, global_vars, typedef_table, record_abi)
+end
+
+"""
+    _record_pass_convention(cc) -> Union{String,Nothing}
+
+DWARF's `DW_AT_calling_convention` on a record, as `"value"` (5,
+DW_CC_pass_by_value) or `"reference"` (4, DW_CC_pass_by_reference). `nothing`
+when the attribute is absent, which is every C record.
+"""
+_record_pass_convention(cc) = cc == 5 ? "value" : cc == 4 ? "reference" : nothing
+
+"""
+    _merge_record_facts!(facts, name, entry)
+
+Records are keyed by name, like `struct_defs`, and one name can have several
+definitions — the same type in many compile units, which agree, or two scopes
+reusing a name, which may not. Agreement keeps the entry. Disagreement marks it
+`"conflict"`, and a conflicted record is never treated as known.
+"""
+function _merge_record_facts!(facts::Dict{String,Dict{String,Any}}, name::String,
+                              entry::Dict{String,Any})
+    prev = get(facts, name, nothing)
+    if prev === nothing
+        facts[name] = entry
+    elseif get(prev, "conflict", false) != true &&
+           any(k -> get(prev, k, nothing) != get(entry, k, nothing), ("byte_size", "pass", "empty"))
+        prev["conflict"] = true
+    end
+    return facts
+end
+
+"""
+    _by_value_record_name(c_type) -> Union{String,Nothing}
+
+The record name a by-value parameter or return names, or `nothing` for a
+pointer, reference, function pointer, array or `void`. Only TOP-LEVEL cv is
+removed: `fstring<const char *>` keeps the `const` inside its argument list,
+which is part of the name the record is keyed under.
+"""
+function _by_value_record_name(c_type::AbstractString)
+    t = strip(c_type)
+    t = replace(t, r"^(?:(?:const|volatile)\s+)+" => "")
+    t = replace(t, r"(?:\s+(?:const|volatile))+$" => "")
+    (isempty(t) || t in ("void", "unknown")) && return nothing
+    occursin(r"[*&(\[]", t) && return nothing
+    return String(t)
 end
 
 """
@@ -5852,12 +6185,13 @@ Extract compilation metadata from source files and binary.
 This is the core of automatic wrapper generation!
 """
 function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
-                                      binary_path::String)::Dict{String,Any}
+                                      binary_path::String;
+                                      nounwind::Union{Nothing,Set{String}}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
     # Extract return types and struct definitions from DWARF debug info (if available)
-    (dwarf_return_types, struct_defs, global_vars, typedef_table) = extract_dwarf_return_types(binary_path)
+    (dwarf_return_types, struct_defs, global_vars, typedef_table, record_abi) = extract_dwarf_return_types(binary_path)
 
     # Collect struct/enum names for type resolution in function signatures
     sig_struct_names = Set{String}()
@@ -5877,8 +6211,13 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # Merge DWARF return types and parameters into function metadata (overrides inference)
     for func in functions
         mangled = func["mangled"]
-        if haskey(dwarf_return_types, mangled)
-            dwarf_info = dwarf_return_types[mangled]
+        # Constructors and destructors are keyed differently on the two sides:
+        # the symbol table carries C1/C2/C3 and D0/D1/D2, and clang writes the
+        # unified C4/D4 into DW_AT_linkage_name. See `_structor_dwarf_key`.
+        dwarf_key = haskey(dwarf_return_types, mangled) ? mangled :
+                    _structor_dwarf_key(mangled, dwarf_return_types)
+        if dwarf_key !== nothing
+            dwarf_info = dwarf_return_types[dwarf_key]
 
             # Merge return type (only the return type fields, not parameters)
             func["return_type"] = Dict(
@@ -5891,8 +6230,12 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             # Merge is_vararg
             func["is_vararg"] = get(dwarf_info, "is_vararg", false)
 
-            # Merge is_noexcept from DWARF info or demangled name
-            func["is_noexcept"] = get(dwarf_info, "is_noexcept", false)
+            # Present only when a definition DIE was seen. `true` is an instance
+            # method, `false` is static (no receiver). Absent → the gates keep
+            # their class-table heuristic.
+            if haskey(dwarf_info, "has_object_pointer")
+                func["has_object_pointer"] = dwarf_info["has_object_pointer"]
+            end
 
             # Merge parameters if available from DWARF (at function level, not in return_type)
             if haskey(dwarf_info, "parameters") && !isempty(dwarf_info["parameters"])
@@ -5905,23 +6248,30 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             func["return_type_source"] = "inferred"
             func["parameters_source"] = "inferred"
             func["is_vararg"] = false
-            # Detect noexcept from demangled name as fallback
-            demangled = get(func, "demangled", "")
-            func["is_noexcept"] = occursin("noexcept", demangled)
         end
     end
 
-    # Detect noexcept from source files (DWARF doesn't emit DW_AT_noexcept).
-    # Scan source + header files for function declarations with 'noexcept' specifier.
-    if config.wrap.language != :c
-        noexcept_names = _scan_noexcept_functions(source_files, get_include_dirs(config))
-        for func in functions
-            name = get(func, "name", "")
-            if name in noexcept_names && !get(func, "is_noexcept", false)
-                func["is_noexcept"] = true
-            end
-        end
-    end
+    # "Can an exception leave this function?" — the question the tier router asks
+    # (DispatchLogic.is_ccall_safe) and the thunk generator asks (FunctionGen:
+    # try_call vs call). A function counts as noexcept only when BOTH:
+    #
+    #   * its bare name was declared `noexcept` somewhere in the sources — the
+    #     candidate set (`_scan_noexcept_functions`), and
+    #   * its own mangled DEFINITION is `nounwind` in the IR the binary was linked
+    #     from (`_nounwind_definitions`) — the proof.
+    #
+    # The proof removes every false positive of the name scan: a bare-name
+    # collision, `noexcept(false)`, a throwing constructor of a class with a
+    # noexcept move constructor. A definition that can unwind is never `nounwind`.
+    # The candidate set keeps the routing from GROWING: `nounwind` alone would also
+    # send every function the optimizer merely proved non-throwing to Tier 3, and
+    # the Tier-3 emitter has type gaps the thunks tolerate (box2d `AddType`'s
+    # nested enum, fmt's inferred constructor signatures). Widening is a separate
+    # change, after those gaps are closed. No IR (ingest mode) means nothing is
+    # noexcept, so all C++ goes to Tier 2, the router's documented safe default.
+    candidates = config.wrap.language == :c ? Set{String}() :
+                 _scan_noexcept_functions(source_files, get_include_dirs(config))
+    _mark_noexcept!(functions, candidates, nounwind)
 
     # Build type registry (basic types + inferred types)
     type_registry = build_type_registry(functions)
@@ -5988,6 +6338,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # Type mappings
         "type_registry" => type_registry,
         "struct_definitions" => struct_defs,  # Struct member layout from DWARF
+        "record_abi" => record_abi,            # By-value records: size, pass convention, empty
         "typedef_table" => typedef_table,      # Typedef name -> Julia type resolution
 
         # STL container method symbols (for JIT thunk generation)
@@ -6010,6 +6361,54 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     )
 
     return metadata
+end
+
+"""
+    _structor_dwarf_key(mangled, dwarf_table) -> Union{String,Nothing}
+
+The DWARF key for a constructor or destructor SYMBOL, or `nothing`.
+
+The symbol table has the Itanium variants: `C1`/`C2`/`C3` (complete, base,
+allocating) and `D0`/`D1`/`D2` (deleting, complete, base). clang writes the
+unified `C4`/`D4` spelling into `DW_AT_linkage_name`, one DIE for every variant.
+The exact-name join therefore missed EVERY constructor and destructor. Their
+signatures fell back to `parse_parameters` on the demangled string, where a
+by-value struct is only a name. msdfgen's `LinearSegment(Vector2, Vector2,
+EdgeColor)` took `Any` arguments and stored garbage points.
+
+Each marker position in the symbol is tried, and only a rewrite DWARF actually
+has is accepted. A marker-shaped substring inside an identifier cannot produce a
+real key. Exactly one hit is required. More than one is refused as ambiguous
+rather than guessed.
+"""
+function _structor_dwarf_key(mangled::AbstractString, dwarf_table::AbstractDict)
+    startswith(mangled, "_Z") || return nothing
+    hits = String[]
+    for m in eachmatch(r"(C[123]|D[012])(?=[EIB])", mangled)
+        unified = m.match[1] == 'C' ? "C4" : "D4"
+        key = mangled[1:prevind(mangled, m.offset)] * unified * mangled[m.offset+2:end]
+        haskey(dwarf_table, key) && push!(hits, key)
+    end
+    return length(hits) == 1 ? hits[1] : nothing
+end
+
+"""
+    _mark_noexcept!(functions, candidates, nounwind)
+
+Set `is_noexcept` on every function: `true` only when its bare `name` is a
+`noexcept` candidate from the sources AND its `mangled` definition is `nounwind`
+in the IR. `nounwind === nothing` (no IR, i.e. ingest) marks nothing, which sends
+all C++ to Tier 2. The reasoning is in `extract_compilation_metadata`, and the
+test is `test_noexcept_routing.jl`.
+"""
+function _mark_noexcept!(functions, candidates::Set{String},
+                         nounwind::Union{Nothing,Set{String}})
+    for func in functions
+        func["is_noexcept"] = nounwind !== nothing &&
+                              get(func, "name", "") in candidates &&
+                              get(func, "mangled", "") in nounwind
+    end
+    return functions
 end
 
 """
@@ -6585,6 +6984,9 @@ const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
     "complex double" => "ComplexF64",
     "float _Complex" => "ComplexF32",
     "double _Complex" => "ComplexF64",
+    "complex float" => "ComplexF32",
+    "complex double" => "ComplexF64",
+    "complex long double" => "ComplexF64",
 )
 
 const _CPP_INTERNAL_TYPE_BLOCKLIST = Set{String}([
@@ -6687,9 +7089,9 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         end
     end
 
-    # Handle references (for non-struct types)
+    # Handle references (for non-struct types). `T&&` is one reference, not two.
     if endswith(cpp_type, "&")
-        base = strip(cpp_type[1:end-1])
+        base = strip(replace(cpp_type, r"&&?$" => ""))
         return "Ref{$(cpp_to_julia_type(base, struct_names, enum_names))}"
     end
 
@@ -6747,9 +7149,10 @@ Save compilation metadata to JSON file next to binary.
 This enables automatic wrapper generation!
 """
 function save_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
-                                   binary_path::String)::String
+                                   binary_path::String;
+                                   nounwind::Union{Nothing,Set{String}}=nothing)::String
     # Extract metadata
-    metadata = extract_compilation_metadata(config, source_files, binary_path)
+    metadata = extract_compilation_metadata(config, source_files, binary_path; nounwind=nounwind)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their

@@ -151,7 +151,10 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
 
 `Base.llvmcall` dispatch is **John's side project**: it ships and works, but it is not
 a supported tier. `[wrap.tier1] enable` defaults false and every Hub config pins
-`[link] enable_lto = false`, so no shipped package takes it. Its suites
+`[link] enable_lto = false` — but Hub recipes DO turn slicing on (lua, sqlite, zlib,
+cglm, … — `grep -l 'enable = true' packages/*/replibuild.toml` under `[wrap.tier1]`),
+so `use()` of those packages takes Tier 1. (This line said "no shipped package takes
+it" until 2026-09-26; it was wrong for as long as those recipes existed.) Its suites
 (`test_static_promotion`, `test_slicer`, `test_tier1_dispatch`) are **deliberately
 unwired** from devtests; `runtests.jl`'s wiring guard names them in an `experimental`
 list. They also need `test/slice_test/replibuild.toml`, which is gitignored and
@@ -210,7 +213,12 @@ If you are asked to work on it:
   `Wrapper/Utils.jl` holds the shared derivations. `Wrapper/Rust/` is experimental
   (`extern "C"` + `#[repr(C)]` only).
 - `Wrapper/DispatchLogic.jl` — tier selection. Any C++ function not `noexcept` goes to
-  Tier 2. `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
+  Tier 2, and **noexcept means a declared-noexcept bare name (candidate) AND a
+  `nounwind` mangled definition in the linked IR** (`_mark_noexcept!`). Never route on
+  a name alone: a throw through a Tier-3 ccall aborts the process
+  (`test_noexcept_routing.jl`, `callback_test` "bare-name noexcept collision"). A
+  `nounwind`-only widening would expose Tier-3 emitter gaps (see CHANGELOG
+  2026-09-26). `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
   DWARF against natural alignment, not the emitted struct with its `_pad_N`. A layout
   check must model what the generator emits.
 - `IRGen/JLCSIRGenerator.jl` + `ir_gen/` (`FunctionGen`, `StructGen`, `ArrayViewGen`) —
@@ -294,7 +302,10 @@ the test named when you touch the area.
 - **Receiver (`this`) gates**: `FunctionGen._has_receiver` and GeneratorCpp's
   `_cpp_this_param` must agree (corpus test in `test_symbol_hygiene.jl` over the
   vendored `test/fixtures/receiver_gate_corpus.json`; regenerate with
-  `test/gen_receiver_corpus.jl`). A ctor/dtor always has a receiver.
+  `test/gen_receiver_corpus.jl`). A ctor/dtor always has a receiver. A definition
+  DIE's `DW_AT_object_pointer` is recorded as `has_object_pointer`, and `false` (a
+  static member) overrides the class heuristic in both gates. Declaration DIEs never
+  carry the attribute, so a missing key must keep the heuristic.
   `_cpp_innermost_scope` keeps `<…>` and `_bare_type_name_cpp` strips it; they are
   not interchangeable.
 - Generated wrappers precompile inside consumer packages: dedup methods by dispatch
@@ -303,6 +314,12 @@ the test named when you touch the area.
   `Base.error(...)` (enforced by `_assert_base_calls_qualified`), and helpers must
   qualify `Base.get`/`Base.string`/…. `ccall` is syntax: `Base.ccall` is an
   UndefVarError.
+- **`Any` is never a foreign-call type**, in either position: as a return it
+  dereferences an integer as a Julia object, and as an argument it passes the box
+  (`jl_value_t*`) instead of the value. `_assert_no_any_ccall_return` and
+  `_assert_no_any_ccall_argument` refuse both. The one exemption is a variadic
+  `@ccall` argument, which is the user's explicit `[wrap.varargs]` declaration.
+  `::Any` in a Julia signature is normal. (`test_wrapper_type_bindings.jl`.)
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
   the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
@@ -343,10 +360,28 @@ the test named when you touch the area.
   (`test_struct_abi.jl`: only a system-clang callee catches a mismatch, because
   self-JIT'd callees share the bug. `gap_probe` is the discriminating case.)
 - **Emitted struct size must equal DWARF `byte_size`.** StructGen lays members out at
-  DWARF offsets with explicit padding (`_apply_dwarf_layout`). A struct that cannot be
-  laid out degrades to an opaque `byte_size` region with a warning — never to the wrong
-  size, which smashes the sret buffer. (`test_struct_layout.jl`.)
+  DWARF offsets with explicit padding (`_apply_dwarf_layout`). When natural alignment
+  cannot place them (packed, `#pragma pack`), the body is PACKED with explicit pads
+  (`_packed_dwarf_layout`), so the classifier sees the misaligned field. Only what no
+  body can model (overlaps, unmeasurable members) degrades to an opaque `byte_size`
+  region — never to the wrong size, which smashes the sret buffer.
+  (`test_struct_layout.jl`, `test_packed_layout.jl`.)
+- **The Julia struct IS the C layout.** GeneratorCpp proves each struct's fields
+  against DWARF (`_prove_julia_layout`) and emits a C-layout byte blob when they
+  cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk
+  reads a Julia value at DWARF offsets (`_dwarf_member_offsets`), never at offsets
+  derived from alignment rules. A named union is `mutable`, so it embeds as a pointer;
+  any struct holding one is a blob.
 - `!jlcs.c_struct` must never appear inside an `!llvm.struct` body; inline the literal.
+- **A by-value record crosses a thunk with its layout, as nothing, by address, or not
+  at all.** Nothing means an empty class, which SysV gives no class. By address means
+  DWARF `DW_CC_pass_by_reference`, and such a return goes through an sret slot, first
+  argument, before `this`. Not at all means an ABI trap on the Julia side.
+  `FunctionGen.by_value_crossing` is the one verdict; the thunk generator and
+  GeneratorCpp both act on it. `record_abi` in metadata carries the DWARF facts. A
+  record must never fall to `!llvm.ptr`: that is how empty classes, declared-only
+  types, `string_view` and every template spelling were mis-passed.
+  (`test_by_value_crossing.jl`.)
 - `dtor_call` has no VTT operand. Its arity gate (exactly one final arg) is
   load-bearing for D2 destructors of classes with virtual bases.
 - vcall uses class-local coordinates (`vtable_offset = this_offset = 0` plus own slot).
@@ -476,14 +511,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
 
 ## Open problems
 
-- **`static` member functions get a phantom `this`** in both receiver gates (e.g.
-  tinyxml2 `XMLDocument::ErrorIDToName`). About 17 sites in the Hub. Fix: read
-  `DW_AT_object_pointer`, which is present on the **definition** DIE only (declaration
-  DIEs of instance methods lack it, so a declaration-fed gate would strip every
-  `this`). Carry it through the `DW_AT_specification` merge. Readelf spells it
-  `DW_AT_object_pointer: <0x70>`, llvm-dwarfdump `DW_AT_object_pointer(0x…)`. Template
-  constructors (`gguf_kv<…>`) miss the ctor-name test and survive only via
-  `struct_types`.
 - **C ccall coverage**: 98.6% (5368/5444, 2026-08-29), target 99%. The 76 misses:
   43 varargs (declaration work via `[wrap.varargs]`), 27 mpack by-value aggregate
   returns (typed correctly but emitted as ABI-trap stubs), 5 mpack by-value aggregate
@@ -491,6 +518,20 @@ check before claiming portability again; reading `.gitignore` does not settle it
   names; a trap stub is not coverage.
 - The `exit(0)` sites listed under Testing rules.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
+
+### Confirmed defects — 2026-09-26 audit
+
+Re-reproduced from clean builds of library-free fixtures (runner and fixtures in the
+gitignored `.claude/audit-2026-09-26/`, `run_all.sh`; each line prints CONFIRMED,
+GUARDED or NOT REPRODUCED). Fixed, with the story in CHANGELOG: F1–F3 and F6–F28;
+F5 (`long double`) is an ABI trap both ways. A fix that lives in metadata reaches a
+Hub package only on a **rebuild** (delete `.replibuild_cache/project_hash`), not a
+re-wrap. Still open:
+
+- **A by-value type only declared in this binary** (F4, constructor homing) is now an
+  ABI trap instead of a SIGSEGV, but the function is still uncallable until the package
+  builds with `-Xclang -fno-use-ctor-homing` or `-fstandalone-debug`. Neither is a
+  default yet (see Not Yet Built).
 
 ## Not Yet Built (roadmap, not bugs)
 
@@ -500,6 +541,14 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
+- By-value toolchain types (`std::string_view`, `back_insert_iterator`, …) have ABI
+  facts in `record_abi` but no layout, so their functions are ABI traps. Keeping the
+  layout of records reachable by value would make them callable (2026-09-27).
+- `long double` through a C++ thunk as `f80` (`fpext`/`fptrunc` against `Float64`).
+  It is an ABI trap on both tiers today; the C bucket has no thunks.
+- Default `-Xclang -fno-use-ctor-homing` for C++ builds. It restores the definition of
+  header-only value types at a fraction of `-fstandalone-debug`'s size, but changes
+  every C++ package's metadata, so it needs a Hub-wide measurement first.
 - Array-view Julia-side accessors for the rank-1 thunks, plus rank ≥ 2 members.
 - `is_struct_packed` over-classifies padding-free structs (wasted work, not wrong).
 - Op verifiers for `ffe_call`, `try_call`, `load/store_array_element`, `ctor_call`,

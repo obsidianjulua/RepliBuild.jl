@@ -260,6 +260,68 @@ if MLIR_AVAILABLE
 
     # ── RAII Dialect ──────────────────────────────────────────────────────
 
+    @testset "StressTest: constructor by-value struct arguments" begin
+        # DWARF names a constructor with the unified C4 linkage name and the symbol
+        # table has C1/C2, so the exact-name join missed EVERY constructor. The
+        # signature was then guessed from the demangled string, where `Point2D` is
+        # only a name: both arguments became `Any` and the thunk stored garbage
+        # (msdfgen's `LinearSegment(Vector2, Vector2, EdgeColor)`, 2026-09-26).
+        meta = RepliBuild.JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"); use_mmap=false)
+        ctor = first(f for f in meta["functions"] if occursin("geom9Segment2DC", f["mangled"]))
+        @test ctor["parameters_source"] == "dwarf"
+        @test [(p["name"], p["c_type"]) for p in ctor["parameters"]] ==
+              [("this", "Segment2D*"), ("from", "Point2D"), ("to", "Point2D")]
+
+        seg = zeros(Float64, 4)                      # geom::Segment2D { Point2D a, b; }
+        GC.@preserve seg begin
+            StressTest.geom_Segment2D_Segment2D(Ptr{StressTest.Segment2D}(pointer(seg)),
+                                                StressTest.Point2D(1.0, 2.0),
+                                                StressTest.Point2D(4.0, 6.0))
+            @test seg == [1.0, 2.0, 4.0, 6.0]
+            @test StressTest.geom_Segment2D_length2(Ptr{StressTest.Segment2D}(pointer(seg))) == 25.0
+        end
+    end
+
+    @testset "StressTest: by-value records without a scalar spelling" begin
+        # Each of these reached the thunk as `!llvm.ptr` (2026-09-27). The empty
+        # class shifted every later argument one register (`unit_scaled` gave
+        # 257-style garbage, never an error); the template record went in as a
+        # pointer and came back from RAX while the callee wrote XMM0; the
+        # string_view was one pointer where the callee reads {len, ptr}.
+        meta = RepliBuild.JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"); use_mmap=false)
+        @test meta["record_abi"]["Unit"] == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true)
+
+        @test StressTest.geom_unit_scaled(StressTest.Unit(), 4, StressTest.Unit(), 2) == 42
+        @test StressTest.geom_unit_make(7) === StressTest.Unit()     # void callee, singleton back
+        @test StressTest.geom_cell_doubled(StressTest.Cell_double(2.5)).v == 5.0
+
+        # No layout in the metadata: refused where it is called, with the
+        # reason, and the rest of the module still loads.
+        err = try StressTest.geom_name_length("hello"); nothing catch e; e end
+        @test err isa ErrorException
+        @test occursin("ABI Safety Trap", sprint(showerror, err))
+        @test occursin("string_view", sprint(showerror, err))
+
+        # DW_CC_pass_by_reference: returned through an sret slot the thunk owns.
+        @test meta["record_abi"]["Ticket"]["pass"] == "reference"
+        @test StressTest.geom_ticket_make(42).n == 42
+    end
+
+    @testset "StressTest: packed structs hold the C layout" begin
+        # 5 and 14 bytes, like C — not the natural 8 and 16.
+        @test sizeof(StressTest.Packed) == 5
+        @test sizeof(StressTest.Pack2) == 14
+        p = StressTest.geom_packed_make(5)
+        @test (Int(p.c), p.i) == (5, 6)
+        @test StressTest.geom_packed_sum(p) == 11.0
+        q = StressTest.geom_pack2_make(5)
+        @test (Int(q.c), q.i, q.d) == (5, 6, 5.5)
+        @test StressTest.geom_pack2_sum(q) == 16.5
+        # Reads through a pointer into C memory: where natural alignment was wrong.
+        t = Ptr{StressTest.Packed}(StressTest.geom_packed_table())
+        @test [unsafe_load(t, k).i for k in 1:3] == [10, 20, 30]
+    end
+
     @testset "StressTest: RAII Dialect" begin
         @testset "Parse ctor_call / dtor_call IR" begin
             ctx = create_context()

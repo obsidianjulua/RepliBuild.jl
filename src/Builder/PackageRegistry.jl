@@ -109,13 +109,21 @@ function hash_config(config::RepliBuildConfig)::String
         end
     end
 
-    # Hash include directory headers
+    # Hash include directory headers, recursively. A flat `readdir` missed
+    # `include/<lib>/<lib>.h`, so editing a nested header left `use()` on the
+    # cached build. Same walk `Compiler.compute_project_hash` already does;
+    # the path is mixed in so a rename is a change even when the bytes are not.
     for inc_dir in config.compile.include_dirs
-        if isdir(inc_dir)
-            for f in sort(readdir(inc_dir; join=true))
-                if isfile(f) && any(endswith(f, ext) for ext in [".h", ".hpp", ".hxx", ".hh"])
-                    SHA.update!(ctx, read(f))
-                end
+        isdir(inc_dir) || continue
+        for (root, dirs, files) in walkdir(inc_dir)
+            filter!(d -> !(d in (".git", "build", ".replibuild_cache")), dirs)
+            sort!(dirs)
+            for f in sort(files)
+                any(endswith(f, ext) for ext in (".h", ".hpp", ".hxx", ".hh")) || continue
+                path = joinpath(root, f)
+                isfile(path) || continue
+                SHA.update!(ctx, Vector{UInt8}(relpath(path, inc_dir)))
+                SHA.update!(ctx, read(path))
             end
         end
     end
@@ -235,6 +243,73 @@ function _save_index(index::RegistryIndex)
     end
 end
 
+# Copy `src` (a file or directory under `orig_root`) to the same relative
+# path under `dest_root`. Skips VCS and build trees.
+function _copy_project_path!(src::String, dest::String)
+    if isfile(src)
+        mkpath(dirname(dest))
+        cp(src, dest; force=true)
+        return
+    end
+    isdir(src) || return
+    for (root, dirs, files) in walkdir(src)
+        filter!(d -> !(d in (".git", ".replibuild_cache", "build")), dirs)
+        rel = relpath(root, src)
+        here = rel == "." ? dest : joinpath(dest, rel)
+        mkpath(here)
+        for f in files
+            cp(joinpath(root, f), joinpath(here, f); force=true)
+        end
+    end
+end
+
+function _within_root(path::AbstractString, root::AbstractString)::Bool
+    path = normpath(abspath(String(path)))
+    root = normpath(abspath(String(root)))
+    root == "/" || (root = rstrip(root, ['/', '\\']))
+    return path == root || startswith(path, root * Base.Filesystem.path_separator)
+end
+
+"""
+Stage the relative inputs of a TOML whose `root` is relative.
+
+`load_config` resolves that root against the stored TOML, i.e. the registry
+directory. `include_dirs = ["config"]` then means `<registry>/config`, so the
+directory has to actually be copied there. An absolute root is left alone:
+the build keeps using the original tree.
+"""
+function _stage_registered_inputs!(orig_toml::String, dest_dir::String)
+    data = try
+        TOML.parsefile(orig_toml)
+    catch
+        return
+    end
+    project = get(data, "project", Dict{String,Any}())
+    project isa Dict || return
+    raw_root = string(get(project, "root", "."))
+    isabspath(raw_root) && return
+    orig_root = normpath(abspath(joinpath(dirname(abspath(orig_toml)), raw_root)))
+    orig_root == "/" || (orig_root = String(rstrip(orig_root, ['/', '\\'])))
+    isdir(orig_root) || return
+    compile = get(data, "compile", Dict{String,Any}())
+    compile isa Dict || return
+    for key in ("include_dirs", "source_files")
+        vals = get(compile, key, Any[])
+        vals isa Vector || continue
+        for rel in vals
+            rel isa AbstractString || continue
+            rel = String(rel)
+            isempty(rel) && continue
+            isabspath(rel) && continue
+            startswith(rel, ".replibuild_cache") && continue
+            src = normpath(joinpath(orig_root, rel))
+            _within_root(src, orig_root) || continue
+            ispath(src) || continue
+            _copy_project_path!(src, joinpath(dest_dir, rel))
+        end
+    end
+end
+
 # =============================================================================
 # REGISTER / UNREGISTER
 # =============================================================================
@@ -266,10 +341,15 @@ function register(toml_path::String; name::String="", verified::Bool=false)::Reg
     content_hash = hash_toml(toml_path)
 
     # Copy TOML into registry (content-addressed)
-    stored_path = joinpath(_registry_dir(), "$(content_hash).toml")
+    regdir = _registry_dir()
+    stored_path = joinpath(regdir, "$(content_hash).toml")
     if !isfile(stored_path)
         cp(toml_path, stored_path)
     end
+    # A relative `root` is resolved against the stored TOML's directory, which
+    # is this registry. The project's relative include dirs and sources have
+    # to be there too, or the build compiles against the system headers.
+    _stage_registered_inputs!(toml_path, regdir)
 
     # Extract git dependency info if present
     deps = get(data, "dependencies", Dict())
@@ -685,7 +765,10 @@ function _load_wrapper(name::String, config_hash::String, config::RepliBuildConf
     # Pick the wrapper by name, not first(): the cache dir is shared across
     # builds from the same source tree, so multiple `<Title>.jl` files coexist
     # there and `first()` picks alphabetically — wrong package every time.
-    expected = string(Symbol(replace(titlecase(replace(name, "_" => " ")), " " => ""))) * ".jl"
+    # The generator names the file with `get_module_name` (`vec2d` → `Vec2d.jl`).
+    # `titlecase` capitalizes after a digit (`vec2d` → `Vec2D.jl`) and the
+    # loader then looked for a file the generator never wrote.
+    expected = ConfigurationManager.get_module_name(config) * ".jl"
     wrapper_path = joinpath(build_dir, expected)
     if !isfile(wrapper_path)
         # Fall back to project output dir for the same named file

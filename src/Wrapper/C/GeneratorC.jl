@@ -10,6 +10,8 @@ const _C_PRIM_FIELD_LAYOUT = Dict{String,Tuple{Int,Int}}(
     "Cfloat" => (4, 4), "Float32" => (4, 4), "Cwchar_t" => _C_WCHAR_SA,
     "Clong" => _C_LONG_SA, "Culong" => _C_LONG_SA, "Clonglong" => (8, 8), "Culonglong" => (8, 8),
     "Int64" => (8, 8), "UInt64" => (8, 8), "Cdouble" => (8, 8), "Float64" => (8, 8),
+    "Int128" => (16, 16), "UInt128" => (16, 16),
+    "ComplexF32" => (8, 4), "ComplexF64" => (16, 8),
     "Csize_t" => (8, 8), "Cssize_t" => (8, 8), "Cptrdiff_t" => (8, 8),
     "Cintptr_t" => (8, 8), "Cuintptr_t" => (8, 8), "Cstring" => (8, 8),
 )
@@ -40,6 +42,12 @@ function _field_layout(jt::String, ct::String,
         if haskey(_C_PRIM_FIELD_LAYOUT, elem)
             esz, eal = _C_PRIM_FIELD_LAYOUT[elem]
             return (jt, n * esz, eal)
+        end
+        # `Later *slots[4]` is `NTuple{4, Ptr{Later}}`. The pointee's identity
+        # does not change the width, and naming it here demands Later exist
+        # before this struct — a mutual pointer cycle cannot be ordered.
+        if startswith(elem, "Ptr{") || elem == "Cstring"
+            return ("NTuple{$n, Ptr{Cvoid}}", n * 8, 8)
         end
         es = _sanitize_c_type_name(elem)
         if haskey(resolved_layouts, es)
@@ -850,7 +858,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                      "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                                      "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
                                      "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
-                                     "Cstring", "Float32", "Float64", "Any", "Nothing"])
+                                     "Cstring", "Float32", "Float64", "ComplexF32", "ComplexF64",
+                                     "Int128", "UInt128", "Any", "Nothing"])
 
                 # Extract the base type by stripping known container prefixes
                 base_ref = julia_type
@@ -860,12 +869,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
                         base_ref = base_ref[5:end-1]
                     elseif startswith(base_ref, "NTuple{")
-                        ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
-                        if !isnothing(ntuple_match)
-                            base_ref = strip(ntuple_match.captures[1])
-                        else
+                        inner = peel_container_arg(base_ref)
+                        if inner === nothing
                             break
                         end
+                        base_ref = inner
                     else
                         break
                     end
@@ -892,7 +900,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                           "Cchar", "Cuchar", "Cfloat", "Cdouble", "Bool", "UInt8", "Int8",
                           "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Csize_t",
                           "Clonglong", "Culonglong", "Cptrdiff_t", "Cssize_t", "Cwchar_t",
-                          "Cstring", "Float32", "Float64", "Any", "Nothing"])
+                          "Cstring", "Float32", "Float64", "ComplexF32", "ComplexF64",
+                                     "Int128", "UInt128", "Any", "Nothing"])
     for func in functions
         all_types = String[]
         for param in get(func, "parameters", [])
@@ -910,12 +919,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
                     base_ref = base_ref[5:end-1]
                 elseif startswith(base_ref, "NTuple{")
-                    ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
-                    if !isnothing(ntuple_match)
-                        base_ref = strip(ntuple_match.captures[1])
-                    else
+                    inner = peel_container_arg(base_ref)
+                    if inner === nothing
                         break
                     end
+                    base_ref = inner
                 else
                     break
                 end
@@ -1025,20 +1033,28 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     is_soft = false
 
                     if startswith(julia_type, "Ptr{")
-                        ptr_match = match(r"Ptr\{([^}]+)\}", julia_type)
-                        if !isnothing(ptr_match)
-                            dep_type = strip(ptr_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            dep_type = unwrap_foreign_type(inner)
                             is_soft = true
                         end
                     elseif startswith(julia_type, "NTuple{")
-                        ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", julia_type)
-                        if !isnothing(ntuple_match)
-                            dep_type = strip(ntuple_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            # `NTuple{4, Ptr{Later}}` names Later only through a
+                            # pointer. A hard dependency would demand Later's
+                            # full layout first; the pointer does not.
+                            if startswith(inner, "Ptr{")
+                                dep_type = unwrap_foreign_type(inner)
+                                is_soft = true
+                            else
+                                dep_type = unwrap_foreign_type(inner)
+                            end
                         end
                     elseif startswith(julia_type, "Ref{")
-                        ref_match = match(r"Ref\{([^}]+)\}", julia_type)
-                        if !isnothing(ref_match)
-                            dep_type = strip(ref_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            dep_type = unwrap_foreign_type(inner)
                         end
                     else
                         dep_type = julia_type
@@ -1653,6 +1669,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         return GC.@preserve r unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(r) + $m_offset))
                                     end""")
                                 push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=m_julia_type))
+                            # `T *slots[4]` → `NTuple{4, Ptr{T}}`. Load as `Ptr{Cvoid}`:
+                            # same width, and the pointee need not be declared yet.
+                            elseif (let _el = peel_container_arg(m_julia_type)
+                                    _el !== nothing && startswith(m_julia_type, "NTuple{") &&
+                                        (startswith(_el, "Ptr{") || _el == "Cstring")
+                                end)
+                                _nm = match(r"^NTuple\{(\d+),", m_julia_type)
+                                _load = _nm === nothing ? "Ptr{Cvoid}" : "NTuple{$(_nm.captures[1]), Ptr{Cvoid}}"
+                                push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{$_load}(pointer_from_objref(r) + $m_offset))
+                                    end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=_load))
                             # Nested struct/union types — extract sub-blob
                             else
                                 # Prefer the Julia type name: an anonymous aggregate
@@ -1818,7 +1848,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                         sanitized_type = julia_type
 
                         # Don't sanitize built-in Julia types (NTuple, Ptr{Cint}, etc.)
-                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Cdouble", "Cfloat", "Clong", "Culong", "Cshort", "Cushort", "Cchar", "Cuchar", "Culonglong", "Clonglong", "Cvoid", "Csize_t", "Cptrdiff_t", "Cssize_t", "Cwchar_t", "Cstring", "Bool", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Float32", "Float64"]
+                        builtin_types = ["NTuple", "Ptr", "Cint", "Cuint", "Cintptr_t", "Cuintptr_t", "Cdouble", "Cfloat", "Clong", "Culong", "Cshort", "Cushort", "Cchar", "Cuchar", "Culonglong", "Clonglong", "Cvoid", "Csize_t", "Cptrdiff_t", "Cssize_t", "Cwchar_t", "Cstring", "Bool", "UInt8", "Int8", "UInt16", "Int16", "UInt32", "Int32", "UInt64", "Int64", "Int128", "UInt128", "Float32", "Float64", "ComplexF32", "ComplexF64"]
                         is_builtin = any(startswith(julia_type, bt) for bt in builtin_types)
 
                         if !is_builtin || occursin(r"[<>]", julia_type)
@@ -2766,7 +2796,15 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
         is_unknown_return = julia_return_type == "_UnsafeUnknown"
 
-        if !isempty(blob_abi_offenders)
+        x87 = _x87_crossings(func)
+        if !isempty(x87)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_x87_trap_body(julia_name, x87))end
+
+            """
+        elseif !isempty(blob_abi_offenders)
             offender_list = join(blob_abi_offenders, "; ")
             func_def = """
             $doc_comment

@@ -348,6 +348,29 @@ include(joinpath(@__DIR__, "test_toolchain_advice.jl"))
 
 include(joinpath(@__DIR__, "test_project_hash.jl"))
 
+# ── noexcept routing: a bare name is a candidate, `nounwind` is the proof ────
+# A C++ throw through a Tier-3 ccall aborts the process. The routing used to
+# trust a regex that returns BARE names, so `B::get` rode along with
+# `A::get() noexcept` (and `noexcept(false)` matched too). The IR's `nounwind`
+# on the mangled definition now has to agree. Pure text, no toolchain.
+
+include(joinpath(@__DIR__, "test_noexcept_routing.jl"))
+
+# ── By-value records at the Tier-2 thunk boundary (no toolchain) ────────────
+# An empty class, a declared-only type, a filtered std type or a template
+# spelling used to reach the thunk as `!llvm.ptr`. `record_abi` (DWARF calling
+# convention + emptiness) and `FunctionGen.by_value_crossing` decide each one;
+# the wrapper traps what the thunk cannot type. Verbatim readelf, text thunks.
+
+include(joinpath(@__DIR__, "test_by_value_crossing.jl"))
+
+# ── Packed C++ structs hold the C layout (no toolchain) ─────────────────────
+# `__attribute__((packed))` / `#pragma pack`: the wrapper proves each struct's
+# Julia layout against DWARF (blob when it cannot), the thunk reads Julia's
+# value at DWARF offsets, StructGen gives the classifier a packed body.
+
+include(joinpath(@__DIR__, "test_packed_layout.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

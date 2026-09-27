@@ -58,3 +58,14 @@ int throws_midway(int iterations) {
     }
     return sum;
 }
+
+// noexcept routing — see callbacks.h
+int collide::Quiet::value(int x) const noexcept { return x + 1; }
+int collide::Loud::value(int x) const {
+    if (x < 0) throw std::runtime_error("Loud::value: negative " + std::to_string(x));
+    return x + 2;
+}
+int collide::checked(int x) noexcept(false) {
+    if (x == 13) throw std::runtime_error("checked: unlucky");
+    return x * 3;
+}

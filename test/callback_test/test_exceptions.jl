@@ -121,6 +121,46 @@ using RepliBuild.MLIRNative
         @test occursin("iteration", ex.message)
     end
 
+    @testset "bare-name noexcept collision" begin
+        # Loud::value shares its bare name with Quiet::value() noexcept, and
+        # checked is noexcept(false). The regex scan named all three. Only Quiet
+        # is nounwind in the IR, so only Quiet may take the ccall path.
+        tier = CallbackTest.DISPATCH_TIER
+        @test tier[:collide_Quiet_value] == :tier3
+        @test tier[:collide_Loud_value] != :tier3
+        @test tier[:collide_checked] != :tier3
+        # Non-throwing calls work on both tiers.
+        q = Ref{UInt8}(0)
+        GC.@preserve q begin
+            p = Base.unsafe_convert(Ptr{UInt8}, q)
+            @test CallbackTest.collide_Quiet_value(p, 1) == 2
+            @test CallbackTest.collide_Loud_value(p, 1) == 3
+        end
+        @test CallbackTest.collide_checked(2) == 6
+
+        # The throws themselves run in a SUBPROCESS. A regression here is not
+        # a failed test but an abort (exit 134), and in-process it would take
+        # every later devtests file down with it.
+        code = raw"""
+            include(ARGS[1]); import .CallbackTest as C
+            q = Ref{UInt8}(0)
+            for (label, f) in (("loud",    () -> GC.@preserve(q, C.collide_Loud_value(Base.unsafe_convert(Ptr{UInt8}, q), -1))),
+                               ("checked", () -> C.collide_checked(13)))
+                try f(); println(label, "=returned") catch e; println(label, "=", typeof(e)) end
+            end
+            """
+        out = IOBuffer()
+        proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(dirname(@__DIR__))) -e $code $wrapper_path`);
+                            stdout=out, stderr=devnull))
+        res = String(take!(out))
+        # `success`, not `exitcode == 0`: an abort is SIGABRT, and a signalled
+        # process reports exitcode 0 with termsignal 6 — the weaker check passes
+        # on exactly the failure this testset exists to catch.
+        @test success(proc)
+        @test occursin("loud=RepliBuild.JITManager.CxxException", res)
+        @test occursin("checked=RepliBuild.JITManager.CxxException", res)
+    end
+
     @testset "Original extern C callbacks still work" begin
         my_add_fn(a::Cint, b::Cint)::Cint = a + b
         c_add = @cfunction($my_add_fn, Cint, (Cint, Cint))

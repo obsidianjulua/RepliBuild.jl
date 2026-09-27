@@ -149,6 +149,7 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     _assert_cstring_policy(wrapper_content, module_name)
     _assert_no_shadowed_ccall_types(wrapper_content, module_name)
     _assert_no_any_ccall_return(wrapper_content, module_name)
+    _assert_no_any_ccall_argument(wrapper_content, module_name)
 
     undefined_types = _undefined_ccall_types(wrapper_content)
     isempty(undefined_types) && return nothing
@@ -305,6 +306,122 @@ function _assert_no_any_ccall_return(wrapper_content::AbstractString,
     `Any` in a return position means the type mapper could not name the type. Resolve \
     it to the real one (an enum's name usually sits in the metadata's `c_type`), or \
     degrade to `Cvoid` — discarding a value is recoverable, corrupting one is not.
+    """)
+end
+
+"""
+    _any_foreign_call_arguments(wrapper_content) -> Vector{Tuple{String,String}}
+
+Every foreign call in the wrapper that declares an ARGUMENT as `Any`, as
+`(enclosing function, call form)` pairs. Walks the parsed AST, not the text: the
+return type in front of the argument tuple can itself contain commas
+(`NTuple{2, UInt64}`), which is where a text pattern stops matching.
+
+The three eager forms the generators emit:
+
+  * `ccall((:sym, LIB), R, (A, B), …)`
+  * `@ccall LIB.var"sym"(a::A, b::B; va::V)::R` — fixed arguments only; the
+    variadic ones are the user's own `[wrap.varargs]` declaration
+  * `Base.llvmcall((ir, "sym"), R, Tuple{A, B}, …)` — Tier 1 slices
+"""
+function _any_foreign_call_arguments(wrapper_content::AbstractString)
+    offenders = Tuple{String,String}[]
+    parsed = try
+        Meta.parseall(wrapper_content)
+    catch
+        return offenders            # _assert_wrapper_parses owns syntax errors
+    end
+
+    is_any(t) = t === :Any || (t isa Expr && t.head === :. && t.args[end] == QuoteNode(:Any))
+
+    fname(sig) = sig isa Expr && sig.head === :call ? string(sig.args[1]) :
+                 sig isa Expr && sig.head === :(::) ? fname(sig.args[1]) :
+                 sig isa Expr && sig.head === :where ? fname(sig.args[1]) : "<anonymous>"
+
+    function walk(x, fn)
+        x isa Expr || return
+        if x.head === :function && !isempty(x.args)
+            fn = fname(x.args[1])
+        elseif x.head === :call && !isempty(x.args)
+            callee = x.args[1]
+            if callee === :ccall && length(x.args) >= 4 &&
+               x.args[4] isa Expr && x.args[4].head === :tuple &&
+               any(is_any, x.args[4].args)
+                push!(offenders, (fn, "ccall"))
+            elseif (callee === :llvmcall ||
+                    (callee isa Expr && callee.head === :. && callee.args[end] == QuoteNode(:llvmcall))) &&
+                   length(x.args) >= 4 && x.args[4] isa Expr && x.args[4].head === :curly &&
+                   any(is_any, x.args[4].args[2:end])
+                push!(offenders, (fn, "llvmcall"))
+            end
+        elseif x.head === :macrocall && x.args[1] === Symbol("@ccall")
+            call = x.args[end]
+            call isa Expr && call.head === :(::) && (call = call.args[1])
+            if call isa Expr && call.head === :call
+                # Fixed arguments only. The variadic ones (after `;`, an
+                # Expr(:parameters)) are not derived — they are exactly what the
+                # user declared in `[wrap.varargs]`, from an allowlist that
+                # includes `Any` on purpose: Hub lua passes a Julia object to
+                # `lua_pushfstring(L, "%p", …)` to format its address, and
+                # test_deep.jl checks that. The fixed arguments come from DWARF
+                # like every other parameter, so they are where an unresolved
+                # type can hide.
+                fixed = [a for a in call.args[2:end]
+                         if !(a isa Expr && a.head === :parameters)]
+                any(a -> a isa Expr && a.head === :(::) && is_any(a.args[end]), fixed) &&
+                    push!(offenders, (fn, "@ccall"))
+            end
+        end
+        for a in x.args
+            walk(a, fn)
+        end
+    end
+
+    walk(parsed, "<module scope>")
+    return unique(offenders)
+end
+
+"""
+    _assert_no_any_ccall_argument(wrapper_content, module_name)
+
+Refuse a wrapper that declares a foreign-call ARGUMENT as `Any`.
+
+The sibling of `_assert_no_any_ccall_return`, and it guards the same meaning
+from the other side. In a foreign-call argument position `Any` does not mean
+"whatever the caller passes" — it means "pass the Julia object itself", a
+`jl_value_t*`. A `Ptr{Cint}` argument arrives boxed and a `Vector{Cint}` arrives
+as its array header, so the callee reads Julia's object layout as C data. The
+call completes and returns a plausible, wrong answer.
+
+`Any` reaches an argument tuple when a parameter's DWARF type did not resolve
+(`c_type` "unknown"). The type that shipped it was `restrict`: its DIE was
+unmodelled, so every `T *restrict` parameter mapped to `Any` — cglm had 58, each
+returning garbage on Tier 3 and raising `Malformed llvmcall` on Tier 1. The
+parser now resolves through that DIE, but "a parameter type the parser cannot
+see" is a class, not an instance, and this is the check that keeps the next
+member of it loud.
+
+`::Any` in a JULIA signature stays legal and is not inspected — the generators
+emit it for every parameter they convert inside the body.
+"""
+function _assert_no_any_ccall_argument(wrapper_content::AbstractString,
+                                       module_name::AbstractString)
+    offenders = _any_foreign_call_arguments(wrapper_content)
+    isempty(offenders) && return nothing
+    detail = join(("  $fn  ($form)" for (fn, form) in first(offenders, 20)), "\n")
+    more = length(offenders) > 20 ? "\n  … (+$(length(offenders) - 20) more)" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(offenders)) foreign call(s) declare \
+    an ARGUMENT as `Any`. That passes the Julia object itself (a jl_value_t*) where C \
+    expects a value or pointer, so the callee reads Julia's object layout as its data — \
+    a plausible wrong answer, not a crash.
+
+    $detail$more
+
+    `Any` there means a parameter's type did not resolve: look for `c_type` "unknown" \
+    on these functions in compilation_metadata.json, which names a DWARF type the \
+    parser does not model yet. Teach the parser that type, or keep the function out \
+    of the wrapper with `[wrap] exclude_symbols` until it can.
     """)
 end
 
@@ -1186,7 +1303,13 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         if isfile(thunks_so)
             thunks_lib_path = abspath(thunks_so)
         else
-            @warn "AOT thunks enabled but companion library not found at $thunks_so"
+            # The companion library is gone: AOT failed and deleted it, or it
+            # was never produced. Emitting AOT call sites anyway either refuses
+            # the wrap (leaving the previous wrapper, bound to the old thunks)
+            # or, when a stale file is still there, runs those thunks. JIT
+            # dispatch is built from this build's metadata.
+            @warn "AOT thunks enabled but $thunks_so is absent; emitting JIT dispatch"
+            config = with_aot_thunks(config, false)
         end
     end
 

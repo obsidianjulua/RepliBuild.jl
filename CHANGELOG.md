@@ -4,6 +4,337 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### `long double` is an ABI trap, both directions (2026-09-27)
+
+`long double` on x86-64 is the 80-bit x87 type. Julia has no type for it, and
+`ccall` has no shape for it. A return comes back in the x87 register `ST0`, where
+`ccall` never looks; the return mapper's `NTuple{2, UInt64}` read RAX:RDX and returned
+plausible garbage (audit F5b). A parameter is X87 class, passed in memory; the
+parameter mapper's `Any` was only caught by the Any-argument guard, which refused to
+write the whole wrapper until the symbol was excluded (F5a).
+
+- Both generators now emit such a function as an **ABI Safety Trap** that names
+  what it crosses and how to keep it out (`_x87_crossings`, one predicate for both).
+  The wrapper writes and loads, and every other function works. Tier-2 thunks
+  already refuse it (`by_value_crossing` → `:opaque`).
+- A `long double*` is an ordinary pointer and is unaffected.
+- Tests: `test_by_value_crossing.jl` "long double is a trap in both generators", and
+  `c_test` (`lerp_ld`, `ld_half`; devtests).
+- Not built: a thunk could take the value in and out through `f80`
+  (`fpext`/`fptrunc` against `Float64`) for C++, which already has Tier 2. The C
+  bucket has no thunks, so there it stays a trap.
+
+### Packed C++ structs hold the C layout (2026-09-27)
+
+`__attribute__((packed))` and `#pragma pack` structs (audit F24) were worse than the
+audit recorded ("pointer access only"). On a fixture of 12 calls, 7 were wrong.
+
+- **GeneratorCpp emitted fields at natural alignment.** A packed `{char; int}` came
+  out 8 bytes with the int at 4 (C: 5 bytes, int at 1). The thunk converted between
+  that layout and the C one, so by-value calls worked. Everything else read the wrong
+  bytes: pointers into C memory (`unsafe_load` of a C array), arrays Julia wrote for
+  C, and any struct embedding one (`Holder { Pk; double }` was 24 bytes, C has 16).
+- **A `#pragma pack(2)` struct has padding**, so StructGen did not treat it as
+  packed. Natural alignment could not place its members, and it degraded to
+  `!llvm.array<14 x i8>`. The SysV classifier never saw a struct, so it was broken
+  by value in both directions.
+- **The thunk read Julia's value at offsets guessed from `min(size, 8)`**
+  (`get_julia_offsets`). That guess is also wrong for an ordinary padding-free struct
+  with a byte array: `{char; char[3]; int}` was read at 0, 3, 8 instead of 0, 1, 4.
+
+What changed:
+
+- **GeneratorCpp proves each struct's Julia layout against DWARF.**
+  `_prove_julia_layout` applies GeneratorC's exact-or-opaque rule to the fields it
+  would emit. When those fields cannot reproduce the C layout, it emits the C-layout
+  byte blob with offset accessors instead.
+- **The thunk reads Julia's value at DWARF offsets**, and a truly packed return goes
+  back as the packed value.
+- **StructGen gives a struct natural alignment cannot place a packed body with
+  explicit pads.** The classifier then sees the misaligned field and picks MEMORY,
+  as clang does.
+- **Blob accessors now cover struct and union members with plain names.** They
+  used to require a template or scoped spelling.
+
+The proof also found a pre-existing bug. A struct embedding a **named** union stored
+it as a pointer, because named unions are `mutable struct`, so the struct was the
+wrong size. box2d `b2ClipVertex` (16 bytes against 12) and `b2ManifoldPoint`, and one
+fmt specs struct, are now C-layout blobs with every member readable. box2d's verifier
+passes 15/15 on the re-wrap.
+
+Measured:
+
+- **Thunks.** Unchanged for all Hub metadata: no Hub package passes a truly packed
+  struct by value.
+- **StructGen.** 14 structs (llamacpp 2, onednn 12) get a packed body instead of an
+  opaque array. Both have the same size and alignment; onednn's verifier passes
+  141/141.
+- **Re-wrap A/B.** box2d changes 2 structs and fmt 1; clipper2, msdfgen, pugixml,
+  stl, tinyxml2 and onednn are identical.
+- **Tests.** `test_packed_layout.jl` (CI, verbatim clang 22 readelf; each part goes
+  red with its function neutered) and stress_test "packed structs hold the C layout".
+
+### By-value records the thunk could not type (2026-09-27)
+
+A by-value parameter or return whose record had no entry in `struct_definitions`
+became `!llvm.ptr` in the Tier-2 thunk, from `map_cpp_type`'s fallback for a
+non-identifier spelling or from `generate_jlcs_ir`'s rewrite of a bodyless
+`!llvm.struct<"X">`. Its bytes were loaded as a pointer and passed in one register.
+On a fixture of 13 such functions, 9 returned a wrong value and 1 segfaulted. The
+other 3 were right by accident: `box_get(Box<double>)` returned whatever was already
+in XMM0.
+
+- An **empty class** (`struct Tag {}` has no members, so no entry) shifted every
+  later argument one register. `with_tag(Tag(), 41)` returned 257, and a call that
+  should throw returned instead. Returning one read RAX from a `void` callee: SIGSEGV.
+- A **type only declared here** (constructor homing, F4) gave NaN or SIGSEGV.
+- A **template or qualified spelling** was never looked up. `Box<double>` went in as
+  a pointer and came back from RAX while the callee wrote XMM0. msdfgen's
+  `BitmapSection<float, N>` (24 bytes, which belong on the stack), fmt's
+  `basic_string_view<char>` and clipper2's `Point<long>` went in as pointers, and
+  qualified enums (clipper2, onednn, pugixml, tinyxml2) did too.
+- A **toolchain type** the provenance gate leaves out, such as pugixml's 22
+  `std::string_view` overloads, passed a 16-byte view as one pointer.
+- A **derived class with no members of its own** has no entry either.
+
+What changed:
+
+- **`record_abi` in metadata.** For every record a function takes or returns by
+  value, it holds `byte_size`, `pass` (DWARF `DW_AT_calling_convention`: `value` or
+  `reference`) and `empty` (no data member, no base). Toolchain types are included.
+- **`FunctionGen.by_value_crossing` decides each crossing**, looking names up by every
+  scope suffix. The thunk generator and GeneratorCpp act on the same verdict:
+  - a record with a layout gets its DWARF type, template and qualified spellings
+    included, and a qualified enum gets its integer;
+  - an empty record is dropped from the callee's arguments (clang does the same) and
+    its slot is skipped; an empty return makes the callee `void`, and the Julia
+    function returns the singleton;
+  - a record with no layout gets no thunk. The Julia function becomes an **ABI Safety
+    Trap** that names the type and the fix (`-Xclang -fno-use-ctor-homing` or
+    `-fstandalone-debug`, or `exclude_symbols`), and the module still loads.
+- **The method dedup prefers a callable definition over a trap** for one Julia
+  signature. pugixml's `append_child`, `set_name` and 20 more now bind the `const
+  char*` overload, not the `string_view` one. pugixml's `test.jl` gives that collision
+  as the reason it navigates positionally.
+- **A record named after a Base binding** (`Pair`, `Vector`, `Type`, …) is emitted as
+  `c_<name>`, and parameter and return annotations now use that name too. Before,
+  `p::Pair` meant `Base.Pair`, and box2d's `b2Contact::AddType(…, b2Shape::Type,
+  b2Shape::Type)` was annotated `::Type`.
+
+### Non-trivial records by value (2026-09-27)
+
+A class with a user destructor or copy constructor is non-trivial for the purposes
+of calls. Itanium passes it as a pointer to a caller-owned temporary and returns it
+through a hidden sret pointer, at every size. Only parameters of a class with an
+emitted destructor were handled. `Owner make_owner(int)`, a 4-byte class, was read
+from EAX while the callee stored the object through the register holding the `int`:
+SIGSEGV. Above 16 bytes the size-based classifier picks sret anyway, which is why
+this went unseen.
+
+- A `pass: reference` return is lowered through an sret slot the thunk owns. The
+  slot is the first argument, before `this`.
+- A `pass: reference` parameter that has a layout and no destructor to run is passed
+  by address. `invoke` already holds a private copy of the bytes.
+- `is_ccall_safe` keeps any function with such a record by value off Tier 3.
+- A `pass: reference` record with no layout is still passed by address as a
+  parameter (the caller supplies a pointer to a real object). As a return it is a trap.
+
+Measured, for both entries:
+
+- **Thunks.** Old and new generator on current Hub metadata give 2,875
+  byte-identical thunks across box2d, imgui, llamacpp, stl and hello_world. The
+  changed thunks (fmt 219, msdfgen 43, pugixml 8, clipper2 3, onednn 2, tinyxml2 1)
+  are all a by-value record or qualified enum that was `!llvm.ptr`. Trapped: pugixml
+  22, and fmt 55, a count taken from pre-C4/D4 metadata.
+- **Hub verifiers** against the new thunks, without a rebuild: pugixml 13/13,
+  tinyxml2 11/11, msdfgen 24 + 1 broken (unchanged), onednn 141/141.
+- **Re-wrap A/B.** Wrappers are identical except box2d `AddType`, pugixml's 22 dedup
+  winners and fmt's traps.
+- **What reaches a Hub package when.** JIT-mode packages get the layout and enum fixes
+  at load, because thunks are generated from metadata. Traps and the name fixes need
+  a re-wrap. Empty and non-trivial records need `record_abi`, so a **rebuild**.
+- **Tests.** `test_by_value_crossing.jl` (CI, verbatim clang 22 readelf; each part
+  goes red with its function neutered) and stress_test "by-value records without a
+  scalar spelling". That second test fails with the old verdict (`unit_scaled` →
+  12804, `cell_doubled` → 6.9e-310).
+
+### The 2026-09-26 audit, continued
+
+Silent-wrong and crash fixes from the re-verification harness. Each one is
+the line the harness names.
+
+- **`_Complex` is two types.** DWARF names both widths `complex`. The base-type
+  byte size now rewrites that to `complex float` (8) or `complex double` (16)
+  before the Julia map, so a wrapper is no longer refused because every complex
+  argument was `Any`.
+- **`__int128` no longer shadows `Base.Int128`.** The type map already said
+  `Int128`; the generator then emitted `struct Int128 end` because that name
+  was not in its builtin set. `Int128`, `UInt128`, `ComplexF32` and `ComplexF64`
+  are builtins. A call with a real `Int128` reaches the ccall.
+- **`NTuple{4, Ptr{Later}}` is not a type named `Ptr_Later`.** The forward-decl
+  scan stopped at the first `}`. Brace matching peels it to `Later`, and a
+  pointer array lays out as `NTuple{N, Ptr{Cvoid}}` (the width does not depend
+  on the pointee, which may not be declared yet).
+- **The C-bucket clang pipe no longer deadlocks** on more than ~64 KiB of
+  diagnostics. Output is drained into an `IOBuffer` while the process runs.
+- **A local dependency compiles `.c` files.** It already compiled `.cpp`.
+- **`register` / `use` keep the project.** A relative `root` is resolved against
+  the TOML file, not the caller's cwd, and `register` copies that project's
+  relative include dirs and sources next to the stored TOML. `use()` of a
+  package with `root = "."` no longer clones dependencies into the caller's
+  directory or compiles against `/usr/include`. The registry build cache hashes
+  include directories recursively. The per-file IR cache's compile fingerprint
+  hashes those headers too, so a nested header edit is not linked from the
+  previous IR. The wrapper file is loaded under `get_module_name`
+  (`vec2d` → `Vec2d.jl`), not `titlecase`.
+- **SysConfigGen proposals.** cmake command quotes are stripped
+  (`-DMSDFGEN_PUBLIC=""` → `-DMSDFGEN_PUBLIC=`), every emitted string goes
+  through `TOML.print`, and non-`-D` flags (`-std=`, `-fvisibility=`) are kept.
+- **A failed AOT build deletes the previous `_thunks.so`.** Wrap, finding it
+  gone, emits JIT dispatch from this build's metadata instead of binding the
+  stale thunks by name.
+- **Static members have no `this`.** A definition DIE with a body and no
+  `DW_AT_object_pointer` records `has_object_pointer = false`. Both receiver
+  gates honour that. A declaration, which never carries the attribute, does
+  not record it, so out-of-line instance methods keep their receiver.
+- **Global constructors are emitted.** `T::T` was skipped because the bare
+  name equals the class; `ns::T::T` was not. The name is `T_T`.
+- **Anonymous C++ unions are immutable byte regions**, so a parent struct
+  inlines them instead of storing a pointer.
+- **A float-array member records its size.** `float v[3]` had member size 0,
+  so the return path treated the struct as unsizable and emitted an integer
+  byte blob. The callee returns that struct in XMM; the blob was read from
+  general-purpose registers.
+- **SysV register exhaustion.** A register-class struct that does not fit in
+  the integer and SSE registers still free is passed in memory, as one
+  operand. It used to be split across the leftover registers and the stack.
+- `long double` is still the x87 return the ccall ABI does not model. A
+  parameter is refused by the `Any` guard; a return is still the wrong bits.
+  A 0-byte by-value stub (constructor homing) is unchanged: the package-side
+  fix is `-fstandalone-debug`, which is not the default because a merged
+  module of that size exhausts clang's source-location counter. An
+  attribute-packed C++ struct is still emitted at natural alignment. A byte
+  blob of the C size does not match the thunk, which returns the aligned
+  layout, so field reads move to the wrong offset.
+
+### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
+
+- **Every constructor and destructor missed its DWARF.** clang writes the unified
+  `C4`/`D4` spelling into `DW_AT_linkage_name`, while the symbol table carries the
+  Itanium variants `C1`/`C2`/`C3` and `D0`/`D1`/`D2`. The exact-name join in
+  `extract_compilation_metadata` never matched. Every structor was
+  `parameters_source: inferred` from the demangled string, where a by-value struct
+  is only a name, so it was typed `Any`. msdfgen's
+  `LinearSegment(Vector2, Vector2, EdgeColor)` stored `p0=(1,3)` and garbage.
+  `_structor_dwarf_key` now rewrites the symbol's marker to C4/D4 and accepts it
+  only when DWARF has exactly that key. Measured on 8 Hub C++ packages rebuilt from
+  scratch copies: all 559 structor symbols now come from DWARF (they had 0), with
+  real parameter names and `this`. Verifiers are unchanged (tinyxml2 11, pugixml
+  13, box2d 15, clipper2 233, stl 35, imgui 202). msdfgen's two `@test_broken` pins
+  for this and the next item turned into unexpected passes, and are now plain tests.
+- The `int` return some template-class destructors were given, from
+  `infer_return_type` splitting the class on a `::` inside `<>`, disappears with
+  this: destructors take `void` from DWARF.
+- **`T&&` was unmodelled.** `DW_TAG_rvalue_reference_type` had no `type_refs` entry,
+  so every move constructor's parameter resolved to `"unknown"`. The string mappers
+  (`dwarf_type_to_julia`, `cpp_to_julia_type`, `TypesCpp.infer_cpp_type`) stripped a
+  single `&`, which turned `T&&` into `Ref{Ref{T}}`. It now resolves to `T&&` and
+  maps to one `Ref{T}`; it is an address at the ABI level, exactly like `T&`.
+- Tests: `test_dwarf_attribution.jl` "rvalue references are references" (verbatim
+  readelf), `test_symbol_hygiene.jl` for the C4/D4 key rewrite (all six variants, a
+  template class, and refusal of an ambiguous pair), and a `geom::Segment2D(Point2D,
+  Point2D)` constructor in the `stress_test` fixture, checked by metadata source and
+  by the values it stores. The fixture test goes red with the join neutered.
+- Found while doing this, not changed: GeneratorCpp skips a constructor when its
+  bare name equals its **qualified** class, which only happens at global scope. So
+  `ns::T::T` is emitted and `T::T` is not (logged in CLAUDE.md open problems).
+
+### A throwing C++ function can no longer take the ccall path by sharing a name (2026-09-26)
+
+Tier 3 (`ccall`) has no landing pad. A C++ exception thrown through it runs
+`std::terminate` and the process dies (`terminate called after throwing …`, exit 134).
+So a C++ function may take Tier 3 only if no exception can leave it. That was decided
+by `_scan_noexcept_functions`, a regex over the sources that returns **bare** names.
+Every function with one of those names was marked noexcept, so:
+
+- `B::get(int)`, which throws, rode along with `A::get() const noexcept`;
+- every constructor of a class with a `noexcept` move constructor was "noexcept",
+  including the ones that validate and throw;
+- `noexcept(false)` matched the regex too.
+
+**Hub fmt shipped eight of these**: `fmt::file::file(path, flags)`,
+`fmt::buffered_file::buffered_file(path, mode)`, `fmt::file::dup2(int)` (its
+`dup2(int, std::error_code&) noexcept` overload supplied the name),
+`fmt::ostream::ostream`, and their ABI-tagged twins. Re-wrapped from the Hub's current
+metadata, `dup2(-1)` aborted with `std::system_error`. After the fix it raises
+`CxxException` and the process lives.
+
+- A name is now only a **candidate**. The proof is LLVM's `nounwind` on the function's
+  own mangled definition in the IR the binary is linked from (`_nounwind_definitions`;
+  clang stamps it on every `noexcept` definition). A definition that can unwind is
+  never `nounwind`, so every false positive above is gone.
+- Deliberately **not** widened: `nounwind` alone would also move every function the
+  optimizer proved non-throwing to Tier 3. Tried on the Hub, that surfaced Tier-3
+  emitter gaps the thunks tolerate: box2d `b2Contact::AddType`'s nested enum `Type`,
+  and fmt `buffer<char>`'s constructor with an inferred `Any` parameter. Both were
+  refused loudly by the wrapper guards, but that is a separate change. With the
+  intersection, the routing can only lose Tier-3 functions, never gain them.
+- The DWARF pass no longer sets `is_noexcept` whenever a function-level line contains
+  the substring "noexcept", and the demangled-name substring check is gone. With no IR
+  (ingest), nothing is noexcept, so all C++ goes to Tier 2.
+- Measured on 8 Hub C++ packages rebuilt from scratch copies: only fmt's routing
+  changed, where exactly those 8 functions left Tier 3 and none entered it. Verifiers
+  are unchanged: tinyxml2 11, pugixml 13, box2d 15, clipper2 233, stl 35, imgui 202,
+  msdfgen 21 plus 3 pinned broken.
+- Tests: `test_noexcept_routing.jl` (CI; the rule tests go red with the name-only rule
+  swapped back in by exact signature). The `callback_test` fixture gains
+  `collide::{Quiet,Loud}::value` and `collide::checked() noexcept(false)`, asserted by
+  tier and by a real throw in a subprocess, because a regression is an abort.
+
+### `restrict`, `volatile` and `_Atomic` resolve; `Any` can no longer reach a ccall argument (2026-09-26)
+
+The DWARF parser had no entry for `DW_TAG_restrict_type`, `DW_TAG_volatile_type` or
+`DW_TAG_atomic_type`, so `resolve_type` answered `"unknown"` for every type behind
+one. `restrict` sits on the pointer itself, so `int *restrict a` came out as a
+parameter of type `Any` — and `Any` in a ccall argument tuple passes the Julia
+object (a `jl_value_t*`), not the pointer. The call completed and returned a
+plausible, wrong answer. `sum(a, 4)` over `[1,2,3,4]` returned a large garbage
+integer; a `restrict` NULL check saw a non-NULL box.
+
+- **Hub cglm shipped 58 of these** (`glmc_mat4_make(const float *__restrict src, …)`
+  and every other `__restrict` parameter). On its Tier-1 path they raised
+  `Malformed llvmcall`. On the ccall splice a precompiled consumer gets, they wrote
+  garbage into `dest`.
+- The three qualifiers now resolve straight through to their target type. They
+  carry no ABI information, and adding a prefix to the type string would give
+  every downstream mapper a spelling only some of them strip. A qualifier with no
+  target qualifies `void` (`volatile void *` → `Ptr{Cvoid}`).
+- **Measured across the Hub** by running the old and new parser on the same readelf
+  dumps (33 packages; llamacpp and onednn not run): 860 function signatures and
+  11 structs changed, and every change is `unknown` becoming a real type.
+  Everything else was identical. The 11 structs are those with a `volatile` or
+  `_Atomic` member (lmdb, lua, sqlite). Six now get typed fields instead of a byte
+  blob, and all 11 still equal their DWARF `byte_size`. A/B rebuilds of lmdb, lua,
+  sqlite, tinyxml2, pugixml and cglm pass their own verifiers unchanged
+  (cglm test_deep 753/753).
+- **Guard: `_assert_no_any_ccall_argument`**, the argument-side twin of
+  `_assert_no_any_ccall_return`. The wrapper refuses to write if any foreign call
+  declares an argument `Any` (`ccall` tuple, `@ccall` fixed arguments, Tier-1
+  `llvmcall` `Tuple{…}`). It walks the parsed AST, because the return type in
+  front of the tuple can contain commas. Variadic `@ccall` arguments are exempt:
+  they are the user's own `[wrap.varargs]` declaration, and Hub lua passes a Julia
+  object to `%p` on purpose. The guard also makes `long double` parameters loud,
+  since they still map to `Any` (open, see CLAUDE.md). A library with one fails to
+  wrap until the symbol is excluded, instead of shipping a silently wrong call.
+  Before this change, a comment in `test_wrapper_type_bindings.jl` called
+  argument-position `Any` "legitimate". That belief is how the cglm functions
+  shipped, and the comment is corrected.
+- Tests: `test_dwarf_attribution.jl` "restrict / volatile / _Atomic resolve through"
+  (verbatim clang 22 readelf; it goes red with the pre-fix parser
+  `include_string`'d back in), and `test_wrapper_type_bindings.jl` "Foreign call
+  must not take Any". With the pre-fix parser, the guard alone refuses the audit
+  fixture and names both `restrict` functions.
+
 ### Wrap-surface fixture reads the PE export directory (2026-09-24)
 
 `test/test_wrap_surface_guard.jl`'s oracle ran `nm -D --defined-only`. That is

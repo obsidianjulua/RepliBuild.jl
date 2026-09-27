@@ -401,4 +401,33 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
         @test checked > 3000
         @test length(pkgs) >= 5
     end
+
+    @testset "constructor/destructor symbols join their C4/D4 DWARF entry" begin
+        # clang writes the unified C4/D4 into DW_AT_linkage_name; the symbol table
+        # has C1/C2/C3 and D0/D1/D2. The exact-name join missed every one of them,
+        # and the signature was guessed from the demangled string instead.
+        C = RepliBuild.Compiler
+        t = Dict("_ZN5audit3SegC4ENS_2PtES1_" => 1, "_ZN5audit3SegD4Ev" => 2,
+                 "_ZN3fmt3v124fileC4ENS0_18basic_cstring_viewIcEEi" => 3,
+                 "_ZN1XIiEC4Ev" => 4)
+        for v in ("C1", "C2", "C3")
+            @test C._structor_dwarf_key("_ZN5audit3Seg$(v)ENS_2PtES1_", t) == "_ZN5audit3SegC4ENS_2PtES1_"
+        end
+        for v in ("D0", "D1", "D2")
+            @test C._structor_dwarf_key("_ZN5audit3Seg$(v)Ev", t) == "_ZN5audit3SegD4Ev"
+        end
+        @test C._structor_dwarf_key("_ZN3fmt3v124fileC2ENS0_18basic_cstring_viewIcEEi", t) ==
+              "_ZN3fmt3v124fileC4ENS0_18basic_cstring_viewIcEEi"
+        # Template class: the marker sits before the class's own `E`, after `I…E`.
+        @test C._structor_dwarf_key("_ZN1XIiEC2Ev", t) == "_ZN1XIiEC4Ev"
+        # Not a structor, not mangled, or no DWARF entry: nothing.
+        @test C._structor_dwarf_key("_ZN5audit1B3getEi", t) === nothing
+        @test C._structor_dwarf_key("plain_c_function", t) === nothing
+        @test C._structor_dwarf_key("_ZN5audit3ResC2Ei", t) === nothing
+        # Two marker-shaped positions that BOTH rewrite to a real key: refused,
+        # not guessed. (Contrived — no real name has two; the rule must still hold.)
+        amb = Dict("_ZC4EC2E" => 1, "_ZC1EC4E" => 2)
+        @test C._structor_dwarf_key("_ZC1EC2E", amb) === nothing
+        @test C._structor_dwarf_key("_ZC1EC2E", Dict("_ZC4EC2E" => 1)) == "_ZC4EC2E"
+    end
 end

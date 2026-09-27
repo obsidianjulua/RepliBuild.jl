@@ -377,7 +377,10 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
             for (root, dirs, files) in walkdir(dep_path)
                 filter!(d -> !in(d, ["build", ".git", ".cache"]), dirs)
                 for file in files
-                    if endswith(file, ".cpp") || endswith(file, ".cc") || endswith(file, ".cxx")
+                    # `.c` too. A local C dependency used to contribute headers
+                    # and nothing else: the sources were never compiled, and
+                    # the symbols were simply absent from the library.
+                    if endswith(file, ".cpp") || endswith(file, ".cc") || endswith(file, ".cxx") || endswith(file, ".c")
                         push!(extra_sources, joinpath(root, file))
                     elseif endswith(file, ".a") || endswith(file, ".so") || endswith(file, ".dylib")
                         push!(extra_link_dirs, root)

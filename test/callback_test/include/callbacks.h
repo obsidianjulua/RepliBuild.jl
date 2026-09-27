@@ -40,6 +40,16 @@ int safe_multiply(int a, int b) noexcept;
 // Throws during iteration of a callback-like loop
 int throws_midway(int iterations);
 
+// noexcept routing (test_exceptions.jl, "bare-name noexcept collision"). The
+// routing used to trust a regex returning BARE names, so a throwing function
+// that shares a name with a noexcept one went to a plain ccall, and its throw
+// aborted the process. `noexcept(false)` matched the same regex.
+namespace collide {
+struct Quiet { int value(int x) const noexcept; };  // really noexcept
+struct Loud  { int value(int x) const; };           // same bare name, THROWS
+int checked(int x) noexcept(false);                 // NOT noexcept
+}
+
 #endif // __cplusplus
 
 #endif // CALLBACKS_H

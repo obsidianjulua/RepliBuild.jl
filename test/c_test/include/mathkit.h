@@ -147,4 +147,9 @@ void read_multi_bits(MultiByteBits s, unsigned *x, unsigned *y, unsigned *z);
 WideBits make_wide_bits(unsigned tag, unsigned data, unsigned flag);
 void read_wide_bits(WideBits s, unsigned *tag, unsigned *data, unsigned *flag);
 
+/* long double (x87, 80-bit): no Julia type, no ccall shape. Both directions are
+   an ABI trap in the wrapper, and the rest of the module still loads. */
+long double lerp_ld(double a, double b, double t);
+double ld_half(long double x);
+
 #endif /* MATHKIT_H */

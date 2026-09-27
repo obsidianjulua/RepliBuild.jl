@@ -143,13 +143,27 @@ Returns false (→ route to MLIR Tier 2) if any of:
 - Contains unsafe nested member
 - Unknown struct not in DWARF
 """
-function is_ccall_safe(func_info, dwarf_structs)
+function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
     # ── -1. Exception safety: C++ functions that may throw ───────────────
     # Conservative: all C++ functions (mangled _Z* names) may throw unless
     # noexcept. Route to MLIR Tier 2 for exception-safe thunks.
     # Plain C functions (unmangled) never throw C++ exceptions.
     if _is_cpp_function(func_info) && !_is_noexcept(func_info)
         return false
+    end
+
+    # ── -0.5. Non-trivial for calls (DWARF DW_CC_pass_by_reference) ───────
+    # Such a record travels as a pointer to a temporary and comes back
+    # through a hidden sret pointer, at any size. `ccall` lays a by-value
+    # struct out by the C rules instead, so a `noexcept` function taking or
+    # returning one goes to the thunk, which does both.
+    let FG = JLCSIRGenerator.FunctionGen
+        for t in Iterators.flatten(((get(func_info["return_type"], "c_type", ""),),
+                                    (get(p, "c_type", "") for p in func_info["parameters"])))
+            s = String(t)
+            (isempty(s) || occursin(r"[*&(\[]", s)) && continue
+            FG.record_passes_by_reference(s, nothing, record_abi) && return false
+        end
     end
 
     # ── 0. STL containers (never ccall-safe by value) ───────────────────

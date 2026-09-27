@@ -800,18 +800,50 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
         }
     }
 
-    // If sret, the return pointer is the first argument.
+    // If sret, the return pointer is the first argument. On both SysV and
+    // Win64 that pointer occupies an integer argument register.
     if (s.needsSret) {
         s.args.push_back(s.sretSlot);
         s.argTypes.push_back(ptrType);
     }
+
+    // Free integer / SSE argument registers. A register-class struct that does
+    // not fit in what remains is passed entirely in memory. Splitting it
+    // anyway puts the leftover eightbytes on the stack as scalars, which is
+    // not the convention: the callee looks for one memory operand. SysV has
+    // 6 GPR + 8 XMM; Win64 has 4 + 4, and its aggregates are already a single
+    // integer whose spill LLVM gets right, so the "does not fit → memory"
+    // rule is SysV only.
+    int gprLeft = target == AbiTarget::Win64 ? 4 : 6;
+    int xmmLeft = target == AbiTarget::Win64 ? 4 : 8;
+    if (s.needsSret && gprLeft > 0)
+        --gprLeft;
+    auto noteScalar = [&](Type t) {
+        if (isa<LLVM::LLVMPointerType>(t) || t.isIntOrIndex()) {
+            if (gprLeft > 0) --gprLeft;
+        } else if (t.isIntOrFloat() && !t.isIntOrIndex()) {
+            if (xmmLeft > 0) --xmmLeft;
+        }
+    };
 
     for (Value arg : args) {
         Type argType = arg.getType();
 
         if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
             auto abi = classifyStruct(structType, ctx, target);
-            if (!abi.memoryClass) {
+            bool asRegs = !abi.memoryClass;
+            if (asRegs && target == AbiTarget::SysV) {
+                int needG = 0, needX = 0;
+                for (Type rt : abi.regs) {
+                    if (rt.isIntOrFloat() && !rt.isIntOrIndex())
+                        ++needX;
+                    else
+                        ++needG;
+                }
+                if (needG > gprLeft || needX > xmmLeft)
+                    asRegs = false; // whole struct on the stack; no registers
+            }
+            if (asRegs) {
                 // Register-class by-value struct: pass one scalar per register
                 // (through memory, matching clang's coercion). The 8-byte GEP
                 // stride is the SysV eightbyte layout; Win64 yields a single
@@ -829,6 +861,7 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
                     Value v = LLVM::LoadOp::create(rewriter, loc, abi.regs[i], p);
                     s.args.push_back(v);
                     s.argTypes.push_back(abi.regs[i]);
+                    noteScalar(abi.regs[i]);
                 }
                 continue;
             }
@@ -868,6 +901,7 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
 
         s.args.push_back(arg);
         s.argTypes.push_back(arg.getType());
+        noteScalar(arg.getType());
     }
 
     return s;
