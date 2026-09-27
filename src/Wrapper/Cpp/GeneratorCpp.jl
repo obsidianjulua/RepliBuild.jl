@@ -801,12 +801,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
                         base_ref = base_ref[5:end-1]
                     elseif startswith(base_ref, "NTuple{")
-                        ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
-                        if !isnothing(ntuple_match)
-                            base_ref = strip(ntuple_match.captures[1])
-                        else
+                        inner = peel_container_arg(base_ref)
+                        if inner === nothing
                             break
                         end
+                        base_ref = inner
                     else
                         break
                     end
@@ -852,12 +851,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
                     base_ref = base_ref[5:end-1]
                 elseif startswith(base_ref, "NTuple{")
-                    ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
-                    if !isnothing(ntuple_match)
-                        base_ref = strip(ntuple_match.captures[1])
-                    else
+                    inner = peel_container_arg(base_ref)
+                    if inner === nothing
                         break
                     end
+                    base_ref = inner
                 else
                     break
                 end
@@ -974,20 +972,28 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     is_soft = false
 
                     if startswith(julia_type, "Ptr{")
-                        ptr_match = match(r"Ptr\{([^}]+)\}", julia_type)
-                        if !isnothing(ptr_match)
-                            dep_type = strip(ptr_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            dep_type = unwrap_foreign_type(inner)
                             is_soft = true
                         end
                     elseif startswith(julia_type, "NTuple{")
-                        ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", julia_type)
-                        if !isnothing(ntuple_match)
-                            dep_type = strip(ntuple_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            # `NTuple{4, Ptr{Later}}` names Later only through a
+                            # pointer. A hard dependency would demand Later's
+                            # full layout first; the pointer does not.
+                            if startswith(inner, "Ptr{")
+                                dep_type = unwrap_foreign_type(inner)
+                                is_soft = true
+                            else
+                                dep_type = unwrap_foreign_type(inner)
+                            end
                         end
                     elseif startswith(julia_type, "Ref{")
-                        ref_match = match(r"Ref\{([^}]+)\}", julia_type)
-                        if !isnothing(ref_match)
-                            dep_type = strip(ref_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            dep_type = unwrap_foreign_type(inner)
                         end
                     else
                         dep_type = julia_type

@@ -39,6 +39,70 @@ const _FOREIGN_BUILTIN_TYPES = Set{String}([
     "ComplexF32", "ComplexF64", "Any", "Nothing",
 ])
 
+# Index of the `}` that closes the `{` at `open_at`, or 0 if the braces do not
+# balance. Byte-oriented: these spellings are ASCII.
+function _brace_close(s::AbstractString, open_at::Int)::Int
+    depth = 0
+    i = open_at
+    n = lastindex(s)
+    while i <= n
+        c = s[i]
+        if c == '{'
+            depth += 1
+        elseif c == '}'
+            depth -= 1
+            depth == 0 && return i
+        end
+        i = nextind(s, i)
+    end
+    return 0
+end
+
+"""
+    peel_container_arg(spelling) -> Union{String,Nothing}
+
+The type argument of a `Ptr{T}`, `Ref{T}`, or `NTuple{N, T}` that is the whole
+string, matched on braces. `NTuple{4, Ptr{Later}}` yields `Ptr{Later}`. A
+`[^}]` scan of the same spelling stops at the inner `}` and invents a type
+named `Ptr{Later`.
+"""
+function peel_container_arg(spelling::AbstractString)::Union{String,Nothing}
+    s = String(strip(spelling))
+    prefix = if startswith(s, "NTuple{")
+        "NTuple{"
+    elseif startswith(s, "Ptr{")
+        "Ptr{"
+    elseif startswith(s, "Ref{")
+        "Ref{"
+    else
+        return nothing
+    end
+    open_at = ncodeunits(prefix)          # '{' — these prefixes are ASCII
+    close_at = _brace_close(s, open_at)
+    (close_at == 0 || close_at != lastindex(s)) && return nothing
+    payload = s[nextind(s, open_at):prevind(s, close_at)]
+    if prefix == "NTuple{"
+        m = match(r"^\d+\s*,\s*(.*)$"s, payload)
+        return m === nothing ? nothing : String(strip(m.captures[1]))
+    end
+    return String(strip(payload))
+end
+
+"""
+    unwrap_foreign_type(spelling) -> String
+
+Peel `Ptr` / `Ref` / `NTuple` until a bare name remains.
+`NTuple{4, Ptr{Later}}` → `Later`.
+"""
+function unwrap_foreign_type(spelling::AbstractString)::String
+    s = String(strip(spelling))
+    while true
+        inner = peel_container_arg(s)
+        inner === nothing && return s
+        s = inner
+    end
+end
+
 """Escape a name if it's a Julia keyword, using var\"...\" syntax."""
 function _escape_keyword(name::String)::String
     if name in _JULIA_KEYWORDS

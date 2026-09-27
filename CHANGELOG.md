@@ -17,6 +17,10 @@ the line the harness names.
   `Int128`; the generator then emitted `struct Int128 end` because that name
   was not in its builtin set. `Int128`, `UInt128`, `ComplexF32` and `ComplexF64`
   are builtins. A call with a real `Int128` reaches the ccall.
+- **`NTuple{4, Ptr{Later}}` is not a type named `Ptr_Later`.** The forward-decl
+  scan stopped at the first `}`. Brace matching peels it to `Later`, and a
+  pointer array lays out as `NTuple{N, Ptr{Cvoid}}` (the width does not depend
+  on the pointee, which may not be declared yet).
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 

@@ -582,4 +582,14 @@ end
     @test loadable !== nothing && occursin("_assert_no_any_ccall_argument(", loadable.match)
 end
 
+@testset "container peel does not stop at the first brace" begin
+    W = RepliBuild.Wrapper
+    @test W.peel_container_arg("NTuple{4, Ptr{Later}}") == "Ptr{Later}"
+    @test W.unwrap_foreign_type("NTuple{4, Ptr{Later}}") == "Later"
+    @test W.unwrap_foreign_type("Ptr{Ptr{Later}}") == "Later"
+    @test W.peel_container_arg("Int128") === nothing
+    @test "Int128" in W._FOREIGN_BUILTIN_TYPES
+    @test "ComplexF64" in W._FOREIGN_BUILTIN_TYPES
+end
+
 end  # testset

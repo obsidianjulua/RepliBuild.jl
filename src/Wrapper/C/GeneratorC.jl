@@ -43,6 +43,12 @@ function _field_layout(jt::String, ct::String,
             esz, eal = _C_PRIM_FIELD_LAYOUT[elem]
             return (jt, n * esz, eal)
         end
+        # `Later *slots[4]` is `NTuple{4, Ptr{Later}}`. The pointee's identity
+        # does not change the width, and naming it here demands Later exist
+        # before this struct — a mutual pointer cycle cannot be ordered.
+        if startswith(elem, "Ptr{") || elem == "Cstring"
+            return ("NTuple{$n, Ptr{Cvoid}}", n * 8, 8)
+        end
         es = _sanitize_c_type_name(elem)
         if haskey(resolved_layouts, es)
             esz, eal = resolved_layouts[es]
@@ -863,12 +869,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
                         base_ref = base_ref[5:end-1]
                     elseif startswith(base_ref, "NTuple{")
-                        ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
-                        if !isnothing(ntuple_match)
-                            base_ref = strip(ntuple_match.captures[1])
-                        else
+                        inner = peel_container_arg(base_ref)
+                        if inner === nothing
                             break
                         end
+                        base_ref = inner
                     else
                         break
                     end
@@ -914,12 +919,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 elseif startswith(base_ref, "Ref{") && endswith(base_ref, "}")
                     base_ref = base_ref[5:end-1]
                 elseif startswith(base_ref, "NTuple{")
-                    ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", base_ref)
-                    if !isnothing(ntuple_match)
-                        base_ref = strip(ntuple_match.captures[1])
-                    else
+                    inner = peel_container_arg(base_ref)
+                    if inner === nothing
                         break
                     end
+                    base_ref = inner
                 else
                     break
                 end
@@ -1029,20 +1033,28 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     is_soft = false
 
                     if startswith(julia_type, "Ptr{")
-                        ptr_match = match(r"Ptr\{([^}]+)\}", julia_type)
-                        if !isnothing(ptr_match)
-                            dep_type = strip(ptr_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            dep_type = unwrap_foreign_type(inner)
                             is_soft = true
                         end
                     elseif startswith(julia_type, "NTuple{")
-                        ntuple_match = match(r"NTuple\{\d+,\s*([^}]+)\}", julia_type)
-                        if !isnothing(ntuple_match)
-                            dep_type = strip(ntuple_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            # `NTuple{4, Ptr{Later}}` names Later only through a
+                            # pointer. A hard dependency would demand Later's
+                            # full layout first; the pointer does not.
+                            if startswith(inner, "Ptr{")
+                                dep_type = unwrap_foreign_type(inner)
+                                is_soft = true
+                            else
+                                dep_type = unwrap_foreign_type(inner)
+                            end
                         end
                     elseif startswith(julia_type, "Ref{")
-                        ref_match = match(r"Ref\{([^}]+)\}", julia_type)
-                        if !isnothing(ref_match)
-                            dep_type = strip(ref_match.captures[1])
+                        inner = peel_container_arg(julia_type)
+                        if inner !== nothing
+                            dep_type = unwrap_foreign_type(inner)
                         end
                     else
                         dep_type = julia_type
@@ -1657,6 +1669,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                         return GC.@preserve r unsafe_load(Ptr{$m_julia_type}(pointer_from_objref(r) + $m_offset))
                                     end""")
                                 push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=m_julia_type))
+                            # `T *slots[4]` → `NTuple{4, Ptr{T}}`. Load as `Ptr{Cvoid}`:
+                            # same width, and the pointee need not be declared yet.
+                            elseif (let _el = peel_container_arg(m_julia_type)
+                                    _el !== nothing && startswith(m_julia_type, "NTuple{") &&
+                                        (startswith(_el, "Ptr{") || _el == "Cstring")
+                                end)
+                                _nm = match(r"^NTuple\{(\d+),", m_julia_type)
+                                _load = _nm === nothing ? "Ptr{Cvoid}" : "NTuple{$(_nm.captures[1]), Ptr{Cvoid}}"
+                                push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        r = Ref(getfield(x, :_data))
+                                        return GC.@preserve r unsafe_load(Ptr{$_load}(pointer_from_objref(r) + $m_offset))
+                                    end""")
+                                push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=_load))
                             # Nested struct/union types — extract sub-blob
                             else
                                 # Prefer the Julia type name: an anonymous aggregate
