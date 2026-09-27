@@ -3389,7 +3389,26 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
     "complex double" => "ComplexF64",
     "float _Complex" => "ComplexF32",
     "double _Complex" => "ComplexF64",
+    # DWARF spells every width `complex`; `_complex_base_name` rewrites it
+    # to one of these before the lookup.
+    "complex float" => "ComplexF32",
+    "complex double" => "ComplexF64",
+    "complex long double" => "ComplexF64",
 )
+
+"""
+    _complex_base_name(nbytes) -> String
+
+DWARF names every C `_Complex` width `complex`. The byte size is the element
+width doubled: 8 is `float`, 16 is `double`, 32 is `long double`. An unknown
+size stays `complex`, which maps to `Any` and is refused rather than guessed.
+"""
+function _complex_base_name(nbytes::Int)::String
+    nbytes == 8 && return "complex float"
+    nbytes == 16 && return "complex double"
+    nbytes == 32 && return "complex long double"
+    return "complex"
+end
 
 """
 Comprehensive C/C++ type to Julia type mapping.
@@ -3956,6 +3975,7 @@ function parse_dwarf_dump(output::AbstractString;
     current_function = nothing
     current_linkage_name = nothing
     type_refs = Dict{String,Any}()  # offset => type_name (String) or type_info (Dict)
+    base_byte_size = Dict{String,Int}()  # base-type offset => DW_AT_byte_size
 
     # First pass: Build type reference table
     # We need to handle: base types, pointer types, const types, reference types
@@ -4415,7 +4435,12 @@ function parse_dwarf_dump(output::AbstractString;
                 
                 if !isempty(type_name)
                     if offset_to_kind[tag_offset] == :base
-                        # Base types are stored as simple strings
+                        # Base types are stored as simple strings. DWARF names
+                        # every `_Complex` width `complex`; the byte size (which
+                        # may already have been seen) is what distinguishes them.
+                        if type_name == "complex"
+                            type_name = _complex_base_name(get(base_byte_size, tag_offset, 0))
+                        end
                         type_refs[tag_offset] = type_name
                     elseif offset_to_kind[tag_offset] in [:struct, :class, :enum, :typedef, :template_type, :template_value, :namespace]
                         # These types are dicts - update the name field
@@ -4529,10 +4554,24 @@ function parse_dwarf_dump(output::AbstractString;
             end
         end
 
-        # Extract DW_AT_byte_size for enums, structs, classes, and unions
+        # Extract DW_AT_byte_size for enums, structs, classes, unions, and base types.
+        # A base type named `complex` is both `_Complex float` (8) and
+        # `_Complex double` (16); the name alone cannot tell them apart, so the
+        # size is recorded and the stored name is rewritten once both are known.
         if contains(line, "DW_AT_byte_size") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :base
+                size_match = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
+                if !isnothing(size_match)
+                    val_str = size_match.captures[1]
+                    nbytes = startswith(val_str, "0x") ?
+                             parse(Int, val_str[3:end], base=16) : parse(Int, val_str)
+                    base_byte_size[tag_offset] = nbytes
+                    if get(type_refs, tag_offset, "") == "complex"
+                        type_refs[tag_offset] = _complex_base_name(nbytes)
+                    end
+                end
+            elseif haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union]
                 # Match value after colon
                 size_match = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
                 if !isnothing(size_match)
@@ -6758,6 +6797,9 @@ const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
     "complex double" => "ComplexF64",
     "float _Complex" => "ComplexF32",
     "double _Complex" => "ComplexF64",
+    "complex float" => "ComplexF32",
+    "complex double" => "ComplexF64",
+    "complex long double" => "ComplexF64",
 )
 
 const _CPP_INTERNAL_TYPE_BLOCKLIST = Set{String}([

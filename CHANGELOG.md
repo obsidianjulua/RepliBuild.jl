@@ -4,6 +4,16 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### The 2026-09-26 audit, continued
+
+Silent-wrong and crash fixes from the re-verification harness. Each one is
+the line the harness names.
+
+- **`_Complex` is two types.** DWARF names both widths `complex`. The base-type
+  byte size now rewrites that to `complex float` (8) or `complex double` (16)
+  before the Julia map, so a wrapper is no longer refused because every complex
+  argument was `Any`.
+
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 
 - **Every constructor and destructor missed its DWARF.** clang writes the unified

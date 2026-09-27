@@ -430,6 +430,38 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test !occursin("Ref{Ref", DWARF_COMPILER.dwarf_type_to_julia("double&&"))
     end
 
+    @testset "complex widths are not one type" begin
+        # DWARF names both `_Complex float` and `_Complex double` `complex`.
+        # The byte size is the only difference. Both used to become `Any`,
+        # and the wrapper was refused.
+        dump = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : clang
+         <1><20>: Abbrev Number: 2 (DW_TAG_base_type)
+            <21>   DW_AT_byte_size   : 8
+            <22>   DW_AT_encoding    : 3	(complex float)
+            <23>   DW_AT_name        : (indexed string: 0x1): complex
+         <1><30>: Abbrev Number: 2 (DW_TAG_base_type)
+            <31>   DW_AT_byte_size   : 16
+            <32>   DW_AT_encoding    : 3	(complex float)
+            <33>   DW_AT_name        : (indexed string: 0x1): complex
+         <1><40>: Abbrev Number: 3 (DW_TAG_subprogram)
+            <41>   DW_AT_name        : cmul
+            <42>   DW_AT_type        : <0x30>
+            <43>   DW_AT_low_pc      : 0x0
+         <2><44>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+            <45>   DW_AT_name        : a
+            <46>   DW_AT_type        : <0x20>
+         <2><47>: Abbrev Number: 0
+         <1><50>: Abbrev Number: 0
+        """
+        rt, _, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
+        @test rt["cmul"]["c_type"] == "complex double"
+        @test rt["cmul"]["julia_type"] == "ComplexF64"
+        @test rt["cmul"]["parameters"][1]["c_type"] == "complex float"
+        @test rt["cmul"]["parameters"][1]["julia_type"] == "ComplexF32"
+    end
+
     # ── The arity guard ─────────────────────────────────────────────────────
 
     @testset "arity guard rejects phantom parameters" begin
