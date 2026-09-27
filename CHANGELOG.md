@@ -51,6 +51,17 @@ the line the harness names.
   so the return path treated the struct as unsizable and emitted an integer
   byte blob. The callee returns that struct in XMM; the blob was read from
   general-purpose registers.
+- **SysV register exhaustion.** A register-class struct that does not fit in
+  the integer and SSE registers still free is passed in memory, as one
+  operand. It used to be split across the leftover registers and the stack.
+- `long double` is still the x87 return the ccall ABI does not model. A
+  parameter is refused by the `Any` guard; a return is still the wrong bits.
+  A 0-byte by-value stub (constructor homing) is unchanged: the package-side
+  fix is `-fstandalone-debug`, which is not the default because a merged
+  module of that size exhausts clang's source-location counter. An
+  attribute-packed C++ struct is still emitted at natural alignment. A byte
+  blob of the C size does not match the thunk, which returns the aligned
+  layout, so field reads move to the wrong offset.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 
