@@ -460,9 +460,13 @@ Contents of the .debug_info section:
         @test k("Box<double>") == (:layout, "Box<double>")    # template spelling
         @test k("Color") == (:enum, "__enum__Color")
         @test k("ns::Color") == (:enum, "__enum__Color")
-        @test k("Tag") == (:ignore, nothing)
-        @test k("const Tag") == (:ignore, nothing)
-        @test k("ee::Tag") == (:ignore, nothing)
+        # SysV drops a 1-byte empty class. Win64 passes it as i8 — see
+        # by_value_crossing. Both answers have to stay, or one host's suite
+        # goes green by stating the other's ABI.
+        empty_tag = Sys.iswindows() ? (:regpad, "i8") : (:ignore, nothing)
+        @test k("Tag") == empty_tag
+        @test k("const Tag") == empty_tag
+        @test k("ee::Tag") == empty_tag
         @test k("Guard") == (:indirect, nothing)
         @test k("P3") == (:opaque, nothing)                   # base but no members
         @test k("Range") == (:opaque, nothing)                # declaration only
@@ -497,17 +501,33 @@ Contents of the .debug_info section:
         gen(f) = BVF.generate_function_thunks([f], structs; may_throw = true, record_abi = ra)
         decl(ir, m) = strip(first(l for l in split(ir, '\n') if startswith(l, "func.func private @$m(")))
 
-        # Empty record first: dropped from the callee's arguments (clang drops
-        # it), while the slot it occupies in the Julia-side array is skipped,
-        # so `x` is still read from the SECOND slot.
+        # Empty record first. SysV: clang drops it, and `x` is still read from
+        # the SECOND Julia slot. Win64: clang takes an i8, which carries no
+        # state, so the thunk passes a zero and still reads `x` from slot 1.
         ir = gen(fn("_ZN2ee8with_tagENS_3TagEi", ["Tag", "int"], "int"))
-        @test decl(ir, "_ZN2ee8with_tagENS_3TagEi") == "func.func private @_ZN2ee8with_tagENS_3TagEi(i32) -> i32"
+        if Sys.iswindows()
+            @test decl(ir, "_ZN2ee8with_tagENS_3TagEi") ==
+                  "func.func private @_ZN2ee8with_tagENS_3TagEi(i8, i32) -> i32"
+            @test occursin("llvm.mlir.constant(0 : i8) : i8", ir)
+        else
+            @test decl(ir, "_ZN2ee8with_tagENS_3TagEi") ==
+                  "func.func private @_ZN2ee8with_tagENS_3TagEi(i32) -> i32"
+        end
         @test occursin("fieldOffset = 8 : i64", ir)
         @test !occursin("fieldOffset = 0 : i64", ir)
 
-        # Empty record returned: the callee is void, and so is the thunk.
+        # Empty record returned. The thunk is void on both ABIs (the wrapper
+        # builds the singleton). Win64's callee still returns i8; declaring
+        # it void would not be the function clang emitted.
         ir = gen(fn("_ZN2ee8make_tagEi", ["int"], "Tag"))
-        @test decl(ir, "_ZN2ee8make_tagEi") == "func.func private @_ZN2ee8make_tagEi(i32)"
+        if Sys.iswindows()
+            @test decl(ir, "_ZN2ee8make_tagEi") ==
+                  "func.func private @_ZN2ee8make_tagEi(i32) -> i8"
+            @test occursin("-> i8", ir)
+        else
+            @test decl(ir, "_ZN2ee8make_tagEi") ==
+                  "func.func private @_ZN2ee8make_tagEi(i32)"
+        end
         @test occursin(r"func\.func @_ZN2ee8make_tagEi_thunk\(%args_ptr: !llvm\.ptr\)\s+attributes", ir)
 
         # Non-trivial for calls: the callee takes the object's address.

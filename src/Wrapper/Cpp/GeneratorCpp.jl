@@ -2853,9 +2853,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 push!(exports, julia_name)
                 continue
             end
-            # An empty record returned by value: the callee is `void` (the
-            # thunk says so too), and the value is the type's only instance.
-            empty_ret = crossings.ret[1] === :ignore
+            # An empty record returned by value. The thunk is void on both
+            # ABIs (SysV's callee is void; Win64's returns iN and the thunk
+            # discards it), and the value is the type's only instance.
+            empty_ret = crossings.ret[1] === :ignore || crossings.ret[1] === :regpad
 
             requires_jit = true
             push!(needed_function_thunks, mangled)

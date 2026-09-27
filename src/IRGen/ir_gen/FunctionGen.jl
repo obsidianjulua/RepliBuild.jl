@@ -35,9 +35,17 @@ How a parameter or return of C type `c_type` crosses a Tier-2 thunk. `kind`:
   * `:layout`   — a record with a DWARF member layout; `key` is its entry in
                   `structs`. A template or qualified name (`Box<double>`) is
                   looked up too, not only a bare identifier.
-  * `:ignore`   — an empty record passed by value. SysV gives it no class, so
-                  it takes no register and no stack slot: clang drops the
-                  argument, and an empty return is `void`.
+  * `:ignore`   — an empty record clang drops. SysV gives it no class, so
+                  it takes no register and no stack slot, and an empty return
+                  is `void`.
+  * `:regpad`   — an empty record Win64 still passes. `key` is the register
+                  type (`i8` for a 1-byte empty class, `i32`/`i64` when
+                  alignment widens it). The byte has no state; the thunk
+                  passes a zero of that width so later arguments keep their
+                  registers. An empty return is still discarded: the thunk
+                  stays `void` and the wrapper builds the singleton, but the
+                  callee is declared with this return type, which is what
+                  clang emitted.
   * `:indirect` — a record C++ passes by invisible reference (non-trivial for
                   the purposes of calls) and that has no layout here. As a
                   parameter the callee takes a pointer, which the thunk passes.
@@ -88,7 +96,28 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi)
             bs = try _parse_byte_size(string(get(facts, "byte_size", "1"))) catch; 1 end
             # C++ says pass-by-value; a C record carries no convention, and
             # there only the GNU size-0 empty struct is empty.
-            (pass == "value" || (pass === nothing && bs == 0)) && return (:ignore, nothing)
+            drops = pass == "value" || (pass === nothing && bs == 0)
+            if drops
+                # SysV: clang drops the argument and makes an empty return
+                # void, even though sizeof is 1. Win64 does not. Measured
+                # with clang 22 for x86_64-w64-windows-gnu:
+                #   struct Unit {};
+                #   int unit_scaled(Unit, int, Unit, int);   // (i8, i32, i8, i32)
+                #   Unit unit_make(int);                     // i8 (i32)
+                #   struct A8 {} __attribute__((aligned(8)));
+                #   int f(A8, int);                          // (i64, i32)
+                # Dropping the i8 shifts every later argument: unit_scaled
+                # returned garbage instead of `x * 10 + y`. A width that is
+                # not 1/2/4/8 is not a Win64 register aggregate, so it is not
+                # this case and must not be dropped either.
+                if Sys.iswindows() && pass == "value" && bs in (1, 2, 4, 8)
+                    return (:regpad, "i$(bs * 8)")
+                end
+                if !Sys.iswindows() || bs == 0 || pass === nothing
+                    return (:ignore, nothing)
+                end
+                return (:opaque, nothing)
+            end
         end
         break
     end
@@ -385,10 +414,20 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         arg_types = String[]
         for (pi, p) in enumerate(params)
             kind, rec_key = param_kinds[pi]
-            # An empty record by value: SysV gives it no class, clang drops the
-            # argument, and every later argument keeps its register. The Julia
-            # side still fills the slot; nothing reads it.
+            # An empty record by value. SysV: clang drops it, so the slot is
+            # not read and nothing is passed; later arguments keep their
+            # registers. Win64 (`:regpad`): clang still passes an iN, and the
+            # byte has no state, so the call gets a zero of that width. Either
+            # way the Julia side still fills the slot, and the slot offset of
+            # every later argument counts it.
             kind === :ignore && continue
+            if kind === :regpad
+                mlir_t = String(rec_key)
+                param_load[pi] = (type = mlir_t, packed = false, info = nothing,
+                                  address = false, pad = true)
+                push!(arg_types, mlir_t)
+                continue
+            end
 
             t = get(p, "c_type", "void*")
             mlir_t = map_cpp_type(t)
@@ -469,9 +508,13 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
 
         ret_kind, ret_key = crossings.ret
         _ret_named = startswith(ret_type, "!llvm.struct<\"") && endswith(ret_type, "\">")
-        if ret_kind === :ignore
-            # An empty record return: clang makes the callee `void`, and reading
-            # RAX for it hands Julia whatever the callee left there.
+        # Win64 empty return: the callee's type is iN (`:regpad`), but the
+        # thunk stays void and the wrapper builds the singleton. The two types
+        # must not be collapsed — declaring the callee void is a different
+        # function type than clang emitted.
+        callee_discard_ret = ""
+        if ret_kind === :ignore || ret_kind === :regpad
+            ret_kind === :regpad && (callee_discard_ret = String(ret_key))
             ret_type = ""
         elseif ret_kind === :enum && !_ret_named
             ju = String(get(structs[ret_key], "julia_type", "Cint"))
@@ -577,8 +620,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                    record_passes_by_reference(ret_c_type, ret_key, record_abi)
         sret_slot_type = is_packed_ret ? ret_packed_type : ret_type
 
-        # External declaration uses the actual C type (packed for packed structs)
-        ext_ret_type = ret_sret ? "" : ret_type
+        # External declaration uses the actual C type (packed for packed structs).
+        # `callee_discard_ret` is the Win64 empty-record return: real on the
+        # callee, absent from the thunk.
+        ext_ret_type = ret_sret ? "" : (callee_discard_ret != "" ? callee_discard_ret : ret_type)
         ext_mlir_ret = ext_ret_type == "" || ext_ret_type == "!llvm.void" ? "" : "-> $ext_ret_type"
 
         # Thunk returns aligned type so Julia can read it correctly
@@ -639,6 +684,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             # counts it, because the Julia side passes every argument.
             load = param_load[i]
             load === nothing && continue
+            if get(load, :pad, false)
+                println(io, "  %pad_$(i) = llvm.mlir.constant(0 : $(load.type)) : $(load.type)")
+                push!(call_args, "%pad_$(i)")
+                continue
+            end
             mlir_t = load.type
             is_packed_struct = load.packed
             struct_info = load.info
@@ -779,7 +829,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 end
             end
             if func_ret == ""
-                println(io, "    $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+                if callee_discard_ret == ""
+                    println(io, "    $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+                else
+                    println(io, "    %discard_ret = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(callee_discard_ret)")
+                end
             else
                 inner_ret = is_packed_ret ? ret_packed_type : func_ret
                 println(io, "    %raii_ret = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(inner_ret)")
@@ -804,7 +858,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
              elseif use_dtor_call
                  println(io, "  jlcs.dtor_call @$(mangled)($(call_args[1]))$(dtor_attrs) : (!llvm.ptr) -> ()")
              else
-                 println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+                 if callee_discard_ret == ""
+                     println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+                 else
+                     println(io, "  %discard_ret = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(callee_discard_ret)")
+                 end
              end
              emit_void_epilogue()
         elseif is_packed_ret

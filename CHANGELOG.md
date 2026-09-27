@@ -4,6 +4,17 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Empty classes passed by value follow the host ABI (2026-09-27)
+
+SysV drops an empty class: no register, no stack slot, and an empty return is
+`void`. Win64 does not. clang for `x86_64-w64-windows-gnu` passes
+`struct Unit {}` as `i8` and returns it as `i8`; `alignas(8)` widens that to
+`i64`. The thunk used the SysV rule on both hosts, so
+`unit_scaled(Unit(), 4, Unit(), 2)` — `x * 10 + y` — returned a garbage
+register on Windows. A Win64 empty record of register width is now passed as
+a zero of that width (the byte has no state). The thunk stays `void` on an
+empty return, and the callee is declared with the `iN` clang actually emits.
+
 ## v4.1.1 (2026-09-27)
 
 **The 2026-09-26 audit.** Patch. No new configuration keys, and nothing removed
