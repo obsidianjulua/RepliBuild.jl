@@ -21,6 +21,8 @@ the line the harness names.
   scan stopped at the first `}`. Brace matching peels it to `Later`, and a
   pointer array lays out as `NTuple{N, Ptr{Cvoid}}` (the width does not depend
   on the pointee, which may not be declared yet).
+- **The C-bucket clang pipe no longer deadlocks** on more than ~64 KiB of
+  diagnostics. Output is drained into an `IOBuffer` while the process runs.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 

@@ -505,13 +505,16 @@ function _clang_for_c_bucket(compiler::String, cmd_args)
         isempty(rtlib)   || push!(extra, "-rtlib=$rtlib")
         cmd = ignorestatus(`$(clang_cmd) $extra $cmd_args`)
 
-        out_pipe = Pipe()
-        err_pipe = Pipe()
-        process = run(pipeline(cmd, stdout = out_pipe, stderr = err_pipe))
-        close(out_pipe.in)
-        close(err_pipe.in)
+        # `Pipe()` plus a read after `run` deadlocks once the child writes more
+        # than the OS pipe buffer (~64 KiB): the child blocks on write, the
+        # parent blocks on the child's exit, and nobody drains. `IOBuffer`
+        # through `pipeline` is drained while the process runs — the same shape
+        # `BuildBridge._run_command_impl` already uses.
+        out_buf = IOBuffer()
+        err_buf = IOBuffer()
+        process = run(pipeline(cmd, stdout = out_buf, stderr = err_buf))
 
-        return (String(read(out_pipe)) * "\n" * String(read(err_pipe)),
+        return (String(take!(out_buf)) * "\n" * String(take!(err_buf)),
                 process.exitcode)
     catch
         return BuildBridge.execute(compiler, cmd_args)
