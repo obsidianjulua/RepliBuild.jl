@@ -43,6 +43,8 @@ the line the harness names.
   `DW_AT_object_pointer` records `has_object_pointer = false`. Both receiver
   gates honour that. A declaration, which never carries the attribute, does
   not record it, so out-of-line instance methods keep their receiver.
+- **Global constructors are emitted.** `T::T` was skipped because the bare
+  name equals the class; `ns::T::T` was not. The name is `T_T`.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 

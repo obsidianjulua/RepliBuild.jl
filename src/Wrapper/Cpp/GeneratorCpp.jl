@@ -2278,10 +2278,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         is_vararg = get(func, "is_vararg", false)
         class_name = get(func, "class", "")
 
-        # Skip constructors for now (need special handling/factory functions)
-        if is_method && func_name == class_name
-            continue 
-        end
+        # Constructors are emitted. The old `func_name == class_name` skip
+        # only fired at global scope (`T::T`, where `class` is the bare name)
+        # and silently dropped those; `ns::T::T` was emitted because `class`
+        # is the qualified prefix. Both go through the same naming
+        # (`$(class)_$(name)`), so a global constructor is `T_T`, not a
+        # redeclaration of the struct `T`.
 
         # Inject missing 'this' pointer for methods.
         # A definition DIE that recorded `has_object_pointer == false` is a
