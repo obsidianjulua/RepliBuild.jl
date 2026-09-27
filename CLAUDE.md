@@ -151,7 +151,10 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
 
 `Base.llvmcall` dispatch is **John's side project**: it ships and works, but it is not
 a supported tier. `[wrap.tier1] enable` defaults false and every Hub config pins
-`[link] enable_lto = false`, so no shipped package takes it. Its suites
+`[link] enable_lto = false` — but Hub recipes DO turn slicing on (lua, sqlite, zlib,
+cglm, … — `grep -l 'enable = true' packages/*/replibuild.toml` under `[wrap.tier1]`),
+so `use()` of those packages takes Tier 1. (This line said "no shipped package takes
+it" until 2026-09-26; it was wrong for as long as those recipes existed.) Its suites
 (`test_static_promotion`, `test_slicer`, `test_tier1_dispatch`) are **deliberately
 unwired** from devtests; `runtests.jl`'s wiring guard names them in an `experimental`
 list. They also need `test/slice_test/replibuild.toml`, which is gitignored and
@@ -516,6 +519,20 @@ check before claiming portability again; reading `.gitignore` does not settle it
 - The `exit(0)` sites listed under Testing rules.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 
+### Confirmed defects — 2026-09-26 audit
+
+Re-reproduced from clean builds of library-free fixtures (runner and fixtures in the
+gitignored `.claude/audit-2026-09-26/`, `run_all.sh`; each line prints CONFIRMED,
+GUARDED or NOT REPRODUCED). Fixed, with the story in CHANGELOG: F1–F3 and F6–F28;
+F5 (`long double`) is an ABI trap both ways. A fix that lives in metadata reaches a
+Hub package only on a **rebuild** (delete `.replibuild_cache/project_hash`), not a
+re-wrap. Still open:
+
+- **A by-value type only declared in this binary** (F4, constructor homing) is now an
+  ABI trap instead of a SIGSEGV, but the function is still uncallable until the package
+  builds with `-Xclang -fno-use-ctor-homing` or `-fstandalone-debug`. Neither is a
+  default yet (see Not Yet Built).
+
 ## Not Yet Built (roadmap, not bugs)
 
 Absence is the default state on this project. A missing feature is an unbuilt piece;
@@ -524,6 +541,14 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
+- By-value toolchain types (`std::string_view`, `back_insert_iterator`, …) have ABI
+  facts in `record_abi` but no layout, so their functions are ABI traps. Keeping the
+  layout of records reachable by value would make them callable (2026-09-27).
+- `long double` through a C++ thunk as `f80` (`fpext`/`fptrunc` against `Float64`).
+  It is an ABI trap on both tiers today; the C bucket has no thunks.
+- Default `-Xclang -fno-use-ctor-homing` for C++ builds. It restores the definition of
+  header-only value types at a fraction of `-fstandalone-debug`'s size, but changes
+  every C++ package's metadata, so it needs a Hub-wide measurement first.
 - Array-view Julia-side accessors for the rank-1 thunks, plus rank ≥ 2 members.
 - `is_struct_packed` over-classifies padding-free structs (wasted work, not wrong).
 - Op verifiers for `ffe_call`, `try_call`, `load/store_array_element`, `ctor_call`,
