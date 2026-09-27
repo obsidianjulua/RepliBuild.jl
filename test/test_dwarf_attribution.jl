@@ -462,6 +462,47 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test rt["cmul"]["parameters"][1]["julia_type"] == "ComplexF32"
     end
 
+    @testset "static members have no object pointer" begin
+        # A definition with a body and no DW_AT_object_pointer is static.
+        # The declaration of an instance method also lacks the attribute, and
+        # that absence must not be recorded — it would strip every `this`.
+        dump = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : clang
+         <1><20>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <21>   DW_AT_name        : twice
+            <22>   DW_AT_linkage_name: _ZN4Calc5twiceEi
+            <23>   DW_AT_low_pc      : 0x1000
+            <24>   DW_AT_type        : <0x60>
+         <2><30>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <31>   DW_AT_name        : x
+            <32>   DW_AT_type        : <0x60>
+         <2><33>: Abbrev Number: 0
+         <1><40>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <41>   DW_AT_name        : scale
+            <42>   DW_AT_linkage_name: _ZN4Calc5scaleEi
+            <43>   DW_AT_low_pc      : 0x1100
+            <44>   DW_AT_object_pointer: <0x50>
+            <45>   DW_AT_type        : <0x60>
+         <2><50>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <51>   DW_AT_name        : this
+            <52>   DW_AT_type        : <0x70>
+         <2><53>: Abbrev Number: 0
+         <1><58>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <59>   DW_AT_name        : decl_only
+            <5a>   DW_AT_linkage_name: _ZN4Calc9decl_onlyEv
+            <5b>   DW_AT_declaration : 1
+         <1><60>: Abbrev Number: 4 (DW_TAG_base_type)
+            <61>   DW_AT_name        : int
+            <62>   DW_AT_byte_size   : 4
+         <1><70>: Abbrev Number: 0
+        """
+        rt, _, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
+        @test rt["_ZN4Calc5twiceEi"]["has_object_pointer"] == false
+        @test rt["_ZN4Calc5scaleEi"]["has_object_pointer"] == true
+        @test !haskey(rt["_ZN4Calc9decl_onlyEv"], "has_object_pointer")
+    end
+
     # ── The arity guard ─────────────────────────────────────────────────────
 
     @testset "arity guard rejects phantom parameters" begin

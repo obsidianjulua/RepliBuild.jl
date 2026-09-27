@@ -57,6 +57,12 @@ function _has_receiver(func, structs)::Bool
     # wrappers — the same shape as the adjustor-thunk bug, found the same day
     # (2026-08-13) by rebuilding box2d for the first time since Jul 17.
     _is_ctor_or_dtor(func) && return true
+    # Definition DIE fact. `false` is a static member: the aggregate table
+    # still contains the class, and the heuristic below would synthesize a
+    # phantom `this` that shifts every argument. `true` is an instance method.
+    # Absent (no definition DIE, or a C function) keeps the heuristic.
+    hop = get(func, "has_object_pointer", nothing)
+    hop isa Bool && return hop
     cls = String(get(func, "class", ""))
     isempty(cls) && return false
     for cand in _scope_suffixes(cls)

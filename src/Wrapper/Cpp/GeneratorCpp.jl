@@ -2283,14 +2283,31 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             continue 
         end
 
-        # BUG FIX: Inject missing 'this' pointer for methods
-        # DWARF metadata sometimes omits the implicit 'this' parameter for methods
-        if is_method && !isempty(class_name)
+        # Inject missing 'this' pointer for methods.
+        # A definition DIE that recorded `has_object_pointer == false` is a
+        # static member: the class is a real aggregate, so the heuristic below
+        # would invent a `this` and the first real argument would be read as
+        # the receiver. Declaration DIEs omit the attribute, so a missing key
+        # must not take this branch.
+        hop = get(func, "has_object_pointer", nothing)
+        if is_method && !isempty(class_name) && hop !== false
             # Check if 'this' is already present (it should be first)
             has_this = !isempty(params) && (params[1]["name"] == "this")
             
             if !has_this
                 this_param = _cpp_this_param(class_name, func_name, struct_types)
+                if this_param === nothing && hop === true
+                    # The definition DIE says there is a receiver, and the
+                    # class has no emitted Julia type. `Ptr{Cvoid}` is the
+                    # same width; leaving it off would disagree with the thunk.
+                    this_param = Dict{String,Any}(
+                        "name" => "this",
+                        "c_type" => String(class_name) * "*",
+                        "julia_type" => "Ptr{Cvoid}",
+                        "position" => 0,
+                        "is_synthesized" => true,
+                    )
+                end
                 this_param === nothing || pushfirst!(params, this_param)
             end
         end

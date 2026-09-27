@@ -299,7 +299,10 @@ the test named when you touch the area.
 - **Receiver (`this`) gates**: `FunctionGen._has_receiver` and GeneratorCpp's
   `_cpp_this_param` must agree (corpus test in `test_symbol_hygiene.jl` over the
   vendored `test/fixtures/receiver_gate_corpus.json`; regenerate with
-  `test/gen_receiver_corpus.jl`). A ctor/dtor always has a receiver.
+  `test/gen_receiver_corpus.jl`). A ctor/dtor always has a receiver. A definition
+  DIE's `DW_AT_object_pointer` is recorded as `has_object_pointer`, and `false` (a
+  static member) overrides the class heuristic in both gates. Declaration DIEs never
+  carry the attribute, so a missing key must keep the heuristic.
   `_cpp_innermost_scope` keeps `<…>` and `_bare_type_name_cpp` strips it; they are
   not interchangeable.
 - Generated wrappers precompile inside consumer packages: dedup methods by dispatch
@@ -487,14 +490,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
 
 ## Open problems
 
-- **`static` member functions get a phantom `this`** in both receiver gates (e.g.
-  tinyxml2 `XMLDocument::ErrorIDToName`). About 17 sites in the Hub. Fix: read
-  `DW_AT_object_pointer`, which is present on the **definition** DIE only (declaration
-  DIEs of instance methods lack it, so a declaration-fed gate would strip every
-  `this`). Carry it through the `DW_AT_specification` merge. Readelf spells it
-  `DW_AT_object_pointer: <0x70>`, llvm-dwarfdump `DW_AT_object_pointer(0x…)`. Template
-  constructors (`gguf_kv<…>`) miss the ctor-name test and survive only via
-  `struct_types`.
 - **C ccall coverage**: 98.6% (5368/5444, 2026-08-29), target 99%. The 76 misses:
   43 varargs (declaration work via `[wrap.varargs]`), 27 mpack by-value aggregate
   returns (typed correctly but emitted as ABI-trap stubs), 5 mpack by-value aggregate

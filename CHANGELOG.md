@@ -39,6 +39,10 @@ the line the harness names.
 - **A failed AOT build deletes the previous `_thunks.so`.** Wrap, finding it
   gone, emits JIT dispatch from this build's metadata instead of binding the
   stale thunks by name.
+- **Static members have no `this`.** A definition DIE with a body and no
+  `DW_AT_object_pointer` records `has_object_pointer = false`. Both receiver
+  gates honour that. A declaration, which never carries the attribute, does
+  not record it, so out-of-line instance methods keep their receiver.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 

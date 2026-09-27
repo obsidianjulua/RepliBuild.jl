@@ -5164,6 +5164,15 @@ function parse_dwarf_dump(output::AbstractString;
     formal_params_in_die = 0
     die_param_counts = Dict{String,Int}()  # function key => DIE-tree arity
 
+    # `DW_AT_object_pointer` exists only on a definition DIE of an instance
+    # method. A declaration of the same method does not carry it, so absence
+    # there must NOT be read as "static" — that would strip `this` from every
+    # out-of-line method. A definition with code and no object pointer is a
+    # static member (or a free function). Recorded only from such a definition.
+    current_fn_is_declaration = false
+    current_fn_has_code = false
+    current_fn_saw_object_pointer = false
+
     # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
     # resolved back to the declaration that owns the mangled name via
     # DW_AT_specification (see the handler below). Declarations precede their
@@ -5215,9 +5224,19 @@ function parse_dwarf_dump(output::AbstractString;
                 # definition DIE.
                 return_types[function_key]["parameters"] = params
             end
+
+            # Definition only. A later declaration of the same key must not
+            # erase the answer, and a declaration must not invent `false`.
+            if !current_fn_is_declaration &&
+               (current_fn_has_code || current_fn_saw_object_pointer)
+                return_types[function_key]["has_object_pointer"] = current_fn_saw_object_pointer
+            end
         end
 
         current_function_offset = nothing
+        current_fn_is_declaration = false
+        current_fn_has_code = false
+        current_fn_saw_object_pointer = false
         current_function_name = nothing
         current_function_linkage = nothing
         current_function_level = nothing
@@ -5328,6 +5347,9 @@ function parse_dwarf_dump(output::AbstractString;
                 function_processed = false  # Reset flag for new function
                 params_for_this_function = []  # Reset for the new function
                 formal_params_in_die = 0
+                current_fn_is_declaration = false
+                current_fn_has_code = false
+                current_fn_saw_object_pointer = false
                 current_subroutine_offset = nothing  # Reset subroutine context when entering function
 
                 # RESET VARIABLE CONTEXT to prevent leakage
@@ -5478,6 +5500,22 @@ function parse_dwarf_dump(output::AbstractString;
 
         # Extract linkage name (mangled name for C++ functions)
         # Example: <5c>   DW_AT_linkage_name: (indexed string: 0x8): _ZN10Calculator5powerEdd
+        # Definition vs declaration, for the object-pointer fact below.
+        # `low_pc` / `ranges` / `high_pc` mean this DIE has a body. Clang puts
+        # `DW_AT_object_pointer` on that body for an instance method and omits
+        # it for a static member.
+        if in_function_context && contains(line, "DW_AT_declaration")
+            current_fn_is_declaration = true
+        end
+        if in_function_context && contains(line, "DW_AT_object_pointer")
+            current_fn_saw_object_pointer = true
+        end
+        if in_function_context && (contains(line, "DW_AT_low_pc") ||
+                                   contains(line, "DW_AT_high_pc") ||
+                                   contains(line, "DW_AT_ranges"))
+            current_fn_has_code = true
+        end
+
         if contains(line, "DW_AT_linkage_name") && in_function_context
             # Extract just the mangled name after the last colon
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
@@ -6071,6 +6109,12 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             # Merge is_vararg
             func["is_vararg"] = get(dwarf_info, "is_vararg", false)
 
+            # Present only when a definition DIE was seen. `true` is an instance
+            # method, `false` is static (no receiver). Absent → the gates keep
+            # their class-table heuristic.
+            if haskey(dwarf_info, "has_object_pointer")
+                func["has_object_pointer"] = dwarf_info["has_object_pointer"]
+            end
 
             # Merge parameters if available from DWARF (at function level, not in return_type)
             if haskey(dwarf_info, "parameters") && !isempty(dwarf_info["parameters"])
