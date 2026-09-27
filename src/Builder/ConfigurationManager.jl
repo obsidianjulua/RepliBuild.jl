@@ -1210,9 +1210,33 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
 end
 
 """
-Update include directories in config (creates new config).
-Used after discovery finds include paths.
+Same config with `[compile] aot_thunks` flipped.
+
+Used when a build asked for AOT thunks and the companion library is absent
+(the AOT pass failed and removed the previous one). The wrapper then emits
+JIT dispatch instead of binding the missing — or, previously, the stale —
+thunk library.
 """
+function with_aot_thunks(config::RepliBuildConfig, enabled::Bool)::RepliBuildConfig
+    new_compile = CompileConfig(
+        config.compile.source_files,
+        config.compile.include_dirs,
+        config.compile.flags,
+        config.compile.defines,
+        config.compile.parallel,
+        enabled,
+        config.compile.visibility
+    )
+    return RepliBuildConfig(
+        config.project, config.paths, config.discovery,
+        new_compile,
+        config.link, config.binary, config.wrap,
+        config.llvm, config.workflow, config.cache, config.dependencies, config.types,
+        config.ingest, config.config_file, config.loaded_at
+    )
+end
+
+"""Update include directories in config (creates new config)."""
 function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String})::RepliBuildConfig
     new_compile = CompileConfig(
         config.compile.source_files,

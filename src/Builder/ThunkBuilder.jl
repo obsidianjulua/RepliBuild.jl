@@ -17,6 +17,16 @@ function build_aot_thunks(config, library_path)
     output_dir = ConfigurationManager.get_output_path(config)
     metadata_path = joinpath(output_dir, "compilation_metadata.json")
 
+    # The previous build's thunk library is invalid the moment this build
+    # starts: layouts may have moved, and a failure below used to leave the
+    # old file in place. Wrap then checked symbol *names*, which still
+    # matched, and the stale thunks ran. Remove it first. A successful link
+    # writes a new one; a failure leaves nothing to run.
+    lib_name = basename(library_path)
+    thunks_name = replace(lib_name, ".so" => "_thunks.so", ".dylib" => "_thunks.dylib", ".dll" => "_thunks.dll")
+    thunks_so = joinpath(output_dir, thunks_name)
+    rm(thunks_so; force=true)
+
     if !isfile(metadata_path)
         @warn "Cannot AOT compile thunks: metadata not found."
         return
@@ -87,10 +97,8 @@ function build_aot_thunks(config, library_path)
             error("Failed to emit object file for AOT thunks.")
         end
 
-        # Link into a companion shared library
-        lib_name = basename(library_path)
-        thunks_name = replace(lib_name, ".so" => "_thunks.so", ".dylib" => "_thunks.dylib", ".dll" => "_thunks.dll")
-        thunks_so = joinpath(output_dir, thunks_name)
+        # Link into the companion shared library named at the top of this
+        # function (the previous file was removed before generation).
 
         # Link thunks against the main library so C function symbols resolve
         lib_dir = dirname(abspath(library_path))

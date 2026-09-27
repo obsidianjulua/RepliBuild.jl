@@ -1303,7 +1303,13 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         if isfile(thunks_so)
             thunks_lib_path = abspath(thunks_so)
         else
-            @warn "AOT thunks enabled but companion library not found at $thunks_so"
+            # The companion library is gone: AOT failed and deleted it, or it
+            # was never produced. Emitting AOT call sites anyway either refuses
+            # the wrap (leaving the previous wrapper, bound to the old thunks)
+            # or, when a stale file is still there, runs those thunks. JIT
+            # dispatch is built from this build's metadata.
+            @warn "AOT thunks enabled but $thunks_so is absent; emitting JIT dispatch"
+            config = with_aot_thunks(config, false)
         end
     end
 

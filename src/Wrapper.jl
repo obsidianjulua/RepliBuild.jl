@@ -12,7 +12,7 @@ using SHA     # library identity stamped into every wrapper (Utils._library_sha2
 # Import from parent RepliBuild module
 import ..ConfigurationManager: RepliBuildConfig, get_output_path, get_module_name,
                                 get_build_path, get_cache_path,
-                                enforce_varargs_provenance
+                                enforce_varargs_provenance, with_aot_thunks
 import ..Slicer
 import ..ClangJLBridge
 import ..BuildBridge

@@ -36,6 +36,9 @@ the line the harness names.
 - **SysConfigGen proposals.** cmake command quotes are stripped
   (`-DMSDFGEN_PUBLIC=""` → `-DMSDFGEN_PUBLIC=`), every emitted string goes
   through `TOML.print`, and non-`-D` flags (`-std=`, `-fvisibility=`) are kept.
+- **A failed AOT build deletes the previous `_thunks.so`.** Wrap, finding it
+  gone, emits JIT dispatch from this build's metadata instead of binding the
+  stale thunks by name.
 
 ### Constructors and destructors read their signatures from DWARF; `T&&` is a reference (2026-09-26)
 
