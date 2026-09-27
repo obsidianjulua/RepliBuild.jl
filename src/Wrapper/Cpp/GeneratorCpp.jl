@@ -142,6 +142,28 @@ function _cpp_this_param(class_name::AbstractString, func_name::AbstractString,
     )
 end
 
+"""
+    _record_name_as_emitted(julia_type, records) -> String
+
+The name a signature must use for a record or enum the module emits. A C++ type
+named after a Base binding (`Pair`, `Vector`, `Type`, `String`, …) is emitted
+as `c_<name>` by `_sanitize_cpp_type_name`, but parameter and return types kept
+the raw name. `p::Pair` then meant `Base.Pair`: the emitted `c_Pair` could not
+dispatch, and a `Base.Pair{Int,Int}` passed instead was marshalled as the
+struct's bytes. Only a bare name, or one directly under `Ptr{…}`/`Ref{…}`, that
+IS a record or enum in the metadata is rewritten; builtin spellings (`Cint`,
+`Any`) never are.
+"""
+function _record_name_as_emitted(julia_type::AbstractString, records)::String
+    m = match(r"^(Ref|Ptr)\{([A-Za-z_][A-Za-z0-9_]*)\}$", julia_type)
+    if m !== nothing
+        inner = String(m.captures[2])
+        inner in records || return String(julia_type)
+        return "$(m.captures[1]){$(_sanitize_cpp_type_name(inner))}"
+    end
+    return julia_type in records ? _sanitize_cpp_type_name(String(julia_type)) : String(julia_type)
+end
+
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
@@ -304,6 +326,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Extract metadata
     functions = metadata["functions"]
     dwarf_structs = get(metadata, "struct_definitions", Dict())
+    # By-value record facts the thunk generator reads too (see the Tier-2
+    # branch below). Absent from metadata built before it existed: every
+    # record outside `struct_definitions` is then untypable, which traps.
+    record_abi = get(metadata, "record_abi", Dict{String,Any}())
 
     # Struct definitions
     # Collect all struct names from DWARF (excluding enums which have __enum__ prefix)
@@ -550,6 +576,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         enum_name = replace(enum_key, "__enum__" => "")
         push!(enum_names, enum_name)
     end
+    # Raw DWARF names of every record and enum, for `_record_name_as_emitted`.
+    emitted_record_names = union(Set{String}(String(k) for k in keys(dwarf_structs)
+                                             if !startswith(String(k), "__enum__")),
+                                 enum_names)
 
     if !isempty(enum_types)
         push!(enum_chunks, """
@@ -2376,6 +2406,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 return_type["julia_type"] = safe_ret
             end
         end
+        return_type["julia_type"] = _record_name_as_emitted(
+            String(get(return_type, "julia_type", "Cvoid")), emitted_record_names)
 
         # =========================================================
         # VARARGS INTERCEPTION
@@ -2457,6 +2489,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     julia_type = _sanitize_cpp_type_name(julia_type)
                 end
             end
+            julia_type = _record_name_as_emitted(julia_type, emitted_record_names)
             c_type_name = get(param, "c_type", "")
 
             # Determine the actual C type for ccall
@@ -2684,6 +2717,35 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # BRANCH 1: MLIR DISPATCH (Robust Path)
         # =========================================================
         if use_mlir_dispatch
+            # One verdict for both ends: the thunk generator asks the same
+            # function about the same metadata, and emits no thunk when this
+            # says trap. A by-value record neither side can type (a declared-only
+            # stub, `std::string_view`, a derived class with no members of its
+            # own) used to become a pointer in the thunk — plausible wrong
+            # answers, NaN, or a segfault — so the call is refused where it is
+            # made, with the reason, and the rest of the wrapper still loads.
+            crossings = JLCSIRGenerator.FunctionGen.thunk_crossings(func, dwarf_structs, record_abi)
+            if crossings.trap !== nothing
+                trap_msg = "ABI Safety Trap: cannot call '$julia_name' ($demangled). " *
+                    "It $(crossings.trap), and that record's layout is not in this " *
+                    "library's DWARF, so no call could pass it correctly. A type " *
+                    "only declared here (header-only, constructor homing) is " *
+                    "recovered by building with `-Xclang -fno-use-ctor-homing` or " *
+                    "`-fstandalone-debug` in [compile] flags; otherwise keep the " *
+                    "function out with [wrap] exclude_symbols."
+                push!(func_chunks, """
+                $doc_comment
+                function $julia_name($param_sig)
+                    Base.error($(repr(trap_msg)))
+                end
+                """)
+                push!(exports, julia_name)
+                continue
+            end
+            # An empty record returned by value: the callee is `void` (the
+            # thunk says so too), and the value is the type's only instance.
+            empty_ret = crossings.ret[1] === :ignore
+
             requires_jit = true
             push!(needed_function_thunks, mangled)
 
@@ -2735,7 +2797,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # Determine if we need the return type overload of invoke
             # Void returns: invoke(name, args...)
             # Struct returns: invoke(name, RetType, args...)
-            is_void_ret = jit_ret_type == "Cvoid" || jit_c_ret == "void"
+            is_void_ret = jit_ret_type == "Cvoid" || jit_c_ret == "void" || empty_ret
+            # What the Julia function returns after a void call for an empty
+            # record: its singleton when the type is emitted, else `nothing`.
+            empty_ret_val = !empty_ret ? "" :
+                (jit_ret_type in defined_struct_names ? "$(jit_ret_type)()" : "nothing")
+            ret_stmt(call) = empty_ret ? "$call\n    return $empty_ret_val" : "return $call"
 
             # A `char*` return gets the same policy here as on the ccall path.
             # The tier decides how the call is MADE; it does not get to decide
@@ -2803,7 +2870,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     $doc_comment
                     function $julia_name($param_sig)
                         # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)
-                        return $invoke_call
+                        $(ret_stmt(invoke_call))
                     end
                     """
                 end
@@ -2833,7 +2900,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     $doc_comment
                     function $julia_name($param_sig)
                         # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)
-                        return $invoke_call
+                        $(ret_stmt(invoke_call))
                     end
                     """
                 end

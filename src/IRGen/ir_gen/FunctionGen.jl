@@ -23,6 +23,105 @@ function _fuzzy_struct_lookup(c_type::String, structs::Any)
 end
 
 """
+    by_value_crossing(c_type, structs, record_abi) -> (kind, key)
+
+How a parameter or return of C type `c_type` crosses a Tier-2 thunk. `kind`:
+
+  * `:direct`   — no record decision to make: a scalar, pointer, reference,
+                  function pointer, or STL container (which has its own blob
+                  path). `key` is `nothing`.
+  * `:enum`     — an enum; `key` is its `__enum__` entry in `structs`, whose
+                  `julia_type` is the integer it travels as.
+  * `:layout`   — a record with a DWARF member layout; `key` is its entry in
+                  `structs`. A template or qualified name (`Box<double>`) is
+                  looked up too, not only a bare identifier.
+  * `:ignore`   — an empty record passed by value. SysV gives it no class, so
+                  it takes no register and no stack slot: clang drops the
+                  argument, and an empty return is `void`.
+  * `:indirect` — a record C++ passes by invisible reference (non-trivial for
+                  the purposes of calls) and that has no layout here. As a
+                  parameter the callee takes a pointer, which the thunk passes.
+  * `:opaque`   — a record the thunk cannot type: only declared here
+                  (constructor homing), a toolchain type left out of
+                  `structs` (`std::string_view`), a derived class with no
+                  members of its own, or a spelling the scalar map does not
+                  know (`long double`).
+
+Every `:opaque` crossing used to become `!llvm.ptr`, from `map_cpp_type`'s
+fallback or `generate_jlcs_ir`'s bodyless-struct rewrite. A 16-byte
+`string_view` then went in as one pointer, an empty `Tag` shifted every later
+argument by one register, and a `Box<double>` return was read from RAX while
+the callee wrote XMM0. None of these crashed reliably; most returned a
+plausible wrong value. `GeneratorCpp` asks this same function, so a function
+the thunk cannot call is emitted as a trap on the Julia side, not as a call.
+"""
+function by_value_crossing(c_type::AbstractString, structs, record_abi)
+    t = strip(String(c_type))
+    t = replace(t, r"^(?:(?:const|volatile)\s+)+" => "")
+    t = String(replace(t, r"(?:\s+(?:const|volatile))+$" => ""))
+    (isempty(t) || t in ("void", "unknown")) && return (:direct, nothing)
+    (occursin(r"[*&(\[]", t) || startswith(t, "function_ptr")) && return (:direct, nothing)
+
+    mapped = map_cpp_type(t)
+    named = startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
+    # A scalar the map knows: `i32`, `f64`, `i1`, …
+    (!named && mapped != "!llvm.ptr" && mapped != "") && return (:direct, nothing)
+    # STL containers keep their own paths (pointer in, byte blob out).
+    get_stl_container_size(t) > 0 && return (:direct, nothing)
+
+    # The tables are keyed on the bare DWARF name (`JoinType`, `Box<double>`);
+    # a signature inferred from the demangler spells it qualified
+    # (`Clipper2Lib::JoinType`). Longest suffix first, as `_has_receiver` does.
+    suffixes = _scope_suffixes(t)
+    for cand in suffixes
+        haskey(structs, "__enum__" * cand) && return (:enum, "__enum__" * cand)
+        key = _fuzzy_struct_lookup(cand, structs)
+        key !== nothing && return (:layout, key)
+    end
+
+    for cand in suffixes
+        facts = get(record_abi, cand, nothing)
+        (facts === nothing || get(facts, "conflict", false) == true) && continue
+        pass = get(facts, "pass", nothing)
+        pass == "reference" && return (:indirect, nothing)
+        if get(facts, "empty", false) == true
+            bs = try _parse_byte_size(string(get(facts, "byte_size", "1"))) catch; 1 end
+            # C++ says pass-by-value; a C record carries no convention, and
+            # there only the GNU size-0 empty struct is empty.
+            (pass == "value" || (pass === nothing && bs == 0)) && return (:ignore, nothing)
+        end
+        break
+    end
+    return (:opaque, nothing)
+end
+
+"""
+    thunk_crossings(func, structs, record_abi) -> NamedTuple
+
+The per-function answer both generators act on: `params` (one
+`by_value_crossing` per DWARF parameter, `this` excluded), `ret`, and `trap` —
+a human-readable reason when some crossing is `:opaque`, or when the return is
+`:indirect` (an sret the thunk does not model), else `nothing`.
+"""
+function thunk_crossings(func, structs, record_abi)
+    # Typed so the thunk generator can prepend `this` as (:direct, nothing).
+    params = Tuple{Symbol,Union{Nothing,String}}[
+        by_value_crossing(String(get(p, "c_type", "")), structs, record_abi)
+        for p in get(func, "parameters", [])]
+    ret_c = String(get(get(func, "return_type", Dict()), "c_type", "void"))
+    ret = by_value_crossing(ret_c, structs, record_abi)
+    reasons = String[]
+    for (p, (k, _)) in zip(get(func, "parameters", []), params)
+        k === :opaque && push!(reasons, "takes `$(get(p, "c_type", "?"))` by value")
+    end
+    ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
+    ret[1] === :indirect && push!(reasons,
+        "returns `$ret_c` by value, which C++ returns through a hidden pointer the thunk does not pass")
+    return (params = params, ret = ret,
+            trap = isempty(reasons) ? nothing : join(reasons, "; "))
+end
+
+"""
     _has_receiver(func, structs) -> Bool
 
 True only when `func`'s enclosing scope is a real class/struct, i.e. when the
@@ -169,7 +268,8 @@ end
 
 function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_throw::Bool=false,
                                   class_raii::Dict{String,Dict{Symbol,String}}=Dict{String,Dict{Symbol,String}}(),
-                                  vcall_info::AbstractDict=Dict{String,Any}())
+                                  vcall_info::AbstractDict=Dict{String,Any}(),
+                                  record_abi::AbstractDict=Dict{String,Any}())
     io = IOBuffer()
     println(io, "// Function Thunks")
 
@@ -191,7 +291,20 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
 
         push!(generated, mangled)
 
+        # A function with a by-value record the thunk cannot type gets no
+        # thunk: every spelling of one would be a wrong call. GeneratorCpp
+        # reaches the same verdict and emits a trap. The line stays in the
+        # .mlir, which is the file a debugger shows.
+        crossings = thunk_crossings(func, structs, record_abi)
+        if crossings.trap !== nothing
+            println(io, "// no thunk for $(mangled): $(replace(crossings.trap, '\n' => ' '))")
+            println(io, "")
+            continue
+        end
+
         params = copy(get(func, "parameters", []))
+        # One crossing per entry of `params`, kept aligned when `this` is added.
+        param_kinds = copy(crossings.params)
         ret_info = get(func, "return_type", Dict())
         is_method = get(func, "is_method", false)
 
@@ -209,6 +322,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         if is_method && _has_receiver(func, structs)
             if isempty(params) || get(params[1], "name", "") != "this"
                 pushfirst!(params, Dict("c_type" => "void*", "name" => "this"))
+                pushfirst!(param_kinds, (:direct, nothing))
             end
         end
 
@@ -221,40 +335,69 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # its address, and destructs it after the call via jlcs.scope.
         # nothing = not an RAII param; NamedTuple = transform it.
         raii_specs = Vector{Any}(nothing, length(params))
+        # What the slot is loaded as, per param, decided once here and read by
+        # the call builder below: `nothing` for an ignored param, else
+        # (type, packed, struct_info). The call builder used to recompute it,
+        # which is how the two ends of one argument drift apart.
+        param_load = Vector{Any}(nothing, length(params))
 
         arg_types = String[]
         for (pi, p) in enumerate(params)
+            kind, rec_key = param_kinds[pi]
+            # An empty record by value: SysV gives it no class, clang drops the
+            # argument, and every later argument keeps its register. The Julia
+            # side still fills the slot; nothing reads it.
+            kind === :ignore && continue
+
             t = get(p, "c_type", "void*")
             mlir_t = map_cpp_type(t)
+            s_name = nothing
+            lookup_key = nothing
+            is_packed_param = false
 
             # Resolve full struct type if available
             if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
                 s_name = mlir_t[15:end-2]
                 lookup_key = haskey(structs, s_name) ? s_name : (haskey(structs, "__enum__$(s_name)") ? "__enum__$(s_name)" : nothing)
-                if lookup_key !== nothing
-                    # Scope-RAII takes precedence over both by-value marshalling
-                    # paths: a class with an emitted destructor is non-trivial
-                    # for the purposes of calls (Itanium), so the callee expects
-                    # a POINTER to a caller-owned temporary regardless of byte
-                    # layout. (is_struct_packed classifies any padding-free
-                    # struct as "packed", so it must not gate this decision.)
-                    cls_key = strip(replace(t, r"\bconst\b" => ""))
-                    bsz = try _parse_byte_size(get(structs[lookup_key], "byte_size", "0")) catch; 0 end
-                    if haskey(class_raii, cls_key) && bsz > 0
-                        raii_specs[pi] = (cls = cls_key, size = bsz,
-                                          dtor = class_raii[cls_key][:dtor],
-                                          copy_ctor = get(class_raii[cls_key], :copy_ctor, ""))
-                        mlir_t = "!llvm.ptr"   # Itanium: pass address of the temporary
-                    elseif StructGen.is_struct_packed(structs[lookup_key])
-                        # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
-                        mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
-                    else
-                        # Use FULL definition string to avoid alias parser issues in function signatures
-                        mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
-                    end
+            end
+            if lookup_key === nothing && kind === :layout
+                # A template or qualified spelling (`Box<double>`,
+                # `pugi::xml_node_iterator`) never maps to a named struct, and
+                # fell to `!llvm.ptr`: the record's bytes loaded as a pointer.
+                s_name = lookup_key = rec_key
+            elseif lookup_key === nothing && kind === :enum
+                ju = String(get(structs[rec_key], "julia_type", "Cint"))
+                mlir_t = map_cpp_type(ju == "Any" ? "int" : ju)
+                mlir_t == "" && (mlir_t = "i32")
+            elseif kind === :indirect
+                mlir_t = "!llvm.ptr"   # Itanium: the callee takes the object's address
+            end
+            if lookup_key !== nothing
+                # Scope-RAII takes precedence over both by-value marshalling
+                # paths: a class with an emitted destructor is non-trivial
+                # for the purposes of calls (Itanium), so the callee expects
+                # a POINTER to a caller-owned temporary regardless of byte
+                # layout. (is_struct_packed classifies any padding-free
+                # struct as "packed", so it must not gate this decision.)
+                cls_key = strip(replace(t, r"\bconst\b" => ""))
+                bsz = try _parse_byte_size(get(structs[lookup_key], "byte_size", "0")) catch; 0 end
+                if haskey(class_raii, cls_key) && bsz > 0
+                    raii_specs[pi] = (cls = cls_key, size = bsz,
+                                      dtor = class_raii[cls_key][:dtor],
+                                      copy_ctor = get(class_raii[cls_key], :copy_ctor, ""))
+                    mlir_t = "!llvm.ptr"   # Itanium: pass address of the temporary
+                elseif StructGen.is_struct_packed(structs[lookup_key])
+                    # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
+                    mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
+                    is_packed_param = true
+                else
+                    # Use FULL definition string to avoid alias parser issues in function signatures
+                    mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
                 end
             end
 
+            param_load[pi] = (type = mlir_t, packed = is_packed_param,
+                              info = lookup_key === nothing ? nothing : structs[lookup_key])
             push!(arg_types, mlir_t)
         end
         has_raii = any(!isnothing, raii_specs)
@@ -268,6 +411,24 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         ret_aligned_type = ""
         ret_struct_info = nothing
         ret_num_members = 0
+
+        ret_kind, ret_key = crossings.ret
+        _ret_named = startswith(ret_type, "!llvm.struct<\"") && endswith(ret_type, "\">")
+        if ret_kind === :ignore
+            # An empty record return: clang makes the callee `void`, and reading
+            # RAX for it hands Julia whatever the callee left there.
+            ret_type = ""
+        elseif ret_kind === :enum && !_ret_named
+            ju = String(get(structs[ret_key], "julia_type", "Cint"))
+            ret_type = map_cpp_type(ju == "Any" ? "int" : ju)
+            ret_type == "" && (ret_type = "i32")
+        elseif ret_kind === :layout && !(_ret_named && haskey(structs, ret_type[15:end-2]))
+            # A template or qualified spelling takes the named-struct path below
+            # under its table key. It used to take the fuzzy branch, which
+            # always answered with an integer byte blob: `Box<double>` came back
+            # from RAX while the callee returned it in XMM0.
+            ret_type = "!llvm.struct<\"$(ret_key)\">"
+        end
 
         # Enum return → bare underlying integer, NOT a single-member struct.
         # A struct result (even `struct<(i32)>`) makes MLIR's emit_c_interface
@@ -374,28 +535,14 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         call_args = String[]
 
         for (i, p) in enumerate(params)
-            t = get(p, "c_type", "void*")
-            mlir_t = map_cpp_type(t)
-
-            # Resolve full struct type if available (must match arg_types)
-            is_packed_struct = false
-            struct_info = nothing
-            s_name = ""
-
-            if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
-                s_name = mlir_t[15:end-2]
-                lookup_key = haskey(structs, s_name) ? s_name : (haskey(structs, "__enum__$(s_name)") ? "__enum__$(s_name)" : nothing)
-                if lookup_key !== nothing
-                    struct_info = structs[lookup_key]
-                    is_packed_struct = StructGen.is_struct_packed(struct_info)
-                    # Use the same type as arg_types for consistency
-                    if is_packed_struct
-                        mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, struct_info, structs)
-                    else
-                        mlir_t = StructGen.get_struct_definition_string(s_name, struct_info, structs)
-                    end
-                end
-            end
+            # The type decided with arg_types above; `nothing` is an ignored
+            # empty record, whose slot is never read. The slot OFFSET still
+            # counts it, because the Julia side passes every argument.
+            load = param_load[i]
+            load === nothing && continue
+            mlir_t = load.type
+            is_packed_struct = load.packed
+            struct_info = load.info
 
             # Argument slot read. The ciface convention hands the thunk a
             # `void**`, so slot i-1 is a field at byte offset 8*(i-1) — which

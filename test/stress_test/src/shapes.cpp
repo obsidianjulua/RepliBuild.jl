@@ -28,3 +28,8 @@ double geom::Segment2D::length2() const {
     double dx = b.x - a.x, dy = b.y - a.y;
     return dx * dx + dy * dy;
 }
+
+int geom::unit_scaled(Unit, int x, Unit, int y) { return x * 10 + y; }
+geom::Unit geom::unit_make(int) { return Unit{}; }
+geom::Cell<double> geom::cell_doubled(Cell<double> c) { return Cell<double>{c.v * 2}; }
+std::size_t geom::name_length(std::string_view s) { return s.size(); }

@@ -526,7 +526,8 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
 
         println(io, generate_function_thunks(filtered_functions, structs_meta;
                                              may_throw=is_cpp, class_raii=class_raii,
-                                             vcall_info=vcall_info))
+                                             vcall_info=vcall_info,
+                                             record_abi=get(metadata, "record_abi", Dict{String,Any}())))
     end
 
     # 5. Generate STL Container Accessor Thunks

@@ -282,6 +282,27 @@ if MLIR_AVAILABLE
         end
     end
 
+    @testset "StressTest: by-value records without a scalar spelling" begin
+        # Each of these reached the thunk as `!llvm.ptr` (2026-09-27). The empty
+        # class shifted every later argument one register (`unit_scaled` gave
+        # 257-style garbage, never an error); the template record went in as a
+        # pointer and came back from RAX while the callee wrote XMM0; the
+        # string_view was one pointer where the callee reads {len, ptr}.
+        meta = RepliBuild.JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"); use_mmap=false)
+        @test meta["record_abi"]["Unit"] == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true)
+
+        @test StressTest.geom_unit_scaled(StressTest.Unit(), 4, StressTest.Unit(), 2) == 42
+        @test StressTest.geom_unit_make(7) === StressTest.Unit()     # void callee, singleton back
+        @test StressTest.geom_cell_doubled(StressTest.Cell_double(2.5)).v == 5.0
+
+        # No layout in the metadata: refused where it is called, with the
+        # reason, and the rest of the module still loads.
+        err = try StressTest.geom_name_length("hello"); nothing catch e; e end
+        @test err isa ErrorException
+        @test occursin("ABI Safety Trap", sprint(showerror, err))
+        @test occursin("string_view", sprint(showerror, err))
+    end
+
     @testset "StressTest: RAII Dialect" begin
         @testset "Parse ctor_call / dtor_call IR" begin
             ctx = create_context()

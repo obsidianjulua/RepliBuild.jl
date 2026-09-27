@@ -3863,11 +3863,12 @@ end
 
 """
 Extract return types and struct definitions from DWARF debug info.
-Returns: (return_types_dict, struct_defs_dict)
+Returns: (return_types, struct_defs, global_vars, typedef_table, record_abi)
   - return_types: Dict{mangled_name => {c_type, julia_type, size}}
   - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
+  - record_abi: Dict{record_name => {byte_size, pass, empty}} for by-value records
 """
-function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
+function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
     # GNU binutils format only — `_dwarf_dumper()` picks readelf (ELF) or
     # objdump (PE). Both print from binutils' dwarf.c; llvm-dwarfdump is a
     # different dialect and is rejected there. A fallback that returns empty
@@ -3889,7 +3890,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         Vector{Dict{Int,String}}()
     end
 
-    (return_types, struct_defs, global_vars, typedefs) = parse_dwarf_dump(output; file_tables=file_tables)
+    (return_types, struct_defs, global_vars, typedefs, record_abi) = parse_dwarf_dump(output; file_tables=file_tables)
 
     # A non-empty dump that yields nothing is a dialect or format mismatch, not
     # a library without debug info — and it is indistinguishable downstream from
@@ -3899,7 +3900,7 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         error(_dwarf_format_mismatch_error(dumper, binary_path, length(output)))
     end
 
-    return (return_types, struct_defs, global_vars, typedefs)
+    return (return_types, struct_defs, global_vars, typedefs, record_abi)
 end
 
 """
@@ -3969,7 +3970,7 @@ function check_param_arity!(return_types::Dict{String,Dict{String,Any}}, die_par
 end
 
 """
-    parse_dwarf_dump(output) -> (return_types, struct_defs, global_vars, typedef_table)
+    parse_dwarf_dump(output) -> (return_types, struct_defs, global_vars, typedef_table, record_abi)
 
 Parse a GNU `readelf --debug-dump=info` dump into the type/signature tables.
 
@@ -3984,7 +3985,7 @@ does — the filter simply does not run, and parsing behaves exactly as before.
 """
 function parse_dwarf_dump(output::AbstractString;
                           file_tables::Vector{Dict{Int,String}}=Vector{Dict{Int,String}}()
-                         )::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}}
+                         )::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
     # Which CU we are inside, 1-based; readelf emits line programs and DIEs in the
     # same section order, so the Nth "Compilation Unit @ offset" uses the Nth table.
     cu_index = 0
@@ -4606,6 +4607,23 @@ function parse_dwarf_dump(output::AbstractString;
                         end
                     end
                 end
+            end
+        end
+
+        # DW_AT_calling_convention on a record DIE is clang's own answer to "is
+        # this type trivial for the purposes of calls": 5 (DW_CC_pass_by_value)
+        # travels in registers or on the stack like a C struct, 4
+        # (DW_CC_pass_by_reference) travels as a pointer to a caller-owned
+        # temporary. Readelf spells it `DW_AT_calling_convention: 5	(pass by
+        # value)`. C records carry none. The same attribute on a subprogram means
+        # something else, so only a record DIE records it.
+        if contains(line, "DW_AT_calling_convention") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) in (:struct, :class) &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                ccm = match(r"DW_AT_calling_convention\s*:?\s*(\d+)", line)
+                ccm === nothing ||
+                    (type_refs[tag_offset]["calling_convention"] = parse(Int, ccm.captures[1]))
             end
         end
 
@@ -5768,10 +5786,28 @@ function parse_dwarf_dump(output::AbstractString;
 
     # Extract struct definitions with member information
     struct_defs = Dict{String,Dict{String,Any}}()
+    record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
     for (offset, type_info) in type_refs
         if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class", "union"]
             struct_name = get(type_info, "name", "unknown")
             if struct_name != "unknown" && struct_name != "unknown_struct" && struct_name != "unknown_class" && struct_name != "unknown_union"
+                # Every named DEFINITION (a declaration has no byte_size), before
+                # any provenance or member filter: calling a function that takes
+                # `std::string_view` by value needs the ABI facts of a type the
+                # API tables below deliberately leave out.
+                if haskey(type_info, "byte_size")
+                    has_base = any(d -> isa(d, Dict) && get(d, "kind", nothing) == "inheritance",
+                                   get(children_by_parent, offset, ()))
+                    _merge_record_facts!(record_facts, String(struct_name), Dict{String,Any}(
+                        "byte_size" => type_info["byte_size"],
+                        "pass" => _record_pass_convention(get(type_info, "calling_convention", nothing)),
+                        # No data member and no base: the record has no bytes a
+                        # callee reads. A union is never counted, and a class
+                        # with virtuals has its `_vptr` member.
+                        "empty" => type_info["kind"] != "union" &&
+                                   isempty(get(type_info, "members", [])) && !has_base))
+                end
+
                 # Resolve member types to Julia types
                 resolved_members = []
                 for member in get(type_info, "members", [])
@@ -6078,8 +6114,70 @@ function parse_dwarf_dump(output::AbstractString;
         end
     end
 
+    # ABI facts for every record a function takes or returns BY VALUE. The
+    # Tier-2 thunk needs them for exactly the records `struct_defs` cannot
+    # describe: an empty class (no members, so no entry), a filtered toolchain
+    # type (`std::string_view`), a record only ever declared here (constructor
+    # homing). See `FunctionGen.by_value_crossing`, which is the consumer.
+    record_abi = Dict{String,Dict{String,Any}}()
+    for (_, info) in return_types
+        isa(info, Dict) || continue
+        for t in Iterators.flatten(((get(info, "c_type", ""),),
+                                    (get(p, "c_type", "") for p in get(info, "parameters", []))))
+            name = _by_value_record_name(String(t))
+            name === nothing && continue
+            facts = get(record_facts, name, nothing)
+            facts === nothing || (record_abi[name] = facts)
+        end
+    end
 
-    return (return_types, struct_defs, global_vars, typedef_table)
+    return (return_types, struct_defs, global_vars, typedef_table, record_abi)
+end
+
+"""
+    _record_pass_convention(cc) -> Union{String,Nothing}
+
+DWARF's `DW_AT_calling_convention` on a record, as `"value"` (5,
+DW_CC_pass_by_value) or `"reference"` (4, DW_CC_pass_by_reference). `nothing`
+when the attribute is absent, which is every C record.
+"""
+_record_pass_convention(cc) = cc == 5 ? "value" : cc == 4 ? "reference" : nothing
+
+"""
+    _merge_record_facts!(facts, name, entry)
+
+Records are keyed by name, like `struct_defs`, and one name can have several
+definitions — the same type in many compile units, which agree, or two scopes
+reusing a name, which may not. Agreement keeps the entry. Disagreement marks it
+`"conflict"`, and a conflicted record is never treated as known.
+"""
+function _merge_record_facts!(facts::Dict{String,Dict{String,Any}}, name::String,
+                              entry::Dict{String,Any})
+    prev = get(facts, name, nothing)
+    if prev === nothing
+        facts[name] = entry
+    elseif get(prev, "conflict", false) != true &&
+           any(k -> get(prev, k, nothing) != get(entry, k, nothing), ("byte_size", "pass", "empty"))
+        prev["conflict"] = true
+    end
+    return facts
+end
+
+"""
+    _by_value_record_name(c_type) -> Union{String,Nothing}
+
+The record name a by-value parameter or return names, or `nothing` for a
+pointer, reference, function pointer, array or `void`. Only TOP-LEVEL cv is
+removed: `fstring<const char *>` keeps the `const` inside its argument list,
+which is part of the name the record is keyed under.
+"""
+function _by_value_record_name(c_type::AbstractString)
+    t = strip(c_type)
+    t = replace(t, r"^(?:(?:const|volatile)\s+)+" => "")
+    t = replace(t, r"(?:\s+(?:const|volatile))+$" => "")
+    (isempty(t) || t in ("void", "unknown")) && return nothing
+    occursin(r"[*&(\[]", t) && return nothing
+    return String(t)
 end
 
 """
@@ -6093,7 +6191,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     symbols = extract_symbols_from_binary(binary_path)
 
     # Extract return types and struct definitions from DWARF debug info (if available)
-    (dwarf_return_types, struct_defs, global_vars, typedef_table) = extract_dwarf_return_types(binary_path)
+    (dwarf_return_types, struct_defs, global_vars, typedef_table, record_abi) = extract_dwarf_return_types(binary_path)
 
     # Collect struct/enum names for type resolution in function signatures
     sig_struct_names = Set{String}()
@@ -6240,6 +6338,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # Type mappings
         "type_registry" => type_registry,
         "struct_definitions" => struct_defs,  # Struct member layout from DWARF
+        "record_abi" => record_abi,            # By-value records: size, pass convention, empty
         "typedef_table" => typedef_table,      # Typedef name -> Julia type resolution
 
         # STL container method symbols (for JIT thunk generation)

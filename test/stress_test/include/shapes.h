@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <string_view>
+
 class Shape {
 public:
     virtual ~Shape() = default;
@@ -38,6 +41,19 @@ public:
     double length2() const;
     Point2D a, b;
 };
+
+// By-value records the Tier-2 thunk used to type as a pointer. `Unit` is an
+// empty class: SysV gives it no register, so each argument after one moved a
+// register over. `Cell<double>` is a template record, whose spelling was never
+// looked up: its bytes went in as a pointer and it came back from RAX while
+// the callee wrote XMM0. `std::string_view` has no layout in the metadata (a
+// toolchain type), so the wrapper refuses the call. See verify.jl.
+struct Unit {};
+int unit_scaled(Unit u, int x, Unit v, int y);
+Unit unit_make(int x);
+template <typename T> struct Cell { T v; };
+Cell<double> cell_doubled(Cell<double> c);
+std::size_t name_length(std::string_view s);
 }
 
 extern "C" {

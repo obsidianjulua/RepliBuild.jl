@@ -356,6 +356,14 @@ include(joinpath(@__DIR__, "test_project_hash.jl"))
 
 include(joinpath(@__DIR__, "test_noexcept_routing.jl"))
 
+# ── By-value records at the Tier-2 thunk boundary (no toolchain) ────────────
+# An empty class, a declared-only type, a filtered std type or a template
+# spelling used to reach the thunk as `!llvm.ptr`. `record_abi` (DWARF calling
+# convention + emptiness) and `FunctionGen.by_value_crossing` decide each one;
+# the wrapper traps what the thunk cannot type. Verbatim readelf, text thunks.
+
+include(joinpath(@__DIR__, "test_by_value_crossing.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

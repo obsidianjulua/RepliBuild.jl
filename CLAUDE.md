@@ -361,6 +361,14 @@ the test named when you touch the area.
   laid out degrades to an opaque `byte_size` region with a warning — never to the wrong
   size, which smashes the sret buffer. (`test_struct_layout.jl`.)
 - `!jlcs.c_struct` must never appear inside an `!llvm.struct` body; inline the literal.
+- **A by-value record crosses a thunk with its layout, as nothing, by address, or not
+  at all.** Nothing means an empty class, which SysV gives no class. By address means
+  DWARF `DW_CC_pass_by_reference`,. Not at all means an ABI trap on the Julia side.
+  `FunctionGen.by_value_crossing` is the one verdict; the thunk generator and
+  GeneratorCpp both act on it. `record_abi` in metadata carries the DWARF facts. A
+  record must never fall to `!llvm.ptr`: that is how empty classes, declared-only
+  types, `string_view` and every template spelling were mis-passed.
+  (`test_by_value_crossing.jl`.)
 - `dtor_call` has no VTT operand. Its arity gate (exactly one final arg) is
   load-bearing for D2 destructors of classes with virtual bases.
 - vcall uses class-local coordinates (`vtable_offset = this_offset = 0` plus own slot).

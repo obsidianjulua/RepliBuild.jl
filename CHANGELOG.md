@@ -4,6 +4,53 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### By-value records the thunk could not type (2026-09-27)
+
+A by-value parameter or return whose record had no entry in `struct_definitions`
+became `!llvm.ptr` in the Tier-2 thunk, from `map_cpp_type`'s fallback for a
+non-identifier spelling or from `generate_jlcs_ir`'s rewrite of a bodyless
+`!llvm.struct<"X">`. Its bytes were loaded as a pointer and passed in one register.
+On a fixture of 13 such functions, 9 returned a wrong value and 1 segfaulted. The
+other 3 were right by accident: `box_get(Box<double>)` returned whatever was already
+in XMM0.
+
+- An **empty class** (`struct Tag {}` has no members, so no entry) shifted every
+  later argument one register. `with_tag(Tag(), 41)` returned 257, and a call that
+  should throw returned instead. Returning one read RAX from a `void` callee: SIGSEGV.
+- A **type only declared here** (constructor homing, F4) gave NaN or SIGSEGV.
+- A **template or qualified spelling** was never looked up. `Box<double>` went in as
+  a pointer and came back from RAX while the callee wrote XMM0. msdfgen's
+  `BitmapSection<float, N>` (24 bytes, which belong on the stack), fmt's
+  `basic_string_view<char>` and clipper2's `Point<long>` went in as pointers, and
+  qualified enums (clipper2, onednn, pugixml, tinyxml2) did too.
+- A **toolchain type** the provenance gate leaves out, such as pugixml's 22
+  `std::string_view` overloads, passed a 16-byte view as one pointer.
+- A **derived class with no members of its own** has no entry either.
+
+What changed:
+
+- **`record_abi` in metadata.** For every record a function takes or returns by
+  value, it holds `byte_size`, `pass` (DWARF `DW_AT_calling_convention`: `value` or
+  `reference`) and `empty` (no data member, no base). Toolchain types are included.
+- **`FunctionGen.by_value_crossing` decides each crossing**, looking names up by every
+  scope suffix. The thunk generator and GeneratorCpp act on the same verdict:
+  - a record with a layout gets its DWARF type, template and qualified spellings
+    included, and a qualified enum gets its integer;
+  - an empty record is dropped from the callee's arguments (clang does the same) and
+    its slot is skipped; an empty return makes the callee `void`, and the Julia
+    function returns the singleton;
+  - a record with no layout gets no thunk. The Julia function becomes an **ABI Safety
+    Trap** that names the type and the fix (`-Xclang -fno-use-ctor-homing` or
+    `-fstandalone-debug`, or `exclude_symbols`), and the module still loads.
+- **The method dedup prefers a callable definition over a trap** for one Julia
+  signature. pugixml's `append_child`, `set_name` and 20 more now bind the `const
+  char*` overload, not the `string_view` one. pugixml's `test.jl` gives that collision
+  as the reason it navigates positionally.
+- **A record named after a Base binding** (`Pair`, `Vector`, `Type`, …) is emitted as
+  `c_<name>`, and parameter and return annotations now use that name too. Before,
+  `p::Pair` meant `Base.Pair`, and box2d's `b2Contact::AddType(…, b2Shape::Type,
+  b2Shape::Type)` was annotated `::Type`.
+
 ### The 2026-09-26 audit, continued
 
 Silent-wrong and crash fixes from the re-verification harness. Each one is

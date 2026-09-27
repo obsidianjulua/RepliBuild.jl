@@ -2249,7 +2249,17 @@ function _dedup_method_chunks(chunks::Vector{String})
     # Which chunk claimed each signature, so a drop can name what shadowed it.
     claimed_by = Dict{String,String}()
     dropped = Tuple{String,String,String}[]   # (signature, dropped symbol, kept symbol)
-    for i in length(chunks):-1:1
+    # A trap stub (a function the generator refuses to call, see
+    # `_is_trap_chunk`) never claims a signature ahead of a callable definition,
+    # wherever the two sit. pugixml's `child(const char*)` and
+    # `child(std::string_view)` both become `(this::Any, arg::Any)`; the
+    # string_view one is last and is a trap, and last-definition-wins would make
+    # the working overload unreachable for a function that cannot be called
+    # anyway. Callables are claimed first, traps only fill what is left; among
+    # callables, and among traps, the last definition still wins.
+    order = vcat([i for i in length(chunks):-1:1 if !_is_trap_chunk(chunks[i])],
+                 [i for i in length(chunks):-1:1 if _is_trap_chunk(chunks[i])])
+    for i in order
         ks = _method_sig_keys(chunks[i])
         isempty(ks) && continue
         if all(k -> k in seen, ks)
@@ -2309,6 +2319,12 @@ function _dedup_method_chunks(chunks::Vector{String})
     end
     return chunks[keep]
 end
+
+# A chunk whose function body only raises one of the generators' refusal
+# errors: GeneratorC's "ABI Safety Trap" / "FFI Safety Trap" stubs and
+# GeneratorCpp's untypable by-value record trap.
+_is_trap_chunk(chunk::AbstractString) =
+    occursin(r"Base\.error\(\"(?:\"\"\s*)?(?:ABI|FFI) Safety Trap", chunk)
 
 # The mangled symbol a chunk was generated from, as recorded in its own
 # docstring ("- Mangled symbol: `_ZN…`"). Read back off the emitted text rather
