@@ -4,6 +4,50 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### `restrict`, `volatile` and `_Atomic` resolve; `Any` can no longer reach a ccall argument (2026-09-26)
+
+The DWARF parser had no entry for `DW_TAG_restrict_type`, `DW_TAG_volatile_type` or
+`DW_TAG_atomic_type`, so `resolve_type` answered `"unknown"` for every type behind
+one. `restrict` sits on the pointer itself, so `int *restrict a` came out as a
+parameter of type `Any` — and `Any` in a ccall argument tuple passes the Julia
+object (a `jl_value_t*`), not the pointer. The call completed and returned a
+plausible, wrong answer. `sum(a, 4)` over `[1,2,3,4]` returned a large garbage
+integer; a `restrict` NULL check saw a non-NULL box.
+
+- **Hub cglm shipped 58 of these** (`glmc_mat4_make(const float *__restrict src, …)`
+  and every other `__restrict` parameter). On its Tier-1 path they raised
+  `Malformed llvmcall`. On the ccall splice a precompiled consumer gets, they wrote
+  garbage into `dest`.
+- The three qualifiers now resolve straight through to their target type. They
+  carry no ABI information, and adding a prefix to the type string would give
+  every downstream mapper a spelling only some of them strip. A qualifier with no
+  target qualifies `void` (`volatile void *` → `Ptr{Cvoid}`).
+- **Measured across the Hub** by running the old and new parser on the same readelf
+  dumps (33 packages; llamacpp and onednn not run): 860 function signatures and
+  11 structs changed, and every change is `unknown` becoming a real type.
+  Everything else was identical. The 11 structs are those with a `volatile` or
+  `_Atomic` member (lmdb, lua, sqlite). Six now get typed fields instead of a byte
+  blob, and all 11 still equal their DWARF `byte_size`. A/B rebuilds of lmdb, lua,
+  sqlite, tinyxml2, pugixml and cglm pass their own verifiers unchanged
+  (cglm test_deep 753/753).
+- **Guard: `_assert_no_any_ccall_argument`**, the argument-side twin of
+  `_assert_no_any_ccall_return`. The wrapper refuses to write if any foreign call
+  declares an argument `Any` (`ccall` tuple, `@ccall` fixed arguments, Tier-1
+  `llvmcall` `Tuple{…}`). It walks the parsed AST, because the return type in
+  front of the tuple can contain commas. Variadic `@ccall` arguments are exempt:
+  they are the user's own `[wrap.varargs]` declaration, and Hub lua passes a Julia
+  object to `%p` on purpose. The guard also makes `long double` parameters loud,
+  since they still map to `Any` (open, see CLAUDE.md). A library with one fails to
+  wrap until the symbol is excluded, instead of shipping a silently wrong call.
+  Before this change, a comment in `test_wrapper_type_bindings.jl` called
+  argument-position `Any` "legitimate". That belief is how the cglm functions
+  shipped, and the comment is corrected.
+- Tests: `test_dwarf_attribution.jl` "restrict / volatile / _Atomic resolve through"
+  (verbatim clang 22 readelf; it goes red with the pre-fix parser
+  `include_string`'d back in), and `test_wrapper_type_bindings.jl` "Foreign call
+  must not take Any". With the pre-fix parser, the guard alone refuses the audit
+  fixture and names both `restrict` functions.
+
 ### Wrap-surface fixture reads the PE export directory (2026-09-24)
 
 `test/test_wrap_surface_guard.jl`'s oracle ran `nm -D --defined-only`. That is

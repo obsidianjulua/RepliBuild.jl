@@ -4045,6 +4045,37 @@ function parse_dwarf_dump(output::AbstractString;
             end
         end
 
+        # Qualifiers that change nothing at the call boundary: `restrict`,
+        # `volatile`, `_Atomic`. Each is its own DIE in the type chain
+        # (`a: restrict → pointer → const → int`), exactly like `const`, and
+        # each is resolved straight through to its target (see resolve_type).
+        #
+        # Without an entry here the DIE has no `type_refs` slot at all, so
+        # `resolve_type` answers "unknown" for everything behind it. For
+        # `restrict` that is the PARAMETER itself — the qualifier sits on the
+        # pointer — so `int *restrict a` mapped to `Any`, and `Any` in a ccall
+        # argument tuple passes a boxed `jl_value_t*`: the callee read Julia's
+        # object header as its array. Silent garbage on Tier 3, and
+        # `Malformed llvmcall` on Tier 1. Hub cglm shipped 58 of these
+        # (`glmc_mat4_make(const float *__restrict src, …)`).
+        #
+        # `_Atomic T` is transparent only for scalars ≤ 8 bytes, which is where
+        # x86-64 gives it T's size and alignment. An `_Atomic` struct can be
+        # padded larger than T; its enclosing layout still comes out right,
+        # because member offsets and `byte_size` are read from DWARF, not
+        # recomputed from the member types.
+        let qm = match(r"\(DW_TAG_(restrict|volatile|atomic)_type\)", line)
+            if !isnothing(qm)
+                offset_match = match(r"<\d+><([^>]+)>", line)
+                if !isnothing(offset_match)
+                    current_type_offset = "0x" * offset_match.captures[1]
+                    type_refs[current_type_offset] = Dict{String,Any}(
+                        "kind" => String(qm.captures[1]), "target" => nothing)
+                    offset_to_kind[current_type_offset] = :qualifier
+                end
+            end
+        end
+
         # Extract struct type definitions (DW_TAG_structure_type)
         # Example: <1><1f5f3e>: DW_TAG_structure_type
         #          DW_AT_name: "Vector3d"
@@ -4323,13 +4354,13 @@ function parse_dwarf_dump(output::AbstractString;
         # Example: <9f7>   DW_AT_type        : <0x41>
         if contains(line, "DW_AT_type") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
-            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :enum, :array, :subroutine, :typedef, :template_type, :template_value, :inheritance]
+            if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:pointer, :const, :reference, :qualifier, :enum, :array, :subroutine, :typedef, :template_type, :template_value, :inheritance]
                 type_match = match(r"<(0x[^>]+)>", line)
                 if !isnothing(type_match)
                     target_offset = String(type_match.captures[1])  # Convert SubString to String
                     if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
-                        # Pointer/const/reference: target
-                        if offset_to_kind[tag_offset] in [:pointer, :const, :reference]
+                        # Pointer/const/reference/qualifier: target
+                        if offset_to_kind[tag_offset] in [:pointer, :const, :reference, :qualifier]
                             type_refs[tag_offset]["target"] = target_offset
                         # Enum: underlying type
                         elseif offset_to_kind[tag_offset] == :enum
@@ -4928,6 +4959,15 @@ function parse_dwarf_dump(output::AbstractString;
             end
 
             target = get(type_info, "target", nothing)
+
+            # restrict / volatile / _Atomic: transparent. The qualifier carries no
+            # ABI information, and spelling it into the type string would hand every
+            # downstream mapper a prefix only some of them strip. A qualifier DIE
+            # with no DW_AT_type qualifies `void` (`volatile void *`), exactly as a
+            # pointer DIE with none points at it.
+            if kind in ("restrict", "volatile", "atomic")
+                return isnothing(target) ? "void" : resolve_type(target, type_refs, visited)
+            end
 
             if isnothing(target)
                 # Pointer/const/reference without target (shouldn't happen but handle it)

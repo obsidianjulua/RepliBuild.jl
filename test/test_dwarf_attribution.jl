@@ -290,6 +290,104 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test [p["name"] for p in rt["execute_outer"]["parameters"]] == ["f", "a"]
     end
 
+    @testset "restrict / volatile / _Atomic resolve through" begin
+        # Verbatim readelf of (clang 22, -g -O0, locals dropped):
+        #   struct Q { volatile int flag; _Atomic int counter; double d; };
+        #   int sum_r(const int *restrict a, unsigned long n);
+        #   double qd(const struct Q *q);
+        #   int vv(volatile void *p);
+        #
+        # The qualifier DIEs used to have no `type_refs` entry, so everything
+        # behind them resolved to "unknown". For `restrict` that is the parameter
+        # itself — `a` came out `Any`, and `Any` in a ccall argument tuple passes
+        # a boxed jl_value_t* (Hub cglm: 58 functions returning garbage).
+        dump = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : (indexed string: 0x0): clang version 22.1.8
+         <1><23>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <2b>   DW_AT_name        : (indexed string: 0x3): sum_r
+            <2e>   DW_AT_type        : <0x9c>
+         <2><32>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <36>   DW_AT_name        : (indexed string: 0x8): a
+            <39>   DW_AT_type        : <0xa4>
+         <2><3d>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <41>   DW_AT_name        : (indexed string: 0x9): n
+            <44>   DW_AT_type        : <0xb3>
+         <2><65>: Abbrev Number: 0
+         <1><66>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <6e>   DW_AT_name        : (indexed string: 0x5): qd
+            <71>   DW_AT_type        : <0xa0>
+         <2><75>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <79>   DW_AT_name        : (indexed string: 0xd): q
+            <7c>   DW_AT_type        : <0xb7>
+         <2><80>: Abbrev Number: 0
+         <1><81>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <89>   DW_AT_name        : (indexed string: 0x7): vv
+            <8c>   DW_AT_type        : <0x9c>
+         <2><90>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <94>   DW_AT_name        : (indexed string: 0x12): p
+            <97>   DW_AT_type        : <0xec>
+         <2><9b>: Abbrev Number: 0
+         <1><9c>: Abbrev Number: 6 (DW_TAG_base_type)
+            <9d>   DW_AT_name        : (indexed string: 0x4): int
+            <9f>   DW_AT_byte_size   : 4
+         <1><a0>: Abbrev Number: 6 (DW_TAG_base_type)
+            <a1>   DW_AT_name        : (indexed string: 0x6): double
+            <a3>   DW_AT_byte_size   : 8
+         <1><a4>: Abbrev Number: 7 (DW_TAG_restrict_type)
+            <a5>   DW_AT_type        : <0xa9>
+         <1><a9>: Abbrev Number: 8 (DW_TAG_pointer_type)
+            <aa>   DW_AT_type        : <0xae>
+         <1><ae>: Abbrev Number: 9 (DW_TAG_const_type)
+            <af>   DW_AT_type        : <0x9c>
+         <1><b3>: Abbrev Number: 6 (DW_TAG_base_type)
+            <b4>   DW_AT_name        : (indexed string: 0xa): unsigned long
+            <b6>   DW_AT_byte_size   : 8
+         <1><b7>: Abbrev Number: 8 (DW_TAG_pointer_type)
+            <b8>   DW_AT_type        : <0xbc>
+         <1><bc>: Abbrev Number: 9 (DW_TAG_const_type)
+            <bd>   DW_AT_type        : <0xc1>
+         <1><c1>: Abbrev Number: 10 (DW_TAG_structure_type)
+            <c2>   DW_AT_name        : (indexed string: 0x11): Q
+            <c3>   DW_AT_byte_size   : 16
+         <2><c6>: Abbrev Number: 11 (DW_TAG_member)
+            <c7>   DW_AT_name        : (indexed string: 0xe): flag
+            <c8>   DW_AT_type        : <0xe2>
+            <ce>   DW_AT_data_member_location: 0
+         <2><cf>: Abbrev Number: 11 (DW_TAG_member)
+            <d0>   DW_AT_name        : (indexed string: 0xf): counter
+            <d1>   DW_AT_type        : <0xe7>
+            <d7>   DW_AT_data_member_location: 4
+         <2><d8>: Abbrev Number: 11 (DW_TAG_member)
+            <d9>   DW_AT_name        : (indexed string: 0x10): d
+            <da>   DW_AT_type        : <0xa0>
+            <e0>   DW_AT_data_member_location: 8
+         <2><e1>: Abbrev Number: 0
+         <1><e2>: Abbrev Number: 12 (DW_TAG_volatile_type)
+            <e3>   DW_AT_type        : <0x9c>
+         <1><e7>: Abbrev Number: 13 (DW_TAG_atomic_type)
+            <e8>   DW_AT_type        : <0x9c>
+         <1><ec>: Abbrev Number: 8 (DW_TAG_pointer_type)
+            <ed>   DW_AT_type        : <0xf1>
+         <1><f1>: Abbrev Number: 14 (DW_TAG_volatile_type)
+         <1><f2>: Abbrev Number: 0
+        """
+        rt, sd, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
+        p(f) = [(x["name"], x["c_type"], x["julia_type"]) for x in rt[f]["parameters"]]
+
+        # restrict on the pointer: the parameter itself.
+        @test p("sum_r") == [("a", "const int*", "Ptr{Cint}"), ("n", "unsigned long", "Culong")]
+        # A qualifier DIE with no DW_AT_type qualifies void.
+        @test p("vv") == [("p", "void*", "Ptr{Cvoid}")]
+        @test p("qd") == [("q", "const Q*", "Ptr{Q}")]
+        # volatile / _Atomic members: typed, at their DWARF offsets.
+        @test [(m["name"], m["c_type"], m["julia_type"], m["offset"]) for m in sd["Q"]["members"]] ==
+              [("flag", "int", "Cint", "0x0"), ("counter", "int", "Cint", "0x4"),
+               ("d", "double", "Cdouble", "0x8")]
+        # Nothing anywhere resolved to the "unknown" sentinel.
+        @test !any(x -> occursin("unknown", x[2]), vcat(p("sum_r"), p("vv"), p("qd")))
+    end
+
     # ── The arity guard ─────────────────────────────────────────────────────
 
     @testset "arity guard rejects phantom parameters" begin

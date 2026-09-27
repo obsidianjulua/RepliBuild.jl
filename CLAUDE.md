@@ -303,6 +303,12 @@ the test named when you touch the area.
   `Base.error(...)` (enforced by `_assert_base_calls_qualified`), and helpers must
   qualify `Base.get`/`Base.string`/…. `ccall` is syntax: `Base.ccall` is an
   UndefVarError.
+- **`Any` is never a foreign-call type**, in either position: as a return it
+  dereferences an integer as a Julia object, and as an argument it passes the box
+  (`jl_value_t*`) instead of the value. `_assert_no_any_ccall_return` and
+  `_assert_no_any_ccall_argument` refuse both. The one exemption is a variadic
+  `@ccall` argument, which is the user's explicit `[wrap.varargs]` declaration.
+  `::Any` in a Julia signature is normal. (`test_wrapper_type_bindings.jl`.)
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
   the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
