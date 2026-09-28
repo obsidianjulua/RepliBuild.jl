@@ -17,6 +17,10 @@
 using Test
 using RepliBuild
 
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
+
 const CONV_TEST_DIR = joinpath(@__DIR__, "convenience_overload_test")
 
 @testset "Convenience overloads: no struct-by-value footgun" begin
@@ -64,19 +68,16 @@ const CONV_TEST_DIR = joinpath(@__DIR__, "convenience_overload_test")
     @test !occursin("accepts structs directly", txt)   # the footgun's marker comment
     @test occursin("accepts arrays directly", txt)     # Vector path survives
 
-    # Subprocess-isolated live probe: parse PROBE lines
+    # Subprocess-isolated live probe (the regression was a double-free abort)
     probe = joinpath(CONV_TEST_DIR, "probe_convenience.jl")
-    out = IOBuffer()
-    proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(@__DIR__)) $probe $wrapper`);
-                        stdout=out, stderr=out))
-    output = String(take!(out))
-    println(output)
+    r = run_isolated(`$probe $wrapper`)
+    v = probe_verdicts(r.output)
 
-    @test proc.exitcode == 0
-    @test occursin("PROBE_DONE", output)               # probe ran to completion (no abort)
+    @test r.ok
+    @test haskey(v, "PROBE_DONE")                      # probe ran to completion (no abort)
     for probe_name in ["no_byvalue_overload", "byvalue_call_refused",
                        "pointer_lifecycle", "vector_convenience",
                        "cstring_policy_aligned"]
-        @test occursin(Regex("PROBE $(probe_name): PASS"), output)
+        @test startswith(get(v, probe_name, "no PROBE line"), "PASS")
     end
 end

@@ -154,5 +154,3 @@ using .ViTest
         @test !any(n -> occursin("thunk_to", String(n)), names(ViTest))
     end
 end
-
-println("VI_VERIFY_DONE")

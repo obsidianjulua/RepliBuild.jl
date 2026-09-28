@@ -16,21 +16,16 @@
 #   B. jlcs.marshal_arg  — memberTypes/juliaOffsets/result-field count mismatch
 #   C. array ops         — are load/store_array_element + array_view still alive?
 #
-# Requires libJLCS.so (build with: cd src/mlir && ./build.sh)
+# Requires libJLCS.so (build with: cd src/mlir && ./build.sh); skips without it.
 
 using Test
+using RepliBuild
 
-const MLIR_AVAILABLE = try
-    using RepliBuild
-    isfile(RepliBuild.MLIRNative.libJLCS)
-catch
-    false
-end
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
-if !MLIR_AVAILABLE
-    @info "libJLCS not found — skipping JLCS invariant probes"
-    exit(0)
-end
+if requires("JLCS invariant probes", :libJLCS)
 
 using RepliBuild.MLIRNative
 
@@ -44,6 +39,7 @@ const PROJECT = dirname(@__DIR__)
 #   :failed   — lowering returned false (graceful diagnostic / pattern failure)
 #   :parse    — parse_module rejected the IR (verifier/parser caught it)
 #   :crash    — process died on a signal (SIGSEGV etc.) → undefined behaviour
+#   :hang     — killed after the timeout
 # ──────────────────────────────────────────────────────────────────────────────
 
 function probe_lowering(ir::String)
@@ -61,20 +57,21 @@ function probe_lowering(ir::String)
         ok = lower_to_llvm(mod)
         exit(ok ? 0 : 2)
     """
-    proc = run(pipeline(
-        ignorestatus(`julia --project=$(PROJECT) -e $driver`);
-        stdout = devnull, stderr = devnull))
+    # echo=false: exits 2 and 3 are outcomes being classified, not failures.
+    r = run_isolated(`-e $driver`; timeout = 300, echo = false)
     rm(irfile; force = true)
-    if proc.termsignal != 0
-        return (:crash, proc.termsignal)
-    elseif proc.exitcode == 0
+    if r.timedout
+        return (:hang, 0)
+    elseif r.signal != 0
+        return (:crash, r.signal)
+    elseif r.exitcode == 0
         return (:lowered, 0)
-    elseif proc.exitcode == 2
+    elseif r.exitcode == 2
         return (:failed, 2)
-    elseif proc.exitcode == 3
+    elseif r.exitcode == 3
         return (:parse, 3)
     else
-        return (:other, proc.exitcode)
+        return (:other, r.exitcode)
     end
 end
 
@@ -132,7 +129,6 @@ end
         @test posA !== nothing && posB !== nothing
         # Reverse destruction: B's destructor call precedes A's in the output.
         @test posB !== nothing && posA !== nothing && first(posB) < first(posA)
-        println("  ✓ A1 well-formed scope lowers; reverse-order destruction confirmed")
     end
 
     # A2 — malformed: 1 managed ptr but 2 destructors.
@@ -154,7 +150,6 @@ end
     }
     """
     outcome, code = probe_lowering(malformed)
-    println("  → A2 malformed scope (1 ptr / 2 dtors): $outcome (code/signal=$code)")
     # Contract: malformed IR must be rejected gracefully (verifier/diagnostic),
     # never segfault. ScopeOp::verify() (2026-07-16) rejects the arity mismatch
     # at parse time — outcome is :parse, not :crash.
@@ -179,7 +174,6 @@ end
     """
     ok, ll = lower_and_emit(wellformed)
     @test ok
-    ok && println("  ✓ B1 well-formed marshal_arg lowers")
 
     # B2 — malformed: 2 memberTypes but only 1 juliaOffset.
     # Lowering loops over memberTypes.size() and reads juliaOffsets[i]; the
@@ -196,7 +190,6 @@ end
     }
     """
     outcome, code = probe_lowering(malformed)
-    println("  → B2 malformed marshal_arg (2 types / 1 offset): $outcome (code/signal=$code)")
     # Same contract as A2: must reject gracefully, never segfault.
     # MarshalArgOp::verify() (2026-07-16) rejects the arity mismatch at parse.
     @test outcome != :crash
@@ -206,9 +199,11 @@ end
 
 # ── C. array ops liveness: are they still wired through the stack? ────────────
 @testset "C. array op liveness" begin
-    # No Julia generator emits these and no other test exercises them. This
-    # probe answers one question definitively: do load/store_array_element +
-    # array_view still parse and lower, or have they bit-rotted?
+    # Written when nothing emitted these ops, to answer whether they had
+    # bit-rotted, so it recorded the outcome rather than presuming one. The
+    # answer has been "they lower" since ArrayViewGen started producing them
+    # (2026-07-16; executed in test_jlcs_producers.jl), so it is asserted now:
+    # a probe that accepts every outcome cannot fail.
     ir = """
     module {
       func.func @arr_load(%v: !llvm.ptr, %i: index) -> f64
@@ -224,13 +219,7 @@ end
     }
     """
     outcome, code = probe_lowering(ir)
-    println("  → C array ops parse+lower: $outcome (code/signal=$code)")
-    @test outcome in (:lowered, :failed, :parse, :crash)
-    if outcome == :lowered
-        println("    array ops are FUNCTIONAL (produced by ArrayViewGen since 2026-07-16; executed in test_jlcs_producers.jl)")
-    elseif outcome in (:parse, :crash)
-        @warn "array ops no longer survive the stack ($outcome) — bit-rotted, wire up or remove"
-    end
+    @test outcome == :lowered
 
     # Also confirm the !jlcs.array_view type itself still parses.
     type_ir = """
@@ -248,8 +237,7 @@ end
     finally
         destroy_context(ctx)
     end
-    println("  → C array_view type parses: $parsed")
-    @test parsed isa Bool  # record, don't presume
+    @test parsed === true
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -385,7 +373,8 @@ end
     # FunctionGen, and must NOT be conjured by the scope lowering instead.
     fg = read(joinpath(PROJECT, "src", "IRGen", "ir_gen", "FunctionGen.jl"), String)
     @test occursin("jlcs.dtor_call", fg)
-    println("  → all $(length(mnemonics)) dialect ops have a producer under src/")
 end
 
 end # testset
+
+end # requires

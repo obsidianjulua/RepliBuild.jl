@@ -296,6 +296,13 @@ include(joinpath(@__DIR__, "test_cxx_personality.jl"))
 
 include(joinpath(@__DIR__, "test_c_bucket_sysroot.jl"))
 
+# ── The C bucket's clang call drains its output while it runs (JLL clang) ────
+# Read after `run`, so more than ~64 KiB of diagnostics blocked clang on a full
+# pipe and hung the build silently. Runs in a SIGKILL-bounded child, because the
+# regression is a hang.
+
+include(joinpath(@__DIR__, "test_c_bucket_pipe.jl"))
+
 # ── One C type, two tiers, two widths (no toolchain) ─────────────────────────
 # C long is 32 bits on Win64 (LLP64) and 64 on Unix64 (LP64) — the one integer
 # whose width the word size does not settle. Wrapper emits Julia Clong and is
@@ -501,6 +508,96 @@ end
     # anything — an empty side would make the intersection trivially empty.
     @test length(ci_files)  > 5
     @test length(dev_files) > 5
+end
+
+# ── No included file can end the suite early ─────────────────────────────────
+# `exit(0)` inside an `include` ends the whole run with a SUCCESS status: every
+# file after it silently never runs and the suite still reports green. Six
+# toolchain files used it as their "libJLCS not built" skip, and
+# test_mlir_templates.jl ran first in the libJLCS group, so a machine without
+# the dialect skipped most of devtests and passed. They wrap their body in
+# `if requires(...)` now (test/support/TestSupport.jl).
+#
+# Checked on the parsed AST, not the text: a subprocess driver held in a string
+# literal (test_jlcs_invariants.jl has two) legitimately calls `exit`, and a
+# comment explaining this rule mentions it. What counts is code that runs at
+# include time — top level, testset bodies, `if`/`let`/`for`/`try` blocks and
+# `do` blocks — not the body of a function, macro or lambda.
+
+@testset "No include-time exit in a suite-included file" begin
+    # Full paths, from every quoted segment of an include line:
+    # include(joinpath(TEST_DIR, "callback_test", "test_exceptions.jl")).
+    function included_paths(suite)
+        paths = String[]
+        for line in eachline(suite)
+            s = lstrip(line)
+            (startswith(s, '#') || !occursin("include(", s)) && continue
+            parts = [m.captures[1] for m in eachmatch(r"\"([^\"]+)\"", s)]
+            (isempty(parts) || !endswith(parts[end], ".jl")) && continue
+            push!(paths, joinpath(@__DIR__, parts...))
+        end
+        return paths
+    end
+
+    is_exit(f) = f === :exit || f == :(Base.exit)
+    is_short_def(ex) = ex.head === :(=) && ex.args[1] isa Expr &&
+        (ex.args[1].head in (:call, :where) ||
+         (ex.args[1].head === :(::) && ex.args[1].args[1] isa Expr &&
+          ex.args[1].args[1].head === :call))
+
+    # Walks in source order, carrying the last LineNumberNode so a hit names
+    # its line. Returns that line.
+    function exits!(hits, ex, line)
+        ex isa LineNumberNode && return ex.line
+        ex isa Expr || return line
+        (ex.head in (:function, :macro, :->, :quote) || is_short_def(ex)) && return line
+        if ex.head === :do
+            # `f() do x … end` runs its lambda now; scan the body, not the head.
+            line = exits!(hits, ex.args[1], line)
+            return exits!(hits, ex.args[2].args[2], line)
+        end
+        ex.head === :call && is_exit(ex.args[1]) && push!(hits, line)
+        for a in ex.args
+            line = exits!(hits, a, line)
+        end
+        return line
+    end
+
+    function include_time_exits(src::AbstractString)
+        ast = Meta.parseall(src)
+        bad = filter(a -> a isa Expr && a.head in (:incomplete, :error), ast.args)
+        isempty(bad) || error("does not parse: $(first(bad))")
+        hits = Int[]
+        exits!(hits, ast, 0)
+        return hits
+    end
+
+    # The walker itself, on shapes whose answer is known. Without these the
+    # empty result below could just mean the walk never reached anything.
+    @test include_time_exits("exit(0)") == [1]
+    @test include_time_exits("if !ok\n    @info \"skip\"\n    exit(0)\nend") == [3]
+    @test include_time_exits("@testset \"t\" begin\n  Base.exit(1)\nend") == [2]
+    @test include_time_exits("mktempdir() do d\n  exit(0)\nend") == [2]
+    @test isempty(include_time_exits("f() = exit(0)"))
+    @test isempty(include_time_exits("function g()\n exit(1)\nend"))
+    @test isempty(include_time_exits("h = x -> exit(x)"))
+    @test isempty(include_time_exits("d = \"\"\"\nexit(3)\n\"\"\""))
+    @test isempty(include_time_exits("# exit(0)"))
+
+    files = unique(vcat(included_paths(joinpath(@__DIR__, "runtests.jl")),
+                        included_paths(joinpath(@__DIR__, "devtests.jl"))))
+    # A path that does not resolve means the reconstruction is wrong, and a
+    # file it cannot read is a file it silently did not check.
+    @test all(isfile, files)
+    @test length(files) > 40
+
+    offenders = Dict{String,Vector{Int}}()
+    for f in filter(isfile, files)
+        hits = include_time_exits(read(f, String))
+        isempty(hits) || (offenders[relpath(f, @__DIR__)] = hits)
+    end
+    isempty(offenders) || @warn "Include-time exit — use `if requires(...)` from test/support/TestSupport.jl" offenders
+    @test isempty(offenders)
 end
 
 # ── Every test import is declared, so `Pkg.test()` works ─────────────────────

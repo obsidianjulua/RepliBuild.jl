@@ -1,9 +1,9 @@
 #!/usr/bin/env julia
 # A/B harness for the `is_virtual` sourcing change.
 #
-#   julia --project=. test/ab_virtual_dispatch.jl baseline
+#   julia --project=. test/tools/ab_virtual_dispatch.jl baseline
 #   <apply the change>
-#   julia --project=. test/ab_virtual_dispatch.jl patched
+#   julia --project=. test/tools/ab_virtual_dispatch.jl patched
 #
 # Re-wraps every C++ Hub package and copies the emitted wrapper to
 # <outdir>/<label>/<pkg>.jl. Wrap-only: `is_virtual` is consumed at wrap, so
@@ -24,7 +24,7 @@ const LABEL = length(ARGS) >= 1 ? ARGS[1] :
     error("usage: ab_virtual_dispatch.jl <baseline|patched>")
 
 const HUB = get(ENV, "REPLIBUILD_HUB_PATH",
-                joinpath(dirname(dirname(@__DIR__)), "RepliBuild-Hub"))
+                joinpath(dirname(dirname(dirname(@__DIR__))), "RepliBuild-Hub"))   # test/tools/ → Projects/
 const OUT = get(ENV, "AB_OUT", joinpath(tempdir(), "ab_virtual"))
 
 isdir(HUB) || error("Hub not found at $HUB — set REPLIBUILD_HUB_PATH")

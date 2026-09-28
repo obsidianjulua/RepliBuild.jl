@@ -7,7 +7,7 @@
 # ONLY file under test/ permitted to read RepliBuild-Hub. Run it by hand after a
 # Hub C++ rebuild that changes class/name metadata, then commit the fixture:
 #
-#     julia --project=. test/gen_receiver_corpus.jl
+#     julia --project=. test/tools/gen_receiver_corpus.jl
 #
 # WHY A FIXTURE INSTEAD OF READING THE HUB DIRECTLY. `test_symbol_hygiene.jl`
 # §"Both receiver gates agree" used to sweep `~/Desktop/Projects/RepliBuild-Hub`
@@ -45,9 +45,10 @@ const W    = RepliBuild.Wrapper
 # than to one contributor's directory layout — this hand-run tool hardcoded
 # `~/Desktop/Projects/` and was unusable by anyone who lays their checkouts out
 # differently. `REPLIBUILD_HUB_PATH` overrides for any other arrangement.
+const TEST_DIR = dirname(@__DIR__)   # this file lives in test/tools/
 const HUB = get(ENV, "REPLIBUILD_HUB_PATH",
-                joinpath(dirname(dirname(@__DIR__)), "RepliBuild-Hub", "packages"))
-const OUT  = joinpath(@__DIR__, "fixtures", "receiver_gate_corpus.json")
+                joinpath(dirname(dirname(TEST_DIR)), "RepliBuild-Hub", "packages"))
+const OUT  = joinpath(TEST_DIR, "fixtures", "receiver_gate_corpus.json")
 
 # Both gates, against one (class, name) and one aggregate-name set.
 function verdicts(cls::String, nm::String, structs, stypes)
@@ -131,7 +132,7 @@ function main()
         println(io, "{")
         println(io, "  \"_comment\": ", JSON.json(
             "Reduced receiver-gate decision table. Regenerate with " *
-            "test/gen_receiver_corpus.jl; do not hand-edit. Both gates are pure " *
+            "test/tools/gen_receiver_corpus.jl; do not hand-edit. Both gates are pure " *
             "functions of (class, name) plus the aggregate-name set, so only " *
             "those are stored."), ",")
         println(io, "  \"_generated\": ", JSON.json(string(Dates.today())), ",")

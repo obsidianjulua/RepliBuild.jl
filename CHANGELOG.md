@@ -4,6 +4,53 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Test suite: one skip rule, one output convention, the audit's proofs in-repo (2026-09-27)
+
+Test-only; nothing under `src/` changed.
+
+- **No file can end devtests early.** Six toolchain files skipped with `exit(0)`
+  when libJLCS was missing, and inside an `include` that ends the whole run with a
+  success status. `test_mlir_templates.jl` ran first in the libJLCS group, so a
+  machine without the dialect skipped most of devtests and reported green. They
+  wrap their body in `if requires(...)` from the new `test/support/TestSupport.jl`,
+  which records a skipped testset. `runtests.jl` refuses an include-time `exit` in
+  any suite-included file, checked on the parsed AST (a subprocess driver in a
+  string literal is not a hit). The guard was run against the old tree first and
+  named all seven sites.
+- **Crash- and hang-mode checks share one runner.** `run_isolated` runs a child
+  julia with a SIGKILL timeout and output through a file, and `probe_verdicts`
+  parses the `PROBE <name>: PASS|FAIL` protocol. The two probe parents had no
+  timeout, and `test_jlcs_invariants.jl` ran whatever `julia` was on `PATH`.
+- **`@test`, not prints.** A failed `@test` inside a testset does not throw, so the
+  `println("  ✓ …")` after it printed on failure too. Removed from
+  `test_mlir_templates.jl`, the fixture `verify.jl` scripts and the pass banners.
+  One of them, "✓ NumberUnion (getters available)", had no test behind it at all;
+  `c_test/verify.jl` now passes a C union by value both ways.
+  `test_jlcs_invariants.jl` §C accepted every outcome ("record, don't presume");
+  its answer has been known since 2026-07-16 and is asserted.
+- **Retired and moved.** `stress_test/run_jit_test.jl` (a March `@assert` script, a
+  subset of `stress_test/verify.jl`, pre-v4 tier numbering) and `c_test/debug_aot.jl`
+  (a March debug script that wiped `c_test` when run) are deleted. The hand-run
+  Hub tools move to `test/tools/`.
+- **Audit gaps ported.** Eight 2026-09-26 fixes were proven only by the gitignored
+  harness in `.claude/audit-2026-09-26/`. Each now has a test, and each test was
+  negative-checked by neutering its fix:
+  - F7, C-bucket pipe drain: `test_c_bucket_pipe.jl` (CI; a SIGKILL-bounded child
+    with 4000 warnings; the old body is killed at the timeout).
+  - F9, `__int128`/`_Complex` bind Base's types: `test_wrapper_type_bindings.jl`,
+    driving both generators. The existing check asserted membership in
+    `Wrapper._FOREIGN_BUILTIN_TYPES`, which no generator reads.
+  - F15/F17, a local dependency compiles `.c` and resolves against the TOML, not
+    the cwd: `test_dep_cache.jl`.
+  - F16, `register` stages a relative-root project's inputs: `test_registry.jl`.
+  - F20, SysV register exhaustion: `test_struct_abi.jl` §E against a clang++
+    callee (65 instead of 84 with the dialect fix reversed in a scratch libJLCS).
+  - F21, array members record their size: `test_dwarf_attribution.jl` (verbatim
+    clang 22 readelf), plus `Arr3` in the `stress_test` fixture.
+  - F22, C++ anonymous unions are inlined: `Variant` in `stress_test`.
+  - F23, a failed AOT pass leaves no stale `_thunks` library: `test_introspection.jl`.
+  - F25, global-scope constructors are emitted: `Span` in `stress_test`.
+
 ### Empty classes passed by value follow the host ABI (2026-09-27)
 
 SysV drops an empty class: no register, no stack slot, and an empty return is

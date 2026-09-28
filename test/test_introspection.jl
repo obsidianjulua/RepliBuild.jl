@@ -372,4 +372,55 @@ const W = RepliBuild.Wrapper
             @warn "skipped: no libc.so.6 or no nm — the fires-on-real-library check did not run"
         end
     end
+
+    @testset "a failed AOT build leaves no stale thunks library" begin
+        # build_aot_thunks named and replaced the companion library only at its
+        # link step, so a failure anywhere before that left the PREVIOUS build's
+        # `_thunks` library in place. Wrap checked thunk names, which still
+        # matched, and bound thunks compiled against the old layouts: a wrong
+        # answer, no error (audit F23, 2026-09-26). The file is removed before
+        # generation now, and wrap, finding none, emits JIT dispatch.
+        CM = RepliBuild.ConfigurationManager
+        mktempdir() do dir
+            write(joinpath(dir, "replibuild.toml"), """
+            [project]
+            name = "stale"
+            root = "$(escape_string(dir))"
+
+            [compile]
+            source_files = []
+            aot_thunks = true
+
+            [wrap]
+            language = "cpp"
+            """)
+            cfg = CM.load_config(joinpath(dir, "replibuild.toml"))
+            out = CM.get_output_path(cfg)
+            mkpath(out)
+            ext = Base.Libc.Libdl.dlext
+            lib = joinpath(out, "libstale.$ext")
+            stale = joinpath(out, "libstale_thunks.$ext")
+            write(lib, "stand-in library")
+            write(stale, "the previous build's thunks")
+
+            # No compilation_metadata.json: the earliest way the AOT pass can fail.
+            @test_logs (:warn, r"metadata not found") match_mode=:any RepliBuild.ThunkBuilder.build_aot_thunks(cfg, lib)
+            @test !isfile(stale)          # the regression
+            @test isfile(lib)             # the library itself is not touched
+
+            # Wrap's fallback: the same config with AOT off and nothing else moved.
+            off = CM.with_aot_thunks(cfg, false)
+            @test cfg.compile.aot_thunks && !off.compile.aot_thunks
+            for f in fieldnames(typeof(cfg.compile))
+                f === :aot_thunks || @test getfield(off.compile, f) == getfield(cfg.compile, f)
+            end
+            for f in fieldnames(typeof(cfg))
+                f === :compile || @test getfield(off, f) === getfield(cfg, f)
+            end
+        end
+
+        # …and wrap takes that fallback when the companion library is absent.
+        gen = read(joinpath(@__DIR__, "..", "src", "Wrapper", "Generator.jl"), String)
+        @test occursin(r"if isfile\(thunks_so\).*?else.*?config = with_aot_thunks\(config, false\)"s, gen)
+    end
 end

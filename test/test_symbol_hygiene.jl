@@ -98,7 +98,7 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
         # 97 asserts here, 89 on a fresh clone.
         #
         # Regenerate after a change that moves fixture symbols:
-        #   julia --project=. test/gen_thunk_symbols.jl
+        #   julia --project=. test/tools/gen_thunk_symbols.jl
         fixture_path = joinpath(@__DIR__, "fixtures", "thunk_symbols.json")
         @test isfile(fixture_path)
         vendored = JSON.parsefile(fixture_path)["fixtures"]
@@ -357,7 +357,7 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
         # Both gates are pure functions of (class, name) plus the aggregate-NAME
         # set — `_fuzzy_struct_lookup` reaches `structs` only through `haskey`
         # and `keys`, never a value — so the fixture stores exactly that and
-        # nothing else. `test/gen_receiver_corpus.jl` regenerates it from the
+        # nothing else. `test/tools/gen_receiver_corpus.jl` regenerates it from the
         # Hub and refuses to write unless both gates give identical verdicts on
         # the real metadata and on the reduction.
         corpus_path = joinpath(@__DIR__, "fixtures", "receiver_gate_corpus.json")

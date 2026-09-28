@@ -107,5 +107,3 @@ const DISC = RepliBuild.Discovery
         @test DISC._collect_preserved_sections(toml) === nothing
     end
 end
-
-println("✅ TOML preservation tests passed")

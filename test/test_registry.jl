@@ -559,4 +559,77 @@ end
     end
 end
 
-println("\n✓ All registry tests passed")
+# ── register stages a relative-root project's inputs ─────────────────────────
+# `load_config` resolves a relative `root` against the STORED TOML, i.e. the
+# registry directory, so `include_dirs = ["config"]` means `<registry>/config`
+# and has to exist there. `register` did not copy it, and a registered project
+# built against whatever the system had: Hub expat compiled against
+# /usr/include/expat_config.h instead of its own harvested one — a different
+# library, no error (audit F16, 2026-09-26). Pure file operations: no toolchain.
+@testset "register stages a relative-root project's inputs" begin
+    with_temp_registry() do home
+        mktempdir() do sb
+            proj = joinpath(sb, "proj")
+            for d in ("config", joinpath("config", ".git"), joinpath("include", "lib"), "src")
+                mkpath(joinpath(proj, d))
+            end
+            write(joinpath(proj, "config", "lib_config.h"), "#define LIB_CFG 1\n")
+            write(joinpath(proj, "config", ".git", "HEAD"), "ref: refs/heads/main\n")
+            write(joinpath(proj, "include", "lib", "lib.h"), "int lib(void);\n")   # nested
+            write(joinpath(proj, "src", "lib.c"), "int lib(void){return 1;}\n")
+            # A path that leaves the project is never copied into the registry.
+            mkpath(joinpath(sb, "sibling"))
+            write(joinpath(sb, "sibling", "outside.h"), "#define OUTSIDE 1\n")
+
+            toml = joinpath(proj, "replibuild.toml")
+            write(toml, """
+            [project]
+            name = "stagedlib"
+            root = "."
+
+            [compile]
+            source_files = ["src/lib.c"]
+            include_dirs = ["config", "include", "../sibling"]
+
+            [wrap]
+            language = "c"
+            """)
+
+            entry = PR.register(toml)
+            regdir = dirname(entry.toml_path)
+            @test startswith(regdir, home)
+            @test isfile(joinpath(regdir, "config", "lib_config.h"))     # the regression
+            @test isfile(joinpath(regdir, "include", "lib", "lib.h"))
+            @test isfile(joinpath(regdir, "src", "lib.c"))
+            @test !ispath(joinpath(regdir, "config", ".git"))            # VCS trees stay behind
+            @test !ispath(normpath(joinpath(regdir, "..", "sibling")))   # outside the root
+
+            # What the build will read: the stored TOML's root is the registry,
+            # and every staged relative input resolves there.
+            cfg = CM.load_config(entry.toml_path)
+            @test cfg.project.root == abspath(regdir)
+            @test isfile(joinpath(cfg.project.root, "config", "lib_config.h"))
+            @test isfile(joinpath(cfg.project.root, only(cfg.compile.source_files)))
+        end
+    end
+
+    # An absolute root keeps building from the original tree: nothing is copied.
+    with_temp_registry() do home
+        mktempdir() do proj
+            mkpath(joinpath(proj, "config"))
+            write(joinpath(proj, "config", "abs_config.h"), "#define ABS 1\n")
+            toml = joinpath(proj, "replibuild.toml")
+            write(toml, """
+            [project]
+            name = "abslib"
+            root = "$(escape_string(proj))"
+
+            [compile]
+            source_files = []
+            include_dirs = ["config"]
+            """)
+            entry = PR.register(toml)
+            @test !ispath(joinpath(dirname(entry.toml_path), "config"))
+        end
+    end
+end

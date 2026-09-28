@@ -20,26 +20,18 @@
 # scripts / devtests); skips cleanly if either is absent.
 
 using Test
+using RepliBuild
 
-const MLIR_AVAILABLE = try
-    using RepliBuild
-    isfile(RepliBuild.MLIRNative.libJLCS)
-catch
-    false
-end
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
-if !MLIR_AVAILABLE
-    @info "libJLCS not found — skipping multi-library JIT tests"
-    exit(0)
-end
+if requires("multi-library JIT", :libJLCS)
 
 const MI_WRAPPER = joinpath(@__DIR__, "mi_test", "julia", "MiTest.jl")
 const VI_WRAPPER = joinpath(@__DIR__, "vi_test", "julia", "ViTest.jl")
 
-# Skip, never `exit`. `exit(0)` inside an `include` ends the whole suite with a
-# SUCCESS status — every testset after this one silently never runs and the run
-# still looks green. Standalone the two are indistinguishable; in a suite they
-# are opposites.
+# Skip, never `exit` (see TestSupport.requires).
 const WRAPPERS_BUILT = isfile(MI_WRAPPER) && isfile(VI_WRAPPER)
 WRAPPERS_BUILT || @info "mi_test/vi_test wrappers not built — skipping multi-library JIT tests (run their verify scripts first)"
 
@@ -115,10 +107,10 @@ using .ViTest
     end
 end
 
-println("✅ multi-library JIT tests passed")
-
 else
     @testset "multi-library JIT (skipped — wrappers not built)" begin
         @test_skip false
     end
 end  # WRAPPERS_BUILT
+
+end # requires

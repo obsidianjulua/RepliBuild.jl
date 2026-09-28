@@ -596,4 +596,76 @@ end
     @test "ComplexF64" in W._FOREIGN_BUILTIN_TYPES
 end
 
+# ── Base's 128-bit and complex types are never redeclared ────────────────────
+# DWARF's `__int128` maps to `Int128` and `_Complex double` to `ComplexF64`, but
+# neither generator counted those as builtins, so each emitted `struct Int128
+# end` for the "unknown" type. Inside the module that shadows Base: the ccall
+# binds to an empty stub, and a caller passing a real `Int128` gets a
+# MethodError (audit F9, 2026-09-26). The set membership asserted above is not
+# this test — no generator reads `_FOREIGN_BUILTIN_TYPES`; each keeps its own
+# inline builtin lists, which is where the fix went. So drive the generators.
+@testset "128-bit and complex signatures bind Base's types" begin
+    fn(name, jt, ct) = Dict{String,Any}(
+        "name" => name, "mangled" => name, "demangled" => name,
+        "parameters" => Any[Dict{String,Any}("name" => "a", "julia_type" => jt, "c_type" => ct),
+                            Dict{String,Any}("name" => "b", "julia_type" => jt, "c_type" => ct)],
+        "return_type" => Dict{String,Any}("julia_type" => jt, "c_type" => ct))
+    metadata() = Dict{String,Any}(
+        "functions" => Any[fn("i128_add", "Int128", "__int128"),
+                           fn("u128_add", "UInt128", "unsigned __int128"),
+                           fn("cmul", "ComplexF64", "complex double"),
+                           fn("cmulf", "ComplexF32", "complex float")],
+        "struct_definitions" => Dict{String,Any}(),
+        "globals" => Dict{String,Any}(),
+        "function_pointer_typedefs" => Dict{String,Any}())
+    libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
+
+    function generate(lang, gen, modname)
+        dir = mktempdir()
+        write(joinpath(dir, "replibuild.toml"), """
+        [project]
+        name = "wide$(lang)"
+        root = "$(escape_string(dir))"
+
+        [link]
+        enable_lto = false
+
+        [wrap]
+        language = "$(lang)"
+
+        [types]
+        strictness = "warn"
+        allow_unknown_structs = true
+
+        [cache]
+        enabled = false
+        """)
+        cfg = RepliBuild.ConfigurationManager.load_config(joinpath(dir, "replibuild.toml"))
+        return gen(cfg, libref, metadata(), modname, WU.create_type_registry(cfg), true)
+    end
+
+    # The C++ generator also returns the thunk names the module needs.
+    codes = Dict("c"   => generate("c", WU.generate_introspective_module_c, "WideC"),
+                 "cpp" => first(generate("cpp", WU.generate_introspective_module_cpp, "WideCpp")))
+    for (lang, code) in codes, T in ("Int128", "UInt128", "ComplexF64", "ComplexF32")
+        # No declaration of a Base name, in either generator.
+        @test !occursin(Regex("^\\s*(mutable\\s+)?struct\\s+$(T)\\b", "m"), code)
+        # Control: the type did reach the emitted signatures, so the absence
+        # above is not just a function that was never emitted.
+        @test occursin(T, code)
+    end
+
+    # Executed: inside the C module the names ARE Base's, and a real Int128 /
+    # ComplexF64 dispatches. (The symbols are not in libjulia; nothing is called.)
+    m = Module(:WideProbe)
+    Core.eval(m, Meta.parseall(codes["c"]))
+    WC = Core.eval(m, :WideC)
+    @test getfield(WC, :Int128) === Base.Int128
+    @test getfield(WC, :ComplexF64) === Base.ComplexF64
+    @test hasmethod(WC.i128_add, Tuple{Int128, Int128})
+    @test hasmethod(WC.u128_add, Tuple{UInt128, UInt128})
+    @test hasmethod(WC.cmul, Tuple{ComplexF64, ComplexF64})
+    @test hasmethod(WC.cmulf, Tuple{ComplexF32, ComplexF32})
+end
+
 end  # testset

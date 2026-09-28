@@ -111,5 +111,3 @@ end
         @test CAbominationTest.stream_null() == Ptr{Cvoid}(C_NULL)
     end
 end
-
-println("✓ C Abomination Test Passed")

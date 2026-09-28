@@ -18,6 +18,8 @@
 //                  of a long; test_llp64_widths.jl owns that question.
 //   Gap            24B, MEMORY class WITH interior padding — the shape the
 //                  emitted-size bug mis-modelled (2026-08-05)
+//   DI, F3 + spill register-class structs that arrive after the registers they
+//                  need are used up — passed in memory, whole (2026-09-26)
 
 extern "C" {
 
@@ -60,6 +62,22 @@ long long gap_probe(Gap g) {
     return (long long)g.a * 1000000LL + (long long)g.b * 1000LL
          + (g.f1 ? 1 : 0) + (g.f2 ? 2 : 0) + (g.f3 ? 4 : 0)
          + (g.p == (void*)0x1234 ? 100 : 0);
+}
+
+// Register exhaustion. SysV has 6 integer and 8 SSE argument registers, and a
+// register-class struct that does not fit in what is LEFT goes to memory whole:
+// it is never split between the last free registers and the stack. `DI` needs
+// one SSE and one INTEGER register and arrives after six ints; `F3` needs two
+// SSE and arrives after eight doubles. Both are memory operands here. The thunk
+// counted no registers and split them (audit F20, 2026-09-26). Every argument
+// feeds the sum, so a misplaced one is a wrong number: 84 when right.
+typedef struct { double d; int i; } DI;      // 16B: SSE, INTEGER
+typedef struct { float x, y, z; } F3;        // 12B: SSE, SSE
+double spill(int a, int b, int c, int d, int e, int f, DI s,
+             double x0, double x1, double x2, double x3,
+             double x4, double x5, double x6, double x7, F3 t) {
+    return a + b + c + d + e + f + s.d + s.i
+         + x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + t.x + t.y + t.z;
 }
 
 }

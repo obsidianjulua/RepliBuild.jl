@@ -550,6 +550,143 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
 
     # ── The arity guard ─────────────────────────────────────────────────────
 
+    @testset "array members record their size" begin
+        # `float v[3]` has no DW_AT_byte_size of its own: the size is the
+        # element's times the subrange counts. It was recorded as 0, which made
+        # the return path treat the struct as unsizable and emit an integer byte
+        # blob, while the callee returned it in XMM (audit F21, 2026-09-26).
+        # Negative-checked: with the fix's hunk removed both sizes read 0.
+        #
+        # clang 22.1.8, `clang -g -O1 -fPIC -shared -fdebug-compilation-dir=/src`
+        # of:
+        #   struct Arr { float v[3]; };
+        #   struct Grid { int g[2][3]; };
+        #   struct Arr mk_Arr(float a);  int grid_sum(struct Grid g);
+        dump = """
+        Contents of the .debug_info section:
+
+          Compilation Unit @ offset 0:
+           Length:        0xa9 (32-bit)
+           Version:       5
+           Unit Type:     DW_UT_compile (1)
+           Abbrev Offset: 0
+           Pointer Size:  8
+         <0><c>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <d>   DW_AT_producer    : (indexed string: 0): clang version 22.1.8
+            <e>   DW_AT_language    : 29	(C11)
+            <10>   DW_AT_name        : (indexed string: 0x1): arr.c
+            <11>   DW_AT_str_offsets_base: 0x8
+            <15>   DW_AT_stmt_list   : 0
+            <19>   DW_AT_comp_dir    : (indexed string: 0x2): /src
+            <1a>   DW_AT_low_pc      : (index: 0): 0x10f0
+            <1b>   DW_AT_high_pc     : 0x29
+            <1f>   DW_AT_addr_base   : 0x8
+            <23>   DW_AT_loclists_base: 0xc (location list)
+         <1><27>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <28>   DW_AT_low_pc      : (index: 0): 0x10f0
+            <29>   DW_AT_high_pc     : 0x1c
+            <2d>   DW_AT_frame_base  : 1 byte block: 57 	(DW_OP_reg7 (rsp))
+            <2f>   DW_AT_call_all_calls: 1
+            <2f>   DW_AT_name        : (indexed string: 0x3): mk_Arr
+            <30>   DW_AT_decl_file   : 0
+            <31>   DW_AT_decl_line   : 3
+            <32>   DW_AT_prototyped  : 1
+            <32>   DW_AT_type        : <0x64>
+            <36>   DW_AT_external    : 1
+         <2><36>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <37>   DW_AT_location    : (index: 0): 0x14 (location list)
+            <38>   DW_AT_name        : (indexed string: 0xa): a
+            <39>   DW_AT_decl_file   : 0
+            <3a>   DW_AT_decl_line   : 3
+            <3b>   DW_AT_type        : <0x7f>
+         <2><3f>: Abbrev Number: 4 (DW_TAG_variable)
+            <40>   DW_AT_location    : (index: 0x1): 0x22 (location list)
+            <41>   DW_AT_name        : (indexed string: 0xb): r
+            <42>   DW_AT_decl_file   : 0
+            <43>   DW_AT_decl_line   : 3
+            <44>   DW_AT_type        : <0x64>
+         <2><48>: Abbrev Number: 0
+         <1><49>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <4a>   DW_AT_low_pc      : (index: 0x1): 0x1110
+            <4b>   DW_AT_high_pc     : 0x9
+            <4f>   DW_AT_frame_base  : 1 byte block: 57 	(DW_OP_reg7 (rsp))
+            <51>   DW_AT_call_all_calls: 1
+            <51>   DW_AT_name        : (indexed string: 0x8): grid_sum
+            <52>   DW_AT_decl_file   : 0
+            <53>   DW_AT_decl_line   : 4
+            <54>   DW_AT_prototyped  : 1
+            <54>   DW_AT_type        : <0x87>
+            <58>   DW_AT_external    : 1
+         <2><58>: Abbrev Number: 5 (DW_TAG_formal_parameter)
+            <59>   DW_AT_location    : 2 byte block: 91 8 	(DW_OP_fbreg: 8)
+            <5c>   DW_AT_name        : (indexed string: 0xc): g
+            <5d>   DW_AT_decl_file   : 0
+            <5e>   DW_AT_decl_line   : 4
+            <5f>   DW_AT_type        : <0x8b>
+         <2><63>: Abbrev Number: 0
+         <1><64>: Abbrev Number: 6 (DW_TAG_structure_type)
+            <65>   DW_AT_name        : (indexed string: 0x7): Arr
+            <66>   DW_AT_byte_size   : 12
+            <67>   DW_AT_decl_file   : 0
+            <68>   DW_AT_decl_line   : 1
+         <2><69>: Abbrev Number: 7 (DW_TAG_member)
+            <6a>   DW_AT_name        : (indexed string: 0x4): v
+            <6b>   DW_AT_type        : <0x73>
+            <6f>   DW_AT_decl_file   : 0
+            <70>   DW_AT_decl_line   : 1
+            <71>   DW_AT_data_member_location: 0
+         <2><72>: Abbrev Number: 0
+         <1><73>: Abbrev Number: 8 (DW_TAG_array_type)
+            <74>   DW_AT_type        : <0x7f>
+         <2><78>: Abbrev Number: 9 (DW_TAG_subrange_type)
+            <79>   DW_AT_type        : <0x83>
+            <7d>   DW_AT_count       : 3
+         <2><7e>: Abbrev Number: 0
+         <1><7f>: Abbrev Number: 10 (DW_TAG_base_type)
+            <80>   DW_AT_name        : (indexed string: 0x5): float
+            <81>   DW_AT_encoding    : 4	(float)
+            <82>   DW_AT_byte_size   : 4
+         <1><83>: Abbrev Number: 11 (DW_TAG_base_type)
+            <84>   DW_AT_name        : (indexed string: 0x6): __ARRAY_SIZE_TYPE__
+            <85>   DW_AT_byte_size   : 8
+            <86>   DW_AT_encoding    : 7	(unsigned)
+         <1><87>: Abbrev Number: 10 (DW_TAG_base_type)
+            <88>   DW_AT_name        : (indexed string: 0x9): int
+            <89>   DW_AT_encoding    : 5	(signed)
+            <8a>   DW_AT_byte_size   : 4
+         <1><8b>: Abbrev Number: 6 (DW_TAG_structure_type)
+            <8c>   DW_AT_name        : (indexed string: 0xd): Grid
+            <8d>   DW_AT_byte_size   : 24
+            <8e>   DW_AT_decl_file   : 0
+            <8f>   DW_AT_decl_line   : 2
+         <2><90>: Abbrev Number: 7 (DW_TAG_member)
+            <91>   DW_AT_name        : (indexed string: 0xc): g
+            <92>   DW_AT_type        : <0x9a>
+            <96>   DW_AT_decl_file   : 0
+            <97>   DW_AT_decl_line   : 2
+            <98>   DW_AT_data_member_location: 0
+         <2><99>: Abbrev Number: 0
+         <1><9a>: Abbrev Number: 8 (DW_TAG_array_type)
+            <9b>   DW_AT_type        : <0x87>
+         <2><9f>: Abbrev Number: 9 (DW_TAG_subrange_type)
+            <a0>   DW_AT_type        : <0x83>
+            <a4>   DW_AT_count       : 2
+         <2><a5>: Abbrev Number: 9 (DW_TAG_subrange_type)
+            <a6>   DW_AT_type        : <0x83>
+            <aa>   DW_AT_count       : 3
+         <2><ab>: Abbrev Number: 0
+         <1><ac>: Abbrev Number: 0
+        """
+        _, sd, _, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
+        arr = only(sd["Arr"]["members"])
+        @test (arr["c_type"], arr["julia_type"], arr["size"]) == ("float[3]", "NTuple{3, Cfloat}", 12)
+        grid = only(sd["Grid"]["members"])     # every subrange multiplies
+        @test (grid["c_type"], grid["julia_type"], grid["size"]) == ("int[2][3]", "NTuple{6, Cint}", 24)
+        # The member sizes now account for the whole record.
+        @test arr["size"] == parse(Int, sd["Arr"]["byte_size"])
+        @test grid["size"] == parse(Int, sd["Grid"]["byte_size"])
+    end
+
     @testset "arity guard rejects phantom parameters" begin
         # A signature claiming more parameters than the DIE tree has is a
         # wrong-argument ccall; the guard must abort rather than emit it.

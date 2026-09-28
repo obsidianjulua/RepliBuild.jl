@@ -25,7 +25,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test isfile(toml_path)
         cfg = read(toml_path, String)
         @test occursin("language = \"c\"", cfg)        # auto-detected C
-        println("  ✓ discover")
     end
 
     # ── 2b. enable LTO ────────────────────────────────────────────────
@@ -41,7 +40,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         lib = RepliBuild.build(toml)
         @test isfile(lib)
         @test endswith(lib, "." * Libdl.dlext)
-        println("  ✓ build → $lib")
     end
 
     # ── 4. wrap ─────────────────────────────────────────────────────────
@@ -74,19 +72,18 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test occursin("Base.llvmcall", code)          # both arms emit the path
         if isempty(lto_syms)
             @test occursin("LTO_IR_PATH", code)        # ... and bind the bitcode
-            println("  ✓ wrap → $wrapper (LTO active)")
         else
             @test occursin("const LTO_IR = UInt8[]", code)   # bound to nothing
             @test occursin("cannot resolve", code)           # and says why
-            println("  ✓ wrap → $wrapper (LTO demoted to ccall: " *
-                    join(lto_syms, ", ") * " unresolvable in-process)")
+            # Which arm ran is not visible in the test summary, and it differs
+            # by platform, so say it.
+            @info "c_test: LTO demoted to ccall — unresolvable in-process" lto_syms
         end
     end
 
     # ── 5. info ─────────────────────────────────────────────────────────
     @testset "info" begin
         @test_nowarn RepliBuild.info(toml)
-        println("  ✓ info")
     end
 
     # ── 6. register ─────────────────────────────────────────────────────
@@ -94,7 +91,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         RepliBuild.register(toml)
         # list_registry prints to stdout; just call it — no error means success
         @test_nowarn RepliBuild.list_registry()
-        println("  ✓ register")
     end
 
     # ── 7. load wrapper and call into the library ───────────────────────
@@ -115,7 +111,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test M.apply_op(M.OP_SUB, Int32(10), Int32(3)) == Int32(7)
         @test M.apply_op(M.OP_MUL, Int32(3), Int32(4)) == Int32(12)
         @test M.apply_op(M.OP_DIV, Int32(12), Int32(4)) == Int32(3)
-        println("  ✓ scalar arithmetic")
 
         # ── long double: no Julia type, no ccall shape ──────────────
         # The return comes back in x87 ST0, which ccall never reads (the
@@ -126,7 +121,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
             err = try f(); nothing catch e; e end
             @test err isa ErrorException && occursin("ABI Safety Trap", err.msg)
         end
-        println("  ✓ long double traps")
 
         # ── Point2D ─────────────────────────────────────────────────
         P = M.Point2D
@@ -145,7 +139,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
             @test s.x ≈ 20.0
             @test s.y ≈ 30.0
         end
-        println("  ✓ Point2D ops")
 
         # ── AABB (byte-blob struct) ─────────────────────────────────
         @testset "AABB struct-pass (LTO)" begin
@@ -155,7 +148,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
             @test M.aabb_contains(box, P(10.0, 0.0)) == Cint(0)
             @test M.aabb_area(box) ≈ 5.0 * 8.0
         end
-        println("  ✓ AABB ops")
 
         # ── array_stats ─────────────────────────────────────────────
         data = [1.0, 2.0, 3.0, 4.0, 5.0]
@@ -164,7 +156,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test stats.min_val ≈ 1.0
         @test stats.max_val ≈ 5.0
         @test stats.count == Csize_t(5)
-        println("  ✓ array_stats")
 
         # ── greet (string through buffer) ───────────────────────────
         buf = Vector{UInt8}(undef, 64)
@@ -173,7 +164,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         greeting = unsafe_string(pointer(buf))
         @test greeting == "Hello, Julia!"
         @test n == Csize_t(length("Hello, Julia!"))
-        println("  ✓ greet")
     end
 
     # ── 8. struct layout edge cases (from basics_test) ───────────────────
@@ -182,42 +172,44 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         ps = M.make_padded(UInt8(10), Int32(20))
         @test ps.a == UInt8(10)
         @test ps.b == Int32(20)
-        println("  ✓ PaddedStruct")
 
         # PackedStruct — packed return via Clang-compiled sret thunk
         pk = M.make_packed(UInt8(30), Int32(40))
         @test pk.a == UInt8(30)
         @test pk.b == Int32(40)
-        println("  ✓ PackedStruct (C sret thunk)")
 
-        # NumberUnion via getter helpers
-        # (union layout is opaque — test through get_union_int / get_union_float)
-        println("  ✓ NumberUnion (getters available)")
+        # NumberUnion — a C union by value. The Julia side writes one arm
+        # through the generated accessors, C reads both arms from the same
+        # four bytes. (This block used to print "NumberUnion (getters
+        # available)" with no test behind it.)
+        u = M.NumberUnion()
+        M.set_NumberUnion_i!(u, Cint(7))
+        @test M.get_NumberUnion_i(u) == Cint(7)
+        @test M.get_union_int(u) == Cint(7)
+        M.set_NumberUnion_f!(u, 2.5f0)
+        @test M.get_union_float(u) == 2.5f0
+        @test M.get_union_int(u) == reinterpret(Cint, 2.5f0)
     end
 
     # ── 9. JIT edge cases (from jit_edge_test) ────────────────────────────
     @testset "JIT edge cases" begin
         @test M.identity(Cint(42)) == Cint(42)
-        println("  ✓ identity")
 
         a_ref = Ref(Cint(10))
         b_ref = Ref(Cint(20))
         out   = Ref(Cint(0))
         M.write_sum(a_ref, b_ref, out)
         @test out[] == Cint(30)
-        println("  ✓ write_sum")
 
         pair = M.make_pair(Cint(11), Cint(22))
         @test pair.first  == Cint(11)
         @test pair.second == Cint(22)
-        println("  ✓ make_pair (struct return)")
 
         # pack_three — packed return via Clang-compiled sret thunk
         triplet = M.pack_three(UInt8('A'), Cint(999), UInt8('Z'))
         @test triplet.tag   == UInt8('A')
         @test triplet.value == Cint(999)
         @test triplet.flag  == UInt8('Z')
-        println("  ✓ pack_three (C sret thunk)")
     end
 
     # ── 10. bitfield structs ──────────────────────────────────────────────
@@ -243,7 +235,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test a_ref[] == UInt32(7)
         @test b_ref[] == UInt32(15)
         @test c_ref[] == UInt32(1)
-        println("  ✓ SingleByteBits (single-byte bitfield get/set)")
 
         # ── MultiByteBits: field spans byte boundary ──
         mb = M.make_multi_bits(UInt32(17), UInt32(3000), UInt32(100))
@@ -265,7 +256,6 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test x_ref[] == UInt32(31)
         @test y_ref[] == UInt32(4095)
         @test z_ref[] == UInt32(127)
-        println("  ✓ MultiByteBits (multi-byte bitfield get/set)")
 
         # ── WideBits: 24-bit data field ──
         wb = M.make_wide_bits(UInt32(0xA), UInt32(0xABCDEF), UInt32(0xF))
@@ -287,14 +277,11 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test tag_ref[] == UInt32(0x5)
         @test data_ref[] == UInt32(0x123456)
         @test flag_ref[] == UInt32(0xC)
-        println("  ✓ WideBits (wide multi-byte bitfield get/set)")
     end
 
     # ── 11. unregister ──────────────────────────────────────────────────
     @testset "unregister" begin
         RepliBuild.unregister(toml)
-        println("  ✓ unregister")
     end
 
-    println("\n✅ c_test: all pipeline stages passed")
 end

@@ -5,26 +5,18 @@
 # patterns: nested CStruct types, packed template structs, template RAII scopes,
 # virtual dispatch on template containers, and struct return through ffe_call.
 #
-# Requires libJLCS.so (build with: cd src/mlir && ./build.sh)
+# Requires libJLCS.so (build with: cd src/mlir && ./build.sh) and clang++ for the
+# support library; skips without them.
 
 using Test
 using Libdl
+using RepliBuild
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Availability guard — skip entire file if libJLCS not available
-# ══════════════════════════════════════════════════════════════════════════════
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
-const MLIR_AVAILABLE = try
-    using RepliBuild
-    isfile(RepliBuild.MLIRNative.libJLCS)
-catch
-    false
-end
-
-if !MLIR_AVAILABLE
-    @info "libJLCS not found — skipping MLIR template tests"
-    exit(0)
-end
+if requires("MLIR template stress tests", :libJLCS, :clangxx)
 
 using RepliBuild.MLIRNative
 
@@ -113,7 +105,6 @@ end
         """
         mod = parse_module(ctx, ir)
         @test mod != C_NULL
-        println("  ✓ nested CStruct types parsed")
     finally
         destroy_context(ctx)
     end
@@ -146,7 +137,6 @@ end
         mod = parse_module(ctx, ir)
         mod_jit = clone_module(mod)
         @test lower_to_llvm(mod_jit) == true
-        println("  ✓ nested CStruct types lowered to LLVM")
     finally
         destroy_context(ctx)
     end
@@ -245,7 +235,6 @@ end
         Libdl.dlclose(lib)
 
         destroy_jit(jit)
-        println("  ✓ nested get_field chains")
     finally
         destroy_context(ctx)
     end
@@ -295,7 +284,6 @@ end
         end
 
         destroy_jit(jit)
-        println("  ✓ packed template struct (pass by pointer)")
     finally
         destroy_context(ctx)
     end
@@ -360,7 +348,6 @@ end
         end
 
         destroy_jit(jit)
-        println("  ✓ packed struct return via ffe_call (sret)")
     finally
         destroy_context(ctx)
     end
@@ -426,7 +413,6 @@ end
         @test result[] == -1.0
 
         destroy_jit(jit)
-        println("  ✓ template RAII scope (single object)")
     finally
         destroy_context(ctx)
     end
@@ -506,7 +492,6 @@ end
         @test log_values == [1, 2, 3, -3, -2, -1]
 
         destroy_jit(jit)
-        println("  ✓ multi-object RAII ordering")
     finally
         destroy_context(ctx)
     end
@@ -594,7 +579,6 @@ end
                 ll = read(llpath, String); rm(llpath, force=true)
                 # Indirect call through the loaded vtable slot (callee is an SSA value).
                 @test occursin(r"call[^\n]*%\d+\(ptr", ll)
-                println("  ✓ vcall ($tag) lowers + emits LLVM IR (no operandSegmentSizes crash)")
             end
         end
 
@@ -648,7 +632,6 @@ end
             destroy_jit(jit)
         end
 
-        println("  ✓ virtual dispatch on template container")
     finally
         destroy_context(ctx)
     end
@@ -749,7 +732,6 @@ end
         end
 
         destroy_jit(jit)
-        println("  ✓ MI vcall: this_offset adjusts `this` for secondary-base dispatch")
 
         # type_info carrying the MI base table (attr-dict) parses + lowers
         ti_ir = """
@@ -765,7 +747,6 @@ end
         @test ti_mod != C_NULL
         ti_jit = clone_module(ti_mod)
         @test lower_to_llvm(ti_jit)
-        println("  ✓ type_info with MI base table parses + lowers")
 
         # Verifier: mismatched base-table arity must be rejected at parse
         bad_ir = """
@@ -777,7 +758,6 @@ end
         }
         """
         @test_throws ErrorException parse_module(ctx, bad_ir)
-        println("  ✓ type_info base-table arity mismatch diagnosed at parse")
     finally
         destroy_context(ctx)
     end
@@ -870,7 +850,6 @@ end
         end
 
         destroy_jit(jit)
-        println("  ✓ vcall may_throw: EH invoke path dispatches + adjusts correctly")
     finally
         destroy_context(ctx)
     end
@@ -903,7 +882,6 @@ end
         @test mod != C_NULL
         mod_jit = clone_module(mod)
         @test lower_to_llvm(mod_jit)
-        println("  ✓ type_info vbase table parses + lowers")
 
         # Verifier: mismatched vbase-table arity rejected at parse
         bad_ir = """
@@ -915,7 +893,6 @@ end
         }
         """
         @test_throws ErrorException parse_module(ctx, bad_ir)
-        println("  ✓ vbase-table arity mismatch diagnosed at parse")
     finally
         destroy_context(ctx)
     end
@@ -955,7 +932,6 @@ end
         mod_jit = clone_module(mod)
         @test lower_to_llvm(mod_jit)
 
-        println("  ✓ TypeInfoOp with template inheritance")
     finally
         destroy_context(ctx)
     end
@@ -1027,12 +1003,11 @@ end
         @test buf[4] ≈ 4.0
 
         destroy_jit(jit)
-        println("  ✓ fixed-size array template")
     finally
         destroy_context(ctx)
     end
 end
 
-println("\n✅ MLIR template stress tests: all passed")
-
 end # @testset "MLIR Templates"
+
+end # requires

@@ -26,12 +26,10 @@ function my_progress(p::Cfloat)::Cvoid
 end
 
 @testset "Callback Verification" begin
-    println("  Testing BinaryOp callback...")
     c_add = @cfunction(my_add, Cint, (Cint, Cint))
     res = CallbackTest.execute_binary_op(Base.unsafe_convert(Ptr{Cvoid}, c_add), Int32(10), Int32(20))
     @test res == 30
 
-    println("  Testing Progress callback...")
     global progress_updates = 0
     global last_progress = 0.0f0
     c_progress = @cfunction(my_progress, Cvoid, (Cfloat,))

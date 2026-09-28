@@ -7,22 +7,23 @@
 # Run it after a change that moves fixture symbols, then commit the fixture:
 #
 #     julia --project=. test/devtests.jl      # build the fixtures first
-#     julia --project=. test/gen_thunk_symbols.jl
+#     julia --project=. test/tools/gen_thunk_symbols.jl
 #
 # Why vendored at all: reading the `.so` directly made the assertions skip
 # silently wherever the fixtures were unbuilt — a fresh clone reported 89/89
 # where this box reported 97/97, both green. Same reason the receiver-gate
-# corpus is vendored; see test/gen_receiver_corpus.jl.
+# corpus is vendored; see test/tools/gen_receiver_corpus.jl.
 
 import JSON
 using Libdl
 
 const FIXTURES = ("mi_test", "vi_test")
-const OUT = joinpath(@__DIR__, "fixtures", "thunk_symbols.json")
+const TEST_DIR = dirname(@__DIR__)   # this file lives in test/tools/
+const OUT = joinpath(TEST_DIR, "fixtures", "thunk_symbols.json")
 
 out = Dict{String,Any}()
 for f in FIXTURES
-    so = joinpath(@__DIR__, f, "julia", "lib$(f)." * Libdl.dlext)
+    so = joinpath(TEST_DIR, f, "julia", "lib$(f)." * Libdl.dlext)
     isfile(so) || error("fixture not built: $so\nRun test/devtests.jl first.")
     syms = String[]
     for line in split(read(`nm -g --defined-only $so`, String), '\n')

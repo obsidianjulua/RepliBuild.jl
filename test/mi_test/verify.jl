@@ -175,5 +175,3 @@ using .MiTest
         @test !any(n -> occursin("thunk_to", String(n)), names(MiTest))
     end
 end
-
-println("MI_VERIFY_DONE")

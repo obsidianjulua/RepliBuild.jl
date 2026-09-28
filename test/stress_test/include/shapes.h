@@ -26,12 +26,22 @@ public:
     double perimeter() const override;
 };
 
+// A constructor at GLOBAL scope. There `class` is the bare name, and the
+// generator's old "name == class, skip it" rule dropped exactly these, silently,
+// while geom::Segment2D's constructor below was emitted (audit F25, 2026-09-26).
+// Emitted as `Span_Span`, the same naming as `geom_Segment2D_Segment2D`.
+class Span {
+public:
+    Span(int lo, int hi);
+    int width() const;
+    int lo, hi;
+};
+
 // A constructor taking value-type structs BY VALUE. Constructors are named C4 in
 // DWARF and C1/C2 in the symbol table; until 2026-09-26 that join always missed,
 // the signature was guessed from the demangled string (`Point2D` → `Any`), and the
 // thunk stored garbage. See verify.jl, "constructor by-value struct arguments".
-// In a namespace on purpose: GeneratorCpp skips a constructor whose bare name
-// equals its QUALIFIED class, which only happens at global scope (open problem).
+// In a namespace; `Span` above is the global-scope constructor.
 namespace geom {
 struct Point2D { double x, y; };
 
@@ -74,6 +84,21 @@ double packed_sum(Packed p);
 Pack2 pack2_make(int a);
 double pack2_sum(Pack2 p);
 const Packed *packed_table();          // {1,10}, {2,20}, {3,30}
+
+// An anonymous union embedded in a record. As a `mutable struct` field the union
+// was a reference, so `Variant` came out 24 bytes instead of 16 and `d` read back
+// as garbage (audit F22, 2026-09-26). Anonymous unions are immutable byte
+// regions now, inlined like C.
+struct Variant { union { int i; float f; } u; double d; };
+Variant variant_make(int a);           // {u.i = a, d = a + 0.25}
+double variant_sum(Variant v);         // u.i + d
+
+// A float-array member. DWARF gives the array no byte_size of its own and it was
+// recorded as 0, so the struct counted as unsizable and came back as an integer
+// byte blob while the callee returned it in XMM registers (audit F21, 2026-09-26).
+struct Arr3 { float v[3]; };
+Arr3 arr3_make(float a);               // {a, a + 1, a + 2}
+double arr3_sum(Arr3 s);
 }
 
 extern "C" {

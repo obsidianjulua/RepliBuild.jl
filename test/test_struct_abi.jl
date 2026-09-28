@@ -28,24 +28,22 @@
 
 using Test
 using Libdl
+using RepliBuild
 
-const MLIR_AVAILABLE = try
-    using RepliBuild
-    isfile(RepliBuild.MLIRNative.libJLCS)
-catch
-    false
-end
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
-if !MLIR_AVAILABLE
-    @info "libJLCS not found — skipping struct-ABI trace tests"
-    exit(0)
-end
+# Julia mirrors of section E's C structs, for its plain-ccall control. Declared
+# OUTSIDE the `requires` block on purpose: that block is one top-level
+# expression, and a `ccall` resolves its argument types before the block runs,
+# so a struct declared inside it is undefined at the `ccall`.
+struct _AbiDI; d::Float64; i::Int32; end
+struct _AbiF3; x::Float32; y::Float32; z::Float32; end
+
+if requires("struct-ABI trace tests", :libJLCS, :clangxx)
 
 const CLANGXX = Sys.which("clang++")
-if CLANGXX === nothing
-    @info "clang++ not found — skipping struct-ABI trace tests"
-    exit(0)
-end
 
 using RepliBuild.MLIRNative
 using RepliBuild.JLCSIRGenerator
@@ -429,6 +427,76 @@ end
     destroy_context(ctx)
 end
 
+# ── E. register exhaustion: a struct that no longer fits goes in memory ──────
+#
+# `buildSysVCallShape` counted no registers, so a register-class struct arriving
+# after the GPRs or XMMs it needs were used up was split: its first eightbytes
+# took the last free registers and the rest went on the stack as scalars. SysV
+# passes such a struct in memory, as one operand, and the callee reads it there
+# (audit F20, 2026-09-26). `spill(6 ints, DI, 8 doubles, F3)` has both cases:
+# DI (SSE+INTEGER) after the six integer registers are gone, F3 (SSE+SSE) after
+# the eight SSE ones are.
+#
+# Driven through the generator like D, and against the clang++-compiled callee
+# for the same reason: a self-JIT'd callee would share the JIT's convention.
+# Julia's own ccall with the real C types is the control that 84 is the C answer.
+@testset "E: register-class structs that no longer fit go in memory" begin
+    vtinfo = DWARFParser.VtableInfo(Dict{String,DWARFParser.ClassInfo}(),
+                                    Dict{String,UInt64}(), Dict{String,UInt64}())
+    mem(n, c, o, s) = Dict{String,Any}("name" => n, "c_type" => c, "offset" => o, "size" => s)
+    di = Dict{String,Any}("kind" => "struct", "byte_size" => "0x10",
+        "members" => [mem("d", "double", 0, 8), mem("i", "int", 8, 4)])
+    f3 = Dict{String,Any}("kind" => "struct", "byte_size" => "0xc",
+        "members" => [mem("x", "float", 0, 4), mem("y", "float", 4, 4), mem("z", "float", 8, 4)])
+    params = vcat(fill("int", 6), ["DI"], fill("double", 8), ["F3"])
+    spill = Dict{String,Any}(
+        "mangled" => "spill", "name" => "spill", "demangled" => "spill()",
+        "return_type" => Dict{String,Any}("c_type" => "double", "size" => 8, "julia_type" => "Cdouble"),
+        "parameters" => [Dict{String,Any}("name" => "p$i", "c_type" => p, "size" => 0)
+                         for (i, p) in enumerate(params)],
+        "is_method" => false, "is_vararg" => false, "exported" => true, "is_noexcept" => true)
+    metadata = Dict{String,Any}("language" => "c",
+        "struct_definitions" => Dict{String,Any}("DI" => di, "F3" => f3),
+        "functions" => Any[spill])
+
+    # The control first: if this is not 84 the fixture, not the thunk, is wrong.
+    lib = Libdl.dlopen(abspath(ABI_LIB))
+    cc = ccall(Libdl.dlsym(lib, :spill), Cdouble,
+               (Cint, Cint, Cint, Cint, Cint, Cint, _AbiDI,
+                Cdouble, Cdouble, Cdouble, Cdouble, Cdouble, Cdouble, Cdouble, Cdouble, _AbiF3),
+               1, 2, 3, 4, 5, 6, _AbiDI(10.0, 11), 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+               _AbiF3(1f0, 2f0, 3f0))
+    @test cc == 84.0
+
+    ir = JLCSIRGenerator.generate_jlcs_ir(vtinfo, metadata)
+    ctx = create_context()
+    mod = parse_module(ctx, ir)
+    @test mod != C_NULL
+    @test lower_to_llvm(mod)
+    jit = create_jit(mod, opt_level=1, shared_libs=[abspath(ABI_LIB), JLCS])
+    @test jit != C_NULL
+    fp = MLIRNative.lookup(jit, "_mlir_ciface_spill_thunk")
+    @test fp != C_NULL
+
+    ints = [Ref(Int32(k)) for k in 1:6]
+    dbls = [Ref(Float64(k)) for k in 1:8]
+    s = Ref(_AbiDI(10.0, 11))            # 16 bytes: d, i, 4 bytes of padding
+    t = Ref(_AbiF3(1f0, 2f0, 3f0))       # 12 bytes
+    GC.@preserve ints dbls s t begin
+        # Thunk arg-slot convention: each slot holds the address of the value.
+        slots = Ptr{Cvoid}[[Base.unsafe_convert(Ptr{Cvoid}, r) for r in ints];
+                           Ptr{Cvoid}(Base.unsafe_convert(Ptr{_AbiDI}, s));
+                           [Base.unsafe_convert(Ptr{Cvoid}, r) for r in dbls];
+                           Ptr{Cvoid}(Base.unsafe_convert(Ptr{_AbiF3}, t))]
+        @test length(slots) == 16
+        r = GC.@preserve slots ccall(fp, Cdouble, (Ptr{Ptr{Cvoid}},), slots)
+        @test r == 84.0
+    end
+
+    destroy_jit(jit)
+    destroy_context(ctx)
+end
+
 end # testset
 
-println("✅ struct-ABI trace tests passed")
+end # requires

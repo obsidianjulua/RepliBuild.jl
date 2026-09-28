@@ -126,5 +126,4 @@ using .StlTest
         @test StlTest.map_size(m) == 3
     end
 
-    println("✓ STL Template Pipeline Passed")
 end

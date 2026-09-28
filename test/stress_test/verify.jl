@@ -73,7 +73,6 @@ end
         @test StressTest.vector_norm(pointer(a), Csize_t(3)) ≈ sqrt(14.0)
     end
 
-    println("  ✓ numerics")
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -96,7 +95,6 @@ end
     StressTest.delete_shape(rect_ptr)
     StressTest.delete_shape(circle_ptr)
 
-    println("  ✓ vtable dispatch")
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -155,7 +153,6 @@ if MLIR_AVAILABLE
         @test parsed != C_NULL
 
         destroy_context(ctx)
-        println("  ✓ MLIR IR generation")
     end
 
     # ── AOT Compilation ───────────────────────────────────────────────────
@@ -255,7 +252,6 @@ if MLIR_AVAILABLE
             end
         end
 
-        println("  ✓ AOT compilation")
     end
 
     # ── RAII Dialect ──────────────────────────────────────────────────────
@@ -322,6 +318,50 @@ if MLIR_AVAILABLE
         @test [unsafe_load(t, k).i for k in 1:3] == [10, 20, 30]
     end
 
+    @testset "StressTest: global-scope constructor" begin
+        # At global scope `class` is the bare name, and the old "name == class,
+        # skip it" rule dropped exactly these constructors (audit F25,
+        # 2026-09-26). Same naming as geom's: Span_Span.
+        @test isdefined(StressTest, :Span_Span)
+        s = zeros(Int32, 2)                          # Span { int lo, hi; }
+        GC.@preserve s begin
+            p = Ptr{StressTest.Span}(pointer(s))
+            StressTest.Span_Span(p, 3, 10)
+            @test s == Int32[3, 10]
+            @test StressTest.Span_width(p) == 7
+        end
+    end
+
+    @testset "StressTest: anonymous union member" begin
+        # The anonymous union is an immutable 4-byte region inlined in its
+        # parent, so Variant keeps named fields, is 16 bytes like C, and `d`
+        # sits at offset 8. As a `mutable struct` the union was a reference
+        # field and the record could not hold the C layout (audit F22).
+        @test hasfield(StressTest.Variant, :u) && hasfield(StressTest.Variant, :d)
+        @test sizeof(StressTest.Variant) == 16
+        if hasfield(StressTest.Variant, :u)
+            U = fieldtype(StressTest.Variant, :u)
+            @test !ismutabletype(U)
+            @test sizeof(U) == 4
+            v = StressTest.geom_variant_make(5)
+            @test v.d == 5.25
+            @test reinterpret(Int32, collect(v.u.data))[1] == 5
+            @test StressTest.geom_variant_sum(v) == 10.25
+        end
+    end
+
+    @testset "StressTest: float-array member" begin
+        # `float v[3]` records 12 bytes, so Arr3 keeps its float field and comes
+        # back from XMM as floats, not as an integer byte blob (audit F21).
+        @test hasfield(StressTest.Arr3, :v)
+        if hasfield(StressTest.Arr3, :v)
+            @test fieldtype(StressTest.Arr3, :v) == NTuple{3, Cfloat}
+            a = StressTest.geom_arr3_make(1f0)
+            @test collect(a.v) == Float32[1, 2, 3]
+            @test StressTest.geom_arr3_sum(StressTest.Arr3((1f0, 2f0, 3f0))) == 6.0
+        end
+    end
+
     @testset "StressTest: RAII Dialect" begin
         @testset "Parse ctor_call / dtor_call IR" begin
             ctx = create_context()
@@ -380,11 +420,9 @@ if MLIR_AVAILABLE
             destroy_context(ctx)
         end
 
-        println("  ✓ RAII dialect")
     end
 
 else
     @info "libJLCS not found — skipping MLIR/AOT/RAII tests"
 end
 
-println("\n✅ stress_test: verification complete")

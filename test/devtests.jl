@@ -208,9 +208,10 @@ include(joinpath(TEST_DIR, "test_jit_unwind.jl"))
 
 # ── 6. JLCS dialect invariant probes ─────────────────────────────────────────
 # Definitive-trace probes that push specific dialect concerns (op arity
-# invariants, dead-producer ops) through parse → lower → emit and record the
-# actual outcome. Self-skips without libJLCS. Two @test_broken entries mark
-# confirmed lowering crashes awaiting verifiers (jlcs.scope, jlcs.marshal_arg).
+# invariants, dead-producer ops) through parse → lower → emit. Self-skips
+# without libJLCS. The malformed jlcs.scope / jlcs.marshal_arg cases used to
+# crash lowering; their verifiers (2026-07-16) reject them at parse, and that
+# is what the file asserts.
 
 include(joinpath(TEST_DIR, "test_jlcs_invariants.jl"))
 

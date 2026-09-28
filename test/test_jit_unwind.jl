@@ -9,20 +9,15 @@
 
 using Test
 using Libdl
+using RepliBuild
 
-const MLIR_AVAILABLE = try
-    using RepliBuild
-    isfile(RepliBuild.MLIRNative.libJLCS)
-catch
-    false
-end
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
+
+if requires("JIT unwind after engine teardown", :libJLCS, :clangxx)
 
 const CLANGXX = Sys.which("clang++")
-if !MLIR_AVAILABLE || CLANGXX === nothing
-    # Do not exit(0): this file is included from devtests.jl, and an exit
-    # would skip every test after it while reporting success.
-    @info "libJLCS or clang++ not found — skipping JIT unwind tests"
-else
 
 using RepliBuild.MLIRNative
 
@@ -130,4 +125,4 @@ end
     destroy_context(ctx)
 end
 
-end # MLIR_AVAILABLE && clang++
+end # requires

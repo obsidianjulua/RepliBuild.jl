@@ -25,22 +25,17 @@
 #     LLVM IR differs cosmetically (GEP element type, !dbg numbering), so a
 #     text diff would prove nothing.
 #
-# Requires libJLCS.so + clang++ (devtests tier).
+# Requires libJLCS.so + clang++ + nm (devtests tier); skips without them.
 
 using Test
 using Libdl
+using RepliBuild
 
-const MLIR_AVAILABLE = try
-    using RepliBuild
-    isfile(RepliBuild.MLIRNative.libJLCS)
-catch
-    false
-end
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
-if !MLIR_AVAILABLE
-    @info "libJLCS not found — skipping JLCS producer tests"
-    exit(0)
-end
+if requires("JLCS producers", :libJLCS, :clangxx, :nm)
 
 using RepliBuild.MLIRNative
 using RepliBuild.JLCSIRGenerator
@@ -300,7 +295,6 @@ const IR = JLCSIRGenerator.generate_jlcs_ir(EMPTY_VT, METADATA)
             @test _tally() == 1
 
             destroy_jit(jit)
-            println("  ✓ scope-RAII + array-view + dtor_call producers execute end-to-end")
         finally
             destroy_context(ctx)
         end
@@ -422,3 +416,5 @@ const IR = JLCSIRGenerator.generate_jlcs_ir(EMPTY_VT, METADATA)
         @test insns(raw_store, "raw_store") == insns(new_store, "new_store")
     end
 end
+
+end # requires

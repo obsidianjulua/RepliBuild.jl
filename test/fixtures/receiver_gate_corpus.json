@@ -1,5 +1,5 @@
 {
-  "_comment": "Reduced receiver-gate decision table. Regenerate with test/gen_receiver_corpus.jl; do not hand-edit. Both gates are pure functions of (class, name) plus the aggregate-name set, so only those are stored.",
+  "_comment": "Reduced receiver-gate decision table. Regenerate with test/tools/gen_receiver_corpus.jl; do not hand-edit. Both gates are pure functions of (class, name) plus the aggregate-name set, so only those are stored.",
   "_generated": "2026-08-20",
   "_source": "RepliBuild-Hub/packages",
   "packages": [

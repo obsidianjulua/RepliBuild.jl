@@ -15,6 +15,9 @@ Circle::Circle(double r) : radius(r) {}
 double Circle::area() const { return M_PI * radius * radius; }
 double Circle::perimeter() const { return 2 * M_PI * radius; }
 
+Span::Span(int l, int h) : lo(l), hi(h) {}
+int Span::width() const { return hi - lo; }
+
 extern "C" {
     Shape* create_rectangle(double w, double h) { return new Rectangle(w, h); }
     Shape* create_circle(double r) { return new Circle(r); }
@@ -41,3 +44,7 @@ geom::Pack2 geom::pack2_make(int a) { Pack2 p; p.c = (char)a; p.i = a + 1; p.d =
 double geom::pack2_sum(Pack2 p) { return p.c + p.i + p.d; }
 static geom::Packed packed_rows[3] = {{1, 10}, {2, 20}, {3, 30}};
 const geom::Packed *geom::packed_table() { return packed_rows; }
+geom::Variant geom::variant_make(int a) { Variant v; v.u.i = a; v.d = a + 0.25; return v; }
+double geom::variant_sum(Variant v) { return v.u.i + v.d; }
+geom::Arr3 geom::arr3_make(float a) { return Arr3{{a, a + 1, a + 2}}; }
+double geom::arr3_sum(Arr3 s) { return s.v[0] + s.v[1] + s.v[2]; }

@@ -199,5 +199,51 @@ end
     end
 end
 
-println("✅ dependency cache version-awareness tests passed")
-println("✅ dependency commit-pinning tests passed")
+# ── A local dependency contributes its sources, whatever the language ────────
+# `[dependencies] type = "local"` walked the dependency for .cpp/.cc/.cxx only,
+# so a local C dependency added its headers and nothing else: the build
+# succeeded and its symbols were simply absent from the library (audit F15,
+# 2026-09-26). No git and no toolchain: resolution only collects paths.
+#
+# The TOML uses `root = "."` and this process's cwd is NOT the project, so the
+# dependency path also has to resolve against the TOML's directory — the other
+# half of the same audit (F17: `use()` cloned dependencies into the caller's cwd
+# because a relative root followed the cwd).
+@testset "local dependency contributes every source language" begin
+    mktempdir() do sb
+        proj = joinpath(sb, "proj")
+        dep  = joinpath(proj, "vendor", "tinydep")
+        mkpath(joinpath(dep, "include")); mkpath(joinpath(dep, "sub")); mkpath(joinpath(dep, "build"))
+        write(joinpath(dep, "one.c"), "int one(void){return 1;}\n")
+        write(joinpath(dep, "sub", "two.cpp"), "int two(){return 2;}\n")
+        write(joinpath(dep, "three.cc"), "int three(){return 3;}\n")
+        write(joinpath(dep, "include", "tinydep.h"), "int one(void);\n")
+        write(joinpath(dep, "build", "generated.c"), "int stale(void){return 0;}\n")  # build/ is skipped
+        toml_path = joinpath(proj, "replibuild.toml")
+        write(toml_path, """
+        [project]
+        name = "localdep"
+        root = "."
+
+        [compile]
+        source_files = []
+
+        [dependencies.tinydep]
+        type = "local"
+        path = "vendor/tinydep"
+        """)
+
+        @test pwd() != proj                     # the case under test, not an accident
+        cfg = DR.resolve_dependencies(CM.load_config(toml_path))
+        srcs = Set(relpath(s, dep) for s in cfg.compile.source_files)
+        @test "one.c" in srcs                   # the regression
+        @test joinpath("sub", "two.cpp") in srcs
+        @test "three.cc" in srcs
+        @test !(joinpath("build", "generated.c") in srcs)
+        @test !any(endswith(".h"), srcs)
+        # Every path is under the project, never under the caller's cwd.
+        @test all(s -> startswith(s, dep), cfg.compile.source_files)
+        @test abspath(dep) in cfg.compile.include_dirs
+        @test abspath(joinpath(dep, "include")) in cfg.compile.include_dirs
+    end
+end

@@ -15,6 +15,11 @@
 # =============================================================================
 
 using Test
+using RepliBuild
+
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
 const ABI_TEST_DIR = joinpath(@__DIR__, "abi_nested_test")
 
@@ -60,20 +65,17 @@ const ABI_TEST_DIR = joinpath(@__DIR__, "abi_nested_test")
     wrapper = joinpath(ABI_TEST_DIR, "julia", "AbiNested.jl")
     @test isfile(wrapper)
 
-    # Subprocess-isolated probe: parse PROBE lines
+    # Subprocess-isolated probe (an ABI break is a crash): one PROBE line per case
     probe = joinpath(ABI_TEST_DIR, "probe_abi_nested.jl")
-    out = IOBuffer()
-    proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(@__DIR__)) $probe $wrapper`);
-                        stdout=out, stderr=out))
-    output = String(take!(out))
-    println(output)
+    r = run_isolated(`$probe $wrapper`)
+    v = probe_verdicts(r.output)
 
-    @test proc.exitcode == 0
-    @test occursin("PROBE_DONE", output)           # probe ran to completion (no abort)
+    @test r.ok
+    @test haskey(v, "PROBE_DONE")                  # probe ran to completion (no abort)
     for probe_name in ["fields_resolved", "xform_not_blob", "xform_return", "xform_byvalue_arg",
                        "mass_roundtrip", "disc_roundtrip", "poly_memory_class",
                        "nestint_roundtrip", "packed_byvalue_guard",
                        "float_param_loosening", "with_helper"]
-        @test occursin(Regex("PROBE $(probe_name): PASS"), output)
+        @test startswith(get(v, probe_name, "no PROBE line"), "PASS")
     end
 end
