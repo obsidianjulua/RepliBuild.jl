@@ -19,6 +19,7 @@ import ..BuildBridge
 import ..MLIRNative
 import ..DWARFParser
 import ..JLCSIRGenerator
+import .._read_json
 
 export wrap_library, wrap_basic, extract_symbols
 export TypeRegistry, SymbolInfo, ParamInfo

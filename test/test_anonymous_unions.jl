@@ -29,7 +29,6 @@
 # =============================================================================
 
 using Test
-using JSON
 using RepliBuild
 
 const ANON_DIR = joinpath(@__DIR__, "c_abomination_test")
@@ -48,10 +47,10 @@ const ANON_DIR = joinpath(@__DIR__, "c_abomination_test")
     wrapper_path = RepliBuild.wrap(toml)
     @test isfile(wrapper_path)
 
-    # use_mmap=false: this runs in the devtests process (not a verify.jl
+    # Not a mapped read: this runs in the devtests process (not a verify.jl
     # subprocess), so a leaked mapping outlives the testset and blocks the next
     # clean_test_dir on Windows. See test_json_mmap_hygiene.jl.
-    meta = JSON.parsefile(joinpath(ANON_DIR, "julia", "compilation_metadata.json"); use_mmap=false)
+    meta = RepliBuild._read_json(joinpath(ANON_DIR, "julia", "compilation_metadata.json"))
     sd = meta["struct_definitions"]
     src = read(wrapper_path, String)
 

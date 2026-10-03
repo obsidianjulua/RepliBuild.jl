@@ -38,7 +38,7 @@
 module SysConfigGen
 
 using Dates
-using JSON
+import .._read_json
 
 # The one thing this needed from its old host's namespace. In RepliBuildTooling
 # it arrived via `using RepliBuild: execute, …`; here it is a sibling submodule,
@@ -591,10 +591,9 @@ function cmake_probe(source_dir::String;
     compiled_gen = Set{String}()                  # build-dir-relative TUs some target compiles
     inc_roots = String[]
     if isfile(ccpath)
-        # use_mmap=false: a live mmap blocks deletion on Windows and is released
-        # only at GC — and this one maps a file inside the cmake build tree that
-        # `capture_config` removes moments later. See Builder/ThunkBuilder.jl.
-        for e in JSON.parsefile(ccpath; use_mmap=false)
+        # Never a mapped read (see `_read_json`): `capture_config` deletes this
+        # cmake build tree moments later, and Windows refuses to while it is mapped.
+        for e in _read_json(ccpath)
             file = get(e, "file", "")
             isempty(file) && continue
             eargs = _entry_args(e)

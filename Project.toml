@@ -5,8 +5,8 @@ version = "4.1.1"
 
 [compat]
 Clang = "0.18, 0.19"
-JSON = "0.21"
-LLVM = "9, 10"
+JSON = "0.21, 1"
+LLVM = "9"
 ProgressMeter = "1"
 SHA = "0.7.0, 1"
 julia = "1.10"

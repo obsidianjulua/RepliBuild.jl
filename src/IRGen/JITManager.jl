@@ -9,7 +9,7 @@ import ..MLIRNative: CXX_PERSONALITY
 using ..JLCSIRGenerator
 using ..DWARFParser
 using Libdl
-import JSON
+import .._read_json
 
 export get_jit_thunk, ensure_jit_initialized, JITContext, invoke, CxxException
 
@@ -736,9 +736,7 @@ function initialize_global_jit(binary_path::String)
             # Load metadata
             metadata_path = joinpath(dirname(rp), "compilation_metadata.json")
             metadata = if isfile(metadata_path)
-                # use_mmap=false: a live mmap blocks deletion on Windows and is
-                # released only at GC — see Builder/ThunkBuilder.jl.
-                JSON.parsefile(metadata_path; use_mmap=false)
+                _read_json(metadata_path)
             else
                 Dict()
             end
@@ -829,7 +827,7 @@ function initialize_global_jit(binary_path::String)
             manifest_path = joinpath(dirname(rp), "thunk_manifest.json")
             needed_symbols = if isfile(manifest_path)
                 try
-                    manifest = JSON.parsefile(manifest_path; use_mmap=false)
+                    manifest = _read_json(manifest_path)
                     Set{String}(get(manifest, "function_thunks", String[]))
                 catch
                     nothing

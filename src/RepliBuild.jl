@@ -124,6 +124,31 @@ function __init__()
     end
 end
 
+"""
+    _read_json(path)
+
+Read a JSON file into `Dict{String,Any}` / `Vector{Any}`. Every JSON read in
+`src/` goes through here; `test/test_json_mmap_hygiene.jl` fails on any other
+read entry point.
+
+It is one function rather than a keyword at each call site because the two JSON
+majors need opposite things:
+
+- JSON 0.21's `parsefile` memory-maps by default, and Julia releases a mapping
+  only when the GC finalizes it. POSIX unlinks a mapped file; Windows refuses,
+  so `clean()` failed on a build tree RepliBuild had just written, leaving
+  `compilation_metadata.json` behind. `read(path, String)` opens, reads and
+  closes, on both majors.
+- JSON 1.x rejects `parsefile(…; use_mmap=false)` — `MethodError` in
+  `JSON.LazyOptions` — and its default object is `JSON.Object`, not `Dict`.
+  `dicttype=Dict{String,Any}` gives the same types under 0.21 and 1.x, nested
+  objects included.
+
+Defined at package level because Builder, IRGen, Wrapper and ThunkBuilder all
+read metadata.
+"""
+_read_json(path::AbstractString) = JSON.parse(read(path, String); dicttype=Dict{String,Any})
+
 # ============================================================================
 # LOAD MODULES
 # ============================================================================

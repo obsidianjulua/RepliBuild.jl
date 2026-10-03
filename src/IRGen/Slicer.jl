@@ -34,6 +34,7 @@ module Slicer
 using LLVM
 using SHA
 using JSON
+import .._read_json
 
 export SliceResult, slice_library, slice_function, sliced
 
@@ -400,9 +401,7 @@ function _cache_load(key_dir::String, target::String)
     meta_path = joinpath(key_dir, target * ".json")
     isfile(meta_path) || return nothing
     try
-        # use_mmap=false: a live mmap blocks deletion on Windows and is released
-        # only at GC — see Builder/ThunkBuilder.jl.
-        meta = JSON.parsefile(meta_path; use_mmap=false)
+        meta = _read_json(meta_path)
         ir = nothing
         if get(meta, "sliced", false)
             ll_path = joinpath(key_dir, target * ".ll")

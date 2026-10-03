@@ -267,13 +267,14 @@ include(joinpath(@__DIR__, "test_exclude_symbols.jl"))
 # 36: callback signatures erase their types and it ships 231/231 on the rest.
 include(joinpath(@__DIR__, "test_surface_types.jl"))
 
-# ── JSON.parsefile must not memory-map (no toolchain) ────────────────────────
+# ── JSON reads go through _read_json (no toolchain) ──────────────────────────
 # A leaked mmap is free on POSIX, where a mapped file still unlinks, and fatal
 # on Windows, where it blocks deleting the file. `clean()` failed on a build
 # tree RepliBuild had just produced, and the file left behind was
-# compilation_metadata.json — not the .dll anyone would have suspected.
-# The guard is textual because the defect is: a new call site omitting the
-# keyword is the failure mode, and no Linux run can observe it.
+# compilation_metadata.json — not the .dll anyone would have suspected. JSON
+# 0.21 maps by default; JSON 1.x rejects the `use_mmap=false` that fixed it.
+# The guard is textual because the defect is: a second read path is the
+# failure mode, and no single run — Linux, or one JSON major — observes both.
 
 include(joinpath(@__DIR__, "test_json_mmap_hygiene.jl"))
 

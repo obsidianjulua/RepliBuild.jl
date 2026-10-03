@@ -48,7 +48,7 @@ module VisibilityProbe
 using ..ConfigurationManager
 using ..Compiler: _clang_for_c_bucket, generate_macro_shims
 using ..DependencyResolver
-import JSON
+import .._read_json
 
 export VisibilityReport, visibility_probe, annotates_exports
 
@@ -253,7 +253,7 @@ function visibility_probe(toml_path::AbstractString; metadata::Union{Nothing,Str
                   joinpath(pkg_dir, "julia", "compilation_metadata.json") : metadata
         if isfile(md_path)
             try
-                md = JSON.parsefile(md_path; use_mmap=false)
+                md = _read_json(md_path)
                 fs = get(md, "functions", nothing)
                 if fs isa Vector
                     for f in fs

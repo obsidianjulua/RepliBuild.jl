@@ -1596,7 +1596,7 @@ function _write_thunk_manifest(output_dir::AbstractString, needed)
 
     previous = if isfile(path)
         try
-            sort!(collect(String.(get(JSON.parsefile(path; use_mmap=false),
+            sort!(collect(String.(get(_read_json(path),
                                       "function_thunks", String[]))))
         catch
             nothing   # unreadable counts as "moved" — rewrite it

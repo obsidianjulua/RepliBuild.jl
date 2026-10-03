@@ -345,6 +345,11 @@ the test named when you touch the area.
   sanitized, because `$` in a const table breaks the load.
 - Build identity: wrappers carry `LIBRARY_SHA` (sha256 of the file — not a build ID,
   which the JLL linker never emits) and `BUILD_GENERATOR`, and warn on drift.
+- **Emitted text must not depend on metadata key order.** The generators read
+  metadata back from JSON, and a Dict's or Set's iteration order follows the file's
+  key order, which JSON 0.21 and 1.x write differently. Iterate sorted keys wherever
+  order reaches the wrapper (export lists, STL factories; the struct topo sort breaks
+  ties with `sort(ready)`), or the byte-identical regression diff below breaks.
 - Validate generated or bulk-edited Julia with `Meta.parseall` **and** check for
   `head in (:incomplete, :error)`. It does not throw on an unterminated file.
 
@@ -509,8 +514,10 @@ changes:
   absolute path first. **Never vendor a second copy** — two exception buffers swallow
   every C++ exception.
 - `FILE` is `struct _iobuf`. Bake paths into generated Julia with `repr()` and into
-  TOML with `TOML.print`. `JSON.parsefile` mmaps and blocks deletion. `_canon_path` is
-  identity off Windows. `/dev/null` passed to `run` is not a path.
+  TOML with `TOML.print`. Read JSON only through `_read_json` (`JSON.parsefile` mmaps
+  on 0.21, which blocks deletion, and rejects `use_mmap` on 1.x;
+  `test_json_mmap_hygiene.jl` enforces it). `_canon_path` is identity off Windows.
+  `/dev/null` passed to `run` is not a path.
 - Before believing any "open on Windows" note, check `git log -S` on the symptom.
 
 ## Fresh clone
@@ -528,6 +535,11 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
+- **General still lets every registered 3.x/4.x version pair with LLVM.jl 10**
+  (`["3 - 4"] LLVM = "9 - 10"` in `R/RepliBuild/Compat.toml`). `Project.toml` has
+  said `"9"` since 2026-10-02, which binds only the next release. Capping the
+  registered versions is a General PR (outward-facing, ask first). Widen to 10 only
+  once the suite is green on it.
 
 ### Confirmed defects — 2026-09-26 audit
 
@@ -568,6 +580,9 @@ DWARF-resolved destructors — **is** built.)
 - vcall for struct-shaped virtual signatures (these keep static dispatch).
 - AAPCS64 classifier (macOS/ARM).
 - Codegen `.ll → .so` still shells to clang; not internalised.
+- STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
+  DWARF `byte_size` lookup never matches: STL records are not in
+  `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
 
 ## Maintaining this file
 

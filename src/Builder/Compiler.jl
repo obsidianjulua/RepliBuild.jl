@@ -18,6 +18,7 @@ import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_d
                                 is_cache_enabled, get_cache_path, with_include_dirs
 import ..BuildBridge
 import ..LLVMEnvironment
+import .._read_json
 
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
        ingest_library,
@@ -2147,7 +2148,7 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     isfile(binary_path) || return
 
     metadata = try
-        JSON.parsefile(metadata_path; use_mmap=false)
+        _read_json(metadata_path)
     catch e
         @debug "wrap-surface guard: metadata unreadable" exception=e
         return
@@ -7178,10 +7179,7 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
     # declarations through this map; tooling uses it to de-mystify nm output.
     promoted_map_path = joinpath(get_build_path(config), "promoted_symbols.json")
     if isfile(promoted_map_path)
-        # use_mmap=false: a live mmap blocks deletion on Windows and is released
-        # only at GC — and this file lives in build/, which clean() removes.
-        # See Builder/ThunkBuilder.jl.
-        metadata["promoted_symbols"] = JSON.parsefile(promoted_map_path; use_mmap=false)
+        metadata["promoted_symbols"] = _read_json(promoted_map_path)
     end
 
     # Save to JSON file next to binary

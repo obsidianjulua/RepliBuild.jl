@@ -3103,8 +3103,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Include enum types, enum values, struct types, and functions
     all_exports = copy(exports)
 
-    # Add enum types
-    for enum_key in enum_types
+    # Add enum types. `enum_types` and `struct_types` are Sets filled from
+    # `dwarf_structs`, read back from compilation_metadata.json, so their order is
+    # the file's key order — which differs between JSON majors. Sort for a stable
+    # export line (GeneratorCpp does the same).
+    for enum_key in sort!(collect(enum_types))
         enum_name = replace(enum_key, "__enum__" => "")
         push!(all_exports, enum_name)
 
@@ -3122,7 +3125,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     end
 
     # Add struct types (filter internal/compiler types)
-    for struct_name in struct_types
+    for struct_name in sort!(collect(struct_types))
         if !(struct_name in enum_names)
             # Sanitize struct name for export
             julia_struct_name = _sanitize_c_type_name(struct_name)

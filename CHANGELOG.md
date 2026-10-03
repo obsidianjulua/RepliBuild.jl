@@ -4,6 +4,74 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### JSON 1.x: one read path for every metadata file (2026-10-02)
+
+`[compat] JSON` was `"0.21"`, and JSON.jl is at 1.10. In an environment that already
+held JSON 1 — 176 General packages have a release requiring it — Pkg answered
+`]add RepliBuild` with **2.0.3**, the last release that admitted JSON 1, and no
+error; asking for RepliBuild 4 there was unsatisfiable. Widening the bound alone
+would have traded that for a hard break: every metadata read was
+`JSON.parsefile(path; use_mmap=false)`, JSON 1 has no `use_mmap` (`MethodError` in
+`JSON.LazyOptions`), and its bare `parsefile` returns `JSON.Object`, not `Dict`. A
+one-file C library compiled and linked, then `build` died at its first metadata
+read. Several of those reads sit inside a `try`, so other paths would have fallen
+back quietly instead of failing.
+
+All twelve reads now go through `RepliBuild._read_json(path) =
+JSON.parse(read(path, String); dicttype=Dict{String,Any})`. It never maps on either
+major, so the Windows `clean()` fix holds, and it returns the same types on both.
+Compat is `"0.21, 1"`. `test_json_mmap_hygiene.jl` refuses any other read entry
+point in `src/` and checks the helper's types under whichever major resolved. It
+was negative-checked three ways: a reverted call site is named; a reverted helper
+is caught by its text on 0.21 and by text and types on 1.x.
+
+Verified on JSON 0.21.4 and 1.9.0 (1.10.0 is not installed on the reference host),
+with Tier 2 on MLIR/LLVM 22.1: `runtests.jl` 1847 and `devtests.jl` 1018 passes on
+both, no failures. With the export-order fix below, the seven integration fixtures
+rebuilt in one directory are byte-identical across the two majors, wrappers and
+`.so` alike.
+
+Writes are unchanged: `JSON.print(io, x, 2)` exists on both majors. As text, JSON 1
+writes object keys in a different order and drops the trailing newline; the data is
+equal. Two differences no RepliBuild-written file exercises today: JSON 1 refuses
+NaN/Inf, where 0.21 wrote `null`, and reads an integer outside Int64 as `BigInt`,
+where 0.21 silently wrapped it (`18446744073709551615` read back as `-1`). None of
+the 113 metadata files on the reference host holds a float or an out-of-range
+integer.
+
+### Wrapper text no longer follows metadata key order (2026-10-02)
+
+Found by A/B-ing the JSON change: rebuilt in one directory, six of the seven
+integration fixtures' wrappers were byte-identical across JSON majors, and
+`StressTest.jl` swapped two names in its `export` line. Both generators collect
+struct and enum names into `Set`s filled from `struct_definitions`, which is read
+back from `compilation_metadata.json`, so their iteration order was the file's key
+order — and the two JSON majors write keys in different orders. Re-wrapping with
+every metadata `Dict` rebuilt in four different insertion orders and capacities
+also moved `StlTest.jl`'s export line, through GeneratorCpp's per-container STL
+factory loop.
+
+The type-export loops in both generators, and GeneratorCpp's STL factory section
+(the per-container loop and its DWARF `byte_size` lookup), now iterate sorted keys.
+Under the same four orderings all seven wrappers are byte-identical; without the
+fix the same harness moves two of them. Export order carries no meaning to Julia —
+this keeps the byte-identical regression diff honest. Expect a one-time reordering
+of `export` lines (and of STL factories) on the next re-wrap.
+
+The DWARF `byte_size` lookup itself never matched anything: STL records are not in
+`struct_definitions` (0 hits across 57 metadata files), so every STL factory is
+sized by `get_stl_container_size`'s table. Recorded in CLAUDE.md, not changed.
+
+### LLVM.jl compat: `"9"`, not `"9, 10"` (2026-10-02)
+
+`[compat] LLVM = "9, 10"` (since 2026-05-08) admitted a major that has never been
+released — General's newest LLVM.jl is 9.13.2 — so the resolver was free to pair
+RepliBuild with LLVM.jl 10 the day it is registered, untested. Now `"9"`. Every
+`LLVM.*` / `LLVM.API.*` name used under `src/` is present in 9.8.2 and 9.13.2;
+9.0–9.7 were not checked. This binds only the next release: General still records
+`LLVM = "9 - 10"` for every registered 3.x and 4.x version, and capping those takes
+a General PR.
+
 ### Test suite: one skip rule, one output convention, the audit's proofs in-repo (2026-09-27)
 
 Test-only; nothing under `src/` changed.

@@ -3506,7 +3506,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
 
-        for (container_type, methods) in stl_methods
+        # Sorted: `stl_methods` comes back from compilation_metadata.json, and a
+        # Dict's iteration order follows the key order of the file it was read
+        # from, which differs between JSON majors. Same for every metadata-derived
+        # collection below that orders emitted code or the export list.
+        for container_type in sort!(collect(keys(stl_methods)))
+            methods = stl_methods[container_type]
             # Build thunks dict for this container
             thunks_entries = String[]
             for m in methods
@@ -3526,7 +3531,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # Try to get exact size from DWARF if available
             # DWARF keys may lack std:: prefix and include allocator args
             container_short = replace(container_type, "std::" => "")
-            for (sname, sinfo) in dwarf_structs
+            for sname in sort!(collect(keys(dwarf_structs)))
+                sinfo = dwarf_structs[sname]
                 if contains(sname, container_type) || contains(sname, container_short) || _normalize_stl_for_dwarf(sname) == container_type
                     bs_str = get(sinfo, "byte_size", "")
                     if !isempty(bs_str)
@@ -3645,8 +3651,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Include enum types, enum values, struct types, and functions
     all_exports = copy(exports)
 
-    # Add enum types (sanitized to match the emitted `@enum` identifier)
-    for enum_key in enum_types
+    # Add enum types (sanitized to match the emitted `@enum` identifier).
+    # `enum_types` and `struct_types` are Sets filled from `dwarf_structs`, so
+    # their order is the metadata file's key order; sort for a stable export line.
+    for enum_key in sort!(collect(enum_types))
         enum_name = _sanitize_cpp_type_name(replace(enum_key, "__enum__" => ""))
         push!(all_exports, enum_name)
 
@@ -3664,7 +3672,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     end
 
     # Add struct types (filter internal/compiler types)
-    for struct_name in struct_types
+    for struct_name in sort!(collect(struct_types))
         if !(struct_name in enum_names)
             if _is_stl_internal_type(struct_name)
                 continue

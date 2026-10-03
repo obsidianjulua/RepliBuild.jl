@@ -158,7 +158,6 @@ if MLIR_AVAILABLE
     # ── AOT Compilation ───────────────────────────────────────────────────
 
     @testset "StressTest: AOT Compilation" begin
-        using JSON
         using Libdl
 
         @testset "Basic emit_object" begin
@@ -188,7 +187,7 @@ if MLIR_AVAILABLE
             ctx = MLIRNative.create_context()
             try
                 vtable_info = DWARFParser.parse_vtables(lib_path)
-                metadata = JSON.parsefile(metadata_path; use_mmap=false)
+                metadata = RepliBuild._read_json(metadata_path)
                 ir_source = JLCSIRGenerator.generate_jlcs_ir(vtable_info, metadata)
                 @test !isempty(ir_source)
 
@@ -262,7 +261,7 @@ if MLIR_AVAILABLE
         # signature was then guessed from the demangled string, where `Point2D` is
         # only a name: both arguments became `Any` and the thunk stored garbage
         # (msdfgen's `LinearSegment(Vector2, Vector2, EdgeColor)`, 2026-09-26).
-        meta = RepliBuild.JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"); use_mmap=false)
+        meta = RepliBuild._read_json(joinpath(@__DIR__, "julia", "compilation_metadata.json"))
         ctor = first(f for f in meta["functions"] if occursin("geom9Segment2DC", f["mangled"]))
         @test ctor["parameters_source"] == "dwarf"
         @test [(p["name"], p["c_type"]) for p in ctor["parameters"]] ==
@@ -284,7 +283,7 @@ if MLIR_AVAILABLE
         # 257-style garbage, never an error); the template record went in as a
         # pointer and came back from RAX while the callee wrote XMM0; the
         # string_view was one pointer where the callee reads {len, ptr}.
-        meta = RepliBuild.JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"); use_mmap=false)
+        meta = RepliBuild._read_json(joinpath(@__DIR__, "julia", "compilation_metadata.json"))
         @test meta["record_abi"]["Unit"] == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true)
 
         @test StressTest.geom_unit_scaled(StressTest.Unit(), 4, StressTest.Unit(), 2) == 42
