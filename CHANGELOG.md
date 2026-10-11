@@ -74,6 +74,35 @@ Hub on Windows with these: lua 103/103 + 189/189, imgui 97/97 + 202/202, glfw
   prefixes instead; the regenerate snippet names the real output directory rather
   than always `config`. Found harvesting curl's Windows config.
 
+### One toolchain per module: a C++ package's `.c` files lost their DWARF (2026-10-11)
+
+The C bucket was chosen per FILE: every `.c` compiled with the JLL clang 18, even
+inside a C++ package whose modules are linked by the system llvm-link. LLVM 23's
+verifier rejects clang 18's debug info ("Function-local variables are not allowed
+in a DICompileUnit's global variables list"); llvm-link printed `warning: ignoring
+invalid debug info`, stripped every `!dbg` from that module and exited 0. llama.cpp
+had six C files and the linked module kept one C compile unit: 439 `ggml_*` and
+all `quantize_*`/`dequantize_*` signatures fell back to `parameters_source =
+"inferred"`, so `ggml_version` wrapped as returning `Cint` and `ggml_init` as
+returning an integer. Only test_deep's version check noticed.
+
+- The C bucket is a property of the package (`[wrap] language = "c"`). A C++
+  package compiles its `.c` files with the system clang as well.
+- `_assert_debug_info_kept` fails the build when llvm-link or the IR->library
+  clang reports dropped debug info, naming the modules.
+- `compute_compile_fingerprint` hashes the system clang's identity for C++
+  packages, so an LLVM upgrade by the package manager invalidates the IR cache
+  instead of serving the old compiler's IR to the new one's tools.
+
+`test_codegen_flags.jl` ("one toolchain per module").
+
+- **libJLCS drift.** `check_environment` reported "dialect compiled" whenever the
+  file existed, so after a package-manager LLVM upgrade it certified Tier 2 on a
+  library whose libLLVM import was gone. `build.sh` writes the llvm-config version
+  to `src/mlir/build/jlcs_llvm_version`; the doctor fails libJLCS when that
+  disagrees with today's llvm-config on major.minor, and otherwise confirms the
+  library loads.
+
 ### libJLCS builds against LLVM/MLIR 23 (2026-10-11)
 
 MSYS2 CLANG64 moved to LLVM/MLIR 23.1.3, and `src/mlir/build.sh` failed in

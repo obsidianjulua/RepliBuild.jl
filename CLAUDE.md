@@ -146,6 +146,15 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   descriptor resolves to Julia's copy; this is correct, do not "fix" it.
 - For LLVM/JIT crashes, check `libJLCS.so`'s mtime/SONAME against the installed MLIR,
   and dual-LLVM symbol scope, before theorising.
+- **One LLVM per module.** The C bucket is chosen by `[wrap] language`, never by
+  file extension: a C++ package compiles its `.c` files with the system clang. IR
+  from an older LLVM read by a newer one can lose its debug info with only a
+  warning, and then every function in it wraps from an inferred signature.
+  `_assert_debug_info_kept` turns that warning into a build error; keep it on every
+  path where one LLVM reads another's IR.
+- The final IR -> library step runs codegen at `[link] optimization_level` with
+  `-disable-llvm-passes` (`_codegen_opt_flags`). Never drop the `-O`: the `-O0`
+  backend is what clang uses without it.
 
 ### Tier 1 — quarantined side project
 

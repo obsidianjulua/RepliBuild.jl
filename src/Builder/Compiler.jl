@@ -90,7 +90,25 @@ function compute_compile_fingerprint(config::RepliBuildConfig)::String
     # changes codegen too.
     h = hash(string(Base.libllvm_version), h)
     h = hash(_detect_target_triple(), h)
+    # A C++ package compiles every TU with the SYSTEM clang, which the package
+    # manager upgrades on its own (MSYS2 moved 22 -> 23). Without its identity
+    # here, IR from the old compiler kept being served to the new one's tools.
+    config.wrap.language == :c || (h = hash(_system_clang_identity(), h))
     return string(h, base=16)
+end
+
+const _SYSTEM_CLANG_ID = Ref{String}("")
+
+"""The system `clang++ --version` first line, memoized; `""` if it cannot be run."""
+function _system_clang_identity()::String
+    isempty(_SYSTEM_CLANG_ID[]) || return _SYSTEM_CLANG_ID[]
+    (out, rc) = try
+        BuildBridge.execute("clang++", ["--version"])
+    catch
+        ("", 1)
+    end
+    _SYSTEM_CLANG_ID[] = rc == 0 ? String(strip(first(split(out, '\n')))) : "unavailable"
+    return _SYSTEM_CLANG_ID[]
 end
 
 """
@@ -579,11 +597,23 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
         ["-o", ir_file, cpp_file]
     )
 
-    # Use Julia's internal Clang for C so the IR matches Julia's LLVM version.
-    # Shared with create_library — both ends of the C bucket must agree on the
-    # compiler, which is exactly what they did not do before (see the helper).
+    # The C BUCKET is a property of the package, not of the file extension. A C
+    # package compiles with Julia's internal Clang so the IR matches Julia's LLVM,
+    # which then links and optimizes it in-process (shared with create_library:
+    # both ends must agree on the compiler — see the helper).
+    #
+    # A C++ package links through the SYSTEM llvm-link/opt, so its `.c` files must
+    # come from the system clang too: one LLVM per module. Routing them to the JLL
+    # clang 18 handed LLVM 23's llvm-link IR whose debug info it rejects
+    # ("Function-local variables are not allowed in a DICompileUnit's global
+    # variables list"), and it then drops ALL of that file's debug info with only
+    # a warning. llama.cpp lost every ggml.c signature to "inferred" that way:
+    # ggml_version wrapped as returning Cint. `_assert_debug_info_kept` makes that
+    # loud should any other mix reach the linker.
     compiler = endswith(cpp_file, ".c") ? "clang" : "clang++"
-    (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
+    (output, exitcode) = config.wrap.language == :c ?
+        _clang_for_c_bucket(compiler, cmd_args) :
+        BuildBridge.execute(compiler, cmd_args)
 
     if !isempty(output) && exitcode != 0
         println("  $(basename(cpp_file)): $output")
@@ -747,6 +777,7 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         end
         llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
         (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
+        _assert_debug_info_kept(output, "llvm-link")
 
         if exitcode != 0 || !isfile(linked_ir)
             # llvm-link crashed or failed (common with very large IR modules).
@@ -1338,6 +1369,31 @@ function _is_source_location_exhaustion(output::AbstractString)::Bool
 end
 
 """
+    _assert_debug_info_kept(tool_output, stage)
+
+Fail the build when an LLVM tool reports that it dropped a module's debug info.
+
+LLVM verifies debug metadata when it reads IR, and on a failure it prints
+`warning: ignoring invalid debug info in <file>`, strips every `!dbg` from that
+module, and carries on with exit 0. DWARF is the source of truth for the wrapper,
+so every function from that file then wraps from an inferred signature: wrong
+types, no error. It happens when IR from one LLVM is read by a newer one with
+stricter rules (JLL clang 18 IR into LLVM 23's llvm-link).
+"""
+function _assert_debug_info_kept(tool_output::AbstractString, stage::AbstractString)
+    dropped = [strip(m.captures[1]) for m in eachmatch(r"ignoring invalid debug info in (.+)", tool_output)]
+    isempty(dropped) && return nothing
+    head = join(first(split(tool_output, '\n'), 6), "\n  ")
+    error("""
+          $stage dropped the debug info of $(length(dropped)) module(s):
+            $(join(dropped, "\n            "))
+          Their functions would wrap from inferred signatures (wrong types, no
+          error). The IR was produced by a different LLVM than the one reading it;
+          every translation unit of a package must come from one toolchain.
+          $head""")
+end
+
+"""
     _codegen_opt_flags(config) -> Vector{String}
 
 Optimization flags for turning IR into machine code (`create_library` and its
@@ -1520,6 +1576,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     compiler = config.wrap.language == :c ? "clang" : "clang++"
     cmd_args = vcat(cmd_head, files, cmd_tail)
     (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
+    _assert_debug_info_kept(output, "clang (IR -> library)")
 
     # ── Source-location fallback ─────────────────────────────────────────────
     # Clang re-parses the linked module as ONE translation unit and allocates a
