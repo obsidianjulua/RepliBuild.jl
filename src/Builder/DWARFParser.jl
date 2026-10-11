@@ -5,6 +5,7 @@
 module DWARFParser
 
 using JSON
+import ..Compiler: _pe_exported_names
 
 export parse_vtables, VirtualMethod, MemberInfo, ClassInfo, VtableInfo,
        export_vtable_json,
@@ -400,6 +401,26 @@ function parse_symbol_table(nm_output::String)
 end
 
 """
+    _gate_to_exports(method_addrs, exported) -> Dict{String, UInt64}
+
+Keep only the methods a thunk can call by name.
+
+The legacy vmethod pass in `JLCSIRGenerator` emits a direct call to every method
+with a non-zero address here, so the symbol has to be one the loader resolves.
+On ELF, `parse_symbol_table`'s `[TW]` filter already gives that: a hidden method
+links as a local `t` and is dropped. On PE, `nm` reads the COFF symbol table, where
+a method the DLL does not export is still a global `T`. Each of those became a
+`thunk_*` that PE cannot bind: the AOT link fails, and the JIT module cannot
+materialise, so every Tier-2 function of the library goes down with it.
+
+`exported` is the PE export directory (`Compiler._pe_exported_names`), or `nothing`
+off PE or when it cannot be read, which leaves `nm`'s answer unchanged.
+"""
+_gate_to_exports(method_addrs::Dict{String,UInt64}, ::Nothing) = method_addrs
+_gate_to_exports(method_addrs::Dict{String,UInt64}, exported::AbstractSet{<:AbstractString}) =
+    filter(p -> first(p) in exported, method_addrs)
+
+"""
     read_vtable_data(binary_path::String, vtable_addr::UInt64, num_entries::Int) -> Vector{UInt64}
 
 Read actual vtable function pointers from binary at given address.
@@ -459,6 +480,7 @@ function parse_vtables(binary_path::String)
     # Parse both
     classes = parse_dwarf_output(dwarf_output)
     (vtable_addrs, method_addrs) = parse_symbol_table(nm_output)
+    method_addrs = _gate_to_exports(method_addrs, _pe_exported_names(binary_path))
 
     @debug "DWARF vtable scan complete" classes=length(classes) vtables=length(vtable_addrs) methods=length(method_addrs)
 

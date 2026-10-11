@@ -102,7 +102,9 @@ end
 """
 Names a wrapper can resolve at runtime.
 
-ELF's dynamic symbol table (`nm -D`). On PE that command is a hard error, and
+ELF's dynamic symbol table (`nm -D`, version suffixes cut; parsed here rather than
+through `C._nm_dynamic_names` so the oracle does not share the guard's parser).
+On PE that command is a hard error, and
 the export directory — `_pe_exported_names`, the same call `verify_wrap_surface`
 makes — is the list `dlsym` will actually see. Using it here is what keeps this
 oracle from going green on a fixture the guard is no longer reading.
@@ -110,7 +112,7 @@ oracle from going green on a fixture the guard is no longer reading.
 function dynsym(so::String)
     pe = C._pe_exported_names(so)
     pe !== nothing && return pe
-    Set(String(p[3]) for p in
+    Set(String(first(split(p[3], '@'))) for p in
         (split(strip(l)) for l in split(read(`nm -D --defined-only $so`, String), '\n'))
         if length(p) >= 3)
 end

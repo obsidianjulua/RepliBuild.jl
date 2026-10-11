@@ -242,6 +242,15 @@ the test named when you touch the area.
   **R1**: an empty surface is a hard error, with or without promotion. **R2**: every
   wrappable function must be in the dynamic table under its mangled name.
   (`test_wrap_surface_guard.jl`, devtests §6c.)
+- **A thunk calls its target by name, so the target must be in that runtime set**,
+  not merely in `nm`. On PE a method the DLL does not export is still a global `T`
+  in the COFF symbol table. `parse_vtables` gates method addresses with
+  `_gate_to_exports`. (`test_windows_port.jl`.)
+- `nm -D` output is parsed only by `Compiler._nm_dynamic_names`, which cuts ELF
+  `@VER`/`@@VER` suffixes. Mangled output only: demangled names can contain `@`.
+- The C++ generator writes `thunk_manifest.json` on **every** wrap, JIT or AOT. A
+  failed AOT link falls back to a JIT wrap, and a wrap that records nothing
+  reproduces the failure on the next build. (`test_thunk_manifest.jl`.)
 - **`-fvisibility=hidden` erases the API of a library that does not annotate its
   exports**, or whose export macro is conditional and inactive. cJSON's `CJSON_PUBLIC`
   needs `CJSON_API_VISIBILITY`; ggml/llama need their `*_SHARED`/`*_BUILD` defines.

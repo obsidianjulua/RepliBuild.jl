@@ -322,6 +322,13 @@ include(joinpath(@__DIR__, "test_llp64_widths.jl"))
 
 include(joinpath(@__DIR__, "test_windows_port.jl"))
 
+# ── The thunk manifest is written in JIT mode too (no toolchain) ─────────────
+# 1c4255b put the write inside the AOT branch. A failed AOT link falls back to a
+# JIT wrap, which then recorded nothing, so the next build emitted the same
+# unfiltered thunk set and failed again.
+
+include(joinpath(@__DIR__, "test_thunk_manifest.jl"))
+
 # ── LLVM tool table probes only what get_tool looks up (no toolchain) ────────
 # A 51-name probe at init listed clang-format, mlir-*, FileCheck, clang-20 —
 # none of which get_tool or execute ever asked for. BuildBridge.execute

@@ -23,7 +23,7 @@ import ..INTERNAL_TYPE_BLOCKLIST
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
-import ..Compiler: _pe_exported_names
+import ..Compiler: _pe_exported_names, _nm_dynamic_names
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -487,12 +487,7 @@ function _runtime_defined_names(library_path::AbstractString)
         return nothing
     end
     code == 0 || return nothing
-    names = Set{String}()
-    for line in eachsplit(out, '\n')
-        parts = split(strip(line))
-        isempty(parts) || push!(names, String(parts[end]))
-    end
-    return names
+    return _nm_dynamic_names(out)
 end
 
 function _surface_type_keys_impl(metadata::Dict{String,Any},
@@ -1676,11 +1671,7 @@ function _assert_aot_thunks_present(func_text::AbstractString,
         slot is a hard error at the call site, not a fallback.
         $out""")
 
-        defined = Set{String}()
-        for line in eachsplit(out, '\n')
-            parts = split(strip(line))
-            isempty(parts) || push!(defined, String(parts[end]))
-        end
+        defined = _nm_dynamic_names(out)
     end
 
     missing_syms = [(nm, _aot_thunk_symbol(taken, nm))

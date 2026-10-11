@@ -306,4 +306,51 @@ const LE = RepliBuild.LLVMEnvironment
             @test !i4.saw_foreign_export
         end
     end
+
+    # A thunk calls a vmethod by name, so its symbol must be one the loader binds.
+    # The same hidden method is a local `t` in ELF's nm output and a global `T` in a
+    # DLL's COFF symbol table; only the PE export directory tells them apart there.
+    @testset "vmethod addresses are gated to what the loader can bind" begin
+        DP = RepliBuild.DWARFParser
+        exported = Set(["_ZN6Widget4drawEv", "_ZN6Widget4sizeEv"])
+
+        elf_nm = """
+        0000000000001130 T _ZN6Widget4drawEv
+        0000000000001150 t _ZN8Internal4tickEv
+        0000000000001170 W _ZN6Widget4sizeEv
+        """
+        pe_nm = """
+        0000000180001130 T _ZN6Widget4drawEv
+        0000000180001150 T _ZN8Internal4tickEv
+        0000000180001170 T _ZN6Widget4sizeEv
+        """
+
+        # ELF: the [TW] filter already drops the hidden method; no export set needed.
+        (_, elf) = DP.parse_symbol_table(elf_nm)
+        @test Set(keys(DP._gate_to_exports(elf, nothing))) == exported
+
+        # PE: nm alone keeps it (the defect), the export directory removes it.
+        (_, pe) = DP.parse_symbol_table(pe_nm)
+        @test haskey(pe, "_ZN8Internal4tickEv")
+        gated = DP._gate_to_exports(pe, exported)
+        @test Set(keys(gated)) == exported
+        @test gated["_ZN6Widget4drawEv"] == 0x0000000180001130   # addresses survive
+
+        # An unreadable export directory must not empty the table.
+        @test DP._gate_to_exports(pe, nothing) == pe
+    end
+
+    # The ELF half of "what the loader binds": GNU nm -D appends the symbol
+    # version, and the guard compares against unversioned DWARF names.
+    @testset "nm -D names lose their ELF version suffix" begin
+        out = """
+        0000000000002a40 T deflate@@ZLIB_1.2.0
+        0000000000002b10 T inflate@ZLIB_1.0
+        0000000000003000 T _ZN3zip6Writer5flushEv
+        0000000000004000 B zlib_debug_level
+        """
+        @test C._nm_dynamic_names(out) ==
+              Set(["deflate", "inflate", "_ZN3zip6Writer5flushEv", "zlib_debug_level"])
+        @test isempty(C._nm_dynamic_names(""))
+    end
 end

@@ -163,6 +163,8 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
                         "DllMain", "DllMainCRTStartup", "_CRT_INIT", "__main",
                         "_initterm", "_initterm_e",
                         "__do_global_ctors", "__do_global_dtors",
+                        # mingw-w64-crt 14: dllcrt2.o calls these, libmingw32.a defines them
+                        "__mingw_dll_do_global_ctors", "__mingw_dll_do_global_dtors",
                         "_pei386_runtime_relocator", "_GetPEImageBase",
                         "__mingw_GetSectionCount", "__mingw_GetSectionForAddress",
                         "___chkstk_ms", "__guard_dispatch_icall_dummy",

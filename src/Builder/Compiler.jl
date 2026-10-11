@@ -2162,12 +2162,7 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     reachable = if pe_exports === nothing
         (out, rc) = BuildBridge.execute("nm", ["-D", "--defined-only", binary_path])
         rc == 0 || return   # cannot ask the question ⇒ assert nothing
-        names = Set{String}()
-        for line in split(out, '\n')
-            parts = split(strip(line))
-            length(parts) >= 3 && push!(names, String(parts[3]))
-        end
-        names
+        _nm_dynamic_names(out)
     else
         pe_exports
     end
@@ -3060,6 +3055,27 @@ end
 # and `nm -D` is an error on PE ("File format has no dynamic symbol table"),
 # which is why the sites that used it never worked on Windows.
 # =============================================================================
+
+"""
+    _nm_dynamic_names(nm_output) -> Set{String}
+
+The names in `nm -D --defined-only` output (mangled, never `--demangle`), with any
+ELF symbol-version suffix cut. GNU nm prints a versioned definition as
+`deflate@@ZLIB_1.2.0` (or `name@VER` for a non-default version), but the loader
+binds, and DWARF names, `deflate`. Left on, every symbol of a library built with
+a version script looked absent. A mangled name never contains `@`, so cutting at
+the first one is exact; demangled output can (`basic_format_arg@fmt`), which is
+why this takes mangled output only.
+"""
+function _nm_dynamic_names(nm_output::AbstractString)
+    names = Set{String}()
+    for line in eachsplit(nm_output, '\n')
+        parts = split(strip(line))
+        length(parts) >= 3 || continue
+        push!(names, String(first(split(parts[3], '@'))))
+    end
+    return names
+end
 
 """
     _pe_exported_names(binary_path) -> Union{Nothing,Set{String}}

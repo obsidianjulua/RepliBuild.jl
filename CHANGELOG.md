@@ -4,6 +4,42 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Fixes salvaged from the quarantined internalize-symbol-tables branch (2026-10-11)
+
+That branch (0399c6e) came off a compromised machine and is dropped unmerged. Its
+symbol-table internalization (`ObjectReader`) is not taken: `nm` and GNU `objdump`
+stay the authorities. The fixes it carried that do not depend on `ObjectReader`
+were re-derived against main, reviewed line by line, and re-typed. Nothing was
+cherry-picked.
+
+- **Thunk manifest in JIT mode.** 1c4255b put `_write_thunk_manifest` inside the
+  `aot_thunks` branch. A failed AOT link falls back to a JIT wrap, which then
+  recorded nothing, so the next build emitted the same unfiltered thunk set and
+  failed again. The write is unconditional now (`test_thunk_manifest.jl`).
+- **PE vmethod gate.** `parse_vtables` took method addresses from `nm`. On PE a
+  method the DLL does not export is still a global `T` in the COFF symbol table
+  (ELF links the same hidden method as a local `t`), so the legacy vmethod pass
+  emitted `thunk_*` calls PE cannot bind. `_gate_to_exports` filters them through
+  the export directory (`_pe_exported_names`). ELF is unchanged.
+- **ELF symbol-version suffixes.** The three `nm -D` readers
+  (`verify_wrap_surface`, `_runtime_defined_names`, `_assert_aot_thunks_present`)
+  kept `name@@VER`, so a library built with a version script looked as if it
+  exported nothing DWARF named. They share one parser now,
+  `Compiler._nm_dynamic_names`, which cuts the suffix. It takes mangled output
+  only, since demangled names can contain `@`; `extract_symbols_nm` reads
+  demangled output and is untouched.
+- **mingw-w64-crt 14.** `__mingw_dll_do_global_ctors/dtors` join the PE
+  static-runtime set in `test_symbol_hygiene.jl` (`dllcrt2.o` references them,
+  `libmingw32.a` defines them; checked against crt 14.0.0.r426).
+- `check_environment`'s Windows binutils advice named the CLANG64 package, which
+  is llvm-tools. It names `mingw-w64-x86_64-binutils` now, matching
+  `_no_dwarf_dumper_error`.
+
+Each new test was negative-checked by neutering its fix. Windows, Julia 1.12.7:
+`runtests.jl` 1871 passes, no failures. The PE gate and the suffix cut are tested
+on fabricated `nm` output only; neither has been exercised on a real versioned ELF
+library or a real C++ DLL yet, and `devtests.jl` was not run.
+
 ### JSON 1.x: one read path for every metadata file (2026-10-02)
 
 `[compat] JSON` was `"0.21"`, and JSON.jl is at 1.10. In an environment that already

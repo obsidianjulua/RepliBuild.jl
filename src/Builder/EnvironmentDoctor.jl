@@ -246,10 +246,13 @@ end
 
 function _dumper_advice()::Vector{String}
     if Sys.iswindows()
+        # The MINGW64 package on purpose; see Compiler._no_dwarf_dumper_error. In
+        # CLANG64, "binutils" resolves to llvm-tools, the llvm-objdump rejected above.
         return ["`objdump` in a CLANG64 shell IS llvm-objdump — a different dump",
                 "dialect that parses to zero functions, so it is rejected on purpose.",
-                "Install GNU binutils into the CLANG64 prefix:",
-                "  pacman -S mingw-w64-clang-x86_64-binutils",
+                "GNU binutils ship only in MSYS2's GCC-flavoured trees; RepliBuild",
+                "finds them there by absolute path from any shell:",
+                "  pacman -S mingw-w64-x86_64-binutils",
                 "Or point at one:  REPLIBUILD_OBJDUMP=/path/to/objdump.exe"]
     end
     return ["RepliBuild parses GNU binutils' dump format specifically; no other",

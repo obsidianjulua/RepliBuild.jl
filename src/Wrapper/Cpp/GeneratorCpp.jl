@@ -3859,9 +3859,15 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # the file wrap had refused to update. Recording what wrap needs is not the
     # same act as certifying the library provides it; doing the first
     # unconditionally makes the second reachable on the next build.
+    #
+    # Unconditionally includes JIT mode. Generator.jl turns a wrap whose thunks
+    # library is missing (a failed AOT link) into a JIT wrap; if that wrap wrote
+    # nothing, the next build emitted the same unfiltered thunk set and failed
+    # the same way, and JITManager compiled a thunk for every function in
+    # metadata. (`test_thunk_manifest.jl`.)
+    manifest_note = _write_thunk_manifest(get_output_path(config),
+                                          needed_function_thunks)
     if config.compile.aot_thunks
-        manifest_note = _write_thunk_manifest(get_output_path(config),
-                                              needed_function_thunks)
         _assert_aot_thunks_present(_funcs, aot_fptr_taken, thunks_lib_path;
                                    manifest_note = manifest_note)
     end
