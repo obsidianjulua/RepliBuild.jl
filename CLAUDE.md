@@ -533,6 +533,11 @@ changes:
 - Relative `[compile]` paths resolve against `root` at load; `save_config` writes
   paths under the project relative with `/`. Never write a machine path into a
   tracked TOML.
+- Windows filesystems fold case. Any file named after a C identifier goes through a
+  case-safe name (`Slicer.slice_file_stem`); `LUA_YIELD` and `lua_yield` collided.
+- PE has no RUNPATH. `[link] link_dirs` DLLs are opened before the library, at the
+  build's load check and in the wrapper's `__init__` (`_link_dir_dlls`,
+  `_link_dir_preload_snippet`).
 - `FILE` is `struct _iobuf`. Bake paths into generated Julia with `repr()` and into
   TOML with `TOML.print`. Read JSON only through `_read_json` (`JSON.parsefile` mmaps
   on 0.21, which blocks deletion, and rejects `use_mmap` on 1.x;

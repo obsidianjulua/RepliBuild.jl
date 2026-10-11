@@ -1553,7 +1553,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         error("Library file not created: $lib_path")
     end
 
-    _assert_library_resolves(lib_path)
+    _assert_library_resolves(lib_path; preload = _link_dir_dlls(config))
 
     size_mb = round(filesize(lib_path) / 1024 / 1024, digits=2)
     println("  link: $lib_name ($size_mb MB)")
@@ -1583,20 +1583,60 @@ names the first offending symbol. `RTLD_LOCAL` + `dlclose` keeps the probe from
 leaking the library into this process's namespace — the same scoping discipline
 the Tier-1 slice pre-flight uses.
 """
-function _assert_library_resolves(lib_path::AbstractString)
-    handle = try
-        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
-    catch e
-        error("""
-              Linked library has unresolved symbols: $(basename(lib_path))
-                $(sprint(showerror, e))
-              The link step succeeded — `ld -shared` permits undefined symbols —
-              but nothing can supply these at load time. Usually a source file
-              excluded in replibuild.toml that something still calls, or a
-              missing entry in [link] link_libraries.""")
+function _assert_library_resolves(lib_path::AbstractString; preload::Vector{String}=String[])
+    # `preload`: the link-dir DLLs a wrapper opens first on Windows
+    # (`_link_dir_dlls`); the probe has to see the process the wrapper will.
+    deps = Ptr{Cvoid}[]
+    try
+        for p in preload
+            push!(deps, Libdl.dlopen(p, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL))
+        end
+        handle = try
+            Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+        catch e
+            error("""
+                  Linked library has unresolved symbols: $(basename(lib_path))
+                    $(sprint(showerror, e))
+                  The link step succeeded — `ld -shared` permits undefined symbols —
+                  but nothing can supply these at load time. Usually a source file
+                  excluded in replibuild.toml that something still calls, or a
+                  missing entry in [link] link_libraries.""")
+        end
+        Libdl.dlclose(handle)
+    finally
+        foreach(Libdl.dlclose, deps)
     end
-    Libdl.dlclose(handle)
     return nothing
+end
+
+"""
+    _link_dir_dlls(config) -> Vector{String}
+
+On Windows, the DLLs `[link] link_libraries` names inside `[link] link_dirs`, as
+absolute paths (relative dirs against the project root); empty elsewhere.
+
+PE has no RUNPATH. `-L../glfw/julia -lglfw` links imgui against the Hub glfw's
+`libglfw.dll`, and then the loader cannot find it: "The specified module could
+not be found". Windows does bind an import to a module already loaded under that
+name, so opening these by absolute path before the library is the PE counterpart
+of the rpath ELF gets, and keeps one copy of process-global state like glfw's.
+"""
+function _link_dir_dlls(config::RepliBuildConfig)::Vector{String}
+    Sys.iswindows() || return String[]
+    found = String[]
+    for dir in config.link.link_dirs
+        d = isabspath(dir) ? dir : joinpath(config.project.root, dir)
+        for lib in config.link.link_libraries
+            for cand in ("lib$lib.dll", "$lib.dll")
+                p = normpath(joinpath(d, cand))
+                if isfile(p)
+                    push!(found, p)
+                    break
+                end
+            end
+        end
+    end
+    return unique(found)
 end
 
 """

@@ -3179,7 +3179,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Pre-load [ingest] extra_link_libs. Must precede every dlopen below,
     # so it is spliced at the TOP of each __init__ variant, not appended
     # with the other snippets.
-    _preload_snippet = _extra_link_libs_snippet(config)
+    _preload_snippet = _extra_link_libs_snippet(config) * _link_dir_preload_snippet(config)
 
     # `stdout` is an exported data symbol in glibc, and is NOT a symbol at all on
     # Windows: the UCRT declares it as a macro over `__acrt_iob_func(1)`. So

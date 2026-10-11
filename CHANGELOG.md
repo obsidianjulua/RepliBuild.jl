@@ -35,6 +35,28 @@ Found by sweeping the Hub on Windows (Julia 1.12.7, MSYS2 CLANG64, LLVM 23).
 
 `runtests.jl` on Windows: 1918 passes, no failures. Each new test negative-checked.
 
+### Windows: slice files survive case folding; link_dirs DLLs load without rpath (2026-10-11)
+
+- **Slice file names.** Tier-1 slices (and the Slicer cache) were named by the raw
+  symbol. NTFS folds case, so lua's value macro `LUA_YIELD` and function-like
+  macro `lua_yield` shared `replibuild_shim_LUA_YIELD.ll`, the later write won, and
+  `LUA_YIELD()` threw "Module IR does not contain specified entry function".
+  `Slicer.slice_file_stem` appends 8 hex digits of SHA-1 to any name with an
+  uppercase letter; all-lowercase names keep their file. `SLICER_VERSION` 4
+  drops caches that may already hold one symbol's IR under another's name. Only
+  file naming changed; no Tier-1 policy did.
+- **`[link] link_dirs` on Windows.** ELF gets `-Wl,-rpath` per link dir; PE has no
+  RUNPATH, so imgui linked against `packages/glfw/julia/libglfw.dll` and then
+  could not load ("The specified module could not be found"), at the build's own
+  load check first. `Compiler._link_dir_dlls` names the `link_libraries` DLLs found
+  in `link_dirs`; the load check opens them first, and both generators emit the
+  same preload in `__init__` (next to the wrapper first, then the build-time path).
+  Windows binds an import to an already-loaded module of that name, which also
+  keeps one copy of glfw's process-global state.
+
+Hub on Windows with these: lua 103/103 + 189/189, imgui 97/97 + 202/202, glfw
+38/38, sqlite deep 145/145. `runtests.jl` 1927 passes.
+
 ### libJLCS builds against LLVM/MLIR 23 (2026-10-11)
 
 MSYS2 CLANG64 moved to LLVM/MLIR 23.1.3, and `src/mlir/build.sh` failed in

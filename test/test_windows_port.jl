@@ -354,6 +354,55 @@ const LE = RepliBuild.LLVMEnvironment
         @test isempty(C._nm_dynamic_names(""))
     end
 
+    # PE has no RUNPATH: a library linked against another Hub package's DLL through
+    # [link] link_dirs cannot load unless that DLL is already in the process
+    # (imgui -> packages/glfw/julia/libglfw.dll).
+    @testset "link_dirs DLLs are preloaded on Windows" begin
+        mktempdir() do dir
+            depdir = joinpath(dir, "dep", "julia"); mkpath(depdir)
+            write(joinpath(depdir, "libdep.dll"), "")      # only existence is probed
+            pkg = joinpath(dir, "pkg"); mkpath(pkg)
+            toml = joinpath(pkg, "replibuild.toml")
+            write(toml, """
+            [project]
+            name = "linkdirprobe"
+            root = "."
+            [link]
+            link_libraries = ["dep", "absent"]
+            link_dirs = ["../dep/julia"]
+            """)
+            cfg = CM.load_config(toml)
+            dlls = C._link_dir_dlls(cfg)
+            snippet = RepliBuild.Wrapper._link_dir_preload_snippet(cfg)
+            if Sys.iswindows()
+                @test length(dlls) == 1
+                @test normpath(only(dlls)) == normpath(joinpath(depdir, "libdep.dll"))
+                @test occursin("joinpath(@__DIR__, basename(_dll))", snippet)   # sibling first
+                ex = Meta.parseall(snippet)
+                @test !any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)
+            else
+                @test isempty(dlls)        # ELF has the rpath; nothing to preload
+                @test isempty(snippet)
+            end
+        end
+    end
+
+    # NTFS (and default APFS) fold case. Slice files named by raw symbol let lua's
+    # LUA_YIELD and lua_yield share one file, and the later write won.
+    @testset "slice file names stay distinct under case folding" begin
+        stem = RepliBuild.Slicer.slice_file_stem
+        names = ["replibuild_shim_LUA_YIELD", "replibuild_shim_lua_yield",
+                 "replibuild_shim_Lua_Yield", "lua_resume", "luaL_checkversion_"]
+        stems = stem.(names)
+        @test length(unique(lowercase.(stems))) == length(names)
+        @test stem("lua_resume") == "lua_resume"            # lowercase names keep their file
+        @test stem("luaL_checkversion_") == stem("luaL_checkversion_")   # deterministic
+        @test startswith(stem("replibuild_shim_LUA_YIELD"), "replibuild_shim_LUA_YIELD-")
+        # The wrapper's path expression and the writer agree on the file.
+        @test occursin("\"$(stem("replibuild_shim_LUA_YIELD")).ll\"",
+                       RepliBuild.Wrapper._slice_path_expr("replibuild_shim_LUA_YIELD"))
+    end
+
     # Julia links msvcrt.dll; a CLANG64-built DLL allocates from the UCRT. Freeing
     # one heap's memory into the other is STATUS_HEAP_CORRUPTION (mpack's growable
     # writer, freed with Libc.free). Wrappers free through the library's runtime.

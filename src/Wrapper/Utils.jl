@@ -23,7 +23,7 @@ import ..INTERNAL_TYPE_BLOCKLIST
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
-import ..Compiler: _pe_exported_names, _nm_dynamic_names, _pe_crt_dll
+import ..Compiler: _pe_exported_names, _nm_dynamic_names, _pe_crt_dll, _link_dir_dlls
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -1499,6 +1499,29 @@ function _extra_link_libs_snippet(config)
                 _h === nothing || break
             end
             _h === nothing && @warn "extra_link_libs: no candidate soname opened. Harmless if this names a library merged into libc (m, pthread, dl, rt on glibc >= 2.34) — there is nothing left to preload. Otherwise the main library may fail to resolve; use a full soname or path." lib=_lib
+        end
+"""
+end
+
+"""
+    _link_dir_preload_snippet(config) -> String
+
+`__init__` source opening `Compiler._link_dir_dlls(config)` before the main library:
+Windows' stand-in for the rpath `[link] link_dirs` emits on ELF. Each DLL is
+looked for next to the wrapper first (a build directory travels as a unit), then at
+its build-time path: the same order as rpath's `\$ORIGIN` then the absolute dir.
+Empty off Windows and when no link-dir DLL exists. Shared by both generators.
+"""
+function _link_dir_preload_snippet(config)
+    dlls = _link_dir_dlls(config)
+    isempty(dlls) && return ""
+    lit = "[" * join(repr.(dlls), ", ") * "]"
+    return """
+        # [link] link_dirs DLLs, opened before the main library: PE has no RUNPATH,
+        # and Windows binds an import to a module already loaded under that name.
+        for _dll in $lit
+            _sib = joinpath(@__DIR__, basename(_dll))
+            Libdl.dlopen(isfile(_sib) ? _sib : _dll, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
         end
 """
 end
