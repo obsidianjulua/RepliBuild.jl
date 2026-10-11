@@ -353,4 +353,41 @@ const LE = RepliBuild.LLVMEnvironment
               Set(["deflate", "inflate", "_ZN3zip6Writer5flushEv", "zlib_debug_level"])
         @test isempty(C._nm_dynamic_names(""))
     end
+
+    # Julia links msvcrt.dll; a CLANG64-built DLL allocates from the UCRT. Freeing
+    # one heap's memory into the other is STATUS_HEAP_CORRUPTION (mpack's growable
+    # writer, freed with Libc.free). Wrappers free through the library's runtime.
+    @testset "libc_free frees through the library's C runtime" begin
+        W = RepliBuild.Wrapper
+        ucrt = W._libc_free_block("libx.dll"; crt_dll="ucrtbase.dll")
+        same = W._libc_free_block("libx.so"; crt_dll=nothing)
+        for src in (ucrt, same)
+            ex = Meta.parseall(src)
+            @test !any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)
+        end
+        @test occursin("ccall((:free, \"ucrtbase.dll\")", ucrt)
+        @test occursin("libc_free(ptr::Ptr) = Libc.free(ptr)", same)
+
+        # A plain `free` owner goes through libc_free; a library deallocator
+        # keeps resolving through the library.
+        @test occursin("libc_free(ptr)", W._cstring_policy_lines("free"))
+        @test !occursin("(:free, LIBRARY_PATH)", W._cstring_policy_lines("free"))
+        @test occursin("(:cJSON_free, LIBRARY_PATH)", W._cstring_policy_lines("cJSON_free"))
+
+        if Sys.iswindows()
+            # The emitted function really releases a UCRT allocation in this
+            # process (Libc.free on the same pointer is the crash).
+            m = Module(:LibcFreeProbe)
+            Base.include_string(m, ucrt)
+            libc_free = Base.invokelatest(getglobal, m, :libc_free)   # defined in a newer world
+            p = ccall((:malloc, "ucrtbase.dll"), Ptr{Cvoid}, (Csize_t,), 64)
+            @test p != C_NULL
+            Base.invokelatest(libc_free, p)
+            @test true
+            # Cstring is what the cstring policy hands it.
+            s = ccall((:_strdup, "ucrtbase.dll"), Cstring, (Cstring,), "owned")
+            Base.invokelatest(libc_free, s)
+            @test true
+        end
+    end
 end

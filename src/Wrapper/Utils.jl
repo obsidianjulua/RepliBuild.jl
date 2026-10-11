@@ -23,7 +23,7 @@ import ..INTERNAL_TYPE_BLOCKLIST
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
-import ..Compiler: _pe_exported_names, _nm_dynamic_names
+import ..Compiler: _pe_exported_names, _nm_dynamic_names, _pe_crt_dll
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -1330,6 +1330,37 @@ end
 # =============================================================================
 
 """
+    _libc_free_block(lib_path; crt_dll=_pe_crt_dll(lib_path)) -> String
+
+Module-level source for `libc_free(ptr)`, spliced into every generated wrapper by
+both generators: release memory the library allocated, through the library's own
+C runtime. On Windows Julia's `Libc.free` is msvcrt's while a RepliBuild-built DLL
+allocates from the UCRT, so `Libc.free` on its buffers corrupts the heap (mpack's
+growable writer died with STATUS_HEAP_CORRUPTION). Elsewhere, and when the
+runtime cannot be identified, it is `Libc.free`.
+"""
+function _libc_free_block(lib_path::AbstractString;
+                          crt_dll::Union{Nothing,String}=_pe_crt_dll(String(lib_path)))::String
+    body = crt_dll === nothing ?
+        "libc_free(ptr::Ptr) = Libc.free(ptr)" :
+        "libc_free(ptr::Ptr) = ccall((:free, $(repr(crt_dll))), Cvoid, (Ptr{Cvoid},), ptr)"
+    # The cstring policy hands over a Cstring, which ccall will not convert to Ptr.
+    body *= "\nlibc_free(ptr::Cstring) = libc_free(reinterpret(Ptr{Cvoid}, ptr))"
+    return """
+    # ── Freeing what the library allocated ─────────────────────────────────────
+    \"\"\"
+        libc_free(ptr)
+
+    Release a buffer the library allocated with malloc/calloc/realloc. Use this,
+    not `Libc.free`: on Windows Julia's `Libc.free` belongs to msvcrt.dll and this
+    library allocates from $(crt_dll === nothing ? "the same C runtime as Julia" : crt_dll),
+    and freeing into the wrong heap corrupts it.
+    \"\"\"
+    $body
+    """
+end
+
+"""
     _cstring_policy_lines(free_sym; indent="    ") -> String
 
 Shared body for every `Cstring`-returning wrapper, applied after the call
@@ -1347,7 +1378,10 @@ overloads, C and C++ generators) splices these same lines so the policy
 cannot drift between sites again.
 """
 function _cstring_policy_lines(free_sym::String; indent::String="    ")::String
+    # Plain `free` is the C runtime's, not the library's: a DLL does not export
+    # what it imports, so looking it up through LIBRARY_PATH fails on Windows.
     free_line = isempty(free_sym) ? "" :
+        free_sym == "free" ? "$(indent)libc_free(ptr)\n" :
         "$(indent)ccall((:$(free_sym), LIBRARY_PATH), Cvoid, (Cstring,), ptr)\n"
     return "$(indent)ptr == C_NULL && return nothing\n" *
            "$(indent)s = unsafe_string(ptr)\n" *

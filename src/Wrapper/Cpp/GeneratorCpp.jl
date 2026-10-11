@@ -267,6 +267,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         Base.error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
     end
 
+    $(_libc_free_block(lib_path))
     # ── Build identity ────────────────────────────────────────────────────────
     # This wrapper is portable SOURCE, but its contents are a snapshot of ONE
     # compilation: struct field offsets, blob byte sizes, enum values and the

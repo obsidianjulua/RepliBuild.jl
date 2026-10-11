@@ -86,6 +86,11 @@ const PRESERVED_TOML_KEYS = [
     # re-discovery would otherwise silently reset the package's API surface to the
     # historical default — the stl_test `[types].templates` class exactly.
     ("compile", "visibility"),
+    # Per-host overrides (ConfigurationManager.apply_platform_overlay). A scan
+    # runs on one host and cannot know what the other one needs.
+    ("platform", "linux"),
+    ("platform", "windows"),
+    ("platform", "macos"),
 ]
 
 """

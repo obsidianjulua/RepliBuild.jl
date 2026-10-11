@@ -522,6 +522,17 @@ changes:
 - AOT thunks import from libJLCS. `JITManager.open_thunks_library` opens libJLCS by
   absolute path first. **Never vendor a second copy** — two exception buffers swallow
   every C++ exception.
+- **Two C runtimes in one process.** Julia links `msvcrt.dll`; RepliBuild-built DLLs
+  allocate from the UCRT. Never `Libc.free` library memory, in generated code or
+  in a Hub test: wrappers define `libc_free` (bound via `Compiler._pe_crt_dll`).
+  Generated code that `Libc.malloc`s storage must also be the code that frees it.
+- Per-host config lives in `[platform.<host>]`, merged by `apply_platform_overlay`
+  inside `load_config`. Anything else that reads a replibuild.toml for build inputs
+  must go through it too (registry staging does). Keep Hub bases correct for Linux
+  and override on Windows: older RepliBuild ignores the table.
+- Relative `[compile]` paths resolve against `root` at load; `save_config` writes
+  paths under the project relative with `/`. Never write a machine path into a
+  tracked TOML.
 - `FILE` is `struct _iobuf`. Bake paths into generated Julia with `repr()` and into
   TOML with `TOML.print`. Read JSON only through `_read_json` (`JSON.parsefile` mmaps
   on 0.21, which blocks deletion, and rejects `use_mmap` on 1.x;

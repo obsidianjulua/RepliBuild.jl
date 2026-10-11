@@ -329,6 +329,18 @@ include(joinpath(@__DIR__, "test_windows_port.jl"))
 
 include(joinpath(@__DIR__, "test_thunk_manifest.jl"))
 
+# ── [platform.<host>] overlays (no toolchain) ────────────────────────────────
+# One config builds on Linux and Windows: per-host link libraries, defines and
+# dependency excludes merge over the base; an unknown platform name is an error.
+
+include(joinpath(@__DIR__, "test_platform_overlay.jl"))
+
+# ── Config paths are portable (no toolchain) ─────────────────────────────────
+# Relative compile paths resolve against the root, not the cwd; save_config
+# (and so discover) writes paths under the project relative, with `/`.
+
+include(joinpath(@__DIR__, "test_portable_paths.jl"))
+
 # ── LLVM tool table probes only what get_tool looks up (no toolchain) ────────
 # A 51-name probe at init listed clang-format, mlir-*, FileCheck, clang-20 —
 # none of which get_tool or execute ever asked for. BuildBridge.execute

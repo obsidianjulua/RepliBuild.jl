@@ -3078,6 +3078,32 @@ function _nm_dynamic_names(nm_output::AbstractString)
 end
 
 """
+    _pe_crt_dll(binary_path) -> Union{Nothing,String}
+
+The C runtime a PE binary allocates from, as the DLL to resolve `free` in:
+`"ucrtbase.dll"` when it imports the UCRT (`api-ms-win-crt-*`, which every
+CLANG64-built library does), `"msvcrt.dll"` when it imports that, `nothing` off
+Windows or when the import table cannot be read.
+
+Julia itself is linked against msvcrt.dll, so `Libc.free` on memory such a library
+malloc'd frees into the wrong heap and the process dies with
+STATUS_HEAP_CORRUPTION. Generated wrappers free through this DLL instead
+(`libc_free`).
+"""
+function _pe_crt_dll(binary_path::String)
+    Sys.iswindows() || return nothing
+    out = try
+        readchomp(pipeline(ignorestatus(`$(_gnu_objdump()) -p $binary_path`), stderr = devnull))
+    catch
+        return nothing
+    end
+    imports = Set(lowercase(m.captures[1]) for m in eachmatch(r"DLL Name:\s*(\S+)", out))
+    any(d -> startswith(d, "api-ms-win-crt-") || d == "ucrtbase.dll", imports) && return "ucrtbase.dll"
+    "msvcrt.dll" in imports && return "msvcrt.dll"
+    return nothing
+end
+
+"""
     _pe_exported_names(binary_path) -> Union{Nothing,Set{String}}
 
 The names in a PE binary's export directory, or `nothing` when the question
