@@ -1338,6 +1338,23 @@ function _is_source_location_exhaustion(output::AbstractString)::Bool
 end
 
 """
+    _codegen_opt_flags(config) -> Vector{String}
+
+Optimization flags for turning IR into machine code (`create_library` and its
+per-TU fallback). The IR is already optimized — per TU by `[compile] flags`, then
+linked and run through opt at `[link] optimization_level` — so clang gets that
+same `-O` for instruction selection and register allocation, with
+`-disable-llvm-passes` so the IR pipeline is not run a second time.
+
+With no `-O` at all, clang compiled optimized IR with the `-O0` backend: FastISel
+and the fast register allocator, i.e. spill-heavy code in every shipped library,
+and on LLVM 23 a backend crash ("Cannot emit physreg copy instruction") in
+llama.cpp's `llama_kv_cache::find_slot` on Windows.
+"""
+_codegen_opt_flags(config::RepliBuildConfig) =
+    ["-O$(config.link.optimization_level)", "-Xclang", "-disable-llvm-passes"]
+
+"""
     _compile_ir_to_objects(config, ir_files, compiler) -> Vector{String}
 
 Compile each IR module to its own object file, in parallel. Each `clang -c` is
@@ -1371,7 +1388,8 @@ function _compile_ir_to_objects(config::RepliBuildConfig, ir_files::Vector{Strin
     # processes, so the concurrency that matters is how many clangs are resident
     # at once — each carries a whole module's debug info.
     asyncmap(todo; ntasks=max(1, Sys.CPU_THREADS)) do i
-        (out, code) = _clang_for_c_bucket(compiler, ["-c", "-fPIC", ir_files[i], "-o", objs[i]])
+        (out, code) = _clang_for_c_bucket(compiler, vcat(["-c", "-fPIC"], _codegen_opt_flags(config),
+                                                         [ir_files[i], "-o", objs[i]]))
         n = Threads.atomic_add!(done, 1) + 1
         if code != 0
             lock(lk) do
@@ -1432,6 +1450,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     cmd_head = [
         "-shared",  # Create shared library
         "-fPIC",    # Position independent code
+        _codegen_opt_flags(config)...,   # codegen at the link level, IR passes off
     ]
     cmd_tail = ["-o", lib_path]
     cmd_args = copy(cmd_head)

@@ -354,6 +354,21 @@ const LE = RepliBuild.LLVMEnvironment
         @test isempty(C._nm_dynamic_names(""))
     end
 
+    # Windows temp dirs live under the user profile; SYSCONFIG.md recorded
+    # `C:/Users/<name>/AppData/Local/Temp/curl_harvest_…` in a tracked file.
+    @testset "SYSCONFIG.md paths hide the temp and home prefixes" begin
+        dp(p) = RepliBuild.SysConfigGen._display_path(p; tmp="/h/me/tmp/", home="/h/me")
+        @test dp("/h/me/tmp/curl_harvest_x") == "<tmp>/curl_harvest_x"   # temp wins over home
+        @test dp("/h/me/src/curl") == "~/src/curl"
+        @test dp("/h/me") == "~"
+        @test dp("/h/meant/x") == "/h/meant/x"                          # prefix, not a parent
+        @test dp("/opt/curl") == "/opt/curl"
+        # Windows paths fold case; POSIX ones do not.
+        @test dp("/H/ME/TMP/x") == (Sys.iswindows() ? "<tmp>/x" : "/H/ME/TMP/x")
+        # The real defaults redact the real temp dir.
+        @test startswith(RepliBuild.SysConfigGen._display_path(joinpath(tempdir(), "probe")), "<tmp>")
+    end
+
     # PE has no RUNPATH: a library linked against another Hub package's DLL through
     # [link] link_dirs cannot load unless that DLL is already in the process
     # (imgui -> packages/glfw/julia/libglfw.dll).

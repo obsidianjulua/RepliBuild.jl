@@ -250,6 +250,23 @@ _has_ext(path, exts) = lowercase(splitext(path)[2]) in exts
 # Windows would corrupt a real name.
 _posix(p::AbstractString) = Sys.iswindows() ? replace(String(p), '\\' => '/') : String(p)
 
+# `p` as written into a checked-in file: the temp-dir prefix as `<tmp>` and the
+# home prefix as `~`. On Windows both sit under the user profile, so a raw path put
+# the harvesting account's name (`C:/Users/<name>/AppData/Local/Temp/…`) into every
+# SYSCONFIG.md. Windows paths compare case-insensitively.
+function _display_path(p::AbstractString; tmp::AbstractString=tempdir(), home::AbstractString=homedir())
+    s = _posix(p)
+    fold = Sys.iswindows() ? lowercase : identity
+    for (prefix, label) in ((tmp, "<tmp>"), (home, "~"))
+        pre = rstrip(_posix(prefix), '/')
+        isempty(pre) && continue
+        if fold(s) == fold(pre) || startswith(fold(s), fold(pre) * "/")
+            return label * s[ncodeunits(pre)+1:end]
+        end
+    end
+    return s
+end
+
 # `joinpath`, but always '/'-separated (see `_posix`) and keeping joinpath's
 # empty-prefix behaviour: `cmake_probe` defaults `clone_rel` to `""`, and
 # `"" * "/" * "lib"` is an ABSOLUTE path, which is not what a clone-relative
@@ -774,7 +791,7 @@ function capture_config(probe::CMakeProbe, out_dir::String;
                       probe.cmake_args)
         println(io, "                args=[", join(map(a -> "\"$a\"", argl),
                                                    ",\n                      "), "])")
-        println(io, "capture_config(p, \"config\"", layout === :auto ? "" : "; layout=:$layout",
+        println(io, "capture_config(p, \"$(basename(out_dir))\"", layout === :auto ? "" : "; layout=:$layout",
                     capture_scratch ? "; capture_scratch=true" : "", ")")
         println(io, "```\n")
         println(io, "Full cmake argument set used:\n")
@@ -786,7 +803,7 @@ function capture_config(probe::CMakeProbe, out_dir::String;
         println(io, "It travels with the package, so the build is reproducible — but it is a")
         println(io, "single-target pin, which matches the Hub. Regenerate on a version bump and")
         println(io, "diff: a changed `SIZEOF_*` or a vanished `USE_*` is real news.\n")
-        println(io, "Captured from `$(probe.source_dir)` on ",
+        println(io, "Captured from `$(_display_path(probe.source_dir))` on ",
                     Dates.format(probe.probed_at, "yyyy-mm-dd"),
                     ", cmake $(probe.cmake_version), ", Sys.MACHINE, ".")
     end

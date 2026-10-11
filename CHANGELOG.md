@@ -57,6 +57,23 @@ Found by sweeping the Hub on Windows (Julia 1.12.7, MSYS2 CLANG64, LLVM 23).
 Hub on Windows with these: lua 103/103 + 189/189, imgui 97/97 + 202/202, glfw
 38/38, sqlite deep 145/145. `runtests.jl` 1927 passes.
 
+### Machine code from the link level, not -O0; SYSCONFIG.md hides the user's paths (2026-10-11)
+
+- **Codegen opt level.** `create_library` handed clang the optimized IR with only
+  `-shared -fPIC`, so every library came out of the `-O0` backend (FastISel and
+  the fast register allocator), on every host. On LLVM 23 that backend crashed
+  outright on llama.cpp ("Cannot emit physreg copy instruction" in
+  `llama_kv_cache::find_slot`; reproduced on the extracted function at `-O0`,
+  clean at `-O2`). `_codegen_opt_flags` passes `[link] optimization_level` with
+  `-Xclang -disable-llvm-passes`, so codegen runs at that level without
+  re-running the IR pipeline; the per-TU fallback gets the same flags.
+  `test_codegen_flags.jl`.
+- **SysConfigGen on Windows.** `SYSCONFIG.md` recorded the probe's checkout path,
+  which on Windows is under the user profile
+  (`C:/Users/<name>/AppData/Local/Temp/…`). `_display_path` writes `<tmp>` / `~`
+  prefixes instead; the regenerate snippet names the real output directory rather
+  than always `config`. Found harvesting curl's Windows config.
+
 ### libJLCS builds against LLVM/MLIR 23 (2026-10-11)
 
 MSYS2 CLANG64 moved to LLVM/MLIR 23.1.3, and `src/mlir/build.sh` failed in

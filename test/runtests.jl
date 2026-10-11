@@ -341,6 +341,13 @@ include(joinpath(@__DIR__, "test_platform_overlay.jl"))
 
 include(joinpath(@__DIR__, "test_portable_paths.jl"))
 
+# ── IR -> machine code at the link level (no toolchain) ──────────────────────
+# create_library passed no -O, so every library came out of the -O0 backend;
+# LLVM 23 crashed there on llama.cpp. Codegen now uses [link]
+# optimization_level with the IR pipeline disabled.
+
+include(joinpath(@__DIR__, "test_codegen_flags.jl"))
+
 # ── LLVM tool table probes only what get_tool looks up (no toolchain) ────────
 # A 51-name probe at init listed clang-format, mlir-*, FileCheck, clang-20 —
 # none of which get_tool or execute ever asked for. BuildBridge.execute
