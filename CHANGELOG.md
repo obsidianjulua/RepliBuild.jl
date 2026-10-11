@@ -4,6 +4,18 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### libJLCS builds against LLVM/MLIR 23 (2026-10-11)
+
+MSYS2 CLANG64 moved to LLVM/MLIR 23.1.3, and `src/mlir/build.sh` failed in
+`JlcsJIT.cpp`: LLVM 23's `LLJITBuilder::ObjectLinkingLayerCreator` takes
+`(ExecutionSession &, jitlink::JITLinkMemoryManager &)`. RuntimeDyld brings its own
+memory manager, so an adapter guarded by `LLVM_VERSION_MAJOR >= 23` accepts the
+new argument and ignores it; LLVM 22 compiles the original path unchanged.
+
+Verified on Windows (Julia 1.12.7, LLVM/MLIR 23.1.3): `MLIRNative.test_dialect()`
+passes, `check_environment` reports both tiers, and Hub tinyxml2 builds, wraps and
+passes `test.jl` (11/11) through JIT-mode Tier-2 thunks.
+
 ### Fixes salvaged from the quarantined internalize-symbol-tables branch (2026-10-11)
 
 That branch (0399c6e) came off a compromised machine and is dropped unmerged. Its
