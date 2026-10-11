@@ -102,6 +102,15 @@ returning an integer. Only test_deep's version check noticed.
   to `src/mlir/build/jlcs_llvm_version`; the doctor fails libJLCS when that
   disagrees with today's llvm-config on major.minor, and otherwise confirms the
   library loads.
+- **SysConfigGen and OBJECT libraries.** curl compiles its code into
+  `libcurl_object` (CMake gives only SHARED targets `<target>_EXPORTS`, so it
+  classifies static) and `libcurl_shared` compiles a stub; `main_target` picked the
+  stub and `toml_fragment` proposed excluding all of `lib/`. Selection is
+  unchanged, but the probe display and the fragment now say which target holds
+  the code and name the `target=` override.
+- Docs: the Windows install command includes `mingw-w64-x86_64-binutils` (GNU
+  objdump, required for DWARF extraction) and the CLANG64 PATH requirement;
+  `docs/updates/WINDOWS_PORT.md` records this pass.
 
 ### libJLCS builds against LLVM/MLIR 23 (2026-10-11)
 

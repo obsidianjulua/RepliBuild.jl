@@ -56,8 +56,15 @@ sudo dnf install llvm21-devel mlir21-devel clang21-devel
 
 # Windows — MSYS2 CLANG64 shell
 pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir \
-                   mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja
+                   mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja \
+                   mingw-w64-x86_64-binutils
 ```
+
+`mingw-w64-x86_64-binutils` is the GNU `objdump` that DWARF extraction needs, from
+the MINGW64 tree on purpose: in CLANG64 "binutils" is llvm-objdump, whose dump
+format RepliBuild rejects. It is found by absolute path from any shell. Put
+`C:\msys64\clang64\bin` on the Windows `PATH` as well, so Julia finds the
+toolchain and the libraries `libJLCS.dll` imports.
 
 Put `llvm-config` and `clang++` on `PATH`. Versioned names (`llvm-config-21`,
 `clang++-21`) are found automatically, and so is a `.exe` suffix.

@@ -125,6 +125,46 @@ building LLVM from source.
 
 ---
 
+## 2026-10-11 — fresh-box compatibility pass (LLVM/MLIR 23)
+
+A clean Windows 11 box, set up from nothing: Julia 1.12.7 (juliaup), MSYS2
+CLANG64 — now **LLVM/MLIR 23.1.3** — plus `mingw-w64-x86_64-binutils` (GNU
+objdump) and `C:\msys64\clang64\bin` on the Windows PATH. Every Hub package was
+built, wrapped and tested; the details are in CHANGELOG `## Unreleased`.
+
+What broke, and what fixed it (RepliBuild side):
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `build.sh` fails in `JlcsJIT.cpp` | LLVM 23 `ObjectLinkingLayerCreator` takes the JITLink memory manager | adapter under `LLVM_VERSION_MAJOR >= 23` |
+| Hub configs right for one OS only (`-ldl`, `LUA_USE_LINUX`, X11 glfw) | no per-host config | `[platform.<host>]` overlays |
+| hello_world carried `/home/…` paths | `discover` wrote absolute paths | relative paths, resolved against `root` |
+| mpack: STATUS_HEAP_CORRUPTION | Julia = msvcrt.dll, the DLL = UCRT; `Libc.free` on its buffer | `libc_free` in every wrapper |
+| lua `LUA_YIELD()` threw | `LUA_YIELD` and `lua_yield` slice files collide on NTFS | `Slicer.slice_file_stem` |
+| imgui: "module could not be found" | no rpath on PE for `[link] link_dirs` | link-dir DLLs preloaded |
+| llama.cpp: clang backend crash | final codegen ran at `-O0` (everywhere) | `_codegen_opt_flags` |
+| llama.cpp: `ggml_version()` returned `Cint` | `.c` files went to JLL clang 18; LLVM 23's llvm-link dropped their debug info | one toolchain per module; `_assert_debug_info_kept` |
+| `check_environment` would pass a stale libJLCS | it only checked that the file existed | `jlcs_llvm_version` stamp + load probe |
+| SYSCONFIG.md recorded `C:/Users/<name>/…` | temp dir is under the profile | `_display_path` |
+
+Hub on Windows: every package's tests pass. llama.cpp is CPU-only for now (its
+Vulkan shaders are harvested by a bash script). curl uses a Windows-harvested
+`config-windows/`. New packages raylib (by-value struct ABI stress) and cmark
+(caller-freed strings) were added and verified on Windows.
+
+Still open:
+
+- **Tier 1 is conservative on Windows.** The slice pre-flight resolves through the
+  DLL's export directory, so any slice declaring a C-runtime symbol demotes to
+  ccall (cglm 606 slices vs >700 on Linux). Correct as it stands: the JIT would
+  bind those symbols from Julia's msvcrt, not the UCRT the library uses.
+- raylib and cmark have unverified Linux bases (cmark needs `harvest.jl` run on
+  Linux).
+- SysConfigGen picks a shared stub over an OBJECT library (curl); the probe now
+  says so and names `target=`.
+
+---
+
 ## Already portable — no work needed
 
 Verified, do not spend time here:

@@ -187,6 +187,25 @@ function main_target(p::CMakeProbe; target::String="")
     return pool[argmax(map(t -> length(t.files), pool))]
 end
 
+"""
+    _object_library_hint(probe, chosen) -> Union{Nothing,String}
+
+A note when the chosen shared target is dwarfed by another target, which is what
+CMake's OBJECT-library pattern looks like from compile_commands.json: the code is
+compiled once into `foo_object` and the shared target compiles only a stub or two.
+CMake defines `<target>_EXPORTS` for SHARED targets alone, so the object library
+classifies as static and `main_target` picks the stub. Found on curl
+(`libcurl_shared`: 2 TUs, `libcurl_object`: ~190). Advisory only: which target
+owns the code is a link-graph fact compile_commands.json does not carry.
+"""
+function _object_library_hint(p::CMakeProbe, chosen::CMakeTarget)::Union{Nothing,String}
+    biggest = p.targets[argmax(map(t -> length(t.files), p.targets))]
+    (biggest === chosen || length(biggest.files) < 4 * max(1, length(chosen.files))) && return nothing
+    return "'$(chosen.name)' compiles $(length(chosen.files)) TU(s) but '$(biggest.name)' compiles " *
+           "$(length(biggest.files)): likely an OBJECT library linked into it. " *
+           "Re-run with target=\"$(biggest.name)\"."
+end
+
 function Base.show(io::IO, t::CMakeTarget)
     print(io, "$(t.name) [$(t.kind)] — $(length(t.files)) TUs, ",
               uniform(t) ? "uniform" : "$(t.flag_sets) flag sets")
@@ -221,6 +240,8 @@ function Base.show(io::IO, p::CMakeProbe)
                                   "NOT uniform, see flag sets above")
         println(io, "  Excludes:  $n_excl file(s) it never compiles")
         println(io, "  Defines:   $(join(mt.defines, " "))")
+        hint = _object_library_hint(p, mt)
+        hint === nothing || println(io, "  NOTE:      ", hint)
     end
     print(io, "  cmake $(p.cmake_version) @ $(Dates.format(p.probed_at, "yyyy-mm-dd HH:MM"))")
 end
@@ -905,6 +926,8 @@ function toml_fragment(probe::CMakeProbe;
     println(io, "# ── proposed by RepliBuild.SysConfigGen.toml_fragment ───────────────────")
     println(io, "# cmake $(probe.cmake_version), probed $(Dates.format(probe.probed_at, "yyyy-mm-dd")).")
     println(io, "# Target '$(t.name)' [$(t.kind)]: $(length(t.files)) TUs.")
+    hint = isempty(target) ? _object_library_hint(probe, t) : nothing
+    hint === nothing || println(io, "# NOTE: ", hint)
     if uniform(t)
         println(io, "# ONE flag set across all of them — admissible for the source build.")
     else

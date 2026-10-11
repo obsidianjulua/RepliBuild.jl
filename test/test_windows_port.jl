@@ -369,6 +369,27 @@ const LE = RepliBuild.LLVMEnvironment
         @test startswith(RepliBuild.SysConfigGen._display_path(joinpath(tempdir(), "probe")), "<tmp>")
     end
 
+    # CMake OBJECT libraries: curl compiles its code into libcurl_object (no
+    # <target>_EXPORTS, so it classifies static) and libcurl_shared compiles a
+    # stub. main_target keeps preferring shared; the probe now says so.
+    @testset "SysConfigGen flags a shared stub fed by an object library" begin
+        S = RepliBuild.SysConfigGen
+        tgt(name, kind, n) = S.CMakeTarget(name, kind, ["lib/f$i.c" for i in 1:n],
+                                           String[], String[], 1, String[])
+        stub = tgt("libcurl_shared", :shared, 2)
+        obj  = tgt("libcurl_object", :static, 190)
+        probe(ts) = S.CMakeProbe("curl", "/src", "/build", String[], String[], String[],
+                                 String[], String[], ts, String[], "4.4.4", S.Dates.now())
+        p = probe([stub, obj])
+        @test S.main_target(p) === stub                       # selection is unchanged
+        hint = S._object_library_hint(p, stub)
+        @test hint !== nothing && occursin("target=\"libcurl_object\"", hint)
+        @test occursin("NOTE:", sprint(show, p))
+        # A real shared library that is simply the biggest target gets no note.
+        whole = tgt("cmark", :shared, 19)
+        @test S._object_library_hint(probe([whole, tgt("cmark_exe", :static, 1)]), whole) === nothing
+    end
+
     # PE has no RUNPATH: a library linked against another Hub package's DLL through
     # [link] link_dirs cannot load unless that DLL is already in the process
     # (imgui -> packages/glfw/julia/libglfw.dll).
