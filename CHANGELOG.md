@@ -4,6 +4,44 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 1 on LLVM.jl 10: the Slicer and static promotion read what they read on 9 (2026-10-17)
+
+- **LLVM.jl 10 changed four names that Tier 1 reads, at five call sites.** Two
+  failed loudly in the Slicer: `local_unnamed_addr` is gone and `unnamed_addr`
+  returns the `UnnamedAddr` enum (a `TypeError` on any internal constant), and
+  `inline_asm!` is gone. Two were silent. An attribute's `kind` is a Symbol, so
+  `_has_enum_attr` never matched the integer kind ID: a `returns_twice` callee
+  lost its `:setjmp_family` hazard, and a `noinline` target also got
+  `alwaysinline`, which the verifier rejects, so the wrap failed. And
+  `isconstant(gv)` now asks whether a value is an LLVM `Constant`, which every
+  global is. In the Slicer a mutable static took the constant branch, and was
+  embedded when it carried `unnamed_addr` or `local_unnamed_addr` (the cJSON
+  divergence class). In `_promote_statics_libllvm` no internal mutable static
+  was promoted, so every C library built with LLVM.jl 10 exported fewer
+  `__rb_*` symbols; only Tier 1 reads them.
+- **On LLVM.jl 9 the Slicer never cleared module asm.** `inline_asm!(mod, "")`
+  appends unless given `overwrite=true`. A slice with module asm is
+  hazard-gated to ccall, so no wrapper shipped one.
+- All five call sites read through `LLVM.API`, the C binding, which is the same
+  in LLVM.jl 9.13.2 and 10.2.1 for Julia's LLVM 18 and 20, so there is no
+  version branch. `SLICER_VERSION` is 5: a v4 cache entry written with LLVM.jl
+  10 can lack `:setjmp_family`.
+- `test_slicer.jl` and `test_static_promotion.jl` each open with a testset on
+  synthetic IR, ahead of the fixture build, so it runs where
+  `test/slice_test/replibuild.toml` is missing. Negative-checked on Julia 1.12
+  and 1.13: with a read put back, its testset fails on LLVM.jl 10, and the
+  module-asm one fails on 9 too.
+- Verified on Windows (MSYS2 CLANG64) with LLVM.jl 9.13.2 and 10.2.1 on Julia
+  1.12.7 and 1.13.2. The three Tier 1 suites give unpatched main's results on
+  LLVM.jl 9, plus the new testsets. On Windows those results include failures
+  that predate this change: `ccall(:dlsym)` and `nm -D` in `test_slicer.jl` and
+  `test_static_promotion.jl`, and `test_slicer.jl`'s direct llvmcall of
+  `st_guarded_div`, whose longjmp ends the process. runtests.jl passes. Hub
+  zlib builds, wraps and passes test_deep 271/271 on all four; all 102 of its
+  Tier 1 kernels compile to llvmcall, and LLVM.jl 9 and 10 give the same Tier 1
+  surface, promoted module and byte-identical slices. Project.toml compat is
+  unchanged.
+
 ## v4.2.0 (2026-10-16)
 
 **LLVM 23 and Windows, end to end.** Minor. New: `[platform.<host>]` tables in
