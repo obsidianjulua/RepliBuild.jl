@@ -90,7 +90,25 @@ function compute_compile_fingerprint(config::RepliBuildConfig)::String
     # changes codegen too.
     h = hash(string(Base.libllvm_version), h)
     h = hash(_detect_target_triple(), h)
+    # A C++ package compiles every TU with the SYSTEM clang, which the package
+    # manager upgrades on its own (MSYS2 moved 22 -> 23). Without its identity
+    # here, IR from the old compiler kept being served to the new one's tools.
+    config.wrap.language == :c || (h = hash(_system_clang_identity(), h))
     return string(h, base=16)
+end
+
+const _SYSTEM_CLANG_ID = Ref{String}("")
+
+"""The system `clang++ --version` first line, memoized; `""` if it cannot be run."""
+function _system_clang_identity()::String
+    isempty(_SYSTEM_CLANG_ID[]) || return _SYSTEM_CLANG_ID[]
+    (out, rc) = try
+        BuildBridge.execute("clang++", ["--version"])
+    catch
+        ("", 1)
+    end
+    _SYSTEM_CLANG_ID[] = rc == 0 ? String(strip(first(split(out, '\n')))) : "unavailable"
+    return _SYSTEM_CLANG_ID[]
 end
 
 """
@@ -579,11 +597,23 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
         ["-o", ir_file, cpp_file]
     )
 
-    # Use Julia's internal Clang for C so the IR matches Julia's LLVM version.
-    # Shared with create_library — both ends of the C bucket must agree on the
-    # compiler, which is exactly what they did not do before (see the helper).
+    # The C BUCKET is a property of the package, not of the file extension. A C
+    # package compiles with Julia's internal Clang so the IR matches Julia's LLVM,
+    # which then links and optimizes it in-process (shared with create_library:
+    # both ends must agree on the compiler — see the helper).
+    #
+    # A C++ package links through the SYSTEM llvm-link/opt, so its `.c` files must
+    # come from the system clang too: one LLVM per module. Routing them to the JLL
+    # clang 18 handed LLVM 23's llvm-link IR whose debug info it rejects
+    # ("Function-local variables are not allowed in a DICompileUnit's global
+    # variables list"), and it then drops ALL of that file's debug info with only
+    # a warning. llama.cpp lost every ggml.c signature to "inferred" that way:
+    # ggml_version wrapped as returning Cint. `_assert_debug_info_kept` makes that
+    # loud should any other mix reach the linker.
     compiler = endswith(cpp_file, ".c") ? "clang" : "clang++"
-    (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
+    (output, exitcode) = config.wrap.language == :c ?
+        _clang_for_c_bucket(compiler, cmd_args) :
+        BuildBridge.execute(compiler, cmd_args)
 
     if !isempty(output) && exitcode != 0
         println("  $(basename(cpp_file)): $output")
@@ -747,6 +777,7 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         end
         llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
         (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
+        _assert_debug_info_kept(output, "llvm-link")
 
         if exitcode != 0 || !isfile(linked_ir)
             # llvm-link crashed or failed (common with very large IR modules).
@@ -1310,14 +1341,21 @@ function _pe_export_intent(ir_files::Vector{String})
     saw_foreign_export = false
     for f in ir_files
         isfile(f) || continue
-        for line in eachline(f)
-            is_shim = occursin("replibuild_shim_", line)
-            is_shim && (saw_shim = true)
-            if occursin("dllexport", line) && !is_shim
-                saw_foreign_export = true
+        # Not `eachline(f)`: that closes the file only once exhausted, so the early
+        # return below left it open, and on Windows an open handle blocks deletion.
+        io = open(f)
+        try
+            for line in eachline(io)
+                is_shim = occursin("replibuild_shim_", line)
+                is_shim && (saw_shim = true)
+                if occursin("dllexport", line) && !is_shim
+                    saw_foreign_export = true
+                end
+                (saw_shim && saw_foreign_export) &&
+                    return (; saw_shim, saw_foreign_export)
             end
-            (saw_shim && saw_foreign_export) &&
-                return (; saw_shim, saw_foreign_export)
+        finally
+            close(io)
         end
     end
     return (; saw_shim, saw_foreign_export)
@@ -1336,6 +1374,48 @@ function _is_source_location_exhaustion(output::AbstractString)::Bool
     return occursin("ran out of source locations", output) ||
            occursin("translation unit is too large", output)
 end
+
+"""
+    _assert_debug_info_kept(tool_output, stage)
+
+Fail the build when an LLVM tool reports that it dropped a module's debug info.
+
+LLVM verifies debug metadata when it reads IR, and on a failure it prints
+`warning: ignoring invalid debug info in <file>`, strips every `!dbg` from that
+module, and carries on with exit 0. DWARF is the source of truth for the wrapper,
+so every function from that file then wraps from an inferred signature: wrong
+types, no error. It happens when IR from one LLVM is read by a newer one with
+stricter rules (JLL clang 18 IR into LLVM 23's llvm-link).
+"""
+function _assert_debug_info_kept(tool_output::AbstractString, stage::AbstractString)
+    dropped = [strip(m.captures[1]) for m in eachmatch(r"ignoring invalid debug info in (.+)", tool_output)]
+    isempty(dropped) && return nothing
+    head = join(first(split(tool_output, '\n'), 6), "\n  ")
+    error("""
+          $stage dropped the debug info of $(length(dropped)) module(s):
+            $(join(dropped, "\n            "))
+          Their functions would wrap from inferred signatures (wrong types, no
+          error). The IR was produced by a different LLVM than the one reading it;
+          every translation unit of a package must come from one toolchain.
+          $head""")
+end
+
+"""
+    _codegen_opt_flags(config) -> Vector{String}
+
+Optimization flags for turning IR into machine code (`create_library` and its
+per-TU fallback). The IR is already optimized — per TU by `[compile] flags`, then
+linked and run through opt at `[link] optimization_level` — so clang gets that
+same `-O` for instruction selection and register allocation, with
+`-disable-llvm-passes` so the IR pipeline is not run a second time.
+
+With no `-O` at all, clang compiled optimized IR with the `-O0` backend: FastISel
+and the fast register allocator, i.e. spill-heavy code in every shipped library,
+and on LLVM 23 a backend crash ("Cannot emit physreg copy instruction") in
+llama.cpp's `llama_kv_cache::find_slot` on Windows.
+"""
+_codegen_opt_flags(config::RepliBuildConfig) =
+    ["-O$(config.link.optimization_level)", "-Xclang", "-disable-llvm-passes"]
 
 """
     _compile_ir_to_objects(config, ir_files, compiler) -> Vector{String}
@@ -1371,7 +1451,8 @@ function _compile_ir_to_objects(config::RepliBuildConfig, ir_files::Vector{Strin
     # processes, so the concurrency that matters is how many clangs are resident
     # at once — each carries a whole module's debug info.
     asyncmap(todo; ntasks=max(1, Sys.CPU_THREADS)) do i
-        (out, code) = _clang_for_c_bucket(compiler, ["-c", "-fPIC", ir_files[i], "-o", objs[i]])
+        (out, code) = _clang_for_c_bucket(compiler, vcat(["-c", "-fPIC"], _codegen_opt_flags(config),
+                                                         [ir_files[i], "-o", objs[i]]))
         n = Threads.atomic_add!(done, 1) + 1
         if code != 0
             lock(lk) do
@@ -1391,6 +1472,104 @@ function _compile_ir_to_objects(config::RepliBuildConfig, ir_files::Vector{Strin
         $(join(last(split(out, '\n'), 20), "\n"))""")
     end
     return objs
+end
+
+# =============================================================================
+# libc++ MEMBERS THE STL PATH BINDS MUST BE EXPORTED
+# -----------------------------------------------------------------------------
+# libc++ 23 opens every `std` namespace block with
+#
+#   #pragma clang attribute _LibcxxExplicitABIAnnotations.push(
+#     __attribute__((__exclude_from_explicit_instantiation__,
+#                    __visibility__("hidden"), __abi_tag__(...))), apply_to = function)
+#
+# (`__configuration/namespace.h`). Every libc++ function without an explicit
+# annotation is therefore hidden: on COFF too, where the per-platform
+# `_LIBCPP_HIDDEN` is empty, and with no macro to opt out
+# (`_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS` does not reach the pragma). On MinGW
+# clang turns hidden into a `-exclude-symbols:` linker directive, so
+# `std::vector<int>::vector()` was a `T` in nm and absent from the DLL's export
+# directory. The STL thunks could not bind it, the JIT module failed, and every
+# Tier-2 function of the library went with it. stl_test: 513 exports and 28/28
+# on LLVM 22; 222 exports on LLVM 23, every STL call "Symbol not found".
+#
+# So, for packages that bind STL members, hidden libc++ definitions are made
+# default visibility in the IR before codegen, which is the export table LLVM 22
+# produced. Only `define` lines of `std::__N` names change: a package's own
+# `-fvisibility=hidden`, clang's helpers (`__clang_call_terminate`) and
+# function-local entities (`_ZZ…`) keep their visibility.
+# =============================================================================
+
+"A hidden function definition in libc++'s versioned namespace (`std::__1`, `__2`, …)."
+const _LIBCXX_HIDDEN_DEFINE = r"^define ((?:\w+ )*?)hidden ([^@]*@_ZN[rVK]*[RO]?St3__[0-9])"
+
+_maybe_hidden_define(line::AbstractString) =
+    startswith(line, "define ") && occursin("hidden", line)
+
+"True if the IR file holds at least one hidden libc++ definition. Stops at the first."
+function _has_hidden_libcxx(path::String)
+    open(path) do io
+        for line in eachline(io)
+            _maybe_hidden_define(line) && occursin(_LIBCXX_HIDDEN_DEFINE, line) && return true
+        end
+        return false
+    end
+end
+
+"""
+    _unhide_libcxx_ir(files, out_dir) -> (files_out, n)
+
+Copies of the IR `files` with every hidden libc++ function definition made default
+visibility, written to `out_dir`, and how many definitions changed. A file with
+none is returned as itself and not copied. A copy at least as new as its input is
+reused, which keeps `_compile_ir_to_objects`'s mtime reuse working on the per-TU
+fallback. Every other line is copied byte for byte.
+"""
+function _unhide_libcxx_ir(files::Vector{String}, out_dir::String)
+    out = String[]
+    total = 0
+    for f in files
+        dst = joinpath(out_dir, basename(f))
+        if isfile(dst) && mtime(dst) >= mtime(f)
+            push!(out, dst)
+            continue
+        end
+        if !_has_hidden_libcxx(f)
+            push!(out, f)
+            continue
+        end
+        mkpath(out_dir)
+        n = 0
+        open(f) do src
+            open(dst, "w") do io
+                for line in eachline(src; keep=true)
+                    if _maybe_hidden_define(line)
+                        rewritten = replace(line, _LIBCXX_HIDDEN_DEFINE => s"define \1\2")
+                        rewritten == line || (n += 1)
+                        line = rewritten
+                    end
+                    write(io, line)
+                end
+            end
+        end
+        total += n
+        push!(out, dst)
+    end
+    return (out, total)
+end
+
+"""
+    _stl_exportable_ir(config, files) -> Vector{String}
+
+`files`, with libc++'s hidden members made exportable when the package binds STL
+members, i.e. C++ with `[types] templates`. Nothing else asks a thunk to call
+libc++ by name, so every other package keeps the export table it had.
+"""
+function _stl_exportable_ir(config::RepliBuildConfig, files::Vector{String})
+    (config.wrap.language == :c || isempty(config.types.templates)) && return files
+    (out, n) = _unhide_libcxx_ir(files, joinpath(get_build_path(config), "libcxx_exported"))
+    n > 0 && println("  link: $n libc++ member(s) made exportable for [types] templates")
+    return out
 end
 
 """
@@ -1414,6 +1593,10 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         end
     end
 
+    # The last point before codegen turns libc++'s hidden visibility into
+    # `-exclude-symbols:` (see _LIBCXX_HIDDEN_DEFINE).
+    files = _stl_exportable_ir(config, files)
+
     # Determine library name
     if isempty(lib_name)
         lib_name = get_library_name(config)
@@ -1432,6 +1615,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     cmd_head = [
         "-shared",  # Create shared library
         "-fPIC",    # Position independent code
+        _codegen_opt_flags(config)...,   # codegen at the link level, IR passes off
     ]
     cmd_tail = ["-o", lib_path]
     cmd_args = copy(cmd_head)
@@ -1501,6 +1685,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     compiler = config.wrap.language == :c ? "clang" : "clang++"
     cmd_args = vcat(cmd_head, files, cmd_tail)
     (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
+    _assert_debug_info_kept(output, "clang (IR -> library)")
 
     # ── Source-location fallback ─────────────────────────────────────────────
     # Clang re-parses the linked module as ONE translation unit and allocates a
@@ -1527,7 +1712,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         # Prefer the unmerged per-TU list when the caller supplied one: `files`
         # here is usually the single merged module, and splitting THAT is not
         # possible — the whole point is to never hand clang the merge.
-        split_inputs = !isempty(per_tu_ir) ? per_tu_ir : files
+        split_inputs = _stl_exportable_ir(config, !isempty(per_tu_ir) ? per_tu_ir : files)
         if length(split_inputs) <= 1
             error("""
             Library creation failed: clang ran out of source locations, and there
@@ -1553,7 +1738,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         error("Library file not created: $lib_path")
     end
 
-    _assert_library_resolves(lib_path)
+    _assert_library_resolves(lib_path; preload = _link_dir_dlls(config))
 
     size_mb = round(filesize(lib_path) / 1024 / 1024, digits=2)
     println("  link: $lib_name ($size_mb MB)")
@@ -1583,20 +1768,60 @@ names the first offending symbol. `RTLD_LOCAL` + `dlclose` keeps the probe from
 leaking the library into this process's namespace — the same scoping discipline
 the Tier-1 slice pre-flight uses.
 """
-function _assert_library_resolves(lib_path::AbstractString)
-    handle = try
-        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
-    catch e
-        error("""
-              Linked library has unresolved symbols: $(basename(lib_path))
-                $(sprint(showerror, e))
-              The link step succeeded — `ld -shared` permits undefined symbols —
-              but nothing can supply these at load time. Usually a source file
-              excluded in replibuild.toml that something still calls, or a
-              missing entry in [link] link_libraries.""")
+function _assert_library_resolves(lib_path::AbstractString; preload::Vector{String}=String[])
+    # `preload`: the link-dir DLLs a wrapper opens first on Windows
+    # (`_link_dir_dlls`); the probe has to see the process the wrapper will.
+    deps = Ptr{Cvoid}[]
+    try
+        for p in preload
+            push!(deps, Libdl.dlopen(p, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL))
+        end
+        handle = try
+            Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+        catch e
+            error("""
+                  Linked library has unresolved symbols: $(basename(lib_path))
+                    $(sprint(showerror, e))
+                  The link step succeeded — `ld -shared` permits undefined symbols —
+                  but nothing can supply these at load time. Usually a source file
+                  excluded in replibuild.toml that something still calls, or a
+                  missing entry in [link] link_libraries.""")
+        end
+        Libdl.dlclose(handle)
+    finally
+        foreach(Libdl.dlclose, deps)
     end
-    Libdl.dlclose(handle)
     return nothing
+end
+
+"""
+    _link_dir_dlls(config) -> Vector{String}
+
+On Windows, the DLLs `[link] link_libraries` names inside `[link] link_dirs`, as
+absolute paths (relative dirs against the project root); empty elsewhere.
+
+PE has no RUNPATH. `-L../glfw/julia -lglfw` links imgui against the Hub glfw's
+`libglfw.dll`, and then the loader cannot find it: "The specified module could
+not be found". Windows does bind an import to a module already loaded under that
+name, so opening these by absolute path before the library is the PE counterpart
+of the rpath ELF gets, and keeps one copy of process-global state like glfw's.
+"""
+function _link_dir_dlls(config::RepliBuildConfig)::Vector{String}
+    Sys.iswindows() || return String[]
+    found = String[]
+    for dir in config.link.link_dirs
+        d = isabspath(dir) ? dir : joinpath(config.project.root, dir)
+        for lib in config.link.link_libraries
+            for cand in ("lib$lib.dll", "$lib.dll")
+                p = normpath(joinpath(d, cand))
+                if isfile(p)
+                    push!(found, p)
+                    break
+                end
+            end
+        end
+    end
+    return unique(found)
 end
 
 """
@@ -2157,20 +2382,9 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     functions isa Vector || return
 
     # `dlsym` sees the dynamic table on ELF; a PE has none, and the export directory
-    # is the equivalent authority there (`_pe_exported_names` returns nothing off PE).
-    pe_exports = _pe_exported_names(binary_path)
-    reachable = if pe_exports === nothing
-        (out, rc) = BuildBridge.execute("nm", ["-D", "--defined-only", binary_path])
-        rc == 0 || return   # cannot ask the question ⇒ assert nothing
-        names = Set{String}()
-        for line in split(out, '\n')
-            parts = split(strip(line))
-            length(parts) >= 3 && push!(names, String(parts[3]))
-        end
-        names
-    else
-        pe_exports
-    end
+    # is the equivalent authority there.
+    reachable = _runtime_symbol_names(binary_path)
+    reachable === nothing && return   # cannot ask the question ⇒ assert nothing
     isempty(reachable) && return
 
     promoted_count = count(startswith(s, "__rb_") for s in reachable)
@@ -2603,7 +2817,8 @@ end
 
 """
 Extract STL method symbols from the compiled binary.
-Uses nm to find mangled names of template-instantiated STL methods.
+Uses nm to find mangled names of template-instantiated STL methods, keeping only
+the ones the loader can bind (see `_stl_methods_from_nm`).
 Returns Dict mapping normalized container type -> vector of method info dicts.
 """
 function extract_stl_method_symbols(binary_path::String, templates::Vector{String})::Dict{String,Any}
@@ -2624,6 +2839,37 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
         return Dict{String,Any}()
     end
 
+    (stl_methods, unbindable) = _stl_methods_from_nm(mangled_output, demangled_output, templates;
+                                                     runtime = _runtime_symbol_names(binary_path))
+    if !isempty(unbindable)
+        shown = join(first(unbindable, 8), "\n  ")
+        more = length(unbindable) > 8 ? "\n  … and $(length(unbindable) - 8) more" : ""
+        @warn "STL: $(length(unbindable)) member(s) of [types] templates are in the symbol " *
+              "table but not among the library's runtime symbols, so no thunk can bind " *
+              "them; the wrapper leaves them out:\n  $shown$more"
+    end
+    return stl_methods
+end
+
+"""
+    _stl_methods_from_nm(mangled_output, demangled_output, templates; runtime=nothing)
+        -> (stl_methods, unbindable)
+
+The STL method table, read from `nm -g --defined-only` output (mangled and `-C`).
+
+`runtime` is `_runtime_symbol_names` of the same binary. A symbol outside it is
+skipped: its thunk would call a name the loader cannot bind, and one such thunk
+fails the library's whole JIT module, so every Tier-2 function of the library
+goes down with it. That is what libc++ 23 did on Windows — its members were
+`T` in nm and absent from the export directory. `nothing` keeps nm's answer.
+
+`unbindable` names each `Container::method` that had symbols but no bindable
+variant, for the caller to report. A method whose other variant binds (a C1
+constructor beside an exported C2) is not unbindable.
+"""
+function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::AbstractString,
+                              templates::Vector{String};
+                              runtime::Union{Nothing,AbstractSet{<:AbstractString}}=nothing)
     # Build address -> mangled mapping (include T and W symbol types)
     address_to_mangled = Dict{String,String}()
     address_to_type = Dict{String,String}()
@@ -2653,6 +2899,7 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
     @debug "STL template set: $template_set"
 
     stl_methods = Dict{String,Any}()
+    skipped = Set{Tuple{String,String}}()   # (container, method) with an unbindable symbol
 
     for line in split(demangled_output, '\n')
         line = strip(line)
@@ -2698,6 +2945,13 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
             end
         end
 
+        # Before the dedup below, so an unbindable variant cannot shadow a
+        # bindable one (C1 first in nm, only C2 exported).
+        if runtime !== nothing && !(mangled in runtime)
+            push!(skipped, (container_normalized, method_name))
+            continue
+        end
+
         # Store (deduplicate: keep first match per method name per container)
         if !haskey(stl_methods, container_normalized)
             stl_methods[container_normalized] = Dict{String,Any}[]
@@ -2718,7 +2972,9 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
         ))
     end
 
-    return stl_methods
+    kept(c, m) = any(x -> get(x, "method", "") == m, get(stl_methods, c, Dict{String,Any}[]))
+    unbindable = sort!([string(c, "::", m) for (c, m) in skipped if !kept(c, m)])
+    return (stl_methods, unbindable)
 end
 
 """
@@ -3062,6 +3318,53 @@ end
 # =============================================================================
 
 """
+    _nm_dynamic_names(nm_output) -> Set{String}
+
+The names in `nm -D --defined-only` output (mangled, never `--demangle`), with any
+ELF symbol-version suffix cut. GNU nm prints a versioned definition as
+`deflate@@ZLIB_1.2.0` (or `name@VER` for a non-default version), but the loader
+binds, and DWARF names, `deflate`. Left on, every symbol of a library built with
+a version script looked absent. A mangled name never contains `@`, so cutting at
+the first one is exact; demangled output can (`basic_format_arg@fmt`), which is
+why this takes mangled output only.
+"""
+function _nm_dynamic_names(nm_output::AbstractString)
+    names = Set{String}()
+    for line in eachsplit(nm_output, '\n')
+        parts = split(strip(line))
+        length(parts) >= 3 || continue
+        push!(names, String(first(split(parts[3], '@'))))
+    end
+    return names
+end
+
+"""
+    _pe_crt_dll(binary_path) -> Union{Nothing,String}
+
+The C runtime a PE binary allocates from, as the DLL to resolve `free` in:
+`"ucrtbase.dll"` when it imports the UCRT (`api-ms-win-crt-*`, which every
+CLANG64-built library does), `"msvcrt.dll"` when it imports that, `nothing` off
+Windows or when the import table cannot be read.
+
+Julia itself is linked against msvcrt.dll, so `Libc.free` on memory such a library
+malloc'd frees into the wrong heap and the process dies with
+STATUS_HEAP_CORRUPTION. Generated wrappers free through this DLL instead
+(`libc_free`).
+"""
+function _pe_crt_dll(binary_path::String)
+    Sys.iswindows() || return nothing
+    out = try
+        readchomp(pipeline(ignorestatus(`$(_gnu_objdump()) -p $binary_path`), stderr = devnull))
+    catch
+        return nothing
+    end
+    imports = Set(lowercase(m.captures[1]) for m in eachmatch(r"DLL Name:\s*(\S+)", out))
+    any(d -> startswith(d, "api-ms-win-crt-") || d == "ucrtbase.dll", imports) && return "ucrtbase.dll"
+    "msvcrt.dll" in imports && return "msvcrt.dll"
+    return nothing
+end
+
+"""
     _pe_exported_names(binary_path) -> Union{Nothing,Set{String}}
 
 The names in a PE binary's export directory, or `nothing` when the question
@@ -3105,6 +3408,24 @@ function _pe_exported_names(binary_path::String)
     end
 
     return isempty(names) ? nothing : names
+end
+
+"""
+    _runtime_symbol_names(binary_path) -> Union{Nothing,Set{String}}
+
+The names a loader can bind in `binary_path`: the PE export directory on Windows,
+the dynamic symbol table (`nm -D`) elsewhere. `nothing` when neither could be
+read, which callers treat as "do not filter".
+
+This is the set a thunk's target has to be in. `nm -g` is not: on PE it reads the
+COFF symbol table, where a function the DLL does not export is still a global `T`.
+"""
+function _runtime_symbol_names(binary_path::String)
+    pe = _pe_exported_names(binary_path)
+    pe === nothing || return pe
+    (out, rc) = BuildBridge.execute("nm", ["-D", "--defined-only", binary_path])
+    rc == 0 || return nothing
+    return _nm_dynamic_names(out)
 end
 
 """

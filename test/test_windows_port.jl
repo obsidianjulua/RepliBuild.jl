@@ -306,4 +306,190 @@ const LE = RepliBuild.LLVMEnvironment
             @test !i4.saw_foreign_export
         end
     end
+
+    # The early return in _pe_export_intent left that file open: `eachline(path)`
+    # closes only once exhausted. On Windows an open handle blocks deletion, which
+    # surfaced as EBUSY when the testset above cleaned its temp dir, and the same
+    # handle sat on IR in the build tree. POSIX unlinks an open file, so this is
+    # only a live check on Windows; it holds on both.
+    @testset "_pe_export_intent closes the file it returns from" begin
+        mktempdir() do dir
+            explicit = joinpath(dir, "explicit.ll")
+            write(explicit, "define dllexport i32 @lib_a() {\n  ret i32 1\n}\n")
+            shim = joinpath(dir, "shim.ll")
+            write(shim, "define dllexport i32 @replibuild_shim_X() {\n  ret i32 8\n}\n")
+            i = C._pe_export_intent([explicit, shim])   # returns while reading `shim`
+            @test i.saw_shim && i.saw_foreign_export
+            @test (rm(shim); !isfile(shim))
+        end
+    end
+
+    # A thunk calls a vmethod by name, so its symbol must be one the loader binds.
+    # The same hidden method is a local `t` in ELF's nm output and a global `T` in a
+    # DLL's COFF symbol table; only the PE export directory tells them apart there.
+    @testset "vmethod addresses are gated to what the loader can bind" begin
+        DP = RepliBuild.DWARFParser
+        exported = Set(["_ZN6Widget4drawEv", "_ZN6Widget4sizeEv"])
+
+        elf_nm = """
+        0000000000001130 T _ZN6Widget4drawEv
+        0000000000001150 t _ZN8Internal4tickEv
+        0000000000001170 W _ZN6Widget4sizeEv
+        """
+        pe_nm = """
+        0000000180001130 T _ZN6Widget4drawEv
+        0000000180001150 T _ZN8Internal4tickEv
+        0000000180001170 T _ZN6Widget4sizeEv
+        """
+
+        # ELF: the [TW] filter already drops the hidden method; no export set needed.
+        (_, elf) = DP.parse_symbol_table(elf_nm)
+        @test Set(keys(DP._gate_to_exports(elf, nothing))) == exported
+
+        # PE: nm alone keeps it (the defect), the export directory removes it.
+        (_, pe) = DP.parse_symbol_table(pe_nm)
+        @test haskey(pe, "_ZN8Internal4tickEv")
+        gated = DP._gate_to_exports(pe, exported)
+        @test Set(keys(gated)) == exported
+        @test gated["_ZN6Widget4drawEv"] == 0x0000000180001130   # addresses survive
+
+        # An unreadable export directory must not empty the table.
+        @test DP._gate_to_exports(pe, nothing) == pe
+    end
+
+    # The ELF half of "what the loader binds": GNU nm -D appends the symbol
+    # version, and the guard compares against unversioned DWARF names.
+    @testset "nm -D names lose their ELF version suffix" begin
+        out = """
+        0000000000002a40 T deflate@@ZLIB_1.2.0
+        0000000000002b10 T inflate@ZLIB_1.0
+        0000000000003000 T _ZN3zip6Writer5flushEv
+        0000000000004000 B zlib_debug_level
+        """
+        @test C._nm_dynamic_names(out) ==
+              Set(["deflate", "inflate", "_ZN3zip6Writer5flushEv", "zlib_debug_level"])
+        @test isempty(C._nm_dynamic_names(""))
+    end
+
+    # Windows temp dirs live under the user profile; SYSCONFIG.md recorded
+    # `C:/Users/<name>/AppData/Local/Temp/curl_harvest_…` in a tracked file.
+    @testset "SYSCONFIG.md paths hide the temp and home prefixes" begin
+        dp(p) = RepliBuild.SysConfigGen._display_path(p; tmp="/h/me/tmp/", home="/h/me")
+        @test dp("/h/me/tmp/curl_harvest_x") == "<tmp>/curl_harvest_x"   # temp wins over home
+        @test dp("/h/me/src/curl") == "~/src/curl"
+        @test dp("/h/me") == "~"
+        @test dp("/h/meant/x") == "/h/meant/x"                          # prefix, not a parent
+        @test dp("/opt/curl") == "/opt/curl"
+        # Windows paths fold case; POSIX ones do not.
+        @test dp("/H/ME/TMP/x") == (Sys.iswindows() ? "<tmp>/x" : "/H/ME/TMP/x")
+        # The real defaults redact the real temp dir.
+        @test startswith(RepliBuild.SysConfigGen._display_path(joinpath(tempdir(), "probe")), "<tmp>")
+    end
+
+    # CMake OBJECT libraries: curl compiles its code into libcurl_object (no
+    # <target>_EXPORTS, so it classifies static) and libcurl_shared compiles a
+    # stub. main_target keeps preferring shared; the probe now says so.
+    @testset "SysConfigGen flags a shared stub fed by an object library" begin
+        S = RepliBuild.SysConfigGen
+        tgt(name, kind, n) = S.CMakeTarget(name, kind, ["lib/f$i.c" for i in 1:n],
+                                           String[], String[], 1, String[])
+        stub = tgt("libcurl_shared", :shared, 2)
+        obj  = tgt("libcurl_object", :static, 190)
+        probe(ts) = S.CMakeProbe("curl", "/src", "/build", String[], String[], String[],
+                                 String[], String[], ts, String[], "4.4.4", S.Dates.now())
+        p = probe([stub, obj])
+        @test S.main_target(p) === stub                       # selection is unchanged
+        hint = S._object_library_hint(p, stub)
+        @test hint !== nothing && occursin("target=\"libcurl_object\"", hint)
+        @test occursin("NOTE:", sprint(show, p))
+        # A real shared library that is simply the biggest target gets no note.
+        whole = tgt("cmark", :shared, 19)
+        @test S._object_library_hint(probe([whole, tgt("cmark_exe", :static, 1)]), whole) === nothing
+    end
+
+    # PE has no RUNPATH: a library linked against another Hub package's DLL through
+    # [link] link_dirs cannot load unless that DLL is already in the process
+    # (imgui -> packages/glfw/julia/libglfw.dll).
+    @testset "link_dirs DLLs are preloaded on Windows" begin
+        mktempdir() do dir
+            depdir = joinpath(dir, "dep", "julia"); mkpath(depdir)
+            write(joinpath(depdir, "libdep.dll"), "")      # only existence is probed
+            pkg = joinpath(dir, "pkg"); mkpath(pkg)
+            toml = joinpath(pkg, "replibuild.toml")
+            write(toml, """
+            [project]
+            name = "linkdirprobe"
+            root = "."
+            [link]
+            link_libraries = ["dep", "absent"]
+            link_dirs = ["../dep/julia"]
+            """)
+            cfg = CM.load_config(toml)
+            dlls = C._link_dir_dlls(cfg)
+            snippet = RepliBuild.Wrapper._link_dir_preload_snippet(cfg)
+            if Sys.iswindows()
+                @test length(dlls) == 1
+                @test normpath(only(dlls)) == normpath(joinpath(depdir, "libdep.dll"))
+                @test occursin("joinpath(@__DIR__, basename(_dll))", snippet)   # sibling first
+                ex = Meta.parseall(snippet)
+                @test !any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)
+            else
+                @test isempty(dlls)        # ELF has the rpath; nothing to preload
+                @test isempty(snippet)
+            end
+        end
+    end
+
+    # NTFS (and default APFS) fold case. Slice files named by raw symbol let lua's
+    # LUA_YIELD and lua_yield share one file, and the later write won.
+    @testset "slice file names stay distinct under case folding" begin
+        stem = RepliBuild.Slicer.slice_file_stem
+        names = ["replibuild_shim_LUA_YIELD", "replibuild_shim_lua_yield",
+                 "replibuild_shim_Lua_Yield", "lua_resume", "luaL_checkversion_"]
+        stems = stem.(names)
+        @test length(unique(lowercase.(stems))) == length(names)
+        @test stem("lua_resume") == "lua_resume"            # lowercase names keep their file
+        @test stem("luaL_checkversion_") == stem("luaL_checkversion_")   # deterministic
+        @test startswith(stem("replibuild_shim_LUA_YIELD"), "replibuild_shim_LUA_YIELD-")
+        # The wrapper's path expression and the writer agree on the file.
+        @test occursin("\"$(stem("replibuild_shim_LUA_YIELD")).ll\"",
+                       RepliBuild.Wrapper._slice_path_expr("replibuild_shim_LUA_YIELD"))
+    end
+
+    # Julia links msvcrt.dll; a CLANG64-built DLL allocates from the UCRT. Freeing
+    # one heap's memory into the other is STATUS_HEAP_CORRUPTION (mpack's growable
+    # writer, freed with Libc.free). Wrappers free through the library's runtime.
+    @testset "libc_free frees through the library's C runtime" begin
+        W = RepliBuild.Wrapper
+        ucrt = W._libc_free_block("libx.dll"; crt_dll="ucrtbase.dll")
+        same = W._libc_free_block("libx.so"; crt_dll=nothing)
+        for src in (ucrt, same)
+            ex = Meta.parseall(src)
+            @test !any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)
+        end
+        @test occursin("ccall((:free, \"ucrtbase.dll\")", ucrt)
+        @test occursin("libc_free(ptr::Ptr) = Libc.free(ptr)", same)
+
+        # A plain `free` owner goes through libc_free; a library deallocator
+        # keeps resolving through the library.
+        @test occursin("libc_free(ptr)", W._cstring_policy_lines("free"))
+        @test !occursin("(:free, LIBRARY_PATH)", W._cstring_policy_lines("free"))
+        @test occursin("(:cJSON_free, LIBRARY_PATH)", W._cstring_policy_lines("cJSON_free"))
+
+        if Sys.iswindows()
+            # The emitted function really releases a UCRT allocation in this
+            # process (Libc.free on the same pointer is the crash).
+            m = Module(:LibcFreeProbe)
+            Base.include_string(m, ucrt)
+            libc_free = Base.invokelatest(getglobal, m, :libc_free)   # defined in a newer world
+            p = ccall((:malloc, "ucrtbase.dll"), Ptr{Cvoid}, (Csize_t,), 64)
+            @test p != C_NULL
+            Base.invokelatest(libc_free, p)
+            @test true
+            # Cstring is what the cstring policy hands it.
+            s = ccall((:_strdup, "ucrtbase.dll"), Cstring, (Cstring,), "owned")
+            Base.invokelatest(libc_free, s)
+            @test true
+        end
+    end
 end

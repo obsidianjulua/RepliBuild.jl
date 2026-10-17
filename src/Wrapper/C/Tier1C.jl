@@ -133,7 +133,7 @@ once for the `include_dependency` that makes the file a precompile dependency �
 so both must be built from here rather than written out twice.
 """
 _slice_path_expr(mangled::AbstractString) =
-    "joinpath(@__DIR__, \"slices\", \"$mangled.ll\")"
+    "joinpath(@__DIR__, \"slices\", \"$(Slicer.slice_file_stem(mangled)).ll\")"
 
 """
     _slice_const_name!(taken, mangled) -> String
@@ -445,20 +445,21 @@ function _tier1_emit_slices!(config::RepliBuildConfig, func_chunks::Vector{Strin
         occursin("@generated function _TIER1_", chunk) || continue
 
         for m in eachmatch(r"^const (_SLICE_\w+) = joinpath\(@__DIR__, \"slices\", \"([^\"]+)\.ll\"\)"m, chunk)
-            const_name, path_mangled = m.captures
+            const_name, path_stem = m.captures
             mangled = get(const_owner, const_name, nothing)
             mangled === nothing &&
                 error("Tier 1: emitted constant $const_name has no owning symbol — " *
                       "every slice const must come from _slice_const_name!")
-            mangled == path_mangled ||
+            stem = Slicer.slice_file_stem(mangled)
+            stem == path_stem ||
                 error("Tier 1: emitted constant $const_name points at " *
-                      "'$path_mangled.ll' but is owned by '$mangled' — the const " *
+                      "'$path_stem.ll' but is owned by '$mangled' — the const " *
                       "and its path have drifted apart")
             haskey(slice_ir, mangled) ||
                 error("Tier 1: emitted constant $const_name reads a slice for " *
                       "'$mangled', which the pre-pass never accepted")
             mangled in written && continue
-            write(joinpath(slices_dir, mangled * ".ll"), slice_ir[mangled])
+            write(joinpath(slices_dir, stem * ".ll"), slice_ir[mangled])
             push!(written, mangled)
             # Recorded off the IR being written, so the runtime check and the
             # file it guards cannot disagree (see _slice_declared_symbols).

@@ -206,6 +206,14 @@ include(joinpath(TEST_DIR, "callback_test", "test_exceptions.jl"))
 # so the next throw through a live JIT frame aborted with "pc not in table".
 include(joinpath(TEST_DIR, "test_jit_unwind.jl"))
 
+# ── 5c. AOT thunks end to end ────────────────────────────────────────────────
+# `[compile] aot_thunks = true` through discover → build → wrap on its own C++
+# fixture (test/aot_test/), cold and again once the thunk manifest exists. Calls
+# through the companion `_thunks` library in a child process: member, by-value
+# records, virtual override, and a C++ throw for every return shape. Placed
+# with §5/§5b, which drive the same thunks through the JIT.
+include(joinpath(TEST_DIR, "test_aot_thunks.jl"))
+
 # ── 6. JLCS dialect invariant probes ─────────────────────────────────────────
 # Definitive-trace probes that push specific dialect concerns (op arity
 # invariants, dead-producer ops) through parse → lower → emit. Self-skips

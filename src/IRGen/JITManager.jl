@@ -246,6 +246,31 @@ at compile time (ccall requires a concrete type, not a TypeVar).
 end
 
 """
+    _invoke_void(fptr, inner_ptrs)
+
+The void-return call, `void ciface(void** args)`: [`_invoke_call`](@ref)'s
+counterpart, shared the same way by `invoke` and both AOT forms.
+
+On Windows it goes through libJLCS's `jlcs_guard_void`, for the reason every
+`_invoke_call` return does. The dialect lowers `try_call` to a plain call there
+(an in-JIT landing pad AVs under SEH, see JlcsJIT.cpp), so the thunk does not
+catch, and the guard is the C++ frame that does. That lowering is the same for a
+thunk compiled into an AOT `_thunks` library. The AOT void forms used to call the
+thunk directly, so a void C++ function that threw unwound into Julia and the
+process died with no message (exit status 0x20474343, the SEH code of an
+uncaught C++ exception), where the JIT `invoke` raised CxxException for the same
+throw (`test_aot_thunks.jl`, probe `throw_void`).
+"""
+@generated function _invoke_void(fptr::Ptr{Cvoid}, inner_ptrs::Vector{Ptr{Cvoid}})
+    if Sys.iswindows()
+        lib = MLIRNative.libJLCS
+        return :(ccall((:jlcs_guard_void, $lib), Cvoid,
+                       (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, inner_ptrs))
+    end
+    return :(ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs))
+end
+
+"""
     _arg_marshal_plan(argtypes) -> (setup, ptr_exprs, preserve_syms)
 
 Build the argument-packing prologue shared by both `invoke` methods.
@@ -374,10 +399,7 @@ end
         $(setup...)
         inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
         GC.@preserve $(preserve_args...) inner_ptrs begin
-            $(Sys.iswindows() ?
-                :(ccall((:jlcs_guard_void, $(MLIRNative.libJLCS)), Cvoid,
-                        (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, inner_ptrs)) :
-                :(ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)))
+            _invoke_void(fptr, inner_ptrs)
         end
         _check_pending_exception()
         return nothing
@@ -472,7 +494,7 @@ Void-return form — no `Type` parameter, same as [`invoke`](@ref)'s.
         $(setup...)
         inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
         GC.@preserve $(preserve_args...) inner_ptrs begin
-            ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+            _invoke_void(fptr, inner_ptrs)
         end
         _check_pending_exception()
         return nothing
@@ -655,7 +677,7 @@ Void-return form — no `Type` parameter, same as [`invoke_aot`](@ref)'s.
         $(setup...)
         inner_ptrs = Ptr{Cvoid}[$(ptrs...)]
         GC.@preserve $(preserve_args...) inner_ptrs begin
-            ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs)
+            _invoke_void(fptr, inner_ptrs)
         end
         _check_pending_exception()
         return nothing

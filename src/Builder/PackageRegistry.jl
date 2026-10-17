@@ -279,8 +279,10 @@ directory has to actually be copied there. An absolute root is left alone:
 the build keeps using the original tree.
 """
 function _stage_registered_inputs!(orig_toml::String, dest_dir::String)
+    # Through the host's [platform.*] overlay, so an include dir only one host
+    # names is staged on that host.
     data = try
-        TOML.parsefile(orig_toml)
+        ConfigurationManager.apply_platform_overlay(TOML.parsefile(orig_toml), orig_toml)
     catch
         return
     end

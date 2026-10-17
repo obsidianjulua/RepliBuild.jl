@@ -63,8 +63,17 @@ end
                 break
             end
         end
-        if probe === nothing
-            @info "no pruned LLVM tool on PATH — skipping execute table-miss fallback probe"
+        # A table miss needs a table. With no LLVM toolchain RepliBuild accepts
+        # (the GitHub runners have clang-format but no LLVM 21+), get_tool raises
+        # before it can miss.
+        has_table = try
+            RepliBuild.LLVMEnvironment.get_toolchain()
+            true
+        catch
+            false
+        end
+        if probe === nothing || !has_table
+            @info "no pruned LLVM tool on PATH, or no toolchain table — skipping execute table-miss fallback probe"
         else
             @test isempty(RepliBuild.LLVMEnvironment.get_tool(probe))
             out, ec = RepliBuild.BuildBridge.execute(probe, ["--version"])

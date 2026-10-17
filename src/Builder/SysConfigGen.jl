@@ -187,6 +187,25 @@ function main_target(p::CMakeProbe; target::String="")
     return pool[argmax(map(t -> length(t.files), pool))]
 end
 
+"""
+    _object_library_hint(probe, chosen) -> Union{Nothing,String}
+
+A note when the chosen shared target is dwarfed by another target, which is what
+CMake's OBJECT-library pattern looks like from compile_commands.json: the code is
+compiled once into `foo_object` and the shared target compiles only a stub or two.
+CMake defines `<target>_EXPORTS` for SHARED targets alone, so the object library
+classifies as static and `main_target` picks the stub. Found on curl
+(`libcurl_shared`: 2 TUs, `libcurl_object`: ~190). Advisory only: which target
+owns the code is a link-graph fact compile_commands.json does not carry.
+"""
+function _object_library_hint(p::CMakeProbe, chosen::CMakeTarget)::Union{Nothing,String}
+    biggest = p.targets[argmax(map(t -> length(t.files), p.targets))]
+    (biggest === chosen || length(biggest.files) < 4 * max(1, length(chosen.files))) && return nothing
+    return "'$(chosen.name)' compiles $(length(chosen.files)) TU(s) but '$(biggest.name)' compiles " *
+           "$(length(biggest.files)): likely an OBJECT library linked into it. " *
+           "Re-run with target=\"$(biggest.name)\"."
+end
+
 function Base.show(io::IO, t::CMakeTarget)
     print(io, "$(t.name) [$(t.kind)] — $(length(t.files)) TUs, ",
               uniform(t) ? "uniform" : "$(t.flag_sets) flag sets")
@@ -221,6 +240,8 @@ function Base.show(io::IO, p::CMakeProbe)
                                   "NOT uniform, see flag sets above")
         println(io, "  Excludes:  $n_excl file(s) it never compiles")
         println(io, "  Defines:   $(join(mt.defines, " "))")
+        hint = _object_library_hint(p, mt)
+        hint === nothing || println(io, "  NOTE:      ", hint)
     end
     print(io, "  cmake $(p.cmake_version) @ $(Dates.format(p.probed_at, "yyyy-mm-dd HH:MM"))")
 end
@@ -249,6 +270,23 @@ _has_ext(path, exts) = lowercase(splitext(path)[2]) in exts
 # backslash is a legal character in a POSIX filename, so rewriting one off
 # Windows would corrupt a real name.
 _posix(p::AbstractString) = Sys.iswindows() ? replace(String(p), '\\' => '/') : String(p)
+
+# `p` as written into a checked-in file: the temp-dir prefix as `<tmp>` and the
+# home prefix as `~`. On Windows both sit under the user profile, so a raw path put
+# the harvesting account's name (`C:/Users/<name>/AppData/Local/Temp/…`) into every
+# SYSCONFIG.md. Windows paths compare case-insensitively.
+function _display_path(p::AbstractString; tmp::AbstractString=tempdir(), home::AbstractString=homedir())
+    s = _posix(p)
+    fold = Sys.iswindows() ? lowercase : identity
+    for (prefix, label) in ((tmp, "<tmp>"), (home, "~"))
+        pre = rstrip(_posix(prefix), '/')
+        isempty(pre) && continue
+        if fold(s) == fold(pre) || startswith(fold(s), fold(pre) * "/")
+            return label * s[ncodeunits(pre)+1:end]
+        end
+    end
+    return s
+end
 
 # `joinpath`, but always '/'-separated (see `_posix`) and keeping joinpath's
 # empty-prefix behaviour: `cmake_probe` defaults `clone_rel` to `""`, and
@@ -774,7 +812,7 @@ function capture_config(probe::CMakeProbe, out_dir::String;
                       probe.cmake_args)
         println(io, "                args=[", join(map(a -> "\"$a\"", argl),
                                                    ",\n                      "), "])")
-        println(io, "capture_config(p, \"config\"", layout === :auto ? "" : "; layout=:$layout",
+        println(io, "capture_config(p, \"$(basename(out_dir))\"", layout === :auto ? "" : "; layout=:$layout",
                     capture_scratch ? "; capture_scratch=true" : "", ")")
         println(io, "```\n")
         println(io, "Full cmake argument set used:\n")
@@ -786,7 +824,7 @@ function capture_config(probe::CMakeProbe, out_dir::String;
         println(io, "It travels with the package, so the build is reproducible — but it is a")
         println(io, "single-target pin, which matches the Hub. Regenerate on a version bump and")
         println(io, "diff: a changed `SIZEOF_*` or a vanished `USE_*` is real news.\n")
-        println(io, "Captured from `$(probe.source_dir)` on ",
+        println(io, "Captured from `$(_display_path(probe.source_dir))` on ",
                     Dates.format(probe.probed_at, "yyyy-mm-dd"),
                     ", cmake $(probe.cmake_version), ", Sys.MACHINE, ".")
     end
@@ -888,6 +926,8 @@ function toml_fragment(probe::CMakeProbe;
     println(io, "# ── proposed by RepliBuild.SysConfigGen.toml_fragment ───────────────────")
     println(io, "# cmake $(probe.cmake_version), probed $(Dates.format(probe.probed_at, "yyyy-mm-dd")).")
     println(io, "# Target '$(t.name)' [$(t.kind)]: $(length(t.files)) TUs.")
+    hint = isempty(target) ? _object_library_hint(probe, t) : nothing
+    hint === nothing || println(io, "# NOTE: ", hint)
     if uniform(t)
         println(io, "# ONE flag set across all of them — admissible for the source build.")
     else

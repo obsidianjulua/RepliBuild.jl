@@ -68,6 +68,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/ExecutionEngine/JITEventListener.h"
 #include "llvm/ExecutionEngine/Orc/AbsoluteSymbols.h"
 #include "llvm/ExecutionEngine/Orc/CompileUtils.h"
@@ -466,6 +467,17 @@ jlcsEngineCreate(mlir::ModuleOp op, int optLevel, bool dumpObject,
     return std::unique_ptr<llvm::orc::ObjectLayer>(std::move(objectLayer));
   };
 
+#if LLVM_VERSION_MAJOR >= 23
+  // LLVM 23 also hands the creator the JITLink memory manager. RuntimeDyld
+  // brings its own (makeMemoryManager above), so it is ignored here.
+  auto linkingLayerCreator = [&](ExecutionSession &session,
+                                 llvm::jitlink::JITLinkMemoryManager &) {
+    return objectLinkingLayerCreator(session);
+  };
+#else
+  auto &linkingLayerCreator = objectLinkingLayerCreator;
+#endif
+
   auto compileFunctionCreator =
       [&](llvm::orc::JITTargetMachineBuilder jtmb)
       -> Expected<std::unique_ptr<llvm::orc::IRCompileLayer::IRCompiler>> {
@@ -476,7 +488,7 @@ jlcsEngineCreate(mlir::ModuleOp op, int optLevel, bool dumpObject,
 
   auto jitOrError = llvm::orc::LLJITBuilder()
                         .setCompileFunctionCreator(compileFunctionCreator)
-                        .setObjectLinkingLayerCreator(objectLinkingLayerCreator)
+                        .setObjectLinkingLayerCreator(linkingLayerCreator)
                         .setDataLayout(dataLayout)
                         .create();
   if (!jitOrError)

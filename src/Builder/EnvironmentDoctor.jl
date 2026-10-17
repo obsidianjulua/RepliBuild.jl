@@ -246,10 +246,13 @@ end
 
 function _dumper_advice()::Vector{String}
     if Sys.iswindows()
+        # The MINGW64 package on purpose; see Compiler._no_dwarf_dumper_error. In
+        # CLANG64, "binutils" resolves to llvm-tools, the llvm-objdump rejected above.
         return ["`objdump` in a CLANG64 shell IS llvm-objdump — a different dump",
                 "dialect that parses to zero functions, so it is rejected on purpose.",
-                "Install GNU binutils into the CLANG64 prefix:",
-                "  pacman -S mingw-w64-clang-x86_64-binutils",
+                "GNU binutils ship only in MSYS2's GCC-flavoured trees; RepliBuild",
+                "finds them there by absolute path from any shell:",
+                "  pacman -S mingw-w64-x86_64-binutils",
                 "Or point at one:  REPLIBUILD_OBJDUMP=/path/to/objdump.exe"]
     end
     return ["RepliBuild parses GNU binutils' dump format specifically; no other",
@@ -384,14 +387,44 @@ function _check_cmake()::ToolStatus
         "CMake $(_get_version(path))"; section=SEC_CPP)
 end
 
-function _check_libJLCS()::ToolStatus
+# "dialect compiled" used to mean "the file exists". A package-manager LLVM upgrade
+# leaves the file and removes the libLLVM it imports (MSYS2: libLLVM-23.dll for
+# libLLVM-24.dll), so the doctor certified Tier 2 on a library that could not load.
+# build.sh now stamps the llvm-config it built against; this compares that with
+# today's llvm-config and then asks the loader.
+function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
     lib_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
+    rebuild = ["cd $(joinpath(SRC_DIR, "mlir")) && ./build.sh",
+               "Rebuild after any system MLIR upgrade — the artifact pins the minor SONAME."]
     isfile(lib_path) || return ToolStatus("libJLCS", false, false, "", "", false,
-        "dialect not built"; section=SEC_CPP,
-        advice=["cd $(joinpath(SRC_DIR, "mlir")) && ./build.sh",
-                "Rebuild after any system MLIR upgrade — the artifact pins the minor SONAME."])
-    ToolStatus("libJLCS", false, true, lib_path, "", true,
-        "dialect compiled"; section=SEC_CPP)
+        "dialect not built"; section=SEC_CPP, advice=rebuild)
+    stamp = joinpath(dirname(lib_path), "jlcs_llvm_version")
+    built = isfile(stamp) ? String(strip(read(stamp, String))) : ""
+    if _jlcs_stale(built, llvm_version)
+        return ToolStatus("libJLCS", false, true, lib_path, built, false,
+            "built against LLVM $built, but llvm-config is $llvm_version";
+            section=SEC_CPP, advice=rebuild)
+    end
+    h = Libdl.dlopen(lib_path, Libdl.RTLD_LAZY; throw_error=false)
+    h === nothing && return ToolStatus("libJLCS", false, true, lib_path, built, false,
+        "does not load — the LLVM/MLIR libraries it was linked against are gone";
+        section=SEC_CPP, advice=rebuild)
+    Libdl.dlclose(h)
+    ToolStatus("libJLCS", false, true, lib_path, built, true,
+        isempty(built) ? "dialect compiled" : "dialect compiled against LLVM $built"; section=SEC_CPP)
+end
+
+"""
+Whether libJLCS's build stamp and today's llvm-config disagree on major.minor, the
+part of the version its library dependency is pinned to. Either side unknown (an
+artifact built before the stamp existed, no llvm-config) is not evidence of
+staleness; the load probe still runs.
+"""
+function _jlcs_stale(built::AbstractString, current::AbstractString)::Bool
+    mm(v) = (m = match(r"^(\d+)\.(\d+)", v); m === nothing ? nothing : (m[1], m[2]))
+    a, b = mm(built), mm(current)
+    (a === nothing || b === nothing) && return false
+    return a != b
 end
 
 # =============================================================================
@@ -448,17 +481,18 @@ first(t for t in status if t.name == "sysroot")     # one probe
 - `throw_on_error`: raise if a required probe failed (default `false`)
 """
 function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)::ToolchainStatus
+    llvm_config = _check_llvm_config()
     tools = ToolStatus[
         _check_platform(),
         _check_c_bucket_clang(),
         _check_sysroot(),
         _check_dwarf_dumper(),
         _check_symbol_reader(),
-        _check_llvm_config(),
+        llvm_config,
         _check_clang(),
         _check_mlir_tblgen(),
         _check_cmake(),
-        _check_libJLCS(),
+        _check_libJLCS(llvm_config.version),
     ]
     Sys.iswindows() && push!(tools, _check_msys2())
 

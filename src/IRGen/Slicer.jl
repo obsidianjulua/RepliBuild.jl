@@ -39,7 +39,9 @@ import .._read_json
 export SliceResult, slice_library, slice_function, sliced
 
 "Bump to invalidate every cached slice (policy/algorithm change)."
-const SLICER_VERSION = "3"
+# 4: entries are named by `slice_file_stem`; a v3 cache on a case-insensitive
+# filesystem can hold one symbol's IR under another's name.
+const SLICER_VERSION = "4"
 
 struct SliceResult
     name::String
@@ -395,16 +397,31 @@ function slice_function(abi_ll::String, target::String;
     return slice_library(abi_ll; targets=[target], cache_dir=cache_dir)[target]
 end
 
+"""
+    slice_file_stem(name) -> String
+
+File name, without extension, for `name`'s slice: in this cache and in a wrapper's
+`slices/` directory. The symbol itself when it has no uppercase letter, otherwise
+the symbol plus 8 hex digits of its SHA-1, so two names that differ only in case
+get two files. Windows (and macOS by default) folds case: lua's value macro
+`LUA_YIELD` and function-like macro `lua_yield` both wrote
+`replibuild_shim_LUA_YIELD.ll`, the later write won, and `LUA_YIELD()` threw
+"Module IR does not contain specified entry function".
+"""
+slice_file_stem(name::AbstractString) =
+    any(isuppercase, name) ? string(name, "-", bytes2hex(sha1(String(name)))[1:8]) : String(name)
+
 # ── cache ────────────────────────────────────────────────────────────────────
 
 function _cache_load(key_dir::String, target::String)
-    meta_path = joinpath(key_dir, target * ".json")
+    stem = slice_file_stem(target)
+    meta_path = joinpath(key_dir, stem * ".json")
     isfile(meta_path) || return nothing
     try
         meta = _read_json(meta_path)
         ir = nothing
         if get(meta, "sliced", false)
-            ll_path = joinpath(key_dir, target * ".ll")
+            ll_path = joinpath(key_dir, stem * ".ll")
             isfile(ll_path) || return nothing
             ir = read(ll_path, String)
         end
@@ -431,8 +448,9 @@ function _atomic_write(path::String, contents::AbstractString)
 end
 
 function _cache_store(key_dir::String, r::SliceResult)
+    stem = slice_file_stem(r.name)
     if sliced(r)
-        _atomic_write(joinpath(key_dir, r.name * ".ll"), r.ir)
+        _atomic_write(joinpath(key_dir, stem * ".ll"), r.ir)
     end
     meta = sprint() do io
         JSON.print(io, Dict(
@@ -445,7 +463,7 @@ function _cache_store(key_dir::String, r::SliceResult)
             "declares" => r.declares,
         ), 2)
     end
-    _atomic_write(joinpath(key_dir, r.name * ".json"), meta)
+    _atomic_write(joinpath(key_dir, stem * ".json"), meta)
 end
 
 end # module Slicer

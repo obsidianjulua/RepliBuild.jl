@@ -23,7 +23,7 @@ import ..INTERNAL_TYPE_BLOCKLIST
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
-import ..Compiler: _pe_exported_names
+import ..Compiler: _pe_exported_names, _nm_dynamic_names, _pe_crt_dll, _link_dir_dlls
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -487,12 +487,7 @@ function _runtime_defined_names(library_path::AbstractString)
         return nothing
     end
     code == 0 || return nothing
-    names = Set{String}()
-    for line in eachsplit(out, '\n')
-        parts = split(strip(line))
-        isempty(parts) || push!(names, String(parts[end]))
-    end
-    return names
+    return _nm_dynamic_names(out)
 end
 
 function _surface_type_keys_impl(metadata::Dict{String,Any},
@@ -1335,6 +1330,37 @@ end
 # =============================================================================
 
 """
+    _libc_free_block(lib_path; crt_dll=_pe_crt_dll(lib_path)) -> String
+
+Module-level source for `libc_free(ptr)`, spliced into every generated wrapper by
+both generators: release memory the library allocated, through the library's own
+C runtime. On Windows Julia's `Libc.free` is msvcrt's while a RepliBuild-built DLL
+allocates from the UCRT, so `Libc.free` on its buffers corrupts the heap (mpack's
+growable writer died with STATUS_HEAP_CORRUPTION). Elsewhere, and when the
+runtime cannot be identified, it is `Libc.free`.
+"""
+function _libc_free_block(lib_path::AbstractString;
+                          crt_dll::Union{Nothing,String}=_pe_crt_dll(String(lib_path)))::String
+    body = crt_dll === nothing ?
+        "libc_free(ptr::Ptr) = Libc.free(ptr)" :
+        "libc_free(ptr::Ptr) = ccall((:free, $(repr(crt_dll))), Cvoid, (Ptr{Cvoid},), ptr)"
+    # The cstring policy hands over a Cstring, which ccall will not convert to Ptr.
+    body *= "\nlibc_free(ptr::Cstring) = libc_free(reinterpret(Ptr{Cvoid}, ptr))"
+    return """
+    # ── Freeing what the library allocated ─────────────────────────────────────
+    \"\"\"
+        libc_free(ptr)
+
+    Release a buffer the library allocated with malloc/calloc/realloc. Use this,
+    not `Libc.free`: on Windows Julia's `Libc.free` belongs to msvcrt.dll and this
+    library allocates from $(crt_dll === nothing ? "the same C runtime as Julia" : crt_dll),
+    and freeing into the wrong heap corrupts it.
+    \"\"\"
+    $body
+    """
+end
+
+"""
     _cstring_policy_lines(free_sym; indent="    ") -> String
 
 Shared body for every `Cstring`-returning wrapper, applied after the call
@@ -1352,7 +1378,10 @@ overloads, C and C++ generators) splices these same lines so the policy
 cannot drift between sites again.
 """
 function _cstring_policy_lines(free_sym::String; indent::String="    ")::String
+    # Plain `free` is the C runtime's, not the library's: a DLL does not export
+    # what it imports, so looking it up through LIBRARY_PATH fails on Windows.
     free_line = isempty(free_sym) ? "" :
+        free_sym == "free" ? "$(indent)libc_free(ptr)\n" :
         "$(indent)ccall((:$(free_sym), LIBRARY_PATH), Cvoid, (Cstring,), ptr)\n"
     return "$(indent)ptr == C_NULL && return nothing\n" *
            "$(indent)s = unsafe_string(ptr)\n" *
@@ -1470,6 +1499,29 @@ function _extra_link_libs_snippet(config)
                 _h === nothing || break
             end
             _h === nothing && @warn "extra_link_libs: no candidate soname opened. Harmless if this names a library merged into libc (m, pthread, dl, rt on glibc >= 2.34) — there is nothing left to preload. Otherwise the main library may fail to resolve; use a full soname or path." lib=_lib
+        end
+"""
+end
+
+"""
+    _link_dir_preload_snippet(config) -> String
+
+`__init__` source opening `Compiler._link_dir_dlls(config)` before the main library:
+Windows' stand-in for the rpath `[link] link_dirs` emits on ELF. Each DLL is
+looked for next to the wrapper first (a build directory travels as a unit), then at
+its build-time path: the same order as rpath's `\$ORIGIN` then the absolute dir.
+Empty off Windows and when no link-dir DLL exists. Shared by both generators.
+"""
+function _link_dir_preload_snippet(config)
+    dlls = _link_dir_dlls(config)
+    isempty(dlls) && return ""
+    lit = "[" * join(repr.(dlls), ", ") * "]"
+    return """
+        # [link] link_dirs DLLs, opened before the main library: PE has no RUNPATH,
+        # and Windows binds an import to a module already loaded under that name.
+        for _dll in $lit
+            _sib = joinpath(@__DIR__, basename(_dll))
+            Libdl.dlopen(isfile(_sib) ? _sib : _dll, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
         end
 """
 end
@@ -1676,11 +1728,7 @@ function _assert_aot_thunks_present(func_text::AbstractString,
         slot is a hard error at the call site, not a fallback.
         $out""")
 
-        defined = Set{String}()
-        for line in eachsplit(out, '\n')
-            parts = split(strip(line))
-            isempty(parts) || push!(defined, String(parts[end]))
-        end
+        defined = _nm_dynamic_names(out)
     end
 
     missing_syms = [(nm, _aot_thunk_symbol(taken, nm))

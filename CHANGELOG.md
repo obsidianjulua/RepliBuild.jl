@@ -4,6 +4,275 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.2.0 (2026-10-16)
+
+**LLVM 23 and Windows, end to end.** Minor. New: `[platform.<host>]` tables in
+replibuild.toml, JSON 1.x, the JLCS dialect on LLVM/MLIR 23, and end-to-end
+coverage of AOT thunks; LLVM.jl compat is 9. Nothing removed from the exports.
+Behaviour changes: relative `[compile]` paths resolve against the project root,
+codegen runs at `[link] optimization_level`, and a C++ package compiles its `.c`
+files with the system clang. A 4.1.1 wrapper keeps working. Build-time fixes, the
+libc++ exports among them, need a rebuild (delete `.replibuild_cache/project_hash`);
+generator fixes need a re-wrap. Verified on Windows (MSYS2 CLANG64, LLVM/MLIR
+23.1.3) with runtests.jl and the full devtests.jl. CI runs runtests.jl on Linux and
+Windows; Tier 2 was not re-run on Linux for this release.
+
+### discover runs without a system LLVM (2026-10-16)
+
+- A C project needs nothing but Julia, yet `discover` raised "LLVM Toolchain not
+  found" on a machine with no LLVM installed. Its dependency walk is optional and
+  meant to skip when clang is missing, but `get_tool` raises, rather than
+  returning `""`, when there is no toolchain at all, and `discover` then also
+  warmed the toolchain for a later build. Both now degrade: the walk is skipped
+  with a warning that says why, the config takes the scanned sources, and a build
+  that needs system LLVM still raises its own error. The first GitHub CI run found
+  it: the Ubuntu runner has no LLVM that RepliBuild accepts, and
+  `test_registry.jl`'s c_test integration runs `discover` on a fresh clone.
+  `test_discover_without_llvm.jl`, negative-checked.
+
+### AOT thunks: an end-to-end suite, and a void thunk that threw no longer ends the process on Windows (2026-10-16)
+
+- **`test_aot_thunks.jl` (devtests §5c).** The AOT path had no end-to-end
+  coverage: stress_test/verify.jl hand-rolls its own link, and
+  test_introspection.jl only checks that a failed AOT build leaves no stale
+  library. The new suite builds `test/aot_test/` (C++, no STL) with
+  `[compile] aot_thunks = true` through discover → build → wrap twice: cold, and
+  again once `thunk_manifest.json` exists, when AOT must emit exactly the
+  manifest's thunks (the cold build also emits thunks for Tier-3 functions,
+  which no wrapper binds). Each pass checks the companion library and its
+  exports, the manifest, and the wrapper (AOT slots, no JIT dispatch), then a
+  child process calls through it: plain members, records by value at 8, 16 and
+  24 bytes (argument and return, including a member returning one), virtual
+  override dispatch, and a C++ throw for every return shape (i32, f64, pointer,
+  sret, void, a non-`std::exception`), with no JIT engine created.
+- **`JITManager._invoke_void`.** On Windows the dialect lowers `try_call` to a
+  plain call, so a thunk does not catch; libJLCS's `jlcs_guard_*` does.
+  `_invoke_call` (every non-void return) and the JIT `invoke` void form went
+  through the guard. The AOT void forms (`invoke_aot` and `invoke_aot_ptr`
+  without a return type) called the thunk directly, so a void C++ function that
+  threw through an AOT thunk killed the process with no message (exit status
+  0x20474343, the SEH code of an uncaught C++ exception), where the JIT wrapper
+  raised `CxxException` for the same throw. All three void forms now share
+  `_invoke_void`. Found by the suite's `throw_void` probe.
+
+### LLVM 23 on Windows: libc++ members reach the export table; STL thunks bind only exported symbols (2026-10-16)
+
+Found by running devtests on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) for the
+first time since the toolchain moved.
+
+- **libc++ 23 hides its own functions.** `__configuration/namespace.h` opens every
+  `std` block with `#pragma clang attribute … push(__attribute__((
+  __exclude_from_explicit_instantiation__, __visibility__("hidden"),
+  __abi_tag__(…))), apply_to = function)`. It applies on COFF, where
+  `_LIBCPP_HIDDEN` is empty, and no macro reaches it
+  (`_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS` does not). On MinGW clang emits
+  `-exclude-symbols:` for hidden definitions, so `std::vector<int>::vector()` and
+  the rest were `T` in nm and absent from the DLL's export directory. stl_test had
+  513 exports and passed 28/28 on LLVM 22; on LLVM 23 it had 222, and all seven STL
+  testsets errored with "Symbol not found": one unbindable thunk failed the
+  library's whole JIT module, `make_ints` included. `create_library` now makes
+  hidden `std::__N` definitions default visibility in the IR before codegen, for
+  C++ packages with `[types] templates` (`_unhide_libcxx_ir`), on the merged module
+  and on the per-TU fallback. A package's own `-fvisibility=hidden`, clang's
+  helpers and function-local entities keep their visibility. stl_test: 531
+  exports, 28/28.
+- **The STL method table takes only bindable symbols.** `extract_stl_method_symbols`
+  read `nm -g`, which on PE is the COFF symbol table (an unexported member is still
+  `T`), and also accepted local `t`/`w`. It is now gated by `_runtime_symbol_names`
+  (the PE export directory, else `nm -D`), the same set `verify_wrap_surface` now
+  reads through. An unbindable member drops out of its container's wrapper with a
+  warning instead of taking the engine down, and a C1 constructor first in nm no
+  longer shadows an exported C2.
+- **Known limitation, unchanged.** Seven `std::basic_string<char>` members (`at`,
+  `find`, `erase`, `insert`, `push_back`, `reserve`, the destructor) are
+  explicit-instantiation copies that `libc++.dll` also exports, and lld does not
+  auto-export a symbol whose `__imp_` twin is in an import library. The gate leaves
+  them out and the warning names them, which matches Linux, where they are
+  undefined in the library. With no destructor thunk `CppString` registers no
+  finalizer, so a string grown past the small-string buffer leaks; nothing crashes.
+
+`test_libcxx_exports.jl` (33 tests), both guards negative-checked. Hub fmt, the only Hub
+package with `[types] templates`, needs a rebuild on Windows, not a re-wrap.
+
+### Pre-release fixes: devtests runs to the end (2026-10-16)
+
+- **`test_c_inprocess.jl` names the fixture's files absolutely.** It copies the
+  discovered c_test config into a temp dir and changes only `root`. Since the
+  portable-paths change `source_files = ["src/mathkit.c"]` resolves against that
+  root, so clang got `<tmp>/src/mathkit.c` and three testsets errored, which also
+  stopped devtests before the ten suites after it. Test-only; devtests had not run
+  since that change. 14 passes plus the known skip for the LLVM-18 fallback tools.
+- **`_pe_export_intent` closes what it opens.** It read IR with `eachline(path)` and
+  returned from inside the loop. That iterator closes the file only once exhausted,
+  so the handle stayed open until GC, and on Windows an open handle blocks deletion:
+  runtests logged EBUSY cleaning a temp dir, and the same handle could hold IR that
+  `clean` or a rebuild had to remove. It was the only early-exit `eachline` over a
+  path in `src/`. `test_windows_port.jl`.
+- **`deps/build.jl` stops telling Windows users the dialect is Linux-only.** Every
+  `Pkg.add`/`Pkg.build` on Windows printed "RepliBuild's dialect is Linux-only",
+  which has been false since 4.0.0, and the script looked for `libJLCS.so`. It now
+  names the library by host extension and reports whether `libJLCS.dll` is built
+  and loads. Otherwise it gives the CLANG64-shell build step, because `Pkg.build`
+  does not run in one, and points at `check_environment()` for the package list
+  rather than repeating it. install.md: the verified toolchain is 23.1.3 under
+  CLANG64, and the WINDOWS_PORT.md link points at `docs/updates/`.
+
+### Windows compatibility: per-host config, portable paths, the library's own free (2026-10-11)
+
+Found by sweeping the Hub on Windows (Julia 1.12.7, MSYS2 CLANG64, LLVM 23).
+
+- **`[platform.<host>]` overlays.** A replibuild.toml could only be right for one
+  OS: sqlite, glfw, miniaudio, curl and llamacpp link `dl`/`rt`, which do not
+  exist under mingw; lua builds with `-DLUA_USE_LINUX`; glfw excludes the win32
+  sources. `apply_platform_overlay` merges `[platform.linux|windows|macos]` over
+  the base in `load_config` before any section parser runs (tables key by key,
+  everything else replaced, unknown names a hard error). `discover(force=true)`
+  preserves the tables and registry staging reads through them. Older RepliBuild
+  ignores the table and sees the base, so Hub configs keep the Linux base and
+  override on Windows. `test_platform_overlay.jl`; config.md §2.15.
+- **Config paths are portable.** Relative `[compile] source_files` /
+  `include_dirs` reached clang as written, so they meant "relative to the process
+  cwd"; they now resolve against `root` at load, which is what registry staging
+  already assumed. `save_config` (so `discover`) writes paths under the project
+  relative with `/` separators. Hub hello_world, generated by an older discover,
+  carried `/home/…` paths and built on no other machine. `test_portable_paths.jl`;
+  config.md §2.16.
+- **`libc_free` in every wrapper.** Julia links `msvcrt.dll`; a CLANG64-built DLL
+  allocates from the UCRT. mpack's deep test freed the growable writer's buffer
+  with `Libc.free` and died with STATUS_HEAP_CORRUPTION. Both generators now emit
+  `libc_free(ptr)` bound to the C runtime the library imports
+  (`Compiler._pe_crt_dll`, read from its PE import table; `Libc.free` off
+  Windows), and `[wrap.cstring_owned] f = "free"` routes through it instead of
+  looking `free` up in a DLL that only imports it. mpack test_deep 171/171 on
+  Windows with the Hub test using `P.libc_free`. `test_windows_port.jl`.
+
+`runtests.jl` on Windows: 1918 passes, no failures. Each new test negative-checked.
+
+### Windows: slice files survive case folding; link_dirs DLLs load without rpath (2026-10-11)
+
+- **Slice file names.** Tier-1 slices (and the Slicer cache) were named by the raw
+  symbol. NTFS folds case, so lua's value macro `LUA_YIELD` and function-like
+  macro `lua_yield` shared `replibuild_shim_LUA_YIELD.ll`, the later write won, and
+  `LUA_YIELD()` threw "Module IR does not contain specified entry function".
+  `Slicer.slice_file_stem` appends 8 hex digits of SHA-1 to any name with an
+  uppercase letter; all-lowercase names keep their file. `SLICER_VERSION` 4
+  drops caches that may already hold one symbol's IR under another's name. Only
+  file naming changed; no Tier-1 policy did.
+- **`[link] link_dirs` on Windows.** ELF gets `-Wl,-rpath` per link dir; PE has no
+  RUNPATH, so imgui linked against `packages/glfw/julia/libglfw.dll` and then
+  could not load ("The specified module could not be found"), at the build's own
+  load check first. `Compiler._link_dir_dlls` names the `link_libraries` DLLs found
+  in `link_dirs`; the load check opens them first, and both generators emit the
+  same preload in `__init__` (next to the wrapper first, then the build-time path).
+  Windows binds an import to an already-loaded module of that name, which also
+  keeps one copy of glfw's process-global state.
+
+Hub on Windows with these: lua 103/103 + 189/189, imgui 97/97 + 202/202, glfw
+38/38, sqlite deep 145/145. `runtests.jl` 1927 passes.
+
+### Machine code from the link level, not -O0; SYSCONFIG.md hides the user's paths (2026-10-11)
+
+- **Codegen opt level.** `create_library` handed clang the optimized IR with only
+  `-shared -fPIC`, so every library came out of the `-O0` backend (FastISel and
+  the fast register allocator), on every host. On LLVM 23 that backend crashed
+  outright on llama.cpp ("Cannot emit physreg copy instruction" in
+  `llama_kv_cache::find_slot`; reproduced on the extracted function at `-O0`,
+  clean at `-O2`). `_codegen_opt_flags` passes `[link] optimization_level` with
+  `-Xclang -disable-llvm-passes`, so codegen runs at that level without
+  re-running the IR pipeline; the per-TU fallback gets the same flags.
+  `test_codegen_flags.jl`.
+- **SysConfigGen on Windows.** `SYSCONFIG.md` recorded the probe's checkout path,
+  which on Windows is under the user profile
+  (`C:/Users/<name>/AppData/Local/Temp/…`). `_display_path` writes `<tmp>` / `~`
+  prefixes instead; the regenerate snippet names the real output directory rather
+  than always `config`. Found harvesting curl's Windows config.
+
+### One toolchain per module: a C++ package's `.c` files lost their DWARF (2026-10-11)
+
+The C bucket was chosen per FILE: every `.c` compiled with the JLL clang 18, even
+inside a C++ package whose modules are linked by the system llvm-link. LLVM 23's
+verifier rejects clang 18's debug info ("Function-local variables are not allowed
+in a DICompileUnit's global variables list"); llvm-link printed `warning: ignoring
+invalid debug info`, stripped every `!dbg` from that module and exited 0. llama.cpp
+had six C files and the linked module kept one C compile unit: 439 `ggml_*` and
+all `quantize_*`/`dequantize_*` signatures fell back to `parameters_source =
+"inferred"`, so `ggml_version` wrapped as returning `Cint` and `ggml_init` as
+returning an integer. Only test_deep's version check noticed.
+
+- The C bucket is a property of the package (`[wrap] language = "c"`). A C++
+  package compiles its `.c` files with the system clang as well.
+- `_assert_debug_info_kept` fails the build when llvm-link or the IR->library
+  clang reports dropped debug info, naming the modules.
+- `compute_compile_fingerprint` hashes the system clang's identity for C++
+  packages, so an LLVM upgrade by the package manager invalidates the IR cache
+  instead of serving the old compiler's IR to the new one's tools.
+
+`test_codegen_flags.jl` ("one toolchain per module").
+
+- **libJLCS drift.** `check_environment` reported "dialect compiled" whenever the
+  file existed, so after a package-manager LLVM upgrade it certified Tier 2 on a
+  library whose libLLVM import was gone. `build.sh` writes the llvm-config version
+  to `src/mlir/build/jlcs_llvm_version`; the doctor fails libJLCS when that
+  disagrees with today's llvm-config on major.minor, and otherwise confirms the
+  library loads.
+- **SysConfigGen and OBJECT libraries.** curl compiles its code into
+  `libcurl_object` (CMake gives only SHARED targets `<target>_EXPORTS`, so it
+  classifies static) and `libcurl_shared` compiles a stub; `main_target` picked the
+  stub and `toml_fragment` proposed excluding all of `lib/`. Selection is
+  unchanged, but the probe display and the fragment now say which target holds
+  the code and name the `target=` override.
+- Docs: the Windows install command includes `mingw-w64-x86_64-binutils` (GNU
+  objdump, required for DWARF extraction) and the CLANG64 PATH requirement;
+  `docs/updates/WINDOWS_PORT.md` records this pass.
+
+### libJLCS builds against LLVM/MLIR 23 (2026-10-11)
+
+MSYS2 CLANG64 moved to LLVM/MLIR 23.1.3, and `src/mlir/build.sh` failed in
+`JlcsJIT.cpp`: LLVM 23's `LLJITBuilder::ObjectLinkingLayerCreator` takes
+`(ExecutionSession &, jitlink::JITLinkMemoryManager &)`. RuntimeDyld brings its own
+memory manager, so an adapter guarded by `LLVM_VERSION_MAJOR >= 23` accepts the
+new argument and ignores it; LLVM 22 compiles the original path unchanged.
+
+Verified on Windows (Julia 1.12.7, LLVM/MLIR 23.1.3): `MLIRNative.test_dialect()`
+passes, `check_environment` reports both tiers, and Hub tinyxml2 builds, wraps and
+passes `test.jl` (11/11) through JIT-mode Tier-2 thunks.
+
+### Fixes salvaged from the quarantined internalize-symbol-tables branch (2026-10-11)
+
+That branch (0399c6e) came off a compromised machine and is dropped unmerged. Its
+symbol-table internalization (`ObjectReader`) is not taken: `nm` and GNU `objdump`
+stay the authorities. The fixes it carried that do not depend on `ObjectReader`
+were re-derived against main, reviewed line by line, and re-typed. Nothing was
+cherry-picked.
+
+- **Thunk manifest in JIT mode.** 1c4255b put `_write_thunk_manifest` inside the
+  `aot_thunks` branch. A failed AOT link falls back to a JIT wrap, which then
+  recorded nothing, so the next build emitted the same unfiltered thunk set and
+  failed again. The write is unconditional now (`test_thunk_manifest.jl`).
+- **PE vmethod gate.** `parse_vtables` took method addresses from `nm`. On PE a
+  method the DLL does not export is still a global `T` in the COFF symbol table
+  (ELF links the same hidden method as a local `t`), so the legacy vmethod pass
+  emitted `thunk_*` calls PE cannot bind. `_gate_to_exports` filters them through
+  the export directory (`_pe_exported_names`). ELF is unchanged.
+- **ELF symbol-version suffixes.** The three `nm -D` readers
+  (`verify_wrap_surface`, `_runtime_defined_names`, `_assert_aot_thunks_present`)
+  kept `name@@VER`, so a library built with a version script looked as if it
+  exported nothing DWARF named. They share one parser now,
+  `Compiler._nm_dynamic_names`, which cuts the suffix. It takes mangled output
+  only, since demangled names can contain `@`; `extract_symbols_nm` reads
+  demangled output and is untouched.
+- **mingw-w64-crt 14.** `__mingw_dll_do_global_ctors/dtors` join the PE
+  static-runtime set in `test_symbol_hygiene.jl` (`dllcrt2.o` references them,
+  `libmingw32.a` defines them; checked against crt 14.0.0.r426).
+- `check_environment`'s Windows binutils advice named the CLANG64 package, which
+  is llvm-tools. It names `mingw-w64-x86_64-binutils` now, matching
+  `_no_dwarf_dumper_error`.
+
+Each new test was negative-checked by neutering its fix. Windows, Julia 1.12.7:
+`runtests.jl` 1871 passes, no failures. The PE gate and the suffix cut are tested
+on fabricated `nm` output only; neither has been exercised on a real versioned ELF
+library or a real C++ DLL yet, and `devtests.jl` was not run.
+
 ### JSON 1.x: one read path for every metadata file (2026-10-02)
 
 `[compat] JSON` was `"0.21"`, and JSON.jl is at 1.10. In an environment that already

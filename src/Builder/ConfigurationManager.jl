@@ -301,15 +301,16 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
         return create_default_config(toml_path)
     end
 
-    data = TOML.parsefile(toml_path)
+    data = apply_platform_overlay(TOML.parsefile(toml_path), toml_path)
 
     # Validate required sections
     validate_toml_data(data, toml_path)
 
     wrap_config = parse_wrap_config(data)
+    project_config = parse_project_config(data, toml_path)
 
     # Parse each section with defaults
-    compile_config = parse_compile_config(data)
+    compile_config = _rooted_compile_paths(parse_compile_config(data), project_config.root)
     link_config = parse_link_config(data, wrap_config.language)
 
     # aot_thunks and enable_lto are always read from the toml (no auto-enable):
@@ -330,7 +331,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     end
 
     config = RepliBuildConfig(
-        parse_project_config(data, toml_path),
+        project_config,
         parse_paths_config(data),
         parse_discovery_config(data),
         compile_config,
@@ -348,6 +349,73 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     )
 
     return config
+end
+
+"""
+Platform names a `[platform.<name>]` table may use. Linux and Windows are the
+supported hosts; `macos` is accepted so a config can carry its overlay ahead of
+support.
+"""
+const PLATFORM_KEYS = ("linux", "windows", "macos")
+
+"""
+Relative `[compile] source_files` / `include_dirs` are relative to the project
+root: the rule `root` itself follows against the TOML, and the one the registry
+stages inputs by (`_stage_registered_inputs!`). They used to reach clang as
+written, which made them relative to the process cwd, i.e. the TOML's directory
+during `build`, and that is the root only while `root = "."`.
+"""
+function _rooted_compile_paths(c::CompileConfig, root::AbstractString)::CompileConfig
+    rooted(p) = isabspath(p) ? p : normpath(joinpath(root, p))
+    return CompileConfig(map(rooted, c.source_files), map(rooted, c.include_dirs),
+                         c.flags, c.defines, c.parallel, c.aot_thunks, c.visibility)
+end
+
+"""The `[platform.<name>]` key for the running host, or `nothing` for any other OS."""
+host_platform_key() = Sys.iswindows() ? "windows" : Sys.isapple() ? "macos" :
+                      Sys.islinux() ? "linux" : nothing
+
+"""
+    apply_platform_overlay(data, toml_path; platform=host_platform_key()) -> Dict
+
+Merge `[platform.<host>]` over the rest of a parsed replibuild.toml, and drop the
+`platform` table so nothing downstream sees it.
+
+One config has to build on Linux and Windows, and the two disagree on link
+libraries (`dl`, `rt` do not exist under mingw), platform defines
+(`LUA_USE_LINUX`, `_GLFW_X11`), and which platform sources to exclude. Tables
+merge key by key at any depth; any other value (string, number, array) replaces
+the base outright, so `link_libraries = []` under `[platform.windows.link]` does
+empty the list. Keep the base section correct for one host and override only on
+the other: a RepliBuild that predates this table ignores it and sees the base.
+
+An unknown platform name is a hard error. A misspelled `[platform.window]` would
+otherwise drop the overlay silently on the one host it exists for.
+"""
+function apply_platform_overlay(data::AbstractDict, toml_path::AbstractString;
+                                platform::Union{String,Nothing}=host_platform_key())
+    haskey(data, "platform") || return data
+    overlays = data["platform"]
+    overlays isa AbstractDict ||
+        error("[platform] in $toml_path must be a table of per-platform tables, e.g. [platform.windows.link]")
+    for (name, overlay) in overlays
+        name in PLATFORM_KEYS ||
+            error("[platform.$name] in $toml_path: unknown platform; expected one of $(join(PLATFORM_KEYS, ", "))")
+        overlay isa AbstractDict ||
+            error("[platform.$name] in $toml_path must be a table, e.g. [platform.$name.link]")
+    end
+    base = Dict{String,Any}(k => v for (k, v) in data if k != "platform")
+    (platform === nothing || !haskey(overlays, platform)) && return base
+    return _merge_overlay(base, overlays[platform])
+end
+
+function _merge_overlay(base::AbstractDict, over::AbstractDict)
+    out = Dict{String,Any}(base)
+    for (k, v) in over
+        cur = get(out, k, nothing)
+        out[k] = (v isa AbstractDict && cur isa AbstractDict) ? _merge_overlay(cur, v) : v
+    end
+    return out
 end
 
 """Parse [project] section"""
@@ -941,16 +1009,35 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
 end
 
 """
+    _portable_path(path, base) -> String
+
+`path` as it should be written into a replibuild.toml: relative to `base` with `/`
+separators when it lies under `base` (`"."` for `base` itself), unchanged otherwise.
+An absolute path ties the file to one checkout on one OS; a discovered Hub config
+carried `/home/…` into every clone. `load_config` resolves the relative form back
+(`root` against the TOML, compile paths against the root).
+"""
+function _portable_path(path::AbstractString, base::AbstractString)::String
+    isabspath(path) || return replace(String(path), '\\' => '/')
+    p = String(rstrip(normpath(path), ['/', '\\']))
+    b = String(rstrip(normpath(base), ['/', '\\']))
+    p == b && return "."
+    startswith(p, b * Base.Filesystem.path_separator) || return String(path)
+    return replace(relpath(p, b), '\\' => '/')
+end
+
+"""
 Save configuration to TOML file.
 Only saves user-configurable settings (not runtime data).
 """
 function save_config(config::RepliBuildConfig)
     data = Dict{String,Any}()
+    root = config.project.root
 
     # [project]
     data["project"] = Dict(
         "name" => config.project.name,
-        "root" => config.project.root,
+        "root" => _portable_path(root, dirname(abspath(config.config_file))),
         "uuid" => string(config.project.uuid)
     )
 
@@ -991,10 +1078,10 @@ function save_config(config::RepliBuildConfig)
     end
     # Only save if non-empty
     if !isempty(config.compile.source_files)
-        compile_dict["source_files"] = config.compile.source_files
+        compile_dict["source_files"] = [_portable_path(p, root) for p in config.compile.source_files]
     end
     if !isempty(config.compile.include_dirs)
-        compile_dict["include_dirs"] = config.compile.include_dirs
+        compile_dict["include_dirs"] = [_portable_path(p, root) for p in config.compile.include_dirs]
     end
     if !isempty(config.compile.defines)
         compile_dict["defines"] = config.compile.defines

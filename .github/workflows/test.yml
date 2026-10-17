@@ -1,0 +1,40 @@
+name: Tests
+
+# runtests.jl is the toolchain-free suite: it needs only Julia and the JLL clang
+# RepliBuild depends on. Run it on both supported hosts so a Linux-only or
+# Windows-only assumption fails here instead of on the other developer's box.
+# (devtests.jl needs system LLVM/MLIR, a built libJLCS and GNU binutils; Hub
+# builds are the integration test.)
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'test/**', 'Project.toml', '.github/workflows/test.yml']
+  pull_request:
+    paths: ['src/**', 'test/**', 'Project.toml', '.github/workflows/test.yml']
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: runtests — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12.7'   # the C bucket is pinned to this Julia's libLLVM
+      - uses: julia-actions/cache@v2
+      - name: Instantiate
+        shell: julia --project=. {0}
+        run: |
+          using Pkg
+          Pkg.instantiate()
+      - name: runtests.jl
+        run: julia --project=. test/runtests.jl

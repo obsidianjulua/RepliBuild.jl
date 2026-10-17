@@ -97,8 +97,12 @@ only MSYS2 repo shipping MLIR.
 
 ```
 pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir \
-                   mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja git
+                   mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja git \
+                   mingw-w64-x86_64-binutils
 ```
+
+(`mingw-w64-x86_64-binutils` supplies GNU `objdump` for DWARF extraction; CLANG64's
+own "binutils" is llvm-objdump, which is rejected.)
 
 Set `git config --global core.autocrlf false` before cloning — CRLF corrupts
 `src/mlir/build.sh`, which then fails as `$'\r': command not found`.

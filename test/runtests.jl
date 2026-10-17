@@ -116,6 +116,13 @@ include(joinpath(@__DIR__, "test_ingest.jl"))
 
 include(joinpath(@__DIR__, "test_registry.jl"))
 
+# ── discover with no system LLVM (no toolchain) ──────────────────────────────
+# A C project needs only Julia, but discover's optional dependency walk and its
+# toolchain warm-up raised "LLVM Toolchain not found" with no LLVM installed.
+# The first GitHub CI run hit it in test_registry's c_test integration.
+
+include(joinpath(@__DIR__, "test_discover_without_llvm.jl"))
+
 # ── Varargs @ccall emission regression (no toolchain required) ───────────────
 
 include(joinpath(@__DIR__, "test_varargs_emission.jl"))
@@ -321,6 +328,41 @@ include(joinpath(@__DIR__, "test_llp64_widths.jl"))
 # path escaping, and LLVM_CONFIG without `.exe`.
 
 include(joinpath(@__DIR__, "test_windows_port.jl"))
+
+# ── The thunk manifest is written in JIT mode too (no toolchain) ─────────────
+# 1c4255b put the write inside the AOT branch. A failed AOT link falls back to a
+# JIT wrap, which then recorded nothing, so the next build emitted the same
+# unfiltered thunk set and failed again.
+
+include(joinpath(@__DIR__, "test_thunk_manifest.jl"))
+
+# ── libc++ members the STL path binds are exported (no toolchain) ────────────
+# libc++ 23 hides every function it does not annotate, with a pragma that
+# applies on COFF too; on MinGW that kept std::vector's members out of the DLL's
+# exports, and one unbindable STL thunk failed the library's whole JIT module.
+# create_library un-hides them for [types] templates packages, and the STL table
+# keeps only symbols the loader can bind.
+
+include(joinpath(@__DIR__, "test_libcxx_exports.jl"))
+
+# ── [platform.<host>] overlays (no toolchain) ────────────────────────────────
+# One config builds on Linux and Windows: per-host link libraries, defines and
+# dependency excludes merge over the base; an unknown platform name is an error.
+
+include(joinpath(@__DIR__, "test_platform_overlay.jl"))
+
+# ── Config paths are portable (no toolchain) ─────────────────────────────────
+# Relative compile paths resolve against the root, not the cwd; save_config
+# (and so discover) writes paths under the project relative, with `/`.
+
+include(joinpath(@__DIR__, "test_portable_paths.jl"))
+
+# ── IR -> machine code at the link level (no toolchain) ──────────────────────
+# create_library passed no -O, so every library came out of the -O0 backend;
+# LLVM 23 crashed there on llama.cpp. Codegen now uses [link]
+# optimization_level with the IR pipeline disabled.
+
+include(joinpath(@__DIR__, "test_codegen_flags.jl"))
 
 # ── LLVM tool table probes only what get_tool looks up (no toolchain) ────────
 # A 51-name probe at init listed clang-format, mlir-*, FileCheck, clang-20 —

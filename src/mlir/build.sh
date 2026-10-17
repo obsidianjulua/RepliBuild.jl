@@ -139,6 +139,11 @@ case "$(uname -s)" in
 esac
 
 if [ -f "$JLCS_LIB" ]; then
+    # The LLVM this artifact is pinned to (its import of libLLVM-<major>.dll /
+    # libLLVM.so.<major.minor>). check_environment compares it with whatever
+    # llvm-config says later, because a package-manager upgrade leaves the file in
+    # place while removing the library it loads.
+    echo "$LLVM_VERSION" > jlcs_llvm_version
     echo ""
     echo "=============================================="
     echo " Build Complete!"

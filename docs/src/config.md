@@ -212,6 +212,15 @@ buffer is left alone. Every `Cstring`-returning function additionally gets a raw
 callers. The value must be a non-empty string; anything else is warned about and
 ignored.
 
+`"free"` names the C runtime's `free`, and is routed through the wrapper's
+`libc_free` rather than looked up in the library: a Windows DLL does not export
+what it imports. Every wrapper defines `libc_free(ptr)` for the same reason a
+caller needs it by hand — to release any buffer the library `malloc`'d (mpack's
+growable writer hands one over). Use it, not `Libc.free`: on Windows Julia links
+`msvcrt.dll`, a RepliBuild-built DLL allocates from the UCRT, and freeing into the
+wrong heap kills the process with `STATUS_HEAP_CORRUPTION`. On Linux the two are
+the same.
+
 !!! note "The policy does not depend on the dispatch tier"
     A `char*` return is presented the same way whether the function is called
     through `ccall`, a Tier-1 slice, or a Tier-2 MLIR thunk — the tier decides
@@ -297,6 +306,10 @@ beyond the obvious runtime failure: the Tier-1 slice pre-flight scopes symbol
 lookup to the library **plus its `DT_NEEDED` chain**, so on miniaudio a missing
 `-lm` demoted all 51 slices that declare `sin`/`pow`/`log` back to `ccall` with no
 other sign.
+
+`dl` and `rt` exist only on Linux, and `pthread` / `m` mean something different
+under mingw. A list that is right for one host goes under that host's overlay
+(§2.15), e.g. `[platform.windows.link] link_libraries = []`.
 
 !!! warning "`link_libraries` vs `extra_link_libs`"
     `[link] link_libraries` is the source-build key. `[ingest] extra_link_libs` is
@@ -543,6 +556,47 @@ as `could not load symbol` or — where the type had also been filtered out —
 resolvable), while box2d, curl and pcre2 lose nothing. When the symbol table
 cannot be read the drop is skipped entirely, same fail-safe as above.
 
+### 2.15 One config, two hosts — `[platform.<host>]`
+
+Linux and Windows disagree about link libraries, platform defines and which
+platform sources a dependency must exclude. A `[platform.linux]` or
+`[platform.windows]` table holds the keys that differ, and is merged over the rest
+of the file on that host only:
+
+```toml
+[compile]
+flags = ["-O1", "-fPIC", "-DLUA_USE_LINUX"]
+
+[link]
+link_libraries = ["m", "dl"]
+
+[platform.windows.compile]
+flags = ["-O1"]                     # replaces the base list outright
+
+[platform.windows.link]
+link_libraries = []                 # empty really means empty
+
+[platform.windows.dependencies.glfw]
+exclude = ["x11_", "glx_", "posix_", "linux_"]   # merges into [dependencies.glfw]
+```
+
+Tables merge key by key at any depth; every other value (string, number, array)
+replaces the base. Keep the base correct for one host and override only on the
+other: a RepliBuild older than this table ignores it and sees the base. Platform
+names are `linux`, `windows` and `macos`; any other name is a hard error, since a
+misspelled overlay would otherwise vanish on the one host it was written for.
+`discover(force=true)` preserves the tables, and `register` stages relative
+include dirs through the overlay of the host it runs on.
+
+### 2.16 Paths are relative to the project
+
+Relative `source_files` and `include_dirs` are resolved against `[project] root`
+at load, and a relative `root` against the TOML's own directory, so a config builds
+from any working directory and in any checkout. `discover()` writes paths under the
+project that way, with `/` separators; paths outside the project stay absolute.
+A config with absolute paths into one machine's tree (`/home/…`) builds nowhere
+else.
+
 ---
 
 ## 3. Section reference
@@ -592,8 +646,8 @@ Types are TOML types. "Default" is what the parser uses when the key is
 | `flags` | Vector{String} | `["-std=c++17", "-fPIC"]` | `discover()` writes `["-fPIC"]` for a C-only scan |
 | `defines` | Table{String→String} | `{}` | Emitted as `-Dkey=value` |
 | `parallel` | Bool | `true` | Multi-threaded per-file compilation |
-| `source_files` | Vector{String} | `[]` (auto-discovered) | Explicit list; validated to exist at load |
-| `include_dirs` | Vector{String} | `[]` (auto-discovered) | Passed as `-I`; relative to the TOML's directory |
+| `source_files` | Vector{String} | `[]` (auto-discovered) | Explicit list; relative entries resolve against `root` (§2.16); validated to exist at load |
+| `include_dirs` | Vector{String} | `[]` (auto-discovered) | Passed as `-I`; relative entries resolve against `root` (§2.16) |
 | `aot_thunks` | Bool | `false` | Pre-compile Tier-2 thunks into `<name>_thunks.so`; needs `libJLCS.so` |
 | `visibility` | `"default"` \| `"hidden"` *(preserved)* | `"default"` | `"hidden"` narrows the wrapper's API to what the library annotates. **Probe first — §2.12.** Any other value is a hard error |
 
@@ -667,7 +721,14 @@ ret = "const char*"
 
 ### `[wrap.cstring_owned]` *(preserved)*
 
-`function name = "deallocator symbol"`. See §2.4.
+`function name = "deallocator symbol"`. `"free"` goes through the wrapper's
+`libc_free`, the library's own C runtime. See §2.4.
+
+### `[platform.<host>]` *(preserved)*
+
+`linux`, `windows` or `macos`. Any section of this file, merged over the base on
+that host: tables key by key, everything else replaced. Unknown names are a hard
+error. See §2.15.
 
 ### `[wrap.tier1]` *(preserved)*
 
