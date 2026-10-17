@@ -137,18 +137,24 @@ end
 # not part of the method's identity, so drop it before asserting which ctor bound.
 _untag(sig::AbstractString) = replace(sig, r"\[abi:[^\]]*\]" => "")
 
-function _clangxx_available()::Bool
-    try
-        p = run(pipeline(ignorestatus(`clang++ --version`), stdout=devnull, stderr=devnull))
-        return p.exitcode == 0
+# What the build needs, not just a clang++ on PATH. Both GitHub runners carry an
+# LLVM that RepliBuild does not accept (clang 18 on ubuntu-latest; LLVM without a
+# MinGW sysroot on windows-latest), so `clang++ --version` succeeded there and the
+# build then failed on the toolchain. Ask the toolchain lookup the C++ build uses,
+# and the environment check the build runs first.
+function _cpp_build_ready()::Bool
+    clangxx = try
+        RepliBuild.LLVMEnvironment.get_tool("clang++")
     catch
-        return false
+        ""
     end
+    isempty(clangxx) && return false
+    return RepliBuild.check_environment(; verbose = false).ready
 end
 
 @testset "force TU at -O2 emits default ctors" begin
-    if !_clangxx_available()
-        @info "clang++ missing — skipping STL -O2 ctor emission probe"
+    if !_cpp_build_ready()
+        @info "no C++ toolchain RepliBuild accepts — skipping STL -O2 ctor emission probe"
         return
     end
 
