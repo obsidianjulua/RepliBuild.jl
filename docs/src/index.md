@@ -94,7 +94,7 @@ the thing, or leaks, or wraps an empty struct. The symptom → key table is in
   `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64), not MSVC. Both read DWARF
   through GNU binutils. macOS is refused at load — the AAPCS64 ABI classifier
   is not built.
-- **Julia 1.10+** (developed on 1.12).
+- **Julia 1.10+** (tested on 1.12 and 1.13).
 - **C libraries: nothing else on Linux.** Clang ships as a JLL;
   link/optimize/assemble run on Julia's own libLLVM. On Windows that JLL borrows
   the MSYS2 CLANG64 sysroot for its headers and CRT.

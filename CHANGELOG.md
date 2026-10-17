@@ -4,6 +4,27 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.2.1 (2026-10-17)
+
+**LLVM.jl 10.** Patch. LLVM.jl compat widens to `9, 10`. Tier 1's Slicer and
+static promotion read the names whose meaning LLVM.jl 10 changed through
+`LLVM.API`, so they behave the same on both majors; nothing else needed a
+change. CI runs runtests.jl on Julia 1.12 and 1.13, on Linux and Windows. No
+API change, and a 4.2.0 wrapper keeps working. Tier 1 slice caches rebuild once
+(`SLICER_VERSION` 5). Verified on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) with
+runtests.jl and the full devtests.jl on LLVM.jl 10.2.1 under Julia 1.12.7 and
+1.13.2, and with the Tier 1 suites and runtests.jl on LLVM.jl 9.13.2 as well
+(below). Tier 2 was not re-run on Linux.
+
+### LLVM.jl 10 and Julia 1.13 in the support window (2026-10-17)
+
+- `Project.toml` compat is `LLVM = "9, 10"`. Every other LLVM.jl call in
+  RepliBuild (the C bucket's in-process link and opt, and the rest of static
+  promotion) means the same on both majors.
+- CI runs runtests.jl on Julia 1.12.7 and 1.13.2 on both hosts. It resolves
+  fresh, so it now tests LLVM.jl 10; LLVM.jl 9 is checked only where an
+  environment pins it.
+
 ### Tier 1 on LLVM.jl 10: the Slicer and static promotion read what they read on 9 (2026-10-17)
 
 - **LLVM.jl 10 changed four names that Tier 1 reads, at five call sites.** Two
@@ -39,8 +60,7 @@ All notable changes to RepliBuild.jl are documented in this file.
   `st_guarded_div`, whose longjmp ends the process. runtests.jl passes. Hub
   zlib builds, wraps and passes test_deep 271/271 on all four; all 102 of its
   Tier 1 kernels compile to llvmcall, and LLVM.jl 9 and 10 give the same Tier 1
-  surface, promoted module and byte-identical slices. Project.toml compat is
-  unchanged.
+  surface, promoted module and byte-identical slices.
 
 ## v4.2.0 (2026-10-16)
 
