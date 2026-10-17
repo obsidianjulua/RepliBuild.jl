@@ -235,7 +235,14 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     include_dirs = build_include_dirs(target_dir, scan_results)
     dep_graph = walk_dependencies(target_dir, scan_results, include_dirs)
     config = generate_config(target_dir, scan_results, binaries, include_dirs, dep_graph)
-    LLVMEnvironment.init_toolchain(config=config)
+    # Warms the toolchain for a build that follows; discover itself does not need
+    # it. A C project builds with the Clang JLL, and a build that does need system
+    # LLVM raises its own "not found" error when it asks.
+    try
+        LLVMEnvironment.init_toolchain(config=config)
+    catch e
+        @debug "discover: no LLVM toolchain to initialize" exception = e
+    end
 
     source_files = ConfigurationManager.get_source_files(config)
     include_dirs = ConfigurationManager.get_include_dirs(config)
@@ -514,8 +521,17 @@ function walk_dependencies(root_dir::String, scan::ScanResults, include_dirs::Ve
         return nothing
     end
 
-    # Get clang from LLVM environment
-    clang_path = LLVMEnvironment.get_tool("clang++")
+    # Get clang from LLVM environment. The walk is optional: with no graph,
+    # generate_config takes the scanned sources. But get_tool raises, rather than
+    # returning "", when there is no LLVM toolchain at all, so on a machine without
+    # system LLVM, where C builds need only the Clang JLL, discover died here. A
+    # failure to get clang skips the walk and says why.
+    clang_path = try
+        LLVMEnvironment.get_tool("clang++")
+    catch e
+        @warn "No LLVM toolchain for the dependency walk, skipping it" reason = sprint(showerror, e)
+        return nothing
+    end
 
     if isempty(clang_path)
         @warn "Clang not found in LLVM environment, skipping AST walk"

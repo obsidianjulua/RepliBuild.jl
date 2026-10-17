@@ -17,6 +17,19 @@ generator fixes need a re-wrap. Verified on Windows (MSYS2 CLANG64, LLVM/MLIR
 23.1.3) with runtests.jl and the full devtests.jl. CI runs runtests.jl on Linux and
 Windows; Tier 2 was not re-run on Linux for this release.
 
+### discover runs without a system LLVM (2026-10-16)
+
+- A C project needs nothing but Julia, yet `discover` raised "LLVM Toolchain not
+  found" on a machine with no LLVM installed. Its dependency walk is optional and
+  meant to skip when clang is missing, but `get_tool` raises, rather than
+  returning `""`, when there is no toolchain at all, and `discover` then also
+  warmed the toolchain for a later build. Both now degrade: the walk is skipped
+  with a warning that says why, the config takes the scanned sources, and a build
+  that needs system LLVM still raises its own error. The first GitHub CI run found
+  it: the Ubuntu runner has no LLVM that RepliBuild accepts, and
+  `test_registry.jl`'s c_test integration runs `discover` on a fresh clone.
+  `test_discover_without_llvm.jl`, negative-checked.
+
 ### AOT thunks: an end-to-end suite, and a void thunk that threw no longer ends the process on Windows (2026-10-16)
 
 - **`test_aot_thunks.jl` (devtests §5c).** The AOT path had no end-to-end

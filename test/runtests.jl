@@ -116,6 +116,13 @@ include(joinpath(@__DIR__, "test_ingest.jl"))
 
 include(joinpath(@__DIR__, "test_registry.jl"))
 
+# ── discover with no system LLVM (no toolchain) ──────────────────────────────
+# A C project needs only Julia, but discover's optional dependency walk and its
+# toolchain warm-up raised "LLVM Toolchain not found" with no LLVM installed.
+# The first GitHub CI run hit it in test_registry's c_test integration.
+
+include(joinpath(@__DIR__, "test_discover_without_llvm.jl"))
+
 # ── Varargs @ccall emission regression (no toolchain required) ───────────────
 
 include(joinpath(@__DIR__, "test_varargs_emission.jl"))
