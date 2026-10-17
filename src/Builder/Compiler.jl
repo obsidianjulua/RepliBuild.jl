@@ -1341,14 +1341,21 @@ function _pe_export_intent(ir_files::Vector{String})
     saw_foreign_export = false
     for f in ir_files
         isfile(f) || continue
-        for line in eachline(f)
-            is_shim = occursin("replibuild_shim_", line)
-            is_shim && (saw_shim = true)
-            if occursin("dllexport", line) && !is_shim
-                saw_foreign_export = true
+        # Not `eachline(f)`: that closes the file only once exhausted, so the early
+        # return below left it open, and on Windows an open handle blocks deletion.
+        io = open(f)
+        try
+            for line in eachline(io)
+                is_shim = occursin("replibuild_shim_", line)
+                is_shim && (saw_shim = true)
+                if occursin("dllexport", line) && !is_shim
+                    saw_foreign_export = true
+                end
+                (saw_shim && saw_foreign_export) &&
+                    return (; saw_shim, saw_foreign_export)
             end
-            (saw_shim && saw_foreign_export) &&
-                return (; saw_shim, saw_foreign_export)
+        finally
+            close(io)
         end
     end
     return (; saw_shim, saw_foreign_export)

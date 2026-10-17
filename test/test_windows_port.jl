@@ -307,6 +307,23 @@ const LE = RepliBuild.LLVMEnvironment
         end
     end
 
+    # The early return in _pe_export_intent left that file open: `eachline(path)`
+    # closes only once exhausted. On Windows an open handle blocks deletion, which
+    # surfaced as EBUSY when the testset above cleaned its temp dir, and the same
+    # handle sat on IR in the build tree. POSIX unlinks an open file, so this is
+    # only a live check on Windows; it holds on both.
+    @testset "_pe_export_intent closes the file it returns from" begin
+        mktempdir() do dir
+            explicit = joinpath(dir, "explicit.ll")
+            write(explicit, "define dllexport i32 @lib_a() {\n  ret i32 1\n}\n")
+            shim = joinpath(dir, "shim.ll")
+            write(shim, "define dllexport i32 @replibuild_shim_X() {\n  ret i32 8\n}\n")
+            i = C._pe_export_intent([explicit, shim])   # returns while reading `shim`
+            @test i.saw_shim && i.saw_foreign_export
+            @test (rm(shim); !isfile(shim))
+        end
+    end
+
     # A thunk calls a vmethod by name, so its symbol must be one the loader binds.
     # The same hidden method is a local `t` in ELF's nm output and a global `T` in a
     # DLL's COFF symbol table; only the PE export directory tells them apart there.

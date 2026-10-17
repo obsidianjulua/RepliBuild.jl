@@ -51,6 +51,12 @@ package with `[types] templates`, needs a rebuild on Windows, not a re-wrap.
   root, so clang got `<tmp>/src/mathkit.c` and three testsets errored, which also
   stopped devtests before the ten suites after it. Test-only; devtests had not run
   since that change. 14 passes plus the known skip for the LLVM-18 fallback tools.
+- **`_pe_export_intent` closes what it opens.** It read IR with `eachline(path)` and
+  returned from inside the loop. That iterator closes the file only once exhausted,
+  so the handle stayed open until GC, and on Windows an open handle blocks deletion:
+  runtests logged EBUSY cleaning a temp dir, and the same handle could hold IR that
+  `clean` or a rebuild had to remove. It was the only early-exit `eachline` over a
+  path in `src/`. `test_windows_port.jl`.
 
 ### Windows compatibility: per-host config, portable paths, the library's own free (2026-10-11)
 
