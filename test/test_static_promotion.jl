@@ -20,6 +20,8 @@
 #      internalizes it, so before this it survived as a `define hidden`: absent
 #      from the dynsym, invisible to dlsym, and a JIT deadlock for any slice
 #      that declared it. Regression lock for that fix.
+#   7. The promotion decision reads constness the same way on LLVM.jl 9 and 10.
+#      Synthetic IR, run first: it needs no fixture.
 #
 # Usage: julia --project=. test/test_static_promotion.jl
 
@@ -27,6 +29,56 @@ using Test
 using JSON
 using Libdl
 using RepliBuild
+
+# `LLVM.isconstant(gv)` is true for every global on LLVM.jl 10 (it asks "is an
+# LLVM Constant"); read that way, no internal mutable static is promoted.
+const PROMOTION_PROBE_IR = """
+@mut = internal global i64 0
+@mut_lua = internal local_unnamed_addr global i64 0
+@tab = internal unnamed_addr constant [2 x i64] [i64 1, i64 2]
+@hidden_tab = hidden constant [2 x i64] [i64 3, i64 4]
+
+define internal i64 @static_fn() {
+  ret i64 1
+}
+
+define hidden i64 @hidden_fn() {
+  ret i64 2
+}
+
+define i64 @api(i64 %i) {
+  %a = load i64, ptr @mut
+  %b = load i64, ptr @mut_lua
+  %p = getelementptr [2 x i64], ptr @tab, i64 0, i64 %i
+  %c = load i64, ptr %p
+  %q = getelementptr [2 x i64], ptr @hidden_tab, i64 0, i64 %i
+  %d = load i64, ptr %q
+  %e = call i64 @static_fn()
+  %f = call i64 @hidden_fn()
+  %s1 = add i64 %a, %b
+  %s2 = add i64 %s1, %c
+  %s3 = add i64 %s2, %d
+  %s4 = add i64 %s3, %e
+  %s5 = add i64 %s4, %f
+  ret i64 %s5
+}
+"""
+
+@testset "Static promotion: constness reads the same on LLVM.jl 9 and 10" begin
+    dir = mktempdir()
+    in_ll, out_ll = joinpath(dir, "probe.ll"), joinpath(dir, "probe_abi.ll")
+    write(in_ll, PROMOTION_PROBE_IR)
+    promoted = RepliBuild.Compiler._promote_statics_libllvm(in_ll, out_ll, "probe")
+    @test promoted !== nothing
+    # Mutable statics (with or without an unnamed_addr marker), static and hidden
+    # functions, and the hidden constant are promoted; only the internal constant
+    # stays behind, for the Slicer to embed.
+    @test Set(keys(something(promoted, Dict()))) ==
+          Set(["mut", "mut_lua", "static_fn", "hidden_fn", "hidden_tab"])
+    out = read(out_ll, String)
+    @test occursin(r"^@__rb_probe_mut = (dso_local )?global i64 0$"m, out)
+    @test occursin(r"^@tab = internal unnamed_addr constant"m, out)
+end
 
 const FIXTURE = joinpath(@__DIR__, "slice_test")
 const TOML_PATH = joinpath(FIXTURE, "replibuild.toml")

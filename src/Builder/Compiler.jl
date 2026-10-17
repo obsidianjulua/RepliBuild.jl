@@ -1298,7 +1298,12 @@ function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::Stri
                 # LUAI_DDEF tables (`luaT_typenames_`) are exactly this, and left
                 # unpromoted they cost lua_typename/luaL_checktype/luaL_tolstring/
                 # luaL_typeerror their Tier-1 slices.
-                (LLVM.isconstant(gv) && LLVM.linkage(gv) in local_linkages) && continue
+                #
+                # `LLVMIsGlobalConstant`, not `LLVM.isconstant`: on LLVM.jl 10 that
+                # asks whether a value is an LLVM Constant, which every global is,
+                # so no internal mutable static would be promoted.
+                (LLVM.API.LLVMIsGlobalConstant(gv) != 0 &&
+                 LLVM.linkage(gv) in local_linkages) && continue
                 old = LLVM.name(gv)
                 (isempty(old) || startswith(old, "llvm.") || startswith(old, "__rb_")) && continue
                 promote!(gv, old)
