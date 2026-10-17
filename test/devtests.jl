@@ -211,9 +211,7 @@ include(joinpath(TEST_DIR, "test_jit_unwind.jl"))
 # fixture (test/aot_test/), cold and again once the thunk manifest exists. Calls
 # through the companion `_thunks` library in a child process: member, by-value
 # records, virtual override, and a C++ throw for every return shape. Placed
-# with §5/§5b rather than at the end: a failing top-level testset stops this
-# file, and §7 (test_c_inprocess) was red on Windows when this was added
-# (2026-10-16).
+# with §5/§5b, which drive the same thunks through the JIT.
 include(joinpath(TEST_DIR, "test_aot_thunks.jl"))
 
 # ── 6. JLCS dialect invariant probes ─────────────────────────────────────────
