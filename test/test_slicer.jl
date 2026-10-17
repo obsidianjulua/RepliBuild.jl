@@ -16,6 +16,9 @@
 #      resolve, including the promoted name of a hidden-visibility callee, and
 #      the M3 pre-flight demotes a slice with an unresolvable declare instead of
 #      letting it deadlock the JIT.
+#   7. Every read whose LLVM.jl spelling changed meaning between 9 and 10
+#      answers the same on both. Synthetic IR, run first: it needs no fixture,
+#      so it still reports where the machine-local slice_test toml is missing.
 #
 # Usage: julia --project=. test/test_slicer.jl
 
@@ -24,6 +27,125 @@ using Libdl
 using RepliBuild
 
 const Slicer = RepliBuild.Slicer
+
+# Each global and attribute here is one the Slicer reads through a call that
+# LLVM.jl 10 kept but changed: an attribute's kind became a Symbol,
+# `isconstant(gv)` became "is an LLVM Constant" (true for every global),
+# `unnamed_addr` became an enum and `local_unnamed_addr` went away, and
+# `inline_asm!` went away (on 9, the form the Slicer called appended "").
+const LLVMJL_PROBE_IR = """
+module asm "# replibuild slicer probe"
+
+@mut_sig = internal global i64 0
+@mut_lua = internal local_unnamed_addr global i64 0
+@tab_ua = internal unnamed_addr constant [2 x i64] [i64 1, i64 2]
+@tab_lua = internal local_unnamed_addr constant [2 x i64] [i64 3, i64 4]
+@tab_sig = internal constant [2 x i64] [i64 5, i64 6]
+
+define i64 @reads_mut_sig() {
+  %v = load i64, ptr @mut_sig
+  ret i64 %v
+}
+
+define i64 @reads_mut_lua() {
+  %v = load i64, ptr @mut_lua
+  ret i64 %v
+}
+
+define i64 @reads_tab_ua(i64 %i) {
+  %p = getelementptr [2 x i64], ptr @tab_ua, i64 0, i64 %i
+  %v = load i64, ptr %p
+  ret i64 %v
+}
+
+define i64 @reads_tab_lua(i64 %i) {
+  %p = getelementptr [2 x i64], ptr @tab_lua, i64 0, i64 %i
+  %v = load i64, ptr %p
+  ret i64 %v
+}
+
+define ptr @addr_tab_sig() {
+  ret ptr @tab_sig
+}
+
+define i64 @kept_out_of_line(i64 %x) #0 {
+  %r = add i64 %x, 1
+  ret i64 %r
+}
+
+declare i32 @rb_custom_returns_twice(ptr) #1
+
+define i32 @calls_returns_twice(ptr %buf) {
+  %r = call i32 @rb_custom_returns_twice(ptr %buf) #1
+  ret i32 %r
+}
+
+attributes #0 = { noinline }
+attributes #1 = { returns_twice }
+"""
+
+@testset "Slicer: reads that changed meaning in LLVM.jl 10" begin
+    ll = joinpath(mktempdir(), "llvmjl_probe_abi.ll")
+    write(ll, LLVMJL_PROBE_IR)
+    # One call per target: a throw while slicing one (the verifier rejecting
+    # `noinline` + `alwaysinline`) must not hide what the others answer.
+    slice(t) = Slicer.slice_function(ll, t)
+
+    @testset "a mutable static is refused as mutable, whatever its marker" begin
+        # `isconstant(gv)` is true for every global on LLVM.jl 10. Read that way,
+        # @mut_lua is embedded (a second copy of live state) and @mut_sig is
+        # refused as an "address-significant internal constant".
+        for (fn, gv) in (("reads_mut_sig", "mut_sig"), ("reads_mut_lua", "mut_lua"))
+            r = slice(fn)
+            @test !Slicer.sliced(r)
+            @test occursin("mutable global '$gv'", something(r.refusal, ""))
+        end
+    end
+
+    @testset "both unnamed_addr markers embed a constant; no marker refuses" begin
+        for (fn, gv, marker) in (("reads_tab_ua", "tab_ua", "unnamed_addr"),
+                                 ("reads_tab_lua", "tab_lua", "local_unnamed_addr"))
+            r = slice(fn)
+            @test Slicer.sliced(r)
+            @test r.n_embedded_constants == 1
+            @test occursin("@$gv = internal $marker constant", something(r.ir, ""))
+        end
+        r = slice("addr_tab_sig")
+        @test !Slicer.sliced(r)
+        @test occursin("address-significant internal constant 'tab_sig'",
+                       something(r.refusal, ""))
+    end
+
+    @testset "function attributes are seen" begin
+        # The control: a target without `noinline` does get `alwaysinline`, so
+        # its absence below is the `noinline` check working, not a no-op.
+        rt = slice("calls_returns_twice")
+        @test Slicer.sliced(rt)
+        @test :setjmp_family in rt.hazards     # by attribute: the name is unlisted
+        @test !("rb_custom_returns_twice" in Slicer.SETJMP_FAMILY)
+        @test "rb_custom_returns_twice" in rt.declares
+        @test occursin("alwaysinline", something(rt.ir, ""))
+
+        rn = slice("kept_out_of_line")
+        @test Slicer.sliced(rn)
+        @test :noinline in rn.hazards
+        @test !occursin("alwaysinline", something(rn.ir, ""))
+    end
+
+    @testset "module asm is reported and cleared" begin
+        sliced_names = ["reads_tab_ua", "reads_tab_lua", "calls_returns_twice",
+                        "kept_out_of_line"]
+        checked = 0
+        for fn in sliced_names
+            r = slice(fn)
+            Slicer.sliced(r) || continue
+            @test :module_asm in r.hazards
+            @test !occursin("module asm", r.ir)
+            checked += 1
+        end
+        @test checked == length(sliced_names)
+    end
+end
 
 const FIXTURE = joinpath(@__DIR__, "slice_test")
 const TOML_PATH = joinpath(FIXTURE, "replibuild.toml")

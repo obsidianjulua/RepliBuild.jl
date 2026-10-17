@@ -28,6 +28,12 @@
 # version-locked philosophy as the C build bucket. Every produced slice is
 # verified before it is returned; a slice that cannot be produced comes back
 # as a refusal with a reason, never as silently-wrong IR.
+#
+# LLVM.jl 9 and 10 both load here. Where a name means different things in the
+# two (attribute kinds, `isconstant`, `unnamed_addr`, module asm), the read goes
+# through `LLVM.API`, the C API binding, which is the same in both. Two of those
+# changes (attribute kinds, `isconstant`) are silent on 10: the old spelling
+# still runs and answers a different question.
 
 module Slicer
 
@@ -41,7 +47,11 @@ export SliceResult, slice_library, slice_function, sliced
 "Bump to invalidate every cached slice (policy/algorithm change)."
 # 4: entries are named by `slice_file_stem`; a v3 cache on a case-insensitive
 # filesystem can hold one symbol's IR under another's name.
-const SLICER_VERSION = "4"
+# 5: reads that changed meaning in LLVM.jl 10 go through `LLVM.API`. A v4 entry
+# written on LLVM.jl 10 can lack its `:setjmp_family` hazard, which would let a
+# setjmp closure through to llvmcall, and on LLVM.jl 9 module asm was never
+# actually cleared.
+const SLICER_VERSION = "5"
 
 struct SliceResult
     name::String
@@ -67,13 +77,14 @@ const SETJMP_FAMILY = Set([
     "longjmp", "_longjmp", "siglongjmp",
 ])
 
+# Looked up by kind ID through `LLVM.API`. `LLVM.kind(attr)` is that integer ID
+# on LLVM.jl 9 but a Symbol on 10, where comparing it to the ID is always false:
+# `returns_twice` callees would lose their hazard, and a `noinline` target would
+# get `alwaysinline` too, which the verifier rejects.
 function _has_enum_attr(f, attr_name::String)::Bool
     kind_id = LLVM.API.LLVMGetEnumAttributeKindForName(attr_name, Csize_t(length(attr_name)))
-    for attr in collect(LLVM.function_attributes(f))
-        attr isa LLVM.EnumAttribute || continue
-        LLVM.kind(attr) == kind_id && return true
-    end
-    return false
+    fn_idx = reinterpret(LLVM.API.LLVMAttributeIndex, LLVM.API.LLVMAttributeFunctionIndex)
+    return LLVM.API.LLVMGetEnumAttributeAtIndex(f, fn_idx, kind_id) != C_NULL
 end
 
 _is_vararg(f) = LLVM.API.LLVMIsFunctionVarArg(LLVM.API.LLVMGlobalGetValueType(f)) != 0
@@ -93,9 +104,24 @@ address-significant within the module" therefore already covers every observer
 that exists. Without either marker the address is live — the pointer may be
 compared, stored and compared later, or used as a sentinel — and two copies
 answer that question differently depending on which tier ran.
+
+Read through `LLVM.API`: LLVM.jl 9 has `unnamed_addr` and `local_unnamed_addr`
+as two Bools, while LLVM.jl 10 drops the second and makes `unnamed_addr` return
+the three-way `LLVM.UnnamedAddr` enum.
 """
 _addr_insignificant(gv) =
-    LLVM.unnamed_addr(gv) || LLVM.local_unnamed_addr(gv)
+    LLVM.API.LLVMGetUnnamedAddress(gv) != LLVM.API.LLVMNoUnnamedAddr
+
+"""
+Whether `gv` is declared `constant`, so its contents never change at run time.
+
+Not `LLVM.isconstant(gv)`: on LLVM.jl 10 that asks whether a value is an LLVM
+`Constant`, and every global variable is one. A mutable static would then take
+the constant branch of the closure walk: embedded when it carries an
+`unnamed_addr` marker (the cJSON divergence class), refused for the wrong reason
+otherwise. LLVM.jl 10 spells the old meaning `gv.constant`.
+"""
+_is_global_constant(gv) = LLVM.API.LLVMIsGlobalConstant(gv) != 0
 
 _is_weak_linkage(gv) =
     LLVM.linkage(gv) in (LLVM.API.LLVMWeakAnyLinkage, LLVM.API.LLVMWeakODRLinkage,
@@ -152,7 +178,7 @@ function _closure(mod, target)
             name in reached_gvs && return
             push!(reached_gvs, name)
             _is_weak_linkage(v) && push!(hazards, :weak)
-            is_const = LLVM.isconstant(v)
+            is_const = _is_global_constant(v)
             if is_const && _is_local_linkage(v) && _addr_insignificant(v)
                 # no symbol exists and the address is dead → embed; its
                 # initializer contributes edges
@@ -233,10 +259,14 @@ function _extract!(mod, target_name::String)
     hazards = Symbol[]
 
     # Module-level asm: the target's code never needs it (per-function asm is a
-    # value, not module asm) — clear it so the JIT link stays clean.
+    # value, not module asm) — clear it so the JIT link stays clean. Cleared
+    # through `LLVM.API`: LLVM.jl 9's `inline_asm!(mod, "")` APPENDS unless given
+    # `overwrite=true`, so it never cleared anything, and LLVM.jl 10 has no
+    # `inline_asm!` at all. (`isempty` reads both the String that `inline_asm`
+    # returns on 9 and the view it returns on 10.)
     if !isempty(LLVM.inline_asm(mod))
         push!(hazards, :module_asm)
-        LLVM.inline_asm!(mod, "")
+        LLVM.API.LLVMSetModuleInlineAsm2(mod, "", 0)
     end
 
     reached_fns, reached_gvs, embedded_gvs, closure_hazards, refusal = _closure(mod, target)
