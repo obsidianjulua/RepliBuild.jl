@@ -29,6 +29,68 @@ All notable changes to RepliBuild.jl are documented in this file.
   raised `CxxException` for the same throw. All three void forms now share
   `_invoke_void`. Found by the suite's `throw_void` probe.
 
+### LLVM 23 on Windows: libc++ members reach the export table; STL thunks bind only exported symbols (2026-10-16)
+
+Found by running devtests on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) for the
+first time since the toolchain moved.
+
+- **libc++ 23 hides its own functions.** `__configuration/namespace.h` opens every
+  `std` block with `#pragma clang attribute … push(__attribute__((
+  __exclude_from_explicit_instantiation__, __visibility__("hidden"),
+  __abi_tag__(…))), apply_to = function)`. It applies on COFF, where
+  `_LIBCPP_HIDDEN` is empty, and no macro reaches it
+  (`_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS` does not). On MinGW clang emits
+  `-exclude-symbols:` for hidden definitions, so `std::vector<int>::vector()` and
+  the rest were `T` in nm and absent from the DLL's export directory. stl_test had
+  513 exports and passed 28/28 on LLVM 22; on LLVM 23 it had 222, and all seven STL
+  testsets errored with "Symbol not found": one unbindable thunk failed the
+  library's whole JIT module, `make_ints` included. `create_library` now makes
+  hidden `std::__N` definitions default visibility in the IR before codegen, for
+  C++ packages with `[types] templates` (`_unhide_libcxx_ir`), on the merged module
+  and on the per-TU fallback. A package's own `-fvisibility=hidden`, clang's
+  helpers and function-local entities keep their visibility. stl_test: 531
+  exports, 28/28.
+- **The STL method table takes only bindable symbols.** `extract_stl_method_symbols`
+  read `nm -g`, which on PE is the COFF symbol table (an unexported member is still
+  `T`), and also accepted local `t`/`w`. It is now gated by `_runtime_symbol_names`
+  (the PE export directory, else `nm -D`), the same set `verify_wrap_surface` now
+  reads through. An unbindable member drops out of its container's wrapper with a
+  warning instead of taking the engine down, and a C1 constructor first in nm no
+  longer shadows an exported C2.
+- **Known limitation, unchanged.** Seven `std::basic_string<char>` members (`at`,
+  `find`, `erase`, `insert`, `push_back`, `reserve`, the destructor) are
+  explicit-instantiation copies that `libc++.dll` also exports, and lld does not
+  auto-export a symbol whose `__imp_` twin is in an import library. The gate leaves
+  them out and the warning names them, which matches Linux, where they are
+  undefined in the library. With no destructor thunk `CppString` registers no
+  finalizer, so a string grown past the small-string buffer leaks; nothing crashes.
+
+`test_libcxx_exports.jl` (33 tests), both guards negative-checked. Hub fmt, the only Hub
+package with `[types] templates`, needs a rebuild on Windows, not a re-wrap.
+
+### Pre-release fixes: devtests runs to the end (2026-10-16)
+
+- **`test_c_inprocess.jl` names the fixture's files absolutely.** It copies the
+  discovered c_test config into a temp dir and changes only `root`. Since the
+  portable-paths change `source_files = ["src/mathkit.c"]` resolves against that
+  root, so clang got `<tmp>/src/mathkit.c` and three testsets errored, which also
+  stopped devtests before the ten suites after it. Test-only; devtests had not run
+  since that change. 14 passes plus the known skip for the LLVM-18 fallback tools.
+- **`_pe_export_intent` closes what it opens.** It read IR with `eachline(path)` and
+  returned from inside the loop. That iterator closes the file only once exhausted,
+  so the handle stayed open until GC, and on Windows an open handle blocks deletion:
+  runtests logged EBUSY cleaning a temp dir, and the same handle could hold IR that
+  `clean` or a rebuild had to remove. It was the only early-exit `eachline` over a
+  path in `src/`. `test_windows_port.jl`.
+- **`deps/build.jl` stops telling Windows users the dialect is Linux-only.** Every
+  `Pkg.add`/`Pkg.build` on Windows printed "RepliBuild's dialect is Linux-only",
+  which has been false since 4.0.0, and the script looked for `libJLCS.so`. It now
+  names the library by host extension and reports whether `libJLCS.dll` is built
+  and loads. Otherwise it gives the CLANG64-shell build step, because `Pkg.build`
+  does not run in one, and points at `check_environment()` for the package list
+  rather than repeating it. install.md: the verified toolchain is 23.1.3 under
+  CLANG64, and the WINDOWS_PORT.md link points at `docs/updates/`.
+
 ### Windows compatibility: per-host config, portable paths, the library's own free (2026-10-11)
 
 Found by sweeping the Hub on Windows (Julia 1.12.7, MSYS2 CLANG64, LLVM 23).

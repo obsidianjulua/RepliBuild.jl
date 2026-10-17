@@ -29,9 +29,9 @@ candidate is accepted only if it really holds `include/math.h`.
 
 ## C++ libraries
 
-C++ needs a system LLVM/MLIR **21+** toolchain (22.x is what this tree is
-verified against), CMake 3.20+, `clang++`, `mlir-tblgen`, and the JLCS dialect
-built once:
+C++ needs a system LLVM/MLIR **21+** toolchain (verified against 23.1.3 under
+MSYS2 CLANG64, and 22.x on Linux before that), CMake 3.20+, `clang++`,
+`mlir-tblgen`, and the JLCS dialect built once:
 
 ```bash
 cd src/mlir && ./build.sh
@@ -87,9 +87,11 @@ git config --global core.longpaths true
 `src/mlir/build.sh`, and MSYS2 bash then fails with `$'\r': command not found`,
 which reads as a broken script rather than a line-ending problem.
 
-`src/mlir/build.sh` is bash and runs as-is under MSYS2.
+`src/mlir/build.sh` is bash and runs as-is under MSYS2. `Pkg.build` cannot run it
+on Windows, because it does not run in a CLANG64 shell: it reports whether
+`libJLCS.dll` is already built and loadable and otherwise points back here.
 
-[WINDOWS_PORT.md](https://github.com/obsidianjulua/RepliBuild.jl/blob/main/WINDOWS_PORT.md)
+[WINDOWS_PORT.md](https://github.com/obsidianjulua/RepliBuild.jl/blob/main/docs/updates/WINDOWS_PORT.md)
 has the rest — what the port found, and what is still open.
 
 ## After install

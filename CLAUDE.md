@@ -137,11 +137,15 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`.
   Final `.ll → .so` still shells to clang. Check `DW_AT_producer` (`…jl`) to prove a
   C artifact came from the JLL.
-- **C++ / Tier 2 uses system LLVM+MLIR 21+** (22.1.x on the reference host) for the
-  dialect and the external pipeline. `libJLCS.so` is a gitignored build artifact
-  pinned to the installed MLIR minor SONAME: rebuild after a minor upgrade. A patch
+- **C++ / Tier 2 uses system LLVM+MLIR 21+** (23.1.3 under MSYS2 CLANG64 on the
+  reference host, which is Windows; no Linux host verifies Tier 2 today) for the
+  dialect and the external pipeline. `libJLCS.so` (`libJLCS.dll` on Windows: it
+  imports `libLLVM-<major>.dll` and links MLIR statically) is a gitignored build
+  artifact pinned to the installed MLIR minor SONAME: rebuild after a minor upgrade. A patch
   bump inside a minor needs nothing. `deps/build.jl` builds it at install time when
-  possible and never throws. Tier 3 alone is the whole product for C.
+  possible (Linux; on Windows it only reports whether `libJLCS.dll` loads, since
+  `Pkg.build` is not a CLANG64 shell) and never throws. Tier 3 alone is the whole
+  product for C.
 - Julia's bundled libLLVM and system libLLVM coexist in one process. The GDB JIT
   descriptor resolves to Julia's copy; this is correct, do not "fix" it.
 - For LLVM/JIT crashes, check `libJLCS.so`'s mtime/SONAME against the installed MLIR,
@@ -254,7 +258,17 @@ the test named when you touch the area.
 - **A thunk calls its target by name, so the target must be in that runtime set**,
   not merely in `nm`. On PE a method the DLL does not export is still a global `T`
   in the COFF symbol table. `parse_vtables` gates method addresses with
-  `_gate_to_exports`. (`test_windows_port.jl`.)
+  `_gate_to_exports`, and the STL method table goes through
+  `_runtime_symbol_names`, the one source for "what the loader binds"
+  (`verify_wrap_surface` reads it too). One unbindable thunk fails the library's
+  whole JIT module. (`test_windows_port.jl`, `test_libcxx_exports.jl`.)
+- **libc++ 23 hides its own functions** with a `#pragma clang attribute` in
+  `__configuration/namespace.h`. It applies on COFF too, and no macro opts out. On
+  MinGW clang turns hidden into `-exclude-symbols:`, so those members never reach the
+  export directory. `create_library` un-hides hidden `std::__N` definitions in the IR
+  for `[types] templates` packages (`_unhide_libcxx_ir`), on both codegen paths.
+  Members `libc++.dll` exports itself are never auto-exported by lld (their `__imp_`
+  twin wins) and stay unbound.
 - `nm -D` output is parsed only by `Compiler._nm_dynamic_names`, which cuts ELF
   `@VER`/`@@VER` suffixes. Mangled output only: demangled names can contain `@`.
 - The C++ generator writes `thunk_manifest.json` on **every** wrap, JIT or AOT. A
@@ -624,6 +638,11 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
+- STL members that live in the C++ runtime library are unbound: libc++'s
+  `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
+  them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches
+  only the wrapped library. Binding them needs the engine to also search the
+  library's runtime dependencies (2026-10-16).
 
 ## Maintaining this file
 
