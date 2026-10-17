@@ -4,6 +4,19 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.2.0 (2026-10-16)
+
+**LLVM 23 and Windows, end to end.** Minor. New: `[platform.<host>]` tables in
+replibuild.toml, JSON 1.x, the JLCS dialect on LLVM/MLIR 23, and end-to-end
+coverage of AOT thunks; LLVM.jl compat is 9. Nothing removed from the exports.
+Behaviour changes: relative `[compile]` paths resolve against the project root,
+codegen runs at `[link] optimization_level`, and a C++ package compiles its `.c`
+files with the system clang. A 4.1.1 wrapper keeps working. Build-time fixes, the
+libc++ exports among them, need a rebuild (delete `.replibuild_cache/project_hash`);
+generator fixes need a re-wrap. Verified on Windows (MSYS2 CLANG64, LLVM/MLIR
+23.1.3) with runtests.jl and the full devtests.jl. CI runs runtests.jl on Linux and
+Windows; Tier 2 was not re-run on Linux for this release.
+
 ### AOT thunks: an end-to-end suite, and a void thunk that threw no longer ends the process on Windows (2026-10-16)
 
 - **`test_aot_thunks.jl` (devtests §5c).** The AOT path had no end-to-end
