@@ -79,13 +79,14 @@ MSYS2 repo carrying MLIR.
 Before cloning:
 
 ```powershell
-git config --global core.autocrlf false
 git config --global core.longpaths true
 ```
 
-`core.autocrlf false` is required rather than preferred: CRLF corrupts
-`src/mlir/build.sh`, and MSYS2 bash then fails with `$'\r': command not found`,
-which reads as a broken script rather than a line-ending problem.
+Line endings take care of themselves: the repository's `.gitattributes` checks
+every text file out with LF whatever `core.autocrlf` says. Without it, CRLF
+corrupted `src/mlir/build.sh`, and MSYS2 bash then failed with
+`$'\r': command not found`, which reads as a broken script rather than a
+line-ending problem.
 
 `src/mlir/build.sh` is bash and runs as-is under MSYS2. `Pkg.build` cannot run it
 on Windows, because it does not run in a CLANG64 shell: it reports whether

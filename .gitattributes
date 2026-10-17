@@ -1,3 +1,9 @@
+# Check out every text file with LF on every platform. A Windows clone with
+# core.autocrlf=true (the GitHub Actions default) got CRLF, which breaks
+# src/mlir/build.sh under MSYS2 bash and the tests that match multi-line
+# patterns in source files.
+* text=auto eol=lf
+
 # Prevent MLIR/C++ infrastructure from skewing language stats
 *.td linguist-vendored
 src/mlir/impl/* linguist-vendored
