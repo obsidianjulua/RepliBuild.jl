@@ -1,8 +1,8 @@
 # Build the JLCS MLIR dialect at install time, when the machine can.
 #
-# `libJLCS.so` is not shipped — it links against the system MLIR and LLVM, so a
-# prebuilt one would be wrong on any box whose LLVM differs, which is most of
-# them. Until now the consequence landed on the user at the worst possible
+# The dialect library (`libJLCS.so`, `libJLCS.dll` on Windows) is not shipped —
+# it links against the system MLIR and LLVM, so a prebuilt one would be wrong on
+# any box whose LLVM differs, which is most of them. Until now the consequence landed on the user at the worst possible
 # moment: `Pkg.add` succeeded, `using RepliBuild` succeeded, and the first call
 # that reached Tier 2 raised "JLCS dialect library not found — build it first"
 # from inside a read-only depot.
@@ -19,8 +19,31 @@
 
 const MLIR_DIR   = joinpath(@__DIR__, "..", "src", "mlir")
 const BUILD_DIR  = joinpath(MLIR_DIR, "build")
-const LIB_PATH   = joinpath(BUILD_DIR, "libJLCS.so")
+# CMake names the target by host convention: libJLCS.so, libJLCS.dll.
+const LIB_PATH   = joinpath(BUILD_DIR, "libJLCS." * Base.Libc.Libdl.dlext)
 const LOG_PATH   = joinpath(@__DIR__, "build.log")
+
+# How to build it by hand, for this host. The Windows package list is not
+# repeated here: check_environment() prints it from the doctor's one copy.
+function build_steps()
+    if Sys.iswindows()
+        dir = replace(abspath(MLIR_DIR), '\\' => '/')
+        return """
+        To build it, from an MSYS2 CLANG64 shell:
+            cd "$dir" && ./build.sh
+
+        `RepliBuild.check_environment()` lists the CLANG64 packages it needs, and
+        docs/src/install.md (Windows) has the setup."""
+    end
+    return """
+    To build it later:
+        cd $(abspath(MLIR_DIR))
+        ./build.sh
+
+    Requires: cmake, a C++ toolchain, and the system MLIR/LLVM development
+    packages (`mlir-tblgen` and `llvm-config` on PATH). On Arch that is the
+    `mlir` package; on Debian/Ubuntu, `mlir-<version>-dev`."""
+end
 
 # What a failure should tell someone who has never heard of JLCS.
 function advise(reason::AbstractString; detail::AbstractString = "")
@@ -31,13 +54,7 @@ function advise(reason::AbstractString; detail::AbstractString = "")
     the MLIR-JIT path used for C++ member functions and by-value aggregates.
     Tier 3 (`ccall`) wrappers, which is all a C library needs, are unaffected.
 
-    To build it later:
-        cd $(abspath(MLIR_DIR))
-        ./build.sh
-
-    Requires: cmake, a C++ toolchain, and the system MLIR/LLVM development
-    packages (`mlir-tblgen` and `llvm-config` on PATH). On Arch that is the
-    `mlir` package; on Debian/Ubuntu, `mlir-<version>-dev`.
+    $(build_steps())
     $(isempty(detail) ? "" : "\n" * detail)
     """
     exit(0)
@@ -56,7 +73,7 @@ function usable_library()
         Base.Libc.Libdl.dlopen(LIB_PATH, Base.Libc.Libdl.RTLD_LAZY)
         return true
     catch
-        @info "RepliBuild: existing libJLCS.so no longer loads (LLVM upgraded?) — rebuilding."
+        @info "RepliBuild: existing $(basename(LIB_PATH)) no longer loads (LLVM upgraded?)."
         return false
     end
 end
@@ -64,7 +81,14 @@ end
 haveit(prog) = Sys.which(prog) !== nothing
 
 function main()
-    Sys.islinux() || advise("This platform is not supported; RepliBuild's dialect is Linux-only.")
+    if Sys.iswindows()
+        # build.sh needs bash and the CLANG64 toolchain and MLIR on PATH, which is
+        # an MSYS2 CLANG64 shell; Pkg.build does not run in one. Report what is
+        # there instead of trying.
+        usable_library() && return println("RepliBuild: JLCS dialect already built and loadable.")
+        advise("On Windows it is built from an MSYS2 CLANG64 shell, which `Pkg.build` does not run in.")
+    end
+    Sys.islinux() || advise("This platform is not supported; RepliBuild runs on Linux and Windows.")
 
     usable_library() && return println("RepliBuild: JLCS dialect already built and loadable.")
 

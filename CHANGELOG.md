@@ -57,6 +57,14 @@ package with `[types] templates`, needs a rebuild on Windows, not a re-wrap.
   runtests logged EBUSY cleaning a temp dir, and the same handle could hold IR that
   `clean` or a rebuild had to remove. It was the only early-exit `eachline` over a
   path in `src/`. `test_windows_port.jl`.
+- **`deps/build.jl` stops telling Windows users the dialect is Linux-only.** Every
+  `Pkg.add`/`Pkg.build` on Windows printed "RepliBuild's dialect is Linux-only",
+  which has been false since 4.0.0, and the script looked for `libJLCS.so`. It now
+  names the library by host extension and reports whether `libJLCS.dll` is built
+  and loads. Otherwise it gives the CLANG64-shell build step, because `Pkg.build`
+  does not run in one, and points at `check_environment()` for the package list
+  rather than repeating it. install.md: the verified toolchain is 23.1.3 under
+  CLANG64, and the WINDOWS_PORT.md link points at `docs/updates/`.
 
 ### Windows compatibility: per-host config, portable paths, the library's own free (2026-10-11)
 
