@@ -159,6 +159,16 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
 - The final IR -> library step runs codegen at `[link] optimization_level` with
   `-disable-llvm-passes` (`_codegen_opt_flags`). Never drop the `-O`: the `-O0`
   backend is what clang uses without it.
+- **Two Julia releases, two LLVM.jl majors.** RepliBuild supports the two Julia
+  releases in the CI matrix (`.github/workflows/test.yml`), each with its own
+  bundled LLVM, and LLVM.jl 9 and 10. Verify on both Julias, not only the juliaup
+  default. LLVM.jl 10 changed what some names mean without renaming them:
+  `isconstant(gv)` asks whether a value is an LLVM `Constant`, which every global
+  is (the old meaning is `constant(gv)`), an attribute's `kind` is a Symbol, and
+  `unnamed_addr` returns an enum. Read such names through `LLVM.API`, which is the
+  same in both majors. A scan for names that no longer exist cannot find this
+  class, so diff the method definitions; the synthetic-IR testsets at the top of
+  `test_slicer.jl` and `test_static_promotion.jl` catch the known cases.
 
 ### Tier 1 — quarantined side project
 
@@ -447,9 +457,10 @@ the test named when you touch the area.
 `RepliBuild.VERSION` is derived from `Project.toml`; never reintroduce a literal. It
 feeds the fingerprint and `BUILD_GENERATOR`. To check what is registered in General,
 read `R/RepliBuild/Versions.toml` from the tarball that `path =` in
-`~/.julia/registries/General.toml` names. That is `General.tar.zst` now, read with
-`tar --zstd`. A leftover `General.tar.gz` beside it is stale and lacks recent
-versions. 3.3.2 is a permanent hole there. Registration is manual and
+`~/.julia/registries/General.toml` names: `General.tar.gz` (`tar -xzOf`) or
+`General.tar.zst` (`tar --zstd -xOf`), depending on the Pkg version. A tarball
+beside it that `path =` does not name is stale and lacks recent versions. 3.3.2
+is a permanent hole there. Registration is manual and
 outward-facing, so ask first.
 
 ## Debugging Tier 2 thunks
@@ -590,11 +601,12 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
-- **General still lets every registered 3.x/4.x version pair with LLVM.jl 10**
-  (`["3 - 4"] LLVM = "9 - 10"` in `R/RepliBuild/Compat.toml`). `Project.toml` has
-  said `"9"` since 2026-10-02, which binds only the next release. Capping the
-  registered versions is a General PR (outward-facing, ask first). Widen to 10 only
-  once the suite is green on it.
+- **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
+  "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles
+  it: their Tier 1 code makes the reads 4.2.1 fixed. 4.2.0 is capped at `"9"`.
+  Once 4.2.1 is registered the resolver prefers it, so the old versions are
+  reached only when another package holds RepliBuild back. Capping them is a
+  General PR (outward-facing, ask first).
 
 ### Confirmed defects — 2026-09-26 audit
 
