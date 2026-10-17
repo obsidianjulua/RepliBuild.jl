@@ -4,6 +4,31 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### AOT thunks: an end-to-end suite, and a void thunk that threw no longer ends the process on Windows (2026-10-16)
+
+- **`test_aot_thunks.jl` (devtests §5c).** The AOT path had no end-to-end
+  coverage: stress_test/verify.jl hand-rolls its own link, and
+  test_introspection.jl only checks that a failed AOT build leaves no stale
+  library. The new suite builds `test/aot_test/` (C++, no STL) with
+  `[compile] aot_thunks = true` through discover → build → wrap twice: cold, and
+  again once `thunk_manifest.json` exists, when AOT must emit exactly the
+  manifest's thunks (the cold build also emits thunks for Tier-3 functions,
+  which no wrapper binds). Each pass checks the companion library and its
+  exports, the manifest, and the wrapper (AOT slots, no JIT dispatch), then a
+  child process calls through it: plain members, records by value at 8, 16 and
+  24 bytes (argument and return, including a member returning one), virtual
+  override dispatch, and a C++ throw for every return shape (i32, f64, pointer,
+  sret, void, a non-`std::exception`), with no JIT engine created.
+- **`JITManager._invoke_void`.** On Windows the dialect lowers `try_call` to a
+  plain call, so a thunk does not catch; libJLCS's `jlcs_guard_*` does.
+  `_invoke_call` (every non-void return) and the JIT `invoke` void form went
+  through the guard. The AOT void forms (`invoke_aot` and `invoke_aot_ptr`
+  without a return type) called the thunk directly, so a void C++ function that
+  threw through an AOT thunk killed the process with no message (exit status
+  0x20474343, the SEH code of an uncaught C++ exception), where the JIT wrapper
+  raised `CxxException` for the same throw. All three void forms now share
+  `_invoke_void`. Found by the suite's `throw_void` probe.
+
 ### Windows compatibility: per-host config, portable paths, the library's own free (2026-10-11)
 
 Found by sweeping the Hub on Windows (Julia 1.12.7, MSYS2 CLANG64, LLVM 23).
