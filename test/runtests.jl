@@ -329,6 +329,15 @@ include(joinpath(@__DIR__, "test_windows_port.jl"))
 
 include(joinpath(@__DIR__, "test_thunk_manifest.jl"))
 
+# ── libc++ members the STL path binds are exported (no toolchain) ────────────
+# libc++ 23 hides every function it does not annotate, with a pragma that
+# applies on COFF too; on MinGW that kept std::vector's members out of the DLL's
+# exports, and one unbindable STL thunk failed the library's whole JIT module.
+# create_library un-hides them for [types] templates packages, and the STL table
+# keeps only symbols the loader can bind.
+
+include(joinpath(@__DIR__, "test_libcxx_exports.jl"))
+
 # ── [platform.<host>] overlays (no toolchain) ────────────────────────────────
 # One config builds on Linux and Windows: per-host link libraries, defines and
 # dependency excludes merge over the base; an unknown platform name is an error.
