@@ -15,7 +15,17 @@ const _CINP_TEST_DIR = @__DIR__
 
 """Write a c_test-derived toml into `root` with the given link overrides."""
 function _c_inprocess_toml(root::String; opt_level::String, fallback::Union{Bool,Nothing})
-    base = TOML.parsefile(joinpath(_CINP_TEST_DIR, "c_test", "replibuild.toml"))
+    fixture = joinpath(_CINP_TEST_DIR, "c_test")
+    base = TOML.parsefile(joinpath(fixture, "replibuild.toml"))
+    # discover writes compile paths relative to the project root, and load_config
+    # resolves them against `root`. This config moves `root` to a temp dir, so the
+    # fixture's sources and headers are named absolutely, or clang is handed
+    # `<tmp>/src/mathkit.c`, which does not exist.
+    for key in ("source_files", "include_dirs")
+        base["compile"][key] = [isabspath(p) ? p : normpath(joinpath(fixture, p))
+                                for p in get(base["compile"], key, String[])]
+    end
+    @test !isempty(base["compile"]["source_files"])
     base["link"]["optimization_level"] = opt_level
     fallback === nothing ? delete!(base["link"], "fallback") : (base["link"]["fallback"] = fallback)
     name = "c_inproc_" * basename(root)

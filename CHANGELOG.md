@@ -43,6 +43,15 @@ first time since the toolchain moved.
 `test_libcxx_exports.jl` (33 tests), both guards negative-checked. Hub fmt, the only Hub
 package with `[types] templates`, needs a rebuild on Windows, not a re-wrap.
 
+### Pre-release fixes: devtests runs to the end (2026-10-16)
+
+- **`test_c_inprocess.jl` names the fixture's files absolutely.** It copies the
+  discovered c_test config into a temp dir and changes only `root`. Since the
+  portable-paths change `source_files = ["src/mathkit.c"]` resolves against that
+  root, so clang got `<tmp>/src/mathkit.c` and three testsets errored, which also
+  stopped devtests before the ten suites after it. Test-only; devtests had not run
+  since that change. 14 passes plus the known skip for the LLVM-18 fallback tools.
+
 ### Windows compatibility: per-host config, portable paths, the library's own free (2026-10-11)
 
 Found by sweeping the Hub on Windows (Julia 1.12.7, MSYS2 CLANG64, LLVM 23).
