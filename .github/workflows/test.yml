@@ -2,9 +2,10 @@ name: Tests
 
 # runtests.jl is the toolchain-free suite: it needs only Julia and the JLL clang
 # RepliBuild depends on. Run it on both supported hosts so a Linux-only or
-# Windows-only assumption fails here instead of on the other developer's box.
-# (devtests.jl needs system LLVM/MLIR, a built libJLCS and GNU binutils; Hub
-# builds are the integration test.)
+# Windows-only assumption fails here instead of on the other developer's box,
+# and on both supported Julia releases, since RepliBuild keeps a two-release
+# window. (devtests.jl needs system LLVM/MLIR, a built libJLCS and GNU
+# binutils; Hub builds are the integration test.)
 
 on:
   push:
@@ -19,17 +20,20 @@ concurrency:
 
 jobs:
   test:
-    name: runtests — ${{ matrix.os }}
+    name: runtests — ${{ matrix.os }}, Julia ${{ matrix.julia }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # Exact versions: the C bucket runs on each Julia's own libLLVM
+        # (1.12 has LLVM 18, 1.13 has LLVM 20).
+        julia: ['1.12.7', '1.13.2']
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.12.7'   # the C bucket is pinned to this Julia's libLLVM
+          version: ${{ matrix.julia }}
       - uses: julia-actions/cache@v2
       - name: Instantiate
         shell: julia --project=. {0}

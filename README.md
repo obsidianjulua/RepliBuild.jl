@@ -82,7 +82,7 @@ lists every key, what discovery cannot infer, and a symptom → key index.
   `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64) — not MSVC. Both read DWARF
   through GNU binutils. macOS is refused at load: the AAPCS64 ABI classifier is
   not built, so arm64 Mach-O has no struct-passing rules to apply.
-- **Julia 1.10+** (developed on 1.12).
+- **Julia 1.10+** (tested on 1.12 and 1.13).
 - **C libraries: nothing else on Linux.** Clang ships as a JLL, and
   link/optimize/assemble run on Julia's own libLLVM.
 - **C++ libraries:** system LLVM/MLIR 21+, then `cd src/mlir && ./build.sh`.
