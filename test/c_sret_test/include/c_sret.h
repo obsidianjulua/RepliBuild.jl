@@ -20,7 +20,8 @@ typedef struct { int n; char s[12]; } IC12;             /* 16 B: SysV INTEGER,IN
 typedef struct __attribute__((packed)) { char c; short s; char d; } P4;     /* 4 B: Win64 RAX; SysV MEMORY */
 typedef struct __attribute__((packed)) { char c; int i; char pad[3]; } P8; /* 8 B: Win64 RAX; SysV MEMORY */
 typedef struct { long long a, b; int c; } Big24;        /* 24 B: memory on both */
-typedef struct { int n; short s[8]; } IS20;            /* 20 B: memory on both; an explicit sret here */
+typedef struct { int n; short s[8]; } IS20;            /* 20 B: memory on both; natural, so a plain ccall */
+typedef struct __attribute__((packed)) { char c; long long x; long long y; } PK17; /* 17 B: the explicit sret */
 typedef struct __attribute__((packed)) { char x; short y; } In3;           /* 3 B, align 1 */
 typedef struct { In3 in; char c[3]; } Out6;             /* 6 B: y at 1, SysV MEMORY; Win64 sret */
 typedef struct { float f; int b : 3; int c; } BF12;     /* 12 B float blob: Win64 sret; SysV refused */
@@ -37,6 +38,7 @@ P8    make_p8(int i);
 int   take_p8(P8 v);                    /* Win64: i64 on both views; SysV: refused */
 Big24 make_big24(long long a, long long b, int c);
 IS20  make_is20(int n);
+PK17  make_pk17(long long x);
 Out6  make_out6(short y);
 BF12  make_bf12(float f, int b, int c); /* Win64: sret; SysV: refused */
 

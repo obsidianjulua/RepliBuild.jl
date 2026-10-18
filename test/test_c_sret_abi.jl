@@ -27,9 +27,9 @@ const C_SRET_DIR = joinpath(@__DIR__, "c_sret_test")
 
 # Every function in c_sret.h, and the ones that return a record by value.
 const C_SRET_FUNCTIONS = ["f4", "f2", "make_ic12", "ic12_sum", "make_p4", "make_p8",
-                          "take_p8", "make_big24", "make_is20", "make_out6", "make_bf12"]
+                          "take_p8", "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12"]
 const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
-                               "make_big24", "make_is20", "make_out6", "make_bf12"]
+                               "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12"]
 
 @testset "Tier 3 record returns, live (C1)" begin
     toml_path = joinpath(C_SRET_DIR, "replibuild.toml")

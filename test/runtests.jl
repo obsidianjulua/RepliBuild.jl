@@ -152,6 +152,13 @@ include(joinpath(@__DIR__, "test_c_generator_policies.jl"))
 
 include(joinpath(@__DIR__, "test_c_sret_classification.jl"))
 
+# ── Record layouts: natural or not, for C and C++ routing (no toolchain) ─────
+# One answer for "does a Julia struct of these fields reproduce the C layout?",
+# from the member types' alignment. GeneratorCpp keeps ≤16-byte byte blobs off
+# the ccall path.
+
+include(joinpath(@__DIR__, "test_record_natural_layout.jl"))
+
 # ── Macro-shim header-collision guard (library-free fixture; needs clang) ────
 
 include(joinpath(@__DIR__, "test_shim_header_guard.jl"))

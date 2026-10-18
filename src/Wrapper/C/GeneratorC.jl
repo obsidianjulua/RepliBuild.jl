@@ -253,29 +253,43 @@ an `abi` argument, so a test can ask for either convention on any host.
 _c_record_abi() = Sys.iswindows() ? :win64 : :sysv
 
 """
+    _c_scalar_layout(jt, ct, size, dwarf_structs) -> (size, alignment) | nothing
     _c_scalar_align(jt, ct, size, dwarf_structs) -> Int | nothing
 
-Alignment of a member that is not a record or an array: a pointer, an entry of
-`_C_PRIM_FIELD_LAYOUT`, an enum by its underlying integer, or `long double`
-(16: an x87 value in a 16-byte slot, which the metadata spells
+Size and alignment of a member that is not a record or an array: a pointer, an
+entry of `_C_PRIM_FIELD_LAYOUT`, an enum by its underlying integer, or `long
+double` (16 and 16: an x87 value in a 16-byte slot, which the metadata spells
 `NTuple{2, UInt64}`). An unknown scalar of 1, 2, 4 or 8 bytes is aligned to its
 size, which holds for every x86-64 scalar of those sizes except `_Complex float`
 (in the table). Never applied to an array or a record: that was C1.
 """
-function _c_scalar_align(jt::String, ct::String, size::Int, dwarf_structs)
-    (endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring") && return 8
-    ct == "long double" && return 16
-    haskey(_C_PRIM_FIELD_LAYOUT, jt) && return _C_PRIM_FIELD_LAYOUT[jt][2]
-    for cand in (jt, ct)
+function _c_scalar_layout(jt::String, ct::String, size::Int, dwarf_structs)
+    (endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring") && return (8, 8)
+    ct == "long double" && return (16, 16)
+    haskey(_C_PRIM_FIELD_LAYOUT, jt) && return _C_PRIM_FIELD_LAYOUT[jt]
+    for cand in _c_type_name_candidates(jt, ct)
         e = get(dwarf_structs, "__enum__" * cand, nothing)
         e === nothing && continue
         ejt = get(e, "julia_type", "")
-        (ejt isa AbstractString && haskey(_C_PRIM_FIELD_LAYOUT, ejt)) && return _C_PRIM_FIELD_LAYOUT[ejt][2]
+        (ejt isa AbstractString && haskey(_C_PRIM_FIELD_LAYOUT, ejt)) && return _C_PRIM_FIELD_LAYOUT[ejt]
         ebs = _parse_dwarf_size(e)
-        return ebs in (1, 2, 4, 8) ? ebs : nothing
+        return ebs in (1, 2, 4, 8) ? (ebs, ebs) : nothing
     end
-    (size in (1, 2, 4, 8) && !occursin('[', ct)) && return size
+    (size in (1, 2, 4, 8) && !occursin('[', ct)) && return (size, size)
     return nothing
+end
+
+_c_scalar_align(jt::String, ct::String, size::Int, dwarf_structs) =
+    (l = _c_scalar_layout(jt, ct, size, dwarf_structs); l === nothing ? nothing : l[2])
+
+# The names a member type may be keyed under: its Julia and C spellings, and
+# for a C++ name each suffix after a `::` scope (`pugi::xml_node` is keyed
+# `xml_node`), as FunctionGen's lookups try them.
+function _c_type_name_candidates(jt::String, ct::String)
+    out = String[]
+    jt == "Any" || isempty(jt) || push!(out, jt)
+    isempty(ct) || append!(out, JLCSIRGenerator.FunctionGen._scope_suffixes(ct))
+    return unique!(out)
 end
 
 # The DWARF record a by-value member's type names, as `(key, info)`; `nothing`
@@ -284,10 +298,12 @@ function _c_member_record(jt::String, ct::String, dwarf_structs,
                           best_dwarf_key::Dict{String,String})
     (endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring") && return nothing
     haskey(_C_PRIM_FIELD_LAYOUT, jt) && return nothing
-    for cand in (jt, ct)
-        (isempty(cand) || cand == "Any") && continue
-        haskey(dwarf_structs, "__enum__" * cand) && return nothing
-        info = get(dwarf_structs, cand, nothing)
+    cands = _c_type_name_candidates(jt, ct)
+    any(c -> haskey(dwarf_structs, "__enum__" * c), cands) && return nothing
+    for cand in cands
+        # Exact key, then the trailing-` >` spellings template nesting leaves.
+        key = JLCSIRGenerator.FunctionGen._fuzzy_struct_lookup(cand, dwarf_structs)
+        info = key === nothing ? nothing : dwarf_structs[key]
         info === nothing && (info = _lookup_dwarf_agg(_sanitize_c_type_name(cand), dwarf_structs, best_dwarf_key))
         (info !== nothing && haskey(info, "members")) && return (cand, info)
     end
@@ -2809,10 +2825,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # register return shifts every argument by one and returns garbage,
         # with no error (C1: `{ char; short[3]; }`, 8 bytes).
         #
-        # `c_safe` only nominates candidates: `get_julia_aligned_size` takes a
-        # member's size as its alignment, so it reports packing too often, and
-        # it cannot see an unaligned field inside a packed member record. An
-        # explicit sret at 16 bytes or less therefore enters whatever it says.
+        # `c_safe` only nominates candidates: a return whose layout is not
+        # natural (`_record_natural_layout`). At 16 bytes or less the explicit
+        # sret is decided here whatever it says; above 16, a natural record
+        # keeps the plain ccall, whose own lowering passes the hidden pointer.
         sret_c_ret = get(return_type, "c_type", "void")
         cleaned_c_ret = String(strip(replace(sret_c_ret, r"\bconst\b" => "")))
         ret_struct_info = get(dwarf_structs, cleaned_c_ret, nothing)

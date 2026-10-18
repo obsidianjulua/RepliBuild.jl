@@ -194,6 +194,30 @@ function _prove_julia_layout(plan, byte_size::Int, jl_layouts, jl_mutable)
 end
 
 """
+    _crosses_small_blob(func, dwarf_structs, record_abi, blob_names) -> Bool
+
+Whether `func` passes or returns by value a record that the struct emitter
+wrote as a byte blob (`blob_names`, sanitized names) of 16 bytes or less. A
+ccall would carry the blob, whose `NTuple{N,UInt8}` claims INTEGER for every
+SysV eightbyte where the record may have SSE ones, so such a function goes to
+the thunk, which lays the record out from DWARF. Above 16 bytes a record
+crosses in memory on both ABIs and the blob's bytes are exact.
+"""
+function _crosses_small_blob(func, dwarf_structs, record_abi, blob_names)::Bool
+    isempty(blob_names) && return false
+    ts = Iterators.flatten(((get(func["return_type"], "c_type", ""),),
+                            (get(p, "c_type", "") for p in func["parameters"])))
+    for t in ts
+        kind, key = JLCSIRGenerator.FunctionGen.by_value_crossing(String(t), dwarf_structs, record_abi)
+        kind === :layout || continue
+        jname = replace(replace(replace(_sanitize_cpp_type_name(key), "*" => "Ptr"), "&" => "Ref"),
+                        r"[^a-zA-Z0-9_]" => "_")
+        jname in blob_names && 1 <= _parse_dwarf_size(dwarf_structs[key]) <= 16 && return true
+    end
+    return false
+end
+
+"""
     _record_name_as_emitted(julia_type, records) -> String
 
 The name a signature must use for a record or enum the module emits. A C++ type
@@ -2421,6 +2445,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # would each call whichever thunk `__init__` resolved last.
     aot_fptr_taken = Dict{String,String}()
 
+    # Records the struct emitter wrote as byte blobs (see the dispatch decision).
+    _blob_names = @isdefined(blob_struct_names) ? blob_struct_names : Set{String}()
+
     for func in functions
         func_name = func["name"]
         mangled = func["mangled"]
@@ -2431,8 +2458,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # =========================================================
 
         # Determine if we should use MLIR or ccall.
-        # Tier 2 is decided by is_ccall_safe alone.
-        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs; record_abi=record_abi)
+        # Tier 2 is decided by is_ccall_safe, and by what ccall would carry:
+        # the Julia type a record crosses by value must be its C layout. A
+        # record `_prove_julia_layout` could not reproduce is a byte blob, and
+        # at 16 bytes or less a blob claims INTEGER for every SysV eightbyte
+        # where the record may have SSE ones. The thunk lays the record out from
+        # DWARF. (Above 16 bytes the record crosses in memory on both ABIs and
+        # the blob's bytes are exact. Unions and bitfield records, the `mutable`
+        # ones, never reach here: `_record_natural_layout` rejects them.)
+        use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs; record_abi=record_abi) ||
+                            _crosses_small_blob(func, dwarf_structs, record_abi, _blob_names)
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])

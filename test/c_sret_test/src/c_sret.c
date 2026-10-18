@@ -95,6 +95,14 @@ IS20 make_is20(int n)
     return r;
 }
 
+PK17 make_pk17(long long x)
+{
+    REC(0, x);
+    c1_rec_n = 1;
+    PK17 r = { 0x55, x + 1, x - 1 };
+    return r;
+}
+
 Out6 make_out6(short y)
 {
     REC(0, y);
