@@ -73,6 +73,15 @@ pinned tag + `commit`), listed in `index.toml`. `REPLIBUILD_HUB_URL` overrides t
 index location. `examples/BoxWorld/` is the reference consumer package. The `hub-wrap`
 skill drives adding a package.
 
+- **Rebuild the Hub only in three cases:**
+  - before a release, for stability;
+  - for the one package that exercises the calling path being changed, or that
+    caused the error;
+  - when John asks.
+
+  A rebuild or re-wrap sweep is never routine verification of a change. Use the
+  change's own regression test plus runtests and devtests. A sweep costs hours of
+  wall-clock time, and outside those cases its wrappers come back byte-identical.
 - **Dev loop: build + wrap in place, never `discover`.** Hub tomls are hand-rolled
   (varargs, macros, excludes) and discover would strip them.
 - **`test.jl` REBUILDS, `test_deep.jl` verifies.** `test.jl` calls `RepliBuild.clean`,
@@ -512,10 +521,11 @@ Start here for any ABI question: register state is observable.
   with a generator script that refuses to write a vacuous fixture. Hand-run tools live
   in `test/tools/` (`gen_receiver_corpus.jl`, `gen_thunk_symbols.jl`,
   `ab_virtual_dispatch.jl`) and are the only files allowed to touch the Hub. Hub
-  rebuilds are the integration test. `test/tools/abi_fuzz.jl` (unwired, touches no
-  Hub) generates a C unit per seed, wraps it as C and as C++, and checks both
-  tiers against the compiler's own `sizeof`/`offsetof` and the values each callee
-  records; its header says how to run and minimise.
+  rebuilds are the release integration test; RepliBuild-Hub says when to run one.
+  `test/tools/abi_fuzz.jl` (unwired, touches no Hub) generates a C unit per seed,
+  wraps it as C and as C++, and checks both tiers against the compiler's own
+  `sizeof`/`offsetof` and the values each callee records. Its header says how to
+  run it and how to minimise a failure.
 - **Guard against vacuous green.** Assert that the loop actually ran
   (`checked == expected`). Never wrap corpus loading in a bare `try/catch`.
   Negative-check a new guard by neutering the fix, using the exact method signature
@@ -542,9 +552,14 @@ Start here for any ABI question: register state is observable.
   read that.
 - A test that states one host's answer instead of the invariant goes red on the other
   host (Linux vs Windows). Drive host-conditional code with both spellings.
-- A regression check for a generator change: re-wrap pugixml (full debug info) or box2d
-  and diff against a wrapper from unpatched HEAD. It should be byte-identical apart
-  from timestamps. For dialect changes, compare machine code, not IR text.
+- A regression check for a generator change is the change's own regression test plus
+  runtests and devtests. For ABI work, also run `test/tools/abi_fuzz.jl` on the same
+  seeds before and after.
+  - Re-wrap a Hub package and diff it against a wrapper from unpatched HEAD only when
+    the change exercises that package, or before a release. pugixml has full debug
+    info; box2d also works.
+  - The re-wrap should be byte-identical apart from timestamps.
+  - For dialect changes, compare machine code, not IR text.
 - Fixtures: `c_test/`, `stress_test/`, `stl_test/`, `mi_test/`, `vi_test/`,
   `callback_test/`, `c_abomination_test/`, `abi_nested_test/`,
   `convenience_overload_test/`, `aot_test/`, `slice_test/` (Tier 1) are
