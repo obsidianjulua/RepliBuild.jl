@@ -9,6 +9,7 @@ using Dates
 using JSON
 using Libdl
 using LLVM
+import SHA
 
 # Import from parent RepliBuild module
 import ..ConfigurationManager
@@ -54,15 +55,19 @@ just a staleness one: the resulting `.so` looks fine but was compiled wrong.
 Excludes individual source content on purpose, so editing one `.cpp` still
 recompiles only that file; a flag/define/include change busts the whole set
 (correct — they affect every translation unit).
+
+`toolchain` is a seam for tests; a build always takes `_toolchain_identity`.
 """
-function compute_compile_fingerprint(config::RepliBuildConfig)::String
-    h = hash("replibuild-compile-fingerprint-v2")
+function compute_compile_fingerprint(config::RepliBuildConfig;
+                                     toolchain::AbstractString=_toolchain_identity(config))::String
+    ctx = SHA.SHA256_CTX()
+    _key_feed!(ctx, "replibuild-compile-fingerprint-v3")
     for f in get_compile_flags(config)
-        h = hash(f, h)
+        _key_feed!(ctx, f)
     end
     for (k, v) in sort(collect(config.compile.defines))
-        h = hash(k, h)
-        h = hash(v, h)
+        _key_feed!(ctx, string(k))
+        _key_feed!(ctx, string(v))
     end
     # Header *contents*, not just the -I path. The per-file cache otherwise
     # serves IR compiled against the previous header: `needs_recompile` only
@@ -71,7 +76,7 @@ function compute_compile_fingerprint(config::RepliBuildConfig)::String
     # edit and refuses the "project unchanged" fast path; without this, the
     # file cache then links the old IR anyway.
     for d in get_include_dirs(config)
-        h = hash(d, h)   # -I path affects header resolution, independent of mtime
+        _key_feed!(ctx, d)   # -I path affects header resolution, independent of mtime
         isdir(d) || continue
         for (root, dirs, files) in walkdir(d)
             filter!(x -> !(x in (".git", "build", ".replibuild_cache")), dirs)
@@ -80,21 +85,35 @@ function compute_compile_fingerprint(config::RepliBuildConfig)::String
                 any(endswith(f, ext) for ext in (".h", ".hpp", ".hxx", ".hh")) || continue
                 path = joinpath(root, f)
                 isfile(path) || continue
-                h = hash(relpath(path, d), h)
-                h = hash(read(path), h)
+                _key_feed!(ctx, relpath(path, d))
+                _key_feed!(ctx, read(path))
             end
         end
     end
-    # Compiler identity: the C path emits via the JLL clang pinned to
-    # Base.libllvm_version, so a Julia/LLVM bump must invalidate. Target triple
-    # changes codegen too.
-    h = hash(string(Base.libllvm_version), h)
-    h = hash(_detect_target_triple(), h)
-    # A C++ package compiles every TU with the SYSTEM clang, which the package
-    # manager upgrades on its own (MSYS2 moved 22 -> 23). Without its identity
-    # here, IR from the old compiler kept being served to the new one's tools.
-    config.wrap.language == :c || (h = hash(_system_clang_identity(), h))
-    return string(h, base=16)
+    # The compiler and target triple; see `_toolchain_identity`.
+    _key_feed!(ctx, toolchain)
+    return bytes2hex(SHA.digest!(ctx))
+end
+
+"""
+    _key_feed!(ctx, x)
+
+Feed one field into a persisted cache key: its length, then its bytes, so two
+consecutive fields cannot run together ("ab" + "c" is not "a" + "bc").
+
+The keys are SHA-256, not `Base.hash`. They are written to disk and read back by
+whatever Julia runs the next build, and `Base.hash` is not stable across Julia
+releases: 1.12 and 1.13 hash the same bytes to different values. A key made with
+it changed whenever Julia did, which is the only reason a Julia switch used to
+rebuild a project at all. That is the wrong reason for a C project, whose
+compiler did change but was never in the project hash, and a needless full
+recompile for a C++ one, whose compiler did not.
+"""
+_key_feed!(ctx, x::AbstractString) = _key_feed!(ctx, codeunits(String(x)))
+function _key_feed!(ctx, bytes::AbstractVector{UInt8})
+    SHA.update!(ctx, reinterpret(UInt8, [UInt64(length(bytes))]))
+    SHA.update!(ctx, bytes)
+    return ctx
 end
 
 const _SYSTEM_CLANG_ID = Ref{String}("")
@@ -109,6 +128,30 @@ function _system_clang_identity()::String
     end
     _SYSTEM_CLANG_ID[] = rc == 0 ? String(strip(first(split(out, '\n')))) : "unavailable"
     return _SYSTEM_CLANG_ID[]
+end
+
+"""
+    _toolchain_identity(config) -> String
+
+The compiler a project's IR comes from, plus the target triple: one string that
+every persisted build key carries (`compute_compile_fingerprint`,
+`compute_project_hash`, the registry's `hash_config`), so switching toolchains
+rebuilds exactly what the switch affects.
+
+- **C**: `libllvm <Base.libllvm_version>`. The JLL clang is pinned to Julia's
+  own libLLVM, link/opt/promotion run in process on it, and Tier 1 slices are
+  IR for it. Switching Julia (1.12 is LLVM 18, 1.13 is LLVM 20) changes all of
+  that, and newer IR does not parse in an older LLVM (`icmp samesign` is LLVM 20).
+- **C++**: `system <clang++ --version>`. Every TU compiles with the system
+  clang, which the package manager upgrades on its own (MSYS2 moved 22 to 23),
+  and Julia's libLLVM plays no part, so a Julia switch leaves a C++ project
+  built.
+"""
+function _toolchain_identity(config::RepliBuildConfig)::String
+    compiler = config.wrap.language == :c ?
+        "libllvm " * string(Base.libllvm_version) :
+        "system " * _system_clang_identity()
+    return compiler * " | " * _detect_target_triple()
 end
 
 """
@@ -200,22 +243,28 @@ end
 # =============================================================================
 
 """
-Compute a content hash for the entire project: replibuild.toml + source files + git HEAD.
-Returns a hex string that changes when anything relevant changes.
+Compute a content hash for the entire project: replibuild.toml + source files +
+headers + git HEAD + the toolchain (`_toolchain_identity`). Returns a hex string
+that changes when anything relevant changes, and only then: it is SHA-256, so it
+is the same under every Julia release (see `_key_feed!`).
+
+`toolchain` is a seam for tests; a build always takes `_toolchain_identity`.
 """
-function compute_project_hash(config::RepliBuildConfig)::String
-    h = UInt64(0)
+function compute_project_hash(config::RepliBuildConfig;
+                              toolchain::AbstractString=_toolchain_identity(config))::String
+    ctx = SHA.SHA256_CTX()
+    _key_feed!(ctx, "replibuild-project-hash-v2")
 
     # Hash the replibuild.toml content
     toml_path = config.config_file
     if isfile(toml_path)
-        h = hash(read(toml_path), h)
+        _key_feed!(ctx, read(toml_path))
     end
 
     # Hash all source files by content
     for src in get_source_files(config)
         if isfile(src)
-            h = hash(read(src), h)
+            _key_feed!(ctx, read(src))
         end
     end
 
@@ -244,8 +293,8 @@ function compute_project_hash(config::RepliBuildConfig)::String
                 isfile(path) || continue
                 # Path as well as content: renaming a header, or swapping the
                 # contents of two, changes what the compiler sees.
-                h = hash(relpath(path, inc_dir), h)
-                h = hash(read(path), h)
+                _key_feed!(ctx, relpath(path, inc_dir))
+                _key_feed!(ctx, read(path))
             end
         end
     end
@@ -254,10 +303,15 @@ function compute_project_hash(config::RepliBuildConfig)::String
     project_root = config.project.root
     git_head = _get_git_head(project_root)
     if !isempty(git_head)
-        h = hash(git_head, h)
+        _key_feed!(ctx, git_head)
     end
 
-    return string(h, base=16)
+    # The toolchain. Without it, switching Julia left a C project "unchanged":
+    # the build was skipped, and the next wrap re-sliced or re-served Tier 1
+    # IR printed by the other libLLVM.
+    _key_feed!(ctx, toolchain)
+
+    return bytes2hex(SHA.digest!(ctx))
 end
 
 function _get_git_head(dir::String)::String

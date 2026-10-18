@@ -389,11 +389,27 @@ function _clone(master, src_text::String)
 end
 
 """
+    _slice_cache_key(src_bytes; llvm_major=Base.libllvm_version.major) -> String
+
+The slice-cache directory for one promoted module: its content hash,
+`SLICER_VERSION`, and the libLLVM major that prints the slices.
+
+The major is there because a cached slice is IR text, printed by whichever
+Julia sliced it. Switch Julia and `wrap` alone (no rebuild) and the module text,
+so the content hash, is unchanged: without the major, Julia 1.12 was served
+slices Julia 1.13 had printed, and their `icmp samesign` failed to parse in
+LLVM 18 at the first call.
+"""
+_slice_cache_key(src_bytes; llvm_major::Integer=Base.libllvm_version.major) =
+    bytes2hex(sha256(src_bytes))[1:16] * "-v" * SLICER_VERSION * "-llvm" * string(llvm_major)
+
+"""
     slice_library(abi_ll; targets, cache_dir=nothing) -> Dict{String,SliceResult}
 
 Slice `targets` out of the post-promotion module at `abi_ll`. Parses the
 module once and clones per target. With `cache_dir`, results are cached by
-(module content hash, target, SLICER_VERSION) and served on hit.
+(module content hash, target, SLICER_VERSION, libLLVM major; see
+`_slice_cache_key`) and served on hit.
 
 An exception while slicing one target becomes that target's refusal, tagged
 `:slicer_error` (see `errored`), and is never cached; the other targets are
@@ -408,8 +424,7 @@ function slice_library(abi_ll::String; targets::Vector{String},
 
     key_dir = nothing
     if cache_dir !== nothing
-        modkey = bytes2hex(sha256(src_bytes))[1:16] * "-v" * SLICER_VERSION
-        key_dir = joinpath(cache_dir, "slices", modkey)
+        key_dir = joinpath(cache_dir, "slices", _slice_cache_key(src_bytes))
         mkpath(key_dir)
     end
 

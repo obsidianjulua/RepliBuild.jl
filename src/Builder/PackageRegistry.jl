@@ -9,6 +9,7 @@ module PackageRegistry
 using ..ConfigurationManager
 using ..DependencyResolver
 using ..EnvironmentDoctor
+import ..Compiler
 using TOML
 using SHA
 using Dates
@@ -138,6 +139,11 @@ function hash_config(config::RepliBuildConfig)::String
     # that produced it, otherwise use() serves wrappers from old RepliBuild
     # versions forever.
     SHA.update!(ctx, Vector{UInt8}(_generator_fingerprint()))
+
+    # ...and only for the toolchain that built it. A C build made on Julia 1.13
+    # (libLLVM 20) carries Tier 1 slices that LLVM 18 cannot parse, so use()
+    # under 1.12 must miss rather than serve it. See `_toolchain_identity`.
+    SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(config)))
 
     return bytes2hex(SHA.digest!(ctx))
 end
