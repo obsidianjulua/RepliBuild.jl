@@ -145,6 +145,13 @@ include(joinpath(@__DIR__, "test_compile_visibility.jl"))
 
 include(joinpath(@__DIR__, "test_c_generator_policies.jl"))
 
+# ── Tier 3 by-value record classification, per target ABI (no toolchain) ────
+# Where C returns a record (hidden pointer or registers) decides the ccall
+# shape, and a wrong answer shifts every argument with no error (C1). Both
+# conventions are checked on any host; the live calls are in devtests.
+
+include(joinpath(@__DIR__, "test_c_sret_classification.jl"))
+
 # ── Macro-shim header-collision guard (library-free fixture; needs clang) ────
 
 include(joinpath(@__DIR__, "test_shim_header_guard.jl"))

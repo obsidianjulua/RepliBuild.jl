@@ -304,6 +304,14 @@ include(joinpath(TEST_DIR, "test_c_inprocess.jl"))
 
 include(joinpath(TEST_DIR, "test_abi_nested.jl"))
 
+# ── 8b. Tier 3 by-value record returns, live (C1) ─────────────────────────────
+# Where C returns a record (registers or a hidden pointer) is per target, and an
+# sret the callee does not expect shifts every argument with no error. Calls
+# every function of a library-free fixture and checks each argument and return
+# member, then checks the classifier against clang's lowering for both targets.
+
+include(joinpath(TEST_DIR, "test_c_sret_abi.jl"))
+
 # ── 9. Per-file IR cache invalidation on compile-config change ────────────────
 # A compile-flag change must invalidate the per-file IR cache without a manual
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.

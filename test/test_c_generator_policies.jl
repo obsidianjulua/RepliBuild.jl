@@ -13,8 +13,8 @@
 # 3. Cstring return policy: Union{String,Nothing}, NULL → nothing, owned
 #    buffers freed via the declared symbol, raw _ptr variant exported —
 #    on the base wrapper AND the vararg @ccall path
-# 4. ABI trap for misaligned (packed) ≤16B all-integer blob params by value;
-#    aligned blobs stay callable
+# 4. ABI trap for misaligned (packed) ≤16B all-integer blob params by value
+#    on SysV; aligned blobs stay callable, and Win64 needs no trap
 # 5. Bitfield multi-byte accessors assemble the exact byte span (no
 #    power-of-2 container overhanging the struct tail, no pointer stores)
 # 6. Unresolved-type globals emit only a Ptr{Cvoid} _ptr accessor
@@ -221,8 +221,11 @@ end
     # libjulia is loaded in every Julia process on every OS — portable anchor.
     libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
     registry = RepliBuild.Wrapper.create_type_registry(cfg)
+    # Generated for SysV on every host, so the misaligned-blob trap below exists
+    # wherever this runs and `use_packed` really stops before its ccall. Win64
+    # needs no such trap; that answer is checked in its own testset.
     code = RepliBuild.Wrapper.generate_introspective_module_c(
-        cfg, libref, _policy_metadata(), "PolicySynth", registry, true)
+        cfg, libref, _policy_metadata(), "PolicySynth", registry, true; abi = :sysv)
 
     @testset "Cstring policy emission" begin
         # Base wrapper: Union return + NULL → nothing
@@ -252,12 +255,22 @@ end
     end
 
     @testset "misaligned blob param trap" begin
-        # Packed (misaligned) all-int ≤16B by value → loud trap
+        # SysV: packed (misaligned) all-int ≤16B by value → loud trap
         @test occursin("ABI Safety Trap: cannot call 'use_packed'", code)
         @test occursin("takes `PackedInt` by value", code)
         # Aligned blob (INTEGER class both views) → normal ccall survives
         @test occursin("ccall((:use_aligned, LIBRARY_PATH)", code)
         @test !occursin("ABI Safety Trap: cannot call 'use_aligned'", code)
+
+        # Win64 passes a record by size alone (6 bytes: by reference to a copy),
+        # and the blob has the record's size, so both views agree and the trap
+        # would only cost a callable function.
+        code_w64 = RepliBuild.Wrapper.generate_introspective_module_c(
+            cfg, libref, _policy_metadata(), "PolicySynth",
+            RepliBuild.Wrapper.create_type_registry(cfg), true; abi = :win64)
+        @test occursin("ccall((:use_packed, LIBRARY_PATH)", code_w64)
+        @test !occursin("ABI Safety Trap: cannot call 'use_packed'", code_w64)
+        @test occursin("ccall((:use_aligned, LIBRARY_PATH)", code_w64)
     end
 
     @testset "bitfield byte-span accessors" begin

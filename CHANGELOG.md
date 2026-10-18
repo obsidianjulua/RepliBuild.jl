@@ -4,6 +4,80 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 3: where C returns a record is decided per target, from real alignment (C1, 2026-10-18)
+
+- **A small record returned by value could get a hidden return pointer the
+  callee does not read.** GeneratorC decided that a record returns through
+  memory by testing each member's offset against the member's SIZE, capped at
+  8, as if that were its alignment. `{ char m1; short m2[3]; }` is 8 bytes and
+  comes back in RAX on both ABIs, but its 6-byte array at offset 2 looked
+  unaligned, so the wrapper passed a hidden sret pointer. The callee then read
+  every argument one register late and the return was garbage, with no error.
+  abi_fuzz found it (C1, seeds 3 and 36): `f4` read `p1.m1` as `0x62ffbc10`
+  instead of `0x79aa7901`, and seed 3's `f2` crashed. The same test sat in the
+  blob-parameter trap and the blob-return guard, and none of the three knew
+  Win64, which returns 1, 2, 4 and 8 bytes in RAX whatever the members are.
+- **Alignment comes from the field's type** (`_c_has_unaligned_field`): an
+  array's element type, each field of a nested record at its offset from the
+  outermost record (a packed member record can hold an unaligned field),
+  every element of an array of records, and an enum's underlying integer. The
+  size test never looked at nested records or enums at all, because the
+  metadata records them with size 0. Bitfields are skipped, as clang skips
+  them.
+- **The return class is per target** (`_c_return_in_memory`): Win64 by size
+  alone, SysV above 16 bytes or with an unaligned field. `_c_record_abi()` is
+  the one place the C generator reads the target, and
+  `generate_introspective_module_c` takes it as `abi`, so a test asks for
+  either convention on any host.
+- **The wrapper passes the hidden pointer itself only where Julia's lowering
+  would not** (`_c_explicit_sret`): SysV with an unaligned field at 16 bytes or
+  less, a rule Julia's lowering never applies. Win64 decides by size on both
+  sides, so there Julia passes the pointer. Above 16 bytes the explicit form
+  stays where it was. A first version sent every Win64 hidden-pointer return
+  through the explicit form, and abi_fuzz showed that also widens C2: that
+  branch never applies the `long double` trap, so units 58 and 61 refused the
+  whole wrapper instead of one function. The explicit form now fires on Win64
+  only where it did before.
+- **Blob parameters** (`_c_blob_param_misclassified`): the SysV trap for a
+  ≤16-byte blob whose record is MEMORY class uses the real alignment, and also
+  refuses a record whose alignment cannot be proven. It no longer fires on
+  Win64, where the record and its blob are passed the same way (1/2/4/8 bytes
+  in a register, anything else by reference). The float-member trap is
+  unchanged on both targets.
+- **Blob returns**: a ≤16-byte float-bearing blob is exempt from the trap when
+  C returns it through a hidden pointer on this target. On Win64 that makes the
+  3, 5, 6, 7 and 9 to 16-byte ones callable; a 1, 2, 4 or 8-byte one is still
+  refused, because the guard's SSE premise is SysV's.
+- Tests: `test_c_sret_classification.jl` (runtests) checks the classifier and
+  the emitted ccall for both ABIs on any host. `test_c_sret_abi.jl`
+  (devtests) builds `c_sret_test`, calls every function and checks every
+  argument and return member, then checks `_c_return_in_memory` against
+  clang's lowering of the same file for `x86_64-unknown-linux-gnu` and
+  `x86_64-w64-windows-gnu`. `test_c_generator_policies.jl` now checks the
+  blob-parameter trap for both ABIs. Negative-checked by restoring the old rule
+  through the exact method signatures: the unit test fails 52 of 114 checks,
+  and the live test fails 23 of 36 (`f4` reads `0xfffffffff41fd5f0` for
+  `0x79aa7901` and returns zeros, then `f2` crashes the child).
+- **abi_fuzz on the first run's seeds** (shape seeds 1–106 and identifier
+  seeds 1–40, C mode, Julia 1.12.7 and 1.13.2, which agree check for check):
+  the four C1 FAILs (3/c and 36/c, `call` and `ret`) pass, and both saved
+  repros pass all 8 checks. 19 ABI-trap GAPs become PASS on Win64. 9 of them
+  are ≤16-byte packed or bitfield blob parameters with an unaligned field,
+  which Win64 passes like the record; 10 are 15- and 16-byte float-bearing blob
+  returns, which Win64 returns through a hidden pointer. Totals go from 2214
+  PASS, 8 FAIL and 76 GAP to 2237, 4 and 57; the 4 FAILs left are C2. In
+  identifier mode one check changed: unit 3n's `include` was a trap stub only
+  because the size test called its packed parameter misaligned. As a real
+  ccall it names `__x_s`, which the sanitizer declares as `_x_s` (the I6
+  class), so the wrapper is now refused when it is written instead of failing
+  to load on I5.
+- **Hub**: the 19 C packages, re-wrapped without a rebuild, give wrappers
+  byte-identical to unpatched HEAD's apart from timestamps, under the Win64
+  rules and under the SysV rules (generated on Windows from the same
+  metadata). Every package's verifier passes.
+- SysV is covered by the unit test and by clang's lowering; no SysV callee has
+  run.
+
 ### Switching toolchains rebuilds what the switch affects (2026-10-18)
 
 - **A Tier 1 wrapper built on Julia 1.13 failed on Julia 1.12** at the first
