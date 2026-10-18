@@ -4,6 +4,24 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### abi_fuzz: generated C shapes as a differential ABI test (2026-10-18)
+
+- **`test/tools/abi_fuzz.jl`**, a hand-run tool wired into no suite. Each seed
+  generates one C unit with structs, unions, bitfields, packed and
+  `#pragma pack` records, anonymous members, enums, arrays, by-value and
+  pointer parameters and spills, plus an exported `sizeof`/`offsetof` table. It
+  wraps the unit as C (Tier 3) and the same text as C++ (Tier 2), and checks in a
+  child: layout against the table (read through `cglobal`), the accessors, every
+  argument member as the callee recorded it, and every member of each returned
+  record against a formula. `--ident` swaps in identifier stress (Julia keywords,
+  Base/Core names, the wrapper's own names, all-underscore names). Failures are
+  delta-debugged into a minimal `.c` under the work directory.
+- Negative-checked: with `GeneratorC._resolve_exact_layout`'s offset proof
+  removed in-process (`--neuter=resolve_exact_layout`), 11 of 30 C units fail
+  59 checks, the first at seed 3. The unpatched run fails none of them.
+- It finds bugs and does not fix them. The first runs' findings went to the
+  maintainer, not into this file.
+
 ### Switching toolchains rebuilds what the switch affects (2026-10-18)
 
 - **A Tier 1 wrapper built on Julia 1.13 failed on Julia 1.12** at the first

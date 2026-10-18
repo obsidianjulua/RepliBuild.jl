@@ -512,7 +512,10 @@ Start here for any ABI question: register state is observable.
   with a generator script that refuses to write a vacuous fixture. Hand-run tools live
   in `test/tools/` (`gen_receiver_corpus.jl`, `gen_thunk_symbols.jl`,
   `ab_virtual_dispatch.jl`) and are the only files allowed to touch the Hub. Hub
-  rebuilds are the integration test.
+  rebuilds are the integration test. `test/tools/abi_fuzz.jl` (unwired, touches no
+  Hub) generates a C unit per seed, wraps it as C and as C++, and checks both
+  tiers against the compiler's own `sizeof`/`offsetof` and the values each callee
+  records; its header says how to run and minimise.
 - **Guard against vacuous green.** Assert that the loop actually ran
   (`checked == expected`). Never wrap corpus loading in a bare `try/catch`.
   Negative-check a new guard by neutering the fix, using the exact method signature
