@@ -9,12 +9,17 @@ All notable changes to RepliBuild.jl are documented in this file.
 **LLVM.jl 10.** Patch. LLVM.jl compat widens to `9, 10`. Tier 1's Slicer and
 static promotion read the names whose meaning LLVM.jl 10 changed through
 `LLVM.API`, so they behave the same on both majors; nothing else needed a
-change. CI runs runtests.jl on Julia 1.12 and 1.13, on Linux and Windows. No
-API change, and a 4.2.0 wrapper keeps working. Tier 1 slice caches rebuild once
-(`SLICER_VERSION` 5). Verified on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) with
-runtests.jl and the full devtests.jl on LLVM.jl 10.2.1 under Julia 1.12.7 and
-1.13.2, and with the Tier 1 suites and runtests.jl on LLVM.jl 9.13.2 as well
-(below). Tier 2 was not re-run on Linux.
+change. A Slicer exception now demotes that one function to ccall instead of
+failing the wrap. On Windows the Tier 1 suites run, and `[wrap.tier1]
+allow_setjmp` is ignored with a warning, because a longjmp back into a JIT'd
+slice frame ends the process there. CI runs runtests.jl on Julia 1.12 and 1.13,
+on Linux and Windows. No API change, and a 4.2.0 wrapper keeps working. Tier 1
+slice caches rebuild once (`SLICER_VERSION` 5). Verified on Windows (MSYS2
+CLANG64, LLVM/MLIR 23.1.3): runtests.jl, the full devtests.jl and the three
+Tier 1 suites on LLVM.jl 10.2.1 under Julia 1.12.7 and 1.13.2, and the Tier 1
+suites and runtests.jl on LLVM.jl 9.13.2. Hub lua builds and wraps with Tier 1
+(342 functions on llvmcall) and passes test_deep. Tier 2 was not re-run on
+Linux.
 
 ### LLVM.jl 10 and Julia 1.13 in the support window (2026-10-17)
 
