@@ -61,13 +61,17 @@ const _SRET_STRUCTS = Dict{String,Any}(
     "P8" => _srec(8, _sm("c", "UInt8", "char", "0x0", 1),
                      _sm("i", "Cint", "int", "0x1", 4),
                      _sm("pad", "NTuple{3, UInt8}", "char[3]", "0x5", 3)),
-    # Over 16 bytes: memory on both. IS20's `short[8]` makes the size test
-    # call it packed, so it reaches BRANCH 0; Big24 passes that test.
+    # Over 16 bytes: memory on both. Big24 and IS20 are natural, so the plain
+    # ccall's own lowering passes the hidden pointer (the old size test called
+    # IS20 packed: `short[8]` as align 8). PK17 is packed, so BRANCH 0 does.
     "Big24" => _srec(24, _sm("a", "Clonglong", "long long", "0x0", 8),
                          _sm("b", "Clonglong", "long long", "0x8", 8),
                          _sm("c", "Cint", "int", "0x10", 4)),
     "IS20" => _srec(20, _sm("n", "Cint", "int", "0x0", 4),
                         _sm("s", "NTuple{8, Cshort}", "short[8]", "0x4", 16)),
+    "PK17" => _srec(17, _sm("c", "UInt8", "char", "0x0", 1),
+                        _sm("x", "Clonglong", "long long", "0x1", 8),
+                        _sm("y", "Clonglong", "long long", "0x9", 8)),
     # An unaligned field inside a packed member record. `In3` is align 1, so
     # `Out6` lays out naturally and the size test (3 + 3 bytes, 3-aligned)
     # agrees with DWARF: `is_c_lto_safe` passes it. `y` is at absolute 1.
@@ -120,7 +124,7 @@ const _SRET_STRUCTS = Dict{String,Any}(
     @testset "unaligned fields: the type's alignment, never the member's size" begin
         unaligned(k) = _SW._c_has_unaligned_field(_SRET_STRUCTS[k], _SRET_STRUCTS)
         expect = Dict("T4" => false, "R5" => false, "IC12" => false, "P4" => true, "P8" => true,
-                      "Big24" => false, "IS20" => false, "In3" => true, "Out6" => true, "ArrIn" => true,
+                      "Big24" => false, "IS20" => false, "PK17" => true, "In3" => true, "Out6" => true, "ArrIn" => true,
                       "EnumOk" => false, "EnumPacked" => true, "BitOnly" => false,
                       "BF12" => false, "BF8" => false, "U3" => false)
         checked = 0
@@ -151,6 +155,7 @@ const _SRET_STRUCTS = Dict{String,Any}(
                  ("P8",       true,  false),   # packed 8: MEMORY vs RAX
                  ("Big24",    true,  true),    # > 16
                  ("IS20",     true,  true),
+                 ("PK17",     true,  true),
                  ("Out6",     true,  true),    # nested unaligned; 6 bytes
                  ("ArrIn",    true,  true),
                  ("EnumOk",   false, false),
@@ -181,6 +186,7 @@ const _SRET_STRUCTS = Dict{String,Any}(
                  ("P4",       true,  false),
                  ("P8",       true,  false),
                  ("Big24",    true,  true),    # > 16: explicit, as it always was
+                 ("PK17",     true,  true),
                  ("Out6",     true,  false),
                  ("EnumPacked", true, false),
                  ("BF12",     false, false)]
@@ -260,6 +266,7 @@ const _SRET_STRUCTS = Dict{String,Any}(
             fn("make_p8", "P8"),
             fn("make_big24", "Big24"),
             fn("make_is20", "IS20"),
+            fn("make_pk17", "PK17"),
             fn("make_out6", "Out6"),
             fn("make_bf12", "BF12"),
             fn("make_bf8", "BF8"),
@@ -295,7 +302,8 @@ const _SRET_STRUCTS = Dict{String,Any}(
              ("make_p4",    :sret,   :ccall),   # packed 4-byte return in RAX on Win64
              ("make_p8",    :sret,   :ccall),
              ("make_big24", :ccall,  :ccall),   # passes the size test; Julia's own sret
-             ("make_is20",  :sret,   :sret),    # nominated by the size test, > 16
+             ("make_is20",  :ccall,  :ccall),   # natural, > 16: Julia's own sret (the size test called it packed)
+             ("make_pk17",  :sret,   :sret),    # packed, > 16
              ("make_out6",  :sret,   :ccall),   # SysV: nested unaligned field, size test blind
              ("make_bf12",  :trap,   :ccall),   # float blob: SysV class unknowable; Win64 sret by size
              ("take_p8",    :trap,   :ccall),   # SysV MEMORY vs blob INTEGER; Win64 i64 both
@@ -332,5 +340,6 @@ const _SRET_STRUCTS = Dict{String,Any}(
     @test occursin("ccall((:f4, LIBRARY_PATH), T4, (R5,), p1)", body(win64, "f4"))
     @test occursin("ccall((:make_p4, LIBRARY_PATH), Cvoid, (Ptr{P4}, ), ret_buf, )", body(sysv, "make_p4"))
     @test occursin("ccall((:make_ic12, LIBRARY_PATH), IC12, (Cint,), n_c)", body(win64, "make_ic12"))
-    @test occursin("ccall((:make_is20, LIBRARY_PATH), Cvoid, (Ptr{IS20}, ), ret_buf, )", body(win64, "make_is20"))
+    @test occursin("ccall((:make_is20, LIBRARY_PATH), IS20, (), )", body(win64, "make_is20"))
+    @test occursin("ccall((:make_pk17, LIBRARY_PATH), Cvoid, (Ptr{PK17}, ), ret_buf, )", body(win64, "make_pk17"))
 end

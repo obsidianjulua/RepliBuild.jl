@@ -80,6 +80,69 @@ All notable changes to RepliBuild.jl are documented in this file.
   the record's own DWARF-derived one.
 - SysV is covered by the unit tests; no SysV callee ran.
 
+### Whether a record is packed comes from its member types' alignment, in C and C++ (2026-10-18)
+
+- **`get_julia_aligned_size` is gone.** It decided whether a record was packed by
+  laying the members out again with each member's size as its alignment, capped
+  at 8, and comparing the result with the DWARF size. C's `is_c_lto_safe` and
+  C++'s `_is_struct_unsafe` (the `is_ccall_safe` choice between ccall and a
+  thunk) both used it. It called a record packed whenever a member's size was not
+  its alignment (`short[3]`, `float[3]`, a nested 8-byte `Vec2`) and whenever a
+  member was an enum, which the metadata records with size 0. Its C++ nested check
+  looked one level down with no type table, so a record packed two levels down
+  read as natural and reached ccall; on SysV its blob travels in registers while
+  C passes it in memory.
+- **`_record_natural_layout`** (Utils.jl) is now the one answer for both. A
+  record is natural when each member, in offset order, sits at the first offset
+  after the previous one that is a multiple of its type's alignment, the size is
+  the members' end rounded up to the largest alignment, and every member record
+  is natural too, at any depth. Unions, bitfields and members it cannot measure
+  are not natural. Static data members and the `__clang_vtable` placeholder (no
+  offset) are skipped. It reuses C1's member primitives (`_c_scalar_layout`,
+  `_c_member_record`), which now also find C++ names through their `::` scopes and
+  the `" >"` key artifacts.
+- **GeneratorCpp keeps a byte blob of 16 bytes or less off the ccall path**
+  (`_crosses_small_blob`). A natural record the struct emitter cannot prove (an
+  enum member with size 0 is enough) is emitted as `NTuple{N,UInt8}`, which
+  claims INTEGER for every SysV eightbyte, so a function crossing one now goes to
+  the thunk. Above 16 bytes a record crosses in memory on both ABIs and the
+  blob's bytes are exact. With the old size test such records happened to read as
+  packed; with a precise one they would have reached ccall.
+- **Hub, re-wrapped without a rebuild against the previous commit** (C++ against
+  main): box2d, pugixml, tinyxml2, imgui, fmt, hello_world and 15 C packages are
+  byte-identical apart from timestamps.
+  - llamacpp: 15 extern "C" functions that take or return its parameter structs
+    by value (`llama_model_default_params`, `llama_model_load_from_file`,
+    `llama_context_default_params`, `ggml_opt_init`, …) go from Tier 2 to ccall.
+    The structs are natural and 28 to 160 bytes, so even as byte blobs they cross
+    exactly. They gain the `*_safe` RAII variants ccall'd functions get.
+  - box2d3 (39), miniaudio (30) and raylib (16) functions returning natural
+    records of 20 to 304 bytes go from the explicit sret to a plain ccall;
+    tomlc17 (6) and miniaudio's `ma_job_init` go the other way, since their
+    records hold a union. Above 16 bytes both forms pass the hidden pointer on
+    both ABIs.
+  - Tier 1 emits the same slices. `is_c_lto_safe` also filters its slicing
+    candidates, which gain or lose record-returning functions (box2d3 +47,
+    miniaudio +33/−1, tomlc17 −6), so the `tier1:` stats line moves (box2d3
+    accepts 406 slices instead of 363). But Tier 1's shape gate never sends a
+    record return to llvmcall: box2d3 still emits 26 slices and miniaudio 743, and
+    no `TIER1_*` line changed.
+- Tests: `test_record_natural_layout.jl` (runtests) covers the layout answer, C++
+  routing, `is_c_lto_safe` and the blob guard through the C++ generator.
+  `test_cpp_record_routing.jl` with `cpp_routing_test` (devtests) builds a C++
+  library, checks each function's tier, and calls every function in both
+  directions. Negative-checked through the exact method signatures: with the old
+  size test the unit test fails 23 of 48 and the live test 6 of 24 (`CS3` and
+  `Mass` back on Tier 2, `Top6` back on ccall); without the blob guard they fail 1
+  and 2 (`EnumRec` rides a ccall as a blob).
+- abi_fuzz, C and C++ modes, seeds 1–106, Julia 1.12.7 and 1.13.2: C mode
+  changes no check against the previous commit on either Julia. C++ mode changes
+  none on 1.13.2; on 1.12.7 two went from FAIL to PASS (59/cpp `ret/f1`, 77/cpp
+  `ret/f2`), both among the 12 X2/X5 checks that read garbage and already
+  differed between the baseline runs. The fuzzer's C++ functions have C++
+  linkage and are not `noexcept`, so they reach Tier 2 whatever the record; this
+  routing is exercised by `test_cpp_record_routing.jl`, not by the fuzzer.
+
 ### Tier 3: where C returns a record is decided per target, from real alignment (C1, 2026-10-18)
 
 - **A small record returned by value could get a hidden return pointer the

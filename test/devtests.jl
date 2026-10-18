@@ -312,6 +312,13 @@ include(joinpath(TEST_DIR, "test_abi_nested.jl"))
 
 include(joinpath(TEST_DIR, "test_c_sret_abi.jl"))
 
+# ── 8c. C++ by-value record routing, live ─────────────────────────────────────
+# A natural record whose Julia type is the C layout goes to Tier 3; a packed one
+# (at any depth) or a ≤16-byte byte blob goes to the thunk. Checks the tier of
+# every function and calls each one. Needs clang++ and libJLCS.
+
+include(joinpath(TEST_DIR, "test_cpp_record_routing.jl"))
+
 # ── 9. Per-file IR cache invalidation on compile-config change ────────────────
 # A compile-flag change must invalidate the per-file IR cache without a manual
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.

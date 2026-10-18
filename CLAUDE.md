@@ -384,11 +384,14 @@ the test named when you touch the area.
   answers, `_c_has_unaligned_field` is the walk, and `_c_record_abi()` is the
   only place GeneratorC reads the target. Register-class traps (a float-bearing
   blob, a mixed float/integer region) are SysV's only: Win64 crosses a record
-  by size alone on both sides. `get_julia_aligned_size` still takes size as
-  alignment, so `c_safe` only nominates. BRANCH 0 runs only when no blob trap
-  fired and never applies the `long double` trap, so clearing a trap can route
-  a function with a `long double` parameter into it, and then the wrapper is
-  refused (abi_fuzz C2). (`test_c_sret_classification.jl`, `test_c_sret_abi.jl`.)
+  by size alone on both sides. Whether a record is packed at all is
+  `_record_natural_layout`, the one answer for `is_c_lto_safe` and
+  `_is_struct_unsafe`. GeneratorCpp sends a function that crosses a ≤16-byte
+  byte blob by value to Tier 2: a blob is not the C layout. BRANCH 0 runs only
+  when no blob trap fired and never applies the `long double` trap, so clearing
+  a trap can route a function with a `long double` parameter into it, and then
+  the wrapper is refused (abi_fuzz C2). (`test_c_sret_classification.jl`,
+  `test_c_sret_abi.jl`, `test_record_natural_layout.jl`.)
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
   the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
@@ -677,6 +680,11 @@ DWARF-resolved destructors — **is** built.)
 - By-value toolchain types (`std::string_view`, `back_insert_iterator`, …) have ABI
   facts in `record_abi` but no layout, so their functions are ABI traps. Keeping the
   layout of records reachable by value would make them callable (2026-09-27).
+- Member sizes for enum members and for members whose type is a typedef of a
+  record. The DWARF parser records them as 0, so GeneratorCpp's layout proof gives
+  up and emits a natural record as a byte blob; at 16 bytes or less its functions
+  then go to Tier 2 (`_crosses_small_blob`). Recording those sizes would keep them
+  on ccall (2026-10-18).
 - `long double` through a C++ thunk as `f80` (`fpext`/`fptrunc` against `Float64`).
   It is an ABI trap on both tiers today; the C bucket has no thunks.
 - Default `-Xclang -fno-use-ctor-homing` for C++ builds. It restores the definition of

@@ -133,7 +133,17 @@ probe("make_big24") do p                    # 24 B: memory on both
     (r.a, r.b, r.c) == (-4, (1 << 40) + 2, Int32(80)) || push!(p, "ret = $r")
 end
 
-probe("make_is20") do p                     # 20 B: the explicit sret on both
+probe("make_pk17") do p                     # packed 17 B: the explicit sret on both
+    reset_rec()
+    x = 0x0102030405060708
+    r = make_pk17(x)
+    args_read(p, 1, [0 => UInt64(x)])
+    d = getfield(r, :_data)
+    (d[1], field(Int64, d, 1), field(Int64, d, 9)) == (0x55, Int64(x) + 1, Int64(x) - 1) ||
+        push!(p, "ret bytes = $d")
+end
+
+probe("make_is20") do p                     # natural 20 B: a plain ccall
     reset_rec()
     r = make_is20(-300)
     args_read(p, 1, [0 => s64(-300)])
