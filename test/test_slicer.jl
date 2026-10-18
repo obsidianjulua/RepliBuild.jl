@@ -229,9 +229,17 @@ end
     ccall((:st_set_op, LIB), Cvoid, (Cint,), 0)
     @test t1_call_op(Clong(9)) == 18
 
-    # setjmp/longjmp across the JIT boundary
+    # setjmp/longjmp across the JIT boundary. The longjmp half runs only where a
+    # setjmp slice may reach llvmcall at all. On Windows it ends the process
+    # (STATUS_BAD_STACK), which is also why `allow_setjmp` is ignored there; see
+    # `Wrapper._setjmp_slices_safe`. Tier 3's st_guarded_div is unaffected:
+    # test_static_promotion calls it with (1, 0).
     @test t1_guarded_div(Clong(84), Clong(2)) == 42
-    @test t1_guarded_div(Clong(1), Clong(0)) == -1
+    if RepliBuild.Wrapper._setjmp_slices_safe()
+        @test t1_guarded_div(Clong(1), Clong(0)) == -1
+    else
+        @test_skip t1_guarded_div(Clong(1), Clong(0)) == -1
+    end
 
     # Call into a de-hidden LUAI_FUNC through the JIT. Un-promoted, this call
     # does not fail — it hangs (ORC waits on a symbol that never arrives), so

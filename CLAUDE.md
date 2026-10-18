@@ -201,6 +201,11 @@ If you are asked to work on it:
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.
+- **On Windows a longjmp cannot come back into a JIT'd slice frame.** Julia's JIT
+  gives each function unwind info for exactly `[start, end)`, a slice ending in a
+  noreturn call returns past it, and the SEH unwind mingw's `longjmp` performs dies
+  with STATUS_BAD_STACK. `_setjmp_slices_safe` holds that fact: `allow_setjmp` is
+  ignored on Windows, and test_slicer skips its `(1, 0)` call there.
 
 ### Key modules
 

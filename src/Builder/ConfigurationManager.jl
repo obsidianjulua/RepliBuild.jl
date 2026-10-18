@@ -110,6 +110,8 @@ declarations-only slice never sees callee bodies. That narrowness is sound —
 the tier-sensitive hazard is setjmp executing *inside* JIT-spliced code;
 longjmp passing *across* the calling Julia frame is identical for ccall and
 llvmcall, so demotion would buy nothing there (verified live, Hub lua 2026-07-31).
+Windows ignores `allow_setjmp`: a longjmp back into a JIT'd slice frame ends the
+process there (`Wrapper._setjmp_slices_safe`).
 """
 struct Tier1Config
     enable::Bool
