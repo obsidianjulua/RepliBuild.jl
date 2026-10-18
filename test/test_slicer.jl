@@ -364,11 +364,16 @@ end
     @test !occursin("[4 x i64] [i64 2", rt.ir)   # declared, never embedded
 
     # Every declared symbol of every produced slice resolves through the same
-    # lookup ORC uses — i.e. the pre-flight passes for this fixture.
+    # lookup ORC uses. That lookup is process-wide: `dlsym(RTLD_DEFAULT, …)` on
+    # ELF; Windows has neither, and the C_NULL arm walks the loaded modules
+    # instead. On ELF this also means the pre-flight passes for this fixture.
+    # On PE it does not for a slice that declares a C runtime symbol
+    # (st_guarded_div's `_setjmp`, `longjmp`): GetProcAddress on the library's
+    # handle sees only the DLL's own exports, not what it imports.
     for name in TARGETS
         Slicer.sliced(R[name]) || continue
         for sym in R[name].declares
-            @test ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, sym) != C_NULL
+            @test RepliBuild.Wrapper._symbol_resolves_via(C_NULL, sym)
         end
     end
 end
@@ -430,9 +435,17 @@ end
     ccall((:st_set_op, LIB), Cvoid, (Cint,), 0)
     @test t1_call_op(Clong(9)) == 18
 
-    # setjmp/longjmp across the JIT boundary
+    # setjmp/longjmp across the JIT boundary. The longjmp half runs only where a
+    # setjmp slice may reach llvmcall at all. On Windows it ends the process
+    # (STATUS_BAD_STACK), which is also why `allow_setjmp` is ignored there; see
+    # `Wrapper._setjmp_slices_safe`. Tier 3's st_guarded_div is unaffected:
+    # test_static_promotion calls it with (1, 0).
     @test t1_guarded_div(Clong(84), Clong(2)) == 42
-    @test t1_guarded_div(Clong(1), Clong(0)) == -1
+    if RepliBuild.Wrapper._setjmp_slices_safe()
+        @test t1_guarded_div(Clong(1), Clong(0)) == -1
+    else
+        @test_skip t1_guarded_div(Clong(1), Clong(0)) == -1
+    end
 
     # Call into a de-hidden LUAI_FUNC through the JIT. Un-promoted, this call
     # does not fail — it hangs (ORC waits on a symbol that never arrives), so

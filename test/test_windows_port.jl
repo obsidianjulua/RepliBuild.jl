@@ -456,6 +456,25 @@ const LE = RepliBuild.LLVMEnvironment
                        RepliBuild.Wrapper._slice_path_expr("replibuild_shim_LUA_YIELD"))
     end
 
+    # A longjmp back into a JIT'd setjmp slice ends the process on Windows
+    # (STATUS_BAD_STACK; see `_setjmp_slices_safe`), so the knob that would let
+    # one reach llvmcall is ignored there, with a warning. Both answers, on any host.
+    @testset "allow_setjmp is ignored on Windows" begin
+        W = RepliBuild.Wrapper
+        @test W._setjmp_slices_safe(windows = false)
+        @test !W._setjmp_slices_safe(windows = true)
+        @test W._setjmp_slices_safe() == !Sys.iswindows()
+
+        base = Set([:varargs_callee, :noinline])
+        for windows in (false, true)
+            @test (@test_logs W._tier1_allowed_hazards(false; windows)) == base
+        end
+        @test (@test_logs W._tier1_allowed_hazards(true; windows = false)) ==
+              base ∪ Set([:setjmp_family])
+        ignored = @test_logs (:warn, r"allow_setjmp. is ignored on Windows") W._tier1_allowed_hazards(true; windows = true)
+        @test ignored == base
+    end
+
     # Julia links msvcrt.dll; a CLANG64-built DLL allocates from the UCRT. Freeing
     # one heap's memory into the other is STATUS_HEAP_CORRUPTION (mpack's growable
     # writer, freed with Libc.free). Wrappers free through the library's runtime.

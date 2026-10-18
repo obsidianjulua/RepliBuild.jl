@@ -312,6 +312,50 @@ function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
 end
 
 """
+    _setjmp_slices_safe(; windows = Sys.iswindows()) -> Bool
+
+Whether a slice that calls `setjmp` may run through `llvmcall` on this host. Not
+on Windows, where a `longjmp` back into the JIT'd slice frame ends the process.
+
+Julia JITs ELF objects there and registers each function's unwind info for
+exactly `[start, end)`. mingw's `setjmp` hands the C runtime a frame, which makes
+`longjmp` an SEH unwind (`RtlUnwindEx`) that has to walk back to that frame. A
+slice whose last instruction is a call to a noreturn function returns to its own
+end, where there is no unwind info — `if (b == 0) longjmp(env, 1);` compiles to
+exactly that — and the unwind stops with STATUS_BAD_STACK (0xC0000028). The COFF
+build of the same function pads the call with an `int3`, which is why a `ccall`
+of it works. Either rewrite of the slice would fix it (a null frame argument to
+`_setjmp`, or a trap after the call); neither is done.
+
+`windows` lets both answers be driven on any host.
+"""
+_setjmp_slices_safe(; windows::Bool = Sys.iswindows()) = !windows
+
+"""
+    _tier1_allowed_hazards(allow_setjmp; windows = Sys.iswindows()) -> Set{Symbol}
+
+The Slicer hazards a slice may carry and still reach `llvmcall`.
+`:varargs_callee` (calling printf through a `declare` is fine) and `:noinline`
+(correct, just not spliced) always may. `:setjmp_family` may when
+`[wrap.tier1] allow_setjmp = true` and `_setjmp_slices_safe`. On Windows the
+knob is ignored, with a warning that says why.
+"""
+function _tier1_allowed_hazards(allow_setjmp::Bool; windows::Bool = Sys.iswindows())
+    allowed = Set{Symbol}([:varargs_callee, :noinline])
+    allow_setjmp || return allowed
+    if _setjmp_slices_safe(; windows)
+        push!(allowed, :setjmp_family)
+    else
+        @warn "Tier 1: `[wrap.tier1] allow_setjmp` is ignored on Windows, so " *
+              "functions that call setjmp stay on ccall. A longjmp back into a " *
+              "JIT'd slice frame ends the process there (STATUS_BAD_STACK): " *
+              "Julia's JIT gives each function unwind info for exactly its own " *
+              "code, and a slice that ends in a call to longjmp returns past it."
+    end
+    return allowed
+end
+
+"""
     _tier1_slice_prepass(config, functions, dwarf_structs, lib_path) -> Union{Nothing,Dict{String,String}}
 
 Run the Slicer over every Tier-1 candidate function (non-varargs, not
@@ -332,8 +376,9 @@ wrapper text is known.
 
 Hazard policy: `:varargs_callee` (calling printf via declare is fine) and
 `:noinline` (correct, just not spliced) are allowed; `:setjmp_family` is gated
-unless `[wrap.tier1] allow_setjmp = true`; everything else (`:weak`,
-`:inline_asm`, `:module_asm`) demotes to Tier 3.
+unless `[wrap.tier1] allow_setjmp = true`, which Windows ignores
+(`_tier1_allowed_hazards`); everything else (`:weak`, `:inline_asm`,
+`:module_asm`) demotes to Tier 3.
 """
 function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs,
                               lib_path::String)
@@ -379,8 +424,7 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
         return nothing
     end
 
-    allowed_hazards = Set{Symbol}([:varargs_callee, :noinline])
-    tier1.allow_setjmp && push!(allowed_hazards, :setjmp_family)
+    allowed_hazards = _tier1_allowed_hazards(tier1.allow_setjmp)
     max_bytes = tier1.max_slice_kb * 1024
 
     accepted = Set{String}()

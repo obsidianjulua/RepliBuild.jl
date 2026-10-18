@@ -9,7 +9,8 @@
 #      exported `__rb_slicetest_*` names; const statics and the public API
 #      don't; the same-named static in the second TU gets the linker's
 #      uniquified name recorded faithfully.
-#   2. The .so's dynamic symbol table matches the map (nm -D).
+#   2. The .so's dynamic symbol table matches the map (nm -D; on PE, the export
+#      directory, with each export's kind read from the COFF symbol table).
 #   3. Single-copy-of-state: dlsym of a promoted counter IS the live datum the
 #      exported API mutates (write through the pointer, read via the API).
 #   4. The promoted map lands in compilation_metadata.json.
@@ -83,6 +84,74 @@ end
 const FIXTURE = joinpath(@__DIR__, "slice_test")
 const TOML_PATH = joinpath(FIXTURE, "replibuild.toml")
 
+# "Dynamic symbol table matches" reads one `nm` listing (`<addr> <kind> <name>`,
+# kind `T` text, `D`/`B` data, `R` read-only data) of the symbols the loader can
+# bind. On ELF that is the dynamic symbol table, `nm -D`. PE has none — `nm -D`
+# is a hard error there ("File format has no dynamic symbol table") — and what
+# binds is the export directory, which holds names only. The kinds come from the
+# COFF symbol table (`nm -g`), which is not the export list: mingw links its C
+# runtime statically, so `DllMainCRTStartup` and friends are defined globals
+# there and exported nowhere.
+
+"""
+    binding_listing(nm_out, exported) -> String
+
+The lines of `nm_out` whose name is in `exported`. `nothing` means `nm_out` is
+already the dynamic symbol table (ELF), and it is returned unchanged.
+"""
+binding_listing(nm_out::AbstractString, ::Nothing) = String(nm_out)
+function binding_listing(nm_out::AbstractString, exported::AbstractSet)
+    io = IOBuffer()
+    for line in eachsplit(nm_out, '\n')
+        f = split(line)
+        length(f) >= 3 && f[3] in exported && println(io, line)
+    end
+    return String(take!(io))
+end
+
+function dynamic_symbols(lib)
+    Sys.iswindows() || return binding_listing(read(`nm -D --defined-only $lib`, String), nothing)
+    exported = RepliBuild.Compiler._pe_exported_names(lib)
+    exported === nothing && error("cannot read the PE export directory of $lib (no GNU objdump?)")
+    return binding_listing(read(`nm -g --defined-only $lib`, String), exported)
+end
+
+# Both spellings, on every host: the canned tool output of each, for the symbols
+# the fixture-backed testset checks. No toolchain needed, so it runs first.
+@testset "Binding listing reads the same on ELF and PE" begin
+    elf = """
+    0000000000004030 B __rb_slicetest_hidden_counter
+    0000000000001150 T __rb_slicetest_st_hidden_scale
+    0000000000002000 R __rb_slicetest_ST_HIDDEN_TABLE
+    0000000000001100 T st_bump
+    """
+    coff = """
+    180003090 R __rb_slicetest_ST_HIDDEN_TABLE
+    180006050 D __rb_slicetest_hidden_counter
+    1800016b0 T __rb_slicetest_st_hidden_scale
+    1800013a0 T st_bump
+    1800012e0 T DllMainCRTStartup
+    180006040 D __dyn_tls_init_callback
+    1800033a0 R __CTOR_LIST__
+    """
+    exports = Set(["__rb_slicetest_ST_HIDDEN_TABLE", "__rb_slicetest_hidden_counter",
+                   "__rb_slicetest_st_hidden_scale", "st_bump"])
+    listings = (elf = binding_listing(elf, nothing), pe = binding_listing(coff, exports))
+    @test listings.elf == elf
+    for l in listings
+        @test occursin(r" [BD] __rb_slicetest_hidden_counter\b", l)
+        @test occursin(r" T __rb_slicetest_st_hidden_scale\b", l)
+        @test occursin(r" R __rb_slicetest_ST_HIDDEN_TABLE\b", l)
+        @test occursin(r" T st_bump\b", l)
+    end
+    # The statically linked CRT is defined in the COFF table, never exported.
+    @test count(==('\n'), listings.pe) == length(exports)
+    for crt in ("DllMainCRTStartup", "__dyn_tls_init_callback", "__CTOR_LIST__")
+        @test occursin(crt, coff)
+        @test !occursin(crt, listings.pe)
+    end
+end
+
 RepliBuild.clean(TOML_PATH)
 const LIB = RepliBuild.build(TOML_PATH)
 const metadata = JSON.parsefile(joinpath(FIXTURE, "julia", "compilation_metadata.json"))
@@ -131,7 +200,7 @@ const metadata = JSON.parsefile(joinpath(FIXTURE, "julia", "compilation_metadata
 end
 
 @testset "Dynamic symbol table matches" begin
-    dynsyms = read(`nm -D --defined-only $LIB`, String)
+    dynsyms = dynamic_symbols(LIB)
     for (old, new) in metadata["promoted_symbols"]
         @test occursin(new, dynsyms)
     end
@@ -239,9 +308,10 @@ end
     @test ccall((:st_get_count, LIB), Clong, ()) == before + 3
 
     # After __init__, promoted symbols resolve through the GLOBAL namespace —
-    # exactly the lookup path slice declarations will take at JIT time.
-    p = ccall(:dlsym, Ptr{Cvoid}, (Ptr{Cvoid}, Cstring), C_NULL, "__rb_slicetest_hidden_counter")
-    @test p != C_NULL
+    # exactly the lookup path slice declarations will take at JIT time. That is
+    # `dlsym(RTLD_DEFAULT, …)` on ELF; Windows has neither, and the C_NULL arm
+    # walks the loaded modules instead.
+    @test RepliBuild.Wrapper._symbol_resolves_via(C_NULL, "__rb_slicetest_hidden_counter")
 end
 
 end  # testset

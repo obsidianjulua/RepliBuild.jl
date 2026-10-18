@@ -747,7 +747,7 @@ exclude      = ["lua_error"]
 |---|---|---|---|
 | `enable` | Bool | `false` | Run the slicer over every Tier-1 candidate and emit `Base.llvmcall` for the accepted ones |
 | `max_slice_kb` | Int | `64` | A tripwire, not a tuning knob — declarations-only slices are kilobyte-sized regardless of function size, so a hit means something unexpected got embedded |
-| `allow_setjmp` | Bool | `false` | Allow slices whose **own body** calls `setjmp`/`longjmp` or a `returns_twice` callee. Direct-reach only: `setjmp` buried in a `.so`-side callee never trips the gate, and does not need to — `longjmp` *across* the calling Julia frame is identical exposure for `ccall` and `llvmcall` |
+| `allow_setjmp` | Bool | `false` | Allow slices whose **own body** calls `setjmp`/`longjmp` or a `returns_twice` callee. Direct-reach only: `setjmp` buried in a `.so`-side callee never trips the gate, and does not need to — `longjmp` *across* the calling Julia frame is identical exposure for `ccall` and `llvmcall`. **Ignored on Windows**, with a warning: a `longjmp` back into a JIT'd slice frame ends the process there (STATUS_BAD_STACK) |
 | `exclude` | Vector{String} | `[]` | Names (mangled or plain) that stay on `ccall` unconditionally |
 
 Requires `[link] promote_statics = true` (the default) and the in-process C
