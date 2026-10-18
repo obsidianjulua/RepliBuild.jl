@@ -60,6 +60,11 @@ src/mlir/IR/tablegen_compile_commands.yml
 
 # MLIR build output
 src/mlir/build/
+# CMake configured by editor tooling. VS Code's CMake Tools, pointed at src/mlir
+# (cmake.sourceDirectory), configures into the repo-root build/ by default.
+/build/
+CMakeUserPresets.json
+cmake-build-*/
 
 # Documentation build
 docs/build/

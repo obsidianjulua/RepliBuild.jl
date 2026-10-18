@@ -9,12 +9,17 @@ All notable changes to RepliBuild.jl are documented in this file.
 **LLVM.jl 10.** Patch. LLVM.jl compat widens to `9, 10`. Tier 1's Slicer and
 static promotion read the names whose meaning LLVM.jl 10 changed through
 `LLVM.API`, so they behave the same on both majors; nothing else needed a
-change. CI runs runtests.jl on Julia 1.12 and 1.13, on Linux and Windows. No
-API change, and a 4.2.0 wrapper keeps working. Tier 1 slice caches rebuild once
-(`SLICER_VERSION` 5). Verified on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) with
-runtests.jl and the full devtests.jl on LLVM.jl 10.2.1 under Julia 1.12.7 and
-1.13.2, and with the Tier 1 suites and runtests.jl on LLVM.jl 9.13.2 as well
-(below). Tier 2 was not re-run on Linux.
+change. A Slicer exception now demotes that one function to ccall instead of
+failing the wrap. On Windows the Tier 1 suites run, and `[wrap.tier1]
+allow_setjmp` is ignored with a warning, because a longjmp back into a JIT'd
+slice frame ends the process there. CI runs runtests.jl on Julia 1.12 and 1.13,
+on Linux and Windows. No API change, and a 4.2.0 wrapper keeps working. Tier 1
+slice caches rebuild once (`SLICER_VERSION` 5). Verified on Windows (MSYS2
+CLANG64, LLVM/MLIR 23.1.3): runtests.jl, the full devtests.jl and the three
+Tier 1 suites on LLVM.jl 10.2.1 under Julia 1.12.7 and 1.13.2, and the Tier 1
+suites and runtests.jl on LLVM.jl 9.13.2. Hub lua builds and wraps with Tier 1
+(342 functions on llvmcall) and passes test_deep. Tier 2 was not re-run on
+Linux.
 
 ### LLVM.jl 10 and Julia 1.13 in the support window (2026-10-17)
 
@@ -24,6 +29,47 @@ runtests.jl and the full devtests.jl on LLVM.jl 10.2.1 under Julia 1.12.7 and
 - CI runs runtests.jl on Julia 1.12.7 and 1.13.2 on both hosts. It resolves
   fresh, so it now tests LLVM.jl 10; LLVM.jl 9 is checked only where an
   environment pins it.
+
+### Tier 1: a Slicer throw demotes that function instead of failing the wrap (2026-10-17)
+
+- Nothing caught on the way from `_tier1_slice_prepass` through
+  `Slicer.slice_library` to `_extract!`, so one exception while slicing one
+  function failed `RepliBuild.wrap` for the whole library. Two of the LLVM.jl 10
+  breaks below did exactly that: the `TypeError` on any internal constant, and
+  the verifier rejecting `noinline` + `alwaysinline`. Tier 1's doctrine is that
+  any doubt resolves to ccall, and a Slicer exception is a doubt.
+- **Per target.** `slice_library` runs `_extract!` in `try`/`finally`, so the
+  clone is always disposed, and turns an exception into that target's refusal,
+  tagged `:slicer_error` (`Slicer.errored`). The reason is one line naming the
+  exception and the innermost `Slicer.jl` frame. An errored refusal is never
+  cached, so a transient failure does not stick until the module or
+  `SLICER_VERSION` changes. `InterruptException` still propagates.
+- **Whole module.** A throw that escapes `slice_library` (reading or parsing the
+  promoted module, stripping debug info, the `llvm.*` sweep) gives one `@warn`
+  with its backtrace, and Tier 1 is off for that wrap. Every function uses
+  ccall, as when the promoted module is missing.
+- **Visible.** The `tier1:` summary line counts `errored` apart from `refused`,
+  and one `@warn` lists each errored function with its reason. Each one is a
+  Slicer bug.
+- `SliceResult`, the cache format and `SLICER_VERSION` are unchanged.
+- Tests, in the two quarantined suites (still unwired):
+  - `test_slicer.jl` slices synthetic IR, ahead of the fixture build, whose
+    target with `optnone` and no `noinline` fails `LLVM.verify`. The other
+    targets still slice, and only verdicts are cached. It also checks that an
+    interrupt propagates.
+  - `test_tier1_dispatch.jl` ends with two real wraps of the fixture. One
+    injects a throw for one target with a more specific `_extract!` method.
+    The wrap succeeds and warns, that function dispatches through ccall, the
+    others keep Tier 1, and no cache entry is written for it. The other wrap
+    has an unparseable promoted module: the wrap succeeds with Tier 1 off.
+  - Negative-checked by neutering, one at a time, the per-target catch, the
+    no-cache rule, the interrupt rethrow and the whole-module catch.
+- Verified on Windows (MSYS2 CLANG64) with LLVM.jl 9.13.2 and 10.2.1 on Julia
+  1.12.7 and 1.13.2. `test_tier1_dispatch.jl` passes 294/294 on all four (254
+  before, plus 40). `test_slicer.jl` gains 19 passes and otherwise gives what it
+  gave before on Windows: 11 errors from its `ccall(:dlsym)` line, and the
+  `st_guarded_div(1, 0)` assertion skipped by the driver it was run through,
+  because that longjmp ends the process. runtests.jl passes (1995) on all four.
 
 ### Tier 1 on LLVM.jl 10: the Slicer and static promotion read what they read on 9 (2026-10-17)
 
@@ -61,6 +107,49 @@ runtests.jl and the full devtests.jl on LLVM.jl 10.2.1 under Julia 1.12.7 and
   zlib builds, wraps and passes test_deep 271/271 on all four; all 102 of its
   Tier 1 kernels compile to llvmcall, and LLVM.jl 9 and 10 give the same Tier 1
   surface, promoted module and byte-identical slices.
+
+### Tier 1 suites pass on Windows; setjmp slices stay on ccall there (2026-10-17)
+
+- **`test_static_promotion.jl` read the dynamic symbol table with `nm -D`, and a
+  PE file has none**, so "Dynamic symbol table matches" errored before asserting
+  anything. On PE the listing is now the export directory (`_pe_exported_names`),
+  which holds names only. Each export's kind (`T`, `D`, `R`) comes from the COFF
+  symbol table, restricted to the exported names: mingw links its C runtime
+  statically, so that table also defines `DllMainCRTStartup` and friends. ELF
+  still reads `nm -D`, and every assertion reads the listing unchanged. A
+  fixture-free testset drives the listing with canned ELF and PE output on every
+  host.
+- **Both Tier 1 suites called `ccall(:dlsym, …, C_NULL, …)`, and Windows has no
+  `dlsym`.** They now call `Wrapper._symbol_resolves_via(C_NULL, …)`, which is
+  that same ccall on ELF and walks the loaded modules on Windows.
+- **A longjmp back into a JIT'd slice frame ends the process on Windows**
+  (STATUS_BAD_STACK, 0xC0000028). `test_slicer.jl` llvmcalls `st_guarded_div`'s
+  slice directly, and with (1, 0) it took the rest of the file down. Julia JITs
+  ELF objects on Windows and registers each function's unwind info for exactly
+  `[start, end)`. The slice ends in `call longjmp`, so the call's return address
+  is the function's end and nothing covers it; the COFF build of the same
+  function pads the call with an `int3`. mingw's `setjmp` hands the C runtime a
+  frame, so `longjmp` is an SEH unwind that has to walk back into that frame,
+  and it stops there. In a probe, nulling `_setjmp`'s frame argument makes (1, 0)
+  return -1, and so does a trap after the call. Neither rewrite is applied.
+- **`[wrap.tier1] allow_setjmp` is ignored on Windows**, with a warning that says
+  why. `_setjmp_slices_safe` holds the fact; `_tier1_allowed_hazards` and
+  `test_slicer.jl`'s (1, 0) call both read it, and `test_windows_port.jl` drives
+  it with both spellings. Before, the knob bypassed the hazard gate on Windows,
+  and the pre-flight then demoted the slice by accident: GetProcAddress on the
+  DLL's handle cannot see C runtime symbols such as `_setjmp`, and the warning
+  blamed static promotion.
+- Verified on Windows (MSYS2 CLANG64) on Julia 1.12.7 and 1.13.2, with LLVM.jl
+  9.13.2 and with LLVM.jl 10.2.1 plus the Slicer and promotion fixes for it:
+  `test_static_promotion.jl` 16/16 and 74/74, `test_slicer.jl` 153/154 (the
+  (1, 0) call skipped) and 169/169, `test_tier1_dispatch.jl` 254/254, plus the
+  testsets those fixes add. runtests.jl is 2006/2006 in all four configurations.
+  Negative-checked: with the PE filter neutered, the fixture-free testset fails
+  4 of 16; pointed at a promotion-less build, the PE listing misses all nine
+  promoted names; with every kind faked as `T`, the data and read-only checks
+  fail; the unpatched `test_slicer.jl` errors 11 times on `dlsym`; with
+  `_setjmp_slices_safe` neutered, `test_slicer.jl` dies with 0xC0000028 and the
+  policy testset fails 4 of 11.
 
 ## v4.2.0 (2026-10-16)
 

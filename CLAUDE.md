@@ -208,9 +208,19 @@ If you are asked to work on it:
   when `jl_generating_output()` or when the slice file is missing. `dispatch_tier`
   returns `:deferred` in output mode. The doctrine: llvmcall is a passenger, any
   doubt resolves to ccall.
+- **A slicing throw demotes; it never fails the wrap.** On one target it is an
+  errored refusal (`Slicer.errored`, tag `:slicer_error`) that is never cached;
+  on the whole module it turns Tier 1 off for that wrap. Keep new slicing work
+  inside those two catches. A nonzero `errored` in the `tier1:` line is a Slicer
+  bug.
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.
+- **On Windows a longjmp cannot come back into a JIT'd slice frame.** Julia's JIT
+  gives each function unwind info for exactly `[start, end)`, a slice ending in a
+  noreturn call returns past it, and the SEH unwind mingw's `longjmp` performs dies
+  with STATUS_BAD_STACK. `_setjmp_slices_safe` holds that fact: `allow_setjmp` is
+  ignored on Windows, and test_slicer skips its `(1, 0)` call there.
 
 ### Key modules
 

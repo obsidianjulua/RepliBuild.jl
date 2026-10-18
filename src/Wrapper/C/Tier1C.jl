@@ -23,9 +23,9 @@
 #
 # THE DOCTRINE, which every function here obeys: llvmcall is a passenger tier,
 # never the driver. Every doubt — output mode, a missing slice file, an
-# unresolvable declare, a refused or hazardous slice — resolves to the `ccall`
-# body, which is always correct. That is why the emitted kernels read as though
-# they distrust their own slices; they do.
+# unresolvable declare, a refused or hazardous slice, a Slicer that threw —
+# resolves to the `ccall` body, which is always correct. That is why the
+# emitted kernels read as though they distrust their own slices; they do.
 #
 # Related: `src/IRGen/Slicer.jl` cuts the slices; `Wrapper/Utils.jl`
 # `_slice_declared_symbols` reads a slice's declares back off the shipped `.ll`.
@@ -312,13 +312,62 @@ function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
 end
 
 """
+    _setjmp_slices_safe(; windows = Sys.iswindows()) -> Bool
+
+Whether a slice that calls `setjmp` may run through `llvmcall` on this host. Not
+on Windows, where a `longjmp` back into the JIT'd slice frame ends the process.
+
+Julia JITs ELF objects there and registers each function's unwind info for
+exactly `[start, end)`. mingw's `setjmp` hands the C runtime a frame, which makes
+`longjmp` an SEH unwind (`RtlUnwindEx`) that has to walk back to that frame. A
+slice whose last instruction is a call to a noreturn function returns to its own
+end, where there is no unwind info — `if (b == 0) longjmp(env, 1);` compiles to
+exactly that — and the unwind stops with STATUS_BAD_STACK (0xC0000028). The COFF
+build of the same function pads the call with an `int3`, which is why a `ccall`
+of it works. Either rewrite of the slice would fix it (a null frame argument to
+`_setjmp`, or a trap after the call); neither is done.
+
+`windows` lets both answers be driven on any host.
+"""
+_setjmp_slices_safe(; windows::Bool = Sys.iswindows()) = !windows
+
+"""
+    _tier1_allowed_hazards(allow_setjmp; windows = Sys.iswindows()) -> Set{Symbol}
+
+The Slicer hazards a slice may carry and still reach `llvmcall`.
+`:varargs_callee` (calling printf through a `declare` is fine) and `:noinline`
+(correct, just not spliced) always may. `:setjmp_family` may when
+`[wrap.tier1] allow_setjmp = true` and `_setjmp_slices_safe`. On Windows the
+knob is ignored, with a warning that says why.
+"""
+function _tier1_allowed_hazards(allow_setjmp::Bool; windows::Bool = Sys.iswindows())
+    allowed = Set{Symbol}([:varargs_callee, :noinline])
+    allow_setjmp || return allowed
+    if _setjmp_slices_safe(; windows)
+        push!(allowed, :setjmp_family)
+    else
+        @warn "Tier 1: `[wrap.tier1] allow_setjmp` is ignored on Windows, so " *
+              "functions that call setjmp stay on ccall. A longjmp back into a " *
+              "JIT'd slice frame ends the process there (STATUS_BAD_STACK): " *
+              "Julia's JIT gives each function unwind info for exactly its own " *
+              "code, and a slice that ends in a call to longjmp returns past it."
+    end
+    return allowed
+end
+
+"""
     _tier1_slice_prepass(config, functions, dwarf_structs, lib_path) -> Union{Nothing,Dict{String,String}}
 
 Run the Slicer over every Tier-1 candidate function (non-varargs, not
 excluded, `is_c_lto_safe`), apply the hazard/size policy, and pre-flight the
 surviving slices' declarations against the real `.so`. Returns `mangled => IR`
 for every accepted slice, or `nothing` when the promoted module is missing
-(promotion off / fallback build) — Tier 1 then disables loudly for this wrap.
+(promotion off / fallback build) or the Slicer fails on it as a whole — Tier 1
+then disables loudly for this wrap.
+
+A function whose slicing threw (`Slicer.errored`) is demoted like a refused
+one, counted as `errored`, and listed in a warning: the wrap stays correct, but
+each one is a Slicer bug.
 
 Nothing is written here. Acceptance only makes a function *eligible*; whether a
 call site actually materialises is decided later by `lto_shape_ok` and by the
@@ -327,8 +376,9 @@ wrapper text is known.
 
 Hazard policy: `:varargs_callee` (calling printf via declare is fine) and
 `:noinline` (correct, just not spliced) are allowed; `:setjmp_family` is gated
-unless `[wrap.tier1] allow_setjmp = true`; everything else (`:weak`,
-`:inline_asm`, `:module_asm`) demotes to Tier 3.
+unless `[wrap.tier1] allow_setjmp = true`, which Windows ignores
+(`_tier1_allowed_hazards`); everything else (`:weak`, `:inline_asm`,
+`:module_asm`) demotes to Tier 3.
 """
 function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs,
                               lib_path::String)
@@ -358,17 +408,32 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
     mkpath(slices_dir)
     isempty(candidates) && return Dict{String,String}()
 
-    results = Slicer.slice_library(abi_ll; targets=unique(candidates),
-                                   cache_dir=get_cache_path(config))
+    results = try
+        Slicer.slice_library(abi_ll; targets=unique(candidates),
+                             cache_dir=get_cache_path(config))
+    catch e
+        e isa InterruptException && rethrow()
+        # A throw on one target comes back as its errored refusal, so what
+        # reaches here failed for the module as a whole (reading or parsing it,
+        # stripping debug info, the llvm.* sweep). No slice from it can be
+        # trusted: the same answer as a missing promoted module.
+        @warn "Tier 1: the Slicer failed on the promoted module ($abi_ll) " *
+              "before slicing any function. Tier 1 disabled for this wrap; all " *
+              "functions dispatch via ccall. A damaged module needs a rebuild; " *
+              "anything else is a Slicer bug." exception=(e, catch_backtrace())
+        return nothing
+    end
 
-    allowed_hazards = Set{Symbol}([:varargs_callee, :noinline])
-    tier1.allow_setjmp && push!(allowed_hazards, :setjmp_family)
+    allowed_hazards = _tier1_allowed_hazards(tier1.allow_setjmp)
     max_bytes = tier1.max_slice_kb * 1024
 
     accepted = Set{String}()
+    errored_names = String[]
     n_refused = 0; n_hazard = 0; n_oversize = 0
     for (name, r) in results
-        if !Slicer.sliced(r)
+        if Slicer.errored(r)
+            push!(errored_names, name)
+        elseif !Slicer.sliced(r)
             n_refused += 1
         elseif !all(h -> h in allowed_hazards, r.hazards)
             n_hazard += 1
@@ -379,15 +444,28 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
         end
     end
 
+    if !isempty(errored_names)
+        detail = join(("$fn → $(results[fn].refusal)" for fn in sort!(errored_names)),
+                      "\n    ")
+        @warn """
+        Tier 1: $(length(errored_names)) function(s) demoted to ccall because the Slicer
+        threw while slicing them. Each emits the ccall it would with Tier 1 off, so
+        this wrap is correct, but every throw here is a Slicer bug: report it with
+        the lines below. Errors are not cached, so the next wrap slices these again.
+            $detail
+        """
+    end
+
     # Symbol pre-flight runs BEFORE anything is handed to the emission loop —
     # a demoted function must not leave a slice for a call site to pick up.
     n_unresolved = length(_tier1_preflight!(accepted, results, lib_path))
 
-    demoted = n_refused + n_hazard + n_oversize + n_unresolved
+    n_errored = length(errored_names)
+    demoted = n_refused + n_errored + n_hazard + n_oversize + n_unresolved
     println("  tier1: $(length(accepted)) slices accepted" *
             (demoted == 0 ? "" :
-             " ($n_refused refused, $n_hazard hazard-gated, $n_oversize oversize, " *
-             "$n_unresolved unresolved-symbol → ccall)"))
+             " ($n_refused refused, $n_errored errored, $n_hazard hazard-gated, " *
+             "$n_oversize oversize, $n_unresolved unresolved-symbol → ccall)"))
     return Dict{String,String}(name => results[name].ir for name in accepted)
 end
 

@@ -747,18 +747,23 @@ exclude      = ["lua_error"]
 |---|---|---|---|
 | `enable` | Bool | `false` | Run the slicer over every Tier-1 candidate and emit `Base.llvmcall` for the accepted ones |
 | `max_slice_kb` | Int | `64` | A tripwire, not a tuning knob — declarations-only slices are kilobyte-sized regardless of function size, so a hit means something unexpected got embedded |
-| `allow_setjmp` | Bool | `false` | Allow slices whose **own body** calls `setjmp`/`longjmp` or a `returns_twice` callee. Direct-reach only: `setjmp` buried in a `.so`-side callee never trips the gate, and does not need to — `longjmp` *across* the calling Julia frame is identical exposure for `ccall` and `llvmcall` |
+| `allow_setjmp` | Bool | `false` | Allow slices whose **own body** calls `setjmp`/`longjmp` or a `returns_twice` callee. Direct-reach only: `setjmp` buried in a `.so`-side callee never trips the gate, and does not need to — `longjmp` *across* the calling Julia frame is identical exposure for `ccall` and `llvmcall`. **Ignored on Windows**, with a warning: a `longjmp` back into a JIT'd slice frame ends the process there (STATUS_BAD_STACK) |
 | `exclude` | Vector{String} | `[]` | Names (mangled or plain) that stay on `ccall` unconditionally |
 
 Requires `[link] promote_statics = true` (the default) and the in-process C
 pipeline. On a `fallback` or ingest build there is no promoted module, so Tier 1
 disables itself for the whole wrap with a warning rather than shipping unverified
-slices. Every non-accepted function emits exactly the `ccall` it would have
+slices. It does the same if the Slicer fails on the promoted module as a whole.
+If the Slicer throws while slicing one function, only that function stays on
+`ccall`, and a warning names it: that is a Slicer bug, never a failed wrap.
+Every non-accepted function emits exactly the `ccall` it would have
 emitted with Tier 1 off, and the module exports `TIER1_FUNCTIONS::Set{String}`.
 
 The wrap prints two counts — `N slices accepted` then `N slices emitted
-(M functions)`. A gap between them is the ABI shape gate refusing a `Cstring` or
-struct crossing, not a failure.
+(M functions)`. The first comes with a breakdown of the rest: refused (by policy),
+errored (the Slicer threw), hazard-gated, oversize, and unresolved-symbol. A gap
+between the two counts is the ABI shape gate refusing a `Cstring` or struct
+crossing, not a failure.
 
 ### `[types]`
 
