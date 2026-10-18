@@ -23,9 +23,9 @@
 #
 # THE DOCTRINE, which every function here obeys: llvmcall is a passenger tier,
 # never the driver. Every doubt — output mode, a missing slice file, an
-# unresolvable declare, a refused or hazardous slice — resolves to the `ccall`
-# body, which is always correct. That is why the emitted kernels read as though
-# they distrust their own slices; they do.
+# unresolvable declare, a refused or hazardous slice, a Slicer that threw —
+# resolves to the `ccall` body, which is always correct. That is why the
+# emitted kernels read as though they distrust their own slices; they do.
 #
 # Related: `src/IRGen/Slicer.jl` cuts the slices; `Wrapper/Utils.jl`
 # `_slice_declared_symbols` reads a slice's declares back off the shipped `.ll`.
@@ -318,7 +318,12 @@ Run the Slicer over every Tier-1 candidate function (non-varargs, not
 excluded, `is_c_lto_safe`), apply the hazard/size policy, and pre-flight the
 surviving slices' declarations against the real `.so`. Returns `mangled => IR`
 for every accepted slice, or `nothing` when the promoted module is missing
-(promotion off / fallback build) — Tier 1 then disables loudly for this wrap.
+(promotion off / fallback build) or the Slicer fails on it as a whole — Tier 1
+then disables loudly for this wrap.
+
+A function whose slicing threw (`Slicer.errored`) is demoted like a refused
+one, counted as `errored`, and listed in a warning: the wrap stays correct, but
+each one is a Slicer bug.
 
 Nothing is written here. Acceptance only makes a function *eligible*; whether a
 call site actually materialises is decided later by `lto_shape_ok` and by the
@@ -358,17 +363,33 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
     mkpath(slices_dir)
     isempty(candidates) && return Dict{String,String}()
 
-    results = Slicer.slice_library(abi_ll; targets=unique(candidates),
-                                   cache_dir=get_cache_path(config))
+    results = try
+        Slicer.slice_library(abi_ll; targets=unique(candidates),
+                             cache_dir=get_cache_path(config))
+    catch e
+        e isa InterruptException && rethrow()
+        # A throw on one target comes back as its errored refusal, so what
+        # reaches here failed for the module as a whole (reading or parsing it,
+        # stripping debug info, the llvm.* sweep). No slice from it can be
+        # trusted: the same answer as a missing promoted module.
+        @warn "Tier 1: the Slicer failed on the promoted module ($abi_ll) " *
+              "before slicing any function. Tier 1 disabled for this wrap; all " *
+              "functions dispatch via ccall. A damaged module needs a rebuild; " *
+              "anything else is a Slicer bug." exception=(e, catch_backtrace())
+        return nothing
+    end
 
     allowed_hazards = Set{Symbol}([:varargs_callee, :noinline])
     tier1.allow_setjmp && push!(allowed_hazards, :setjmp_family)
     max_bytes = tier1.max_slice_kb * 1024
 
     accepted = Set{String}()
+    errored_names = String[]
     n_refused = 0; n_hazard = 0; n_oversize = 0
     for (name, r) in results
-        if !Slicer.sliced(r)
+        if Slicer.errored(r)
+            push!(errored_names, name)
+        elseif !Slicer.sliced(r)
             n_refused += 1
         elseif !all(h -> h in allowed_hazards, r.hazards)
             n_hazard += 1
@@ -379,15 +400,28 @@ function _tier1_slice_prepass(config::RepliBuildConfig, functions, dwarf_structs
         end
     end
 
+    if !isempty(errored_names)
+        detail = join(("$fn → $(results[fn].refusal)" for fn in sort!(errored_names)),
+                      "\n    ")
+        @warn """
+        Tier 1: $(length(errored_names)) function(s) demoted to ccall because the Slicer
+        threw while slicing them. Each emits the ccall it would with Tier 1 off, so
+        this wrap is correct, but every throw here is a Slicer bug: report it with
+        the lines below. Errors are not cached, so the next wrap slices these again.
+            $detail
+        """
+    end
+
     # Symbol pre-flight runs BEFORE anything is handed to the emission loop —
     # a demoted function must not leave a slice for a call site to pick up.
     n_unresolved = length(_tier1_preflight!(accepted, results, lib_path))
 
-    demoted = n_refused + n_hazard + n_oversize + n_unresolved
+    n_errored = length(errored_names)
+    demoted = n_refused + n_errored + n_hazard + n_oversize + n_unresolved
     println("  tier1: $(length(accepted)) slices accepted" *
             (demoted == 0 ? "" :
-             " ($n_refused refused, $n_hazard hazard-gated, $n_oversize oversize, " *
-             "$n_unresolved unresolved-symbol → ccall)"))
+             " ($n_refused refused, $n_errored errored, $n_hazard hazard-gated, " *
+             "$n_oversize oversize, $n_unresolved unresolved-symbol → ccall)"))
     return Dict{String,String}(name => results[name].ir for name in accepted)
 end
 

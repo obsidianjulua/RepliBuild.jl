@@ -753,12 +753,17 @@ exclude      = ["lua_error"]
 Requires `[link] promote_statics = true` (the default) and the in-process C
 pipeline. On a `fallback` or ingest build there is no promoted module, so Tier 1
 disables itself for the whole wrap with a warning rather than shipping unverified
-slices. Every non-accepted function emits exactly the `ccall` it would have
+slices. It does the same if the Slicer fails on the promoted module as a whole.
+If the Slicer throws while slicing one function, only that function stays on
+`ccall`, and a warning names it: that is a Slicer bug, never a failed wrap.
+Every non-accepted function emits exactly the `ccall` it would have
 emitted with Tier 1 off, and the module exports `TIER1_FUNCTIONS::Set{String}`.
 
 The wrap prints two counts — `N slices accepted` then `N slices emitted
-(M functions)`. A gap between them is the ABI shape gate refusing a `Cstring` or
-struct crossing, not a failure.
+(M functions)`. The first comes with a breakdown of the rest: refused (by policy),
+errored (the Slicer threw), hazard-gated, oversize, and unresolved-symbol. A gap
+between the two counts is the ABI shape gate refusing a `Cstring` or struct
+crossing, not a failure.
 
 ### `[types]`
 

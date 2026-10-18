@@ -27,7 +27,10 @@
 # Everything runs on Julia's resident libLLVM via LLVM.jl — same in-process,
 # version-locked philosophy as the C build bucket. Every produced slice is
 # verified before it is returned; a slice that cannot be produced comes back
-# as a refusal with a reason, never as silently-wrong IR.
+# as a refusal with a reason, never as silently-wrong IR. That includes the
+# Slicer's own failures: an exception while slicing one target comes back as
+# that target's refusal (`errored`), so a Slicer bug costs one function its
+# slice and never fails the wrap.
 #
 # LLVM.jl 9 and 10 both load here. Where a name means different things in the
 # two (attribute kinds, `isconstant`, `unnamed_addr`, module asm), the read goes
@@ -67,8 +70,34 @@ end
 "Whether a usable slice was produced."
 sliced(r::SliceResult) = r.ir !== nothing
 
+"""
+Whether slicing threw instead of reaching a verdict. The refusal then says
+nothing about the function: it is a Slicer bug or a transient failure. So it
+is never cached, and the wrap reports it apart from the policy refusals.
+"""
+errored(r::SliceResult) = :slicer_error in r.hazards
+
 _refuse(name, why::String, hazards=Symbol[]) =
     SliceResult(name, nothing, hazards, why, 0, 0, 0, String[])
+
+# One line naming the exception and the innermost Slicer frame it came through,
+# so a report from a wrap log points at the read that broke. Capped: a
+# systematic break refuses every target it reaches with the same text.
+function _error_reason(e, bt)
+    T = string(nameof(typeof(e)))
+    msg = replace(strip(sprint(showerror, e)), r"\s+" => " ")
+    msg = chopprefix(msg, T * ": ")     # most `showerror`s open with the type
+    length(msg) > 300 && (msg = first(msg, 300) * "…")
+    site = ""
+    for fr in stacktrace(bt)
+        basename(String(fr.file)) == "Slicer.jl" || continue
+        fn = string(fr.func)
+        # An anonymous closure's name (`#9`) says nothing; the line does.
+        site = (startswith(fn, "#") ? "" : " in $fn") * " at Slicer.jl:$(fr.line)"
+        break
+    end
+    return "slicing threw $T$site: $msg"
+end
 
 # ── attribute / classification helpers ───────────────────────────────────────
 
@@ -365,6 +394,11 @@ end
 Slice `targets` out of the post-promotion module at `abi_ll`. Parses the
 module once and clones per target. With `cache_dir`, results are cached by
 (module content hash, target, SLICER_VERSION) and served on hit.
+
+An exception while slicing one target becomes that target's refusal, tagged
+`:slicer_error` (see `errored`), and is never cached; the other targets are
+unaffected. A failure on the module as a whole (reading, parsing, the shared
+prep) still throws, because no target can be sliced from it.
 """
 function slice_library(abi_ll::String; targets::Vector{String},
                        cache_dir::Union{Nothing,String}=nothing)
@@ -409,10 +443,18 @@ function slice_library(abi_ll::String; targets::Vector{String},
 
             for t in to_compute
                 clone = _clone(master, src_text)
-                r = _extract!(clone, t)
-                LLVM.dispose(clone)
+                r = try
+                    _extract!(clone, t)
+                catch e
+                    e isa InterruptException && rethrow()
+                    _refuse(t, _error_reason(e, catch_backtrace()), [:slicer_error])
+                finally
+                    LLVM.dispose(clone)
+                end
                 results[t] = r
-                key_dir === nothing || _cache_store(key_dir, r)
+                # An error is not a verdict on the function. Cached, it would be
+                # served until the module or SLICER_VERSION changed.
+                (key_dir === nothing || errored(r)) || _cache_store(key_dir, r)
             end
             LLVM.dispose(master)
         end

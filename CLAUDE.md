@@ -198,6 +198,11 @@ If you are asked to work on it:
   when `jl_generating_output()` or when the slice file is missing. `dispatch_tier`
   returns `:deferred` in output mode. The doctrine: llvmcall is a passenger, any
   doubt resolves to ccall.
+- **A slicing throw demotes; it never fails the wrap.** On one target it is an
+  errored refusal (`Slicer.errored`, tag `:slicer_error`) that is never cached;
+  on the whole module it turns Tier 1 off for that wrap. Keep new slicing work
+  inside those two catches. A nonzero `errored` in the `tier1:` line is a Slicer
+  bug.
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.

@@ -12,6 +12,9 @@
 #      jl_generating_output, and a real consumer package precompiles a Tier-1
 #      workload without deadlocking (the 2026-07-31 engine-lock class).
 #   4. The [wrap.tier1] knobs parse.
+#   5. A Slicer throw never fails the wrap: on one target it demotes only that
+#      function to ccall and caches nothing for it; on the whole module it turns
+#      Tier 1 off for the wrap. Both warn.
 #
 # Usage: julia --project=. test/test_tier1_dispatch.jl
 
@@ -345,6 +348,149 @@ end
                           stdout=out, stderr=devnull))
     @test ok
     @test occursin("FOREIGN_OK", String(take!(out)))
+end
+
+@testset "A Slicer throw costs Tier 1, never the wrap" begin
+    # Last, because each wrap here rewrites julia/ and the slice cache; the end
+    # of the testset puts both back. Wraps and `which` go through
+    # `invokelatest`: a Slicer method is added and deleted below, and code
+    # already running here keeps dispatching in the world it started in.
+    Slicer = RepliBuild.Slicer
+    cfg = RepliBuild.ConfigurationManager.load_config(TOML_PATH)
+    slice_cache = joinpath(RepliBuild.ConfigurationManager.get_cache_path(cfg), "slices")
+    julia_dir = RepliBuild.ConfigurationManager.get_output_path(cfg)
+    victim = "st_get_count"                       # Tier 1 in every testset above
+    kept = ("st_bump", "st_apply", "st_call_op")
+
+    # Wrap and return the wrapper's path with what the wrap printed: the
+    # `tier1:` summary goes to stdout, not to the logger. Echoed afterwards, so
+    # a failure report inside the redirect is not lost.
+    function wrap_logged(pattern)
+        out_path, out_io = mktemp()
+        w = try
+            redirect_stdout(out_io) do
+                @test_logs (:warn, pattern) match_mode=:any Base.invokelatest(RepliBuild.wrap, TOML_PATH)
+            end
+        finally
+            close(out_io)
+        end
+        printed = read(out_path, String)
+        print(printed)
+        return w, printed
+    end
+
+    @testset "one target: demoted to ccall, the rest keep Tier 1" begin
+        # A cache hit never reaches `_extract!`, and the first wrap cached every
+        # verdict.
+        rm(slice_cache; recursive=true, force=true)
+
+        # Fault injection. A method more specific than `_extract!(mod, ::String)`
+        # wins dispatch for every clone (an `LLVM.Module`): it throws for the
+        # victim and hands every other target to the real method.
+        @eval Slicer function _extract!(mod::LLVM.Module, target_name::String)
+            target_name == $victim && throw(ArgumentError("injected Slicer fault"))
+            return invoke(_extract!, Tuple{Any,String}, mod, target_name)
+        end
+        injected = Base.invokelatest(which, Slicer._extract!, Tuple{Slicer.LLVM.Module,String})
+        @test injected.sig == Tuple{typeof(Slicer._extract!),Slicer.LLVM.Module,String}
+        # The throw site is the `_extract!` call in an anonymous closure, so the
+        # reason gives only its line; the type is named once.
+        warned = Regex("(?s)Tier 1: 1 function\\(s\\) demoted to ccall because the " *
+                       "Slicer\\s+threw.*$victim → slicing threw ArgumentError at " *
+                       "Slicer\\.jl:\\d+: injected Slicer fault")
+        w, printed = try
+            wrap_logged(warned)
+        finally
+            Base.delete_method(injected)
+        end
+        @test occursin(r"tier1: \d+ slices accepted \(\d+ refused, 1 errored, ", printed)
+
+        text = read(w, String)
+        # The victim emits the ccall it would with Tier 1 off ...
+        @test !occursin("_SLICE_$victim", text)
+        @test occursin("ccall((:$victim, LIBRARY_PATH)", text)
+        @test occursin(":$victim => :tier3,", text)
+        @test !isfile(joinpath(julia_dir, "slices", "$victim.ll"))
+        # ... and nothing else lost its slice.
+        for fn in kept
+            @test occursin("@generated function _TIER1_$fn(", text)
+            @test occursin(":$fn => :tier1,", text)
+            @test isfile(joinpath(julia_dir, "slices", "$fn.ll"))
+        end
+
+        # Every verdict was cached; the error was not.
+        key_dir = only(readdir(slice_cache; join=true))
+        @test !isfile(joinpath(key_dir, "$victim.json"))
+        for fn in kept
+            @test isfile(joinpath(key_dir, "$fn.json"))
+        end
+
+        # The wrapper loads and runs, in a fresh process because this one
+        # already holds a `Slicetest`. The victim computes through ccall, a kept
+        # function really splices llvmcall, and both address one counter.
+        driver = joinpath(mktempdir(), "errored_slice_probe.jl")
+        write(driver, """
+            include($(repr(w)))
+            using .Slicetest
+            println("TIER ", Slicetest.dispatch_tier(:$victim), " ", Slicetest.dispatch_tier(:st_bump))
+            println("TIER1 ", join(sort!(collect(Slicetest.TIER1_FUNCTIONS)), ","))
+            println("VALUES ", Slicetest.st_bump(5), " ", Slicetest.st_get_count())
+            """)
+        out, err = IOBuffer(), IOBuffer()
+        ok = success(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$(dirname(Base.active_project())) $driver`;
+                              stdout=out, stderr=err))
+        probe = String(take!(out))
+        ok || @info "errored-slice probe failed" probe err_text = String(take!(err))
+        @test ok
+        @test occursin("TIER tier3 tier1", probe)
+        tier1_line = match(r"^TIER1 (.*)$"m, probe)
+        tier1_names = tier1_line === nothing ? String[] : split(tier1_line.captures[1], ",")
+        @test !(victim in tier1_names)
+        @test all(fn -> fn in tier1_names, kept)
+        @test occursin("VALUES 5 5", probe)
+    end
+
+    @testset "whole module: Tier 1 off for the wrap, every function on ccall" begin
+        abi_ll = joinpath(RepliBuild.ConfigurationManager.get_build_path(cfg), "slicetest_abi.ll")
+        saved = read(abi_ll)
+        before = Set(readdir(slice_cache))
+        new_keys = Dict{String,Vector{String}}()   # cache key => entries under it
+        w, printed = try
+            write(abi_ll, "this is not LLVM IR\n")
+            wrap_logged(r"Tier 1: the Slicer failed on the promoted module")
+        finally
+            # Restored even when the wrap throws, so the end of the testset
+            # still finds the fixture's module and a single cache key.
+            write(abi_ll, saved)
+            for k in setdiff(Set(readdir(slice_cache)), before)
+                new_keys[k] = readdir(joinpath(slice_cache, k))
+                rm(joinpath(slice_cache, k); recursive=true)
+            end
+        end
+
+        text = read(w, String)
+        @test !occursin("_SLICE_", text)
+        @test !occursin("@generated function _TIER1_", text)
+        @test !occursin("TIER1_FUNCTIONS", text)
+        for fn in (victim, kept...)
+            @test occursin("ccall((:$fn, LIBRARY_PATH)", text)
+        end
+        @test isempty(readdir(joinpath(julia_dir, "slices")))
+        @test !occursin("tier1:", printed)     # the pre-pass stopped before its summary
+
+        # The unparseable module got a key, and nothing was cached under it.
+        @test length(new_keys) == 1
+        @test all(isempty, values(new_keys))
+    end
+
+    # Back to the real method, and to the fixture the testsets above left. The
+    # victim slices again because its error was never cached, and now its
+    # verdict is.
+    @test Base.invokelatest(which, Slicer._extract!, Tuple{Slicer.LLVM.Module,String}).sig ==
+          Tuple{typeof(Slicer._extract!),Any,String}
+    restored = read(Base.invokelatest(RepliBuild.wrap, TOML_PATH), String)
+    @test occursin("@generated function _TIER1_$victim(", restored)
+    @test isfile(joinpath(only(readdir(slice_cache; join=true)), "$victim.json"))
 end
 
 end  # testset
