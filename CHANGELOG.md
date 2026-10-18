@@ -4,6 +4,82 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 3: the register-class traps are SysV's only (2026-10-18)
+
+- **Win64 refused by-value crossings it makes correctly.** Two GeneratorC
+  traps assume SysV's register classes. The float-member trap refuses a
+  record of 16 bytes or less kept as an `NTuple{N,UInt8}` blob when it has a
+  float member, because SysV passes it in XMM registers while the blob claims
+  INTEGER. `abi_class_risk` refuses the same way a named-field struct holding
+  an opaque region of mixed float and integer members. Win64 gives a record no
+  register class: C passes and returns it by size alone (1, 2, 4 or 8 bytes as
+  an integer of that width, any other size by reference to a copy or through a
+  hidden return pointer), and Julia lowers a non-primitive type of the same
+  size the same way. There the traps only cost callable functions: 31 in the
+  abi_fuzz corpus after C1, and all 31 of Hub mpack's stubs (`mpack_tag_t` is
+  16 bytes and holds a union of integers and floats).
+- `_c_register_class_misstated(byte_size, class_risk; abi)` decides both traps
+  per target, from `_c_record_abi()`: on SysV at 16 bytes or less when the
+  stand-in may misstate the class, as before, and never on Win64. SysV's
+  MEMORY-class exemption for returns and its unaligned-field blob trap are
+  unchanged.
+- **C2 can now refuse a whole wrapper where Win64 used to refuse one
+  function.** BRANCH 0 (explicit sret) runs only when no blob trap fired, and
+  it never applies the `long double` trap (abi_fuzz C2). A function that takes
+  a float-bearing blob or a mixed-region struct by value, returns a record
+  BRANCH 0 takes (over 16 bytes and nominated by `c_safe`), and also takes a
+  `long double` used to get the `long double` stub on Win64. It now reaches
+  BRANCH 0, and its `Any` argument refuses the wrapper. No fuzz unit and no Hub
+  package has one. Fixing C2 closes it.
+- Tests: `test_c_sret_classification.jl` pins the predicate and what is
+  emitted for both ABIs: float blobs as parameters and as a register-sized
+  return, an mpack-shaped mixed region, the struct embedding it, and an
+  all-float region that is callable on both. `test_c_generator_policies.jl`
+  checks a float-bearing bitfield blob as parameter and return for both ABIs,
+  and loads the Win64 module, whose blob crossings reach their ccall.
+  `abi_nested_test`'s probe now expects `packedfv_sum` (a 9-byte packed float
+  blob) refused on SysV and called on Win64, where it returns 11.0.
+  Negative-checked through the exact method signature. With SysV's rule on
+  every target the two unit tests fail 16 of 154 and 8 of 96 checks and the
+  probe fails on Windows. With no trap on any target they fail 16 of 154 and
+  6 of 96, all of them the SysV checks.
+- **abi_fuzz** (C mode, shape seeds 1–106 and identifier seeds 1–40, Julia
+  1.12.7 and 1.13.2, which agree check for check), compared with f40496f's
+  results: 57 checks go from GAP to PASS, every one an ABI-trap refusal, and
+  no other status changes. 31 functions in 18 units are now calls: 22 take a
+  float-bearing blob of 7 to 16 bytes, 1 returns an 8-byte one, and 8 take or
+  return a 4- or 16-byte struct holding a mixed region. Their call and return
+  checks compare every member with what the callee read or wrote. Totals go
+  from 2237 PASS, 4 FAIL and 57 GAP to 2294, 4 and 0, and the 4 FAILs are C2.
+  The 31 trap gap lines are gone. 8 `param-type` gap lines appear, all on
+  newly callable functions: the trap had hidden the existing gap where a C
+  `char` parameter is declared `::UInt8`. In identifier mode nothing changes
+  status. In units 31n and 34n three stubs became calls ahead of the syntax
+  errors that still refuse those wrappers, which moves the line number in the
+  quoted parse error.
+- **Hub**: the 19 C packages, re-wrapped without a rebuild and compared with
+  wrappers from a clean export of f40496f. Under the SysV rules (generated on
+  Windows from the same metadata) all 19 are byte-identical apart from
+  timestamps. Under the Win64 rules only mpack changes: its 31 trap stubs
+  become Tier 3 ccalls and gain their 31 `DISPATCH_TIER` entries, and nothing
+  else in it moves. Every package's verifier passes against the Win64
+  wrappers (17 `test_deep.jl`, curl's `test.jl`, and pcre2 loads). mpack's
+  `test_deep.jl` calls none of the 31, so a separate live check called them
+  against `libmpack.dll` (143 checks, all passing). It reads every returned
+  tag through its fields and through the library's own pointer getters,
+  checks equality and ordering of tags passed in, compares what
+  `mpack_write_tag` encodes with the MessagePack spec byte for byte, reads tags
+  back with `mpack_read_tag`, `mpack_peek_tag`, `mpack_expect_tag` and
+  `mpack_node_tag`, and makes 400 000 calls under GC. Against f40496f's
+  wrapper the same check fails 62 checks and errors 5.
+- **Found on the way, not fixed: a Tier-3 sret buffer has the Julia type's
+  alignment.** A callee returning a record aligned above its stand-in may
+  store it with `movaps`; on Win64 that crashes (see CLAUDE.md, Open
+  problems). The returns this change makes callable are register-sized blobs,
+  which come back in RAX, and mixed-region structs, whose Julia alignment is
+  the record's own DWARF-derived one.
+- SysV is covered by the unit tests; no SysV callee ran.
+
 ### Tier 3: where C returns a record is decided per target, from real alignment (C1, 2026-10-18)
 
 - **A small record returned by value could get a hidden return pointer the

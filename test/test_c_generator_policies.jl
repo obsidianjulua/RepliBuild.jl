@@ -13,8 +13,9 @@
 # 3. Cstring return policy: Union{String,Nothing}, NULL → nothing, owned
 #    buffers freed via the declared symbol, raw _ptr variant exported —
 #    on the base wrapper AND the vararg @ccall path
-# 4. ABI trap for misaligned (packed) ≤16B all-integer blob params by value
-#    on SysV; aligned blobs stay callable, and Win64 needs no trap
+# 4. ABI traps for ≤16B blobs by value on SysV: misaligned (packed)
+#    all-integer params, and float-bearing params and returns (SSE class);
+#    aligned all-integer blobs stay callable, and Win64 needs neither trap
 # 5. Bitfield multi-byte accessors assemble the exact byte span (no
 #    power-of-2 container overhanging the struct tail, no pointer stores)
 # 6. Unresolved-type globals emit only a Ptr{Cvoid} _ptr accessor
@@ -89,6 +90,15 @@ function _policy_metadata()
                 Dict{String,Any}("name" => "tag", "julia_type" => "Cchar", "c_type" => "char", "offset" => "0x0", "size" => 1),
                 Dict{String,Any}("name" => "val", "julia_type" => "Cint", "c_type" => "int", "offset" => "0x1", "size" => 4),
             ]),
+        # Bitfields make it a blob, and the float puts its first eightbyte in
+        # XMM on SysV, which the blob claims is INTEGER → trapped there. Win64
+        # passes and returns any 8-byte record as an i64, blob included.
+        "FloatBits" => Dict{String,Any}(
+            "kind" => "struct", "byte_size" => "0x8",
+            "members" => Any[
+                Dict{String,Any}("name" => "f", "julia_type" => "Cfloat", "c_type" => "float", "offset" => "0x0", "size" => 4),
+                Dict{String,Any}("name" => "flags", "julia_type" => "Cuint", "c_type" => "unsigned int", "bit_size" => 3, "data_bit_offset" => 32),
+            ]),
         # Blob for a different reason (unresolvable member type) but aligned:
         # INTEGER class on both views → must stay callable
         "AlignedBlob" => Dict{String,Any}(
@@ -147,6 +157,12 @@ function _policy_metadata()
         Dict{String,Any}("name" => "use_aligned", "mangled" => "use_aligned", "demangled" => "use_aligned",
             "parameters" => Any[Dict{String,Any}("name" => "p", "julia_type" => "Any", "c_type" => "AlignedBlob")],
             "return_type" => Dict{String,Any}("julia_type" => "Cvoid", "c_type" => "void")),
+        Dict{String,Any}("name" => "use_floatbits", "mangled" => "use_floatbits", "demangled" => "use_floatbits",
+            "parameters" => Any[Dict{String,Any}("name" => "p", "julia_type" => "Any", "c_type" => "FloatBits")],
+            "return_type" => Dict{String,Any}("julia_type" => "Cvoid", "c_type" => "void")),
+        Dict{String,Any}("name" => "make_floatbits", "mangled" => "make_floatbits", "demangled" => "make_floatbits",
+            "parameters" => Any[],
+            "return_type" => Dict{String,Any}("julia_type" => "Any", "c_type" => "FloatBits")),
         Dict{String,Any}("name" => "on_event", "mangled" => "on_event", "demangled" => "on_event",
             "parameters" => Any[Dict{String,Any}("name" => "cb", "julia_type" => "Ptr{Cvoid}", "c_type" => "void (*)(int)")],
             "return_type" => Dict{String,Any}("julia_type" => "Cvoid", "c_type" => "void")),
@@ -221,11 +237,14 @@ end
     # libjulia is loaded in every Julia process on every OS — portable anchor.
     libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
     registry = RepliBuild.Wrapper.create_type_registry(cfg)
-    # Generated for SysV on every host, so the misaligned-blob trap below exists
-    # wherever this runs and `use_packed` really stops before its ccall. Win64
-    # needs no such trap; that answer is checked in its own testset.
+    # Generated for SysV on every host, so the blob traps below exist wherever
+    # this runs and `use_packed` really stops before its ccall. Win64 needs
+    # neither trap; the same metadata generated for it is checked alongside.
     code = RepliBuild.Wrapper.generate_introspective_module_c(
         cfg, libref, _policy_metadata(), "PolicySynth", registry, true; abi = :sysv)
+    code_w64 = RepliBuild.Wrapper.generate_introspective_module_c(
+        cfg, libref, _policy_metadata(), "PolicySynthW64",
+        RepliBuild.Wrapper.create_type_registry(cfg), true; abi = :win64)
 
     @testset "Cstring policy emission" begin
         # Base wrapper: Union return + NULL → nothing
@@ -254,23 +273,31 @@ end
         @test occursin("ptr = @ccall LIBRARY_PATH.var\"fmt_msg\"(fmt::Cstring; va_1::Cint)::Cstring", code)
     end
 
-    @testset "misaligned blob param trap" begin
+    @testset "blob by-value traps: SysV only" begin
         # SysV: packed (misaligned) all-int ≤16B by value → loud trap
         @test occursin("ABI Safety Trap: cannot call 'use_packed'", code)
         @test occursin("takes `PackedInt` by value", code)
+        # SysV: a float-bearing ≤16B blob → loud trap, as a param and a return
+        @test occursin("ABI Safety Trap: cannot call 'use_floatbits'", code)
+        @test occursin("takes `FloatBits` by value", code)
+        @test occursin("ABI Safety Trap: cannot call 'make_floatbits'", code)
+        @test occursin("returns `FloatBits` by value", code)
         # Aligned blob (INTEGER class both views) → normal ccall survives
         @test occursin("ccall((:use_aligned, LIBRARY_PATH)", code)
         @test !occursin("ABI Safety Trap: cannot call 'use_aligned'", code)
 
-        # Win64 passes a record by size alone (6 bytes: by reference to a copy),
-        # and the blob has the record's size, so both views agree and the trap
-        # would only cost a callable function.
-        code_w64 = RepliBuild.Wrapper.generate_introspective_module_c(
-            cfg, libref, _policy_metadata(), "PolicySynth",
-            RepliBuild.Wrapper.create_type_registry(cfg), true; abi = :win64)
-        @test occursin("ccall((:use_packed, LIBRARY_PATH)", code_w64)
-        @test !occursin("ABI Safety Trap: cannot call 'use_packed'", code_w64)
-        @test occursin("ccall((:use_aligned, LIBRARY_PATH)", code_w64)
+        # Win64 passes and returns a record by size alone (6 bytes: by reference
+        # to a copy; 8 bytes: an i64), and the blob has the record's size, so
+        # both views agree whatever the members are, and either trap would only
+        # cost a callable function.
+        checked = 0
+        for f in ("use_packed", "use_floatbits", "make_floatbits", "use_aligned")
+            b = _fn_body(code_w64, "function $f(")
+            @test (f, occursin("ccall((:$f, LIBRARY_PATH)", b)) == (f, true)
+            @test (f, occursin("ABI Safety Trap", b)) == (f, false)
+            checked += 1
+        end
+        @test checked == 4
     end
 
     @testset "bitfield byte-span accessors" begin
@@ -409,8 +436,25 @@ end
 
         # The trap fires before any ccall
         @test_throws ErrorException M.use_packed(p)
+        trap_msg(f) = try f(); "" catch e; sprint(showerror, e) end
+        @test occursin("ABI Safety Trap", trap_msg(() -> M.use_floatbits(M.FloatBits())))
+        @test occursin("ABI Safety Trap", trap_msg(M.make_floatbits))
 
         # Raw _ptr variants are real callables
         @test isempty(methods(M.get_msg_ptr)) == false
+
+        # The Win64 wrapper loads, and its blob crossings reach the ccall: the
+        # symbol is not in libjulia, so the lookup fails instead of a trap.
+        genfile64 = joinpath(dir, "PolicySynthW64.jl")
+        write(genfile64, code_w64)
+        M64 = include(genfile64)
+        @test M64 isa Module
+        for (f, args) in ((M64.use_packed, (M64.PackedInt(),)),
+                          (M64.use_floatbits, (M64.FloatBits(),)),
+                          (M64.make_floatbits, ()))
+            msg = trap_msg(() -> f(args...))
+            @test (nameof(f), occursin("could not load symbol", msg)) == (nameof(f), true)
+            @test (nameof(f), occursin("ABI Safety Trap", msg)) == (nameof(f), false)
+        end
     end
 end

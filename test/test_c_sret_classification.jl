@@ -14,6 +14,14 @@
 # trap and the blob-return guard, and none of the three knew Win64, which
 # classifies by size alone.
 #
+# The register-class traps are per target too. A ≤16-byte record whose Julia
+# stand-in cannot reproduce its member types (the byte blob of a float-bearing
+# record, or a struct holding a mixed float/integer region) travels SysV in
+# eightbytes the stand-in misclasses, so it is refused there. Win64 gives a
+# record no register class: C and Julia both cross it by size alone, so the
+# traps only cost callable functions (31 in the abi_fuzz corpus; Hub mpack's
+# 31 `mpack_tag_t` stubs).
+#
 # Every answer is checked for BOTH conventions (`abi = :sysv` / `:win64`), on
 # any host. The DWARF tables below are in the shape the parser writes: hex
 # offsets, `size = 0` for record and enum members, bitfields with no offset.
@@ -35,6 +43,7 @@ _sbit(name, jt, ct, bits, at) = Dict{String,Any}("name" => name, "julia_type" =>
                                                  "bit_size" => bits, "data_bit_offset" => at)
 _srec(size, members...; kind = "struct") =
     Dict{String,Any}("kind" => kind, "byte_size" => "0x" * string(size, base = 16), "members" => Any[members...])
+_sanon(rec) = (rec["anonymous"] = true; rec)
 
 const _SRET_STRUCTS = Dict{String,Any}(
     # C1, seed 36: 8 bytes, `short[3]` 2-aligned at offset 2. RAX on both ABIs.
@@ -86,6 +95,16 @@ const _SRET_STRUCTS = Dict{String,Any}(
                         _sbit("b", "Cint", "int", 3, 32),
                         _sm("c", "Cint", "int", "0x8", 4)),
     "BF8" => _srec(8, _sm("f", "Cfloat", "float", "0x0", 4), _sbit("b", "Cint", "int", 3, 32)),
+    # mpack_tag_t's shape: an anonymous union of an integer and a double
+    # becomes an aligned `NTuple{1, UInt64}` region, which claims INTEGER for an
+    # eightbyte a float member also covers. The region and the struct holding
+    # it are `abi_class_risk`. An all-float region states its class (Float64).
+    "Tag16_v" => _sanon(_srec(8, _sm("i", "Clonglong", "long long", "0x0", 8),
+                                 _sm("d", "Cdouble", "double", "0x0", 8); kind = "union")),
+    "Tag16" => _srec(16, _sm("type", "Cint", "int", "0x0", 4),
+                         _sm("v", "Tag16_v", "Tag16_v", "0x8", 8)),
+    "FV8_v" => _sanon(_srec(8, _sm("f", "NTuple{2, Cfloat}", "float[2]", "0x0", 8),
+                               _sm("d", "Cdouble", "double", "0x0", 8); kind = "union")),
     # Members at offset 0 of a union.
     "U3" => _srec(4, _sm("i", "Cint", "int", "0x0", 4), _sm("c", "NTuple{3, UInt8}", "char[3]", "0x0", 3);
                   kind = "union"),
@@ -188,6 +207,28 @@ const _SRET_STRUCTS = Dict{String,Any}(
         @test_throws ArgumentError _SW._c_blob_param_misclassified(8, false; abi = :aapcs64)
     end
 
+    @testset "register class: SysV eightbytes by member type; Win64 none" begin
+        # (size, the stand-in may misstate the class) → SysV, Win64
+        table = [(1,  true,  true,  false),
+                 (8,  true,  true,  false),   # BF8: XMM vs GPR on SysV; i64 on both Win64
+                 (12, true,  true,  false),   # BF12: by reference on both Win64
+                 (16, true,  true,  false),   # Tag16: by reference / sret on both Win64
+                 (17, true,  false, false),   # MEMORY on both views
+                 (24, true,  false, false),
+                 (8,  false, false, false),   # the stand-in states the class
+                 (16, false, false, false)]
+        checked = 0
+        for (n, risk, sysv, win64) in table
+            @test (n, risk, :sysv, _SW._c_register_class_misstated(n, risk; abi = :sysv)) ==
+                  (n, risk, :sysv, sysv)
+            @test (n, risk, :win64, _SW._c_register_class_misstated(n, risk; abi = :win64)) ==
+                  (n, risk, :win64, win64)
+            checked += 1
+        end
+        @test checked == length(table)
+        @test_throws ArgumentError _SW._c_register_class_misstated(8, true; abi = :aapcs64)
+    end
+
     # ── What the generator emits for each shape, per target ──────────────────
     dir = mktempdir()
     write(joinpath(dir, "replibuild.toml"), """
@@ -224,6 +265,12 @@ const _SRET_STRUCTS = Dict{String,Any}(
             fn("make_bf8", "BF8"),
             fn("take_p8", "void", rec_param("v", "P8")),
             fn("take_t4", "void", rec_param("v", "T4")),
+            fn("take_bf8", "void", rec_param("v", "BF8")),
+            fn("take_bf12", "Cint", rec_param("v", "BF12")),
+            fn("make_tag16", "Tag16", rec_param("n", "Clonglong")),
+            fn("take_tag16", "void", rec_param("t", "Tag16")),
+            fn("take_tag16_v", "void", rec_param("v", "Tag16_v")),
+            fn("take_fv8_v", "void", rec_param("v", "FV8_v")),
         ])
     libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
     gen(abi) = _SW.generate_introspective_module_c(cfg, libref, meta, "SretSynth",
@@ -252,7 +299,16 @@ const _SRET_STRUCTS = Dict{String,Any}(
              ("make_out6",  :sret,   :ccall),   # SysV: nested unaligned field, size test blind
              ("make_bf12",  :trap,   :ccall),   # float blob: SysV class unknowable; Win64 sret by size
              ("take_p8",    :trap,   :ccall),   # SysV MEMORY vs blob INTEGER; Win64 i64 both
-             ("take_t4",    :ccall,  :ccall)]
+             ("take_t4",    :ccall,  :ccall),
+             # The register-class traps. SysV: the stand-in claims INTEGER for an
+             # eightbyte C passes in XMM. Win64: by size on both sides.
+             ("make_bf8",   :trap,   :ccall),   # float blob, RAX on Win64
+             ("take_bf8",   :trap,   :ccall),   # float blob, i64 on Win64
+             ("take_bf12",  :trap,   :ccall),   # float blob, by reference on Win64
+             ("make_tag16", :trap,   :ccall),   # mixed region (mpack_tag_t), sret on Win64
+             ("take_tag16", :trap,   :ccall),   # by reference on Win64
+             ("take_tag16_v", :trap, :ccall),   # the region itself, i64 on Win64
+             ("take_fv8_v", :ccall,  :ccall)]   # all-float region states SSE: no trap
     checked = 0
     for (name, want_sysv, want_win64) in table
         @test (name, :sysv, form(sysv, name)) == (name, :sysv, want_sysv)
@@ -260,9 +316,17 @@ const _SRET_STRUCTS = Dict{String,Any}(
         checked += 1
     end
     @test checked == length(table)
-    # A float blob in RAX stays refused on SysV, whose register class it cannot
-    # know. (Win64 needs no class, but the guard is SysV-shaped; not pinned.)
-    @test form(sysv, "make_bf8") == :trap
+    # SysV names what it refused; Win64 refuses nothing for a class.
+    @test occursin("returns `BF8` by value", body(sysv, "make_bf8"))
+    @test occursin("takes `BF12` by value", body(sysv, "take_bf12"))
+    @test occursin("returns `Tag16` by value", body(sysv, "make_tag16"))
+    @test occursin("takes `Tag16_v` by value", body(sysv, "take_tag16_v"))
+    @test !occursin("ABI Safety Trap", win64)
+    # Win64 hands the stand-in itself to ccall, which lowers it by size.
+    @test occursin("ccall((:make_bf8, LIBRARY_PATH), BF8, (), )", body(win64, "make_bf8"))
+    @test occursin("ccall((:take_bf12, LIBRARY_PATH), Cint, (BF12,), v)", body(win64, "take_bf12"))
+    @test occursin("ccall((:make_tag16, LIBRARY_PATH), Tag16, (Clonglong,), n_c)", body(win64, "make_tag16"))
+    @test occursin(r"ccall\(\(:take_tag16, LIBRARY_PATH\), \w+, \(Tag16,\), t\)", body(win64, "take_tag16"))
     # The plain ccall returns the record itself, with no hidden first argument.
     @test occursin("ccall((:f4, LIBRARY_PATH), T4, (R5,), p1)", body(sysv, "f4"))
     @test occursin("ccall((:f4, LIBRARY_PATH), T4, (R5,), p1)", body(win64, "f4"))

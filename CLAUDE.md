@@ -379,11 +379,16 @@ the test named when you touch the area.
   `::Any` in a Julia signature is normal. (`test_wrapper_type_bindings.jl`.)
 - **A Tier-3 by-value record is classified per target, from its fields' type
   alignment, never a member's size** (C1: `{ char; short[3]; }` got an sret
-  the callee never reads). `_c_return_in_memory`, `_c_explicit_sret` and
-  `_c_blob_param_misclassified` are the answers, `_c_has_unaligned_field` is the
-  walk, and `_c_record_abi()` is the only place GeneratorC reads the target.
-  `get_julia_aligned_size` still takes size as alignment, so `c_safe` only
-  nominates. (`test_c_sret_classification.jl`, `test_c_sret_abi.jl`.)
+  the callee never reads). `_c_return_in_memory`, `_c_explicit_sret`,
+  `_c_blob_param_misclassified` and `_c_register_class_misstated` are the
+  answers, `_c_has_unaligned_field` is the walk, and `_c_record_abi()` is the
+  only place GeneratorC reads the target. Register-class traps (a float-bearing
+  blob, a mixed float/integer region) are SysV's only: Win64 crosses a record
+  by size alone on both sides. `get_julia_aligned_size` still takes size as
+  alignment, so `c_safe` only nominates. BRANCH 0 runs only when no blob trap
+  fired and never applies the `long double` trap, so clearing a trap can route
+  a function with a `long double` parameter into it, and then the wrapper is
+  refused (abi_fuzz C2). (`test_c_sret_classification.jl`, `test_c_sret_abi.jl`.)
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
   the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
@@ -628,7 +633,16 @@ check before claiming portability again; reading `.gitignore` does not settle it
   43 varargs (declaration work via `[wrap.varargs]`), 27 mpack by-value aggregate
   returns (typed correctly but emitted as ABI-trap stubs), 5 mpack by-value aggregate
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
-  names; a trap stub is not coverage.
+  names; a trap stub is not coverage. The mpack stubs are SysV-only since
+  2026-10-18: Win64 calls them.
+- **A Tier-3 sret buffer has the Julia type's alignment, not the C record's**
+  (2026-10-18). A callee returning a record aligned above its stand-in
+  (`_Alignas(16)`, `aligned(16)`, `long double`, `__int128`) may store it with
+  `movaps`. On Win64 that is an access violation for sizes other than 1, 2, 4
+  and 8 (clang 23, `S16 get(void) { return g; }` through a byte blob or an
+  8-aligned stand-in). SysV MEMORY-class returns and byval parameters have the
+  same shape and have not been run. Win64 parameters are safe: LLVM's `byval`
+  lowering puts the copy at 16.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles

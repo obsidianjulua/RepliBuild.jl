@@ -449,14 +449,44 @@ the `NTuple{N,UInt8}` blob standing in for it. `unaligned` is
     register, anything else by reference to a copy), and the blob has the
     record's size.
 
-Float members are a separate hazard (an SSE eightbyte the blob cannot claim),
-which the caller checks.
+Float members are a separate hazard (an SSE eightbyte the blob cannot claim):
+[`_c_register_class_misstated`](@ref).
 """
 function _c_blob_param_misclassified(byte_size::Integer, unaligned::Union{Bool,Nothing};
                                      abi::Symbol = _c_record_abi())
     abi === :win64 && return false
     abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
     return byte_size <= 16 && unaligned !== false
+end
+
+"""
+    _c_register_class_misstated(byte_size, class_risk; abi = _c_record_abi()) -> Bool
+
+Whether a by-value record travels in other registers than the Julia type
+standing in for it, when that type cannot reproduce the record's member types
+(`class_risk`): the `NTuple{N,UInt8}` blob of a record with float members, or a
+named-field struct holding an opaque region of mixed float and integer members
+(`abi_class_risk`).
+
+  * `:sysv`: at 16 bytes or less a record travels in eightbytes that its members
+    class INTEGER or SSE, while the stand-in's element type claims one class for
+    all of them: a float record goes in XMM registers and its blob in
+    general-purpose ones. Refused when `class_risk`. Above 16 bytes both are
+    MEMORY.
+  * `:win64`: never. A record has no register class there. C passes and returns
+    it by size alone (1, 2, 4 or 8 bytes as an integer of that width in a
+    general-purpose register, any other size by reference to a copy or through
+    a hidden return pointer), and Julia lowers a non-primitive type of the same
+    size the same way (`abi_win64.cpp`). The stand-in has the record's size.
+
+A SysV return that C makes through a hidden pointer has no class to misstate;
+the caller exempts it with [`_c_return_in_memory`](@ref).
+"""
+function _c_register_class_misstated(byte_size::Integer, class_risk::Bool;
+                                     abi::Symbol = _c_record_abi())
+    abi === :win64 && return false
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    return class_risk && byte_size <= 16
 end
 
 """
@@ -816,7 +846,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     #   struct emitted with VERIFIED named fields (eligible as inline members
     #   and ABI-exact for by-value crossings)
     # - blob_struct_names/sizes/float_risk: structs that stayed opaque byte
-    #   blobs; ≤16B float-bearing blobs may not cross the ABI by value
+    #   blobs; ≤16B float-bearing blobs may not cross the SysV ABI by value
     resolved_layouts = Dict{String,Tuple{Int,Int}}()
     blob_struct_names = Set{String}()
     blob_struct_sizes = Dict{String,Int}()
@@ -2742,13 +2772,15 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # (the real struct travels in SSE eightbytes, NTuple{N,UInt8} claims
         # INTEGER). A by-value crossing would silently read/write the wrong
         # registers — refuse loudly instead. Pointer crossings and >16-byte
-        # blobs (MEMORY class on both views) remain fine.
+        # blobs (MEMORY class on both views) remain fine. Win64 gives a record
+        # no register class: C and Julia both pass and return it by size
+        # alone, so the guard is SysV's only (`_c_register_class_misstated`).
         blob_abi_offenders = String[]
         let _rjt = String(get(return_type, "julia_type", "Any")),
             _rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
             _rname = _rjt == "Any" ? _sanitize_c_type_name(_rct) : _rjt
             if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16 &&
-               get(blob_float_risk, _rname, true)
+               _c_register_class_misstated(blob_struct_sizes[_rname], get(blob_float_risk, _rname, true); abi)
                 # A record C returns through a hidden pointer has no register
                 # class to get wrong: the caller's buffer is exact even for a
                 # blob (BRANCH 0 passes it explicitly wherever Julia's own
@@ -2763,7 +2795,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # of mixed SysV class (see `abi_class_risk`): it has real fields, so
             # the blob test above never sees it, but its register class is just
             # as unknowable from the Julia side.
-            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16
+            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16 &&
+               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi)
                 push!(blob_abi_offenders, "returns `$_rname` by value")
             end
         end
@@ -2784,9 +2817,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         end
         for _pt in param_types
             if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
-               (get(blob_float_risk, _pt, true) || _blob_param_misaligned(_pt))
+               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi) ||
+                _blob_param_misaligned(_pt))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
-            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16
+            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16 &&
+                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
         end
