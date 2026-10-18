@@ -25,6 +25,47 @@ runtests.jl and the full devtests.jl on LLVM.jl 10.2.1 under Julia 1.12.7 and
   fresh, so it now tests LLVM.jl 10; LLVM.jl 9 is checked only where an
   environment pins it.
 
+### Tier 1: a Slicer throw demotes that function instead of failing the wrap (2026-10-17)
+
+- Nothing caught on the way from `_tier1_slice_prepass` through
+  `Slicer.slice_library` to `_extract!`, so one exception while slicing one
+  function failed `RepliBuild.wrap` for the whole library. Two of the LLVM.jl 10
+  breaks below did exactly that: the `TypeError` on any internal constant, and
+  the verifier rejecting `noinline` + `alwaysinline`. Tier 1's doctrine is that
+  any doubt resolves to ccall, and a Slicer exception is a doubt.
+- **Per target.** `slice_library` runs `_extract!` in `try`/`finally`, so the
+  clone is always disposed, and turns an exception into that target's refusal,
+  tagged `:slicer_error` (`Slicer.errored`). The reason is one line naming the
+  exception and the innermost `Slicer.jl` frame. An errored refusal is never
+  cached, so a transient failure does not stick until the module or
+  `SLICER_VERSION` changes. `InterruptException` still propagates.
+- **Whole module.** A throw that escapes `slice_library` (reading or parsing the
+  promoted module, stripping debug info, the `llvm.*` sweep) gives one `@warn`
+  with its backtrace, and Tier 1 is off for that wrap. Every function uses
+  ccall, as when the promoted module is missing.
+- **Visible.** The `tier1:` summary line counts `errored` apart from `refused`,
+  and one `@warn` lists each errored function with its reason. Each one is a
+  Slicer bug.
+- `SliceResult`, the cache format and `SLICER_VERSION` are unchanged.
+- Tests, in the two quarantined suites (still unwired):
+  - `test_slicer.jl` slices synthetic IR, ahead of the fixture build, whose
+    target with `optnone` and no `noinline` fails `LLVM.verify`. The other
+    targets still slice, and only verdicts are cached. It also checks that an
+    interrupt propagates.
+  - `test_tier1_dispatch.jl` ends with two real wraps of the fixture. One
+    injects a throw for one target with a more specific `_extract!` method.
+    The wrap succeeds and warns, that function dispatches through ccall, the
+    others keep Tier 1, and no cache entry is written for it. The other wrap
+    has an unparseable promoted module: the wrap succeeds with Tier 1 off.
+  - Negative-checked by neutering, one at a time, the per-target catch, the
+    no-cache rule, the interrupt rethrow and the whole-module catch.
+- Verified on Windows (MSYS2 CLANG64) with LLVM.jl 9.13.2 and 10.2.1 on Julia
+  1.12.7 and 1.13.2. `test_tier1_dispatch.jl` passes 294/294 on all four (254
+  before, plus 40). `test_slicer.jl` gains 19 passes and otherwise gives what it
+  gave before on Windows: 11 errors from its `ccall(:dlsym)` line, and the
+  `st_guarded_div(1, 0)` assertion skipped by the driver it was run through,
+  because that longjmp ends the process. runtests.jl passes (1995) on all four.
+
 ### Tier 1 on LLVM.jl 10: the Slicer and static promotion read what they read on 9 (2026-10-17)
 
 - **LLVM.jl 10 changed four names that Tier 1 reads, at five call sites.** Two

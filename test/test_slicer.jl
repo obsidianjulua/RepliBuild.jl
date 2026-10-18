@@ -19,6 +19,9 @@
 #   7. Every read whose LLVM.jl spelling changed meaning between 9 and 10
 #      answers the same on both. Synthetic IR, run first: it needs no fixture,
 #      so it still reports where the machine-local slice_test toml is missing.
+#   8. A throw while slicing one target is that target's refusal, never cached,
+#      and the other targets still slice; an interrupt still propagates.
+#      Synthetic IR, also run first.
 #
 # Usage: julia --project=. test/test_slicer.jl
 
@@ -144,6 +147,87 @@ attributes #1 = { returns_twice }
             checked += 1
         end
         @test checked == length(sliced_names)
+    end
+end
+
+# `optnone` without `noinline` is IR the verifier rejects. The Slicer copies a
+# target's attributes verbatim, so this target's slice fails `LLVM.verify` in
+# `_extract!`, the call the LLVM.jl 10 `noinline` + `alwaysinline` break threw
+# from. The input is never verified (it has no debug-info version flag), so it
+# parses. The variadic target is the contrast: a policy refusal, not an error.
+const SLICER_ERROR_PROBE_IR = """
+define i64 @fails_verify(i64 %x) #0 {
+  %r = mul i64 %x, 3
+  ret i64 %r
+}
+
+define i64 @plain(i64 %x) {
+  %r = add i64 %x, 1
+  ret i64 %r
+}
+
+define i64 @varargs_target(i64 %n, ...) {
+  ret i64 %n
+}
+
+attributes #0 = { optnone }
+"""
+
+@testset "Slicer: a throw while slicing one target is that target's refusal" begin
+    dir = mktempdir()
+    ll = joinpath(dir, "error_probe_abi.ll")
+    write(ll, SLICER_ERROR_PROBE_IR)
+    cache = joinpath(dir, "cache")
+    # The failing target goes first, so the loop has to carry on past it.
+    targets = ["fails_verify", "plain", "varargs_target"]
+    R1 = Slicer.slice_library(ll; targets=targets, cache_dir=cache)
+
+    bad = R1["fails_verify"]
+    reason = something(bad.refusal, "")
+    @test !Slicer.sliced(bad)
+    @test Slicer.errored(bad)
+    @test bad.hazards == [:slicer_error]
+    # The reason names the exception and the Slicer frame it came through, on
+    # one line, with LLVM's own message kept.
+    @test startswith(reason, "slicing threw LLVMException in _extract! at Slicer.jl:")
+    @test occursin("Attribute 'optnone' requires 'noinline'", reason)
+    @test !occursin('\n', reason)
+
+    @test Slicer.sliced(R1["plain"])
+    @test !Slicer.errored(R1["plain"])
+    @test !Slicer.sliced(R1["varargs_target"])
+    @test !Slicer.errored(R1["varargs_target"])
+
+    # Verdicts are cached. The error is not: cached, it would be served until
+    # the module or SLICER_VERSION changed.
+    key_dir = only(readdir(joinpath(cache, "slices"); join=true))
+    @test isfile(joinpath(key_dir, "plain.json"))
+    @test isfile(joinpath(key_dir, "varargs_target.json"))
+    @test !isfile(joinpath(key_dir, "fails_verify.json"))
+    @test !isfile(joinpath(key_dir, "fails_verify.ll"))
+
+    # So the next call slices it again, while the others are served.
+    R2 = Slicer.slice_library(ll; targets=targets, cache_dir=cache)
+    @test Slicer.errored(R2["fails_verify"])
+    @test R2["plain"].ir == R1["plain"].ir
+    @test !isfile(joinpath(key_dir, "fails_verify.json"))
+
+    @testset "an interrupt is not a slicing error" begin
+        # Swallowed, Ctrl-C would cost one target its slice and the loop would
+        # go on to the next. A method more specific than `_extract!(mod,
+        # ::String)` wins dispatch for the clone and throws the interrupt;
+        # `invokelatest` because it is newer than this testset.
+        @eval Slicer function _extract!(mod::LLVM.Module, target_name::String)
+            target_name == "plain" && throw(InterruptException())
+            return invoke(_extract!, Tuple{Any,String}, mod, target_name)
+        end
+        injected = Base.invokelatest(which, Slicer._extract!, Tuple{Slicer.LLVM.Module,String})
+        try
+            @test_throws InterruptException Base.invokelatest(Slicer.slice_function, ll, "plain")
+        finally
+            Base.delete_method(injected)
+        end
+        @test Slicer.sliced(Base.invokelatest(Slicer.slice_function, ll, "plain"))
     end
 end
 
