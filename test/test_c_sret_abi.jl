@@ -7,11 +7,18 @@
 # `f2` return `{ char m1; short m2[3]; }`, an 8-byte register-class record the
 # generator used to return through a hidden pointer the callee never reads.
 #
+# The `make_*` records after BF12 are more aligned than the Julia type standing
+# in for them, and each maker stores its return with movaps: the wrapper must
+# hand the callee a buffer at the record's alignment, which Julia's own lowering
+# of the stand-in does not.
+#
 # The probe runs this host's convention only. The second testset checks the
 # classifier against clang's own lowering of the same file for BOTH targets,
 # using this build's DWARF metadata: clang marks a hidden-pointer return
-# `sret`, and `_c_return_in_memory` must agree for SysV and for Win64. That is a
-# specification check; running the SysV side needs a Linux host.
+# `sret`, and `_c_return_in_memory` must agree for SysV and for Win64. The third
+# checks `_c_record_align` against the alignment clang gives each record's
+# global. Both are specification checks; running the SysV side needs a Linux
+# host.
 #
 # Needs the C bucket (a build) and, for the second testset, clang on PATH.
 # =============================================================================
@@ -26,10 +33,14 @@ using .TestSupport
 const C_SRET_DIR = joinpath(@__DIR__, "c_sret_test")
 
 # Every function in c_sret.h, and the ones that return a record by value.
+const C_SRET_ALIGNED = ["make_ab16", "make_v4a", "make_d4a", "make_ma32", "make_a32",
+                        "make_hvec", "make_hv4", "make_nesta"]
 const C_SRET_FUNCTIONS = ["f4", "f2", "make_ic12", "ic12_sum", "make_p4", "make_p8",
-                          "take_p8", "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12"]
+                          "take_p8", "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12",
+                          C_SRET_ALIGNED...]
 const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
-                               "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12"]
+                               "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12",
+                               C_SRET_ALIGNED...]
 
 @testset "Tier 3 record returns, live (C1)" begin
     toml_path = joinpath(C_SRET_DIR, "replibuild.toml")
@@ -108,6 +119,26 @@ const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
                 end
             end
             @test checked == 2 * length(C_SRET_RECORD_RETURNS)
+        end
+
+        @testset "record alignment agrees with clang, SysV and Win64" begin
+            W = RepliBuild.Wrapper
+            meta = RepliBuild._read_json(joinpath(C_SRET_DIR, "julia", "compilation_metadata.json"))
+            sd = meta["struct_definitions"]
+            checked = 0
+            for triple in ("x86_64-unknown-linux-gnu", "x86_64-w64-windows-gnu")
+                ll = joinpath(mktempdir(), "c_sret.ll")
+                @test success(`$(Sys.which("clang")) --target=$triple -O1 -S -emit-llvm -I$inc -o $ll $src`)
+                # `@g_v4a = dso_local global %struct.V4A zeroinitializer, align 16`
+                globals = Dict(String(m.captures[1]) => parse(Int, m.captures[2])
+                               for m in eachmatch(r"(?m)^@g_\w+ = [^\n]*?global %struct\.(\w+) [^\n]*, align (\d+)\r?$",
+                                                  read(ll, String)))
+                for (rec, want) in sort(collect(globals))
+                    @test (rec, triple, W._c_record_align(sd[rec], sd)) == (rec, triple, want)
+                    checked += 1
+                end
+            end
+            @test checked == 2 * length(C_SRET_ALIGNED)
         end
     end # requires
 end

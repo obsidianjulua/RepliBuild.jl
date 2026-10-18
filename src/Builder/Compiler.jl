@@ -4438,7 +4438,7 @@ function parse_dwarf_dump(output::AbstractString;
                             "type" => mi["type"],
                             "offset" => mi["offset"]
                         )
-                        for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy"]
+                        for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy", "alignment"]
                             if haskey(mi, bf_key)
                                 member_dict[bf_key] = mi[bf_key]
                             end
@@ -5005,6 +5005,36 @@ function parse_dwarf_dump(output::AbstractString;
                 ccm = match(r"DW_AT_calling_convention\s*:?\s*(\d+)", line)
                 ccm === nothing ||
                     (type_refs[tag_offset]["calling_convention"] = parse(Int, ccm.captures[1]))
+            end
+        end
+
+        # DW_AT_alignment: an alignment the source asked for, `aligned(N)` on a
+        # record and `_Alignas(N)` on a member. Clang also puts it on a member
+        # whose type is an over-aligned typedef (the typedef itself carries
+        # none), and emits it in DWARF 4 too. A record's alignment decides how a
+        # hidden return buffer must be aligned (GeneratorC `_c_record_align`).
+        # Natural alignment has no attribute: `long double` and vectors are
+        # found from their types.
+        if contains(line, "DW_AT_alignment") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) in (:struct, :class, :member) &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                am = match(r"DW_AT_alignment\s*:\s*(0x[0-9a-fA-F]+|\d+)", line)
+                if am !== nothing
+                    v = String(am.captures[1])
+                    type_refs[tag_offset]["alignment"] =
+                        startswith(v, "0x") ? parse(Int, v[3:end], base=16) : parse(Int, v)
+                end
+            end
+        end
+
+        # DW_AT_GNU_vector: the array is a vector (`vector_size`, `__m128`),
+        # aligned to its size where an array is aligned to its element.
+        if contains(line, "DW_AT_GNU_vector") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) == :array &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                type_refs[tag_offset]["vector"] = true
             end
         end
 
@@ -6275,6 +6305,14 @@ function parse_dwarf_dump(output::AbstractString;
                         if get(member, "anonymous_member", false) == true
                             member_resolved["anonymous_member"] = true
                         end
+                        # The alignment the member asked for (DW_AT_alignment),
+                        # or a vector's, which is its size and carries no
+                        # attribute. Natural alignment is left to the reader.
+                        m_align = get(member, "alignment", nothing)
+                        if _is_vector_type(member_type_ref, type_refs) && ispow2(m_size)
+                            m_align = max(something(m_align, 1), m_size)
+                        end
+                        m_align === nothing || (member_resolved["alignment"] = m_align)
                         push!(resolved_members, member_resolved)
                     end
                 end
@@ -6291,6 +6329,8 @@ function parse_dwarf_dump(output::AbstractString;
                     if get(type_info, "anonymous", false) == true
                         struct_def["anonymous"] = true
                     end
+                    # `aligned(N)` on the record (DW_AT_alignment); see above.
+                    haskey(type_info, "alignment") && (struct_def["alignment"] = type_info["alignment"])
 
                     # Add inheritance information if available
                     base_classes = []
@@ -6542,6 +6582,27 @@ DW_CC_pass_by_value) or `"reference"` (4, DW_CC_pass_by_reference). `nothing`
 when the attribute is absent, which is every C record.
 """
 _record_pass_convention(cc) = cc == 5 ? "value" : cc == 4 ? "reference" : nothing
+
+"""
+    _is_vector_type(type_ref, type_refs) -> Bool
+
+Whether a DWARF type reference names a vector (`__attribute__((vector_size))`,
+`__m128`): an array DIE with `DW_AT_GNU_vector`, reached through typedefs and
+cv-qualifiers. A vector is aligned to its size, which no attribute states.
+"""
+function _is_vector_type(type_ref, type_refs)
+    ref = type_ref
+    for _ in 1:16                                  # typedef chains are short; no cycles
+        t = get(type_refs, ref, nothing)
+        t isa Dict || return false
+        kind = get(t, "kind", nothing)
+        kind == "array" && return get(t, "vector", false) == true
+        kind in ("typedef", "const", "volatile") || return false
+        ref = get(t, "target", nothing)
+        ref === nothing && return false
+    end
+    return false
+end
 
 """
     _merge_record_facts!(facts, name, entry)

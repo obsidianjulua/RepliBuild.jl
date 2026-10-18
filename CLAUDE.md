@@ -392,6 +392,14 @@ the test named when you touch the area.
   a trap can route a function with a `long double` parameter into it, and then
   the wrapper is refused (abi_fuzz C2). (`test_c_sret_classification.jl`,
   `test_c_sret_abi.jl`, `test_record_natural_layout.jl`.)
+- **A hidden return buffer has the record's alignment.** Julia's own sret
+  buffer is aligned to the stand-in (a byte blob: 1), and the callee may store
+  with `movaps`. `_c_record_align` is the record's (the parser records
+  `DW_AT_alignment` on records and members as `alignment`, a vector member's as
+  its size), and BRANCH 0 passes a buffer it aligned itself wherever that
+  exceeds the stand-in's and 8 (`_c_sret_buffer_align`). The metadata needs a
+  rebuild to carry it. Record-level `alignment` also routes C++ to Tier 2
+  (`_is_struct_unsafe`).
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
   the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
@@ -638,14 +646,15 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
-- **A Tier-3 sret buffer has the Julia type's alignment, not the C record's**
-  (2026-10-18). A callee returning a record aligned above its stand-in
-  (`_Alignas(16)`, `aligned(16)`, `long double`, `__int128`) may store it with
-  `movaps`. On Win64 that is an access violation for sizes other than 1, 2, 4
-  and 8 (clang 23, `S16 get(void) { return g; }` through a byte blob or an
-  8-aligned stand-in). SysV MEMORY-class returns and byval parameters have the
-  same shape and have not been run. Win64 parameters are safe: LLVM's `byval`
-  lowering puts the copy at 16.
+- **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
+  GeneratorCpp's own ccall path has no aligned buffer; only a record-level
+  `alignment` keeps a function off it, so a member-level `alignas` record can
+  still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
+  path, which skips BRANCH 0 altogether. An alignment only a typedef carries
+  (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
+  SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
+  parameters are safe (LLVM's `byval` lowering puts the copy at 16). A SysV
+  record holding a `long double` returns in `st0`, which no Julia type does.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles

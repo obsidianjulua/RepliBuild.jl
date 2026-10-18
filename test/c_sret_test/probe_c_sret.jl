@@ -175,4 +175,78 @@ probe("make_bf12") do p                     # float blob, 12 B: Win64 sret; SysV
     end
 end
 
+# Records more aligned than the Julia type standing in for them. The callee
+# stores through the hidden return pointer with movaps, so a buffer aligned only
+# to the stand-in faults. Each call goes through invokelatest: the buffer is then
+# the wrapper's own, which is where it can land misaligned (inlined into this
+# frame it can land aligned by luck, and the check would prove nothing).
+call(f, args...) = Base.invokelatest(f, args...)
+f32(x) = UInt64(reinterpret(UInt32, Float32(x)))
+f64(x) = reinterpret(UInt64, Float64(x))
+
+probe("make_ab16") do p                     # 16 B blob, member _Alignas(16): Win64 sret; SysV refused
+    reset_rec()
+    if ABI === :sysv
+        refused(p, () -> call(make_ab16, 1.5f0, -2))
+    else
+        r = call(make_ab16, 1.5f0, -2)
+        args_read(p, 2, [0 => f32(1.5f0), 1 => s64(-2)])
+        d = getfield(r, :_data)
+        c3 = Int(d[9] & 0x07)
+        c3 >= 4 && (c3 -= 8)                # a signed 3-bit field
+        (field(Float32, d, 0), field(Float32, d, 4), c3) == (1.5f0, 3.0f0, -2) ||
+            push!(p, "ret bytes = $d")
+    end
+end
+
+probe("make_v4a") do p                      # 16 B aligned(16): Win64 sret; SysV SSE,SSE
+    reset_rec()
+    r = call(make_v4a, 2.5f0)
+    args_read(p, 1, [0 => f32(2.5f0)])
+    (r.x, r.y, r.z, r.w) == (2.5f0, 3.5f0, 4.5f0, 5.5f0) || push!(p, "ret = $r")
+end
+
+probe("make_d4a") do p                      # 32 B aligned(16), natural fields
+    reset_rec()
+    r = call(make_d4a, 3.0)
+    args_read(p, 1, [0 => f64(3.0)])
+    (r.a, r.b, r.c, r.d) == (3.0, -3.0, 6.0, 1.5) || push!(p, "ret = $r")
+end
+
+probe("make_ma32") do p                     # 32 B, member _Alignas(16)
+    reset_rec()
+    r = call(make_ma32, 0x07, Int32(-11))
+    args_read(p, 2, [0 => s64(7), 1 => s64(-11)])
+    (Int(r.c), r.i) == (7, Int32(-33)) || push!(p, "ret = $r")
+end
+
+probe("make_a32") do p                      # 32 B aligned(32)
+    reset_rec()
+    r = call(make_a32, 4.5)
+    args_read(p, 1, [0 => f64(4.5)])
+    r.d == (4.5, -4.5) || push!(p, "ret = $r")
+end
+
+probe("make_hvec") do p                     # vector member: 16-aligned, no attribute
+    reset_rec()
+    r = call(make_hvec, 1.25f0, Int32(41))
+    args_read(p, 2, [0 => f32(1.25f0), 1 => s64(41)])
+    (r.v, r.k) == ((1.25f0, 2.25f0, 3.25f0, 4.25f0), Int32(42)) || push!(p, "ret = $r")
+end
+
+probe("make_hv4") do p                      # member of an over-aligned typedef
+    reset_rec()
+    r = call(make_hv4, 2.0f0, -1.0f0)
+    args_read(p, 2, [0 => f32(2.0f0), 1 => f32(-1.0f0)])
+    (r.v, r.s) == ((2.0f0, 4.0f0, 6.0f0, 8.0f0), -1.0f0) || push!(p, "ret = $r")
+end
+
+probe("make_nesta") do p                    # nested aligned record
+    reset_rec()
+    r = call(make_nesta, 0.5f0, 9.0f0)
+    args_read(p, 2, [0 => f32(0.5f0), 1 => f32(9.0f0)])
+    a = r.a
+    (a.x, a.y, a.z, a.w, r.t) == (0.5f0, -0.5f0, 2.0f0, 0.25f0, 9.0f0) || push!(p, "ret = $r")
+end
+
 println("PROBE_DONE")

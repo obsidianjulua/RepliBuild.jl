@@ -4,6 +4,81 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 3: a hidden return buffer has the record's alignment (2026-10-18)
+
+- **A record returned through a hidden pointer could crash its callee.**
+  Julia's ccall allocates that buffer at the alignment of the Julia type
+  standing in for the record: 1 for an `NTuple{N,UInt8}` byte blob, 4 for a
+  struct of `Float32`s. C's callee may assume the record's own alignment and
+  store with `movaps`. `S16 get(void) { return g; }`, with a 16-aligned `S16`,
+  compiles to `movaps %xmm0, (%rcx)`, and Julia put a blob's buffer at
+  `-24(%rbp)`: an access violation on every call that was not inlined into a
+  frame where it happened to land aligned. A record is more aligned than its
+  stand-in with `aligned(N)` on it, an `_Alignas` member, a member of an
+  over-aligned typedef (cglm's `vec4` style), a vector member, a `long double`,
+  or any of these nested.
+- **The parser records the alignment.** `DW_AT_alignment`, which clang emits
+  in DWARF 4 as well, becomes `alignment` on the record and on the member in
+  `struct_definitions`. Clang puts it on the member when it comes from an
+  over-aligned typedef, whose own DIE carries none. A vector member
+  (`DW_AT_GNU_vector`) gets its size. Packages need a rebuild to carry it;
+  delete `.replibuild_cache/project_hash`.
+- `_c_record_align` is the record's alignment: the largest of its own
+  attribute, its members', and its member types' alignments (`long double`
+  16, nested records, arrays by element). A member type nothing can measure
+  makes it the largest power of two dividing the size, which is never too
+  small. `_c_sret_buffer_align` asks for the wrapper's own buffer where that
+  alignment is above both the stand-in's and 8: on x86-64 nothing faults on a
+  misaligned access below 16.
+- BRANCH 0 emits it: `Ref{NTuple{size + align - 1, UInt8}}()`, the record at
+  the first aligned address inside, and `unsafe_load` of the stand-in from
+  there. Such a return takes this branch whatever `c_safe` says. A function
+  with a `long double` parameter keeps its x87 stub instead, because BRANCH 0
+  would hand its `Any` argument to ccall and refuse the wrapper (C2).
+- C++: the record-level key wakes `_is_struct_unsafe`'s check that sends a
+  record aligned above 8 to Tier 2. In the Hub only libc++'s `aligned_storage`
+  unions carry one, and unions go to Tier 2 already.
+- Tests. `test_c_sret_classification.jl` (runtests) pins `_c_record_align`
+  for every shape above and the plain ones, `_c_sret_buffer_align`, the parser
+  on a vendored GNU objdump dump (record attribute, `_Alignas` member,
+  over-aligned typedef member, vector, nested record), and what BRANCH 0 emits
+  for both ABIs, including the `long double` guard. `c_sret_test` gains eight
+  makers that copy an aligned global out, so clang stores the return with
+  `movaps`. `test_c_sret_abi.jl` (devtests) calls them through `invokelatest`,
+  so the buffer is the wrapper's own, and checks `_c_record_align` against the
+  alignment clang gives each record's global for both targets.
+  Negative-checked: with the old rule the unit test fails 25 of 231 and the
+  live child dies of an access violation in `make_ab16`; without the vector
+  rule `HVec` comes out 4-aligned in both tests; without the parser's capture
+  they fail 8 of 231 and 24 of 82; without the `long double` guard, 3 of 231.
+  runtests.jl passes on Julia 1.12.7 and 1.13.2, devtests.jl on 1.12.7, and
+  the live test on both.
+- **abi_fuzz** (C mode, shape seeds 1–106 and identifier seeds 1–40, Julia
+  1.12.7 and 1.13.2), compared with this branch before the merge and this
+  change: no check changes status, and no verdict text changes beyond paths,
+  timings and timestamps. The fuzzer generates no over-aligned record. In
+  identifier mode, units 16n, 26n and 27n quote a parse error from a function
+  that is now in BRANCH 0's explicit-sret form. b934795 generates the same
+  text from the same metadata, so that comes from the merged
+  `_record_natural_layout` commit, not from this one.
+- **Hub**: the 19 C packages were rebuilt with `project_hash` removed, so
+  their metadata carries alignment. That covers box2d3's SIMD solver records,
+  duktape's and lua's `jmp_buf` holders, miniaudio's and raylib's atomics, and
+  xxhash's 64-aligned `XXH3_state_s`. On the same DWARF, b934795's parser and
+  this one give identical records apart from the new keys. Re-wrapped from
+  that metadata, every wrapper is byte-identical to b934795's under the SysV
+  rules and the Win64 rules: no Hub function returns an over-aligned record
+  through a hidden pointer. Every verifier passes on the rebuilt Hub (17
+  `test_deep.jl`, curl's `test.jl`, pcre2 loads, and the mpack tag check).
+  The Hub's earlier metadata came from an older parser (2026-10-11), whose
+  member sizes differ. The rebuilt wrappers differ from the earlier ones only
+  in a timestamp and, in box2d3, miniaudio, raylib and tomlc17, in the
+  >16-byte returns the merged commit moves between a plain ccall and the
+  explicit sret.
+- Not covered, in CLAUDE.md's Open problems: GeneratorCpp's own ccall path,
+  the `[wrap.varargs]` path, an alignment only a typedef carries, SysV byval
+  parameters, and SysV records holding a `long double`.
+
 ### Tier 3: the register-class traps are SysV's only (2026-10-18)
 
 - **Win64 refused by-value crossings it makes correctly.** Two GeneratorC
@@ -72,12 +147,12 @@ All notable changes to RepliBuild.jl are documented in this file.
   back with `mpack_read_tag`, `mpack_peek_tag`, `mpack_expect_tag` and
   `mpack_node_tag`, and makes 400 000 calls under GC. Against f40496f's
   wrapper the same check fails 62 checks and errors 5.
-- **Found on the way, not fixed: a Tier-3 sret buffer has the Julia type's
-  alignment.** A callee returning a record aligned above its stand-in may
-  store it with `movaps`; on Win64 that crashes (see CLAUDE.md, Open
-  problems). The returns this change makes callable are register-sized blobs,
-  which come back in RAX, and mixed-region structs, whose Julia alignment is
-  the record's own DWARF-derived one.
+- **Found on the way: a Tier-3 sret buffer had the Julia type's alignment.** A
+  callee returning a record aligned above its stand-in may store it with
+  `movaps`, and on Win64 that crashed. The returns this change makes callable
+  are register-sized blobs, which come back in RAX, and mixed-region structs,
+  whose Julia alignment is the record's own DWARF-derived one. Fixed by
+  "a hidden return buffer has the record's alignment" below.
 - SysV is covered by the unit tests; no SysV callee ran.
 
 ### Whether a record is packed comes from its member types' alignment, in C and C++ (2026-10-18)
