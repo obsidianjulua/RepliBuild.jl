@@ -189,6 +189,12 @@ passenger tier, never the driver — so every doubt resolves to the ccall body:
     a runtime first call regenerates to the slice.
   - **missing slice file**: a wrapper vendored or relocated without `slices/`
     stays a working ccall wrapper instead of failing at load or call time.
+  - **another libLLVM major** (`TIER1_LIBLLVM_MAJOR`): a slice is IR text for
+    the LLVM that printed it, and newer IR does not parse in an older LLVM
+    (`icmp samesign` is LLVM 20; Julia 1.12 is LLVM 18). A wrapper built under
+    one Julia and loaded under another failed at the first call with "Failed to
+    parse LLVM assembly"; now it keeps its ccall bodies until a rebuild under
+    that Julia brings the slices back.
 
 The slice is read at GENERATION time (first call), so module load does no
 slice I/O, uncalled functions keep nothing resident, and the `.ji` no longer
@@ -210,6 +216,7 @@ function _tier1_kernel_chunk(slice_const::String, kernel::String, mangled::Strin
 
     @generated function $kernel($sig)
         if ccall(:jl_generating_output, Cint, ()) == 1 || !isfile($slice_const) ||
+           Base.libllvm_version.major != TIER1_LIBLLVM_MAJOR ||
            !_slice_symbols_resolve(get(TIER1_DECLARES, "$mangled", String[]))
             return :(ccall((:$mangled, LIBRARY_PATH), $ret_type, $ccall_types$arg_tail))
         end
@@ -591,12 +598,19 @@ function _tier1_registry_chunk(emitted::Vector{String},
     #   * missing slice file — a wrapper vendored or relocated without its
     #     `slices/` directory stays a working ccall wrapper rather than failing
     #     at load or call time;
+    #   * another libLLVM major — see TIER1_LIBLLVM_MAJOR below;
     #   * unresolvable declare — see _slice_symbols_resolve below.
     # Empty set ⇒ every function dispatches through ccall/thunk.
     const TIER1_FUNCTIONS = Set{String}($(repr(sort(unique(emitted)))))
 
     # Symbols each slice binds by `declare`, recorded off the shipped .ll files.
     const TIER1_DECLARES = $(_render_declares_literal(declares))
+
+    # The libLLVM major that printed the slices. A slice is IR text for that
+    # LLVM, and newer IR does not parse in an older one (`icmp samesign` is
+    # LLVM 20, Julia 1.12 is LLVM 18), so under any other major every kernel
+    # keeps its ccall body. Rebuild under the running Julia to get them back.
+    const TIER1_LIBLLVM_MAJOR = $(Base.libllvm_version.major)
 
     \"\"\"
     Whether every symbol a slice declares can be resolved in this process.

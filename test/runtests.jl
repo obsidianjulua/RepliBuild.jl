@@ -398,6 +398,15 @@ include(joinpath(@__DIR__, "test_toolchain_advice.jl"))
 
 include(joinpath(@__DIR__, "test_project_hash.jl"))
 
+# ── Switching toolchains rebuilds what the switch affects (no toolchain) ─────
+# A Julia switch changes a C project's compiler (the JLL clang is pinned to
+# Julia's libLLVM) and its Tier 1 slices; a wrapper built under 1.13 failed under
+# 1.12 at the first call. The keys carry the toolchain, the slice cache is per
+# libLLVM major, and a kernel keeps its ccall body under another major (run
+# against the C runtime's `abs`).
+
+include(joinpath(@__DIR__, "test_toolchain_switch.jl"))
+
 # ── noexcept routing: a bare name is a candidate, `nounwind` is the proof ────
 # A C++ throw through a Tier-3 ccall aborts the process. The routing used to
 # trust a regex that returns BARE names, so `B::get` rode along with

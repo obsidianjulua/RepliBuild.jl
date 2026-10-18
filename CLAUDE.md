@@ -216,6 +216,11 @@ If you are asked to work on it:
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.
+- **A slice is IR for the libLLVM that printed it**, and newer IR does not parse
+  in an older LLVM (`icmp samesign` is LLVM 20; Julia 1.12 is 18). The slice cache
+  is per libLLVM major (`_slice_cache_key`), and a kernel keeps its ccall body
+  when the running major is not the wrapper's `TIER1_LIBLLVM_MAJOR`
+  (`test_toolchain_switch.jl`).
 - **On Windows a longjmp cannot come back into a JIT'd slice frame.** Julia's JIT
   gives each function unwind info for exactly `[start, end)`, a slice ending in a
   noreturn call returns past it, and the SEH unwind mingw's `longjmp` performs dies
@@ -459,7 +464,12 @@ the test named when you touch the area.
 1. Per-file IR cache (`.replibuild_cache/`), keyed on a compile-fingerprint `.key`
    sidecar. The hash in the IR filename identifies the source, not the flags.
 2. Project content hash (`.replibuild_cache/project_hash`): TOML, sources, include
-   dirs (recursive), git HEAD.
+   dirs (recursive), git HEAD, and the toolchain (`_toolchain_identity`: Julia's
+   libLLVM for C, the system clang for C++, plus the triple). A Julia switch
+   rebuilds a C project and leaves a C++ one built.
+
+Every persisted key (these two and the registry's `hash_config`) is SHA-256 fed
+through `_key_feed!`, never `Base.hash`, which differs between Julia releases.
 3. Registry build cache (`~/.replibuild/builds/<hash>/`, gates `use()`). It includes
    `_generator_fingerprint`: RepliBuild version, HEAD, **and a dirty-tree digest**, so
    uncommitted generator edits miss. `_store_build` copies directories.

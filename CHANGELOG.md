@@ -4,6 +4,39 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Switching toolchains rebuilds what the switch affects (2026-10-18)
+
+- **A Tier 1 wrapper built on Julia 1.13 failed on Julia 1.12** at the first
+  call, with "Failed to parse LLVM assembly: expected icmp predicate". Its slices
+  are IR printed by 1.13's libLLVM 20, and `icmp samesign` does not parse in
+  LLVM 18. A copy of Hub zlib built on 1.13 and loaded on 1.12 failed 18 and
+  errored 59 of its `test_deep.jl` assertions; built on 1.12 and loaded on 1.13
+  it passed.
+- **Kernels keep their ccall body under another libLLVM major.** The Tier 1
+  registry records `TIER1_LIBLLVM_MAJOR`, and every `@generated` kernel adds it
+  to its generation-time doubts. Rebuilding under the running Julia brings the
+  slices back.
+- **The slice cache is per libLLVM major** (`Slicer._slice_cache_key`). A `wrap`
+  after a Julia switch, with no rebuild, sees the same module text, and the cache
+  served the other Julia's slices.
+- **Every persisted build key carries the toolchain.** `_toolchain_identity` is
+  Julia's libLLVM version for a C project (the JLL clang is pinned to it) and
+  the system clang for a C++ one, plus the target triple. The project hash had
+  no toolchain in it: a Julia switch rebuilt a project only because `Base.hash`
+  hashes the same bytes differently in 1.12 and 1.13. The project hash and the
+  per-file IR fingerprint are now SHA-256 (`_key_feed!`), stable across Julia
+  releases, so a Julia switch rebuilds a C project and no longer recompiles a
+  C++ one. The registry's `hash_config` carries the identity too, so `use()`
+  under one Julia does not serve a build made under another.
+- The first build after upgrading recompiles every file once: the fingerprint
+  format changed.
+- `test_toolchain_switch.jl` (runtests) covers the identities, both keys, the
+  slice cache key, and a kernel run against the C runtime's `abs` with a slice
+  that makes llvmcall and ccall disagree. Negative-checked: with the guard
+  disabled the kernel took llvmcall under a mismatched major (777, not 5);
+  without the toolchain the project hash did not move; without the major, the
+  cache key did not either.
+
 ## v4.2.1 (2026-10-17)
 
 **LLVM.jl 10.** Patch. LLVM.jl compat widens to `9, 10`. Tier 1's Slicer and
