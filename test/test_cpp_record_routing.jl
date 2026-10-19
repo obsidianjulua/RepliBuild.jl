@@ -8,8 +8,10 @@
 #
 #   * natural records whose Julia type is the C layout (CS3, Mass) go to
 #     Tier 3; the size-as-alignment test sent both to Tier 2.
-#   * a natural record the struct emitter writes as a byte blob of 16 bytes or
-#     less (EnumRec: its enum member has size 0 in the metadata) goes to Tier 2.
+#   * EnumRec, whose enum member the DWARF parser now sizes, gets fields, the
+#     member typed as its enum, and goes to Tier 3. While that member had size
+#     0 the struct emitter wrote a byte blob, which (at 16 bytes or less) goes
+#     to Tier 2; that path is checked in test_record_natural_layout.jl.
 #   * packed records go to Tier 2, including Top6, which is packed two levels
 #     down and reached ccall before.
 #
@@ -71,7 +73,7 @@ if requires("C++ record routing", :libJLCS, :clangxx)
     @testset "the Julia type each record crosses as" begin
         @test occursin(r"struct CS3\n\s+c::UInt8", code)
         @test occursin(r"struct Mass\n\s+m::Cfloat", code)
-        @test occursin(r"struct EnumRec\n\s+_data::NTuple\{4, UInt8\}", code)
+        @test occursin(r"struct EnumRec\n\s+c::UInt8\n\s+_pad_0::NTuple\{1, UInt8\}\n\s+k::Kind\nend", code)
         @test occursin(r"struct Pk5\n\s+_data::NTuple\{5, UInt8\}", code)
     end
 
@@ -80,7 +82,7 @@ if requires("C++ record routing", :libJLCS, :clangxx)
                      for m in eachmatch(r"\n\s+:(\w+) => :(tier\d)", code))
         want = Dict(:make_cs3 => :tier3, :cs3_sum => :tier3,
                     :make_mass => :tier3, :mass_sum => :tier3,
-                    :make_enumrec => :tier2, :enumrec_sum => :tier2,
+                    :make_enumrec => :tier3, :enumrec_sum => :tier3,
                     :make_pk5 => :tier2, :pk5_sum => :tier2,
                     :make_top6 => :tier2, :top6_sum => :tier2)
         checked = 0

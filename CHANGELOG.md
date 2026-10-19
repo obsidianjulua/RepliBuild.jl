@@ -4,6 +4,119 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Enum and typedef'd members have a size, and the C++ struct emitter can take them (2026-10-18)
+
+- **`parse_dwarf_dump` gave three kinds of member size 0**: an enum member, a
+  member whose type is a typedef of a record or an enum, and an array of records.
+  It sized a member from its C type's spelling and a lookup of record names.
+  `_die_byte_size` follows the member's type DIE instead. A typedef or a qualifier
+  leads to its target, and an enum or a record gives its `byte_size`. An array is
+  its element times its dimensions, and a pointer or a reference is 8. On the
+  Hub, 1,908 member sizes go from 0 to a size, in 23 of 26 packages. Each fits its
+  slot (the next member's offset, or the record's end), and no size that was
+  already set changes. Apart from the timestamp, nothing else in the metadata
+  changes. A package gets this on a rebuild (delete
+  `.replibuild_cache/project_hash`), not a re-wrap.
+- **GeneratorCpp's struct field path now meets those records, and a size-0
+  member had been masking its gaps.** Such a record was always a blob. Re-wrapped
+  on the new metadata, box2d, fmt, imgui and llamacpp did not load, and llamacpp
+  had 194 structs of the wrong size.
+  - **Arrays of records.** An array named its element wrong:
+    `NTuple{2, ImVector<unsigned int>}` was sanitized whole into
+    `NTuple_2_ImVector_unsigned_int`, and `NTuple{16, b2ContactRegister}` named a
+    struct emitted later. `_usable_field_type` now peels the array and checks the
+    element like any other field type.
+  - **Members with no offset.** A static data member, or clang's
+    `__clang_vtable`, has no offset. It was sorted as 0 and became a field at the
+    front of the struct. It is not a field any more (`layout_members`). Every
+    polymorphic class carries `__clang_vtable`, which on its own made each of them
+    a blob.
+  - **Fields the layout proof cannot measure.** These were emitted anyway. A
+    bitfield record or an opaque placeholder is a `mutable struct`, a reference
+    where C has the value inline. A forward declaration is an empty
+    `struct X end`. The proof answered `:unknown` and the fields went out
+    unproven: `llama_hparams` came out 492 bytes for 29180. A type is now a
+    field's type only when the proof can measure it and it has the member's DWARF
+    size. Otherwise the member is its bytes (`_member_field`).
+  - **Enum members are typed.** An enum member is now typed as its enum
+    (`k::Kind`). The layout comes from the enum as emitted; an alias has its
+    canonical's.
+  - **A forward declaration could replace an enum.** Typed enum fields exposed
+    this. `dwarf_defined_names` held raw enum names, so an enum emitted under
+    another name (`Type` → `c_Type`) also got `struct c_Type end`, and Julia 1.12
+    lets that replace the `@enum`. In box2d and fmt, every later `::c_Type` meant
+    an empty struct; box2d's `b2Contact_AddType` took two of them.
+  - **A record holding a named union is a blob, checked by type.** A named
+    union is a `mutable struct`, so as a field it is a reference, and the proof
+    measures it as a pointer. An 8-byte union at an aligned offset fits that
+    measure. abi_fuzz unit 104's `R5`, which ends in `union T4 m6`, got fields,
+    so `R5` was not plain bits and C's bytes in it crashed the GC. Before, its
+    size-0 enum members had made it a blob.
+  - **Setters for records that stop being blobs.** A blob struct gets
+    `setproperty`/`setproperties`; a field struct got neither. llama.cpp's
+    consumers set `llama_context_params` and `llama_model_params` fields with
+    them. Every C++ field struct now gets `setproperty`, plus a `setproperty!`
+    whose error says to use it (`_field_setter_chunk`).
+  - **Routing.** A record of 16 bytes or less goes to Tier 2, as a blob does, when
+    its fields put bytes where C has a `float` or `double`: a member written as
+    bytes, or a field whose record is a blob (`_type_has_sse`,
+    `_crosses_small_blob`). Bytes over integers or an enum stay on ccall.
+- **The thunk generator met them too, and a whole JIT module failed (abi_fuzz
+  X3).** StructGen calls a record packed when its member sizes add up to its
+  `byte_size`, and such a record crosses a thunk through `jlcs.marshal_arg`,
+  member by member into its packed body. The body holds a record, an enum or an
+  array of records as that type's bytes. `memberTypes` spelled the member from
+  its C type instead, so the `insertvalue` did not type-check and the module
+  failed to translate to LLVM IR, taking every Tier 2 function in the library
+  with it.
+  - With sizes, many more records add up: abi_fuzz C++ mode went from 4 units
+    failing this way to 33.
+  - `memberTypes` are now read off the packed body itself.
+  - The 4 units where X3 showed before (41, 52, 54, 78) build their engines
+    too, so X3's bitfield-and-enum shape is fixed as well.
+- **Hub.** All 26 packages were rebuilt with the new parser, and the 7 C++ ones
+  re-wrapped. That re-wrap came before two of the fixes above, the named-union
+  rule and the `marshal_arg` fix, and neither was measured on the Hub. The first
+  can only turn a field struct into a blob. The verifiers were not rerun.
+  - The 19 C wrappers are byte-identical apart from `LIBRARY_SHA`, since a rebuild
+    relinks the library.
+  - Blob counts in the C++ wrappers: tinyxml2 18 → 0, fmt 34 → 5, pugixml 30 → 0,
+    box2d 53 → 3, imgui 31 → 0, llamacpp 317 → 0.
+  - Loaded and measured against DWARF, every emitted struct has its `byte_size`
+    and every field its offset. That includes 8 structs that were already wrong
+    (imgui 2, llamacpp 6).
+  - No `DISPATCH_TIER` entry changed.
+- **Tests.**
+  - `test_dwarf_member_sizes.jl` (runtests) parses a vendored GNU objdump dump of
+    a C file with each member kind, and calls `_die_byte_size` directly.
+  - `test_record_natural_layout.jl` runs the C++ generator on synthetic metadata
+    covering every case above. It checks the emitted text and the tiers, then
+    loads the module and checks the sizes, the enum field and the setters, and
+    that every struct emitted immutable is plain bits.
+  - `test_cpp_record_routing.jl` (devtests) checks `EnumRec`'s typed fields and
+    its Tier 3 route on a real build.
+  - `test_packed_layout.jl` (runtests) checks that each `marshal_arg`'s
+    `memberTypes` are its packed body's fields. `test_jlcs_producers.jl` §H
+    (devtests) builds the engine for such a module.
+  - Negative checks: with the old member sizing, the parser test fails 15 of 24
+    and the live test 3 of 24. With each of the 9 generator guards removed in
+    turn, the unit test fails 1 to 4 checks. With `memberTypes` spelled from the
+    C types again, the packed-layout test fails 2 and §H fails to build its
+    engine.
+- abi_fuzz, C mode, seeds 1–106, Julia 1.12.7 and 1.13.2: no check changes
+  against the previous commit.
+- abi_fuzz, C++ mode, seeds 1–106, against the previous commit on the same Julia:
+  - FAILs go from 527 to 428 on 1.12.7 and from 529 to 432 on 1.13.2.
+  - 97 checks go from FAIL to PASS on each, and none goes the other way. On
+    1.12.7 six more checks changed, all of them ones that already differed
+    between the baseline runs. Two went back to FAIL (59/cpp `ret/f1` and
+    77/cpp `ret/f2`), the X2/X5 garbage reads the previous entry saw pass.
+  - 41 of the 97 are X3's engine failures. X3 is gone: 54 checks to 0.
+  - X7's two units (57 and 79) now pass: the misaligned enum member had size
+    0, so the record was never classed packed.
+  - X4's repro unit (53) passes its layout checks (8 FAILs to 2).
+  - X5 is unchanged.
+
 ### Whether a record is packed comes from its member types' alignment, in C and C++ (2026-10-18)
 
 - **`get_julia_aligned_size` is gone.** It decided whether a record was packed by

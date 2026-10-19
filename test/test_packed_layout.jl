@@ -331,4 +331,42 @@ Contents of the .debug_info section:
         ir = gen(fn("_ZN2pk10mk_TaggedEi", ["int"], "Tagged"))
         @test occursin("jlcs.marshal_ret", ir)
     end
+
+    @testset "marshal_arg reads each member as the packed body holds it" begin
+        # A record whose member sizes add up to its byte_size travels the
+        # marshalling path. Its body holds a record member as the record's
+        # bytes, but `memberTypes` spelled the member from its C type, so the
+        # `insertvalue` of an array of records or an enum into that body did not
+        # type-check and the whole module failed to translate (abi_fuzz X3).
+        # These shapes reach the path since the parser sizes enum members and
+        # arrays of records.
+        rec(bs, ms...) = Dict{String,Any}("kind" => "struct", "byte_size" => bs, "members" => Any[ms...])
+        mem(n, c, off, sz) = Dict{String,Any}("name" => n, "c_type" => c, "offset" => off, "size" => sz)
+        syn = Dict{String,Any}(
+            "__enum__E1" => Dict{String,Any}("kind" => "enum", "byte_size" => "0x4", "julia_type" => "Cint",
+                                             "underlying_type" => "int",
+                                             "enumerators" => Any[Dict{String,Any}("name" => "E1_K1", "value" => 42)]),
+            # { E1; unsigned char[2]; float; E1 }: 16 bytes, 2 of them padding
+            "R2" => rec("0x10", mem("m1", "E1", "0x0", 4), mem("m2", "unsigned char[2]", "0x4", 2),
+                        mem("m3", "float", "0x8", 4), mem("m4", "E1", "0xc", 4)),
+            # `#pragma pack(4) { R2 m1[2]; }`: no padding, so StructGen calls it packed
+            "R4" => rec("0x20", mem("m1", "R2[2]", "0x0", 32)),
+            # `{ char; E1; } __attribute__((packed))`
+            "PkE" => rec("0x5", mem("c", "char", "0x0", 1), mem("e", "E1", "0x1", 4)))
+        sd2 = merge(sd, syn)
+        ra2 = merge(ra, Dict(k => Dict{String,Any}("byte_size" => v["byte_size"], "pass" => "value",
+                                                   "empty" => false)
+                             for (k, v) in syn if !startswith(k, "__enum__")))
+        marshal = r"jlcs\.marshal_arg %\S+ \{ memberTypes = \[(.*)\], juliaOffsets = \[[^\]]*\] \} : \(!llvm\.ptr\) -> !llvm\.struct<packed \((.*)\)\s*>"
+        checked = 0
+        for (sym, r) in (("_Z7take_r42R4", "R4"), ("_Z8take_pke3PkE", "PkE"))
+            ir = PLF.generate_function_thunks([fn(sym, [r], "int")], sd2; may_throw = true, record_abi = ra2)
+            m = match(marshal, ir)
+            @test (r, m !== nothing) == (r, true)
+            m === nothing && continue
+            @test (r, PLS._split_type_list(m.captures[1])) == (r, PLS._split_type_list(m.captures[2]))
+            checked += 1
+        end
+        @test checked == 2
+    end
 end

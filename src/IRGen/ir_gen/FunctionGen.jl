@@ -736,7 +736,17 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 # `char data[3]` member at 3.
                 offsets = _dwarf_member_offsets(struct_info)
                 members = get(struct_info, "members", [])
-                member_types_strs = [map_cpp_type(get(m, "c_type", "void*")) for m in members]
+                # The member types are the packed body's own, element for
+                # element: the lowering inserts member i of the Julia value
+                # into field i of that body. Spelled from the C types instead,
+                # a record, an enum or an array of records was read as a struct
+                # where the body holds its bytes, the `insertvalue` did not
+                # type-check, and the module failed to translate to LLVM IR,
+                # taking every thunk in the library with it (abi_fuzz X3).
+                body = match(r"^!llvm\.struct<packed \((.*)\)\s*>$", llvm_t)
+                body_types = body === nothing ? String[] : StructGen._split_type_list(body.captures[1])
+                member_types_strs = length(body_types) == length(members) ? body_types :
+                    [map_cpp_type(get(m, "c_type", "void*")) for m in members]
 
                 member_types_attr = "[" * join(member_types_strs, ", ") * "]"
                 offsets_attr = "[" * join(["$(o) : i64" for o in offsets], ", ") * "]"

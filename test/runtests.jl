@@ -159,6 +159,12 @@ include(joinpath(@__DIR__, "test_c_sret_classification.jl"))
 
 include(joinpath(@__DIR__, "test_record_natural_layout.jl"))
 
+# ── DWARF member sizes through typedefs, enums, qualifiers, arrays (no toolchain)
+# A member typed as an enum or a typedef'd record came out with size 0, and the
+# C++ layout proof turned the whole record into a byte blob. A real GNU dump.
+
+include(joinpath(@__DIR__, "test_dwarf_member_sizes.jl"))
+
 # ── Macro-shim header-collision guard (library-free fixture; needs clang) ────
 
 include(joinpath(@__DIR__, "test_shim_header_guard.jl"))
