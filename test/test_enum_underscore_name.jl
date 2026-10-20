@@ -111,3 +111,26 @@ const W = RepliBuild.Wrapper
         @test all(!isempty, names)
     end
 end
+
+# abi_fuzz I1: a C type named with a Julia reserved word must come out as a
+# valid type name from BOTH sanitizers. `begin` and `elseif` were missing from
+# their keyword lists, so `typedef struct {…} begin;` emitted `struct begin` and
+# the wrapper failed to parse. The ground truth is the parser, not a list.
+@testset "reserved words are escaped in C and C++ type names (abi_fuzz I1)" begin
+    words = ["baremodule", "begin", "break", "catch", "const", "continue", "do", "else",
+             "elseif", "end", "export", "false", "finally", "for", "function", "global",
+             "if", "import", "let", "local", "macro", "module", "quote", "return",
+             "struct", "true", "try", "using", "while"]
+    valid_type_name(s) = (e = Meta.parse("struct $s\nx::Int\nend"; raise = false);
+                          e isa Expr && e.head === :struct && e.args[2] === Symbol(s))
+    checked = 0
+    for w in words
+        c = RepliBuild.Wrapper._sanitize_c_type_name(w)
+        cpp = RepliBuild.Wrapper._sanitize_cpp_type_name(w)
+        @test (w, :c, valid_type_name(c)) == (w, :c, true)
+        @test (w, :cpp, valid_type_name(cpp)) == (w, :cpp, true)
+        @test (w, c) == (w, cpp)        # two generators, one answer
+        checked += 1
+    end
+    @test checked == length(words)
+end

@@ -16,6 +16,7 @@ All notable changes to RepliBuild.jl are documented in this file.
   - Signatures, however, took the metadata's raw spelling unless it held `<>`, `::` or other non-identifier characters. `ccall(..., baremodule, ...)` reached a type position, and the module failed to parse.
   - GeneratorC now re-spells return and parameter types through `_as_declared`, a table of the names the sanitizer changes. That covers `Ptr{…}`/`Ref{…}` and `Any` parameters named by their C type.
   - Names the sanitizer leaves alone are untouched, so ordinary wrappers are byte-identical.
+  - `begin` and `elseif` were missing from both sanitizers' keyword lists, so `typedef struct {…} begin;` emitted `struct begin` and the wrapper did not parse. Both lists now escape every word the parser rejects as a type name; `test_enum_underscore_name.jl` checks each word against the parser for both generators.
 - **A project directory starting with a digit gave a module that did not load (M1).**
   - `get_module_name` produced `3cCallF21`, and `module 3cCallF21` parses as a module named `3`.
   - The derived name now gets a `_` prefix, or becomes `Wrapper` when nothing is left.
@@ -25,6 +26,10 @@ All notable changes to RepliBuild.jl are documented in this file.
   - `test_c_sret_classification.jl` covers C2, I1 and the SysV case, for both ABIs. `test_function_name_derivation.jl` covers M1.
   - With each fix removed in turn, 6, 10, 2, 3 and 1 checks fail.
   - The fuzzer repros `C2-31-c-load` and `I1-11n-c-load` pass.
+- **Fuzzer, compared with the base on Julia 1.13.2** (C mode, shape seeds 1–106 and identifier seeds 1–40):
+  - C2's 4 failures pass. The 96 checks behind the 4 refused wrappers now run: 86 pass, and 10 are `long double` stubs.
+  - Identifier passes go from 61 to 101, and no failure from a keyword-named type is left.
+  - Nothing that passed before fails. Unit 33n now loads, and 9 of its checks fail on names that shadow Base bindings (I4/I5), which are still open.
 
 ### Enum and typedef'd members have a size, and the C++ struct emitter can take them (2026-10-18)
 
