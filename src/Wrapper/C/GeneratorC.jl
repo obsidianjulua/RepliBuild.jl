@@ -237,6 +237,368 @@ function _dwarf_aggregate_align(jname::String, dwarf_structs,
     return al
 end
 
+# =============================================================================
+# BY-VALUE RECORD CLASSIFICATION (Tier 3 ccall)
+# =============================================================================
+
+"""
+    _c_record_abi() -> :sysv | :win64
+
+The x86-64 convention a C record crosses a Tier-3 `ccall` in. RepliBuild builds
+for its host and refuses macOS at load, so the host decides it:
+`x86_64-w64-windows-gnu` is Win64 and Linux is SysV. This is the one place the C
+generator asks. Everything that classifies a by-value record takes the answer as
+an `abi` argument, so a test can ask for either convention on any host.
+"""
+_c_record_abi() = Sys.iswindows() ? :win64 : :sysv
+
+"""
+    _c_scalar_layout(jt, ct, size, dwarf_structs) -> (size, alignment) | nothing
+    _c_scalar_align(jt, ct, size, dwarf_structs) -> Int | nothing
+
+Size and alignment of a member that is not a record or an array: a pointer, an
+entry of `_C_PRIM_FIELD_LAYOUT`, an enum by its underlying integer, or `long
+double` (16 and 16: an x87 value in a 16-byte slot, which the metadata spells
+`NTuple{2, UInt64}`). An unknown scalar of 1, 2, 4 or 8 bytes is aligned to its
+size, which holds for every x86-64 scalar of those sizes except `_Complex float`
+(in the table). Never applied to an array or a record: that was C1.
+"""
+function _c_scalar_layout(jt::String, ct::String, size::Int, dwarf_structs)
+    (endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring") && return (8, 8)
+    ct == "long double" && return (16, 16)
+    haskey(_C_PRIM_FIELD_LAYOUT, jt) && return _C_PRIM_FIELD_LAYOUT[jt]
+    for cand in _c_type_name_candidates(jt, ct)
+        e = get(dwarf_structs, "__enum__" * cand, nothing)
+        e === nothing && continue
+        ejt = get(e, "julia_type", "")
+        (ejt isa AbstractString && haskey(_C_PRIM_FIELD_LAYOUT, ejt)) && return _C_PRIM_FIELD_LAYOUT[ejt]
+        ebs = _parse_dwarf_size(e)
+        return ebs in (1, 2, 4, 8) ? (ebs, ebs) : nothing
+    end
+    (size in (1, 2, 4, 8) && !occursin('[', ct)) && return (size, size)
+    return nothing
+end
+
+_c_scalar_align(jt::String, ct::String, size::Int, dwarf_structs) =
+    (l = _c_scalar_layout(jt, ct, size, dwarf_structs); l === nothing ? nothing : l[2])
+
+# The names a member type may be keyed under: its Julia and C spellings, and
+# for a C++ name each suffix after a `::` scope (`pugi::xml_node` is keyed
+# `xml_node`), as FunctionGen's lookups try them.
+function _c_type_name_candidates(jt::String, ct::String)
+    out = String[]
+    jt == "Any" || isempty(jt) || push!(out, jt)
+    isempty(ct) || append!(out, JLCSIRGenerator.FunctionGen._scope_suffixes(ct))
+    return unique!(out)
+end
+
+# The DWARF record a by-value member's type names, as `(key, info)`; `nothing`
+# for a pointer, a primitive or an enum.
+function _c_member_record(jt::String, ct::String, dwarf_structs,
+                          best_dwarf_key::Dict{String,String})
+    (endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring") && return nothing
+    haskey(_C_PRIM_FIELD_LAYOUT, jt) && return nothing
+    cands = _c_type_name_candidates(jt, ct)
+    any(c -> haskey(dwarf_structs, "__enum__" * c), cands) && return nothing
+    for cand in cands
+        # Exact key, then the trailing-` >` spellings template nesting leaves.
+        key = JLCSIRGenerator.FunctionGen._fuzzy_struct_lookup(cand, dwarf_structs)
+        info = key === nothing ? nothing : dwarf_structs[key]
+        info === nothing && (info = _lookup_dwarf_agg(_sanitize_c_type_name(cand), dwarf_structs, best_dwarf_key))
+        (info !== nothing && haskey(info, "members")) && return (cand, info)
+    end
+    return nothing
+end
+
+"""
+    _c_has_unaligned_field(info, dwarf_structs; best_dwarf_key) -> Bool | nothing
+
+SysV's "contains unaligned fields", which makes a record MEMORY class (AMD64
+psABI §3.2.3): some non-bitfield field, at any depth, sits at an offset from the
+start of the outermost record that is not a multiple of its type's own
+alignment. Clang checks every field of the record and of each nested record at
+that absolute offset, an array at its base against its element's alignment, and
+each element of an array of records (an element may itself be packed).
+
+Alignment is the type's, never the member's size. `short m2[3]` is 6 bytes and
+2-aligned; testing the size made `{ char m1; short m2[3]; }` look packed, and its
+8-byte return went through a hidden pointer the callee never reads (C1). The
+metadata records nested records and enums with `size = 0`, so the size test
+never looked inside them either.
+
+Bitfields are skipped, as clang skips them. `nothing` when some field's
+alignment cannot be derived; each caller decides what that costs.
+"""
+function _c_has_unaligned_field(info, dwarf_structs;
+                                best_dwarf_key::Dict{String,String} = Dict{String,String}(),
+                                base::Int = 0, seen::Set{String} = Set{String}())
+    is_union = get(info, "kind", "struct") == "union"
+    for m in get(info, "members", [])
+        haskey(m, "bit_size") && continue
+        raw = get(m, "offset", nothing)
+        raw === nothing && !is_union && return nothing
+        off = base + (raw === nothing ? 0 : _parse_int_or_hex(raw))
+        # Every by-value record goes through here, so a field the parser left
+        # null must not throw where the wrap used to succeed.
+        sz, jt, ct = get(m, "size", 0), get(m, "julia_type", "Any"), get(m, "c_type", "")
+        jt isa AbstractString || (jt = "Any")
+        ct isa AbstractString || (ct = "")
+        ct = String(strip(replace(ct, r"\b(?:const|volatile)\b" => "")))
+        r = _c_field_unaligned(String(jt), ct, sz isa Integer ? Int(sz) : 0,
+                               off, dwarf_structs, best_dwarf_key, seen)
+        r === nothing && return nothing
+        r && return true
+    end
+    return false
+end
+
+function _c_field_unaligned(jt::String, ct::String, size::Int, off::Int, dwarf_structs,
+                            best_dwarf_key::Dict{String,String}, seen::Set{String})
+    # Scalars the array and record cases would misread: a pointer, and
+    # `long double`, which the metadata spells as an NTuple.
+    if endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring" ||
+       ct == "long double"
+        return off % _c_scalar_align(jt, ct, size, dwarf_structs) != 0
+    end
+    nt = match(r"^NTuple\{(\d+),\s*(.+)\}$", jt)
+    if nt !== nothing
+        n = parse(Int, nt.captures[1])
+        ejt = String(strip(nt.captures[2]))
+        # `short[2][3]` is two `short[3]`: the element drops the first extent.
+        ect = String(strip(replace(ct, r"\[\d*\]" => ""; count = 1)))
+        rec = _c_member_record(ejt, ect, dwarf_structs, best_dwarf_key)
+        if rec === nothing
+            # Scalar elements: an element's size is a multiple of its alignment,
+            # so every element is aligned exactly when the base is.
+            esz = (n > 0 && size > 0) ? size ÷ n : 0
+            return _c_field_unaligned(ejt, ect, esz, off, dwarf_structs, best_dwarf_key, seen)
+        end
+        key, rinfo = rec
+        rsz = _parse_dwarf_size(rinfo)
+        (rsz <= 0 || key in seen) && return nothing
+        push!(seen, key)
+        try
+            for i in 0:n-1
+                r = _c_has_unaligned_field(rinfo, dwarf_structs; best_dwarf_key,
+                                           base = off + i * rsz, seen)
+                r === false || return r
+            end
+        finally
+            delete!(seen, key)
+        end
+        return false
+    end
+    rec = _c_member_record(jt, ct, dwarf_structs, best_dwarf_key)
+    if rec !== nothing
+        key, rinfo = rec
+        key in seen && return nothing          # a record cannot contain itself by value
+        push!(seen, key)
+        r = _c_has_unaligned_field(rinfo, dwarf_structs; best_dwarf_key, base = off, seen)
+        delete!(seen, key)
+        return r
+    end
+    a = _c_scalar_align(jt, ct, size, dwarf_structs)
+    return a === nothing ? nothing : off % a != 0
+end
+
+"""
+    _c_record_align(info, dwarf_structs; best_dwarf_key) -> Int
+
+The alignment C gives a record, which is what a callee may assume of a hidden
+return buffer. The largest of the record's own `DW_AT_alignment`
+(`__attribute__((aligned(N)))`), each member's (`_Alignas`, or a member whose
+type is an over-aligned typedef or a vector; the metadata records both as the
+member's `alignment`), and each member type's alignment: a scalar's
+(`_c_scalar_layout`, so `long double` is 16), a nested record's by this same
+rule, an array's element's. A bitfield counts its declared type, as C does.
+
+When some member type cannot be measured, the largest power of two that
+divides the record's size stands in, up to 4096: C's alignment always divides
+the size, so that bound is never too small. A packed record answers its
+members' alignments, which is more than C's 1. Either way the answer can only
+make a buffer more aligned than it needs to be, which is still a correct buffer.
+"""
+function _c_record_align(info, dwarf_structs;
+                         best_dwarf_key::Dict{String,String} = Dict{String,String}(),
+                         seen::Set{String} = Set{String}())
+    al = _c_explicit_align(get(info, "alignment", nothing))
+    for m in get(info, "members", [])
+        al = max(al, _c_explicit_align(get(m, "alignment", nothing)))
+        sz, jt, ct = get(m, "size", 0), get(m, "julia_type", "Any"), get(m, "c_type", "")
+        jt isa AbstractString || (jt = "Any")
+        ct isa AbstractString || (ct = "")
+        ct = String(strip(replace(ct, r"\b(?:const|volatile)\b" => "")))
+        a = _c_type_align(String(jt), ct, sz isa Integer ? Int(sz) : 0,
+                          dwarf_structs, best_dwarf_key, seen)
+        if a === nothing
+            n = _parse_dwarf_size(info)
+            return max(al, n > 0 ? min(n & -n, 4096) : 1)
+        end
+        al = max(al, a)
+    end
+    return al
+end
+
+# A metadata `alignment` value (DW_AT_alignment) as an Int; 1 when absent.
+function _c_explicit_align(v)
+    v isa Integer && return max(Int(v), 1)
+    v isa AbstractString && return max(something(tryparse(Int, v), 1), 1)
+    return 1
+end
+
+function _c_type_align(jt::String, ct::String, size::Int, dwarf_structs,
+                       best_dwarf_key::Dict{String,String}, seen::Set{String})
+    # A pointer, and `long double`, which the metadata spells as an NTuple.
+    if endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring" ||
+       ct == "long double"
+        return _c_scalar_align(jt, ct, size, dwarf_structs)
+    end
+    nt = match(r"^NTuple\{(\d+),\s*(.+)\}$", jt)
+    if nt !== nothing
+        n = parse(Int, nt.captures[1])
+        ect = String(strip(replace(ct, r"\[\d*\]" => ""; count = 1)))
+        return _c_type_align(String(strip(nt.captures[2])), ect,
+                             (n > 0 && size > 0) ? size ÷ n : 0, dwarf_structs, best_dwarf_key, seen)
+    end
+    rec = _c_member_record(jt, ct, dwarf_structs, best_dwarf_key)
+    if rec !== nothing
+        key, rinfo = rec
+        key in seen && return nothing          # a record cannot contain itself by value
+        push!(seen, key)
+        a = _c_record_align(rinfo, dwarf_structs; best_dwarf_key, seen)
+        delete!(seen, key)
+        return a
+    end
+    return _c_scalar_align(jt, ct, size, dwarf_structs)
+end
+
+"""
+    _c_sret_buffer_align(record_align, stand_in_align) -> Int
+
+The alignment a Tier-3 wrapper must give a hidden return buffer itself, or 0
+when the buffer Julia's own lowering allocates will do.
+
+Julia aligns that buffer to the type standing in for the record: 1 for an
+`NTuple{N,UInt8}` blob, the largest field alignment for a struct of fields.
+C's callee may assume the record's alignment ([`_c_record_align`](@ref)) and
+store through the pointer with an instruction that faults when it is
+misaligned. On x86-64 only accesses emitted for 16-byte or larger alignment do
+(`movaps`, AVX's 32-byte forms), so the wrapper supplies the buffer when the
+record's alignment is above both the stand-in's and 8. `stand_in_align` is
+`nothing` for a stand-in that is not a plain value (a `mutable` placeholder),
+which this does not decide.
+
+`S16 get(void) { return g; }` with a 16-aligned `S16` compiles to `movaps
+%xmm0, (%rcx)`, and Julia's buffer for a blob sat 8 bytes off: an access
+violation on every call.
+"""
+_c_sret_buffer_align(record_align::Integer, stand_in_align::Union{Integer,Nothing}) =
+    (stand_in_align !== nothing && record_align > max(stand_in_align, 8)) ? Int(record_align) : 0
+
+"""
+    _c_return_in_memory(byte_size, unaligned; abi = _c_record_abi()) -> Bool | nothing
+
+Whether C returns a record of `byte_size` bytes through a hidden pointer (sret)
+instead of in registers. `unaligned` is [`_c_has_unaligned_field`](@ref) for the
+record; only SysV reads it.
+
+  * `:win64`: by size alone. 1, 2, 4 and 8 bytes come back in RAX whatever the
+    members are, packed or not; every other size goes through the hidden pointer.
+  * `:sysv`: MEMORY class above 16 bytes or with an unaligned field, INTEGER or
+    SSE registers otherwise. `nothing` when the record is at most 16 bytes and
+    `unaligned` is `nothing`.
+
+Whether the wrapper must pass that pointer itself is
+[`_c_explicit_sret`](@ref).
+"""
+function _c_return_in_memory(byte_size::Integer, unaligned::Union{Bool,Nothing};
+                             abi::Symbol = _c_record_abi())
+    abi === :win64 && return !(byte_size in (1, 2, 4, 8))
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    byte_size > 16 && return true
+    return unaligned
+end
+
+"""
+    _c_explicit_sret(byte_size, unaligned; abi = _c_record_abi()) -> Bool
+
+Whether a Tier-3 wrapper must pass the hidden return pointer itself (an explicit
+sret ccall: `Cvoid` return, `Ptr{Ret}` first argument) for a record C returns
+through one ([`_c_return_in_memory`](@ref)).
+
+Julia's own `ccall` lowering of the emitted type passes that pointer wherever it
+agrees with C: on Win64 everywhere, since both decide by size alone, and on SysV
+above 16 bytes. The one return it gets wrong is SysV with an unaligned field at
+16 bytes or less, because a Julia type has no unaligned fields and its lowering
+never applies that rule; only an explicit sret reaches the callee there. Above
+16 bytes the answer is yes too, so the records BRANCH 0 is given keep the
+explicit form they always had; there it is equivalent.
+
+An explicit sret for a return that comes back in registers shifts every
+argument by one and returns garbage, with no error (C1).
+"""
+function _c_explicit_sret(byte_size::Integer, unaligned::Union{Bool,Nothing};
+                          abi::Symbol = _c_record_abi())
+    _c_return_in_memory(byte_size, unaligned; abi) === true || return false
+    return byte_size > 16 || abi === :sysv
+end
+
+"""
+    _c_blob_param_misclassified(byte_size, unaligned; abi = _c_record_abi()) -> Bool
+
+Whether a by-value parameter crosses differently as the record C declares and as
+the `NTuple{N,UInt8}` blob standing in for it. `unaligned` is
+[`_c_has_unaligned_field`](@ref) for the record.
+
+  * `:sysv`: at 16 bytes or less, a record with an unaligned field is MEMORY
+    class and goes on the stack, while the blob classifies INTEGER and goes in
+    registers. A record whose alignment cannot be proven (`nothing`) counts as
+    misclassified, so it is refused rather than guessed. Above 16 bytes both are
+    MEMORY.
+  * `:win64`: never. A record is passed by size alone (1, 2, 4 or 8 bytes in a
+    register, anything else by reference to a copy), and the blob has the
+    record's size.
+
+Float members are a separate hazard (an SSE eightbyte the blob cannot claim):
+[`_c_register_class_misstated`](@ref).
+"""
+function _c_blob_param_misclassified(byte_size::Integer, unaligned::Union{Bool,Nothing};
+                                     abi::Symbol = _c_record_abi())
+    abi === :win64 && return false
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    return byte_size <= 16 && unaligned !== false
+end
+
+"""
+    _c_register_class_misstated(byte_size, class_risk; abi = _c_record_abi()) -> Bool
+
+Whether a by-value record travels in other registers than the Julia type
+standing in for it, when that type cannot reproduce the record's member types
+(`class_risk`): the `NTuple{N,UInt8}` blob of a record with float members, or a
+named-field struct holding an opaque region of mixed float and integer members
+(`abi_class_risk`).
+
+  * `:sysv`: at 16 bytes or less a record travels in eightbytes that its members
+    class INTEGER or SSE, while the stand-in's element type claims one class for
+    all of them: a float record goes in XMM registers and its blob in
+    general-purpose ones. Refused when `class_risk`. Above 16 bytes both are
+    MEMORY.
+  * `:win64`: never. A record has no register class there. C passes and returns
+    it by size alone (1, 2, 4 or 8 bytes as an integer of that width in a
+    general-purpose register, any other size by reference to a copy or through
+    a hidden return pointer), and Julia lowers a non-primitive type of the same
+    size the same way (`abi_win64.cpp`). The stand-in has the record's size.
+
+A SysV return that C makes through a hidden pointer has no class to misstate;
+the caller exempts it with [`_c_return_in_memory`](@ref).
+"""
+function _c_register_class_misstated(byte_size::Integer, class_risk::Bool;
+                                     abi::Symbol = _c_record_abi())
+    abi === :win64 && return false
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    return class_risk && byte_size <= 16
+end
+
 """
     _aligned_region_storage(byte_size, align; all_float=false) -> (elem_type, count) | nothing
 
@@ -327,7 +689,10 @@ end
 function generate_introspective_module_c(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
-                                      thunks_lib_path::String="")
+                                      thunks_lib_path::String="";
+                                      abi::Symbol = _c_record_abi())
+    abi in (:sysv, :win64) ||
+        throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
 
     # Track exported symbols
     exports = String[]
@@ -591,7 +956,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     #   struct emitted with VERIFIED named fields (eligible as inline members
     #   and ABI-exact for by-value crossings)
     # - blob_struct_names/sizes/float_risk: structs that stayed opaque byte
-    #   blobs; ≤16B float-bearing blobs may not cross the ABI by value
+    #   blobs; ≤16B float-bearing blobs may not cross the SysV ABI by value
     resolved_layouts = Dict{String,Tuple{Int,Int}}()
     blob_struct_names = Set{String}()
     blob_struct_sizes = Dict{String,Int}()
@@ -2106,6 +2471,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     end
     _assert_no_bound_name_rejected(rejected_type_names, "Union accessor filter")
 
+    # `_c_has_unaligned_field` per DWARF record, computed once: every function
+    # that takes or returns the same record asks the same question.
+    _unaligned_bdk = @isdefined(best_dwarf_key) ? best_dwarf_key : Dict{String,String}()
+    _unaligned_memo = IdDict{Any,Union{Bool,Nothing}}()
+    _rec_unaligned(info) = get!(_unaligned_memo, info) do
+        _c_has_unaligned_field(info, dwarf_structs; best_dwarf_key = _unaligned_bdk)
+    end
+    # Whether C returns this record through a hidden pointer, on this target.
+    # `info` is its DWARF entry, or `nothing` when that was not found.
+    _ret_in_memory(size::Int, info) =
+        _c_return_in_memory(size, info === nothing ? nothing : _rec_unaligned(info); abi)
+    # The alignment C gives a record, and that of the Julia type emitted for it:
+    # 1 for a byte blob, the proven field alignment for a struct of fields or an
+    # aligned region, `nothing` for anything else (a `mutable` placeholder).
+    _align_memo = IdDict{Any,Int}()
+    _rec_align(info) = get!(_align_memo, info) do
+        _c_record_align(info, dwarf_structs; best_dwarf_key = _unaligned_bdk)
+    end
+    _stand_in_align(jname) =
+        !(jname isa AbstractString) ? nothing :
+        jname in blob_struct_names ? 1 :
+        haskey(resolved_layouts, jname) ? resolved_layouts[jname][2] : nothing
+
     for func in functions
         func_name = func["name"]
         mangled = func["mangled"]
@@ -2505,31 +2893,22 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # (the real struct travels in SSE eightbytes, NTuple{N,UInt8} claims
         # INTEGER). A by-value crossing would silently read/write the wrong
         # registers — refuse loudly instead. Pointer crossings and >16-byte
-        # blobs (MEMORY class on both views) remain fine.
+        # blobs (MEMORY class on both views) remain fine. Win64 gives a record
+        # no register class: C and Julia both pass and return it by size
+        # alone, so the guard is SysV's only (`_c_register_class_misstated`).
         blob_abi_offenders = String[]
         let _rjt = String(get(return_type, "julia_type", "Any")),
             _rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
             _rname = _rjt == "Any" ? _sanitize_c_type_name(_rct) : _rjt
             if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16 &&
-               get(blob_float_risk, _rname, true)
-                # A ≤16B struct with an unaligned member is MEMORY class — BRANCH 0
-                # returns it through an explicit sret buffer, which is exact even
-                # for a blob. Only register-class (aligned) returns are unfixable.
-                _runaligned = false
-                _rinfo = get(dwarf_structs, _rct, nothing)
-                if _rinfo !== nothing
-                    for _m in get(_rinfo, "members", [])
-                        haskey(_m, "bit_size") && continue
-                        _msz = get(_m, "size", 0)
-                        _msz <= 0 && continue
-                        _mal = _msz > 8 ? 8 : _msz
-                        if _parse_int_or_hex(get(_m, "offset", "0")) % _mal != 0
-                            _runaligned = true
-                            break
-                        end
-                    end
-                end
-                if !_runaligned
+               _c_register_class_misstated(blob_struct_sizes[_rname], get(blob_float_risk, _rname, true); abi)
+                # A record C returns through a hidden pointer has no register
+                # class to get wrong: the caller's buffer is exact even for a
+                # blob (BRANCH 0 passes it explicitly wherever Julia's own
+                # lowering would not). Only a register return is unfixable, and
+                # so is one whose class cannot be proven. Where C returns a
+                # record is per target; see `_c_return_in_memory`.
+                if _ret_in_memory(blob_struct_sizes[_rname], get(dwarf_structs, _rct, nothing)) !== true
                     push!(blob_abi_offenders, "returns `$_rname` by value")
                 end
             end
@@ -2537,37 +2916,33 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # of mixed SysV class (see `abi_class_risk`): it has real fields, so
             # the blob test above never sees it, but its register class is just
             # as unknowable from the Julia side.
-            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16
+            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16 &&
+               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi)
                 push!(blob_abi_offenders, "returns `$_rname` by value")
             end
         end
-        # A ≤16B blob param with a misaligned (packed) member is MEMORY class in
-        # the real SysV ABI — passed on the stack — while its NTuple byte image
-        # classifies INTEGER and travels in registers. That mismatch corrupts
-        # arguments silently even with no float member, so trap it alongside
-        # the SSE-class (float-risk) case. Aligned all-integer blobs classify
-        # INTEGER on both views and stay callable; >16B blobs are MEMORY on
-        # both views and stay callable.
+        # A ≤16B blob param with an unaligned member is MEMORY class in SysV —
+        # passed on the stack — while its NTuple byte image classifies INTEGER
+        # and travels in registers. That mismatch corrupts arguments silently
+        # even with no float member, so trap it alongside the SSE-class
+        # (float-risk) case. Aligned all-integer blobs classify INTEGER on both
+        # views and stay callable; >16B blobs are MEMORY on both views. Win64
+        # passes a record by size alone, as Julia passes the blob, so it has no
+        # mismatch to trap. See `_c_blob_param_misclassified`; alignment is the
+        # field type's (`_c_has_unaligned_field`), never its size.
         _blob_param_misaligned = function(jname::String)
             raw = get(best_dwarf_key, jname, jname)
             info = get(dwarf_structs, raw, nothing)
             info === nothing && return false
-            for _m in get(info, "members", [])
-                haskey(_m, "bit_size") && continue
-                _msz = get(_m, "size", 0)
-                _msz <= 0 && continue
-                _mal = _msz > 8 ? 8 : _msz
-                if _parse_int_or_hex(get(_m, "offset", "0")) % _mal != 0
-                    return true
-                end
-            end
-            return false
+            return _c_blob_param_misclassified(get(blob_struct_sizes, jname, 0), _rec_unaligned(info); abi)
         end
         for _pt in param_types
             if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
-               (get(blob_float_risk, _pt, true) || _blob_param_misaligned(_pt))
+               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi) ||
+                _blob_param_misaligned(_pt))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
-            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16
+            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16 &&
+                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
         end
@@ -2575,68 +2950,88 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # =========================================================
         # BRANCH 0: MEMORY-CLASS RETURN — explicit-sret ccall
         # =========================================================
-        # SysV classifies an aggregate return as MEMORY only when it has an
-        # unaligned non-bitfield field (true `__attribute__((packed))`) or
-        # is larger than 16 bytes. MEMORY-class returns require the caller
-        # to allocate storage and pass its address as a hidden first arg —
-        # we emit the ccall with that exact shape (`Cvoid` return,
-        # `Ptr{Ret}` first arg) so it matches the SysV sret lowering of
-        # `Ret f(args...)`. No C thunk needed.
+        # A record C returns through a hidden pointer: the caller allocates
+        # storage and passes its address as a hidden first argument. Where
+        # Julia's own lowering would not pass it, we emit the ccall with that
+        # exact shape (`Cvoid` return, `Ptr{Ret}` first arg) so it matches the
+        # sret lowering of `Ret f(args...)`. No C thunk needed.
         #
-        # Bitfield-only structs and aligned aggregates ≤ 16 bytes are
-        # INTEGER class (returned in registers) and fall through to
-        # BRANCH 2's normal ccall.
-        if !c_safe && isempty(blob_abi_offenders)
-            sret_c_ret = get(return_type, "c_type", "void")
-            cleaned_c_ret = String(strip(replace(sret_c_ret, r"\bconst\b" => "")))
-            ret_struct_info = get(dwarf_structs, cleaned_c_ret, nothing)
-            needs_sret = false
-            if ret_struct_info !== nothing
-                rs_size = _parse_dwarf_size(ret_struct_info)
-                if rs_size > 16
-                    needs_sret = true
-                else
-                    for m in get(ret_struct_info, "members", [])
-                        haskey(m, "bit_size") && continue
-                        m_size = get(m, "size", 0)
-                        m_size <= 0 && continue
-                        m_align = m_size > 8 ? 8 : m_size
-                        m_off = _parse_int_or_hex(get(m, "offset", "0"))
-                        if m_off % m_align != 0
-                            needs_sret = true
-                            break
-                        end
-                    end
+        # Where C returns a record is per target (`_c_return_in_memory`): Win64
+        # by size alone (1/2/4/8 bytes in RAX, packed or not), SysV above 16
+        # bytes or with an unaligned field. Julia's lowering agrees except for
+        # SysV with an unaligned field at 16 bytes or less, so that is the
+        # return this branch exists for (`_c_explicit_sret`). Everything else
+        # falls through to BRANCH 2's normal ccall. An explicit sret for a
+        # register return shifts every argument by one and returns garbage,
+        # with no error (C1: `{ char; short[3]; }`, 8 bytes).
+        #
+        # `c_safe` only nominates candidates: a return whose layout is not
+        # natural (`_record_natural_layout`). At 16 bytes or less the explicit
+        # sret is decided here whatever it says; above 16, a natural record
+        # keeps the plain ccall, whose own lowering passes the hidden pointer.
+        #
+        # The buffer behind the hidden pointer must also have the record's
+        # alignment. Julia's own lowering allocates it at the alignment of the
+        # Julia type standing in for the record, and the callee may store to it
+        # with `movaps`: so where the record is more aligned than its stand-in
+        # (`_c_sret_buffer_align`), the wrapper passes a buffer it aligned
+        # itself, whatever `c_safe` says. A function the `long double` trap
+        # refuses below needs no buffer, and must not reach this branch (C2).
+        sret_c_ret = get(return_type, "c_type", "void")
+        cleaned_c_ret = String(strip(replace(sret_c_ret, r"\bconst\b" => "")))
+        ret_struct_info = get(dwarf_structs, cleaned_c_ret, nothing)
+        rs_size = ret_struct_info === nothing ? 0 : _parse_dwarf_size(ret_struct_info)
+        sret_ret_type = return_type["julia_type"]
+        if sret_ret_type == "Any" && sret_c_ret != "void"
+            if haskey(dwarf_structs, sret_c_ret)
+                sret_ret_type = _sanitize_c_type_name(sret_c_ret)
+            else
+                matched_key = _fuzzy_dwarf_lookup(sret_c_ret, dwarf_structs)
+                if matched_key !== nothing
+                    sret_ret_type = _sanitize_c_type_name(matched_key)
                 end
             end
-
+        end
+        sret_align = (ret_struct_info !== nothing && isempty(_x87_crossings(func)) &&
+                      _ret_in_memory(rs_size, ret_struct_info) === true) ?
+            _c_sret_buffer_align(_rec_align(ret_struct_info), _stand_in_align(sret_ret_type)) : 0
+        needs_sret = sret_align > 0 || (ret_struct_info !== nothing &&
+            _c_explicit_sret(rs_size, _rec_unaligned(ret_struct_info); abi))
+        if (!c_safe || rs_size <= 16 || sret_align > 0) && isempty(blob_abi_offenders)
             if needs_sret
-                sret_ret_type = return_type["julia_type"]
-                if sret_ret_type == "Any" && sret_c_ret != "void"
-                    if haskey(dwarf_structs, sret_c_ret)
-                        sret_ret_type = _sanitize_c_type_name(sret_c_ret)
-                    else
-                        matched_key = _fuzzy_dwarf_lookup(sret_c_ret, dwarf_structs)
-                        if matched_key !== nothing
-                            sret_ret_type = _sanitize_c_type_name(matched_key)
-                        end
-                    end
-                end
-
                 sret_ccall_types = "(Ptr{$sret_ret_type}, $(join(param_types, ", "))$(isempty(param_types) ? "" : ","))"
                 sret_ccall_args  = "ret_buf, $(join(param_names, ", "))"
 
-                func_def = """
-                $doc_comment
-                function $julia_name($param_sig)
-                    ret_buf = Ref($sret_ret_type())
-                    GC.@preserve ret_buf begin
-                        ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
+                func_def = if sret_align > 0
+                    # Over-allocate by `align - 1` bytes and start the record at
+                    # the first aligned address inside.
+                    sret_mask = sret_align - 1
+                    """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        # `$cleaned_c_ret` is $sret_align-byte aligned in C: the buffer must be too.
+                        ret_buf = Ref{NTuple{$(rs_size + sret_mask), UInt8}}()
+                        GC.@preserve ret_buf begin
+                            ret_ptr = Ptr{$sret_ret_type}((UInt(Base.unsafe_convert(Ptr{Cvoid}, ret_buf)) + $sret_mask) & ~UInt($sret_mask))
+                            ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, ret_ptr, $(join(param_names, ", ")))
+                            return unsafe_load(ret_ptr)
+                        end
                     end
-                    return ret_buf[]
-                end
 
-                """
+                    """
+                else
+                    """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        ret_buf = Ref($sret_ret_type())
+                        GC.@preserve ret_buf begin
+                            ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
+                        end
+                        return ret_buf[]
+                    end
+
+                    """
+                end
 
                 push!(func_chunks, func_def)
                 push!(exports, julia_name)

@@ -25,18 +25,22 @@ end
     is_c_lto_safe(func_info, dwarf_structs)::Bool
 
 Determine if a C function can be dispatched via direct ccall/llvmcall.
-Returns false (→ route to Clang-compiled sret thunk) only when the
-**return type** is:
+Returns false only when the **return type** is:
 
-- A packed struct (DWARF byte_size ≠ Julia aligned size)
+- A record whose layout is not natural (`_record_natural_layout`: packed,
+  `#pragma pack`, an explicit alignment, a bitfield or union inside, or a
+  member type it cannot measure)
 - A union by value
+
+Such a return is a candidate for GeneratorC's explicit-sret branch, which
+decides per target where C returns it (`_c_explicit_sret`), and is never a
+Tier 1 slice candidate.
 
 C has no templates, vtables, STL, or inheritance — the only ABI hazards
 are packed struct returns and union returns where ccall's return convention
 doesn't match the actual layout.
 
-Parameters by value are fine: the caller pushes bytes according to the ABI
-regardless of packing, so ccall handles them correctly.
+By-value parameters are not decided here: GeneratorC's blob guards check them.
 """
 function is_c_lto_safe(func_info, dwarf_structs)::Bool
     ret_type = String(get(func_info["return_type"], "c_type", ""))
@@ -61,30 +65,9 @@ function is_c_lto_safe(func_info, dwarf_structs)::Bool
             return false
         end
 
-        # Packed struct return: DWARF byte_size ≠ Julia aligned size
-        dwarf_size = _parse_dwarf_size(s_info)
-        members = get(s_info, "members", [])
-
-        # Resolve nested struct member sizes (same fix as _is_struct_unsafe)
-        resolved_members = map(members) do m
-            if get(m, "size", 0) == 0
-                m_type = strip(replace(get(m, "c_type", ""), r"\bconst\b" => ""))
-                if haskey(dwarf_structs, m_type)
-                    nested_size = _parse_dwarf_size(dwarf_structs[m_type])
-                    if nested_size > 0
-                        m2 = copy(m)
-                        m2["size"] = nested_size
-                        return m2
-                    end
-                end
-            end
-            return m
-        end
-
-        julia_size = get_julia_aligned_size(resolved_members)
-        if dwarf_size > 0 && julia_size > 0 && dwarf_size != julia_size
-            return false
-        end
+        # A record whose layout is not natural (the same question C++'s
+        # `_is_struct_unsafe` asks)
+        _record_natural_layout(s_info, dwarf_structs) === true || return false
     end
 
     return true
@@ -125,7 +108,7 @@ Returns false (→ route to MLIR Tier 2) if any of:
 **Return type:**
 - STL container by value
 - Template type (contains `<`)
-- Packed struct (DWARF size ≠ Julia size)
+- Not a natural layout (`_record_natural_layout`: packed, a bitfield or union inside, unmeasurable)
 - Overaligned (alignment > 8)
 - Polymorphic (has vtable)
 - Inherits from base class
@@ -137,7 +120,7 @@ Returns false (→ route to MLIR Tier 2) if any of:
 - STL container
 - Template type (contains `<`)
 - Union
-- Packed struct
+- Not a natural layout
 - Overaligned
 - Polymorphic / inherits
 - Contains unsafe nested member

@@ -14,8 +14,9 @@ typedef struct { short a, b; } Pair;                  // flat int, 4B (control)
 typedef struct { Pair ip; short c, d; } NestInt;      // nested int, 8B (INTEGER — blob-coincidence-safe)
 
 // Packed: float at offset 1 (unaligned member). Layout cannot be reproduced
-// with Julia natural alignment -> must stay opaque; by-value crossings of it
-// must fail loudly, never silently corrupt.
+// with Julia natural alignment -> must stay opaque. On SysV its by-value
+// crossings must fail loudly, never silently corrupt; Win64 passes it by
+// reference (9 bytes), so there they must work.
 typedef struct __attribute__((packed)) { char tag; float a; float b; } PackedFV; // 9B
 
 XForm make_xform(float a, float b, float c, float d);

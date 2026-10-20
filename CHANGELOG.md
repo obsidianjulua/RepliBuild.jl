@@ -4,6 +4,294 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 3: a hidden return buffer has the record's alignment (2026-10-18)
+
+- **A record returned through a hidden pointer could crash its callee.**
+  Julia's ccall allocates that buffer at the alignment of the Julia type
+  standing in for the record: 1 for an `NTuple{N,UInt8}` byte blob, 4 for a
+  struct of `Float32`s. C's callee may assume the record's own alignment and
+  store with `movaps`. `S16 get(void) { return g; }`, with a 16-aligned `S16`,
+  compiles to `movaps %xmm0, (%rcx)`, and Julia put a blob's buffer at
+  `-24(%rbp)`: an access violation on every call that was not inlined into a
+  frame where it happened to land aligned. A record is more aligned than its
+  stand-in with `aligned(N)` on it, an `_Alignas` member, a member of an
+  over-aligned typedef (cglm's `vec4` style), a vector member, a `long double`,
+  or any of these nested.
+- **The parser records the alignment.** `DW_AT_alignment`, which clang emits
+  in DWARF 4 as well, becomes `alignment` on the record and on the member in
+  `struct_definitions`. Clang puts it on the member when it comes from an
+  over-aligned typedef, whose own DIE carries none. A vector member
+  (`DW_AT_GNU_vector`) gets its size. Packages need a rebuild to carry it;
+  delete `.replibuild_cache/project_hash`.
+- `_c_record_align` is the record's alignment: the largest of its own
+  attribute, its members', and its member types' alignments (`long double`
+  16, nested records, arrays by element). A member type nothing can measure
+  makes it the largest power of two dividing the size, which is never too
+  small. `_c_sret_buffer_align` asks for the wrapper's own buffer where that
+  alignment is above both the stand-in's and 8: on x86-64 nothing faults on a
+  misaligned access below 16.
+- BRANCH 0 emits it: `Ref{NTuple{size + align - 1, UInt8}}()`, the record at
+  the first aligned address inside, and `unsafe_load` of the stand-in from
+  there. Such a return takes this branch whatever `c_safe` says. A function
+  with a `long double` parameter keeps its x87 stub instead, because BRANCH 0
+  would hand its `Any` argument to ccall and refuse the wrapper (C2).
+- C++: the record-level key wakes `_is_struct_unsafe`'s check that sends a
+  record aligned above 8 to Tier 2. In the Hub only libc++'s `aligned_storage`
+  unions carry one, and unions go to Tier 2 already.
+- Tests. `test_c_sret_classification.jl` (runtests) pins `_c_record_align`
+  for every shape above and the plain ones, `_c_sret_buffer_align`, the parser
+  on a vendored GNU objdump dump (record attribute, `_Alignas` member,
+  over-aligned typedef member, vector, nested record), and what BRANCH 0 emits
+  for both ABIs, including the `long double` guard. `c_sret_test` gains eight
+  makers that copy an aligned global out, so clang stores the return with
+  `movaps`. `test_c_sret_abi.jl` (devtests) calls them through `invokelatest`,
+  so the buffer is the wrapper's own, and checks `_c_record_align` against the
+  alignment clang gives each record's global for both targets.
+  Negative-checked: with the old rule the unit test fails 25 of 231 and the
+  live child dies of an access violation in `make_ab16`; without the vector
+  rule `HVec` comes out 4-aligned in both tests; without the parser's capture
+  they fail 8 of 231 and 24 of 82; without the `long double` guard, 3 of 231.
+  runtests.jl passes on Julia 1.12.7 and 1.13.2, devtests.jl on 1.12.7, and
+  the live test on both.
+- **abi_fuzz** (C mode, shape seeds 1–106 and identifier seeds 1–40, Julia
+  1.12.7 and 1.13.2), compared with this branch before the merge and this
+  change: no check changes status, and no verdict text changes beyond paths,
+  timings and timestamps. The fuzzer generates no over-aligned record. In
+  identifier mode, units 16n, 26n and 27n quote a parse error from a function
+  that is now in BRANCH 0's explicit-sret form. b934795 generates the same
+  text from the same metadata, so that comes from the merged
+  `_record_natural_layout` commit, not from this one.
+- **Hub**: the 19 C packages were rebuilt with `project_hash` removed, so
+  their metadata carries alignment. That covers box2d3's SIMD solver records,
+  duktape's and lua's `jmp_buf` holders, miniaudio's and raylib's atomics, and
+  xxhash's 64-aligned `XXH3_state_s`. On the same DWARF, b934795's parser and
+  this one give identical records apart from the new keys. Re-wrapped from
+  that metadata, every wrapper is byte-identical to b934795's under the SysV
+  rules and the Win64 rules: no Hub function returns an over-aligned record
+  through a hidden pointer. Every verifier passes on the rebuilt Hub (17
+  `test_deep.jl`, curl's `test.jl`, pcre2 loads, and the mpack tag check).
+  The Hub's earlier metadata came from an older parser (2026-10-11), whose
+  member sizes differ. The rebuilt wrappers differ from the earlier ones only
+  in a timestamp and, in box2d3, miniaudio, raylib and tomlc17, in the
+  >16-byte returns the merged commit moves between a plain ccall and the
+  explicit sret.
+- Not covered, in CLAUDE.md's Open problems: GeneratorCpp's own ccall path,
+  the `[wrap.varargs]` path, an alignment only a typedef carries, SysV byval
+  parameters, and SysV records holding a `long double`.
+
+### Tier 3: the register-class traps are SysV's only (2026-10-18)
+
+- **Win64 refused by-value crossings it makes correctly.** Two GeneratorC
+  traps assume SysV's register classes. The float-member trap refuses a
+  record of 16 bytes or less kept as an `NTuple{N,UInt8}` blob when it has a
+  float member, because SysV passes it in XMM registers while the blob claims
+  INTEGER. `abi_class_risk` refuses the same way a named-field struct holding
+  an opaque region of mixed float and integer members. Win64 gives a record no
+  register class: C passes and returns it by size alone (1, 2, 4 or 8 bytes as
+  an integer of that width, any other size by reference to a copy or through a
+  hidden return pointer), and Julia lowers a non-primitive type of the same
+  size the same way. There the traps only cost callable functions: 31 in the
+  abi_fuzz corpus after C1, and all 31 of Hub mpack's stubs (`mpack_tag_t` is
+  16 bytes and holds a union of integers and floats).
+- `_c_register_class_misstated(byte_size, class_risk; abi)` decides both traps
+  per target, from `_c_record_abi()`: on SysV at 16 bytes or less when the
+  stand-in may misstate the class, as before, and never on Win64. SysV's
+  MEMORY-class exemption for returns and its unaligned-field blob trap are
+  unchanged.
+- **C2 can now refuse a whole wrapper where Win64 used to refuse one
+  function.** BRANCH 0 (explicit sret) runs only when no blob trap fired, and
+  it never applies the `long double` trap (abi_fuzz C2). A function that takes
+  a float-bearing blob or a mixed-region struct by value, returns a record
+  BRANCH 0 takes (over 16 bytes and nominated by `c_safe`), and also takes a
+  `long double` used to get the `long double` stub on Win64. It now reaches
+  BRANCH 0, and its `Any` argument refuses the wrapper. No fuzz unit and no Hub
+  package has one. Fixing C2 closes it.
+- Tests: `test_c_sret_classification.jl` pins the predicate and what is
+  emitted for both ABIs: float blobs as parameters and as a register-sized
+  return, an mpack-shaped mixed region, the struct embedding it, and an
+  all-float region that is callable on both. `test_c_generator_policies.jl`
+  checks a float-bearing bitfield blob as parameter and return for both ABIs,
+  and loads the Win64 module, whose blob crossings reach their ccall.
+  `abi_nested_test`'s probe now expects `packedfv_sum` (a 9-byte packed float
+  blob) refused on SysV and called on Win64, where it returns 11.0.
+  Negative-checked through the exact method signature. With SysV's rule on
+  every target the two unit tests fail 16 of 154 and 8 of 96 checks and the
+  probe fails on Windows. With no trap on any target they fail 16 of 154 and
+  6 of 96, all of them the SysV checks.
+- **abi_fuzz** (C mode, shape seeds 1–106 and identifier seeds 1–40, Julia
+  1.12.7 and 1.13.2, which agree check for check), compared with f40496f's
+  results: 57 checks go from GAP to PASS, every one an ABI-trap refusal, and
+  no other status changes. 31 functions in 18 units are now calls: 22 take a
+  float-bearing blob of 7 to 16 bytes, 1 returns an 8-byte one, and 8 take or
+  return a 4- or 16-byte struct holding a mixed region. Their call and return
+  checks compare every member with what the callee read or wrote. Totals go
+  from 2237 PASS, 4 FAIL and 57 GAP to 2294, 4 and 0, and the 4 FAILs are C2.
+  The 31 trap gap lines are gone. 8 `param-type` gap lines appear, all on
+  newly callable functions: the trap had hidden the existing gap where a C
+  `char` parameter is declared `::UInt8`. In identifier mode nothing changes
+  status. In units 31n and 34n three stubs became calls ahead of the syntax
+  errors that still refuse those wrappers, which moves the line number in the
+  quoted parse error.
+- **Hub**: the 19 C packages, re-wrapped without a rebuild and compared with
+  wrappers from a clean export of f40496f. Under the SysV rules (generated on
+  Windows from the same metadata) all 19 are byte-identical apart from
+  timestamps. Under the Win64 rules only mpack changes: its 31 trap stubs
+  become Tier 3 ccalls and gain their 31 `DISPATCH_TIER` entries, and nothing
+  else in it moves. Every package's verifier passes against the Win64
+  wrappers (17 `test_deep.jl`, curl's `test.jl`, and pcre2 loads). mpack's
+  `test_deep.jl` calls none of the 31, so a separate live check called them
+  against `libmpack.dll` (143 checks, all passing). It reads every returned
+  tag through its fields and through the library's own pointer getters,
+  checks equality and ordering of tags passed in, compares what
+  `mpack_write_tag` encodes with the MessagePack spec byte for byte, reads tags
+  back with `mpack_read_tag`, `mpack_peek_tag`, `mpack_expect_tag` and
+  `mpack_node_tag`, and makes 400 000 calls under GC. Against f40496f's
+  wrapper the same check fails 62 checks and errors 5.
+- **Found on the way: a Tier-3 sret buffer had the Julia type's alignment.** A
+  callee returning a record aligned above its stand-in may store it with
+  `movaps`, and on Win64 that crashed. The returns this change makes callable
+  are register-sized blobs, which come back in RAX, and mixed-region structs,
+  whose Julia alignment is the record's own DWARF-derived one. Fixed by
+  "a hidden return buffer has the record's alignment" below.
+- SysV is covered by the unit tests; no SysV callee ran.
+
+### Whether a record is packed comes from its member types' alignment, in C and C++ (2026-10-18)
+
+- **`get_julia_aligned_size` is gone.** It decided whether a record was packed by
+  laying the members out again with each member's size as its alignment, capped
+  at 8, and comparing the result with the DWARF size. C's `is_c_lto_safe` and
+  C++'s `_is_struct_unsafe` (the `is_ccall_safe` choice between ccall and a
+  thunk) both used it. It called a record packed whenever a member's size was not
+  its alignment (`short[3]`, `float[3]`, a nested 8-byte `Vec2`) and whenever a
+  member was an enum, which the metadata records with size 0. Its C++ nested check
+  looked one level down with no type table, so a record packed two levels down
+  read as natural and reached ccall; on SysV its blob travels in registers while
+  C passes it in memory.
+- **`_record_natural_layout`** (Utils.jl) is now the one answer for both. A
+  record is natural when each member, in offset order, sits at the first offset
+  after the previous one that is a multiple of its type's alignment, the size is
+  the members' end rounded up to the largest alignment, and every member record
+  is natural too, at any depth. Unions, bitfields and members it cannot measure
+  are not natural. Static data members and the `__clang_vtable` placeholder (no
+  offset) are skipped. It reuses C1's member primitives (`_c_scalar_layout`,
+  `_c_member_record`), which now also find C++ names through their `::` scopes and
+  the `" >"` key artifacts.
+- **GeneratorCpp keeps a byte blob of 16 bytes or less off the ccall path**
+  (`_crosses_small_blob`). A natural record the struct emitter cannot prove (an
+  enum member with size 0 is enough) is emitted as `NTuple{N,UInt8}`, which
+  claims INTEGER for every SysV eightbyte, so a function crossing one now goes to
+  the thunk. Above 16 bytes a record crosses in memory on both ABIs and the
+  blob's bytes are exact. With the old size test such records happened to read as
+  packed; with a precise one they would have reached ccall.
+- **Hub, re-wrapped without a rebuild against the previous commit** (C++ against
+  main): box2d, pugixml, tinyxml2, imgui, fmt, hello_world and 15 C packages are
+  byte-identical apart from timestamps.
+  - llamacpp: 15 extern "C" functions that take or return its parameter structs
+    by value (`llama_model_default_params`, `llama_model_load_from_file`,
+    `llama_context_default_params`, `ggml_opt_init`, …) go from Tier 2 to ccall.
+    The structs are natural and 28 to 160 bytes, so even as byte blobs they cross
+    exactly. They gain the `*_safe` RAII variants ccall'd functions get.
+  - box2d3 (39), miniaudio (30) and raylib (16) functions returning natural
+    records of 20 to 304 bytes go from the explicit sret to a plain ccall;
+    tomlc17 (6) and miniaudio's `ma_job_init` go the other way, since their
+    records hold a union. Above 16 bytes both forms pass the hidden pointer on
+    both ABIs.
+  - Tier 1 emits the same slices. `is_c_lto_safe` also filters its slicing
+    candidates, which gain or lose record-returning functions (box2d3 +47,
+    miniaudio +33/−1, tomlc17 −6), so the `tier1:` stats line moves (box2d3
+    accepts 406 slices instead of 363). But Tier 1's shape gate never sends a
+    record return to llvmcall: box2d3 still emits 26 slices and miniaudio 743, and
+    no `TIER1_*` line changed.
+- Tests: `test_record_natural_layout.jl` (runtests) covers the layout answer, C++
+  routing, `is_c_lto_safe` and the blob guard through the C++ generator.
+  `test_cpp_record_routing.jl` with `cpp_routing_test` (devtests) builds a C++
+  library, checks each function's tier, and calls every function in both
+  directions. Negative-checked through the exact method signatures: with the old
+  size test the unit test fails 23 of 48 and the live test 6 of 24 (`CS3` and
+  `Mass` back on Tier 2, `Top6` back on ccall); without the blob guard they fail 1
+  and 2 (`EnumRec` rides a ccall as a blob).
+- abi_fuzz, C and C++ modes, seeds 1–106, Julia 1.12.7 and 1.13.2: C mode
+  changes no check against the previous commit on either Julia. C++ mode changes
+  none on 1.13.2; on 1.12.7 two went from FAIL to PASS (59/cpp `ret/f1`, 77/cpp
+  `ret/f2`), both among the 12 X2/X5 checks that read garbage and already
+  differed between the baseline runs. The fuzzer's C++ functions have C++
+  linkage and are not `noexcept`, so they reach Tier 2 whatever the record; this
+  routing is exercised by `test_cpp_record_routing.jl`, not by the fuzzer.
+
+### Tier 3: where C returns a record is decided per target, from real alignment (C1, 2026-10-18)
+
+- **A small record returned by value could get a hidden return pointer the
+  callee does not read.** GeneratorC decided that a record returns through
+  memory by testing each member's offset against the member's SIZE, capped at
+  8, as if that were its alignment. `{ char m1; short m2[3]; }` is 8 bytes and
+  comes back in RAX on both ABIs, but its 6-byte array at offset 2 looked
+  unaligned, so the wrapper passed a hidden sret pointer. The callee then read
+  every argument one register late and the return was garbage, with no error.
+  abi_fuzz found it (C1, seeds 3 and 36): `f4` read `p1.m1` as `0x62ffbc10`
+  instead of `0x79aa7901`, and seed 3's `f2` crashed. The same test sat in the
+  blob-parameter trap and the blob-return guard, and none of the three knew
+  Win64, which returns 1, 2, 4 and 8 bytes in RAX whatever the members are.
+- **Alignment comes from the field's type** (`_c_has_unaligned_field`): an
+  array's element type, each field of a nested record at its offset from the
+  outermost record (a packed member record can hold an unaligned field),
+  every element of an array of records, and an enum's underlying integer. The
+  size test never looked at nested records or enums at all, because the
+  metadata records them with size 0. Bitfields are skipped, as clang skips
+  them.
+- **The return class is per target** (`_c_return_in_memory`): Win64 by size
+  alone, SysV above 16 bytes or with an unaligned field. `_c_record_abi()` is
+  the one place the C generator reads the target, and
+  `generate_introspective_module_c` takes it as `abi`, so a test asks for
+  either convention on any host.
+- **The wrapper passes the hidden pointer itself only where Julia's lowering
+  would not** (`_c_explicit_sret`): SysV with an unaligned field at 16 bytes or
+  less, a rule Julia's lowering never applies. Win64 decides by size on both
+  sides, so there Julia passes the pointer. Above 16 bytes the explicit form
+  stays where it was. A first version sent every Win64 hidden-pointer return
+  through the explicit form, and abi_fuzz showed that also widens C2: that
+  branch never applies the `long double` trap, so units 58 and 61 refused the
+  whole wrapper instead of one function. The explicit form now fires on Win64
+  only where it did before.
+- **Blob parameters** (`_c_blob_param_misclassified`): the SysV trap for a
+  ≤16-byte blob whose record is MEMORY class uses the real alignment, and also
+  refuses a record whose alignment cannot be proven. It no longer fires on
+  Win64, where the record and its blob are passed the same way (1/2/4/8 bytes
+  in a register, anything else by reference). The float-member trap is
+  unchanged on both targets.
+- **Blob returns**: a ≤16-byte float-bearing blob is exempt from the trap when
+  C returns it through a hidden pointer on this target. On Win64 that makes the
+  3, 5, 6, 7 and 9 to 16-byte ones callable; a 1, 2, 4 or 8-byte one is still
+  refused, because the guard's SSE premise is SysV's.
+- Tests: `test_c_sret_classification.jl` (runtests) checks the classifier and
+  the emitted ccall for both ABIs on any host. `test_c_sret_abi.jl`
+  (devtests) builds `c_sret_test`, calls every function and checks every
+  argument and return member, then checks `_c_return_in_memory` against
+  clang's lowering of the same file for `x86_64-unknown-linux-gnu` and
+  `x86_64-w64-windows-gnu`. `test_c_generator_policies.jl` now checks the
+  blob-parameter trap for both ABIs. Negative-checked by restoring the old rule
+  through the exact method signatures: the unit test fails 52 of 114 checks,
+  and the live test fails 23 of 36 (`f4` reads `0xfffffffff41fd5f0` for
+  `0x79aa7901` and returns zeros, then `f2` crashes the child).
+- **abi_fuzz on the first run's seeds** (shape seeds 1–106 and identifier
+  seeds 1–40, C mode, Julia 1.12.7 and 1.13.2, which agree check for check):
+  the four C1 FAILs (3/c and 36/c, `call` and `ret`) pass, and both saved
+  repros pass all 8 checks. 19 ABI-trap GAPs become PASS on Win64. 9 of them
+  are ≤16-byte packed or bitfield blob parameters with an unaligned field,
+  which Win64 passes like the record; 10 are 15- and 16-byte float-bearing blob
+  returns, which Win64 returns through a hidden pointer. Totals go from 2214
+  PASS, 8 FAIL and 76 GAP to 2237, 4 and 57; the 4 FAILs left are C2. In
+  identifier mode one check changed: unit 3n's `include` was a trap stub only
+  because the size test called its packed parameter misaligned. As a real
+  ccall it names `__x_s`, which the sanitizer declares as `_x_s` (the I6
+  class), so the wrapper is now refused when it is written instead of failing
+  to load on I5.
+- **Hub**: the 19 C packages, re-wrapped without a rebuild, give wrappers
+  byte-identical to unpatched HEAD's apart from timestamps, under the Win64
+  rules and under the SysV rules (generated on Windows from the same
+  metadata). Every package's verifier passes.
+- SysV is covered by the unit test and by clang's lowering; no SysV callee has
+  run.
+
 ### abi_fuzz: generated C shapes as a differential ABI test (2026-10-18)
 
 - **`test/tools/abi_fuzz.jl`**, a hand-run tool wired into no suite. Each seed
