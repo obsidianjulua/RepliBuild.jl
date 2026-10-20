@@ -193,15 +193,56 @@ function _prove_julia_layout(plan, byte_size::Int, jl_layouts, jl_mutable)
     return total == byte_size ? (total, maxal) : :mismatch
 end
 
+const _SSE_JULIA_TYPES = ("Cfloat", "Cdouble", "Float16", "Float32", "Float64", "ComplexF32", "ComplexF64")
+
+"""
+    _type_has_sse(julia_type, dwarf_structs, record_key, is_enum; seen) -> Bool
+
+Whether the C type a member's `julia_type` spells may hold a `float` or
+`double`, which SysV puts in an SSE eightbyte: a floating scalar, an array of
+one, or a record holding one at any depth, bases included. Integers, pointers
+and enums do not. `record_key(name)` maps a record name to its `dwarf_structs`
+key or `nothing`; a type that is neither resolved nor known counts as holding
+one.
+"""
+function _type_has_sse(jt::AbstractString, dwarf_structs, record_key, is_enum;
+                       seen::Set{String} = Set{String}())::Bool
+    jt = String(strip(jt))
+    jt in _SSE_JULIA_TYPES && return true
+    (startswith(jt, "Ptr{") || haskey(_C_PRIM_FIELD_LAYOUT, jt)) && return false
+    am = match(r"^NTuple\{\d+,\s*(.+)\}$", jt)
+    am !== nothing && return _type_has_sse(am.captures[1], dwarf_structs, record_key, is_enum; seen)
+    is_enum(jt) && return false
+    key = record_key(jt)
+    key === nothing && return true
+    key in seen && return false
+    push!(seen, key)
+    info = dwarf_structs[key]
+    for b in get(info, "base_classes", [])
+        bt = replace(String(get(b, "type", "")), r"^(class|struct)\s+" => "")
+        isempty(bt) && continue
+        _type_has_sse(bt, dwarf_structs, record_key, is_enum; seen) && return true
+    end
+    for m in get(info, "members", [])
+        # A static member is not part of the object.
+        get(m, "offset", nothing) === nothing && !haskey(m, "bit_size") && continue
+        _type_has_sse(String(get(m, "julia_type", "Any")), dwarf_structs, record_key, is_enum; seen) &&
+            return true
+    end
+    return false
+end
+
 """
     _crosses_small_blob(func, dwarf_structs, record_abi, blob_names) -> Bool
 
-Whether `func` passes or returns by value a record that the struct emitter
-wrote as a byte blob (`blob_names`, sanitized names) of 16 bytes or less. A
-ccall would carry the blob, whose `NTuple{N,UInt8}` claims INTEGER for every
+Whether `func` passes or returns by value, at 16 bytes or less, a record whose
+Julia type puts bytes where C has a `float` or `double` (`blob_names`,
+sanitized names): one the struct emitter wrote as a byte blob, or one with a
+field it wrote as bytes because the member's type cannot be named there. A
+ccall would carry those bytes, and `NTuple{N,UInt8}` claims INTEGER for every
 SysV eightbyte where the record may have SSE ones, so such a function goes to
 the thunk, which lays the record out from DWARF. Above 16 bytes a record
-crosses in memory on both ABIs and the blob's bytes are exact.
+crosses in memory on both ABIs and the bytes are exact.
 """
 function _crosses_small_blob(func, dwarf_structs, record_abi, blob_names)::Bool
     isempty(blob_names) && return false
@@ -642,6 +683,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # =============================================================================
 
     enum_chunks = String[]
+    # Julia (sizeof, alignment) of each DWARF enum as emitted, by emitted name:
+    # what a struct field of that enum type is. An alias has its canonical's.
+    emitted_enum_layout = Dict{String,Tuple{Int,Int}}()
 
     # Extract enums (stored with __enum__ prefix)
     enum_types = filter(k -> startswith(k, "__enum__"), keys(dwarf_structs))
@@ -725,6 +769,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 enum_sig = sort(members, by=first)
                 if haskey(emitted_enum_sigs, enum_sig)
                     canonical = emitted_enum_sigs[enum_sig]
+                    haskey(emitted_enum_layout, canonical) &&
+                        (emitted_enum_layout[enum_name] = emitted_enum_layout[canonical])
                     if canonical != enum_name
                         push!(enum_chunks, """
                         # $enum_name is $canonical under a different DWARF spelling
@@ -739,6 +785,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     continue
                 end
                 emitted_enum_sigs[enum_sig] = enum_name
+                # `@enum X::T` and the bitflag alias `const X = T` both have T's layout.
+                haskey(_C_PRIM_FIELD_LAYOUT, julia_underlying) &&
+                    (emitted_enum_layout[enum_name] = _C_PRIM_FIELD_LAYOUT[julia_underlying])
 
                 if _is_bitflag_enum(last.(members))
                     push!(enum_chunks, _bitflag_enum_chunk(enum_name, julia_underlying, members))
@@ -980,6 +1029,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     struct_chunks = String[]
     union_accessor_defs = ""  # Deferred union accessors (emitted after all struct defs)
     blob_setters_emitted = false  # gates the one module-level `setproperties`
+    field_setters_emitted = false  # gates the helper the field-struct setters call
     # Seeded inside the struct-emission block. Must exist even when DWARF
     # reports zero types (hello_world): function signatures still gate
     # parameter annotations on this set.
@@ -1003,8 +1053,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         s = replace(s, r"[^a-zA-Z0-9_]" => "_")
         push!(dwarf_defined_names, s)
     end
-    # Also exclude enum names — they're already defined via @enum
+    # Also exclude enum names — they're already defined via @enum, under the
+    # name `_sanitize_cpp_type_name` gives them. The raw name missed every enum
+    # it changes (`Type` is emitted as `c_Type`): box2d got `struct c_Type end`
+    # after `@enum c_Type`, and Julia 1.12 lets that replace the enum, so every
+    # field and signature naming it below meant an empty struct.
     union!(dwarf_defined_names, enum_names)
+    union!(dwarf_defined_names, (_sanitize_cpp_type_name(e) for e in enum_names))
 
     if !isempty(all_forward_decls)
         push!(struct_chunks, """
@@ -1295,17 +1350,25 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
         end
         blob_struct_names = Set{String}()  # Track which structs became byte-blobs
+        # Field-emitted structs with bytes over a float or double (see the
+        # dispatch decision), and what `_type_has_sse` resolves names with.
+        sse_bytes_struct_names = Set{String}()
+        _record_key = function (name)
+            haskey(dwarf_structs, name) && !startswith(name, "__enum__") && return name
+            jn = replace(replace(replace(_sanitize_cpp_type_name(name), "*" => "Ptr"), "&" => "Ref"),
+                         r"[^a-zA-Z0-9_]" => "_")
+            k = get(best_dwarf_key, jn, nothing)
+            return k !== nothing && haskey(dwarf_structs, k) ? k : nothing
+        end
+        _enum_jl_names = Set{String}(_sanitize_cpp_type_name(e) for e in enum_names)
+        _is_enum_name = name -> name in enum_names || _sanitize_cpp_type_name(name) in _enum_jl_names
         # Julia (sizeof, alignment) of every type emitted so far, as a FIELD, for
         # `_prove_julia_layout`: proven-exact structs, blobs, anonymous unions and
         # enums. Named unions are `mutable` and embed as a pointer.
-        jl_layouts = Dict{String,Tuple{Int,Int}}()
+        # Enums as emitted: an alias has its canonical's layout, not its own
+        # DWARF one, and an enum with no enumerators is not emitted at all.
+        jl_layouts = Dict{String,Tuple{Int,Int}}(emitted_enum_layout)
         jl_mutable = Set{String}()
-        for (ek, einfo) in dwarf_structs
-            startswith(String(ek), "__enum__") || continue
-            ejt = String(get(einfo, "julia_type", "Cint"))
-            haskey(_C_PRIM_FIELD_LAYOUT, ejt) || continue
-            jl_layouts[_sanitize_cpp_type_name(String(ek)[9:end])] = _C_PRIM_FIELD_LAYOUT[ejt]
-        end
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
@@ -1610,6 +1673,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         continue
                     end
 
+                    # The members that are part of the object. A static data
+                    # member, and clang's `__clang_vtable`, has no offset; sorted
+                    # as offset 0 above, it would be a field at the front.
+                    layout_members = filter(m -> get(m, "offset", nothing) !== nothing, members)
+
                     # Check if any member has unresolvable size (template types with no DWARF size info).
                     # When DWARF byte_size is known but member sizes aren't, use a byte blob to ensure
                     # the Julia struct has the correct total size for ABI safety.
@@ -1623,7 +1691,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         "wchar_t",
                     ])
                     has_unresolvable = false
-                    for m in members
+                    for m in layout_members
                         if get(m, "size", 0) == 0
                             c_type_raw = strip(replace(get(m, "c_type", ""), r"\bconst\b" => ""))
                             c_type_raw = strip(c_type_raw)
@@ -1644,11 +1712,21 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                          parse(Int, string(byte_size_str)[3:end], base=16) :
                          parse(Int, string(byte_size_str)))
 
-                    # The Julia field type a member is emitted as. One function for
-                    # the layout proof below and for the emission loop, so the proof
-                    # checks exactly the fields that get written.
-                    _member_field_type = function (member)
-                        julia_type = get(member, "julia_type", "Any")
+                    # The Julia type `julia_type` is written as in a field here,
+                    # or `nothing` when this module cannot name it at this point.
+                    _usable_field_type = function (julia_type::String)
+                    # An array is usable when its element is. Peeled before any
+                    # sanitizing, which folded `NTuple{2, ImVector<unsigned int>}`
+                    # into one name nothing declares, and the element is checked
+                    # like a bare field type: `NTuple{16, b2ContactRegister}` named
+                    # a struct emitted later. Either one failed the module at load
+                    # once DWARF gave such members a size.
+                    am = match(r"^NTuple\{(\d+),\s*(.+)\}$", julia_type)
+                    if am !== nothing
+                        el = _usable_field_type(String(am.captures[2]))
+                        el === nothing && return nothing
+                        return el == am.captures[2] ? julia_type : "NTuple{$(am.captures[1]), $el}"
+                    end
                     # Sanitize member types that reference other structs with template syntax
                     # Only sanitize custom struct names, not built-in Julia types like NTuple
                     sanitized_type = julia_type
@@ -1676,26 +1754,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             end
                         elseif occursin(r"[<>]", julia_type)
                             # Direct custom struct reference with template syntax
-                            if _is_stl_internal_type(julia_type)
-                                m_size = get(member, "size", 0)
-                                sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
-                            else
-                                sanitized_type = _sanitize_cpp_type_name(julia_type)
-                            end
+                            _is_stl_internal_type(julia_type) && return nothing
+                            sanitized_type = _sanitize_cpp_type_name(julia_type)
                         end
 
                         # If the (now-sanitized) type refers to an STL-internal type that
-                        # will be filtered out during struct generation, fall back to a byte
-                        # buffer so the embedding struct remains valid Julia syntax.
-                        if sanitized_type == julia_type && _is_stl_internal_type(julia_type)
-                            m_size = get(member, "size", 0)
-                            if m_size > 0
-                                sanitized_type = "NTuple{$m_size, UInt8}"
-                            else
-                                # Size unknown; use Ptr{Cvoid} as a same-width placeholder
-                                sanitized_type = "Ptr{Cvoid}"
-                            end
-                        end
+                        # will be filtered out during struct generation, the member
+                        # becomes bytes so the embedding struct remains valid Julia syntax.
+                        sanitized_type == julia_type && _is_stl_internal_type(julia_type) && return nothing
                     end
 
                     # If the field is Ptr{X} and X hasn't been defined yet,
@@ -1711,19 +1777,56 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     # them: llama.cpp's `_Sp_alloc_shared_tag` had
                     # `_M_a::Ref_allocator_void` (from `const allocator<void>&`,
                     # '&' → "Ref" at line ~906) — declared nowhere, used once,
-                    # and all 98k lines failed to load.
-                    # Degrade to the member's DWARF size as a byte region so the
-                    # containing struct keeps its exact layout; fall back to
-                    # pointer width only when the size is unknown. Emission is
-                    # topological, so "not yet defined" here means "cannot be
-                    # used", not "defined later".
-                    if !any(startswith(sanitized_type, bt) for bt in builtin_types) &&
-                       !(sanitized_type in defined_struct_names)
-                        m_size = get(member, "size", 0)
-                        sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
-                    end
+                    # and all 98k lines failed to load. Emission is topological,
+                    # so "not yet defined" here means "cannot be used", not
+                    # "defined later".
+                    #
+                    # Defined is not enough: the layout proof must be able to
+                    # measure the field. A bitfield record or an opaque
+                    # placeholder is a `mutable struct`, a reference where C has
+                    # the value inline, and a forward declaration is an empty
+                    # `struct X end`; neither is in `jl_layouts`, the proof
+                    # answered `:unknown`, and the fields went out unproven
+                    # (llama.cpp's `llama_hparams`: 492 bytes for 29180). Named
+                    # unions are in `jl_mutable`, so the proof measures them as
+                    # the reference they are. Builtins match whole names: a
+                    # prefix test took a struct named `BoolVector` for `Bool`.
+                    (sanitized_type in builtin_types || startswith(sanitized_type, "Ptr{")) &&
                         return sanitized_type
+                    sanitized_type in defined_struct_names &&
+                        (haskey(jl_layouts, sanitized_type) || sanitized_type in jl_mutable) &&
+                        return sanitized_type
+                    # An enum the module emitted, under the name it has there
+                    # (a raw `Type` is emitted as `c_Type`). Enums precede
+                    # structs in the file.
+                    if _is_enum_name(sanitized_type)
+                        en = _sanitize_cpp_type_name(sanitized_type)
+                        haskey(emitted_enum_layout, en) && return en
                     end
+                    return nothing
+                    end
+
+                    # The Julia field type a member is emitted as, and whether it
+                    # stands in for the member's type as bytes. One function for
+                    # the layout proof below and for the emission loop, so the proof
+                    # checks exactly the fields that get written. A type this module
+                    # cannot name here degrades to the member's DWARF size as a byte
+                    # region, so the containing struct keeps its exact layout;
+                    # pointer width only when the size is unknown. So does a type of
+                    # another size than the member's: fmt's `arg_id_kind&` is
+                    # spelled as its enum but is a pointer. (A named union keeps its
+                    # reference; the proof measures that.)
+                    _member_field = function (member)
+                        m_size = get(member, "size", 0)
+                        t = _usable_field_type(String(get(member, "julia_type", "Any")))
+                        if t !== nothing && m_size > 0 && !(t in jl_mutable)
+                            lay = _julia_field_layout(t, jl_layouts, jl_mutable)
+                            lay !== nothing && lay[1] != m_size && (t = nothing)
+                        end
+                        t === nothing || return (t, false)
+                        return (m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}", true)
+                    end
+                    _member_field_type = member -> first(_member_field(member))
 
                     # Exact or opaque, never approximate — GeneratorC's
                     # `_resolve_exact_layout`, applied to the fields this struct
@@ -1737,7 +1840,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     # cannot reproduce the C layout, the byte blob below can.
                     field_plan = Tuple{String,Union{Int,Nothing}}[]
                     let cur = 0
-                        for member in members
+                        for member in layout_members
                             ov = get(member, "offset", "0x0")      # parsed as the emission loop does
                             off = isnothing(ov) ? 0 : parse(Int, ov)
                             off > cur && push!(field_plan, ("NTuple{$(off - cur), UInt8}", nothing))
@@ -1749,6 +1852,21 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end
                     layout_proof = _prove_julia_layout(field_plan, byte_size, jl_layouts, jl_mutable)
                     if layout_proof === :mismatch && byte_size > 0 && !isempty(members)
+                        has_unresolvable = true
+                    end
+                    # A named union is `mutable`: as a field it is a reference
+                    # where C has the union's bytes inline, so a record holding
+                    # one is a blob. The proof measures the reference as a
+                    # pointer, which an 8-byte union at an aligned offset fits
+                    # (abi_fuzz unit 104: `R5`'s `m6::T4` made `R5` non-isbits,
+                    # and C's bytes in it crashed the GC), so check by type.
+                    _in_mutable = function (t)
+                        while (am = match(r"^NTuple\{\d+,\s*(.+)\}$", t)) !== nothing
+                            t = String(am.captures[1])
+                        end
+                        return t in jl_mutable
+                    end
+                    if byte_size > 0 && any(m -> _in_mutable(first(_member_field(m))), layout_members)
                         has_unresolvable = true
                     end
 
@@ -1926,7 +2044,25 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         continue
                     end
 
-                    member_count = length(members)
+                    # Bytes over C data that holds a float or double, in a field
+                    # written as bytes or inside a field's own record: a ccall
+                    # classifies them INTEGER (`_crosses_small_blob`). An enum
+                    # written as bytes is INTEGER in C as well.
+                    _sse_under_bytes = any(layout_members) do member
+                        jt = String(get(member, "julia_type", "Any"))
+                        (ft, as_bytes) = _member_field(member)
+                        as_bytes && return _type_has_sse(jt, dwarf_structs, _record_key, _is_enum_name)
+                        while (am = match(r"^NTuple\{\d+,\s*(.+)\}$", ft)) !== nothing
+                            ft = String(am.captures[1])
+                        end
+                        ft in sse_bytes_struct_names && return true
+                        ft in blob_struct_names || return false
+                        key = get(best_dwarf_key, ft, nothing)
+                        return key === nothing || _type_has_sse(key, dwarf_structs, _record_key, _is_enum_name)
+                    end
+                    _sse_under_bytes && push!(sse_bytes_struct_names, julia_struct_name)
+
+                    member_count = length(layout_members)
                     push!(struct_chunks, """
                     # C++ struct: $struct_name ($member_count members)
                     struct $julia_struct_name
@@ -1935,7 +2071,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     current_offset = 0
                     pad_idx = 0
 
-                    for member in members
+                    for member in layout_members
                         member_name = get(member, "name", "unknown")
                         julia_type = get(member, "julia_type", "Any")
                         
@@ -1985,6 +2121,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end
 
                     """)
+                    # The setters a byte blob gets, so a record keeps them when
+                    # the struct emitter can lay it out instead.
+                    push!(struct_chunks, _field_setter_chunk(julia_struct_name))
+                    field_setters_emitted = true
+                    blob_setters_emitted = true
                 else
                     # Struct found but no members (empty struct or incomplete info)
                     push!(struct_chunks, """
@@ -2445,8 +2586,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # would each call whichever thunk `__init__` resolved last.
     aot_fptr_taken = Dict{String,String}()
 
-    # Records the struct emitter wrote as byte blobs (see the dispatch decision).
-    _blob_names = @isdefined(blob_struct_names) ? blob_struct_names : Set{String}()
+    # Records whose Julia type puts bytes where C has a float or double: the
+    # byte blobs, and field-emitted ones (see the dispatch decision).
+    _blob_names = @isdefined(blob_struct_names) ? union(blob_struct_names, sse_bytes_struct_names) :
+                  Set{String}()
 
     for func in functions
         func_name = func["name"]
@@ -2462,10 +2605,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # the Julia type a record crosses by value must be its C layout. A
         # record `_prove_julia_layout` could not reproduce is a byte blob, and
         # at 16 bytes or less a blob claims INTEGER for every SysV eightbyte
-        # where the record may have SSE ones. The thunk lays the record out from
-        # DWARF. (Above 16 bytes the record crosses in memory on both ABIs and
-        # the blob's bytes are exact. Unions and bitfield records, the `mutable`
-        # ones, never reach here: `_record_natural_layout` rejects them.)
+        # where the record may have SSE ones. So does a field written as bytes
+        # over a float or double. The thunk lays the record out from DWARF.
+        # (Above 16 bytes the record crosses in memory on both ABIs and the
+        # bytes are exact. Unions and bitfield records, the `mutable` ones,
+        # never reach here: `_record_natural_layout` rejects them.)
         use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs; record_abi=record_abi) ||
                             _crosses_small_blob(func, dwarf_structs, record_abi, _blob_names)
 
@@ -3732,6 +3876,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # it would shadow the library's own `setproperties` for every call. The
     # per-struct `setproperty` methods are safe either way (they dispatch on a
     # concrete blob type, and `_dedup_method_chunks` settles exact collisions).
+    field_setters_emitted && push!(struct_chunks, _field_setter_helpers_chunk())
     if blob_setters_emitted
         if !("setproperties" in all_exports)
             push!(struct_chunks, _blob_setproperties_chunk())

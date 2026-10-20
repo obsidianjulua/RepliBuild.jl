@@ -2624,3 +2624,50 @@ setproperties(x; kwargs...) =
     foldl((acc, kv) -> setproperty(acc, first(kv), last(kv)), pairs(kwargs); init = x)
 
 """
+
+"""
+    _field_setter_chunk(name) -> String
+
+`setproperty` and the `x.f = v` diagnostic for a C++ struct emitted with real
+fields: the API a byte blob gets from `_blob_setter_chunk`, so a record keeps it
+when the struct emitter can lay it out instead. llama.cpp's
+`llama_context_params` was a blob while its enum members had no size in the
+metadata, and the Hub's consumers set its fields with `setproperties`. Both
+methods call helpers from `_field_setter_helpers_chunk`.
+"""
+_field_setter_chunk(name::String) = """
+setproperty(x::$name, s::Symbol, v) = _rb_setfield_copy(x, s, v)
+Base.setproperty!(x::$name, s::Symbol, v) = _rb_immutable_setfield_error($name, s)
+
+"""
+
+"""
+    _field_setter_helpers_chunk() -> String
+
+What the `_field_setter_chunk` methods call, emitted once. Every name is
+qualified: the module's namespace belongs to the library.
+"""
+_field_setter_helpers_chunk() = """
+\"\"\"
+    setproperty(x, s::Symbol, v) -> typeof(x)
+
+Return a copy of the struct `x` with field `s` set to `v`, converted to the
+field's type. Structs cross the ABI by value, so they are immutable: this
+returns a new value rather than mutating `x`. See also `setproperties`.
+\"\"\"
+function setproperty end
+
+function _rb_setfield_copy(x::T, s::Symbol, v) where {T}
+    i = Base.fieldindex(T, s, false)
+    i == 0 && Base.error("type ", T, " has no settable field ", s)
+    ft = Base.fieldtype(T, i)
+    nv = Core.isa(v, ft) ? v : Base.convert(ft, v)
+    return T(Base.ntuple(j -> j == i ? nv : Base.getfield(x, j), Base.fieldcount(T))...)
+end
+
+_rb_immutable_setfield_error(T, s) =
+    Base.error("`", T, "` is immutable (it crosses the ABI by value), so `x.", s, " = ...` ",
+               "cannot work. Use `x = setproperty(x, :", s, ", v)` or `x = setproperties(x; ",
+               s, " = v)`.")
+
+"""

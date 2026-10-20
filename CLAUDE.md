@@ -379,19 +379,23 @@ the test named when you touch the area.
   `::Any` in a Julia signature is normal. (`test_wrapper_type_bindings.jl`.)
 - **A Tier-3 by-value record is classified per target, from its fields' type
   alignment, never a member's size** (C1: `{ char; short[3]; }` got an sret
-  the callee never reads). `_c_return_in_memory`, `_c_explicit_sret`,
-  `_c_blob_param_misclassified` and `_c_register_class_misstated` are the
-  answers, `_c_has_unaligned_field` is the walk, and `_c_record_abi()` is the
-  only place GeneratorC reads the target. Register-class traps (a float-bearing
-  blob, a mixed float/integer region) are SysV's only: Win64 crosses a record
-  by size alone on both sides. Whether a record is packed at all is
-  `_record_natural_layout`, the one answer for `is_c_lto_safe` and
-  `_is_struct_unsafe`. GeneratorCpp sends a function that crosses a ≤16-byte
-  byte blob by value to Tier 2: a blob is not the C layout. BRANCH 0 runs only
-  when no blob trap fired and never applies the `long double` trap, so clearing
-  a trap can route a function with a `long double` parameter into it, and then
-  the wrapper is refused (abi_fuzz C2). (`test_c_sret_classification.jl`,
-  `test_c_sret_abi.jl`, `test_record_natural_layout.jl`.)
+  the callee never reads).
+  - `_c_return_in_memory`, `_c_explicit_sret`, `_c_blob_param_misclassified` and
+    `_c_register_class_misstated` are the answers, and `_c_has_unaligned_field`
+    is the walk. `_c_record_abi()` is the only place GeneratorC reads the target.
+  - Register-class traps (a float-bearing blob, a mixed float/integer region) are
+    SysV's only: Win64 crosses a record by size alone on both sides.
+  - Whether a record is packed at all is `_record_natural_layout`, the one answer
+    for `is_c_lto_safe` and `_is_struct_unsafe`.
+  - GeneratorCpp sends to Tier 2 a function that crosses by value a ≤16-byte
+    byte blob, or a record whose fields put bytes over a `float` or `double`,
+    because bytes classify INTEGER (`_crosses_small_blob`).
+  - BRANCH 0 runs only when no blob trap fired, and it never applies the
+    `long double` trap. Clearing a trap can therefore route a function with a
+    `long double` parameter into it, and then the wrapper is refused (abi_fuzz C2).
+
+  Tests: `test_c_sret_classification.jl`, `test_c_sret_abi.jl`,
+  `test_record_natural_layout.jl`.
 - **A hidden return buffer has the record's alignment.** Julia's own sret
   buffer is aligned to the stand-in (a byte blob: 1), and the callee may store
   with `movaps`. `_c_record_align` is the record's (the parser records
@@ -409,7 +413,8 @@ the test named when you touch the area.
   only the call body. `char*` returns become `Union{String,Nothing}` plus a `_ptr`
   sibling on every tier. (`test_cstring_policy.jl`.)
 - Blob structs get `setproperty`/`setproperties` built in the same loop as the getters.
-  `with()` forwards to them.
+  `with()` forwards to them. C++ field structs get `setproperty` too
+  (`_field_setter_chunk`), so a record keeps its setters when it stops being a blob.
 - **Function names come from `_julia_function_name` only.** That covers both
   generators, both varargs paths, and GeneratorCpp's proxy and deleter
   references. It is total: a catch-all after the curated list, an empty name
@@ -456,8 +461,17 @@ the test named when you touch the area.
   cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk
   reads a Julia value at DWARF offsets (`_dwarf_member_offsets`), never at offsets
   derived from alignment rules. A named union is `mutable`, so it embeds as a pointer;
-  any struct holding one is a blob.
+  any struct holding one is a blob, checked by type: an 8-byte union at an aligned
+  offset fits the proof's pointer measure. In GeneratorCpp a field takes a type only when
+  the proof can measure it and it has the member's DWARF size (`_member_field`);
+  otherwise the field is the member's bytes. A member with no offset (a static,
+  `__clang_vtable`) is not a field. A forward declaration never reuses an emitted
+  enum's name: Julia 1.12 lets `struct X end` replace `@enum X`.
 - `!jlcs.c_struct` must never appear inside an `!llvm.struct` body; inline the literal.
+- `jlcs.marshal_arg`'s `memberTypes` are the packed body's own fields, read off
+  that type. Spelled from the C types, a record, enum or array-of-records member
+  does not type-check, and the module fails to translate, taking every thunk in
+  the library with it (`test_jlcs_producers.jl` §H).
 - **A by-value record crosses a thunk with its layout, as nothing, by address, or not
   at all.** Nothing means an empty class, which SysV gives no class. By address means
   DWARF `DW_CC_pass_by_reference`, and such a return goes through an sret slot, first
@@ -692,11 +706,6 @@ DWARF-resolved destructors — **is** built.)
 - By-value toolchain types (`std::string_view`, `back_insert_iterator`, …) have ABI
   facts in `record_abi` but no layout, so their functions are ABI traps. Keeping the
   layout of records reachable by value would make them callable (2026-09-27).
-- Member sizes for enum members and for members whose type is a typedef of a
-  record. The DWARF parser records them as 0, so GeneratorCpp's layout proof gives
-  up and emits a natural record as a byte blob; at 16 bytes or less its functions
-  then go to Tier 2 (`_crosses_small_blob`). Recording those sizes would keep them
-  on ccall (2026-10-18).
 - `long double` through a C++ thunk as `f80` (`fpext`/`fptrunc` against `Float64`).
   It is an ABI trap on both tiers today; the C bucket has no thunks.
 - Default `-Xclang -fno-use-ctor-homing` for C++ builds. It restores the definition of
