@@ -467,6 +467,16 @@ the test named when you touch the area.
   otherwise the field is the member's bytes. A member with no offset (a static,
   `__clang_vtable`) is not a field. A forward declaration never reuses an emitted
   enum's name: Julia 1.12 lets `struct X end` replace `@enum X`.
+- **A named union or bitfield record moves by value only through its bytes.** Both
+  are a `mutable struct` whose one field is the C bytes.
+  - `_invoke_call` allocates one for a Tier 2 sret return. `Ref{T}()` is an
+    undefined reference for a mutable `T` (abi_fuzz X1).
+  - An accessor builds one from bytes (`jl_byte_records`), never with
+    `unsafe_load(Ptr{T})`, which reads C's bytes as a reference (X5).
+  - A bitfield accessor gathers exactly the bytes the field spans, into an integer
+    wide enough for them (X6).
+
+  (`test_cpp_mutable_records.jl`.)
 - `!jlcs.c_struct` must never appear inside an `!llvm.struct` body; inline the literal.
 - `jlcs.marshal_arg`'s `memberTypes` are the packed body's own fields, read off
   that type. Spelled from the C types, a record, enum or array-of-records member

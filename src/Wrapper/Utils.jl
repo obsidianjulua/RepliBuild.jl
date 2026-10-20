@@ -2541,6 +2541,11 @@ function _blob_store_expr(m_name::AbstractString, offset::Int, kind::Symbol;
     elseif kind === :blob_struct_full
         "unsafe_store!(Ptr{NTuple{$nested_size,UInt8}}(p + $offset), " *
         "getfield(convert($struct_name, v), :_data))"
+    elseif kind === :mutable_record
+        # A named union or a bitfield record: a `mutable struct` whose single
+        # field is its C bytes (`data` or `_data`), so take field 1.
+        "unsafe_store!(Ptr{NTuple{$nested_size,UInt8}}(p + $offset), " *
+        "getfield(convert($struct_name, v), 1))"
     elseif kind === :blob_struct_partial
         # The getter zero-pads a member the struct has no room for; the setter
         # must write only the bytes that FIT or it scribbles over the next one.

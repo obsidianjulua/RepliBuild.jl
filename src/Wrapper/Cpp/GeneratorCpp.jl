@@ -1369,6 +1369,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # DWARF one, and an enum with no enumerators is not emitted at all.
         jl_layouts = Dict{String,Tuple{Int,Int}}(emitted_enum_layout)
         jl_mutable = Set{String}()
+        # Every record emitted as a `mutable struct` of its C bytes (a named
+        # union, a bitfield record), with its size. An accessor must build one
+        # from bytes: `unsafe_load(Ptr{T})` reads C's bytes as an object
+        # reference (abi_fuzz X5).
+        jl_byte_records = Dict{String,Int}()
         for struct_name in sorted_structs
             # Skip if this is actually an enum (enums are generated separately)
             if struct_name in enum_names
@@ -1444,6 +1449,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     # As a FIELD: the anonymous one is its bytes, the named one a reference.
                     anon_union ? (jl_layouts[julia_struct_name] = (byte_size, 1)) :
                                  push!(jl_mutable, julia_struct_name)
+                    anon_union || (jl_byte_records[julia_struct_name] = byte_size)
 
                     push!(struct_chunks, """
                     # C union: $struct_name (size $byte_size bytes)
@@ -1573,6 +1579,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         $julia_struct_name() = $julia_struct_name(ntuple(i -> 0x00, $byte_size))
 
                         """)
+                        jl_byte_records[julia_struct_name] = byte_size
 
                         # Generate accessor functions for each member
                         for member in members
@@ -1640,13 +1647,36 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                                     """)
                                 else
-                                    # Multi-byte bitfield — use unsafe_load for the containing integer
+                                    # Multi-byte bitfield. The bytes it spans are assembled
+                                    # into an integer wide enough for them. A fixed UInt32
+                                    # load threw on every field wider than 32 bits (its mask
+                                    # does not fit) and could read past the struct; it had no
+                                    # setter either (abi_fuzz X6).
+                                    span = bit_within_byte + bit_size
+                                    nbytes = cld(span, 8)
+                                    raw_t = span <= 16 ? "UInt16" : span <= 32 ? "UInt32" :
+                                            span <= 64 ? "UInt64" : "UInt128"
+                                    ret_t = bit_size <= 32 ? "UInt32" : "UInt64"
+                                    mask_lit = "$raw_t(0x" * string((UInt128(1) << bit_size) - 1, base = 16) * ")"
+                                    gather(src) = join(["($raw_t($src[$(byte_pos + 1 + k)]) << $(8k))"
+                                                        for k in 0:nbytes-1], " | ")
+                                    scatter = join(["    data[$(byte_pos + 1 + k)] = (raw >> $(8k)) % UInt8"
+                                                    for k in 0:nbytes-1], "\n")
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::UInt32
-                                        p = pointer(collect(s._data)) + $byte_pos
-                                        raw = unsafe_load(Ptr{UInt32}(p))
-                                        return (raw >> $bit_within_byte) & UInt32($(mask))
+                                    function get_$(safe_member)(s::$julia_struct_name)::$ret_t
+                                        raw = $(gather("s._data"))
+                                        return $ret_t((raw >> $bit_within_byte) & $mask_lit)
+                                    end
+
+                                    \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name`.\"\"\"
+                                    function set_$(safe_member)!(s::$julia_struct_name, v::Integer)
+                                        data = collect(s._data)
+                                        raw = $(gather("data"))
+                                        m = $mask_lit << $bit_within_byte
+                                        raw = (raw & ~m) | (((v % $raw_t) & $mask_lit) << $bit_within_byte)
+                                    $scatter
+                                        s._data = NTuple{$byte_size, UInt8}(data)
                                     end
 
                                     """)
@@ -1656,7 +1686,21 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             else
                                 # Non-bitfield member in a bitfield struct — byte-offset accessor
                                 byte_off = parse(Int, get(member, "offset", "0x0"))
-                                if julia_type != "Any" && !startswith(julia_type, "NTuple{")
+                                if haskey(jl_byte_records, julia_type)
+                                    # A named union or bitfield record is a `mutable struct`:
+                                    # build it from its bytes (abi_fuzz X5).
+                                    nb = jl_byte_records[julia_type]
+                                    if byte_off + nb <= byte_size
+                                        push!(struct_chunks, """
+                                        \"\"\"Get non-bitfield member `$member_name` from `$julia_struct_name`.\"\"\"
+                                        function get_$(safe_member)(s::$julia_struct_name)::$julia_type
+                                            return $julia_type(ntuple(i -> s._data[$byte_off + i], $nb))
+                                        end
+
+                                        """)
+                                        push!(exports, "get_$(safe_member)")
+                                    end
+                                elseif julia_type != "Any" && !startswith(julia_type, "NTuple{")
                                     push!(struct_chunks, """
                                     \"\"\"Get non-bitfield member `$member_name` from `$julia_struct_name`.\"\"\"
                                     function get_$(safe_member)(s::$julia_struct_name)::$julia_type
@@ -2008,6 +2052,20 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     end""")
                                                     push!(_setter_branches, _blob_store_expr(m_name, m_offset, :blob_struct_partial;
                                                         struct_name=m_sanitized, nested_size=nested_bs, actual_size=actual_size))
+                                                end
+                                            elseif haskey(jl_byte_records, m_sanitized)
+                                                # A named union or bitfield record is a `mutable
+                                                # struct`; `unsafe_load(Ptr{T})` would read C's bytes
+                                                # as an object reference (abi_fuzz X5). Build it from
+                                                # its bytes, and store its bytes back.
+                                                if nested_bs <= available_size
+                                                    push!(_accessor_branches, """
+                                    if s === :$m_name
+                                        bytes = GC.@preserve x ntuple(i -> unsafe_load(Ptr{UInt8}(pointer_from_objref(Ref(x._data)) + $m_offset + i - 1)), $nested_bs)
+                                        return $(m_sanitized)(bytes)
+                                    end""")
+                                                    push!(_setter_branches, _blob_store_expr(m_name, m_offset, :mutable_record;
+                                                        struct_name=m_sanitized, nested_size=nested_bs))
                                                 end
                                             else
                                                 # Target is a normal typed struct — unsafe_load directly

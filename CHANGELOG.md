@@ -4,6 +4,28 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 2 and C++ accessors: unions and bitfield records move through their bytes; wide bitfields (abi_fuzz X1, X5, X6; 2026-10-20)
+
+The C++ generator emits a named union and a bitfield record as a `mutable struct` whose one field is the record's C bytes. In Julia such a type is a reference, and three places moved one as if it were not.
+
+- **X1: every Tier 2 function returning a union or bitfield record threw `UndefRefError`.**
+  - `JITManager._invoke_call` allocated the sret buffer as `Ref{T}()`, which is an undefined reference for a mutable `T`, and the ccall conversion threw.
+  - It now allocates the record, zeroes it, and hands the thunk the address of its bytes, both through the Windows guard and in the direct call.
+  - A mutable type with no inline byte layout is refused before the call.
+- **X5: accessors read a union or bitfield-record member with `unsafe_load(Ptr{T}(p))`**, which reads C's bytes as an object reference.
+  - The bitfield-record accessor and the blob `getproperty` now build such a member from its bytes.
+  - The blob setter stores the bytes back (new `_blob_store_expr` kind `:mutable_record`).
+- **X6: bitfields wider than 32 bits.**
+  - The getter loaded a `UInt32` and masked it with a mask that does not fit, so it always threw. It could also read past the record, and there was no setter.
+  - The getter and a new setter gather exactly the bytes the field spans, into an integer wide enough for them. A field over 32 bits reads as `UInt64`.
+- X4's repro already passed on this base (ef8f822 sizes the member, which then degrades to bytes).
+- **Tests:** `test_cpp_mutable_records.jl` (runtests). It evaluates the generated accessors in a scratch module and returns a record through `_invoke_call` from a Julia callback standing in for the thunk.
+  - With each fix removed in turn, 1, 2 and 2 checks fail.
+  - The repros `X1-48-cpp-call_f1`, `X5-73-cpp-access_R3` and `X6-31-cpp-access_R4` pass.
+- **Fuzzer, compared with the base** (C++ mode, seeds 1–40, Julia 1.13.2):
+  - Failures drop from 153 to 110; 44 checks go from FAIL to PASS.
+  - One went the other way: `9/cpp ret/f5`, a crash inside a callee whose call check fails on both runs. That callee takes a bitfield record by value (X2, still open here), so whether it crashes depends on what the misplaced registers hold.
+
 ### Enum and typedef'd members have a size, and the C++ struct emitter can take them (2026-10-18)
 
 - **`parse_dwarf_dump` gave three kinds of member size 0**: an enum member, a
