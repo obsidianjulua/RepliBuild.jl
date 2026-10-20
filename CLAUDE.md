@@ -147,8 +147,9 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   Final `.ll → .so` still shells to clang. Check `DW_AT_producer` (`…jl`) to prove a
   C artifact came from the JLL.
 - **C++ / Tier 2 uses system LLVM+MLIR 21+** (23.1.3 under MSYS2 CLANG64 on the
-  reference host, which is Windows; no Linux host verifies Tier 2 today) for the
-  dialect and the external pipeline. `libJLCS.so` (`libJLCS.dll` on Windows: it
+  reference host, which is Windows; on Linux, CI's `tier2-linux.yml` runs devtests
+  against apt.llvm.org's LLVM/MLIR 22 and 23) for the dialect and the external
+  pipeline. `libJLCS.so` (`libJLCS.dll` on Windows: it
   imports `libLLVM-<major>.dll` and links MLIR statically) is a gitignored build
   artifact pinned to the installed MLIR minor SONAME: rebuild after a minor upgrade. A patch
   bump inside a minor needs nothing. `deps/build.jl` builds it at install time when
