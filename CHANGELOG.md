@@ -4,6 +4,28 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 3: one refused function stays one; records are spelled as declared; module names are identifiers (abi_fuzz C2, I1, M1; 2026-10-20)
+
+- **A `long double` parameter could refuse the whole wrapper (C2).**
+  - BRANCH 0, the explicit-sret path, never applied the `long double` trap.
+  - So a function that took a `long double` and returned a record through a hidden pointer got a ccall that declared the `long double` as `Any`, and `_assert_no_any_ccall_argument` refused the whole module.
+  - BRANCH 0 now leaves such a function to BRANCH 2, which emits its trap stub, and the rest of the library wraps.
+  - No `long double` support was added.
+- **A record named with a Julia keyword broke the wrapper (I1).**
+  - Records and enums are declared under `_sanitize_c_type_name` of their C name (`baremodule` becomes `c_baremodule`).
+  - Signatures, however, took the metadata's raw spelling unless it held `<>`, `::` or other non-identifier characters. `ccall(..., baremodule, ...)` reached a type position, and the module failed to parse.
+  - GeneratorC now re-spells return and parameter types through `_as_declared`, a table of the names the sanitizer changes. That covers `Ptr{…}`/`Ref{…}` and `Any` parameters named by their C type.
+  - Names the sanitizer leaves alone are untouched, so ordinary wrappers are byte-identical.
+- **A project directory starting with a digit gave a module that did not load (M1).**
+  - `get_module_name` produced `3cCallF21`, and `module 3cCallF21` parses as a module named `3`.
+  - The derived name now gets a `_` prefix, or becomes `Wrapper` when nothing is left.
+  - `_assert_wrapper_parses` now refuses a module whose name is not an identifier.
+- **SysV: a blob return of 16 bytes or less whose fields' alignment cannot be proven is refused**, as the parameter path already did. An unaligned field would make it MEMORY class while its byte image comes back in registers. Win64 is unaffected.
+- **Tests:**
+  - `test_c_sret_classification.jl` covers C2, I1 and the SysV case, for both ABIs. `test_function_name_derivation.jl` covers M1.
+  - With each fix removed in turn, 6, 10, 2, 3 and 1 checks fail.
+  - The fuzzer repros `C2-31-c-load` and `I1-11n-c-load` pass.
+
 ### Enum and typedef'd members have a size, and the C++ struct emitter can take them (2026-10-18)
 
 - **`parse_dwarf_dump` gave three kinds of member size 0**: an enum member, a

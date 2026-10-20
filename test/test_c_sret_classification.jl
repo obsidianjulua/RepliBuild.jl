@@ -139,6 +139,13 @@ const _SRET_STRUCTS = Dict{String,Any}(
     # A member type nothing can measure: the size bounds the alignment.
     "Mys48" => _srec(48, _sm("q", "Any", "Mystery", "0x0", 0)),
     "Mys24" => _srec(24, _sm("q", "Any", "Mystery", "0x0", 0)),
+    # abi_fuzz I1: a record named with a Julia keyword is declared
+    # `c_baremodule`, and every signature must spell it that way.
+    "baremodule" => _srec(4, _sm("nothing", "Cint", "int", "0x0", 4)),
+    # A ≤16-byte bitfield blob with no float member whose alignment nothing can
+    # prove (an unmeasurable 6-byte member). SysV could pass it in memory or in
+    # registers, so it is refused there; Win64 returns it by size.
+    "BFM12" => _srec(12, _sbit("b", "Cint", "int", 3, 0), _sm("q", "Any", "Mystery", "0x4", 6)),
 )
 
 # DW_AT_alignment as clang emits it, through the GNU binutils parser. clang
@@ -608,6 +615,16 @@ Contents of the .debug_info section:
             fn("make_mys24", "Mys24"),
             # A `long double` parameter: the x87 stub, never the buffer (C2).
             fn("ld_d4a", "D4A", Dict{String,Any}("name" => "x", "julia_type" => "Any", "c_type" => "long double")),
+            # ...nor BRANCH 0's explicit sret, whose ccall would declare the
+            # `long double` as `Any` and get the whole wrapper refused (C2).
+            fn("ld_pk17", "PK17", Dict{String,Any}("name" => "x", "julia_type" => "Any", "c_type" => "long double")),
+            fn("ld_p8", "P8", Dict{String,Any}("name" => "x", "julia_type" => "Any", "c_type" => "long double")),
+            # A keyword-named record by value, by pointer, and as an `Any` parameter (I1).
+            fn("kw_make", "baremodule"),
+            fn("kw_take", "Cint", rec_param("b", "baremodule")),
+            fn("kw_ptr", "Cint", rec_param("p", "Ptr{baremodule}")),
+            fn("kw_any", "Cint", Dict{String,Any}("name" => "a", "julia_type" => "Any", "c_type" => "baremodule")),
+            fn("make_bfm12", "BFM12"),
         ])
     libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
     gen(abi) = _SW.generate_introspective_module_c(cfg, libref, meta, "SretSynth",
@@ -659,7 +676,12 @@ Contents of the .debug_info section:
              ("make_nesta", :aligned, :aligned),# nested aligned record
              ("make_mys48", :aligned, :aligned),# unmeasurable member: aligned to 16 from the size
              ("make_mys24", :sret,   :sret),    # bound 8: Julia's Ref buffer, as before
-             ("ld_d4a",     :trap,   :trap)]    # long double: its x87 stub, not BRANCH 0 (C2)
+             ("ld_d4a",     :trap,   :trap),    # long double: its x87 stub, not BRANCH 0 (C2)
+             ("ld_pk17",    :trap,   :trap),    # was BRANCH 0's sret with an `Any` argument (C2)
+             ("ld_p8",      :trap,   :trap),    # same on SysV, where P8 is MEMORY (C2)
+             ("kw_make",    :ccall,  :ccall),   # 4-byte natural record: RAX on both (I1)
+             ("kw_take",    :ccall,  :ccall),
+             ("make_bfm12", :trap,   :ccall)]   # alignment unprovable: SysV refuses, Win64 by size
     checked = 0
     for (name, want_sysv, want_win64) in table
         @test (name, :sysv, form(sysv, name)) == (name, :sysv, want_sysv)
@@ -698,4 +720,20 @@ Contents of the .debug_info section:
     @test occursin("& ~UInt(15)", body(win64, "make_v4a"))
     # The long double function keeps its x87 stub and passes no `Any` to ccall.
     @test occursin("long double", body(win64, "ld_d4a")) && !occursin("ccall((", body(win64, "ld_d4a"))
+    for (code, abi) in ((sysv, :sysv), (win64, :win64)), f in ("ld_pk17", "ld_p8")
+        @test (abi, f, occursin("long double", body(code, f)) && !occursin("ccall((", body(code, f))) ==
+              (abi, f, true)
+    end
+    # I1: the keyword-named record is spelled as declared in every type position,
+    # so the module parses at all.
+    for (code, abi) in ((sysv, :sysv), (win64, :win64))
+        ex = Meta.parseall(code)
+        @test (abi, any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)) == (abi, false)
+        @test (abi, occursin("ccall((:kw_make, LIBRARY_PATH), c_baremodule, (), )", body(code, "kw_make"))) == (abi, true)
+        @test (abi, occursin("(c_baremodule,)", body(code, "kw_take"))) == (abi, true)
+        @test (abi, occursin("(Ptr{c_baremodule},)", body(code, "kw_ptr"))) == (abi, true)
+        @test (abi, occursin("(c_baremodule,)", body(code, "kw_any"))) == (abi, true)
+    end
+    @test occursin("returns `BFM12` by value", body(sysv, "make_bfm12"))
+    @test occursin("ccall((:make_bfm12, LIBRARY_PATH), BFM12, (), )", body(win64, "make_bfm12"))
 end
