@@ -1,0 +1,249 @@
+name: Tier 2 (Linux)
+
+# devtests.jl on Linux: the suite runtests.jl (test.yml) cannot run, because it
+# needs the JLCS dialect (libJLCS.so, built by src/mlir/build.sh), system
+# LLVM/Clang/MLIR and GNU binutils. Development happens on Windows, so this is
+# what exercises Tier 2 on Linux between runs on a Linux box.
+#
+# Every cell of the support window: system LLVM/MLIR 22 and 23 from apt.llvm.org,
+# times Julia 1.12 and 1.13 at test.yml's exact versions. The job is heavy (the
+# toolchain, the dialect build, every fixture), so it runs on demand and on pull
+# requests that touch what devtests covers, not on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm:
+        description: One LLVM/Clang/MLIR major to run (apt.llvm.org). Empty runs 22 and 23.
+        type: string
+        default: ''
+      julia:
+        description: One exact Julia version to run. Empty runs 1.12.7 and 1.13.2.
+        type: string
+        default: ''
+      skip_tests:
+        description: >-
+          REPLIBUILD_SKIP_TESTS: comma-separated devtests fixtures to skip while
+          they are known red (stress_test, mi_test, vi_test, stl_test, c_test,
+          c_abomination_test, callback_test). It does not reach the test_*.jl
+          files devtests includes.
+        type: string
+        default: ''
+  pull_request:
+    # What devtests exercises: every source directory, the module roots, the
+    # dependencies, the tests, and this file.
+    paths:
+      - 'src/mlir/**'
+      - 'src/IRGen/**'
+      - 'src/Builder/**'
+      - 'src/Wrapper/**'
+      - 'src/Debug/**'
+      - 'src/*.jl'
+      - 'test/**'
+      - 'Project.toml'
+      - '.github/workflows/tier2-linux.yml'
+
+# A new push to a pull request supersedes its running jobs. Manual runs never
+# cancel each other.
+concurrency:
+  group: tier2-linux-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write   # julia-actions/cache deletes the caches it supersedes
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  devtests:
+    name: devtests — LLVM ${{ matrix.llvm }}, Julia ${{ matrix.julia }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two supported majors of each. Not MIN_LLVM_VERSION
+        # (src/Builder/LLVMEnvironment.jl), which is the floor build.sh enforces.
+        # Julia versions are exact for the reason test.yml gives: the C bucket
+        # runs on each Julia's own libLLVM.
+        llvm: ${{ fromJSON(inputs.llvm && format('["{0}"]', inputs.llvm) || '["22", "23"]') }}
+        julia: ${{ fromJSON(inputs.julia && format('["{0}"]', inputs.julia) || '["1.12.7", "1.13.2"]') }}
+    env:
+      LLVM_MAJOR: ${{ matrix.llvm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # First, so a malformed input fails before the toolchain download.
+      - name: Check inputs
+        env:
+          SKIP: ${{ inputs.skip_tests }}
+        run: |
+          if [[ ! "$LLVM_MAJOR" =~ ^[0-9]+$ ]]; then
+            echo "::error::llvm takes a major version number, got '$LLVM_MAJOR'"
+            exit 1
+          fi
+          # devtests splits on ',' and compares names exactly, so a space would
+          # quietly skip nothing.
+          skip=${SKIP//[[:space:]]/}
+          if [[ ! "$skip" =~ ^[A-Za-z0-9_,]*$ ]]; then
+            echo "::error::skip_tests takes comma-separated fixture names, got '$SKIP'"
+            exit 1
+          fi
+          echo "REPLIBUILD_SKIP_TESTS=$skip" >> "$GITHUB_ENV"
+          if [ -n "$skip" ]; then
+            echo "::warning title=devtests::Skipping fixtures: $skip"
+          fi
+
+      - name: Install LLVM, Clang and MLIR from apt.llvm.org
+        id: llvm
+        run: |
+          . /etc/os-release
+          echo "codename=$VERSION_CODENAME" >> "$GITHUB_OUTPUT"
+
+          # Trust apt.llvm.org's archive key and nothing else, pinned by fingerprint.
+          key=/etc/apt/keyrings/apt.llvm.org.asc
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee "$key" > /dev/null
+          fpr=$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10; exit }')
+          if [ "$fpr" != 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421 ]; then
+            echo "::error::apt.llvm.org key fingerprint is '$fpr', expected 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
+            exit 1
+          fi
+          echo "deb [signed-by=$key] https://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$LLVM_MAJOR main" \
+            | sudo tee /etc/apt/sources.list.d/apt.llvm.org.list
+
+          # clang-N: clang and clang++.
+          # llvm-N-dev: LLVM's CMake package; pulls llvm-N (llvm-config, opt,
+          #   llvm-link, llvm-dwarfdump).
+          # libmlir-N-dev: MLIR's CMake package, headers and static libraries.
+          # mlir-N-tools: mlir-tblgen. find_package(MLIR) also checks that every
+          #   MLIR executable exists, so the dialect cannot configure without it.
+          # GNU binutils (readelf, nm, objdump) and cmake ship with the runner.
+          pkgs=("clang-$LLVM_MAJOR" "llvm-$LLVM_MAJOR-dev" "libmlir-$LLVM_MAJOR-dev" "mlir-$LLVM_MAJOR-tools")
+          # apt.llvm.org republishes its branches every few days, and an index
+          # caught mid-publish fails with a hash mismatch, so retry.
+          for attempt in 1 2 3; do
+            if sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends "${pkgs[@]}"; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::apt-get failed three times"
+              exit 1
+            fi
+            echo "::warning::apt-get failed (attempt $attempt), retrying in 30s"
+            sleep 30
+          done
+          echo "package=$(dpkg-query -W -f='${Version}' "llvm-$LLVM_MAJOR-dev")" >> "$GITHUB_OUTPUT"
+
+          # Unversioned names for build.sh and the test prerequisites. Nothing in
+          # this directory is called readelf, nm or objdump, so GNU binutils keep
+          # those names.
+          echo "/usr/lib/llvm-$LLVM_MAJOR/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain
+        id: toolchain
+        env:
+          CODENAME: ${{ steps.llvm.outputs.codename }}
+          PACKAGE: ${{ steps.llvm.outputs.package }}
+          JULIA: ${{ matrix.julia }}
+        run: |
+          llvm=$(llvm-config --version)
+          if [ "${llvm%%.*}" != "$LLVM_MAJOR" ]; then
+            echo "::error::llvm-config on PATH is $llvm ($(command -v llvm-config)), expected $LLVM_MAJOR"
+            exit 1
+          fi
+          echo "llvm=$llvm" >> "$GITHUB_OUTPUT"
+          for tool in llvm-config mlir-tblgen clang++ llvm-dwarfdump cmake readelf nm objdump; do
+            printf '%-15s %s\n' "$tool" "$(command -v "$tool")"
+          done
+          clang++ --version | head -n 1
+          cmake --version | head -n 1
+          readelf --version | head -n 1
+          {
+            echo "### LLVM $LLVM_MAJOR, Julia $JULIA"
+            echo "- Ubuntu $CODENAME, LLVM/Clang/MLIR $llvm (\`$PACKAGE\`)"
+            echo "- REPLIBUILD_SKIP_TESTS: \`${REPLIBUILD_SKIP_TESTS:-none}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # libJLCS is pinned to LLVM's minor SONAME and carries MLIR from the static
+      # libraries, so it is reused only for the same llvm-config version and the
+      # same dialect sources. Julia plays no part in it, so both Julia cells of
+      # one LLVM share it. Saved straight after the build rather than at the end
+      # of the job, so a red devtests run still keeps it.
+      - name: Restore libJLCS
+        id: jlcs
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            src/mlir/build/libJLCS.so*
+            src/mlir/build/jlcs_llvm_version
+          key: libJLCS-${{ steps.llvm.outputs.codename }}-llvm${{ steps.toolchain.outputs.llvm }}-${{ hashFiles('src/mlir/CMakeLists.txt', 'src/mlir/build.sh', 'src/mlir/*.td', 'src/mlir/IR/*.h', 'src/mlir/impl/*') }}
+
+      - name: Build the JLCS dialect
+        if: steps.jlcs.outputs.cache-hit != 'true'
+        working-directory: src/mlir
+        run: ./build.sh
+
+      - name: Save libJLCS
+        if: steps.jlcs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            src/mlir/build/libJLCS.so*
+            src/mlir/build/jlcs_llvm_version
+          key: ${{ steps.jlcs.outputs.cache-primary-key }}
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+
+      - name: Instantiate
+        shell: julia --project=. {0}
+        run: |
+          using Pkg
+          Pkg.instantiate()
+
+      # The dialect test files skip themselves when libJLCS is missing
+      # (TestSupport.requires), and devtests still passes. Before the long run,
+      # require the whole Tier 2 toolchain (check_environment), a library that
+      # loads and parses JLCS IR (test_dialect), and a build pipeline that
+      # resolves the LLVM installed above.
+      - name: Tier 2 is live
+        shell: julia --project=. {0}
+        run: |
+          using RepliBuild
+          major = ENV["LLVM_MAJOR"]
+          root = RepliBuild.LLVMEnvironment.find_system_llvm()
+          root === nothing && error("RepliBuild found no system LLVM")
+          found = strip(read(`$(joinpath(root, "bin", "llvm-config")) --version`, String))
+          startswith(found, major * ".") ||
+              error("RepliBuild resolved the system LLVM to $root ($found), expected LLVM $major")
+          status = RepliBuild.check_environment()
+          status.tier2_ready || error("check_environment(): Tier 2 is not ready (report above)")
+          RepliBuild.MLIRNative.test_dialect()
+
+      - name: devtests.jl
+        timeout-minutes: 120
+        run: julia --project=. test/devtests.jl
+
+      # Linux failures are rarely reproducible on the Windows dev box, so keep
+      # what the fixtures produced: wrappers, metadata, libraries and the MLIR a
+      # thunk's debug info points at.
+      - name: Upload fixture outputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-linux-llvm${{ matrix.llvm }}-julia${{ matrix.julia }}-attempt${{ github.run_attempt }}
+          path: |
+            test/*/julia/
+            test/*/replibuild.toml
+            test/*/.debug/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
