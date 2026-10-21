@@ -20,6 +20,10 @@ All notable changes to RepliBuild.jl are documented in this file.
   - `cpp_routing_test` gains the unions `U4` and `U12`, the bitfield record `BF8` and a `#pragma pack(4)` record `PK28`. `test_cpp_record_routing.jl` (devtests) checks that each routes to Tier 2 and calls each live.
   - `make_u4`, `make_u12` and `make_bf8` return each record by value through a thunk, live, and pass it back in. That takes X1 (the record Julia allocates) and X2 (the thunk receiving it as C returns it) together.
   - The repros `X2-18-cpp-call_f2-union`, `X2-53-cpp-call_f3-bitfield`, `X2-99-cpp-call_f1-bitfield` and `X8-49-cpp-call_f4` pass.
+- **Fuzzer, with this entry, X1/X5/X6 and C2/I1/M1 together, compared with the base on Julia 1.13.2:**
+  - C++ mode, seeds 1–40: failures drop from 153 to 15. 138 checks go from FAIL to PASS, 95 more than X1/X5/X6 alone, including `9/cpp ret/f5`, and none the other way.
+  - The 15 left are calls that pass a record holding a bitfield. Some members arrive wrong: the bitfield, or members laid out after it. Tier 3 passes the same calls (see Open problems in CLAUDE.md).
+  - C mode, seeds 1–106: no failures. Identifier mode, seeds 1–40: the same verdicts as C2/I1/M1 alone.
 
 ### Tier 2 and C++ accessors: unions and bitfield records move through their bytes; wide bitfields (abi_fuzz X1, X5, X6; 2026-10-20)
 
@@ -41,7 +45,7 @@ The C++ generator emits a named union and a bitfield record as a `mutable struct
   - The repros `X1-48-cpp-call_f1`, `X5-73-cpp-access_R3` and `X6-31-cpp-access_R4` pass.
 - **Fuzzer, compared with the base** (C++ mode, seeds 1–40, Julia 1.13.2):
   - Failures drop from 153 to 110; 44 checks go from FAIL to PASS.
-  - One went the other way: `9/cpp ret/f5`, a crash inside a callee whose call check fails on both runs. That callee takes a bitfield record by value (X2, still open here), so whether it crashes depends on what the misplaced registers hold.
+  - One went the other way: `9/cpp ret/f5`, a crash inside a callee whose call check fails on both runs. That callee takes a bitfield record by value (X2, open on that branch), so whether it crashes depends on what the misplaced registers hold.
 
 ### Tier 3: one refused function stays one; records are spelled as declared; module names are identifiers (abi_fuzz C2, I1, M1; 2026-10-20)
 

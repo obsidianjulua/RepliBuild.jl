@@ -700,6 +700,13 @@ check before claiming portability again; reading `.gitignore` does not settle it
   SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
   parameters are safe (LLVM's `byval` lowering puts the copy at 16). A SysV
   record holding a `long double` returns in `st0`, which no Julia type does.
+- **Tier 2: a by-value record holding a bitfield can lose members** (abi_fuzz,
+  2026-10-21; root cause open). Some members of such an argument arrive wrong:
+  the bitfield, or members laid out after it. In C++ seeds 1–40 on Windows that
+  is 15 calls, and Tier 3 passes all 15. Several of the records are packed, where
+  MinGW's MS-style bitfield layout differs from Itanium's (a `pack(1)`
+  `{unsigned; unsigned long long : 7}` is 12 bytes, not 5). Reproduce with
+  `abi_fuzz.jl --target=12/cpp/call/f3`.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles
