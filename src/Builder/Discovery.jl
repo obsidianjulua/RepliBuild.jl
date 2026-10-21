@@ -202,8 +202,12 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     end
 
     config_path = joinpath(target_dir, "replibuild.toml")
+    # An existing file is kept, but `build=true`/`wrap=true` still run: returning
+    # early used to skip them silently, so the documented one-shot call did
+    # nothing on every run after the first.
     if isfile(config_path) && !force
-        return config_path
+        println("RepliBuild | discover: keeping the existing $(basename(config_path)) (force=true rescans)")
+        return _build_and_wrap(config_path, build, wrap)
     end
 
     # Ingest-mode configs describe a pre-built library, not a source tree. Source
@@ -214,7 +218,7 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
             existing = TOML.parsefile(config_path)
             if haskey(existing, "ingest")
                 @info "Skipping discovery: $config_path is an ingest-mode config"
-                return config_path
+                return _build_and_wrap(config_path, build, wrap)
             end
         catch
             # Fall through to normal discovery if parsing fails
@@ -259,16 +263,20 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
         @debug "Auto-registration skipped" exception=e
     end
 
+    return _build_and_wrap(config_path, build, wrap)
+end
+
+# The optional tail of `discover`: `build`, then `wrap` (which needs `build`).
+function _build_and_wrap(config_path::String, build::Bool, wrap::Bool)::String
     if build
         build_func = getfield(parentmodule(@__MODULE__), :build)
-        library_path = build_func(config_path)
+        build_func(config_path)
 
         if wrap
             wrap_func = getfield(parentmodule(@__MODULE__), :wrap)
-            wrapper_path = wrap_func(config_path)
+            wrap_func(config_path)
         end
     end
-
     return config_path
 end
 

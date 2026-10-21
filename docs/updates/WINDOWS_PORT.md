@@ -30,6 +30,15 @@ the receiver-gate fixes, the tracked `CLAUDE.md`. The branch is a stale leftover
 
 ## Environment setup
 
+> **Superseded.** The current setup is
+> [docs/src/install.md](../src/install.md) (Windows). The steps below are as of
+> 2026-09-05 and are kept as the record of the port. Since then:
+> `.gitattributes` checks every file out with LF, so `core.autocrlf` no longer
+> matters; GNU `objdump` (`mingw-w64-x86_64-binutils`) is required, because
+> DWARF extraction stayed on GNU binutils rather than moving to llvm-dwarfdump;
+> MSYS2 ships LLVM/MLIR 23; Julia 1.12 and 1.13 are both supported; and
+> `C:\msys64\clang64\bin` must be on the Windows `PATH`.
+
 ### Git — before cloning
 
 ```powershell
@@ -370,7 +379,13 @@ marks build trees `ReadOnly + ReparsePoint` and `rm` fails with `EACCES`.
 
 ### Open
 
-- **`libunwind: pc not in table`** aborts the `devtests.jl` parent process after
+Nothing. The one item below was closed on 2026-09-07 by `f99e07f`: MLIR's
+RuntimeDyld handed the JIT's `.pdata` to `__register_frame`, the ELF path, which
+poisoned unwinding process-wide. The dialect now owns the LLJIT and registers
+`.pdata` with `RtlAddFunctionTable` (`JlcsJIT.cpp`); `test/test_jit_unwind.jl`
+covers it.
+
+- *(closed)* **`libunwind: pc not in table`** aborted the `devtests.jl` parent process after
   the callback fixture, in some runs, before the last two sections. Zero test
   failures in every run — every assertion that executes passes — and it does not
   reproduce standalone (callback verify is 3/3 over repeated runs) nor when the

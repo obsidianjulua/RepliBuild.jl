@@ -3,7 +3,8 @@
 RepliBuild runs on **Linux** (ELF `.so`) and **Windows** (PE `.dll`, under
 `x86_64-w64-windows-gnu` — mingw via MSYS2 CLANG64, not MSVC). Both read DWARF
 through GNU binutils. macOS is refused at load: the AAPCS64 ABI classifier is
-not built, so arm64 Mach-O has no struct-passing rules to apply.
+not built, so arm64 Mach-O has no struct-passing rules to apply. This manual
+writes `.so`; on Windows read `.dll`.
 
 ```julia
 using Pkg
@@ -12,62 +13,98 @@ using RepliBuild
 RepliBuild.check_environment()
 ```
 
-`check_environment()` prints what this machine can do and how to install anything
-missing. `status.ready` means C builds will work. `status.tier2_ready` means C++
-and the hard ABI cases will work too.
+`Pkg.add` installs the newest registered release. This manual is built from
+`main`, so it can describe changes that release does not have yet:
+`pkgversion(RepliBuild)` says which version you have, and the
+[Changelog](release-notes.md) says what each one changed.
+
+`check_environment()` probes every tool a build runs and prints how to install
+whatever is missing. `status.ready` means C builds will work. `status.tier2_ready`
+means C++ and the hard ABI cases (Tier 2) will work too.
+
+**Julia.** CI tests Julia 1.12 and 1.13. `Project.toml` still admits 1.10 and
+1.11, which nothing tests.
 
 ## C libraries
 
-On Linux, nothing beyond Julia 1.10+. Compilation uses the Clang JLL; linking
-runs in-process on Julia's own libLLVM. If `using RepliBuild` loads, you can
-wrap C.
+**Linux:** GNU binutils (`readelf`, `nm`), which almost every distribution
+installs. Nothing else: compilation uses the Clang JLL, and linking runs
+in-process on Julia's own libLLVM.
 
-On Windows the Clang JLL needs a sysroot. It is a bare compiler artifact — no
-libc headers, no CRT — so it borrows MSYS2 CLANG64's. That is found from the
-on-`PATH` clang automatically; `REPLIBUILD_C_SYSROOT` overrides it, and a
-candidate is accepted only if it really holds `include/math.h`.
+**Windows:** MSYS2 with its CLANG64 environment, and GNU `objdump` — see
+[Windows](#Windows) below. The Clang JLL is a bare compiler artifact, with no
+libc headers and no CRT, so it borrows the CLANG64 sysroot. It finds that through
+the `clang` on `PATH`, then under `MSYS2_ROOT` (default `C:\msys64`);
+`REPLIBUILD_C_SYSROOT` overrides both, and a candidate is accepted only if it
+really holds `include/math.h`.
 
 ## C++ libraries
 
-C++ needs a system LLVM/MLIR **21+** toolchain (verified against 23.1.3 under
-MSYS2 CLANG64, and 22.x on Linux before that), CMake 3.20+, `clang++`,
-`mlir-tblgen`, and the JLCS dialect built once:
+C++ needs a system LLVM/MLIR **21 or newer** (verified against 23.1.3 under
+MSYS2 CLANG64, and 22.x on Linux), CMake 3.20+, and the JLCS dialect built
+against that LLVM (below).
+
+Put LLVM's `bin` directory on `PATH`, so that `llvm-config`, `clang++`,
+`mlir-tblgen` and `llvm-dwarfdump` resolve to it. A C++ wrapper runs
+`llvm-dwarfdump` by that name when it loads, unless it was built with AOT
+thunks. apt.llvm.org packages keep those names in `/usr/lib/llvm-<N>/bin`.
+
+OS-specific install hints (`check_environment()` prints the same ones):
 
 ```bash
-cd src/mlir && ./build.sh
-```
-
-That writes `src/mlir/build/libJLCS.so` (gitignored). A fresh clone has no
-dialect `.so` — C++ wrapping fails in a way that looks like a regression until
-you build it.
-
-That writes `src/mlir/build/libJLCS.dll` on Windows — CMake names the target by
-host convention, so the extension follows the host and `MLIRNative` looks for it
-with `Libdl.dlext`.
-
-OS-specific install hints (also printed by `check_environment()`):
-
-```bash
-# Ubuntu/Debian
+# Ubuntu/Debian — what the Tier 2 Linux CI job installs
 wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 21
+sudo apt install llvm-21-dev libmlir-21-dev mlir-21-tools
+export PATH="/usr/lib/llvm-21/bin:$PATH"
 
 # Fedora/RHEL
-sudo dnf install llvm21-devel mlir21-devel clang21-devel
+sudo dnf install llvm-devel mlir-devel clang-devel
 
-# Windows — MSYS2 CLANG64 shell
-pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir \
-                   mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja \
-                   mingw-w64-x86_64-binutils
+# Arch
+yay -S llvm mlir
 ```
 
-`mingw-w64-x86_64-binutils` is the GNU `objdump` that DWARF extraction needs, from
-the MINGW64 tree on purpose: in CLANG64 "binutils" is llvm-objdump, whose dump
-format RepliBuild rejects. It is found by absolute path from any shell. Put
-`C:\msys64\clang64\bin` on the Windows `PATH` as well, so Julia finds the
-toolchain and the libraries `libJLCS.dll` imports.
+On Windows, the [Windows](#Windows) steps below install all of it.
 
-Put `llvm-config` and `clang++` on `PATH`. Versioned names (`llvm-config-21`,
-`clang++-21`) are found automatically, and so is a `.exe` suffix.
+### The JLCS dialect
+
+The dialect is a library, `libJLCS.so` (`libJLCS.dll` on Windows). It is not
+shipped, because it links against your system MLIR. It is built into the
+installed package, under `src/mlir/build/`. To find that folder:
+
+```julia
+joinpath(pkgdir(RepliBuild), "src", "mlir")
+```
+
+- **Linux:** `Pkg.add` builds it when `cmake`, `llvm-config` and `mlir-tblgen`
+  are on `PATH`. Installed LLVM/MLIR afterwards? Run `Pkg.build("RepliBuild")`.
+  Pkg writes the build's output to a log file (it prints the path), not to the
+  REPL, so check the result with `check_environment()`.
+- **Windows:** build it yourself, once, from an **MSYS2 CLANG64** shell.
+  `Pkg.build` cannot do it, because it does not run in a CLANG64 shell. Write the
+  path with forward slashes, since bash strips backslashes:
+
+  ```bash
+  cd "C:/Users/<you>/.julia/packages/RepliBuild/<slug>/src/mlir" && ./build.sh
+  ```
+
+  `replace(joinpath(pkgdir(RepliBuild), "src", "mlir"), '\\' => '/')` prints that
+  path.
+- **From a clone of the repository:** `cd src/mlir && ./build.sh`.
+
+Build it again:
+
+- **after a system LLVM/MLIR upgrade that changes the minor version.** The library is
+  pinned to the MLIR it was built against, and `check_environment()` reports a
+  mismatch. On Linux, `Pkg.build("RepliBuild")` rebuilds a library that no
+  longer loads.
+- **on Windows, after upgrading RepliBuild.** Each version installs into a new
+  folder, which has no dialect library yet. On Linux, Pkg builds it for the new
+  version.
+
+A C++ wrapper needs the dialect when it **runs**, not only when it is
+generated, with JIT and AOT thunks alike — see
+[Ship a package](using-wrappers.md#Load-time).
 
 ## Windows
 
@@ -76,24 +113,44 @@ UCRT64. It is the `x86_64-w64-windows-gnu` target that matches Julia's own mingw
 build (so a wrapper `.dll` shares the process's C++ ABI), and it is the only
 MSYS2 repo carrying MLIR.
 
-Before cloning:
+1. Install MSYS2 from [msys2.org](https://www.msys2.org). The default location,
+   `C:\msys64`, is the one RepliBuild looks in; set `MSYS2_ROOT` if you choose
+   another.
+2. Open **MSYS2 CLANG64** from the Start menu and run `pacman -Syu`. It closes
+   the shell partway through; reopen it and repeat until there is nothing left
+   to do.
+3. Install the toolchain:
 
-```powershell
-git config --global core.longpaths true
-```
+   ```bash
+   pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir \
+                      mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja \
+                      mingw-w64-x86_64-binutils
+   ```
 
-Line endings take care of themselves: the repository's `.gitattributes` checks
-every text file out with LF whatever `core.autocrlf` says. Without it, CRLF
-corrupted `src/mlir/build.sh`, and MSYS2 bash then failed with
-`$'\r': command not found`, which reads as a broken script rather than a
-line-ending problem.
+   `mingw-w64-x86_64-binutils` is the GNU `objdump` that DWARF extraction
+   needs, from the MINGW64 tree on purpose: in CLANG64, "binutils" is
+   llvm-objdump, whose dump format RepliBuild rejects. RepliBuild finds it at
+   `C:\msys64\mingw64\bin\objdump.exe` from any shell; `REPLIBUILD_OBJDUMP`
+   names a different program.
+4. Add `C:\msys64\clang64\bin` to the Windows `PATH`, then restart Julia. Julia
+   finds the toolchain through it, and `libJLCS.dll` imports `libLLVM-<N>.dll`
+   and `libc++.dll` from it. Julia itself can run from any shell or editor; it
+   does not have to be started from MSYS2.
+5. For C++, build the dialect ([above](#The-JLCS-dialect)).
 
-`src/mlir/build.sh` is bash and runs as-is under MSYS2. `Pkg.build` cannot run it
-on Windows, because it does not run in a CLANG64 shell: it reports whether
-`libJLCS.dll` is already built and loadable and otherwise points back here.
+To work from a clone, run `git config --global core.longpaths true` before
+cloning. Line endings take care of themselves: the repository's
+`.gitattributes` checks every text file out with LF, whatever `core.autocrlf`
+says. Without it, CRLF corrupted `src/mlir/build.sh`, and MSYS2 bash then
+failed with `$'\r': command not found`.
+
+**Smart App Control.** On Windows 11, Smart App Control (or another App Control
+policy) can refuse to load the libraries RepliBuild builds, because they are new
+and unsigned. [Troubleshooting](troubleshooting.md#Build-and-environment) says
+how to recognise it.
 
 [WINDOWS_PORT.md](https://github.com/obsidianjulua/RepliBuild.jl/blob/main/docs/updates/WINDOWS_PORT.md)
-has the rest — what the port found, and what is still open.
+holds the port's engineering notes: what it found, and how.
 
 ## After install
 

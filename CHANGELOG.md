@@ -4,6 +4,58 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### User docs and messages say what RepliBuild does; registry entries get their own folders (2026-10-21)
+
+Two checks found these. One followed the user docs alone, as a new user, in a fresh environment: a small C library and a small C++ library, the registry, and six deliberate mistakes. The other audited every user-facing message. Every call in the walkthrough returned the right value; what failed was the guidance around it.
+
+- **Registry (behaviour).**
+  - Every entry staged its project into one shared folder, and a relative `root` resolves to the stored TOML's folder. Two projects with the same relative paths overwrote each other's sources, so `use("twin_a")` loaded twin_b's library.
+  - Each entry now has a folder of its own (`_entry_dir`), holding its build tree too. Registering again replaces the directories it staged, and `unregister` removes the folder. An entry registered before this keeps the shared folder until it is registered again.
+  - `use(name; force_rebuild=true)` now builds from nothing (`build(clean=true)`). It used to re-wrap only: an unchanged project hash skipped the build, so metadata from an older RepliBuild survived the call meant to replace it.
+- **`discover(path; build=true, wrap=true)`** on a project that already had its TOML returned before building or wrapping, silently. It now keeps the TOML and runs both.
+- **`wrap` without `compilation_metadata.json`** asked "Did you compile with -g flag?", although RepliBuild always passes `-g`, then fell back to `wrap_basic`. `_assert_base_calls_qualified` refuses that function's output, so the fallback could never succeed. It is now an error that says to run `build`.
+- **`check_environment()`**:
+  - A `libJLCS.dll` that would not load because `clang64\bin` was missing from PATH was reported as built against an LLVM that is gone, with the advice to rebuild. It now says which of the two it is (`_clang64_bin_off_path`).
+  - The MSYS2 probe read `MSYSTEM`. Julia started from PowerShell was told to switch to the CLANG64 shell, and Git Bash (which sets `MSYSTEM=MINGW64`) got a C++ ABI warning while every tool came from clang64. It now reads where `clang++` lives.
+  - New probe: `llvm-dwarfdump`. Every JIT C++ wrapper runs it, by that bare name, when it loads; Tier 2 now requires it.
+  - The summary said "C and C++ wrappers will build" on the C bucket's evidence alone. It now has a separate C++ line, decided by `clang++` and `llvm-config`.
+  - "Tier 2 unavailable" said C++ "falls back to ccall where it can". It now says what is actually left: a C++ wrapper's noexcept functions whose arguments ccall can pass.
+  - The install advice:
+    - Debian/Ubuntu now lists the MLIR packages that `llvm.sh` does not install.
+    - Windows says to put `clang64\bin` on PATH, and the cmake advice is per platform.
+    - The dialect build line is written with `/`, because bash strips backslashes, and names `Pkg.build` on Linux.
+- **The build's load check** reported a Smart App Control block, and a DLL missing from PATH, as "unresolved symbols". `_load_failure_message` now tells the three apart.
+- **Registry messages.**
+  - `search` ended with "Install: RepliBuild.use(...)", which fails for an unregistered name. It now prints the register-then-use steps.
+  - `use`'s error for a name not in the registry now mentions the Hub.
+  - `list_registry`'s "cached / not built" looked under the TOML's hash, but builds are stored under `hash_config`, so it always said "not built". It now says whether `use` has built the entry.
+  - `unregister`'s removal of cached builds had the same mismatch, and is gone.
+- **Messages that named the wrong fix.**
+  - "Run discover() first to find C++ sources" appeared for a project discover had already scanned.
+  - The generated stale-wrapper warning said only "Re-run wrap()". A fix in what `build` extracts also needs `build(toml; clean=true)`.
+  - The FFI trap and the strict-mode type error recommended an internal function. They now name `[types.custom]` and the other `[types]` keys.
+  - `clean` on Windows now says that a loaded library blocks the delete.
+  - The "Run … first" messages print the path with `repr`, so it pastes into Julia.
+- **Docs.**
+  - install: where the dialect lives for a `Pkg.add` install and when to rebuild it; `llvm-dwarfdump` on PATH; binutils on Linux; the full Windows setup; Smart App Control.
+  - calling: how to construct and destroy a C++ object (`T()` is a zeroed value, not a construction); `Managed*` and `_safe` as they are generated; by-value versus pointer struct parameters; argument types; `libc_free`; when `dispatch_tier` exists.
+  - Ship a package: a C++ wrapper needs libJLCS where it runs, JIT or AOT, plus the Windows runtime DLLs.
+  - Registry: `use` builds from the copy `register` made.
+  - Troubleshooting: the Windows loader cases and calling errors.
+  - API: `LIBRARY_SHA`, not `BUILD_ID`.
+  - The changelog page covers 4.1 to `main` and says which fixes need a rebuild rather than a re-wrap.
+  - README: the broken WINDOWS_PORT.md link, and the stale autocrlf step.
+  - WINDOWS_PORT.md marks its setup section superseded, and its one open item closed by `f99e07f`.
+- **Generated wrappers** change only in the text of those two messages: the stale-wrapper warning and the FFI trap.
+- **Tests:**
+  - `test_user_messages.jl` (new, runtests).
+  - Four new testsets in `test_registry.jl`.
+  - Each of the seven code fixes was undone, using its exact method signature. Each time, its own testset failed.
+- **Verified** on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3):
+  - runtests: 2660 on Julia 1.12.7 and on 1.13.2.
+  - devtests (1.12.7): 1318, plus the 1 broken test already broken on main.
+  - A local docs build: no broken links or anchors.
+
 ### Tier 2: a tiled record's bitfield is read where its body puts it (abi_fuzz X9; 2026-10-21)
 
 - **A record holding a bitfield could reach the callee with the bitfield, or members after it, wrong.**

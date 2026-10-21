@@ -36,13 +36,15 @@ function build_steps()
         docs/src/install.md (Windows) has the setup."""
     end
     return """
-    To build it later:
-        cd $(abspath(MLIR_DIR))
-        ./build.sh
+    To build it later, once the tools are installed:
+        julia -e 'using Pkg; Pkg.build("RepliBuild")'
+    or by hand:
+        cd "$(abspath(MLIR_DIR))" && ./build.sh
 
     Requires: cmake, a C++ toolchain, and the system MLIR/LLVM development
-    packages (`mlir-tblgen` and `llvm-config` on PATH). On Arch that is the
-    `mlir` package; on Debian/Ubuntu, `mlir-<version>-dev`."""
+    packages, with `mlir-tblgen` and `llvm-config` on PATH. On Arch that is the
+    `mlir` package; on Debian/Ubuntu (apt.llvm.org), `libmlir-<N>-dev` and
+    `mlir-<N>-tools`. `RepliBuild.check_environment()` prints the full list."""
 end
 
 # What a failure should tell someone who has never heard of JLCS.
@@ -73,7 +75,11 @@ function usable_library()
         Base.Libc.Libdl.dlopen(LIB_PATH, Base.Libc.Libdl.RTLD_LAZY)
         return true
     catch
-        @info "RepliBuild: existing $(basename(LIB_PATH)) no longer loads (LLVM upgraded?)."
+        # On Windows the same failure has a second cause: the DLLs it imports
+        # (libLLVM, libc++) are in CLANG64's bin, which must be on PATH.
+        why = Sys.iswindows() ? "LLVM upgraded, or C:\\msys64\\clang64\\bin not on PATH?" :
+                                "LLVM upgraded?"
+        @info "RepliBuild: existing $(basename(LIB_PATH)) does not load ($why)."
         return false
     end
 end

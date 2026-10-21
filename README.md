@@ -2,7 +2,7 @@
 
 [![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/stable/)
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/dev/)
-[![Julia 1.10+](https://img.shields.io/badge/julia-1.10+-9558B2?logo=julia)](https://julialang.org)
+[![Julia 1.12 | 1.13](https://img.shields.io/badge/julia-1.12%20%7C%201.13-9558B2?logo=julia)](https://julialang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Point RepliBuild at C or C++ source. It compiles the library, reads the ABI the
@@ -82,10 +82,16 @@ lists every key, what discovery cannot infer, and a symptom → key index.
   `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64) — not MSVC. Both read DWARF
   through GNU binutils. macOS is refused at load: the AAPCS64 ABI classifier is
   not built, so arm64 Mach-O has no struct-passing rules to apply.
-- **Julia 1.10+** (tested on 1.12 and 1.13).
-- **C libraries: nothing else on Linux.** Clang ships as a JLL, and
-  link/optimize/assemble run on Julia's own libLLVM.
-- **C++ libraries:** system LLVM/MLIR 21+, then `cd src/mlir && ./build.sh`.
+- **Julia 1.12 or 1.13**, the versions CI tests. `Project.toml` still admits
+  1.10 and 1.11, which nothing tests.
+- **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every
+  distribution has. Clang ships as a JLL, and link/optimize/assemble run on
+  Julia's own libLLVM. On Windows, MSYS2 CLANG64 and GNU `objdump` (below).
+- **C++ libraries:** system LLVM/MLIR 21+, and the JLCS dialect library built
+  against it. On Linux `Pkg.build("RepliBuild")` builds it when the LLVM/MLIR
+  tools are on `PATH`; on Windows you run `build.sh` from an MSYS2 CLANG64
+  shell. [Install](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/)
+  has the steps.
 
 `RepliBuild.check_environment()` reports which of those this machine has.
 
@@ -93,7 +99,7 @@ lists every key, what discovery cannot infer, and a symptom → key index.
 
 Use the **MSYS2 CLANG64** environment specifically — it is the
 `x86_64-w64-windows-gnu` target that matches Julia's own mingw build, and the
-only MSYS2 repo shipping MLIR.
+only MSYS2 repo shipping MLIR. In a CLANG64 shell:
 
 ```
 pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir \
@@ -102,16 +108,16 @@ pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir 
 ```
 
 (`mingw-w64-x86_64-binutils` supplies GNU `objdump` for DWARF extraction; CLANG64's
-own "binutils" is llvm-objdump, which is rejected.)
-
-Set `git config --global core.autocrlf false` before cloning — CRLF corrupts
-`src/mlir/build.sh`, which then fails as `$'\r': command not found`.
+own "binutils" is llvm-objdump, which is rejected.) Then add
+`C:\msys64\clang64\bin` to the Windows `PATH`.
 
 The C bucket compiles through the Clang JLL, which carries no headers or CRT of
-its own, so it borrows the CLANG64 sysroot. That is found automatically from the
-on-`PATH` clang; `REPLIBUILD_C_SYSROOT` overrides it.
+its own, so it borrows the CLANG64 sysroot. That is found automatically;
+`REPLIBUILD_C_SYSROOT` overrides it.
 
-[WINDOWS_PORT.md](WINDOWS_PORT.md) has the full setup and what the port found.
+[Install](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/#Windows)
+has the full setup. [WINDOWS_PORT.md](docs/updates/WINDOWS_PORT.md) records what
+the port found.
 
 ## Documentation
 

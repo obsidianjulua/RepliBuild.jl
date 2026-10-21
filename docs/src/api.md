@@ -19,10 +19,13 @@ RepliBuild.build(toml)                           # clang → .so
 RepliBuild.wrap(toml)                            # .so → julia/<Module>.jl
 ```
 
-`discover(..., build=true, wrap=true)` runs the whole pipeline. `discover(force=true)`
-regenerates the config but **preserves** the hand-edited keys listed in
+`discover(..., build=true, wrap=true)` runs the whole pipeline; on a project
+that already has a `replibuild.toml` it keeps that file and runs `build` and
+`wrap`. `discover(force=true)` regenerates the config but **preserves** the
+hand-edited keys listed in
 [Edit the TOML](config.md#1.-How-the-file-is-created-and-maintained).
-`build(clean=true)` ignores the cache.
+`build(clean=true)` deletes `build/`, `julia/` and `.replibuild_cache/` first,
+then builds from nothing.
 
 ```@docs
 discover
@@ -46,8 +49,10 @@ RepliBuild.search("xml")                 # browse Hub TOML names; does not regis
 ```
 
 `REPLIBUILD_HOME` relocates `~/.replibuild/`. `REPLIBUILD_HUB_URL` points
-`search` at a private index mirror. The `use` cache key includes RepliBuild's
-version, so an upgrade rebuilds each registered package once.
+`search` at a private index mirror. `use` builds from the copy `register` made
+of the project, so register again after editing its sources. The `use` cache key
+includes RepliBuild's version, so an upgrade rebuilds each registered package
+once. See [Registry](use.md).
 
 ```@docs
 register
@@ -89,8 +94,12 @@ Not exported. Qualified access only. Full usage: [Call a wrapper](calling.md#Int
 
 | Name | What it answers |
 |------|-----------------|
-| `dispatch_tier(f)` | Which path `f` will actually take (`:tier1` / `:tier2` / `:tier3`, or `:unknown` / `:mixed` / `:deferred`) |
-| `DISPATCH_TIER` | What the generator emitted |
 | `struct_size(name)` | Byte size of a wrapped struct |
 | `member_offset(name, member)` | Byte offset of a member |
-| `BUILD_ID` / `BUILD_TARGET` / `BUILD_GENERATOR` | Identity of the library and the generator that wrote this file |
+| `LIBRARY_PATH` | The library the wrapper calls (the copy beside the wrapper first, else the build-time path) |
+| `LIBRARY_SHA` / `BUILD_TARGET` / `BUILD_GENERATOR` | SHA-256 of the library it was generated against, the target triple, and the RepliBuild version that wrote it |
+| `dispatch_tier(f)` | Which path `f` will actually take (`:tier1` / `:tier2` / `:tier3`, or `:unknown` / `:mixed` / `:deferred`) |
+| `DISPATCH_TIER` | What the generator emitted |
+
+`dispatch_tier` and `DISPATCH_TIER` exist only in a wrapper that mixes tiers or
+has Tier 1 kernels; a single-tier wrapper names its tier in a comment instead.

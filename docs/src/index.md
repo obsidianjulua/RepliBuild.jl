@@ -56,7 +56,7 @@ registered that name yourself. See [Registry](use.md).
 
 | Function | What it does |
 |:---------|:---------------|
-| `discover(path)` | Scan a source tree, write `replibuild.toml`, register locally. |
+| `discover(path)` | Scan a source tree, write `replibuild.toml`, register locally. An existing `replibuild.toml` is kept unless `force=true`. |
 | `build(toml)` | Compile to a `.so` plus debug metadata. |
 | `wrap(toml)` | Emit `julia/<Module>.jl`. |
 | `register(toml)` | Put a project in the local registry so `use` finds it. |
@@ -94,9 +94,13 @@ the thing, or leaks, or wraps an empty struct. The symptom → key table is in
   `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64), not MSVC. Both read DWARF
   through GNU binutils. macOS is refused at load — the AAPCS64 ABI classifier
   is not built.
-- **Julia 1.10+** (tested on 1.12 and 1.13).
-- **C libraries: nothing else on Linux.** Clang ships as a JLL;
-  link/optimize/assemble run on Julia's own libLLVM. On Windows that JLL borrows
-  the MSYS2 CLANG64 sysroot for its headers and CRT.
-- **C++ libraries:** system LLVM/MLIR 21+, CMake 3.20+, and `cd src/mlir && ./build.sh`
-  once. See [Install](install.md).
+- **Julia 1.12 or 1.13**, the versions CI tests. `Project.toml` still admits
+  1.10 and 1.11, which nothing tests.
+- **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every
+  distribution has. Clang ships as a JLL; link/optimize/assemble run on Julia's
+  own libLLVM. On Windows that JLL borrows the MSYS2 CLANG64 sysroot for its
+  headers and CRT, and DWARF extraction needs GNU `objdump`.
+- **C++ libraries:** system LLVM/MLIR 21+, CMake 3.20+, and the JLCS dialect
+  library built against that LLVM. See [Install](install.md).
+
+This manual writes `.so`; on Windows read `.dll`.

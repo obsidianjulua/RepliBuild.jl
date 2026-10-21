@@ -26,6 +26,7 @@ export take_diagnostics
 # Note: We use libJLCS for C API functions since it includes wrappers
 # that link against the static MLIRCAPIIR library
 import ..SRC_DIR
+import ..EnvironmentDoctor
 import SHA
 import Libdl
 
@@ -61,13 +62,10 @@ function check_library()
         error("""
         JLCS dialect library not found at: $libJLCS_path
 
-        Build it first with:
-            cd src/mlir
-            ./build.sh
+        $(join(EnvironmentDoctor.jlcs_build_advice(), "\n"))
 
-        Needs LLVM/MLIR 21+ from one install. On Windows, build it from an
-        MSYS2 CLANG64 shell — that is the x86_64-w64-windows-gnu environment
-        matching Julia's own mingw build, and the only MSYS2 repo shipping MLIR.
+        It needs a system LLVM/MLIR 21+ from one install. RepliBuild.check_environment()
+        checks the toolchain; the manual's Install page ("The JLCS dialect") has the steps.
         """)
     end
 end

@@ -10,8 +10,8 @@
 
 Generate Julia wrapper for compiled library.
 
-Always uses introspective (DWARF metadata) wrapping when metadata is available,
-otherwise falls back to basic symbol-only extraction with conservative types.
+Wraps from the DWARF metadata (`compilation_metadata.json`) that `build` writes
+beside the library, and refuses when that file is missing.
 
 # Arguments
 - `config`: RepliBuildConfig with wrapper settings
@@ -43,14 +43,17 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
     # this is where a stale table turns into wrong wrappers.
     enforce_varargs_provenance(config)
 
-    # Check for metadata (DWARF + symbol info from compilation)
+    # Every type in the wrapper comes from the metadata `build` writes beside the
+    # library. Without it this used to warn "Did you compile with -g flag?"
+    # (RepliBuild always passes -g) and fall back to `wrap_basic`, whose output
+    # `_assert_base_calls_qualified` refuses, so the fallback could not succeed.
     metadata_file = joinpath(dirname(library_path), "compilation_metadata.json")
-    has_metadata = isfile(metadata_file)
-
-    if !has_metadata
-        @warn "No compilation metadata found. Did you compile with -g flag?"
-        @warn "Falling back to basic symbol-only wrapper (conservative types, limited safety)"
-        return wrap_basic(config, library_path, generate_docs=generate_docs)
+    if !isfile(metadata_file)
+        error("""
+        No compilation_metadata.json next to $library_path.
+        build() writes it beside the library, and wrap() takes every type from it.
+        Run RepliBuild.build(toml) before wrap(); a build with the file missing
+        is not skipped as cached.""")
     end
 
     return wrap_introspective(config, library_path, headers, generate_docs=generate_docs)
