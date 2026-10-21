@@ -21,8 +21,11 @@ One-shot (still edit the TOML afterwards — discovery cannot invent macros):
 RepliBuild.discover("path/to/project", build=true, wrap=true)
 ```
 
-On a project that already has a `replibuild.toml`, the same call keeps that file
-and runs `build` and `wrap` with it.
+It builds and wraps the project where it lives, then registers it: the build is
+vendored to `~/.replibuild/` and added to your Julia environment as a package,
+so `RepliBuild.use("myproject")` and `using MyProject` load it from any session
+([Registry](use.md)). On a project that already has a `replibuild.toml`, the same
+call keeps that file.
 
 `RepliBuild.clean(toml)` removes `build/`, `julia/`, and `.replibuild_cache/`
 (git dependencies are fetched again on the next build).
@@ -38,10 +41,9 @@ RepliBuild.discover("path/to/project", force=true)   # rescan
 ```
 
 Discovery walks the tree, follows `#include`s, sets `wrap.language` from the
-file extensions, and writes `replibuild.toml`. When it writes the file it also
-registers the project locally, so `use("[project].name")` works — see
-[Registry](use.md). Without `force=true`, an existing `replibuild.toml` is left
-as it is.
+file extensions, and writes `replibuild.toml`. Without `force=true`, an existing
+`replibuild.toml` is left as it is. Discovery alone registers nothing: register
+the project once its wrapper is ready (step 4).
 
 `force=true` regenerates the file but **keeps** the keys you are expected to
 hand-edit: `[types].templates` / `template_headers`, `[wrap].varargs` /
@@ -124,6 +126,28 @@ using .MyProject
 The `.so` and the `.jl` travel as a unit. Do not edit the generated module —
 regenerate with `wrap()`, put Julia-idiomatic API in your own code. See
 [Call a wrapper](calling.md) and [Ship a package](using-wrappers.md).
+
+Everything so far stays in the project: `build/`, `julia/` and
+`.replibuild_cache/` under its root.
+
+## 4. Register
+
+```julia
+RepliBuild.register(toml)
+```
+
+Once the wrapper does what you want, `register` makes it loadable from any
+session. It builds and wraps the project in place (a cache hit when nothing
+changed), vendors the build to `~/.replibuild/builds/<hash>/`, and adds a Julia
+package around it to your Julia environment. Then:
+
+```julia
+M = RepliBuild.use("myproject")   # any session
+using MyProject                   # any session, from the Julia environment
+```
+
+`use` follows later edits to the project by rebuilding it in place. See
+[Registry](use.md).
 
 ## C vs C++
 

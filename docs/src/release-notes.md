@@ -38,6 +38,19 @@ registered release, which can be older than what is described here;
 - **Switching Julia or the C++ toolchain** rebuilds what the switch affects.
 - **Rebuild, then re-wrap.** Member sizes and record alignment are now
   recorded in the metadata.
+- **The registry builds a project where it lives.**
+  - `register` builds and wraps the project in place, vendors the build to
+    `~/.replibuild/builds/<hash>/`, and adds a Julia package around it to your
+    Julia environment (`env`, default the `@v#.#` one). `using MyProject` loads
+    it from there, and `use("myproject")` loads it too.
+  - `use` follows edits by rebuilding the project in place, and loads the last
+    vendored build if the project has moved.
+  - A bare `discover` no longer registers anything; `discover(...; build=true,
+    wrap=true)` ends by registering.
+  - The registry no longer copies a project's sources into itself, so two
+    projects with the same relative paths can no longer overwrite each other.
+  - A project registered by an earlier RepliBuild keeps building the copy that
+    version made. Register it again, from the project.
 
 ## v4.2.1 (2026-10-17)
 

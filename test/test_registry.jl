@@ -2,16 +2,24 @@
 # test/test_registry.jl — Registry System Tests
 #
 # Tests the PackageRegistry module: register, unregister, list_registry,
-# TOML hashing, build artifact caching, and environment check caching.
+# TOML hashing, build artifact caching, vendoring, the Julia package around a
+# vendored build, and environment check caching.
 #
 # Usage:  julia --project=. test/test_registry.jl
 #
-# These tests use REPLIBUILD_HOME pointed at a temp directory for isolation.
+# These tests use REPLIBUILD_HOME pointed at a temp directory, and temp Julia
+# environments, for isolation. Pkg runs offline in them: only installed
+# versions resolve, so nothing is downloaded.
 
 using Test
 using RepliBuild
 using TOML
 using Dates
+using UUIDs
+
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
 const TEST_DIR = @__DIR__
 const PROJECT_ROOT = dirname(TEST_DIR)
@@ -22,6 +30,47 @@ const CM = RepliBuild.ConfigurationManager
 const ED = RepliBuild.EnvironmentDoctor
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+"""Record a project without building it or touching a Julia environment."""
+register_only(toml::String; kw...) = PR.register(toml; build=false, env=nothing, kw...)
+
+"""
+A project with a fake build in `julia/`: what `build` + `wrap` leave there, for
+testing what `register` does after building without a toolchain.
+"""
+function make_fake_built_project(dir::String; name="fakewrap", module_name="Fakewrap")
+    mkpath(joinpath(dir, "julia"))
+    write(joinpath(dir, "replibuild.toml"), """
+    [project]
+    name = "$name"
+    root = "."
+
+    [compile]
+    source_files = []
+
+    [wrap]
+    language = "c"
+    """)
+    write(joinpath(dir, "julia", "$module_name.jl"), """
+    module $module_name
+    using Libdl
+    import RepliBuild
+    ok() = 42
+    vendored_from() = @__DIR__
+    end
+    """)
+    write(joinpath(dir, "julia", "lib$name." * Base.Libc.Libdl.dlext), "not a library")
+    write(joinpath(dir, "julia", "compilation_metadata.json"), "{}")
+    return joinpath(dir, "replibuild.toml")
+end
+
+"""Vendor the fake build as `register` does once it has built (no toolchain)."""
+function vendor_fake!(entry)
+    cfg = CM.load_config(entry.toml_path)
+    h = PR.hash_config(cfg)   # `use` hashes the same: this project has no dependencies to resolve
+    PR._store_build(h, CM.get_output_path(cfg))
+    return PR._publish!(entry, h, CM.get_module_name(cfg); verbose=false)
+end
 
 """Set up an isolated registry home in a temp directory and return its path."""
 function with_temp_registry(f::Function)
@@ -96,13 +145,15 @@ end
         with_temp_registry() do home
             mktempdir() do proj
                 toml = make_test_toml(proj; name="my_lib")
-                entry = PR.register(toml)
+                entry = register_only(toml)
 
                 @test entry.name == "my_lib"
                 @test !isempty(entry.hash)
                 @test entry.verified == false
-                @test isfile(entry.toml_path)
-                @test startswith(entry.toml_path, joinpath(home, "registry"))
+                # The entry points at the project itself, not a copy.
+                @test entry.toml_path == abspath(toml)
+                @test entry.project_root == proj
+                @test isempty(entry.build_hash) && isempty(entry.julia_env)
 
                 # Index should contain the entry
                 index = PR._load_index()
@@ -116,7 +167,7 @@ end
         with_temp_registry() do home
             mktempdir() do proj
                 toml = make_test_toml(proj; name="original_name")
-                entry = PR.register(toml; name="custom_name")
+                entry = register_only(toml; name="custom_name")
 
                 @test entry.name == "custom_name"
                 index = PR._load_index()
@@ -126,20 +177,18 @@ end
         end
     end
 
-    @testset "unregister removes entry and stored TOML" begin
+    @testset "unregister removes the entry and keeps the project's TOML" begin
         with_temp_registry() do home
             mktempdir() do proj
                 toml = make_test_toml(proj; name="ephemeral")
-                entry = PR.register(toml)
-
-                stored_path = entry.toml_path
-                @test isfile(stored_path)
+                entry = register_only(toml)
+                @test entry.toml_path == abspath(toml)
 
                 PR.unregister("ephemeral")
 
                 index = PR._load_index()
                 @test !haskey(index.entries, "ephemeral")
-                @test !isfile(stored_path)
+                @test isfile(toml)        # the project's own file, never the registry's to delete
             end
         end
     end
@@ -155,13 +204,13 @@ end
             mktempdir() do proj
                 toml = make_test_toml(proj; name="cycled")
 
-                e1 = PR.register(toml)
+                e1 = register_only(toml)
                 PR.unregister("cycled")
 
                 index = PR._load_index()
                 @test !haskey(index.entries, "cycled")
 
-                e2 = PR.register(toml)
+                e2 = register_only(toml)
                 @test e2.hash == e1.hash  # same content → same hash
 
                 index = PR._load_index()
@@ -177,8 +226,8 @@ end
                     toml1 = make_test_toml(proj1; name="dedup_a")
                     toml2 = make_test_toml(proj2; name="dedup_b")
 
-                    e1 = PR.register(toml1)
-                    e2 = PR.register(toml2)
+                    e1 = register_only(toml1)
+                    e2 = register_only(toml2)
 
                     # Different names but hashes depend on content (which differs by name/root)
                     @test e1.name == "dedup_a"
@@ -196,8 +245,8 @@ end
             mktempdir() do proj
                 toml = make_test_toml(proj; name="idem")
 
-                e1 = PR.register(toml)
-                e2 = PR.register(toml)
+                e1 = register_only(toml)
+                e2 = register_only(toml)
 
                 @test e1.hash == e2.hash
                 @test e1.toml_path == e2.toml_path
@@ -212,7 +261,7 @@ end
         with_temp_registry() do home
             mktempdir() do proj
                 toml = make_test_toml(proj; name="visible_pkg")
-                PR.register(toml)
+                register_only(toml)
 
                 output = capture_stdout(PR.list_registry)
                 @test contains(output, "visible_pkg")
@@ -235,8 +284,8 @@ end
                     make_test_toml(proj1; name="alpha")
                     make_test_toml(proj2; name="beta")
 
-                    PR.register(joinpath(proj1, "replibuild.toml"))
-                    PR.register(joinpath(proj2, "replibuild.toml"))
+                    register_only(joinpath(proj1, "replibuild.toml"))
+                    register_only(joinpath(proj2, "replibuild.toml"))
 
                     index = PR._load_index()
                     @test length(index.entries) == 2
@@ -253,7 +302,7 @@ end
 
     @testset "error: register missing TOML file" begin
         with_temp_registry() do home
-            @test_throws ErrorException PR.register("/nonexistent/path.toml")
+            @test_throws ErrorException register_only("/nonexistent/path.toml")
         end
     end
 
@@ -265,7 +314,7 @@ end
                 [compile]
                 source_files = []
                 """)
-                @test_throws ErrorException PR.register(toml_path)
+                @test_throws ErrorException register_only(toml_path)
             end
         end
     end
@@ -291,7 +340,7 @@ end
                 enable_lto = false
                 """)
 
-                entry = PR.register(toml_path)
+                entry = register_only(toml_path)
                 @test contains(entry.source_url, "mylib.git")
                 @test entry.source_tag == "v1.0.0"
             end
@@ -302,7 +351,7 @@ end
         with_temp_registry() do home
             mktempdir() do proj
                 toml = make_test_toml(proj; name="persist_test")
-                PR.register(toml)
+                register_only(toml)
 
                 # Load index from disk (simulating a fresh session)
                 idx1 = PR._load_index()
@@ -482,7 +531,7 @@ end
 
     with_temp_registry() do home
         @testset "register c_test" begin
-            entry = PR.register(ctest_toml; name="c_test_reg")
+            entry = register_only(ctest_toml; name="c_test_reg")
             @test entry.name == "c_test_reg"
             @test isfile(entry.toml_path)
             @test !entry.verified
@@ -559,95 +608,60 @@ end
     end
 end
 
-# ── register stages a relative-root project's inputs ─────────────────────────
-# `load_config` resolves a relative `root` against the STORED TOML, i.e. the
-# registry directory, so `include_dirs = ["config"]` means `<registry>/config`
-# and has to exist there. `register` did not copy it, and a registered project
-# built against whatever the system had: Hub expat compiled against
-# /usr/include/expat_config.h instead of its own harvested one — a different
-# library, no error (audit F16, 2026-09-26). Pure file operations: no toolchain.
-@testset "register stages a relative-root project's inputs" begin
+# ── a registered project builds from its own tree ────────────────────────────
+# The registry used to copy a project's sources into itself and build the copy,
+# because the stored TOML's relative root pointed there. A missed input built a
+# different library (audit F16: Hub expat compiled against the system's
+# expat_config.h), two projects with the same relative paths overwrote each
+# other, and edits never reached `use`. The entry now points at the project.
+# Pure file operations: no toolchain.
+@testset "a registered project builds from its own tree" begin
     with_temp_registry() do home
         mktempdir() do sb
             proj = joinpath(sb, "proj")
-            for d in ("config", joinpath("config", ".git"), joinpath("include", "lib"), "src")
+            for d in ("config", joinpath("include", "lib"), "src")
                 mkpath(joinpath(proj, d))
             end
             write(joinpath(proj, "config", "lib_config.h"), "#define LIB_CFG 1\n")
-            write(joinpath(proj, "config", ".git", "HEAD"), "ref: refs/heads/main\n")
-            write(joinpath(proj, "include", "lib", "lib.h"), "int lib(void);\n")   # nested
+            write(joinpath(proj, "include", "lib", "lib.h"), "int lib(void);\n")
             write(joinpath(proj, "src", "lib.c"), "int lib(void){return 1;}\n")
-            # A path that leaves the project is never copied into the registry.
-            mkpath(joinpath(sb, "sibling"))
-            write(joinpath(sb, "sibling", "outside.h"), "#define OUTSIDE 1\n")
-
             toml = joinpath(proj, "replibuild.toml")
             write(toml, """
             [project]
-            name = "stagedlib"
+            name = "ownlib"
             root = "."
 
             [compile]
             source_files = ["src/lib.c"]
-            include_dirs = ["config", "include", "../sibling"]
+            include_dirs = ["config", "include"]
 
             [wrap]
             language = "c"
             """)
 
-            entry = PR.register(toml)
-            regdir = dirname(entry.toml_path)
-            @test startswith(regdir, home)
-            @test isfile(joinpath(regdir, "config", "lib_config.h"))     # the regression
-            @test isfile(joinpath(regdir, "include", "lib", "lib.h"))
-            @test isfile(joinpath(regdir, "src", "lib.c"))
-            @test !ispath(joinpath(regdir, "config", ".git"))            # VCS trees stay behind
-            @test !ispath(normpath(joinpath(regdir, "..", "sibling")))   # outside the root
-
-            # What the build will read: the stored TOML's root is the registry,
-            # and every staged relative input resolves there.
+            entry = register_only(toml)
+            @test entry.toml_path == abspath(toml)
+            @test entry.project_root == proj
             cfg = CM.load_config(entry.toml_path)
-            @test cfg.project.root == abspath(regdir)
+            @test cfg.project.root == abspath(proj)
             @test isfile(joinpath(cfg.project.root, "config", "lib_config.h"))
-            @test isfile(joinpath(cfg.project.root, only(cfg.compile.source_files)))
-        end
-    end
-
-    # An absolute root keeps building from the original tree: nothing is copied.
-    with_temp_registry() do home
-        mktempdir() do proj
-            mkpath(joinpath(proj, "config"))
-            write(joinpath(proj, "config", "abs_config.h"), "#define ABS 1\n")
-            toml = joinpath(proj, "replibuild.toml")
-            write(toml, """
-            [project]
-            name = "abslib"
-            root = "$(escape_string(proj))"
-
-            [compile]
-            source_files = []
-            include_dirs = ["config"]
-            """)
-            entry = PR.register(toml)
-            @test !ispath(joinpath(dirname(entry.toml_path), "config"))
+            @test all(isdir, cfg.compile.include_dirs)
+            # Nothing of the project is copied into the registry.
+            copied = [f for (_, _, fs) in walkdir(home) for f in fs if f in ("lib_config.h", "lib.h", "lib.c")]
+            @test isempty(copied)
         end
     end
 end
 
-# ── each entry has a registry folder of its own ──────────────────────────────
-# Every entry used to share the registry folder, and a relative root resolves to
-# the stored TOML's folder, so two projects with the same relative paths
-# overwrote each other's staged sources: `use("twin_a")` built twin_b's library
-# (found by a walkthrough of the user docs, 2026-10-21). Pure file operations.
-@testset "each registry entry has a folder of its own" begin
+@testset "twin projects stay apart" begin
+    # Two projects with the same relative paths: with copies in one shared
+    # registry folder, `use("twin_a")` loaded twin_b's library.
     with_temp_registry() do home
         mktempdir() do sb
-            folders = Dict{String,String}()
-            for (name, body) in (("twin_a", "int f(void){return 1;}\n"),
-                                 ("twin_b", "int f(void){return 2;}\n"))
+            for (name, n) in (("twin_a", 1), ("twin_b", 2))
                 proj = joinpath(sb, name)
                 mkpath(joinpath(proj, "src"))
-                write(joinpath(proj, "src", "lib.c"), body)
+                write(joinpath(proj, "src", "lib.c"), "int f(void){return $n;}\n")
                 write(joinpath(proj, "replibuild.toml"), """
                 [project]
                 name = "$name"
@@ -659,59 +673,146 @@ end
                 [wrap]
                 language = "c"
                 """)
-                folders[name] = dirname(PR.register(joinpath(proj, "replibuild.toml")).toml_path)
+                register_only(joinpath(proj, "replibuild.toml"))
             end
-            @test folders["twin_a"] != folders["twin_b"]
-            @test read(joinpath(folders["twin_a"], "src", "lib.c"), String) == "int f(void){return 1;}\n"
-            @test read(joinpath(folders["twin_b"], "src", "lib.c"), String) == "int f(void){return 2;}\n"
-            # What `use` builds from: each stored TOML's root is its own folder.
-            for (name, d) in folders
-                cfg = CM.load_config(PR._load_index().entries[name].toml_path)
-                @test cfg.project.root == abspath(d)
+            entries = PR._load_index().entries
+            for (name, n) in (("twin_a", 1), ("twin_b", 2))
+                cfg = CM.load_config(entries[name].toml_path)
+                @test read(only(cfg.compile.source_files), String) == "int f(void){return $n;}\n"
             end
         end
     end
 end
 
-@testset "registering again replaces what was staged" begin
+@testset "a bare discover registers nothing" begin
+    # There is no build yet to vendor; `discover(...; build=true, wrap=true)`
+    # registers once it has built and wrapped.
     with_temp_registry() do home
         mktempdir() do proj
-            mkpath(joinpath(proj, "include"))
-            write(joinpath(proj, "include", "a.h"), "int a(void);\n")
-            write(joinpath(proj, "include", "gone.h"), "int gone(void);\n")
-            toml = joinpath(proj, "replibuild.toml")
-            write(toml, """
-            [project]
-            name = "restaged"
-            root = "."
-
-            [compile]
-            source_files = []
-            include_dirs = ["include", "."]
-            """)
-            d = dirname(PR.register(toml).toml_path)
-            @test isfile(joinpath(d, "include", "gone.h"))
-
-            rm(joinpath(proj, "include", "gone.h"))
-            write(joinpath(proj, "include", "a.h"), "int a(int);\n")
-            entry = PR.register(toml)
-            @test !ispath(joinpath(d, "include", "gone.h"))      # deleted in the project
-            @test read(joinpath(d, "include", "a.h"), String) == "int a(int);\n"
-            @test isfile(entry.toml_path)                        # "." never clears the folder
+            mkpath(joinpath(proj, "src"))
+            write(joinpath(proj, "src", "tiny.c"), "int tiny(void){return 1;}\n")
+            RepliBuild.discover(proj)
+            @test isfile(joinpath(proj, "replibuild.toml"))
+            @test isempty(PR._load_index().entries)
         end
     end
 end
 
-@testset "unregister removes the entry's folder, not the registry" begin
+# ── vendoring: use() and the Julia package load the vendored build ───────────
+@testset "use loads the vendored build, and still does when the project is gone" begin
     with_temp_registry() do home
-        mktempdir() do proj
-            d = dirname(PR.register(make_test_toml(proj; name="foldered")).toml_path)
-            @test isdir(d)
-            @test normpath(d) != normpath(PR._registry_dir())
-            PR.unregister("foldered")
-            @test !ispath(d)
-            @test isdir(PR._registry_dir())
+        mktempdir() do sb
+            proj = joinpath(sb, "fakewrap")
+            toml = make_fake_built_project(proj)
+            entry = vendor_fake!(register_only(toml))
+            build_dir = PR._cached_build_dir(entry.build_hash)
+            @test isfile(joinpath(build_dir, "Fakewrap.jl"))
+            @test entry.verified && entry.module_name == "Fakewrap"
+            @test PR._load_index().entries["fakewrap"].build_hash == entry.build_hash
+            # The package written around it includes that build and nothing else.
+            stub = read(joinpath(PR._packages_dir(), "Fakewrap", "src", "Fakewrap.jl"), String)
+            @test occursin(repr(joinpath(build_dir, "Fakewrap.jl")), stub)
+
+            m = PR.use("fakewrap"; verbose=false)
+            @test Base.invokelatest(() -> m.ok()) == 42
+            @test Base.invokelatest(() -> m.vendored_from()) == build_dir
+
+            out = capture_stdout(PR.list_registry)
+            @test occursin("vendored $(entry.build_hash[1:12])", out)
+
+            # The project moves away: what was vendored still loads, with a warning.
+            rm(proj; recursive=true)
+            m2 = @test_logs (:warn, r"project is gone") PR.use("fakewrap"; verbose=false)
+            @test Base.invokelatest(() -> m2.ok()) == 42
         end
+    end
+end
+
+@testset "register adds the vendored build to a Julia environment" begin
+    with_temp_registry() do home
+        mktempdir() do sb
+            proj = joinpath(sb, "fakewrap")
+            envdir = joinpath(sb, "env")
+            toml = make_fake_built_project(proj)
+            entry = withenv("JULIA_PKG_OFFLINE" => "true") do
+                vendor_fake!(PR.register(toml; build=false, env=envdir))
+            end
+            @test entry.julia_env == envdir
+            pkg = joinpath(PR._packages_dir(), "Fakewrap")
+            @test PR._env_package_path(envdir, "Fakewrap") == normpath(pkg)
+            project = TOML.parsefile(joinpath(pkg, "Project.toml"))
+            @test project["name"] == "Fakewrap"
+            @test sort(collect(keys(project["deps"]))) == ["Libdl", "RepliBuild"]
+
+            # `using` in a child whose only environments are that one and the stdlib.
+            code = "using Fakewrap; print(\"LOADED \", Fakewrap.ok(), \" \", Fakewrap.vendored_from())"
+            r = withenv("JULIA_LOAD_PATH" => join(["@", "@stdlib"], Sys.iswindows() ? ";" : ":"),
+                        "JULIA_PKG_OFFLINE" => "true") do
+                run_isolated(`--startup-file=no -e $code`; project=envdir, timeout=900)
+            end
+            @test r.ok
+            @test occursin("LOADED 42 " * PR._cached_build_dir(entry.build_hash), r.output)
+
+            # unregister takes it all back out, and leaves the project alone.
+            withenv("JULIA_PKG_OFFLINE" => "true") do
+                PR.unregister("fakewrap")
+            end
+            @test PR._env_package_path(envdir, "Fakewrap") === nothing
+            @test !isdir(pkg)
+            @test !isdir(PR._cached_build_dir(entry.build_hash))
+            @test isfile(toml)
+        end
+    end
+end
+
+@testset "register adds to environments, never to a package's Project.toml" begin
+    with_temp_registry() do home
+        mktempdir() do sb
+            pkgproj = joinpath(sb, "SomePkg")
+            mkpath(pkgproj)
+            write(joinpath(pkgproj, "Project.toml"), "name = \"SomePkg\"\nuuid = \"$(uuid4())\"\n")
+            before = read(joinpath(pkgproj, "Project.toml"), String)
+            entry = PR.register(make_fake_built_project(joinpath(sb, "fakewrap")); build=false, env=pkgproj)
+            @test_logs (:warn, r"belongs to a package") match_mode=:any vendor_fake!(entry)
+            @test read(joinpath(pkgproj, "Project.toml"), String) == before
+        end
+    end
+end
+
+@testset "which Julia environment register uses" begin
+    depot_env = joinpath(first(DEPOT_PATH), "environments", "v$(VERSION.major).$(VERSION.minor)")
+    @test PR._julia_env_dir(:default) == depot_env
+    @test PR._julia_env_dir(:none) === nothing
+    @test PR._julia_env_dir(nothing) === nothing
+    @test PR._julia_env_dir(:active) == dirname(Base.active_project())
+    mktempdir() do d
+        @test PR._julia_env_dir(joinpath(d, "Project.toml")) == d
+        @test PR._julia_env_dir(d) == d
+    end
+    @test_throws ErrorException PR._julia_env_dir(:elsewhere)
+    withenv("REPLIBUILD_JULIA_ENV" => nothing) do
+        @test PR._default_julia_env() === :default
+    end
+    withenv("REPLIBUILD_JULIA_ENV" => "none") do
+        @test PR._default_julia_env() === :none
+    end
+    withenv("REPLIBUILD_JULIA_ENV" => "some/env") do
+        @test PR._default_julia_env() == "some/env"
+    end
+end
+
+@testset "a vendored package keeps its identity" begin
+    mktempdir() do d
+        with_uuid = joinpath(d, "a.toml")
+        write(with_uuid, "[project]\nname = \"a\"\nuuid = \"62ced8e5-6545-4ef7-b0ee-9fbee98eda80\"\nversion = \"5.4.7\"\n")
+        no_uuid = joinpath(d, "b.toml")
+        write(no_uuid, "[project]\nname = \"b\"\n")
+        @test PR._package_uuid(with_uuid, "a") == UUID("62ced8e5-6545-4ef7-b0ee-9fbee98eda80")
+        # Derived from the name, never random: the package must not change identity.
+        @test PR._package_uuid(no_uuid, "b") == PR._package_uuid(no_uuid, "b")
+        @test PR._package_uuid(no_uuid, "b") != PR._package_uuid(no_uuid, "c")
+        @test PR._package_version(with_uuid) == v"5.4.7"
+        @test PR._package_version(no_uuid) == v"0.1.0"
     end
 end
 
@@ -720,9 +821,10 @@ end
     # hash_config, so every entry read "not built".
     with_temp_registry() do home
         mktempdir() do proj
-            PR.register(make_test_toml(proj; name="listed"))
+            register_only(make_test_toml(proj; name="listed"))
             out = capture_stdout(PR.list_registry)
-            @test occursin("not built by use() yet", out)
+            @test occursin("not built yet", out)
+            @test occursin(proj, out)
         end
     end
 end

@@ -10,14 +10,14 @@ using .MyProject
 MyProject.some_function(...)     # everything exported; docs on each symbol
 ```
 
-If the project is in your local registry (`discover` registers it),
-`RepliBuild.use("myproject")` returns the loaded module and you can skip
-`include`. [Registry](use.md).
+Once the project is registered (`register(toml)`), `RepliBuild.use("myproject")`
+returns the loaded module, and `using MyProject` loads it from your Julia
+environment, so you can skip `include`. [Registry](use.md).
 
 Load a wrapper at top level. `include` and `use` define the module while your
 code runs, so a function that loads one and then calls into it in the same call
 fails with `method too new to be called from this world context`. If you must
-do both in one function, call through `Base.invokelatest`.
+do both in one function, call through `Base.@invokelatest M.f(x)`.
 
 Never hand-edit `julia/MyProject.jl`. Regenerate with `wrap()`. Put Julia-shaped
 API in your own module — [Ship a package](using-wrappers.md).

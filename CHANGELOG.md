@@ -4,6 +4,27 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### The registry builds a project where it lives, vendors that build, and adds it to the Julia environment (2026-10-21)
+
+- **A project builds in its own root, and only there.** `discover`, `build` and `wrap` already worked in the project. `use` did not: it built a copy of the project's sources that `register` had staged inside the registry, because the stored TOML's relative `root` pointed there.
+  - Two projects with the same relative paths overwrote each other's staged sources, so `use("twin_a")` loaded twin_b's library.
+  - Edits to the project never reached `use` until it was registered again.
+  - A registered project's first `use` compiled it a second time.
+- **`register` vendors the project's own build.**
+  - An entry points at the project's TOML.
+  - `register` runs `build` and `wrap` on the project in place, which is a cache hit when they are current, and copies the output to `~/.replibuild/builds/<hash>/`, keyed on `hash_config`.
+  - It writes `~/.replibuild/packages/<Module>/`, a Julia package whose entry file includes that vendored wrapper.
+  - It adds that package to a Julia environment: `env`, by default the `@v#.#` one; `:active`, a path, or `nothing` are the alternatives, and `REPLIBUILD_JULIA_ENV` changes the default. `using <Module>` then loads it.
+  - An environment without RepliBuild gets the running copy, which generated the wrapper. A package's own Project.toml, one with a `name`, is never changed.
+  - `register(toml; build=false)` records the project only.
+- **`use`** loads the vendored build while the project's inputs still hash to it. After an edit it rebuilds and wraps the project in place, vendors the result, and points the package at it. It loads the last vendored build, with a warning, when the project has moved or been deleted.
+- **Vendored builds are immutable folders.** A session that has a build loaded keeps it. On Windows no open DLL is ever overwritten: re-vendoring rewrites the package's small entry file.
+- **The package's entry file** uses `Base.include(Base.__toplevel__, …)`. A package file is evaluated in `Base.__toplevel__`, where a bare `include` does not exist, and the wrapper defines its own module.
+- **`unregister`** removes the vendored build, the package and its place in the environment. It never removes the project's files; the old code deleted the stored TOML, which is now the project's own.
+- **`discover`:** a bare `discover` no longer registers, since there is nothing to vendor yet. `discover(...; build=true, wrap=true)` ends with `register`.
+- **Entries registered by an earlier RepliBuild** point at their registry copy and keep building it until registered again.
+- **Tests no longer touch the user's registry or Julia environments.** devtests' chained `discover` had registered fixtures in the real `~/.replibuild` on every run. Both suites now set `REPLIBUILD_HOME` to a temp dir and `REPLIBUILD_JULIA_ENV=none`.
+
 ### User docs and messages say what RepliBuild does; registry entries get their own folders (2026-10-21)
 
 Two checks found these. One followed the user docs alone, as a new user, in a fresh environment: a small C library and a small C++ library, the registry, and six deliberate mistakes. The other audited every user-facing message. Every call in the walkthrough returned the right value; what failed was the guidance around it.

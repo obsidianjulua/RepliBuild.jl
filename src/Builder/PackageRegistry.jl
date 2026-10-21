@@ -1,8 +1,10 @@
 #!/usr/bin/env julia
 # PackageRegistry.jl - Global registry for RepliBuild wrapper packages
 #
-# Stores validated TOML configs as content-addressed entries in ~/.replibuild/
-# Provides use(name) to resolve, build, wrap, and load wrappers by name.
+# A project builds where it lives. `register` records it in ~/.replibuild/,
+# vendors its build there (builds/<hash>/), and writes a Julia package around
+# that build (packages/<Module>/) which it adds to a Julia environment. A
+# wrapper then loads by `use(name)` from any session, or by `using <Module>`.
 
 module PackageRegistry
 
@@ -15,6 +17,8 @@ using SHA
 using Dates
 using UUIDs
 using Downloads
+import Libdl
+import Pkg
 
 export register, unregister, use, list_registry, search, scaffold_package
 export RegistryEntry, RegistryIndex
@@ -25,6 +29,7 @@ export RegistryEntry, RegistryIndex
 
 const REGISTRY_DIR = "registry"
 const BUILDS_DIR = "builds"
+const PACKAGES_DIR = "packages"
 const INDEX_FILE = "index.toml"
 const TOOLCHAIN_CACHE = "toolchain.toml"
 const DEFAULT_HUB_URL = "https://raw.githubusercontent.com/obsidianjulua/RepliBuild-Hub/main"
@@ -48,6 +53,12 @@ function _builds_dir()::String
     return d
 end
 
+function _packages_dir()::String
+    d = joinpath(_replibuild_home(), PACKAGES_DIR)
+    mkpath(d)
+    return d
+end
+
 function _index_path()::String
     joinpath(_registry_dir(), INDEX_FILE)
 end
@@ -59,13 +70,20 @@ end
 struct RegistryEntry
     name::String
     hash::String
-    toml_path::String           # path to stored TOML in registry
+    toml_path::String           # the project's own replibuild.toml; `use` builds there
     source_url::String          # git URL if dependency-based
     source_tag::String          # git tag/branch
     registered_at::DateTime
-    verified::Bool              # true if build+wrap succeeded at least once
-    project_root::String        # original project root at registration time
+    verified::Bool              # true once a build has been vendored
+    project_root::String        # the project's root, absolute
+    build_hash::String          # hash_config of the vendored build (builds/<hash>/); "" before one
+    module_name::String         # the wrapper module, and the Julia package written around it
+    julia_env::String           # environment directory the package is added to; "" for none
 end
+
+"""A copy of `entry` with the named fields replaced."""
+_with(entry::RegistryEntry; kw...) =
+    RegistryEntry((haskey(kw, f) ? kw[f] : getfield(entry, f) for f in fieldnames(RegistryEntry))...)
 
 struct RegistryIndex
     entries::Dict{String, RegistryEntry}
@@ -222,10 +240,22 @@ function _load_index()::RegistryIndex
             DateTime(get(info, "registered_at", string(now()))),
             get(info, "verified", false),
             get(info, "project_root", ""),
+            # Absent from an index written before entries pointed at their project.
+            get(info, "build_hash", ""),
+            get(info, "module_name", ""),
+            get(info, "julia_env", ""),
         )
     end
 
     return RegistryIndex(entries)
+end
+
+"""Store one entry, replacing any of the same name."""
+function _save_entry(entry::RegistryEntry)
+    index = _load_index()
+    index.entries[entry.name] = entry
+    _save_index(index)
+    return entry
 end
 
 function _save_index(index::RegistryIndex)
@@ -241,6 +271,9 @@ function _save_index(index::RegistryIndex)
             "registered_at" => string(entry.registered_at),
             "verified" => entry.verified,
             "project_root" => entry.project_root,
+            "build_hash" => entry.build_hash,
+            "module_name" => entry.module_name,
+            "julia_env" => entry.julia_env,
         )
     end
 
@@ -248,30 +281,6 @@ function _save_index(index::RegistryIndex)
         TOML.print(io, data)
     end
 end
-
-# Copy `src` (a file or directory under `orig_root`) to the same relative
-# path under `dest_root`. Skips VCS and build trees.
-function _copy_project_path!(src::String, dest::String)
-    if isfile(src)
-        mkpath(dirname(dest))
-        cp(src, dest; force=true)
-        return
-    end
-    isdir(src) || return
-    for (root, dirs, files) in walkdir(src)
-        filter!(d -> !(d in (".git", ".replibuild_cache", "build")), dirs)
-        rel = relpath(root, src)
-        here = rel == "." ? dest : joinpath(dest, rel)
-        mkpath(here)
-        for f in files
-            cp(joinpath(root, f), joinpath(here, f); force=true)
-        end
-    end
-end
-
-"""Whether two paths name the same directory, whatever their trailing separators."""
-_same_dir(a::AbstractString, b::AbstractString)::Bool =
-    rstrip(normpath(abspath(String(a))), ['/', '\\']) == rstrip(normpath(abspath(String(b))), ['/', '\\'])
 
 function _within_root(path::AbstractString, root::AbstractString)::Bool
     path = normpath(abspath(String(path)))
@@ -281,71 +290,209 @@ function _within_root(path::AbstractString, root::AbstractString)::Bool
 end
 
 """
-Stage the relative inputs of a TOML whose `root` is relative.
+The project root a replibuild.toml names, absolute: `[project] root` through the
+host's `[platform.*]` overlay, resolved against the TOML's folder, as
+`load_config` resolves it.
 
-`load_config` resolves that root against the stored TOML, i.e. the registry
-directory. `include_dirs = ["config"]` then means `<registry>/config`, so the
-directory has to actually be copied there. An absolute root is left alone:
-the build keeps using the original tree.
+The registry used to copy a project's sources into itself and build the copy,
+because that is where the stored TOML's relative root pointed. Two projects with
+the same relative paths then overwrote each other, and edits to the project
+never reached `use`. Pointing at the project itself removes both.
 """
-function _stage_registered_inputs!(orig_toml::String, dest_dir::String)
-    # Through the host's [platform.*] overlay, so an include dir only one host
-    # names is staged on that host.
+function _project_root(data::Dict, toml_path::String)::String
     data = try
-        ConfigurationManager.apply_platform_overlay(TOML.parsefile(orig_toml), orig_toml)
+        ConfigurationManager.apply_platform_overlay(data, toml_path)
     catch
-        return
+        data
     end
     project = get(data, "project", Dict{String,Any}())
-    project isa Dict || return
-    raw_root = string(get(project, "root", "."))
-    isabspath(raw_root) && return
-    orig_root = normpath(abspath(joinpath(dirname(abspath(orig_toml)), raw_root)))
-    orig_root == "/" || (orig_root = String(rstrip(orig_root, ['/', '\\'])))
-    isdir(orig_root) || return
-    compile = get(data, "compile", Dict{String,Any}())
-    compile isa Dict || return
-    for key in ("include_dirs", "source_files")
-        vals = get(compile, key, Any[])
-        vals isa Vector || continue
-        for rel in vals
-            rel isa AbstractString || continue
-            rel = String(rel)
-            isempty(rel) && continue
-            isabspath(rel) && continue
-            startswith(rel, ".replibuild_cache") && continue
-            src = normpath(joinpath(orig_root, rel))
-            _within_root(src, orig_root) || continue
-            ispath(src) || continue
-            dest = normpath(joinpath(dest_dir, rel))
-            # Registering again replaces a directory an earlier registration
-            # staged, so a file deleted from the project does not live on in
-            # the copy. Never the entry folder itself (`include_dirs = ["."]`,
-            # which normpath spells with a trailing separator): it also holds
-            # the stored TOML and the build.
-            if isdir(dest) && _within_root(dest, dest_dir) && !_same_dir(dest, dest_dir)
-                rm(dest; recursive=true, force=true)
-            end
-            _copy_project_path!(src, dest)
-        end
-    end
+    raw = project isa Dict ? string(get(project, "root", ".")) : "."
+    root = normpath(isabspath(raw) ? raw : joinpath(dirname(toml_path), raw))
+    return root == "/" ? root : String(rstrip(root, ['/', '\\']))
+end
+
+# Namespace for package UUIDs derived from a registry name, when the project's
+# TOML has no `[project] uuid`. Fixed: changing it changes every such UUID.
+const _PACKAGE_UUID_NAMESPACE = UUID("8b3f5f1e-6c1a-5a52-9a63-3f0d2c5e7a41")
+
+"""
+The Julia package UUID for a registered project: its `[project] uuid`, which
+`discover` writes once, or else one derived from the registry name — never a
+fresh `uuid4()`, or the package would change identity on every vendoring.
+"""
+function _package_uuid(toml_path::String, name::AbstractString)::UUID
+    project = get(TOML.parsefile(toml_path), "project", Dict{String,Any}())
+    u = project isa Dict ? tryparse(UUID, string(get(project, "uuid", ""))) : nothing
+    return u === nothing ? uuid5(_PACKAGE_UUID_NAMESPACE, "replibuild:" * String(name)) : u
+end
+
+"""The package version: `[project] version` when it parses, else 0.1.0."""
+function _package_version(toml_path::String)::VersionNumber
+    project = get(TOML.parsefile(toml_path), "project", Dict{String,Any}())
+    v = project isa Dict ? tryparse(VersionNumber, string(get(project, "version", ""))) : nothing
+    return something(v, v"0.1.0")
+end
+
+"""RepliBuild's own version: the generator a vendored wrapper needs at least."""
+_replibuild_version()::VersionNumber = getfield(parentmodule(@__MODULE__), :VERSION)
+
+"""
+Write `packages/<Module>/`: a Julia package whose `src/<Module>.jl` includes
+the vendored wrapper in `builds/<hash>/`.
+
+The wrapper finds its library and metadata beside itself, so the package holds
+no binary. Vendoring a new build rewrites one small file rather than replacing a
+DLL that a running session may hold open, which Windows refuses.
+"""
+function _write_package(module_name::String, uuid::UUID, version::VersionNumber,
+                        wrapper_path::String)::String
+    pkg_dir = joinpath(_packages_dir(), module_name)
+    mkpath(joinpath(pkg_dir, "src"))
+    rb = _replibuild_version()
+    project = Dict{String,Any}(
+        "name" => module_name,
+        "uuid" => string(uuid),
+        "version" => string(version),
+        "deps" => Dict{String,Any}(
+            "Libdl" => string(Base.PkgId(Libdl).uuid),
+            "RepliBuild" => _replibuild_uuid(),
+        ),
+        # Caret compat: at least the RepliBuild that generated the wrapper.
+        "compat" => Dict{String,Any}(
+            "RepliBuild" => "$(rb.major).$(rb.minor).$(rb.patch)",
+            "julia" => "1.10",
+        ),
+    )
+    open(io -> TOML.print(io, project; sorted=true), joinpath(pkg_dir, "Project.toml"), "w")
+    # A package's entry file is evaluated in `Base.__toplevel__`, which has no
+    # `include` of its own, and the wrapper file defines `module <Module>`
+    # itself, so it is evaluated there directly rather than inside a module.
+    write(joinpath(pkg_dir, "src", module_name * ".jl"), """
+        # Written by RepliBuild (register / use). It loads the build vendored in
+        # $(dirname(wrapper_path)),
+        # and is rewritten whenever that build changes. Do not edit.
+        Base.include(Base.__toplevel__, $(repr(wrapper_path)))
+        """)
+    return pkg_dir
 end
 
 """
-    _entry_dir(name) -> String
-
-The registry folder of one entry: its stored TOML, the inputs staged from the
-project, and — because a relative `root` resolves to this folder — its `build/`
-and `julia/`. One shared folder for every entry let two projects with the same
-relative paths (`src/lib.c`) overwrite each other's staged sources, so `use` of
-one built the other. The name is made filesystem-safe; the hash suffix keeps
-names that differ only in case apart on a case-folding filesystem.
+The Julia environment `register` adds packages to unless told otherwise:
+`ENV["REPLIBUILD_JULIA_ENV"]` (`default`, `active`, `none`, or a path), else
+`:default`, the `@v#.#` environment every session can load from.
 """
-function _entry_dir(name::AbstractString)::String
-    safe = replace(String(name), r"[^A-Za-z0-9._-]" => "_")
-    d = joinpath(_registry_dir(), safe * "_" * bytes2hex(sha256(String(name)))[1:8])
-    mkpath(d)
-    return d
+function _default_julia_env()
+    s = String(strip(get(ENV, "REPLIBUILD_JULIA_ENV", "")))
+    isempty(s) && return :default
+    s in ("default", "active", "none") && return Symbol(s)
+    return s
+end
+
+"""The environment directory `env` names, or `nothing` for none."""
+function _julia_env_dir(env)::Union{String,Nothing}
+    (env === nothing || env === :none) && return nothing
+    env === :default && return joinpath(first(DEPOT_PATH), "environments",
+                                        "v$(Base.VERSION.major).$(Base.VERSION.minor)")
+    env === :active && return dirname(Base.active_project())
+    env isa AbstractString ||
+        error("env must be :default, :active, :none, nothing, or a path; got $(repr(env))")
+    p = abspath(String(env))
+    return basename(p) in ("Project.toml", "JuliaProject.toml") ? dirname(p) : p
+end
+
+"""
+The path the environment in `env_dir` loads package `name` from, if it lists the
+package as developed by path; `""` when it lists it otherwise, `nothing` when it
+does not list it at all.
+"""
+function _env_package_path(env_dir::AbstractString, name::AbstractString)::Union{String,Nothing}
+    proj = joinpath(env_dir, "Project.toml")
+    isfile(proj) || return nothing
+    haskey(get(TOML.parsefile(proj), "deps", Dict{String,Any}()), name) || return nothing
+    manifest = joinpath(env_dir, "Manifest.toml")
+    isfile(manifest) || return ""
+    entries = get(get(TOML.parsefile(manifest), "deps", Dict{String,Any}()), name, Any[])
+    for e in entries
+        e isa Dict && haskey(e, "path") || continue
+        p = String(e["path"])
+        return normpath(isabspath(p) ? p : joinpath(env_dir, p))
+    end
+    return ""
+end
+
+"""Whether `dir` is a registry install under some depot's `packages/`, not a dev checkout."""
+_is_registry_install(dir::AbstractString)::Bool =
+    any(d -> _within_root(dir, joinpath(d, "packages")), DEPOT_PATH)
+
+"""
+Add the vendored package at `pkg_dir` to the Julia environment in `env_dir`, by
+path, so `using <Module>` loads it there. Returns whether it is there now.
+
+Only environments change, never a package's own Project.toml (one with a
+`name`): adding a dependency to RepliBuild's own project, say, would be a
+change to RepliBuild. An environment without RepliBuild gets the running copy,
+which generated the wrapper; one that has RepliBuild keeps the copy it has.
+Pkg's automatic precompilation is off here; the first `using` precompiles.
+"""
+function _add_to_julia_env(pkg_dir::String, module_name::String, env_dir::String;
+                           verbose::Bool=true)::Bool
+    proj = joinpath(env_dir, "Project.toml")
+    if isfile(proj) && haskey(TOML.parsefile(proj), "name")
+        @warn "Not adding $module_name to $env_dir: that Project.toml belongs to a package, not an environment. Pass `env` an environment, or `nothing`."
+        return false
+    end
+    current = _env_package_path(env_dir, module_name)
+    current !== nothing && _within_root(current, pkg_dir) && _within_root(pkg_dir, current) && return true
+    if current !== nothing
+        @warn "Not adding $module_name to $env_dir: that environment already has a different package of that name."
+        return false
+    end
+    rb_dir = pkgdir(parentmodule(@__MODULE__))
+    try
+        mkpath(env_dir)
+        withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+            Pkg.activate(env_dir) do
+                if _env_package_path(env_dir, "RepliBuild") === nothing
+                    if rb_dir !== nothing && !_is_registry_install(rb_dir)
+                        Pkg.develop(Pkg.PackageSpec(path=rb_dir); io=devnull)
+                    else
+                        Pkg.add(Pkg.PackageSpec(name="RepliBuild", uuid=UUID(_replibuild_uuid()),
+                                                version=_replibuild_version()); io=devnull)
+                    end
+                end
+                Pkg.develop(Pkg.PackageSpec(path=pkg_dir); io=devnull)
+            end
+        end
+    catch e
+        @warn "Could not add $module_name to the Julia environment $env_dir. RepliBuild.use still loads it." exception=e
+        return false
+    end
+    verbose && println("  julia env: $env_dir — `using $module_name` loads it there")
+    return true
+end
+
+"""Remove `module_name` from the environment in `env_dir`, if it is the vendored package."""
+function _remove_from_julia_env(module_name::String, env_dir::String)
+    pkg_dir = joinpath(_packages_dir(), module_name)
+    current = _env_package_path(env_dir, module_name)
+    (current !== nothing && _within_root(current, pkg_dir)) || return
+    try
+        Pkg.activate(env_dir) do
+            Pkg.rm(Pkg.PackageSpec(name=module_name); io=devnull)
+        end
+    catch e
+        @warn "Could not remove $module_name from the Julia environment $env_dir." exception=e
+    end
+end
+
+"""Delete a directory the registry made, or say why it could not."""
+function _rm_vendored(path::String)
+    isdir(path) || return
+    try
+        rm(path; recursive=true, force=true)
+    catch e
+        @warn "Could not delete $path. A running Julia session may still have its library loaded; close it and delete the folder." exception=e
+    end
 end
 
 # =============================================================================
@@ -353,13 +500,25 @@ end
 # =============================================================================
 
 """
-    register(toml_path::String; name::String="", verified::Bool=false)::RegistryEntry
+    register(toml_path; name="", build=true, env=:default) -> RegistryEntry
 
-Hash and store a replibuild.toml in the global registry (~/.replibuild/registry/).
-Name is inferred from [project].name if not provided.
-Returns the created RegistryEntry.
+Record a project in the global registry (`~/.replibuild/`) and vendor its build.
+
+The project builds where it lives. `register` runs `build` and `wrap` on the
+project itself (a cache hit when its build is current), copies the result to
+`~/.replibuild/builds/<hash>/`, and writes a Julia package around it in
+`~/.replibuild/packages/<Module>/`. From then on `use(name)` loads that build in
+any session, and `using <Module>` loads it in the Julia environment `env`.
+
+- `name`: the registry name; default `[project].name`.
+- `build=false`: record the project only. `use(name)` builds and vendors it.
+- `env`: where the package goes — `:default` (the `@v#.#` environment, which
+  every session can load from), `:active`, the path of an environment, or
+  `nothing`. `ENV["REPLIBUILD_JULIA_ENV"]` (`default`, `active`, `none`, or a
+  path) changes the default. A package's own Project.toml is never changed.
 """
-function register(toml_path::String; name::String="", verified::Bool=false)::RegistryEntry
+function register(toml_path::String; name::String="", verified::Bool=false,
+                  build::Bool=true, env=_default_julia_env())::RegistryEntry
     toml_path = abspath(toml_path)
     if !isfile(toml_path)
         error("TOML file not found: $toml_path")
@@ -378,17 +537,6 @@ function register(toml_path::String; name::String="", verified::Bool=false)::Reg
     # Compute content hash
     content_hash = hash_toml(toml_path)
 
-    # Copy TOML into the entry's own registry folder (content-addressed name)
-    regdir = _entry_dir(name)
-    stored_path = joinpath(regdir, "$(content_hash).toml")
-    if !isfile(stored_path)
-        cp(toml_path, stored_path)
-    end
-    # A relative `root` is resolved against the stored TOML's directory, which
-    # is that folder. The project's relative include dirs and sources have
-    # to be there too, or the build compiles against the system headers.
-    _stage_registered_inputs!(toml_path, regdir)
-
     # Extract git dependency info if present
     deps = get(data, "dependencies", Dict())
     source_url = ""
@@ -401,31 +549,81 @@ function register(toml_path::String; name::String="", verified::Bool=false)::Reg
         end
     end
 
-    # Get project root
-    project = get(data, "project", Dict())
-    project_root = get(project, "root", dirname(toml_path))
-
+    # The entry points at the project's own TOML: `use` builds the project
+    # where it lives. A build vendored earlier stays recorded until a new one
+    # replaces it; `use` tells a stale one from the hash.
+    env_dir = _julia_env_dir(env)
+    previous = get(_load_index().entries, name, nothing)
     entry = RegistryEntry(
-        name, content_hash, stored_path,
+        name, content_hash, toml_path,
         source_url, source_tag,
-        now(), verified, project_root,
+        now(), verified, _project_root(data, toml_path),
+        previous === nothing ? "" : previous.build_hash,
+        previous === nothing ? "" : previous.module_name,
+        env_dir === nothing ? "" : env_dir,
     )
+    _save_entry(entry)
+    println("  registered: $name ($(content_hash[1:12])…)  project: $(entry.project_root)")
 
-    # Update index
-    index = _load_index()
-    index.entries[name] = entry
-    _save_index(index)
+    build || return entry
+    return _build_and_vendor!(entry)
+end
 
-    println("  registered: $name ($(content_hash[1:12])…)")
+"""
+Build and wrap the project where it lives, then vendor the result: copy its
+output directory to `builds/<hash>/` and publish it (`_publish!`). Returns the
+updated entry, saved.
+"""
+function _build_and_vendor!(entry::RegistryEntry; clean::Bool=false, verbose::Bool=true)::RegistryEntry
+    _ensure_toolchain()
+    parent_mod = parentmodule(@__MODULE__)
+    parent_mod.build(entry.toml_path; clean=clean)
+    parent_mod.wrap(entry.toml_path)
+    # The same inputs `use` hashes: the loaded config with its dependencies resolved.
+    config = DependencyResolver.resolve_dependencies(ConfigurationManager.load_config(entry.toml_path))
+    config_hash = hash_config(config)
+    _store_build(config_hash, ConfigurationManager.get_output_path(config))
+    verbose && println("  vendored: $(_cached_build_dir(config_hash))")
+    return _publish!(entry, config_hash, ConfigurationManager.get_module_name(config); verbose=verbose)
+end
+
+"""
+Point the entry and its Julia package at the vendored build `config_hash`, and
+add the package to the entry's Julia environment if it is not there yet.
+"""
+function _publish!(entry::RegistryEntry, config_hash::String, module_name::String;
+                   verbose::Bool=true)::RegistryEntry
+    wrapper = joinpath(_cached_build_dir(config_hash), module_name * ".jl")
+    isfile(wrapper) || error("The vendored build $(_cached_build_dir(config_hash)) has no $module_name.jl.")
+    pkg_dir = _write_package(module_name, _package_uuid(entry.toml_path, entry.name),
+                             _package_version(entry.toml_path), wrapper)
+    entry = _save_entry(_with(entry; build_hash=config_hash, module_name=module_name, verified=true))
+    isempty(entry.julia_env) || _add_to_julia_env(pkg_dir, module_name, entry.julia_env; verbose=verbose)
     return entry
+end
+
+"""
+The toolchain check `use` and `register` run before building, from the cached
+result when it is fresh.
+"""
+function _ensure_toolchain()
+    cached_status = _cached_env_check()
+    if isnothing(cached_status)
+        status = EnvironmentDoctor.check_environment(verbose=false, throw_on_error=false)
+        _cache_env_check(status)
+        status.tier1_ready || EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
+    elseif !cached_status.ready
+        EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
+    end
+    return nothing
 end
 
 """
     unregister(name::String)
 
-Remove a package from the global registry, with its registry folder: the stored
-TOML, the staged copy of its inputs, and its build tree. Cached builds under
-`builds/` are kept.
+Remove a package from the global registry, with what the registry made from it:
+its vendored build, its Julia package, and that package's place in a Julia
+environment. The project itself is never touched.
 """
 function unregister(name::String)
     index = _load_index()
@@ -435,21 +633,22 @@ function unregister(name::String)
     end
 
     entry = index.entries[name]
+    others = [e for e in values(index.entries) if e.name != name]
 
-    # Remove the entry's folder: stored TOML, staged inputs and build tree. An
-    # entry registered before entries had folders keeps its TOML in the shared
-    # registry folder, and only that file is removed.
-    entry_dir = dirname(entry.toml_path)
-    if isdir(entry_dir) && !_same_dir(entry_dir, _registry_dir()) &&
-       _within_root(entry_dir, _registry_dir())
-        rm(entry_dir; recursive=true, force=true)
-    elseif isfile(entry.toml_path)
+    if !isempty(entry.module_name)
+        isempty(entry.julia_env) || _remove_from_julia_env(entry.module_name, entry.julia_env)
+        any(e -> e.module_name == entry.module_name, others) ||
+            _rm_vendored(joinpath(_packages_dir(), entry.module_name))
+    end
+    # Another entry can vendor the identical build (the same project under two names).
+    if !isempty(entry.build_hash) && !any(e -> e.build_hash == entry.build_hash, others)
+        _rm_vendored(_cached_build_dir(entry.build_hash))
+    end
+    # An entry from before entries pointed at their project holds a TOML copy
+    # in the registry. Never the project's own file.
+    if isfile(entry.toml_path) && _within_root(entry.toml_path, _registry_dir())
         rm(entry.toml_path; force=true)
     end
-
-    # Cached builds under builds/ stay: they are keyed on hash_config (the
-    # resolved inputs and the generator), not on this entry's TOML hash, which
-    # is what this used to look up — so it never found one.
 
     delete!(index.entries, name)
     _save_index(index)
@@ -487,14 +686,22 @@ function list_registry()
         else
             "local"
         end
-        # Whether `use` has built it. This used to test builds/<TOML hash>, but
-        # builds are stored under hash_config, so it always said "not built".
-        built = entry.verified ? "built by use()" : "not built by use() yet"
+        # The build the entry records as vendored. This used to test
+        # builds/<TOML hash>, but builds are stored under hash_config, so it
+        # always said "not built".
+        built = !isempty(entry.build_hash) && _has_cached_build(entry.build_hash) ?
+            "vendored $(entry.build_hash[1:12])…" : "not built yet"
+        project = isfile(entry.toml_path) ? entry.project_root : "(missing) $(entry.toml_path)"
+        julia = isempty(entry.julia_env) ? "not in a Julia environment" :
+                isempty(entry.module_name) ? "goes into $(entry.julia_env) once built" :
+                "using $(entry.module_name), in $(entry.julia_env)"
 
         println("  $status $name")
-        println("    hash:   $hash_short…")
-        println("    source: $source")
-        println("    status: $built")
+        println("    project: $project")
+        println("    hash:    $hash_short…")
+        println("    source:  $source")
+        println("    status:  $built")
+        println("    julia:   $julia")
         println("    registered: $(Dates.format(entry.registered_at, "yyyy-mm-dd HH:MM"))")
         println()
     end
@@ -735,12 +942,14 @@ end
 """
     use(name::String; force_rebuild::Bool=false, verbose::Bool=true)::Module
 
-Load a wrapper by registry name. Resolves dependencies, checks environment,
-builds if needed, wraps, and returns the loaded Julia module.
+Load a registered wrapper by name, and return its module.
 
-It builds from the copy `register` made of the project, not from the original
-tree. `force_rebuild=true` ignores the cached build and builds that copy again
-from nothing.
+The project builds where it lives. When its inputs (TOML, sources, headers,
+dependencies, toolchain, RepliBuild itself) match a vendored build, `use` loads
+that build. Otherwise it builds and wraps the project in place, vendors the
+result, and loads it — so edits to the project reach `use` without registering
+again. A project that has moved or been deleted still loads from its last
+vendored build. `force_rebuild=true` builds the project from nothing first.
 
 ```julia
 Lua = RepliBuild.use("lua")
@@ -748,7 +957,6 @@ Lua.luaL_newstate()
 ```
 """
 function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)::Module
-    # 1. Lookup in registry
     index = _load_index()
     if !haskey(index.entries, name)
         error("Package '$name' not in registry. Use RepliBuild.list_registry() to see available packages,\n" *
@@ -759,100 +967,57 @@ function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)::Modul
 
     verbose && println("RepliBuild | use $name")
 
-    # 2. Load the stored TOML config
     if !isfile(entry.toml_path)
-        error("Registry TOML missing: $(entry.toml_path)\nRe-register with RepliBuild.register()")
+        # The project moved or was deleted. What was vendored still loads.
+        if !isempty(entry.build_hash) && !isempty(entry.module_name) && _has_cached_build(entry.build_hash)
+            @warn "$name: its project is gone ($(entry.toml_path)); loading the build vendored for it. Register it again from where it is now to rebuild."
+            return _load_wrapper(name, entry.build_hash, entry.module_name, verbose)
+        end
+        error("$name: its replibuild.toml is gone ($(entry.toml_path)) and nothing was vendored. " *
+              "Register the project again from where it is now.")
     end
-    config = ConfigurationManager.load_config(entry.toml_path)
 
-    # 3. Resolve dependencies (git clone, pkg-config, etc.)
-    config = DependencyResolver.resolve_dependencies(config)
-
-    # 4. Compute build hash (includes resolved sources)
+    config = DependencyResolver.resolve_dependencies(ConfigurationManager.load_config(entry.toml_path))
     config_hash = hash_config(config)
+    module_name = ConfigurationManager.get_module_name(config)
 
-    # 5. Check for cached build artifacts
     if !force_rebuild && _has_cached_build(config_hash)
         verbose && println("  cached build: $(config_hash[1:12])…")
-        return _load_wrapper(name, config_hash, config, verbose)
+        # The same inputs were vendored under another entry, or before an edit
+        # that was then undone: point this entry and its package at that build.
+        entry.build_hash == config_hash && entry.module_name == module_name ||
+            (entry = _publish!(entry, config_hash, module_name; verbose=verbose))
+        return _load_wrapper(name, config_hash, module_name, verbose)
     end
 
-    # 6. Check environment (use cache when possible)
-    cached_status = _cached_env_check()
-    if isnothing(cached_status)
-        status = EnvironmentDoctor.check_environment(verbose=false, throw_on_error=false)
-        _cache_env_check(status)
-        if !status.tier1_ready
-            EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
-        end
-    else
-        if !cached_status.ready
-            EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
-        end
-    end
-
-    # 7. Build (compile + link)
-    verbose && println("  building...")
-
-    # We need to call the parent module's build/wrap — access via Main.RepliBuild
-    parent_mod = parentmodule(@__MODULE__)
+    verbose && println("  building in $(entry.project_root)")
     # `force_rebuild` builds from nothing. Without `clean`, an unchanged project
     # hash skipped the build, so it only re-wrapped: metadata extracted by an
     # older RepliBuild survived the one call meant to replace it.
-    library_path = parent_mod.build(entry.toml_path; clean=force_rebuild)
-
-    # 8. Wrap (generate Julia bindings)
-    verbose && println("  wrapping...")
-    wrapper_path = parent_mod.wrap(entry.toml_path)
-
-    # 9. Cache the build artifacts
-    output_dir = abspath(joinpath(dirname(entry.toml_path), ConfigurationManager.get_output_path(config)))
-    _store_build(config_hash, output_dir)
-
-    # 10. Mark as verified in registry
-    if !entry.verified
-        verified_entry = RegistryEntry(
-            entry.name, entry.hash, entry.toml_path,
-            entry.source_url, entry.source_tag,
-            entry.registered_at, true, entry.project_root,
-        )
-        index.entries[name] = verified_entry
-        _save_index(index)
-    end
-
+    entry = _build_and_vendor!(entry; clean=force_rebuild, verbose=verbose)
     verbose && println("  done: $name ready")
-    return _load_wrapper(name, config_hash, config, verbose)
+    return _load_wrapper(name, entry.build_hash, entry.module_name, verbose)
 end
 
-"""Load a wrapper module from cached build artifacts."""
-function _load_wrapper(name::String, config_hash::String, config::RepliBuildConfig, verbose::Bool)::Module
+"""Load a wrapper module from a vendored build."""
+function _load_wrapper(name::String, config_hash::String, module_name::String, verbose::Bool)::Module
     build_dir = _cached_build_dir(config_hash)
 
-    # Pick the wrapper by name, not first(): the cache dir is shared across
-    # builds from the same source tree, so multiple `<Title>.jl` files coexist
-    # there and `first()` picks alphabetically — wrong package every time.
-    # The generator names the file with `get_module_name` (`vec2d` → `Vec2d.jl`).
-    # `titlecase` capitalizes after a digit (`vec2d` → `Vec2D.jl`) and the
-    # loader then looked for a file the generator never wrote.
-    expected = ConfigurationManager.get_module_name(config) * ".jl"
+    # Pick the wrapper by name, not first(): the generator names the file with
+    # `get_module_name` (`vec2d` → `Vec2d.jl`). `titlecase` capitalizes after a
+    # digit (`vec2d` → `Vec2D.jl`) and the loader then looked for a file the
+    # generator never wrote.
+    expected = module_name * ".jl"
     wrapper_path = joinpath(build_dir, expected)
     if !isfile(wrapper_path)
-        # Fall back to project output dir for the same named file
-        output_dir = ConfigurationManager.get_output_path(config)
-        candidate = joinpath(output_dir, expected)
-        if isfile(candidate)
-            wrapper_path = candidate
-        else
-            avail = join(filter(f -> endswith(f, ".jl"), readdir(build_dir)), ", ")
-            error("Wrapper '$expected' not found for '$name' in $build_dir. Available: $avail")
-        end
+        avail = isdir(build_dir) ? join(filter(f -> endswith(f, ".jl"), readdir(build_dir)), ", ") : "(no such folder)"
+        error("Wrapper '$expected' not found for '$name' in $build_dir. Available: $avail")
     end
 
     # The wrapper resolves LIBRARY_PATH relative to its own file first (the
     # .so copy _store_build placed beside it in this build dir), falling back
-    # to the absolute path baked at generation time. Loading from the per-hash
-    # dir therefore survives later builds overwriting the shared
-    # ~/.replibuild/registry/julia/ output dir.
+    # to the absolute path baked at generation time, so the vendored build
+    # stays bound to its own library whatever the project's julia/ holds now.
 
     verbose && println("  loading: $wrapper_path")
 

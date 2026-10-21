@@ -362,10 +362,9 @@ const PLATFORM_KEYS = ("linux", "windows", "macos")
 
 """
 Relative `[compile] source_files` / `include_dirs` are relative to the project
-root: the rule `root` itself follows against the TOML, and the one the registry
-stages inputs by (`_stage_registered_inputs!`). They used to reach clang as
-written, which made them relative to the process cwd, i.e. the TOML's directory
-during `build`, and that is the root only while `root = "."`.
+root: the rule `root` itself follows against the TOML. They used to reach clang
+as written, which made them relative to the process cwd, i.e. the TOML's
+directory during `build`, and that is the root only while `root = "."`.
 """
 function _rooted_compile_paths(c::CompileConfig, root::AbstractString)::CompileConfig
     rooted(p) = isabspath(p) ? p : normpath(joinpath(root, p))

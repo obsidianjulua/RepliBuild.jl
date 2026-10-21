@@ -31,9 +31,12 @@ Or `RepliBuild.discover("path/to/project", build=true, wrap=true)` in one call.
 Then open the TOML — discovery writes the shape of the tree; you add the things
 it cannot see.
 
-`discover` registers the project locally, so later `RepliBuild.use("myproject")`
-reloads it without `include`. A fresh install has an empty registry:
-`use("cjson")` is not a first-run command.
+The project builds where it lives. When the wrapper is ready,
+`RepliBuild.register(toml)` vendors that build to `~/.replibuild/` and adds a
+Julia package around it to your Julia environment, so `RepliBuild.use("myproject")`
+or `using MyProject` loads it in any session; the one-shot `discover` above ends
+by registering. A fresh install has an empty registry: `use("cjson")` is not a
+first-run command.
 
 ## What you edit
 

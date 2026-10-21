@@ -37,22 +37,26 @@ info
 
 ## Registry
 
-`use("name")` loads a project already in the **local** registry. `discover`
-registers for you; otherwise call `register` first. A fresh install has an
-empty registry — there is no Hub fallback.
+A project builds where it lives. `register` builds and wraps it in place, vendors
+the build to `~/.replibuild/builds/<hash>/`, and adds a Julia package around it to
+a Julia environment (`env`, default the `@v#.#` environment). `use("name")` loads
+the vendored build, or rebuilds the project in place after an edit. A fresh
+install has an empty registry — there is no Hub fallback.
 
 ```julia
-RepliBuild.register("replibuild.toml")
-RepliBuild.use("myproject")              # name from [project].name; cached
+RepliBuild.register("replibuild.toml")   # also: env=:active, env="path", env=nothing, build=false
+RepliBuild.use("myproject")              # name from [project].name
+using MyProject                          # from the Julia environment register added it to
 RepliBuild.list_registry()
 RepliBuild.search("xml")                 # browse Hub TOML names; does not register
 ```
 
-`REPLIBUILD_HOME` relocates `~/.replibuild/`. `REPLIBUILD_HUB_URL` points
-`search` at a private index mirror. `use` builds from the copy `register` made
-of the project, so register again after editing its sources. The `use` cache key
-includes RepliBuild's version, so an upgrade rebuilds each registered package
-once. See [Registry](use.md).
+`REPLIBUILD_HOME` relocates `~/.replibuild/`. `REPLIBUILD_JULIA_ENV`
+(`default`, `active`, `none`, or a path) changes where `register` adds packages.
+`REPLIBUILD_HUB_URL` points `search` at a private index mirror. The vendored
+build's hash includes RepliBuild's version, so after an upgrade `use` wraps each
+registered package again, once; a fix in what `build` extracts also needs
+`use(name; force_rebuild=true)`. See [Registry](use.md).
 
 ```@docs
 register
