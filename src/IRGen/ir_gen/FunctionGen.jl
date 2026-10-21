@@ -149,6 +149,71 @@ function record_passes_by_reference(c_type::AbstractString, key, record_abi)::Bo
 end
 
 """
+    _byte_region_size(key, structs) -> Union{Int,Nothing}
+
+`N` when the record `key` names has no body a thunk can type field by field, so
+StructGen emits it as `!llvm.array<N x i8>`: a union, a bitfield record, or
+overlapping members. `nothing` for a record with a real body.
+
+By value such a region must not cross as that array. LLVM splits an array
+argument into one register per element, so the callee read only the first
+byte, and on Win64 a size passed by reference arrived as that byte read as an
+address (abi_fuzz X2). It crosses as `_byte_blob_type(N)` instead, a packed
+struct of the same bytes, which the dialect's SysV and Win64 classifiers
+place as C does for a record without float members.
+"""
+function _byte_region_size(key, structs)
+    (key === nothing || !haskey(structs, key)) && return nothing
+    def = StructGen.get_struct_definition_string(String(key), structs[key], structs)
+    m = match(r"^!llvm\.array<(\d+) x i8>$", def)
+    return m === nothing ? nothing : parse(Int, m.captures[1])
+end
+
+"""
+    _record_float_risk(info, structs) -> Bool
+
+Whether a record's bytes may hold a `float`, `double` or `long double`, at any
+depth. A member whose type is unknown counts, since its class is unknown too.
+"""
+function _record_float_risk(info, structs, seen::Set{String}=Set{String}())
+    for m in get(info, "members", [])
+        ct = strip(replace(String(get(m, "c_type", "")), r"\b(?:const|volatile)\b" => ""))
+        (endswith(ct, "*") || endswith(ct, "&")) && continue
+        base = String(strip(replace(ct, r"\[\d*\]" => "")))
+        occursin(r"\b(?:float|double)\b", base) && return true
+        mapped = map_cpp_type(base)
+        mapped in ("f16", "f32", "f64", "f80", "f128") && return true
+        if startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
+            key = mapped[15:end-2]
+            haskey(structs, "__enum__" * key) && continue
+            sub = get(structs, key, nothing)
+            sub === nothing && return true
+            key in seen && continue
+            push!(seen, key)
+            _record_float_risk(sub, structs, seen) && return true
+        elseif mapped == "" || mapped == "!llvm.ptr"
+            return true          # a spelling the scalar map does not know
+        end
+    end
+    return false
+end
+
+"""
+    _byte_region_unclassifiable(key, structs) -> Bool
+
+A byte region SysV would pass in registers whose classes the bytes cannot
+state: 16 bytes or less and possibly holding a float, which C puts in an SSE
+eightbyte where the byte blob claims INTEGER. Win64 crosses a record by size
+alone, so there it never is.
+"""
+function _byte_region_unclassifiable(key, structs; abi::Symbol = Sys.iswindows() ? :win64 : :sysv)
+    abi === :win64 && return false
+    abi === :sysv || throw(ArgumentError("unknown record ABI `$abi`; expected :sysv or :win64"))
+    n = _byte_region_size(key, structs)
+    return n !== nothing && n <= 16 && _record_float_risk(structs[key], structs)
+end
+
+"""
     thunk_crossings(func, structs, record_abi) -> NamedTuple
 
 The per-function answer both generators act on: `params` (one
@@ -164,10 +229,16 @@ function thunk_crossings(func, structs, record_abi)
     ret_c = String(get(get(func, "return_type", Dict()), "c_type", "void"))
     ret = by_value_crossing(ret_c, structs, record_abi)
     reasons = String[]
-    for (p, (k, _)) in zip(get(func, "parameters", []), params)
+    sse_note = " (a union or bitfield record of 16 bytes or less that may hold a float: " *
+               "SysV passes it in SSE registers its bytes cannot state)"
+    for (p, (k, key)) in zip(get(func, "parameters", []), params)
         k === :opaque && push!(reasons, "takes `$(get(p, "c_type", "?"))` by value")
+        k === :layout && _byte_region_unclassifiable(key, structs) &&
+            push!(reasons, "takes `$(get(p, "c_type", "?"))` by value" * sse_note)
     end
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
+    ret[1] === :layout && _byte_region_unclassifiable(ret[2], structs) &&
+        push!(reasons, "returns `$ret_c` by value" * sse_note)
     ret[1] === :indirect && push!(reasons,
         "returns `$ret_c` by value, which C++ returns through a hidden pointer the thunk does not pass")
     return (params = params, ret = ret,
@@ -486,6 +557,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 else
                     # Use FULL definition string to avoid alias parser issues in function signatures
                     mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
+                    # A union or bitfield record is a byte region; by value it
+                    # crosses as a packed struct of its bytes (`_byte_region_size`).
+                    br = match(r"^!llvm\.array<(\d+) x i8>$", mlir_t)
+                    br === nothing || (mlir_t = _byte_blob_type(parse(Int, br.captures[1])))
                 end
             end
 
@@ -586,6 +661,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                         ret_type = _byte_blob_type(byte_size)
                     else
                         ret_type = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
+                        # A union or bitfield record comes back as a packed
+                        # struct of its bytes, as it goes in (`_byte_region_size`).
+                        br = match(r"^!llvm\.array<(\d+) x i8>$", ret_type)
+                        br === nothing || (ret_type = _byte_blob_type(parse(Int, br.captures[1])))
                     end
                 end
             end

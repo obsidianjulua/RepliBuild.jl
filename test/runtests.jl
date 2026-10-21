@@ -450,6 +450,12 @@ include(joinpath(@__DIR__, "test_by_value_crossing.jl"))
 
 include(joinpath(@__DIR__, "test_packed_layout.jl"))
 
+# ── Tier 2 thunk bodies for byte regions and #pragma pack (no toolchain) ────
+# A union or bitfield record crosses as a packed struct of its bytes, never an
+# array (abi_fuzz X2); a member is measured as what is emitted (X8).
+
+include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

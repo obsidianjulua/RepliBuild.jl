@@ -21,6 +21,21 @@ struct __attribute__((packed)) In3 { char x; short y; };
 struct Out6 { In3 in; char c[3]; };
 struct Top6 { Out6 o; };                                    /* packed two levels down: Tier 2 */
 
+/* Byte regions by value through a thunk (abi_fuzz X2). A union and a bitfield
+   record have no field-by-field body, so the thunk passes their bytes, which
+   must still reach the callee the way C passes the record. */
+union U4 { int i; unsigned char b[4]; };                    /* 4 B: one register */
+union U12 { int i[3]; char c; };                            /* 12 B: two eightbytes (SysV), by reference (Win64) */
+struct BF8 { unsigned a : 3; unsigned b : 7; int n; };      /* 8 B bitfield record */
+
+/* A `#pragma pack` record holding a pointer-aligned one (abi_fuzz X8): `r` sits
+   at offset 4, where natural alignment would put it at 8. */
+struct PIn { int a; void* p; };
+struct PR { int m1; PIn in; };
+#pragma pack(push, 4)
+struct PK28 { char c; PR r; };
+#pragma pack(pop)
+
 extern "C" {
 
 CS3     make_cs3(int base);
@@ -33,6 +48,11 @@ Pk5     make_pk5(int i);
 int     pk5_sum(Pk5 v);
 Top6    make_top6(short y);
 int     top6_sum(Top6 v);
+int     u4_sum(U4 v);
+int     u12_sum(U12 v);
+int     bf8_sum(BF8 v);
+PK28    make_pk28(int m1);
+int     pk28_sum(PK28 v);
 
 }
 

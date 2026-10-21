@@ -67,4 +67,32 @@ probe("top6") do p
     (s = top6_sum(r)) == 0x31 + 10000 + 1500 || push!(p, "top6_sum = $s")
 end
 
+# Byte regions by value (abi_fuzz X2): built from their bytes, since a union
+# and a bitfield record are a `mutable struct` of their C bytes in Julia.
+probe("u4") do p
+    (s = u4_sum(U4((0x01, 0x02, 0x03, 0x04)))) == 1 + 4 + 9 + 16 || push!(p, "u4_sum = $s")
+end
+
+probe("u12") do p
+    le(x) = ntuple(k -> UInt8((x >> (8 * (k - 1))) & 0xff), 4)
+    v = U12((le(5)..., le(6)..., le(7)...))
+    (s = u12_sum(v)) == 5 + 12 + 21 || push!(p, "u12_sum = $s")
+end
+
+probe("bf8") do p
+    # a = 5 in bits 0-2, b = 9 in bits 3-9, n = 3 at byte 4.
+    v = BF8((UInt8(5 | (9 << 3)), 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00))
+    (s = bf8_sum(v)) == 5 + 90 + 300 || push!(p, "bf8_sum = $s")
+end
+
+# A `#pragma pack` record holding a pointer-aligned one (abi_fuzz X8): `r` at 4.
+probe("pk28") do p
+    r = make_pk28(Int32(11))
+    b = bytes(r)
+    sizeof(r) == 28 || push!(p, "sizeof = $(sizeof(r))")
+    (b[1], field(Int32, b, 4), field(Int32, b, 12), field(UInt64, b, 20)) == (0x41, 11, 7, 0x1234) ||
+        push!(p, "make_pk28 bytes = $b")
+    (s = pk28_sum(r)) == 0x41 + 22 + 21 + 0x1234 || push!(p, "pk28_sum = $s")
+end
+
 println("PROBE_DONE")

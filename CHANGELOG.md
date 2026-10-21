@@ -4,6 +4,22 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 2 thunks: unions and bitfield records cross by value as their bytes; `#pragma pack` bodies stay packed (abi_fuzz X2, X8; 2026-10-20)
+
+- **X2: a union or bitfield record passed by value reached the callee as its first byte, or crashed it.**
+  - A record with no field-by-field body (a union, a bitfield record, overlapping members) is `!llvm.array<N x i8>` to StructGen, and the thunk passed and returned it as that array.
+  - LLVM splits an array argument into one register per element, so the callee read byte 0 and whatever the other registers held. On Win64, which passes a record of any size but 1, 2, 4 or 8 by reference, the callee read that byte as an address.
+  - Such a record now crosses as `_byte_blob_type(N)`, a packed struct of the same bytes, in both directions. The dialect's SysV and Win64 classifiers place it as C places a record without float members.
+  - On SysV, one of 16 bytes or less that may hold a `float` or `double` is refused with a trap stub (`_byte_region_unclassifiable`). C passes it in SSE registers, and its bytes cannot say which ones. Win64 crosses a record by size alone, so nothing is refused there.
+- **X8: a `#pragma pack` record holding a pointer-aligned record got an unpacked thunk body.**
+  - `_sized_member_types` measured an alias member (`!Struct_X`) as X's bytes, alignment 1, while the body emitted the alias, which has X's alignment.
+  - The natural-layout check accepted the member at offset 4, LLVM moved it to 8, and the body came out 4 bytes larger than the record.
+  - The member is now measured as what is emitted, so the body is packed.
+- **Tests:**
+  - `test_thunk_byte_regions.jl` (runtests) checks the X8 body, which records are byte regions, the SysV and Win64 verdicts, and the declarations a thunk module gets. With each fix removed in turn (the X2 crossing, the SSE refusal, the X8 measure), 5, 1 and 2 checks fail.
+  - `cpp_routing_test` gains the unions `U4` and `U12`, the bitfield record `BF8` and a `#pragma pack(4)` record `PK28`. `test_cpp_record_routing.jl` (devtests) checks that each routes to Tier 2 and calls each live.
+  - The repros `X2-18-cpp-call_f2-union`, `X2-53-cpp-call_f3-bitfield`, `X2-99-cpp-call_f1-bitfield` and `X8-49-cpp-call_f4` pass.
+
 ### Enum and typedef'd members have a size, and the C++ struct emitter can take them (2026-10-18)
 
 - **`parse_dwarf_dump` gave three kinds of member size 0**: an enum member, a

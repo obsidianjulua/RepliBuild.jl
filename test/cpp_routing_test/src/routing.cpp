@@ -60,4 +60,34 @@ int top6_sum(Top6 v)
     return v.o.in.x + 10 * v.o.in.y + 100 * (v.o.c[0] + v.o.c[1] + v.o.c[2]);
 }
 
+int u4_sum(U4 v)
+{
+    return v.b[0] + 2 * v.b[1] + 3 * v.b[2] + 4 * v.b[3];
+}
+
+int u12_sum(U12 v)
+{
+    return v.i[0] + 2 * v.i[1] + 3 * v.i[2];
+}
+
+int bf8_sum(BF8 v)
+{
+    return (int)v.a + 10 * (int)v.b + 100 * v.n;
+}
+
+PK28 make_pk28(int m1)
+{
+    PK28 r = {};
+    r.c = 0x41;
+    r.r.m1 = m1;
+    r.r.in.a = 7;
+    r.r.in.p = (void*)0x1234;
+    return r;
+}
+
+int pk28_sum(PK28 v)
+{
+    return v.c + 2 * v.r.m1 + 3 * v.r.in.a + (int)(long long)v.r.in.p;
+}
+
 }
