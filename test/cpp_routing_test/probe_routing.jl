@@ -113,6 +113,19 @@ probe("bf8ret") do p
     (s = bf8_sum(r)) == 5 + 90 + 300 || push!(p, "bf8_sum(make_bf8) = $s")
 end
 
+# A tiled record holding a bitfield (abi_fuzz X9): m1 in bytes 0-3, m2's 7 bits
+# in byte 4, whatever the record's size (12 on MinGW, 5 on Itanium).
+probe("pb12") do p
+    b = zeros(UInt8, sizeof(PB12))
+    b[1:4] .= reinterpret(UInt8, [Int32(3)])
+    b[5] = 0x09
+    (s = pb12_sum(PB12(Tuple(b)))) == 3 + 9000 || push!(p, "pb12_sum = $s")
+    r = make_pb12(Int32(5))
+    rb = rbytes(r)
+    (field(Int32, rb, 0), rb[5] & 0x7f) == (5, 0x0b) || push!(p, "make_pb12 bytes = $rb")
+    (s = pb12_sum(r)) == 5 + 11000 || push!(p, "pb12_sum(make_pb12) = $s")
+end
+
 # A `#pragma pack` record holding a pointer-aligned one (abi_fuzz X8): `r` at 4.
 probe("pk28") do p
     r = make_pk28(Int32(11))

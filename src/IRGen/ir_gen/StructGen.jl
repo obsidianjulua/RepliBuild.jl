@@ -7,7 +7,20 @@ export generate_struct_definitions, get_struct_type_string, get_struct_definitio
 """
     is_struct_packed(info::Any) -> Bool
 
-Determine if a struct is packed (dwarf_size == sum(member_sizes)).
+Whether a struct's body is its members tiled end to end: `byte_size ==
+sum(member sizes)`, with every member where that tiling puts it. Such a body
+travels the `!jlcs.c_struct` marshalling path, which places member i at the sum
+of the sizes before it (`get_julia_offsets(info, true)`).
+
+A matching sum is not enough. A bitfield's `size` is its declared type's, not
+the bytes it occupies, and it has no DWARF byte offset. So each member with an
+offset must sit at it, and each bitfield's bits must lie inside the unit the
+tiling gives it. MinGW lays bitfields out MS-style, one declared-size unit per
+run, so its exact tilings are real. Itanium packs a bitfield into the bytes
+after its neighbours: `{short; int : 4; short}` sums to its 8 bytes with the
+second short at 4, not 6 (abi_fuzz X9). A record that does not tile is laid out
+from its DWARF offsets, or crosses as its bytes. A member with no placement
+recorded at all has nothing to contradict the tiling.
 """
 function is_struct_packed(info::Any)
     dwarf_size_str = get(info, "byte_size", "0")
@@ -38,8 +51,22 @@ function is_struct_packed(info::Any)
         end
         sum_size += m_size
     end
-    
-    return sum_size == dwarf_size
+    sum_size == dwarf_size || return false
+
+    cur = 0
+    for m in members
+        m_size = something(_parse_num(get(m, "size", 0)), 0)
+        off = _parse_num(get(m, "offset", nothing))
+        bits = _parse_num(get(m, "bit_size", nothing))
+        at = _parse_num(get(m, "data_bit_offset", nothing))
+        if off !== nothing
+            off == cur || return false
+        elseif bits !== nothing && at !== nothing
+            (8 * cur <= at && at + bits <= 8 * (cur + m_size)) || return false
+        end
+        cur += m_size
+    end
+    return true
 end
 
 """

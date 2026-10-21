@@ -4,6 +4,21 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 2: a tiled record's bitfield is read where its body puts it (abi_fuzz X9; 2026-10-21)
+
+- **A record holding a bitfield could reach the callee with the bitfield, or members after it, wrong.**
+  - `is_struct_packed` calls a record packed when its member sizes sum to its size, and its thunk body then tiles the members end to end (`get_julia_offsets(info, true)`).
+  - The marshal that copies the Julia value into that body reads each member at its DWARF offset. A bitfield has none, and `_dwarf_member_offsets` then fell back to aligned guesses for the whole record.
+  - On MinGW a `#pragma pack(1) {unsigned; unsigned long long : 7}` is 12 bytes, with the bitfield's own 8-byte unit at 4. The body put the unit at 4, but the marshal read it from 8: the callee got four bytes of the record and four from past its end.
+  - A member without a DWARF offset is now read where the body puts it.
+- **A matching sum is no longer taken for a tiling.** `is_struct_packed` also requires every member with a DWARF offset to sit at it, and every bitfield's bits to lie inside the unit the tiling gives it.
+  - MinGW lays bitfields out MS-style, one declared-size unit per run, so its exact sums are real tilings.
+  - Itanium packs a bitfield into the neighbouring bytes: `{short; int : 4; short}` sums to its 8 bytes with the second short at 4, not 6. Such a record now crosses as its bytes.
+- **Tests:**
+  - `test_thunk_byte_regions.jl` (runtests) checks the offsets of the three failing shapes (fuzz units 12, 31 and 39), the marshal they produce, and the Itanium counter-example. With the offset fix removed 4 checks fail; with the tiling check removed, 5.
+  - `cpp_routing_test` gains `PB12`, passed and returned live. Without the fix, `pb12_sum` read `m2` as 0.
+- **Fuzzer, C++ mode, seeds 1–40, Julia 1.13.2:** the 15 failures left after the merged fixes pass, and nothing regresses. That mode now has no failures: against the base, all 153 pass.
+
 ### Tier 2 thunks: unions and bitfield records cross by value as their bytes; `#pragma pack` bodies stay packed (abi_fuzz X2, X8; 2026-10-20)
 
 - **X2: a union or bitfield record passed by value reached the callee as its first byte, or crashed it.**
@@ -22,7 +37,7 @@ All notable changes to RepliBuild.jl are documented in this file.
   - The repros `X2-18-cpp-call_f2-union`, `X2-53-cpp-call_f3-bitfield`, `X2-99-cpp-call_f1-bitfield` and `X8-49-cpp-call_f4` pass.
 - **Fuzzer, with this entry, X1/X5/X6 and C2/I1/M1 together, compared with the base on Julia 1.13.2:**
   - C++ mode, seeds 1–40: failures drop from 153 to 15. 138 checks go from FAIL to PASS, 95 more than X1/X5/X6 alone, including `9/cpp ret/f5`, and none the other way.
-  - The 15 left are calls that pass a record holding a bitfield. Some members arrive wrong: the bitfield, or members laid out after it. Tier 3 passes the same calls (see Open problems in CLAUDE.md).
+  - The 15 left are calls that pass a record holding a bitfield. Some members arrive wrong: the bitfield, or members laid out after it. Tier 3 passes the same calls. That is X9, fixed in the entry above.
   - C mode, seeds 1–106: no failures. Identifier mode, seeds 1–40: the same verdicts as C2/I1/M1 alone.
 
 ### Tier 2 and C++ accessors: unions and bitfield records move through their bytes; wide bitfields (abi_fuzz X1, X5, X6; 2026-10-20)

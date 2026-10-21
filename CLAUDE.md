@@ -471,7 +471,11 @@ the test named when you touch the area.
   against DWARF (`_prove_julia_layout`) and emits a C-layout byte blob when they
   cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk
   reads a Julia value at DWARF offsets (`_dwarf_member_offsets`), never at offsets
-  derived from alignment rules. A named union is `mutable`, so it embeds as a pointer;
+  derived from alignment rules. A bitfield has no DWARF byte offset, so it is read
+  where the tiled body puts it. `is_struct_packed` (member sizes summing to
+  `byte_size`) admits a tiled body only when every member and every bitfield's bits
+  sit where the tiling says: Itanium can sum without tiling (abi_fuzz X9,
+  `test_thunk_byte_regions.jl`). A named union is `mutable`, so it embeds as a pointer;
   any struct holding one is a blob, checked by type: an 8-byte union at an aligned
   offset fits the proof's pointer measure. In GeneratorCpp a field takes a type only when
   the proof can measure it and it has the member's DWARF size (`_member_field`);
@@ -700,13 +704,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
   SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
   parameters are safe (LLVM's `byval` lowering puts the copy at 16). A SysV
   record holding a `long double` returns in `st0`, which no Julia type does.
-- **Tier 2: a by-value record holding a bitfield can lose members** (abi_fuzz,
-  2026-10-21; root cause open). Some members of such an argument arrive wrong:
-  the bitfield, or members laid out after it. In C++ seeds 1–40 on Windows that
-  is 15 calls, and Tier 3 passes all 15. Several of the records are packed, where
-  MinGW's MS-style bitfield layout differs from Itanium's (a `pack(1)`
-  `{unsigned; unsigned long long : 7}` is 12 bytes, not 5). Reproduce with
-  `abi_fuzz.jl --target=12/cpp/call/f3`.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles

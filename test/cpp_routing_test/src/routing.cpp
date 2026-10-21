@@ -115,4 +115,17 @@ int pk28_sum(PK28 v)
     return v.c + 2 * v.r.m1 + 3 * v.r.in.a + (int)(long long)v.r.in.p;
 }
 
+int pb12_sum(PB12 v)
+{
+    return (int)v.m1 + 1000 * (int)v.m2;
+}
+
+PB12 make_pb12(int m1)
+{
+    PB12 r = {};
+    r.m1 = (unsigned)m1;
+    r.m2 = 11;
+    return r;
+}
+
 }

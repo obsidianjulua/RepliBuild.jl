@@ -372,16 +372,24 @@ end
 """
     _dwarf_member_offsets(info) -> Vector{Int}
 
-Each member's DWARF byte offset, falling back to `StructGen.get_julia_offsets`
-only when a member has none recorded.
+Where each member of a tiled (`StructGen.is_struct_packed`) record sits in the
+Julia value, which is the C layout: its DWARF byte offset, or, for a member with
+none (a bitfield), where the tiled body puts it (`get_julia_offsets(info,
+true)`). `is_struct_packed` admits only records whose tiling agrees with every
+DWARF offset and bitfield, so the two cannot disagree.
+
+The fallback used to be the aligned guess for the whole record. It read a
+`#pragma pack(1) {unsigned; unsigned long long : 7}`'s unit from offset 8, where
+C and the body have it at 4, and the callee got the bytes after it (abi_fuzz X9).
 """
 function _dwarf_member_offsets(info)
     members = get(info, "members", [])
+    tiled = StructGen.get_julia_offsets(info, true)
     offs = Int[]
-    for m in members
+    for (i, m) in enumerate(members)
         o = get(m, "offset", nothing)
-        o === nothing && return StructGen.get_julia_offsets(info)
-        push!(offs, o isa Integer ? Int(o) : _parse_byte_size(string(o)))
+        push!(offs, o === nothing ? tiled[i] :
+                    o isa Integer ? Int(o) : _parse_byte_size(string(o)))
     end
     return offs
 end

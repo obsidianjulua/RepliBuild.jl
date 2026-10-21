@@ -37,6 +37,14 @@ struct PR { int m1; PIn in; };
 struct PK28 { char c; PR r; };
 #pragma pack(pop)
 
+/* A tiled record holding a bitfield (abi_fuzz X9): the member sizes sum to the
+   record's, so the thunk body tiles them, and the bitfield's unit must be read
+   where that body puts it. 12 bytes on MinGW (MS-style: m2 has its own 8-byte
+   unit at 4), 5 on Itanium; m2's bits are in byte 4 either way. */
+#pragma pack(push, 1)
+struct PB12 { unsigned int m1; unsigned long long m2 : 7; };
+#pragma pack(pop)
+
 extern "C" {
 
 CS3     make_cs3(int base);
@@ -57,6 +65,8 @@ U12     make_u12(int base);
 BF8     make_bf8(int n);
 PK28    make_pk28(int m1);
 int     pk28_sum(PK28 v);
+int     pb12_sum(PB12 v);
+PB12    make_pb12(int m1);
 
 }
 
