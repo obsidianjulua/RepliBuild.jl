@@ -75,6 +75,31 @@ int bf8_sum(BF8 v)
     return (int)v.a + 10 * (int)v.b + 100 * v.n;
 }
 
+U4 make_u4(int i)
+{
+    U4 u;
+    u.i = i;
+    return u;
+}
+
+U12 make_u12(int base)
+{
+    U12 u;
+    u.i[0] = base;
+    u.i[1] = base + 1;
+    u.i[2] = base + 2;
+    return u;
+}
+
+BF8 make_bf8(int n)
+{
+    BF8 v = {};
+    v.a = 5;
+    v.b = 9;
+    v.n = n;
+    return v;
+}
+
 PK28 make_pk28(int m1)
 {
     PK28 r = {};

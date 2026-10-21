@@ -23,7 +23,8 @@ struct Top6 { Out6 o; };                                    /* packed two levels
 
 /* Byte regions by value through a thunk (abi_fuzz X2). A union and a bitfield
    record have no field-by-field body, so the thunk passes their bytes, which
-   must still reach the callee the way C passes the record. */
+   must still reach the callee the way C passes the record, and come back the
+   way C returns it into the record Julia allocates (X1). */
 union U4 { int i; unsigned char b[4]; };                    /* 4 B: one register */
 union U12 { int i[3]; char c; };                            /* 12 B: two eightbytes (SysV), by reference (Win64) */
 struct BF8 { unsigned a : 3; unsigned b : 7; int n; };      /* 8 B bitfield record */
@@ -51,6 +52,9 @@ int     top6_sum(Top6 v);
 int     u4_sum(U4 v);
 int     u12_sum(U12 v);
 int     bf8_sum(BF8 v);
+U4      make_u4(int i);
+U12     make_u12(int base);
+BF8     make_bf8(int n);
 PK28    make_pk28(int m1);
 int     pk28_sum(PK28 v);
 

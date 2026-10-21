@@ -14,6 +14,9 @@
 #     to Tier 2; that path is checked in test_record_natural_layout.jl.
 #   * packed records go to Tier 2, including Top6, which is packed two levels
 #     down and reached ccall before.
+#   * unions and a bitfield record cross a thunk as their bytes, in and out
+#     (abi_fuzz X2; a return also needs X1's allocation), and a `#pragma pack`
+#     record holding a pointer-aligned one keeps a packed body (X8).
 #
 # Needs clang++ and libJLCS (the Tier 2 thunks).
 # =============================================================================
@@ -87,6 +90,7 @@ if requires("C++ record routing", :libJLCS, :clangxx)
                     :make_top6 => :tier2, :top6_sum => :tier2,
                     # Byte regions and the X8 record cross a thunk.
                     :u4_sum => :tier2, :u12_sum => :tier2, :bf8_sum => :tier2,
+                    :make_u4 => :tier2, :make_u12 => :tier2, :make_bf8 => :tier2,
                     :make_pk28 => :tier2, :pk28_sum => :tier2)
         checked = 0
         for (f, t) in sort(collect(want); by = first)
@@ -101,7 +105,8 @@ if requires("C++ record routing", :libJLCS, :clangxx)
         v = probe_verdicts(r.output)
         @test r.ok
         @test haskey(v, "PROBE_DONE")
-        names = ["cs3", "mass", "enumrec", "pk5", "top6", "u4", "u12", "bf8", "pk28"]
+        names = ["cs3", "mass", "enumrec", "pk5", "top6", "u4", "u12", "bf8",
+                 "u4ret", "u12ret", "bf8ret", "pk28"]
         for n in names
             @test (n, get(v, n, "no PROBE line")) == (n, "PASS")
         end

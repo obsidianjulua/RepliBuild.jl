@@ -85,6 +85,34 @@ probe("bf8") do p
     (s = bf8_sum(v)) == 5 + 90 + 300 || push!(p, "bf8_sum = $s")
 end
 
+# Byte regions returned by value: X1 allocates the record on the Julia side and
+# X2 makes the thunk receive it the way C returns it (U4 and BF8 in a register,
+# U12 in two on SysV and through a hidden pointer on Win64). Each goes back in
+# by value too. The one field of such a `mutable struct` is its C bytes.
+rbytes(x) = collect(getfield(x, 1))
+
+probe("u4ret") do p
+    r = make_u4(Int32(0x04030201))
+    (b = rbytes(r)) == [0x01, 0x02, 0x03, 0x04] || push!(p, "make_u4 bytes = $b")
+    (s = u4_sum(r)) == 1 + 4 + 9 + 16 || push!(p, "u4_sum(make_u4) = $s")
+end
+
+probe("u12ret") do p
+    r = make_u12(Int32(5))
+    b = rbytes(r)
+    Tuple(field(Int32, b, o) for o in (0, 4, 8)) == (5, 6, 7) || push!(p, "make_u12 bytes = $b")
+    (s = u12_sum(r)) == 5 + 12 + 21 || push!(p, "u12_sum(make_u12) = $s")
+end
+
+probe("bf8ret") do p
+    # a = 5 and b = 9 in bits 0-9 (the rest of that unit is padding), n at byte 4.
+    r = make_bf8(Int32(3))
+    b = rbytes(r)
+    ((UInt16(b[1]) | UInt16(b[2]) << 8) & 0x03ff, field(Int32, b, 4)) == (UInt16(5 | 9 << 3), 3) ||
+        push!(p, "make_bf8 bytes = $b")
+    (s = bf8_sum(r)) == 5 + 90 + 300 || push!(p, "bf8_sum(make_bf8) = $s")
+end
+
 # A `#pragma pack` record holding a pointer-aligned one (abi_fuzz X8): `r` at 4.
 probe("pk28") do p
     r = make_pk28(Int32(11))
