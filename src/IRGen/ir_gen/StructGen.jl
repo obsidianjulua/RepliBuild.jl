@@ -507,10 +507,23 @@ function _sized_member_types(name::String, info::Any, all_structs; alias_form::B
         mapped = map_cpp_type(t)
         push!(emit, _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
                                                 alias_form=alias_form, fallback_size=m_size))
-        push!(measure, alias_form ?
-              _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
-                                          alias_form=false, fallback_size=m_size) :
-              emit[end])
+        # Measure what is emitted. The alias `!Struct_X` stands for X's own body,
+        # with X's alignment, so measure it as the bare ref: `_mlir_layout` sizes
+        # that from DWARF and aligns it by X's members. The alias-free spelling is
+        # X's bytes, alignment 1. Measuring the alias by it let a `#pragma pack`
+        # struct holding a pointer-aligned record pass the natural-layout check
+        # with the record at an offset LLVM then moved: the body came out unpacked
+        # and 4 bytes too large (abi_fuzz X8).
+        bare = match(r"^!llvm\.struct<\"(.+)\">$", mapped)
+        if alias_form && startswith(emit[end], "!Struct_") && bare !== nothing &&
+           all_structs !== nothing && _lookup_struct(all_structs, String(bare.captures[1])) !== nothing
+            push!(measure, mapped)
+        else
+            push!(measure, alias_form ?
+                  _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
+                                              alias_form=false, fallback_size=m_size) :
+                  emit[end])
+        end
     end
     return (emit, measure)
 end

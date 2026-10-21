@@ -84,7 +84,10 @@ if requires("C++ record routing", :libJLCS, :clangxx)
                     :make_mass => :tier3, :mass_sum => :tier3,
                     :make_enumrec => :tier3, :enumrec_sum => :tier3,
                     :make_pk5 => :tier2, :pk5_sum => :tier2,
-                    :make_top6 => :tier2, :top6_sum => :tier2)
+                    :make_top6 => :tier2, :top6_sum => :tier2,
+                    # Byte regions and the X8 record cross a thunk.
+                    :u4_sum => :tier2, :u12_sum => :tier2, :bf8_sum => :tier2,
+                    :make_pk28 => :tier2, :pk28_sum => :tier2)
         checked = 0
         for (f, t) in sort(collect(want); by = first)
             @test (f, get(tiers, f, :missing)) == (f, t)
@@ -98,7 +101,7 @@ if requires("C++ record routing", :libJLCS, :clangxx)
         v = probe_verdicts(r.output)
         @test r.ok
         @test haskey(v, "PROBE_DONE")
-        names = ["cs3", "mass", "enumrec", "pk5", "top6"]
+        names = ["cs3", "mass", "enumrec", "pk5", "top6", "u4", "u12", "bf8", "pk28"]
         for n in names
             @test (n, get(v, n, "no PROBE line")) == (n, "PASS")
         end

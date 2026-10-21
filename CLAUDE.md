@@ -461,10 +461,12 @@ the test named when you touch the area.
 - **Emitted struct size must equal DWARF `byte_size`.** StructGen lays members out at
   DWARF offsets with explicit padding (`_apply_dwarf_layout`). When natural alignment
   cannot place them (packed, `#pragma pack`), the body is PACKED with explicit pads
-  (`_packed_dwarf_layout`), so the classifier sees the misaligned field. Only what no
-  body can model (overlaps, unmeasurable members) degrades to an opaque `byte_size`
-  region — never to the wrong size, which smashes the sret buffer.
-  (`test_struct_layout.jl`, `test_packed_layout.jl`.)
+  (`_packed_dwarf_layout`), so the classifier sees the misaligned field. That check
+  measures each member as the body emits it: an alias `!Struct_X` has X's alignment,
+  not the 1 of its bytes, or a `#pragma pack` body comes out unpacked (abi_fuzz X8).
+  Only what no body can model (overlaps, unmeasurable members) degrades to an opaque
+  `byte_size` region — never to the wrong size, which smashes the sret buffer.
+  (`test_struct_layout.jl`, `test_packed_layout.jl`, `test_thunk_byte_regions.jl`.)
 - **The Julia struct IS the C layout.** GeneratorCpp proves each struct's fields
   against DWARF (`_prove_julia_layout`) and emits a C-layout byte blob when they
   cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk
@@ -500,6 +502,13 @@ the test named when you touch the area.
   record must never fall to `!llvm.ptr`: that is how empty classes, declared-only
   types, `string_view` and every template spelling were mis-passed.
   (`test_by_value_crossing.jl`.)
+- **A byte region never crosses a thunk as an array.** A record with no
+  field-by-field body (a union, a bitfield record, overlapping members) is
+  `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one
+  register per element (abi_fuzz X2). By value it crosses as `_byte_blob_type(N)`,
+  a packed struct of the same bytes. On SysV one of 16 bytes or less that may hold
+  a float is refused (`_byte_region_unclassifiable`): C passes it in SSE registers
+  its bytes cannot state. (`test_thunk_byte_regions.jl`.)
 - `dtor_call` has no VTT operand. Its arity gate (exactly one final arg) is
   load-bearing for D2 destructors of classes with virtual bases.
 - vcall uses class-local coordinates (`vtable_offset = this_offset = 0` plus own slot).
