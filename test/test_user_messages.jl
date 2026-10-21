@@ -73,6 +73,9 @@ const _CO = RepliBuild.Compiler
                     @test RepliBuild.discover(dir) == toml
                     # With it, build runs against the kept file — which refuses
                     # the missing source. It used to return before building.
+                    # A host with no C toolchain (CI's Windows runner has no
+                    # mingw sysroot) stops at the toolchain check, which comes
+                    # first and is just as much past the old early return.
                     err = try
                         RepliBuild.discover(dir; build=true, wrap=true)
                         nothing
@@ -80,7 +83,14 @@ const _CO = RepliBuild.Compiler
                         e
                     end
                     @test err !== nothing
-                    err === nothing || @test occursin("no_such_file.c", sprint(showerror, err))
+                    if err !== nothing
+                        msg = sprint(showerror, err)
+                        if RepliBuild.check_environment(verbose=false).ready
+                            @test occursin("no_such_file.c", msg)
+                        else
+                            @test occursin("Toolchain incomplete", msg)
+                        end
+                    end
                 end
             end
             @test read(toml, String) == text          # kept as written, not rescanned
