@@ -268,3 +268,30 @@ end
         end
     end
 end
+
+# abi_fuzz M1: a project directory starting with a digit gave `module 3cCallF21`,
+# which parses, as a module named `3`, and fails at load. The parse guard now
+# refuses a module whose name is not an identifier, and the derived name never
+# starts with a digit or comes out empty.
+@testset "module names are identifiers (abi_fuzz M1)" begin
+    modname(project) = mktempdir() do dir
+        write(joinpath(dir, "replibuild.toml"), """
+        [project]
+        name = "$project"
+        root = "$(escape_string(dir))"
+        [wrap]
+        language = "c"
+        """)
+        RepliBuild.ConfigurationManager.get_module_name(
+            RepliBuild.ConfigurationManager.load_config(joinpath(dir, "replibuild.toml")))
+    end
+    @test modname("3c_call_f2") == "_3cCallF2"
+    @test modname("zlib") == "Zlib"
+    @test modname("my_lib") == "MyLib"
+    @test modname("---") == "Wrapper"
+    for p in ("3c_call_f2", "zlib", "my_lib", "---", "42")
+        @test (p, _is_fn_name(modname(p))) == (p, true)
+    end
+    @test_throws ErrorException W._assert_wrapper_parses("module 3cCallF21\nf() = 1\nend\n", "Synth3c")
+    @test (W._assert_wrapper_parses("module _3cCallF21\nf() = 1\nend\n", "Synth3c"); true)
+end

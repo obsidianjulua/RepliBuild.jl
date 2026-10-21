@@ -29,7 +29,7 @@ function _sanitize_c_type_name(name::AbstractString)::String
     if isempty(s)
         return "_UnknownType"
     end
-    if s in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "true", "false", "abstract", "type", "mutable", "primitive")
+    if s in ("for", "if", "else", "while", "function", "struct", "end", "module", "using", "import", "export", "return", "continue", "break", "try", "catch", "finally", "macro", "quote", "let", "local", "global", "const", "do", "baremodule", "begin", "elseif", "true", "false", "abstract", "type", "mutable", "primitive")
         s = "c_" * s
     end
     return s

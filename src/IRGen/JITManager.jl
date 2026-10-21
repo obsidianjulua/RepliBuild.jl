@@ -223,6 +223,36 @@ at compile time (ccall requires a concrete type, not a TypeVar).
         return :(ccall(fptr, $T, (Ptr{Ptr{Cvoid}},), inner_ptrs))
     else
         # Struct return: void ciface(T* sret, void** args_ptr) — sret convention
+        if ismutabletype(T)
+            # A named union or a bitfield record is a `mutable struct` holding
+            # its C bytes inline. `Ref{T}()` would hold an undefined reference,
+            # and converting it for the sret slot threw UndefRefError on every
+            # such return (abi_fuzz X1). Allocate the object, zero it, and give
+            # the thunk the address of its fields.
+            if !(isconcretetype(T) && fieldcount(T) > 0 && sizeof(T) > 0 &&
+                 all(i -> isbitstype(fieldtype(T, i)), 1:fieldcount(T)))
+                msg = "JIT invoke: cannot return `$T` by value: it is a mutable " *
+                      "type without an inline byte layout to fill."
+                return :(error($msg))
+            end
+            n = sizeof(T)
+            call = if Sys.iswindows()
+                lib = MLIRNative.libJLCS
+                :(ccall((:jlcs_guard_sret, $lib), Cvoid,
+                        (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, p, inner_ptrs))
+            else
+                :(ccall(fptr, Cvoid, (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), p, inner_ptrs))
+            end
+            return quote
+                ret_obj = ccall(:jl_new_struct_uninit, Any, (Any,), $T)::$T
+                GC.@preserve ret_obj begin
+                    p = pointer_from_objref(ret_obj)
+                    ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), p, 0, $n)
+                    $call
+                end
+                ret_obj
+            end
+        end
         if Sys.iswindows()
             lib = MLIRNative.libJLCS
             return quote

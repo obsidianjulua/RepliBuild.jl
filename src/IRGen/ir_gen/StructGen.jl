@@ -7,7 +7,20 @@ export generate_struct_definitions, get_struct_type_string, get_struct_definitio
 """
     is_struct_packed(info::Any) -> Bool
 
-Determine if a struct is packed (dwarf_size == sum(member_sizes)).
+Whether a struct's body is its members tiled end to end: `byte_size ==
+sum(member sizes)`, with every member where that tiling puts it. Such a body
+travels the `!jlcs.c_struct` marshalling path, which places member i at the sum
+of the sizes before it (`get_julia_offsets(info, true)`).
+
+A matching sum is not enough. A bitfield's `size` is its declared type's, not
+the bytes it occupies, and it has no DWARF byte offset. So each member with an
+offset must sit at it, and each bitfield's bits must lie inside the unit the
+tiling gives it. MinGW lays bitfields out MS-style, one declared-size unit per
+run, so its exact tilings are real. Itanium packs a bitfield into the bytes
+after its neighbours: `{short; int : 4; short}` sums to its 8 bytes with the
+second short at 4, not 6 (abi_fuzz X9). A record that does not tile is laid out
+from its DWARF offsets, or crosses as its bytes. A member with no placement
+recorded at all has nothing to contradict the tiling.
 """
 function is_struct_packed(info::Any)
     dwarf_size_str = get(info, "byte_size", "0")
@@ -38,8 +51,22 @@ function is_struct_packed(info::Any)
         end
         sum_size += m_size
     end
-    
-    return sum_size == dwarf_size
+    sum_size == dwarf_size || return false
+
+    cur = 0
+    for m in members
+        m_size = something(_parse_num(get(m, "size", 0)), 0)
+        off = _parse_num(get(m, "offset", nothing))
+        bits = _parse_num(get(m, "bit_size", nothing))
+        at = _parse_num(get(m, "data_bit_offset", nothing))
+        if off !== nothing
+            off == cur || return false
+        elseif bits !== nothing && at !== nothing
+            (8 * cur <= at && at + bits <= 8 * (cur + m_size)) || return false
+        end
+        cur += m_size
+    end
+    return true
 end
 
 """
@@ -507,10 +534,23 @@ function _sized_member_types(name::String, info::Any, all_structs; alias_form::B
         mapped = map_cpp_type(t)
         push!(emit, _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
                                                 alias_form=alias_form, fallback_size=m_size))
-        push!(measure, alias_form ?
-              _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
-                                          alias_form=false, fallback_size=m_size) :
-              emit[end])
+        # Measure what is emitted. The alias `!Struct_X` stands for X's own body,
+        # with X's alignment, so measure it as the bare ref: `_mlir_layout` sizes
+        # that from DWARF and aligns it by X's members. The alias-free spelling is
+        # X's bytes, alignment 1. Measuring the alias by it let a `#pragma pack`
+        # struct holding a pointer-aligned record pass the natural-layout check
+        # with the record at an offset LLVM then moved: the body came out unpacked
+        # and 4 bytes too large (abi_fuzz X8).
+        bare = match(r"^!llvm\.struct<\"(.+)\">$", mapped)
+        if alias_form && startswith(emit[end], "!Struct_") && bare !== nothing &&
+           all_structs !== nothing && _lookup_struct(all_structs, String(bare.captures[1])) !== nothing
+            push!(measure, mapped)
+        else
+            push!(measure, alias_form ?
+                  _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
+                                              alias_form=false, fallback_size=m_size) :
+                  emit[end])
+        end
     end
     return (emit, measure)
 end

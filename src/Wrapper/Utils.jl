@@ -1131,35 +1131,107 @@ end
 # =============================================================================
 
 """
-    get_julia_aligned_size(members::Vector)
+    _record_natural_layout(info, dwarf_structs; best_dwarf_key) -> Bool | nothing
 
-Calculate the size of a struct in Julia including standard padding alignment.
-Used to detect if a C++ struct is 'packed' (Julia size > DWARF size).
+Whether a record's DWARF layout is the one natural alignment gives, which is
+the layout a Julia `struct` of the same member types has. In offset order each
+member sits at the first offset after the previous member that is a multiple of
+its type's alignment, and the record's size is the members' end rounded up to
+the largest of those alignments. `__attribute__((packed))`, `#pragma pack` and
+an explicit `aligned` break that, and so does a member record that is not
+natural itself, at any depth.
+
+Alignment is the member type's, never its size (`_c_scalar_layout`,
+`_c_member_record`): an array's element type, a nested record's own members, an
+enum's underlying integer. Taking a member's size as its alignment, capped at 8,
+called `{ char; short[3]; }` and `{ float; Vec2; float; }` packed, and it never
+looked inside a record two levels down.
+
+A union, a record with a bitfield, or a record that holds either is not
+natural: a Julia struct of fields has no overlapping fields and no bitfields,
+so none reproduces them. Members without an offset (C++ static data members,
+the `__clang_vtable` placeholder) take no storage here and are skipped. An
+empty record is natural. `nothing` when some member type cannot be measured.
+
+C's `is_c_lto_safe` and C++'s `_is_struct_unsafe` both ask this, so the two
+generators get one answer.
 """
-function get_julia_aligned_size(members::Vector)
-    current_offset = 0
-    max_align = 1
+function _record_natural_layout(info, dwarf_structs;
+                                best_dwarf_key::Dict{String,String} = Dict{String,String}())
+    a = _natural_record_align(info, dwarf_structs, best_dwarf_key, Set{String}())
+    return a === nothing ? nothing : a !== false
+end
 
-    for m in members
-        # specific size of this member
-        m_size = get(m, "size", 0)
-
-        # simple alignment heuristic (size usually equals alignment for primitives)
-        # generic pointer/int alignment cap at 8 bytes on 64-bit
-        align = m_size > 8 ? 8 : m_size
-        align = align == 0 ? 1 : align # handle empty/void
-
-        # update generic alignment requirement
-        max_align = max(max_align, align)
-
-        # Add padding to current offset
-        padding = (align - (current_offset % align)) % align
-        current_offset += padding + m_size
+# The alignment of a record whose layout is natural; `false` when it is not,
+# `nothing` when some member cannot be measured.
+function _natural_record_align(info, dwarf_structs, best_dwarf_key::Dict{String,String},
+                               seen::Set{String})
+    get(info, "kind", "struct") == "union" && return false
+    placed = Tuple{Int,Any}[]
+    for m in get(info, "members", [])
+        haskey(m, "bit_size") && return false
+        raw = get(m, "offset", nothing)
+        raw === nothing && continue
+        push!(placed, (_parse_int_or_hex(raw), m))
     end
+    isempty(placed) && return 1
+    sort!(placed; by = first)
+    cur = 0
+    maxal = 1
+    for (off, m) in placed
+        lay = _natural_member_layout(m, dwarf_structs, best_dwarf_key, seen)
+        lay isa Tuple || return lay
+        (sz, al) = lay
+        cur = _align_up(cur, al)
+        off == cur || return false
+        cur += sz
+        maxal = max(maxal, al)
+    end
+    return _align_up(cur, maxal) == _parse_dwarf_size(info) ? maxal : false
+end
 
-    # Final structure alignment padding
-    padding = (max_align - (current_offset % max_align)) % max_align
-    return current_offset + padding
+# (size, alignment) of one member as natural layout places it, `false` when it
+# is a union or a record that is not natural, `nothing` when it cannot be
+# measured.
+function _natural_member_layout(m, dwarf_structs, best_dwarf_key::Dict{String,String},
+                                seen::Set{String})
+    jt, ct, sz = get(m, "julia_type", "Any"), get(m, "c_type", ""), get(m, "size", 0)
+    jt isa AbstractString || (jt = "Any")
+    ct isa AbstractString || (ct = "")
+    ct = String(strip(replace(ct, r"\b(?:const|volatile)\b" => "")))
+    return _natural_type_layout(String(jt), ct, sz isa Integer ? Int(sz) : 0,
+                                dwarf_structs, best_dwarf_key, seen)
+end
+
+function _natural_type_layout(jt::String, ct::String, size::Int, dwarf_structs,
+                              best_dwarf_key::Dict{String,String}, seen::Set{String})
+    # A pointer is never an aggregate; `long double` is spelled as an NTuple.
+    if endswith(ct, "*") || endswith(ct, "&") || startswith(jt, "Ptr{") || jt == "Cstring" ||
+       ct == "long double"
+        return _c_scalar_layout(jt, ct, size, dwarf_structs)
+    end
+    nt = match(r"^NTuple\{(\d+),\s*(.+)\}$", jt)
+    if nt !== nothing
+        n = parse(Int, nt.captures[1])
+        ejt = String(strip(nt.captures[2]))
+        # `short[2][3]` is two `short[3]`: the element drops the first extent.
+        ect = String(strip(replace(ct, r"\[\d*\]" => ""; count = 1)))
+        el = _natural_type_layout(ejt, ect, (n > 0 && size > 0) ? size ÷ n : 0,
+                                  dwarf_structs, best_dwarf_key, seen)
+        el isa Tuple || return el
+        return (n * el[1], el[2])
+    end
+    rec = _c_member_record(jt, ct, dwarf_structs, best_dwarf_key)
+    if rec !== nothing
+        key, rinfo = rec
+        key in seen && return nothing          # a record cannot contain itself by value
+        push!(seen, key)
+        a = _natural_record_align(rinfo, dwarf_structs, best_dwarf_key, seen)
+        delete!(seen, key)
+        a isa Int || return a
+        return (_parse_dwarf_size(rinfo), a)
+    end
+    return _c_scalar_layout(jt, ct, size, dwarf_structs)
 end
 
 """
@@ -1216,30 +1288,14 @@ function _is_struct_unsafe(s_info, dwarf_structs)::Bool
 end
 
 function _is_struct_unsafe_impl(s_info, dwarf_structs)::Bool
-    # Packed struct: DWARF size != Julia calculated size (alignment mismatch)
-    dwarf_size = _parse_dwarf_size(s_info)
     members = get(s_info, "members", [])
 
-    # Resolve member sizes: when a member's c_type is itself a struct in
-    # dwarf_structs and the DWARF parser left its size=0, substitute the
-    # nested struct's byte_size so get_julia_aligned_size computes correctly.
-    resolved_members = map(members) do m
-        if get(m, "size", 0) == 0
-            m_type = strip(replace(get(m, "c_type", ""), r"\bconst\b" => ""))
-            if haskey(dwarf_structs, m_type)
-                nested_size = _parse_dwarf_size(dwarf_structs[m_type])
-                if nested_size > 0
-                    m2 = copy(m)
-                    m2["size"] = nested_size
-                    return m2
-                end
-            end
-        end
-        return m
-    end
-
-    julia_size = get_julia_aligned_size(resolved_members)
-    if dwarf_size > 0 && julia_size > 0 && dwarf_size != julia_size
+    # Not a natural layout (packed, `#pragma pack`, an explicit alignment, a
+    # bitfield or union anywhere inside, or a member it cannot measure): no
+    # Julia struct of these fields reproduces it. `_record_natural_layout`
+    # walks every nested record itself, so it is asked at the top level only;
+    # the nested calls below get no table to look types up in.
+    if !isempty(dwarf_structs) && _record_natural_layout(s_info, dwarf_structs) !== true
         return true
     end
 
@@ -2485,6 +2541,11 @@ function _blob_store_expr(m_name::AbstractString, offset::Int, kind::Symbol;
     elseif kind === :blob_struct_full
         "unsafe_store!(Ptr{NTuple{$nested_size,UInt8}}(p + $offset), " *
         "getfield(convert($struct_name, v), :_data))"
+    elseif kind === :mutable_record
+        # A named union or a bitfield record: a `mutable struct` whose single
+        # field is its C bytes (`data` or `_data`), so take field 1.
+        "unsafe_store!(Ptr{NTuple{$nested_size,UInt8}}(p + $offset), " *
+        "getfield(convert($struct_name, v), 1))"
     elseif kind === :blob_struct_partial
         # The getter zero-pads a member the struct has no room for; the setter
         # must write only the bytes that FIT or it scribbles over the next one.
@@ -2566,5 +2627,52 @@ Return a copy of `x` with each named field set. Byte-blob structs are immutable
 \"\"\"
 setproperties(x; kwargs...) =
     foldl((acc, kv) -> setproperty(acc, first(kv), last(kv)), pairs(kwargs); init = x)
+
+"""
+
+"""
+    _field_setter_chunk(name) -> String
+
+`setproperty` and the `x.f = v` diagnostic for a C++ struct emitted with real
+fields: the API a byte blob gets from `_blob_setter_chunk`, so a record keeps it
+when the struct emitter can lay it out instead. llama.cpp's
+`llama_context_params` was a blob while its enum members had no size in the
+metadata, and the Hub's consumers set its fields with `setproperties`. Both
+methods call helpers from `_field_setter_helpers_chunk`.
+"""
+_field_setter_chunk(name::String) = """
+setproperty(x::$name, s::Symbol, v) = _rb_setfield_copy(x, s, v)
+Base.setproperty!(x::$name, s::Symbol, v) = _rb_immutable_setfield_error($name, s)
+
+"""
+
+"""
+    _field_setter_helpers_chunk() -> String
+
+What the `_field_setter_chunk` methods call, emitted once. Every name is
+qualified: the module's namespace belongs to the library.
+"""
+_field_setter_helpers_chunk() = """
+\"\"\"
+    setproperty(x, s::Symbol, v) -> typeof(x)
+
+Return a copy of the struct `x` with field `s` set to `v`, converted to the
+field's type. Structs cross the ABI by value, so they are immutable: this
+returns a new value rather than mutating `x`. See also `setproperties`.
+\"\"\"
+function setproperty end
+
+function _rb_setfield_copy(x::T, s::Symbol, v) where {T}
+    i = Base.fieldindex(T, s, false)
+    i == 0 && Base.error("type ", T, " has no settable field ", s)
+    ft = Base.fieldtype(T, i)
+    nv = Core.isa(v, ft) ? v : Base.convert(ft, v)
+    return T(Base.ntuple(j -> j == i ? nv : Base.getfield(x, j), Base.fieldcount(T))...)
+end
+
+_rb_immutable_setfield_error(T, s) =
+    Base.error("`", T, "` is immutable (it crosses the ABI by value), so `x.", s, " = ...` ",
+               "cannot work. Use `x = setproperty(x, :", s, ", v)` or `x = setproperties(x; ",
+               s, " = v)`.")
 
 """

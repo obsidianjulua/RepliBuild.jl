@@ -697,6 +697,11 @@ function _assert_wrapper_parses(wrapper_content::AbstractString, module_name::Ab
             # whole surrounding expression and is useless in a log line.
             fail(isempty(node.args) ? node.head : node.args[1])
         end
+        # `module 3cCallF21` parses without an error, as a module named `3` whose
+        # body starts with `cCallF21`, and only fails at load (abi_fuzz M1).
+        if node.head === :module && length(node.args) >= 2 && !(node.args[2] isa Symbol)
+            fail("the module name is not an identifier: `module $(node.args[2]) …`")
+        end
         append!(stack, node.args)
     end
     return nothing

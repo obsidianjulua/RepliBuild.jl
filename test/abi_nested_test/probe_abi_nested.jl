@@ -59,22 +59,36 @@ let ok = nestint_sum(ni) == 1000
     println("PROBE nestint_roundtrip: ", ok ? "PASS" : "FAIL", " sum=", nestint_sum(ni))
 end
 
-# Packed float struct: must stay opaque AND refuse by-value crossing loudly
-s = try
-    make_packedfv()   # return side: sret branch handles MEMORY-class packed returns
-catch e
-    nothing
-end
-if s === nothing
-    println("PROBE packed_byvalue_guard: PASS (return refused loudly)")
-else
-    refused = try
-        packedfv_sum(s)
-        false
+# Packed float struct: must stay opaque (a byte blob), and its by-value crossing
+# is per target. SysV: 9 bytes with a float at offset 1 is MEMORY class while
+# the blob classifies INTEGER, and the float puts it in the SSE trap besides, so
+# the argument must be refused loudly. Win64 passes any 9-byte record by
+# reference to a copy and returns it through a hidden pointer, the blob
+# included, so both directions must work. The target is the host's, decided
+# here independently of the generator's own `_c_record_abi`.
+let opaque = :_data in fieldnames(PackedFV)
+    s = try
+        make_packedfv()   # SysV: explicit sret (MEMORY class); Win64: hidden pointer by size
     catch e
-        occursin("ABI", sprint(showerror, e)) || occursin("opaque", sprint(showerror, e))
+        nothing
     end
-    println("PROBE packed_byvalue_guard: ", refused ? "PASS (arg refused loudly)" : "FAIL (silent crossing)")
+    if Sys.iswindows()
+        v = s === nothing ? nothing : try packedfv_sum(s) catch e; sprint(showerror, e) end
+        ok = opaque && v isa AbstractFloat && approx(v, 11.0)
+        println("PROBE packed_float_byvalue: ", ok ? "PASS (Win64: crosses by reference)" : "FAIL",
+                " opaque=", opaque, " s=", s, " sum=", v)
+    elseif s === nothing
+        println("PROBE packed_float_byvalue: ", opaque ? "PASS (return refused loudly)" : "FAIL (not opaque)")
+    else
+        refused = try
+            packedfv_sum(s)
+            false
+        catch e
+            occursin("ABI", sprint(showerror, e)) || occursin("opaque", sprint(showerror, e))
+        end
+        println("PROBE packed_float_byvalue: ", !opaque ? "FAIL (not opaque)" :
+                refused ? "PASS (arg refused loudly)" : "FAIL (silent crossing)")
+    end
 end
 
 # Float param ergonomics: Int and Float64 into a Cfloat slot

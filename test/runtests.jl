@@ -145,6 +145,33 @@ include(joinpath(@__DIR__, "test_compile_visibility.jl"))
 
 include(joinpath(@__DIR__, "test_c_generator_policies.jl"))
 
+# ── Tier 3 by-value record classification, per target ABI (no toolchain) ────
+# Where C returns a record (hidden pointer or registers) decides the ccall
+# shape, and a wrong answer shifts every argument with no error (C1). Both
+# conventions are checked on any host; the live calls are in devtests.
+
+include(joinpath(@__DIR__, "test_c_sret_classification.jl"))
+
+# ── Record layouts: natural or not, for C and C++ routing (no toolchain) ─────
+# One answer for "does a Julia struct of these fields reproduce the C layout?",
+# from the member types' alignment. GeneratorCpp keeps ≤16-byte byte blobs off
+# the ccall path.
+
+include(joinpath(@__DIR__, "test_record_natural_layout.jl"))
+
+# ── C++ records emitted as `mutable struct` (no toolchain) ──────────────────
+# A named union or bitfield record moves by value only through its bytes:
+# the Tier 2 sret return (abi_fuzz X1), member accessors (X5), and bitfields
+# wider than 32 bits (X6).
+
+include(joinpath(@__DIR__, "test_cpp_mutable_records.jl"))
+
+# ── DWARF member sizes through typedefs, enums, qualifiers, arrays (no toolchain)
+# A member typed as an enum or a typedef'd record came out with size 0, and the
+# C++ layout proof turned the whole record into a byte blob. A real GNU dump.
+
+include(joinpath(@__DIR__, "test_dwarf_member_sizes.jl"))
+
 # ── Macro-shim header-collision guard (library-free fixture; needs clang) ────
 
 include(joinpath(@__DIR__, "test_shim_header_guard.jl"))
@@ -429,6 +456,12 @@ include(joinpath(@__DIR__, "test_by_value_crossing.jl"))
 # value at DWARF offsets, StructGen gives the classifier a packed body.
 
 include(joinpath(@__DIR__, "test_packed_layout.jl"))
+
+# ── Tier 2 thunk bodies for byte regions and #pragma pack (no toolchain) ────
+# A union or bitfield record crosses as a packed struct of its bytes, never an
+# array (abi_fuzz X2); a member is measured as what is emitted (X8).
+
+include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
 
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:

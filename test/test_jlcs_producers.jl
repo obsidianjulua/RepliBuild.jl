@@ -24,6 +24,8 @@
 #     chains. Pinned by MACHINE-CODE equality against the old spelling — the
 #     LLVM IR differs cosmetically (GEP element type, !dbg numbering), so a
 #     text diff would prove nothing.
+#  H. marshal_arg producer (2026-10-18): a packed record holding an array of
+#     records or an enum builds an engine (it failed to translate, X3).
 #
 # Requires libJLCS.so + clang++ + nm (devtests tier); skips without them.
 
@@ -414,6 +416,49 @@ const IR = JLCSIRGenerator.generate_jlcs_ir(EMPTY_VT, METADATA)
         new_store = wrap("""
             "jlcs.set_field"(%args_ptr, %args_ptr) {fieldOffset = 16 : i64} : (!llvm.ptr, !llvm.ptr) -> ()""")
         @test insns(raw_store, "raw_store") == insns(new_store, "new_store")
+    end
+
+    @testset "H. a packed record's marshal_arg translates (abi_fuzz X3)" begin
+        # A record whose member sizes add up to its byte_size is marshalled
+        # member by member into its packed body. A member that is an array of
+        # records or an enum was read as another type than the body holds, the
+        # module failed to translate to LLVM IR, and every thunk in the library
+        # went with it. No call: building the engine is what failed.
+        rec(bs, ms...) = Dict{String,Any}("kind" => "struct", "byte_size" => bs, "members" => Any[ms...])
+        mem(n, c, off, sz) = Dict{String,Any}("name" => n, "c_type" => c, "offset" => off, "size" => sz)
+        structs = Dict{String,Any}(
+            "__enum__E1" => Dict{String,Any}("kind" => "enum", "byte_size" => "0x4", "julia_type" => "Cint",
+                                             "underlying_type" => "int",
+                                             "enumerators" => Any[Dict{String,Any}("name" => "E1_K1", "value" => 42)]),
+            "R2" => rec("0x10", mem("m1", "E1", "0x0", 4), mem("m2", "unsigned char[2]", "0x4", 2),
+                        mem("m3", "float", "0x8", 4), mem("m4", "E1", "0xc", 4)),
+            "R4" => rec("0x20", mem("m1", "R2[2]", "0x0", 32)),                        # pack(4) { R2[2] }
+            "PkE" => rec("0x5", mem("c", "char", "0x0", 1), mem("e", "E1", "0x1", 4)))  # packed { char; E1 }
+        take(sym, r) = Dict{String,Any}("name" => sym, "mangled" => sym, "demangled" => sym, "is_method" => false,
+            "parameters" => Any[Dict{String,Any}("name" => "p", "c_type" => r)],
+            "return_type" => Dict{String,Any}("c_type" => "int"))
+        meta = Dict{String,Any}("language" => "cpp", "struct_definitions" => structs,
+            "record_abi" => Dict{String,Any}(k => Dict{String,Any}("byte_size" => v["byte_size"],
+                                                                   "pass" => "value", "empty" => false)
+                                             for (k, v) in structs if !startswith(k, "__enum__")),
+            "functions" => Any[take("_Z7take_r42R4", "R4"), take("_Z8take_pke3PkE", "PkE")])
+        ir = JLCSIRGenerator.generate_jlcs_ir(EMPTY_VT, meta)
+        @test count("jlcs.marshal_arg", ir) == 2
+        ctx = create_context()
+        try
+            mod = parse_module(ctx, ir; source_name = "packed_marshal.mlir")
+            @test lower_to_llvm(mod)
+            jit = try
+                create_jit(mod)
+            catch e
+                sprint(showerror, e)
+            end
+            @test !(jit isa String)
+            jit isa String && @info "create_jit failed" jit
+            jit isa String || destroy_jit(jit)
+        finally
+            destroy_context(ctx)
+        end
     end
 end
 

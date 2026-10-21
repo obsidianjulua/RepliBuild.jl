@@ -377,6 +377,39 @@ the test named when you touch the area.
   `_assert_no_any_ccall_argument` refuse both. The one exemption is a variadic
   `@ccall` argument, which is the user's explicit `[wrap.varargs]` declaration.
   `::Any` in a Julia signature is normal. (`test_wrapper_type_bindings.jl`.)
+- **A Tier-3 by-value record is classified per target, from its fields' type
+  alignment, never a member's size** (C1: `{ char; short[3]; }` got an sret
+  the callee never reads).
+  - `_c_return_in_memory`, `_c_explicit_sret`, `_c_blob_param_misclassified` and
+    `_c_register_class_misstated` are the answers, and `_c_has_unaligned_field`
+    is the walk. `_c_record_abi()` is the only place GeneratorC reads the target.
+  - Register-class traps (a float-bearing blob, a mixed float/integer region) are
+    SysV's only: Win64 crosses a record by size alone on both sides.
+  - Whether a record is packed at all is `_record_natural_layout`, the one answer
+    for `is_c_lto_safe` and `_is_struct_unsafe`.
+  - GeneratorCpp sends to Tier 2 a function that crosses by value a ≤16-byte
+    byte blob, or a record whose fields put bytes over a `float` or `double`,
+    because bytes classify INTEGER (`_crosses_small_blob`).
+  - BRANCH 0 runs only when no blob trap fired and no `long double` crosses.
+    A function the x87 trap refuses goes to BRANCH 2's stub, never to an
+    explicit-sret ccall that would declare the `long double` as `Any` and get the
+    whole wrapper refused (abi_fuzz C2).
+
+  Tests: `test_c_sret_classification.jl`, `test_c_sret_abi.jl`,
+  `test_record_natural_layout.jl`.
+- **A hidden return buffer has the record's alignment.** Julia's own sret
+  buffer is aligned to the stand-in (a byte blob: 1), and the callee may store
+  with `movaps`. `_c_record_align` is the record's (the parser records
+  `DW_AT_alignment` on records and members as `alignment`, a vector member's as
+  its size), and BRANCH 0 passes a buffer it aligned itself wherever that
+  exceeds the stand-in's and 8 (`_c_sret_buffer_align`). The metadata needs a
+  rebuild to carry it. Record-level `alignment` also routes C++ to Tier 2
+  (`_is_struct_unsafe`).
+- **A signature spells a record or enum the way it is declared**, which is
+  `_sanitize_c_type_name` of its C name. GeneratorC re-spells every return and
+  parameter type through `_as_declared`, a table of the names the sanitizer
+  changes. A raw keyword (`baremodule`) in a ccall type position fails the parse
+  (abi_fuzz I1). (`test_c_sret_classification.jl`.)
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
   the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
@@ -386,7 +419,8 @@ the test named when you touch the area.
   only the call body. `char*` returns become `Union{String,Nothing}` plus a `_ptr`
   sibling on every tier. (`test_cstring_policy.jl`.)
 - Blob structs get `setproperty`/`setproperties` built in the same loop as the getters.
-  `with()` forwards to them.
+  `with()` forwards to them. C++ field structs get `setproperty` too
+  (`_field_setter_chunk`), so a record keeps its setters when it stops being a blob.
 - **Function names come from `_julia_function_name` only.** That covers both
   generators, both varargs paths, and GeneratorCpp's proxy and deleter
   references. It is total: a catch-all after the curated list, an empty name
@@ -409,6 +443,9 @@ the test named when you touch the area.
   ties with `sort(ready)`), or the byte-identical regression diff below breaks.
 - Validate generated or bulk-edited Julia with `Meta.parseall` **and** check for
   `head in (:incomplete, :error)`. It does not throw on an unterminated file.
+  `module 3x` parses as a module named `3`, so `_assert_wrapper_parses` also
+  requires the module name to be a Symbol, and `get_module_name` never starts
+  one with a digit (abi_fuzz M1).
 
 ### JLCS dialect and ABI
 
@@ -424,17 +461,42 @@ the test named when you touch the area.
 - **Emitted struct size must equal DWARF `byte_size`.** StructGen lays members out at
   DWARF offsets with explicit padding (`_apply_dwarf_layout`). When natural alignment
   cannot place them (packed, `#pragma pack`), the body is PACKED with explicit pads
-  (`_packed_dwarf_layout`), so the classifier sees the misaligned field. Only what no
-  body can model (overlaps, unmeasurable members) degrades to an opaque `byte_size`
-  region — never to the wrong size, which smashes the sret buffer.
-  (`test_struct_layout.jl`, `test_packed_layout.jl`.)
+  (`_packed_dwarf_layout`), so the classifier sees the misaligned field. That check
+  measures each member as the body emits it: an alias `!Struct_X` has X's alignment,
+  not the 1 of its bytes, or a `#pragma pack` body comes out unpacked (abi_fuzz X8).
+  Only what no body can model (overlaps, unmeasurable members) degrades to an opaque
+  `byte_size` region — never to the wrong size, which smashes the sret buffer.
+  (`test_struct_layout.jl`, `test_packed_layout.jl`, `test_thunk_byte_regions.jl`.)
 - **The Julia struct IS the C layout.** GeneratorCpp proves each struct's fields
   against DWARF (`_prove_julia_layout`) and emits a C-layout byte blob when they
   cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk
   reads a Julia value at DWARF offsets (`_dwarf_member_offsets`), never at offsets
-  derived from alignment rules. A named union is `mutable`, so it embeds as a pointer;
-  any struct holding one is a blob.
+  derived from alignment rules. A bitfield has no DWARF byte offset, so it is read
+  where the tiled body puts it. `is_struct_packed` (member sizes summing to
+  `byte_size`) admits a tiled body only when every member and every bitfield's bits
+  sit where the tiling says: Itanium can sum without tiling (abi_fuzz X9,
+  `test_thunk_byte_regions.jl`). A named union is `mutable`, so it embeds as a pointer;
+  any struct holding one is a blob, checked by type: an 8-byte union at an aligned
+  offset fits the proof's pointer measure. In GeneratorCpp a field takes a type only when
+  the proof can measure it and it has the member's DWARF size (`_member_field`);
+  otherwise the field is the member's bytes. A member with no offset (a static,
+  `__clang_vtable`) is not a field. A forward declaration never reuses an emitted
+  enum's name: Julia 1.12 lets `struct X end` replace `@enum X`.
+- **A named union or bitfield record moves by value only through its bytes.** Both
+  are a `mutable struct` whose one field is the C bytes.
+  - `_invoke_call` allocates one for a Tier 2 sret return. `Ref{T}()` is an
+    undefined reference for a mutable `T` (abi_fuzz X1).
+  - An accessor builds one from bytes (`jl_byte_records`), never with
+    `unsafe_load(Ptr{T})`, which reads C's bytes as a reference (X5).
+  - A bitfield accessor gathers exactly the bytes the field spans, into an integer
+    wide enough for them (X6).
+
+  (`test_cpp_mutable_records.jl`.)
 - `!jlcs.c_struct` must never appear inside an `!llvm.struct` body; inline the literal.
+- `jlcs.marshal_arg`'s `memberTypes` are the packed body's own fields, read off
+  that type. Spelled from the C types, a record, enum or array-of-records member
+  does not type-check, and the module fails to translate, taking every thunk in
+  the library with it (`test_jlcs_producers.jl` §H).
 - **A by-value record crosses a thunk with its layout, as nothing, by address, or not
   at all.** Nothing means an empty class, which SysV gives no class. By address means
   DWARF `DW_CC_pass_by_reference`, and such a return goes through an sret slot, first
@@ -444,6 +506,13 @@ the test named when you touch the area.
   record must never fall to `!llvm.ptr`: that is how empty classes, declared-only
   types, `string_view` and every template spelling were mis-passed.
   (`test_by_value_crossing.jl`.)
+- **A byte region never crosses a thunk as an array.** A record with no
+  field-by-field body (a union, a bitfield record, overlapping members) is
+  `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one
+  register per element (abi_fuzz X2). By value it crosses as `_byte_blob_type(N)`,
+  a packed struct of the same bytes. On SysV one of 16 bytes or less that may hold
+  a float is refused (`_byte_region_unclassifiable`): C passes it in SSE registers
+  its bytes cannot state. (`test_thunk_byte_regions.jl`.)
 - `dtor_call` has no VTT operand. Its arity gate (exactly one final arg) is
   load-bearing for D2 destructors of classes with virtual bases.
 - vcall uses class-local coordinates (`vtable_offset = this_offset = 0` plus own slot).
@@ -546,11 +615,13 @@ Start here for any ABI question: register state is observable.
   and diff against a wrapper from unpatched HEAD. It should be byte-identical apart
   from timestamps. For dialect changes, compare machine code, not IR text.
 - Fixtures: `c_test/`, `stress_test/`, `stl_test/`, `mi_test/`, `vi_test/`,
-  `callback_test/`, `c_abomination_test/`, `abi_nested_test/`,
+  `callback_test/`, `c_abomination_test/`,
   `convenience_overload_test/`, `aot_test/`, `slice_test/` (Tier 1) are
   discover-driven projects. Fixture tomls are regenerated by devtests'
   `discover(force=true)`, with `CURATED_FIXTURE_CONFIG` re-seeded after
   (`test_aot_thunks.jl` sets its own `aot_thunks = true` the same way).
+  `abi_nested_test/` and `c_sret_test/` are projects whose test writes the toml
+  and runs build + wrap.
   `struct_abi/`, `jlcs_producers/`, `mlir_templates/` and `jit_unwind/` are
   single-file clang++ fixtures their test compiles directly; `fixtures/` holds
   the vendored JSON corpora.
@@ -622,7 +693,17 @@ check before claiming portability again; reading `.gitignore` does not settle it
   43 varargs (declaration work via `[wrap.varargs]`), 27 mpack by-value aggregate
   returns (typed correctly but emitted as ABI-trap stubs), 5 mpack by-value aggregate
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
-  names; a trap stub is not coverage.
+  names; a trap stub is not coverage. The mpack stubs are SysV-only since
+  2026-10-18: Win64 calls them.
+- **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
+  GeneratorCpp's own ccall path has no aligned buffer; only a record-level
+  `alignment` keeps a function off it, so a member-level `alignas` record can
+  still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
+  path, which skips BRANCH 0 altogether. An alignment only a typedef carries
+  (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
+  SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
+  parameters are safe (LLVM's `byval` lowering puts the copy at 16). A SysV
+  record holding a `long double` returns in `st0`, which no Julia type does.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles

@@ -3973,6 +3973,47 @@ function get_type_size(c_type::AbstractString)::Int
     return get(_C_TYPE_SIZE_MAP, stripped, 0)
 end
 
+"""
+    _die_byte_size(ref, type_refs; base_sizes) -> Int
+
+Byte size of the type DIE at `ref` in `parse_dwarf_dump`'s DIE table,
+following the chain DWARF spells a type with: a typedef or a `const`,
+`volatile`, `restrict` or `_Atomic` qualifier to its target; an enum, struct,
+class or union to its `DW_AT_byte_size`; an array to its element times its
+extents; a pointer or reference to 8; a base type to its own `DW_AT_byte_size`
+(`base_sizes`, by DIE offset), else `get_type_size` of its name. `0` when the
+chain ends somewhere unmeasured.
+
+`get_type_size` answers only for spelled primitives. A member whose type is an
+enum, a typedef of a record, or an array of records came out with size 0, and
+GeneratorCpp's layout proof then gave up and emitted the enclosing record as a
+byte blob.
+"""
+function _die_byte_size(ref, type_refs; base_sizes::AbstractDict = Dict{String,Int}(),
+                        visited::Set{String} = Set{String}())::Int
+    (ref isa AbstractString && !(ref in visited)) || return 0
+    push!(visited, ref)
+    info = get(type_refs, ref, nothing)
+    info isa AbstractString && return get(base_sizes, ref, get_type_size(info))
+    info isa Dict || return 0
+    kind = get(info, "kind", nothing)
+    kind in ("pointer", "reference", "rvalue_reference") && return 8
+    if kind in ("struct", "class", "union", "enum")
+        bs = get(info, "byte_size", nothing)
+        bs === nothing && return 0
+        s = string(bs)
+        return something(startswith(s, "0x") ? tryparse(Int, s[3:end]; base = 16) : tryparse(Int, s), 0)
+    end
+    follow(r) = _die_byte_size(r, type_refs; base_sizes, visited)
+    kind in ("typedef", "const", "volatile", "restrict", "atomic") && return follow(get(info, "target", nothing))
+    if kind == "array"
+        dims = get(info, "dimensions", [])
+        isempty(dims) && return 0
+        return follow(get(info, "element_type", nothing)) * prod(Int.(dims))
+    end
+    return 0
+end
+
 function _is_gnu_binutils(version_out::AbstractString)::Bool
     # LLVM's llvm-objdump has printed `compatible with GNU objdump`. A
     # substring `GNU` accepts that dialect, which `parse_dwarf_dump` cannot
@@ -4438,7 +4479,7 @@ function parse_dwarf_dump(output::AbstractString;
                             "type" => mi["type"],
                             "offset" => mi["offset"]
                         )
-                        for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy"]
+                        for bf_key in ["bit_size", "data_bit_offset", "bit_offset_legacy", "alignment"]
                             if haskey(mi, bf_key)
                                 member_dict[bf_key] = mi[bf_key]
                             end
@@ -5005,6 +5046,36 @@ function parse_dwarf_dump(output::AbstractString;
                 ccm = match(r"DW_AT_calling_convention\s*:?\s*(\d+)", line)
                 ccm === nothing ||
                     (type_refs[tag_offset]["calling_convention"] = parse(Int, ccm.captures[1]))
+            end
+        end
+
+        # DW_AT_alignment: an alignment the source asked for, `aligned(N)` on a
+        # record and `_Alignas(N)` on a member. Clang also puts it on a member
+        # whose type is an over-aligned typedef (the typedef itself carries
+        # none), and emits it in DWARF 4 too. A record's alignment decides how a
+        # hidden return buffer must be aligned (GeneratorC `_c_record_align`).
+        # Natural alignment has no attribute: `long double` and vectors are
+        # found from their types.
+        if contains(line, "DW_AT_alignment") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) in (:struct, :class, :member) &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                am = match(r"DW_AT_alignment\s*:\s*(0x[0-9a-fA-F]+|\d+)", line)
+                if am !== nothing
+                    v = String(am.captures[1])
+                    type_refs[tag_offset]["alignment"] =
+                        startswith(v, "0x") ? parse(Int, v[3:end], base=16) : parse(Int, v)
+                end
+            end
+        end
+
+        # DW_AT_GNU_vector: the array is a vector (`vector_size`, `__m128`),
+        # aligned to its size where an array is aligned to its element.
+        if contains(line, "DW_AT_GNU_vector") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) == :array &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                type_refs[tag_offset]["vector"] = true
             end
         end
 
@@ -6215,38 +6286,16 @@ function parse_dwarf_dump(output::AbstractString;
                     if !isnothing(member_type_ref)
                         c_type = resolve_type(member_type_ref, type_refs)
                         julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
-                        # `get_type_size` only knows primitives; an aggregate
-                        # member's size comes from its own DIE. Without this an
-                        # embedded struct/union member reports size 0 and the
-                        # emitter's running offset silently stops tracking.
+                        # `get_type_size` only knows primitives; any other
+                        # member's size comes from its type's DIE chain
+                        # (`_die_byte_size`): an embedded record, an enum, a
+                        # typedef of either, an array of anything (`float v[3]`
+                        # carries no byte_size of its own). A size of 0 stops the
+                        # emitters' running offset, and GeneratorCpp's layout
+                        # proof then emits the whole record as a byte blob.
                         m_size = get_type_size(c_type)
-                        if m_size == 0
-                            mt = get(type_refs, member_type_ref, nothing)
-                            if isa(mt, Dict) && get(mt, "kind", "") in ["struct", "class", "union"]
-                                bs = get(mt, "byte_size", nothing)
-                                if !isnothing(bs)
-                                    m_size = try
-                                        s = string(bs)
-                                        startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
-                                    catch
-                                        0
-                                    end
-                                end
-                            elseif isa(mt, Dict) && get(mt, "kind", "") == "array"
-                                # `float v[3]` carries no byte_size of its own.
-                                # A size of 0 made the return path treat the
-                                # struct as unsizable and emit an integer byte
-                                # blob, so the callee's XMM return was read as
-                                # GPRs.
-                                dims = get(mt, "dimensions", Int[])
-                                elem_ref = get(mt, "element_type", nothing)
-                                elem_c = isnothing(elem_ref) ? "" : resolve_type(elem_ref, type_refs)
-                                es = get_type_size(elem_c)
-                                if es > 0 && !isempty(dims)
-                                    m_size = es * prod(Int.(dims))
-                                end
-                            end
-                        end
+                        m_size == 0 &&
+                            (m_size = _die_byte_size(member_type_ref, type_refs; base_sizes = base_byte_size))
                         if m_size == 0
                             am = match(r"^(.+?)((?:\[\d+\])+)$", c_type)
                             if am !== nothing
@@ -6275,6 +6324,14 @@ function parse_dwarf_dump(output::AbstractString;
                         if get(member, "anonymous_member", false) == true
                             member_resolved["anonymous_member"] = true
                         end
+                        # The alignment the member asked for (DW_AT_alignment),
+                        # or a vector's, which is its size and carries no
+                        # attribute. Natural alignment is left to the reader.
+                        m_align = get(member, "alignment", nothing)
+                        if _is_vector_type(member_type_ref, type_refs) && ispow2(m_size)
+                            m_align = max(something(m_align, 1), m_size)
+                        end
+                        m_align === nothing || (member_resolved["alignment"] = m_align)
                         push!(resolved_members, member_resolved)
                     end
                 end
@@ -6291,6 +6348,8 @@ function parse_dwarf_dump(output::AbstractString;
                     if get(type_info, "anonymous", false) == true
                         struct_def["anonymous"] = true
                     end
+                    # `aligned(N)` on the record (DW_AT_alignment); see above.
+                    haskey(type_info, "alignment") && (struct_def["alignment"] = type_info["alignment"])
 
                     # Add inheritance information if available
                     base_classes = []
@@ -6542,6 +6601,27 @@ DW_CC_pass_by_value) or `"reference"` (4, DW_CC_pass_by_reference). `nothing`
 when the attribute is absent, which is every C record.
 """
 _record_pass_convention(cc) = cc == 5 ? "value" : cc == 4 ? "reference" : nothing
+
+"""
+    _is_vector_type(type_ref, type_refs) -> Bool
+
+Whether a DWARF type reference names a vector (`__attribute__((vector_size))`,
+`__m128`): an array DIE with `DW_AT_GNU_vector`, reached through typedefs and
+cv-qualifiers. A vector is aligned to its size, which no attribute states.
+"""
+function _is_vector_type(type_ref, type_refs)
+    ref = type_ref
+    for _ in 1:16                                  # typedef chains are short; no cycles
+        t = get(type_refs, ref, nothing)
+        t isa Dict || return false
+        kind = get(t, "kind", nothing)
+        kind == "array" && return get(t, "vector", false) == true
+        kind in ("typedef", "const", "volatile") || return false
+        ref = get(t, "target", nothing)
+        ref === nothing && return false
+    end
+    return false
+end
 
 """
     _merge_record_facts!(facts, name, entry)

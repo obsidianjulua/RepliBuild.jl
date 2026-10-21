@@ -11,7 +11,8 @@
 # `xform_not_blob` are the actual guard on both ABIs; the live round-trips
 # still prove the crossing works.
 # The probe runs in a subprocess so an ABI break can never take down the
-# test session (see also: packed structs are expected to refuse loudly).
+# test session (see also: a packed float struct must refuse loudly on SysV and
+# cross by reference on Win64).
 # =============================================================================
 
 using Test
@@ -74,7 +75,7 @@ const ABI_TEST_DIR = joinpath(@__DIR__, "abi_nested_test")
     @test haskey(v, "PROBE_DONE")                  # probe ran to completion (no abort)
     for probe_name in ["fields_resolved", "xform_not_blob", "xform_return", "xform_byvalue_arg",
                        "mass_roundtrip", "disc_roundtrip", "poly_memory_class",
-                       "nestint_roundtrip", "packed_byvalue_guard",
+                       "nestint_roundtrip", "packed_float_byvalue",
                        "float_param_loosening", "with_helper"]
         @test startswith(get(v, probe_name, "no PROBE line"), "PASS")
     end
