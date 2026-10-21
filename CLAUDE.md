@@ -390,9 +390,10 @@ the test named when you touch the area.
   - GeneratorCpp sends to Tier 2 a function that crosses by value a ≤16-byte
     byte blob, or a record whose fields put bytes over a `float` or `double`,
     because bytes classify INTEGER (`_crosses_small_blob`).
-  - BRANCH 0 runs only when no blob trap fired, and it never applies the
-    `long double` trap. Clearing a trap can therefore route a function with a
-    `long double` parameter into it, and then the wrapper is refused (abi_fuzz C2).
+  - BRANCH 0 runs only when no blob trap fired and no `long double` crosses.
+    A function the x87 trap refuses goes to BRANCH 2's stub, never to an
+    explicit-sret ccall that would declare the `long double` as `Any` and get the
+    whole wrapper refused (abi_fuzz C2).
 
   Tests: `test_c_sret_classification.jl`, `test_c_sret_abi.jl`,
   `test_record_natural_layout.jl`.
@@ -404,6 +405,11 @@ the test named when you touch the area.
   exceeds the stand-in's and 8 (`_c_sret_buffer_align`). The metadata needs a
   rebuild to carry it. Record-level `alignment` also routes C++ to Tier 2
   (`_is_struct_unsafe`).
+- **A signature spells a record or enum the way it is declared**, which is
+  `_sanitize_c_type_name` of its C name. GeneratorC re-spells every return and
+  parameter type through `_as_declared`, a table of the names the sanitizer
+  changes. A raw keyword (`baremodule`) in a ccall type position fails the parse
+  (abi_fuzz I1). (`test_c_sret_classification.jl`.)
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
   the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
@@ -437,6 +443,9 @@ the test named when you touch the area.
   ties with `sort(ready)`), or the byte-identical regression diff below breaks.
 - Validate generated or bulk-edited Julia with `Meta.parseall` **and** check for
   `head in (:incomplete, :error)`. It does not throw on an unterminated file.
+  `module 3x` parses as a module named `3`, so `_assert_wrapper_parses` also
+  requires the module name to be a Symbol, and `get_module_name` never starts
+  one with a digit (abi_fuzz M1).
 
 ### JLCS dialect and ABI
 

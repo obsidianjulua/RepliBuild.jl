@@ -2494,6 +2494,31 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         jname in blob_struct_names ? 1 :
         haskey(resolved_layouts, jname) ? resolved_layouts[jname][2] : nothing
 
+    # Every record and enum is declared under `_sanitize_c_type_name` of its C
+    # name, so a signature must spell it the same way. The metadata spells it
+    # raw, and only names holding `<>`, `::` or other non-identifier characters
+    # used to be re-spelled. A Julia keyword (`baremodule`) then reached a ccall
+    # type position, and the wrapper failed to parse (abi_fuzz I1). Only names
+    # the sanitizer changes are in the table, so an ordinary library's wrapper is
+    # unchanged.
+    _declared_as = Dict{String,String}()
+    for k in keys(dwarf_structs)
+        raw = String(chopprefix(String(k), "__enum__"))
+        s = _sanitize_c_type_name(raw)
+        s == raw || (_declared_as[raw] = s)
+    end
+    function _as_declared(t::AbstractString)::String
+        m = match(r"^(Ptr|Ref)\{(.*)\}$", t)
+        m === nothing && return get(_declared_as, t, String(t))
+        return "$(m.captures[1]){$(_as_declared(m.captures[2]))}"
+    end
+    # A copy: `params` shares its Dicts with the metadata.
+    function _param_as_declared(p)
+        q = copy(p)
+        q["julia_type"] = _as_declared(String(get(p, "julia_type", "Any")))
+        return q
+    end
+
     for func in functions
         func_name = func["name"]
         mangled = func["mangled"]
@@ -2507,6 +2532,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         params = copy(func["parameters"])
         return_type = copy(func["return_type"])
         is_vararg = get(func, "is_vararg", false)
+        if !isempty(_declared_as)
+            return_type["julia_type"] = _as_declared(String(get(return_type, "julia_type", "Cvoid")))
+            params = Any[_param_as_declared(p) for p in params]
+        end
 
         # BUG FIX: Refine return types (Ptr{Cvoid} -> Ptr{Struct})
         # If c_type indicates a pointer to a known struct, but julia_type is generic Ptr{Cvoid}, fix it.
@@ -2682,7 +2711,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # Determine the actual C type for ccall
             # If julia_type is "Any" but c_type has a name, it's likely a struct
             actual_c_type = if julia_type == "Any" && !isempty(c_type_name) && c_type_name in struct_types
-                c_type_name  # Use the struct name directly
+                _as_declared(c_type_name)  # the struct, as it is declared
             else
                 julia_type
             end
@@ -2900,15 +2929,26 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         let _rjt = String(get(return_type, "julia_type", "Any")),
             _rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
             _rname = _rjt == "Any" ? _sanitize_c_type_name(_rct) : _rjt
-            if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16 &&
-               _c_register_class_misstated(blob_struct_sizes[_rname], get(blob_float_risk, _rname, true); abi)
-                # A record C returns through a hidden pointer has no register
-                # class to get wrong: the caller's buffer is exact even for a
-                # blob (BRANCH 0 passes it explicitly wherever Julia's own
-                # lowering would not). Only a register return is unfixable, and
-                # so is one whose class cannot be proven. Where C returns a
-                # record is per target; see `_c_return_in_memory`.
-                if _ret_in_memory(blob_struct_sizes[_rname], get(dwarf_structs, _rct, nothing)) !== true
+            if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16
+                _rsz = blob_struct_sizes[_rname]
+                _rinfo = get(dwarf_structs, _rct, nothing)
+                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi)
+                    # A record C returns through a hidden pointer has no register
+                    # class to get wrong: the caller's buffer is exact even for a
+                    # blob (BRANCH 0 passes it explicitly wherever Julia's own
+                    # lowering would not). Only a register return is unfixable, and
+                    # so is one whose class cannot be proven. Where C returns a
+                    # record is per target; see `_c_return_in_memory`.
+                    if _ret_in_memory(_rsz, _rinfo) !== true
+                        push!(blob_abi_offenders, "returns `$_rname` by value")
+                    end
+                elseif _rinfo !== nothing && _ret_in_memory(_rsz, _rinfo) === nothing
+                    # No float member, but no proof of the fields' alignment
+                    # either: on SysV an unaligned field would make the record
+                    # MEMORY class while its byte image comes back in registers.
+                    # The parameter path refuses the same case
+                    # (`_c_blob_param_misclassified`). Win64 decides by size
+                    # alone, so `_c_return_in_memory` never answers `nothing` there.
                     push!(blob_abi_offenders, "returns `$_rname` by value")
                 end
             end
@@ -2992,11 +3032,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 end
             end
         end
-        sret_align = (ret_struct_info !== nothing && isempty(_x87_crossings(func)) &&
+        # A function that crosses a `long double` is a trap stub, emitted below
+        # in BRANCH 2. BRANCH 0 must leave it alone: its ccall would declare the
+        # `long double` as `Any`, and `_assert_no_any_ccall_argument` would then
+        # refuse the whole wrapper instead of one function (abi_fuzz C2).
+        x87 = _x87_crossings(func)
+        sret_align = (ret_struct_info !== nothing && isempty(x87) &&
                       _ret_in_memory(rs_size, ret_struct_info) === true) ?
             _c_sret_buffer_align(_rec_align(ret_struct_info), _stand_in_align(sret_ret_type)) : 0
-        needs_sret = sret_align > 0 || (ret_struct_info !== nothing &&
-            _c_explicit_sret(rs_size, _rec_unaligned(ret_struct_info); abi))
+        needs_sret = isempty(x87) && (sret_align > 0 || (ret_struct_info !== nothing &&
+            _c_explicit_sret(rs_size, _rec_unaligned(ret_struct_info); abi)))
         if (!c_safe || rs_size <= 16 || sret_align > 0) && isempty(blob_abi_offenders)
             if needs_sret
                 sret_ccall_types = "(Ptr{$sret_ret_type}, $(join(param_types, ", "))$(isempty(param_types) ? "" : ","))"
@@ -3192,7 +3237,6 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
         is_unknown_return = julia_return_type == "_UnsafeUnknown"
 
-        x87 = _x87_crossings(func)
         if !isempty(x87)
             func_def = """
             $doc_comment

@@ -1407,7 +1407,13 @@ function get_module_name(c::RepliBuildConfig)::String
     # Auto-generate: CamelCase from project name
     name = replace(c.project.name, r"[^a-zA-Z0-9]" => "_")
     parts = split(name, "_")
-    return join([uppercasefirst(p) for p in parts if !isempty(p)], "")
+    modname = join([uppercasefirst(p) for p in parts if !isempty(p)], "")
+    # A module name must be an identifier. A project directory starting with a
+    # digit gave `module 3cCallF21`, which parses as a module named `3` and does
+    # not load (abi_fuzz M1). A name with no letters or digits gave none at all.
+    isempty(modname) && return "Wrapper"
+    isdigit(first(modname)) && return "_" * modname
+    return modname
 end
 
 """Check if a stage is in the workflow"""
