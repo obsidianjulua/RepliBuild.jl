@@ -277,26 +277,24 @@ function handle_unknown_cpp_type(registry::TypeRegistry, cpp_type::String, conte
         Suggestions:
         ───────────────────────────────────────────────────────────────
 
-        1. Add custom type mapping in your code:
-           registry = create_cpp_type_registry(config,
-               custom_types=Dict("$cpp_type" => "YourJuliaType"))
+        1. Map it in replibuild.toml:
+           [types.custom]
+           "$cpp_type" = "YourJuliaType"
 
         2. If this is a struct/class:
-           - Ensure it's defined in your headers with debug info (-g flag)
-           - Check that DWARF metadata extraction is working
-           - Consider allowing unknown structs: allow_unknown_structs=true
+           - Its definition must reach DWARF: a type defined only in a header
+             needs -fstandalone-debug in [compile] flags
+           - Or accept an opaque pointer: [types] allow_unknown_structs = true
 
         3. If this is an enum:
-           - Verify enum extraction from DWARF is working
-           - Enable enum fallback: allow_unknown_enums=true
+           - [types] allow_unknown_enums = true maps it to Int32
 
         4. If this is a function pointer:
-           - Enable function pointer support: allow_function_pointers=true
-           - This will map to Ptr{Cvoid}
+           - [types] allow_function_pointers = true maps it to Ptr{Cvoid}
 
         5. If this is a template type:
-           - Add template mapping for this specific instantiation
-           - Example: "std::vector<$cpp_type>" => "Vector{JuliaType}"
+           - Name the instantiation in [types] templates, and its header in
+             [types] template_headers
 
         ───────────────────────────────────────────────────────────────
         Temporary Workaround:

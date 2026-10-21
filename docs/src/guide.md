@@ -21,9 +21,13 @@ One-shot (still edit the TOML afterwards — discovery cannot invent macros):
 RepliBuild.discover("path/to/project", build=true, wrap=true)
 ```
 
-`build(clean=true)` ignores the cache. `RepliBuild.clean(toml)` removes
-`build/`, `julia/`, and `.replibuild_cache/`. `RepliBuild.info(toml)` prints
-whether the `.so` and wrapper exist.
+On a project that already has a `replibuild.toml`, the same call keeps that file
+and runs `build` and `wrap` with it.
+
+`RepliBuild.clean(toml)` removes `build/`, `julia/`, and `.replibuild_cache/`
+(git dependencies are fetched again on the next build).
+`RepliBuild.build(toml; clean=true)` does that first and then builds.
+`RepliBuild.info(toml)` prints whether the `.so` and wrapper exist.
 
 ## 1. Discover
 
@@ -34,8 +38,10 @@ RepliBuild.discover("path/to/project", force=true)   # rescan
 ```
 
 Discovery walks the tree, follows `#include`s, sets `wrap.language` from the
-file extensions, and writes `replibuild.toml`. It registers the project locally
-so `use("[project].name")` works after a successful wrap.
+file extensions, and writes `replibuild.toml`. When it writes the file it also
+registers the project locally, so `use("[project].name")` works — see
+[Registry](use.md). Without `force=true`, an existing `replibuild.toml` is left
+as it is.
 
 `force=true` regenerates the file but **keeps** the keys you are expected to
 hand-edit: `[types].templates` / `template_headers`, `[wrap].varargs` /

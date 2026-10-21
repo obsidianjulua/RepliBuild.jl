@@ -633,3 +633,96 @@ end
         end
     end
 end
+
+# ── each entry has a registry folder of its own ──────────────────────────────
+# Every entry used to share the registry folder, and a relative root resolves to
+# the stored TOML's folder, so two projects with the same relative paths
+# overwrote each other's staged sources: `use("twin_a")` built twin_b's library
+# (found by a walkthrough of the user docs, 2026-10-21). Pure file operations.
+@testset "each registry entry has a folder of its own" begin
+    with_temp_registry() do home
+        mktempdir() do sb
+            folders = Dict{String,String}()
+            for (name, body) in (("twin_a", "int f(void){return 1;}\n"),
+                                 ("twin_b", "int f(void){return 2;}\n"))
+                proj = joinpath(sb, name)
+                mkpath(joinpath(proj, "src"))
+                write(joinpath(proj, "src", "lib.c"), body)
+                write(joinpath(proj, "replibuild.toml"), """
+                [project]
+                name = "$name"
+                root = "."
+
+                [compile]
+                source_files = ["src/lib.c"]
+
+                [wrap]
+                language = "c"
+                """)
+                folders[name] = dirname(PR.register(joinpath(proj, "replibuild.toml")).toml_path)
+            end
+            @test folders["twin_a"] != folders["twin_b"]
+            @test read(joinpath(folders["twin_a"], "src", "lib.c"), String) == "int f(void){return 1;}\n"
+            @test read(joinpath(folders["twin_b"], "src", "lib.c"), String) == "int f(void){return 2;}\n"
+            # What `use` builds from: each stored TOML's root is its own folder.
+            for (name, d) in folders
+                cfg = CM.load_config(PR._load_index().entries[name].toml_path)
+                @test cfg.project.root == abspath(d)
+            end
+        end
+    end
+end
+
+@testset "registering again replaces what was staged" begin
+    with_temp_registry() do home
+        mktempdir() do proj
+            mkpath(joinpath(proj, "include"))
+            write(joinpath(proj, "include", "a.h"), "int a(void);\n")
+            write(joinpath(proj, "include", "gone.h"), "int gone(void);\n")
+            toml = joinpath(proj, "replibuild.toml")
+            write(toml, """
+            [project]
+            name = "restaged"
+            root = "."
+
+            [compile]
+            source_files = []
+            include_dirs = ["include", "."]
+            """)
+            d = dirname(PR.register(toml).toml_path)
+            @test isfile(joinpath(d, "include", "gone.h"))
+
+            rm(joinpath(proj, "include", "gone.h"))
+            write(joinpath(proj, "include", "a.h"), "int a(int);\n")
+            entry = PR.register(toml)
+            @test !ispath(joinpath(d, "include", "gone.h"))      # deleted in the project
+            @test read(joinpath(d, "include", "a.h"), String) == "int a(int);\n"
+            @test isfile(entry.toml_path)                        # "." never clears the folder
+        end
+    end
+end
+
+@testset "unregister removes the entry's folder, not the registry" begin
+    with_temp_registry() do home
+        mktempdir() do proj
+            d = dirname(PR.register(make_test_toml(proj; name="foldered")).toml_path)
+            @test isdir(d)
+            @test normpath(d) != normpath(PR._registry_dir())
+            PR.unregister("foldered")
+            @test !ispath(d)
+            @test isdir(PR._registry_dir())
+        end
+    end
+end
+
+@testset "list_registry does not claim a build it cannot see" begin
+    # It used to test builds/<TOML hash>, but builds are stored under
+    # hash_config, so every entry read "not built".
+    with_temp_registry() do home
+        mktempdir() do proj
+            PR.register(make_test_toml(proj; name="listed"))
+            out = capture_stdout(PR.list_registry)
+            @test occursin("not built by use() yet", out)
+        end
+    end
+end

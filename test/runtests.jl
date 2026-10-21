@@ -123,6 +123,10 @@ include(joinpath(@__DIR__, "test_registry.jl"))
 
 include(joinpath(@__DIR__, "test_discover_without_llvm.jl"))
 
+# ── User-facing messages say what is true (no toolchain) ─────────────────────
+
+include(joinpath(@__DIR__, "test_user_messages.jl"))
+
 # ── Varargs @ccall emission regression (no toolchain required) ───────────────
 
 include(joinpath(@__DIR__, "test_varargs_emission.jl"))

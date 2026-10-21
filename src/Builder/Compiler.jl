@@ -1838,19 +1838,51 @@ function _assert_library_resolves(lib_path::AbstractString; preload::Vector{Stri
         handle = try
             Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
         catch e
-            error("""
-                  Linked library has unresolved symbols: $(basename(lib_path))
-                    $(sprint(showerror, e))
-                  The link step succeeded — `ld -shared` permits undefined symbols —
-                  but nothing can supply these at load time. Usually a source file
-                  excluded in replibuild.toml that something still calls, or a
-                  missing entry in [link] link_libraries.""")
+            error(_load_failure_message(lib_path, sprint(showerror, e)))
         end
         Libdl.dlclose(handle)
     finally
         foreach(Libdl.dlclose, deps)
     end
     return nothing
+end
+
+"""
+    _load_failure_message(lib_path, loader_msg) -> String
+
+Why the freshly linked library would not load, from the loader's own message.
+Unresolved symbols are the usual cause, but two Windows failures look the same
+from here and need different fixes: an App Control policy (Smart App Control)
+refusing a new unsigned DLL, and a DLL it imports that the loader cannot find.
+Reporting either as "unresolved symbols" sent people to their TOML.
+"""
+function _load_failure_message(lib_path::AbstractString, loader_msg::AbstractString)::String
+    name = basename(lib_path)
+    if occursin("Application Control policy has blocked", loader_msg)
+        return """
+        Windows refused to load the library it just built: $name
+          $loader_msg
+        Smart App Control, or another App Control policy, blocks new unsigned
+        binaries, and every library RepliBuild builds is one. Event 3077 in Event
+        Viewer (Applications and Services Logs > Microsoft > Windows > CodeIntegrity
+        > Operational) names the file. RepliBuild cannot sign what it builds;
+        whether to change the policy is your decision."""
+    end
+    if occursin("The specified module could not be found", loader_msg)
+        return """
+        A library that $name imports could not be found:
+          $loader_msg
+        Windows looks for it beside the library and on PATH. A C++ library imports
+        libc++.dll from C:\\msys64\\clang64\\bin, which must be on PATH; a
+        [link] link_libraries DLL in [link] link_dirs is opened first by itself."""
+    end
+    return """
+    Linked library has unresolved symbols: $name
+      $loader_msg
+    The link step succeeded — `ld -shared` permits undefined symbols —
+    but nothing can supply these at load time. Usually a source file
+    excluded in replibuild.toml that something still calls, or a
+    missing entry in [link] link_libraries."""
 end
 
 """
@@ -3070,8 +3102,13 @@ function compile_project(config::RepliBuildConfig)
         "replibuild_shims.$(config.wrap.language == :c ? "c" : "cpp")"))
 
     if isempty(cpp_files)
-        @warn "No source files found in config"
-        println("Run discover() first to find C++ sources")
+        # Not "run discover() first": this is usually reached after discover
+        # ran and found nothing, or after a git dependency failed to clone.
+        @warn """No source files to compile for $(config.project.name).
+        [compile] source_files is empty and the scan of $(config.project.root) found none.
+        If the sources come from a [dependencies] entry, look above for
+        "Failed to clone dependency". Otherwise add sources under the project and
+        run RepliBuild.discover(path; force=true)."""
         return nothing
     end
 

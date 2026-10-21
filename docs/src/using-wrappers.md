@@ -54,8 +54,12 @@ The copy in `lib/` is self-contained:
 1. The wrapper resolves its `.so` next to itself first (build-time absolute path
    is the fallback), so the vendored pair stays bound wherever the package lives.
 2. Metadata is read from the wrapper's own directory at load.
-3. The only Julia dependency is `RepliBuild`. There is no MLIR/LLVM package in
-   the consumer — `libJLCS.so` is found through the installed RepliBuild.
+3. The only Julia dependency is `RepliBuild`: every wrapper imports it for its
+   build-identity check, and C++ wrappers dispatch through it. A C wrapper needs
+   nothing more. A wrapper with Tier 2 functions — most C++ wrappers — also
+   needs the JLCS dialect library loadable on the machine that runs it, in that
+   machine's RepliBuild install. That means a system LLVM/MLIR 21+ there, and the
+   dialect built against it ([Install](install.md#The-JLCS-dialect)).
 
 Alternatives: `RepliBuild.use("box2d")` at runtime if that name is already in
 your local registry (scripts, not precompiled packages), or
@@ -96,12 +100,21 @@ library, once per process, in `__init__`.
 
 Multiple wrapped libraries compose: one engine per `.so`. One library's
 initialization failure disables the hard ABI path for *that* library only —
-its `ccall` wrappers and every other library keep working. Catch the error and
-degrade features rather than crashing `using MyPkg`.
+its `ccall` wrappers and every other library keep working. The failure does not
+throw: the wrapper logs `Failed to initialize JIT for lib….so` with the reason,
+`using MyPkg` succeeds, and calling one of that library's Tier 2 functions then
+raises. To degrade features instead, check the engine in your `__init__`:
+`RepliBuild.JITManager.GLOBAL_JIT.engines` holds one entry per library, with
+`binary_path` and `init_error` (`nothing` when it worked).
 
-`[compile] aot_thunks = true` at wrap time ships a companion `_thunks.so`
-instead of compiling at load: faster startup, second binary, no MLIR at
-runtime. `libJLCS.so` is still required *to wrap*.
+`[compile] aot_thunks = true` at build time ships a companion `_thunks.so`
+instead of compiling at load: faster startup, a second binary, and no JIT
+compilation in the consumer. It does not remove the dialect library: the AOT
+thunks still need `libJLCS` when they run. On Linux they import
+`jlcs_catch_current_exception` from it, and on Windows every thunk call goes
+through its `jlcs_guard_*` frame, which is what catches a C++ exception there.
+An AOT wrapper whose thunks library will not open fails in `__init__`, naming
+the state of `libJLCS`.
 
 ## C++-isms to wrap once
 
@@ -150,6 +163,9 @@ engine registered if you depend on it:
           RepliBuild.JITManager.GLOBAL_JIT.engines)
 ```
 
+That holds for a JIT wrapper. An AOT wrapper creates no engine; for it, call
+one of its Tier 2 functions in the test instead.
+
 ## Deployment
 
 - The vendored `.so` is platform-specific. Multi-platform: per-platform
@@ -158,3 +174,10 @@ engine registered if you depend on it:
 - Strip nothing. The DWARF in the `.so` is read at load.
 - Linux and Windows, same as RepliBuild. The vendored binary is `.so` or
   `.dll`; the `.jl` is the same either way.
+- On Windows, a C wrapper's `.dll` imports only the Windows C runtime and
+  whatever `[link] link_libraries` adds. A C++ wrapper also needs
+  `C:\msys64\clang64\bin` on the consumer's `PATH`: `libJLCS.dll` imports
+  `libLLVM-<N>.dll` and `libc++.dll` from there, and a library that uses the
+  standard library imports `libc++.dll` itself.
+- A JIT wrapper also runs `llvm-dwarfdump` at load, so the consumer needs it on
+  `PATH` too.

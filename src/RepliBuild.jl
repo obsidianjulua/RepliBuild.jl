@@ -277,6 +277,13 @@ environment, builds if needed, and returns the loaded Julia module.
 The name must already be registered (`discover` does this; otherwise
 `register(toml)`). There is no Hub fallback — a missing name errors.
 
+`use` builds from the copy `register` made of the project, so register again
+after editing its sources. `force_rebuild=true` ignores the cached build and
+builds that copy again from nothing (git dependencies are fetched again).
+
+Call it at top level: the module is defined while your code runs, so calling
+into it from the function that called `use` needs `Base.invokelatest`.
+
 # Example
 ```julia
 RepliBuild.register("path/to/replibuild.toml")   # or discover(), which registers
@@ -337,9 +344,12 @@ end
 """
     discover(target_dir="."; force=false, build=false, wrap=false) -> String
 
-Scan C++ project and generate replibuild.toml configuration file.
+Scan a C or C++ project, generate its replibuild.toml, and register it locally.
 
 **This is the entry point for new projects.** Run this first to set up RepliBuild.
+
+An existing replibuild.toml is kept, not rescanned or registered again, unless
+`force=true`; `build` and `wrap` still run against it.
 
 # Arguments
 - `target_dir`: Project directory to scan (default: current directory)
@@ -348,7 +358,7 @@ Scan C++ project and generate replibuild.toml configuration file.
 - `wrap`: Automatically run wrap() after build (requires build=true, default: false)
 
 # Returns
-Path to generated `replibuild.toml` file
+Path to the `replibuild.toml` file
 
 # Workflow
 
@@ -591,7 +601,8 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
     toml_path = abspath(toml_path)
 
     if !isfile(toml_path)
-        error("Configuration file not found: $toml_path\nRun RepliBuild.Discovery.discover() first!")
+        error("Configuration file not found: $toml_path\n" *
+              "Run RepliBuild.discover($(repr(dirname(toml_path)))) first, or pass the path of an existing replibuild.toml.")
     end
 
     project_dir = dirname(toml_path)
@@ -674,7 +685,8 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
     toml_path = abspath(toml_path)
 
     if !isfile(toml_path)
-        error("Configuration file not found: $toml_path\nRun RepliBuild.Discovery.discover() first!")
+        error("Configuration file not found: $toml_path\n" *
+              "Run RepliBuild.discover($(repr(dirname(toml_path)))) first, or pass the path of an existing replibuild.toml.")
     end
 
     project_dir = dirname(toml_path)
@@ -708,17 +720,10 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
         library_path = joinpath(output_dir, lib_name)
 
         if !isfile(library_path)
-            error("Library not found: $library_path\nRun RepliBuild.build(\"$toml_path\") first!")
+            error("Library not found: $library_path\nRun RepliBuild.build($(repr(toml_path))) first.")
         end
 
-        # Check for metadata
-        metadata_path = joinpath(output_dir, "compilation_metadata.json")
-        if !isfile(metadata_path)
-            @warn "No metadata found. Wrapper quality may be limited."
-        end
-
-
-        # Generate wrapper
+        # Generate wrapper (it refuses when compilation_metadata.json is missing)
         wrapper_path = Wrapper.wrap_library(
             config,
             library_path,
@@ -828,7 +833,16 @@ function clean_internal(path::String)
     for dir in dirs_to_remove
         dir_path = joinpath(path, dir)
         if isdir(dir_path)
-            _rm_tree(dir_path)
+            try
+                _rm_tree(dir_path)
+            catch e
+                # Windows will not delete a file a running process has loaded,
+                # and the raw IOError does not say which process that is.
+                hint = Sys.iswindows() ?
+                    "\nWindows cannot delete a library a running process has loaded — usually a " *
+                    "Julia session that included the wrapper. Close it and run clean again." : ""
+                error("Could not delete $dir_path: $(sprint(showerror, e))$hint")
+            end
             push!(removed, dir)
         end
     end

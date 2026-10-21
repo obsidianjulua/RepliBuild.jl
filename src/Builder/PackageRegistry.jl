@@ -269,6 +269,10 @@ function _copy_project_path!(src::String, dest::String)
     end
 end
 
+"""Whether two paths name the same directory, whatever their trailing separators."""
+_same_dir(a::AbstractString, b::AbstractString)::Bool =
+    rstrip(normpath(abspath(String(a))), ['/', '\\']) == rstrip(normpath(abspath(String(b))), ['/', '\\'])
+
 function _within_root(path::AbstractString, root::AbstractString)::Bool
     path = normpath(abspath(String(path)))
     root = normpath(abspath(String(root)))
@@ -313,9 +317,35 @@ function _stage_registered_inputs!(orig_toml::String, dest_dir::String)
             src = normpath(joinpath(orig_root, rel))
             _within_root(src, orig_root) || continue
             ispath(src) || continue
-            _copy_project_path!(src, joinpath(dest_dir, rel))
+            dest = normpath(joinpath(dest_dir, rel))
+            # Registering again replaces a directory an earlier registration
+            # staged, so a file deleted from the project does not live on in
+            # the copy. Never the entry folder itself (`include_dirs = ["."]`,
+            # which normpath spells with a trailing separator): it also holds
+            # the stored TOML and the build.
+            if isdir(dest) && _within_root(dest, dest_dir) && !_same_dir(dest, dest_dir)
+                rm(dest; recursive=true, force=true)
+            end
+            _copy_project_path!(src, dest)
         end
     end
+end
+
+"""
+    _entry_dir(name) -> String
+
+The registry folder of one entry: its stored TOML, the inputs staged from the
+project, and — because a relative `root` resolves to this folder — its `build/`
+and `julia/`. One shared folder for every entry let two projects with the same
+relative paths (`src/lib.c`) overwrite each other's staged sources, so `use` of
+one built the other. The name is made filesystem-safe; the hash suffix keeps
+names that differ only in case apart on a case-folding filesystem.
+"""
+function _entry_dir(name::AbstractString)::String
+    safe = replace(String(name), r"[^A-Za-z0-9._-]" => "_")
+    d = joinpath(_registry_dir(), safe * "_" * bytes2hex(sha256(String(name)))[1:8])
+    mkpath(d)
+    return d
 end
 
 # =============================================================================
@@ -348,14 +378,14 @@ function register(toml_path::String; name::String="", verified::Bool=false)::Reg
     # Compute content hash
     content_hash = hash_toml(toml_path)
 
-    # Copy TOML into registry (content-addressed)
-    regdir = _registry_dir()
+    # Copy TOML into the entry's own registry folder (content-addressed name)
+    regdir = _entry_dir(name)
     stored_path = joinpath(regdir, "$(content_hash).toml")
     if !isfile(stored_path)
         cp(toml_path, stored_path)
     end
     # A relative `root` is resolved against the stored TOML's directory, which
-    # is this registry. The project's relative include dirs and sources have
+    # is that folder. The project's relative include dirs and sources have
     # to be there too, or the build compiles against the system headers.
     _stage_registered_inputs!(toml_path, regdir)
 
@@ -393,7 +423,9 @@ end
 """
     unregister(name::String)
 
-Remove a package from the global registry. Deletes stored TOML and cached builds.
+Remove a package from the global registry, with its registry folder: the stored
+TOML, the staged copy of its inputs, and its build tree. Cached builds under
+`builds/` are kept.
 """
 function unregister(name::String)
     index = _load_index()
@@ -404,16 +436,20 @@ function unregister(name::String)
 
     entry = index.entries[name]
 
-    # Remove stored TOML
-    if isfile(entry.toml_path)
+    # Remove the entry's folder: stored TOML, staged inputs and build tree. An
+    # entry registered before entries had folders keeps its TOML in the shared
+    # registry folder, and only that file is removed.
+    entry_dir = dirname(entry.toml_path)
+    if isdir(entry_dir) && !_same_dir(entry_dir, _registry_dir()) &&
+       _within_root(entry_dir, _registry_dir())
+        rm(entry_dir; recursive=true, force=true)
+    elseif isfile(entry.toml_path)
         rm(entry.toml_path; force=true)
     end
 
-    # Remove cached builds
-    build_dir = joinpath(_builds_dir(), entry.hash)
-    if isdir(build_dir)
-        rm(build_dir; recursive=true, force=true)
-    end
+    # Cached builds under builds/ stay: they are keyed on hash_config (the
+    # resolved inputs and the generator), not on this entry's TOML hash, which
+    # is what this used to look up — so it never found one.
 
     delete!(index.entries, name)
     _save_index(index)
@@ -451,12 +487,14 @@ function list_registry()
         else
             "local"
         end
-        cached = isdir(joinpath(_builds_dir(), entry.hash)) ? "cached" : "not built"
+        # Whether `use` has built it. This used to test builds/<TOML hash>, but
+        # builds are stored under hash_config, so it always said "not built".
+        built = entry.verified ? "built by use()" : "not built by use() yet"
 
         println("  $status $name")
         println("    hash:   $hash_short…")
         println("    source: $source")
-        println("    status: $cached")
+        println("    status: $built")
         println("    registered: $(Dates.format(entry.registered_at, "yyyy-mm-dd HH:MM"))")
         println()
     end
@@ -535,7 +573,7 @@ function search(query::String="")
         ver = get(info, "version", "")
         lang = get(info, "language", "")
         tags = get(info, "tags", String[])
-        local_status = haskey(local_index.entries, name) ? " (installed)" : ""
+        local_status = haskey(local_index.entries, name) ? " (registered locally)" : ""
 
         println("  $name $ver [$lang]$local_status")
         !isempty(desc) && println("    $desc")
@@ -544,8 +582,19 @@ function search(query::String="")
     end
 
     println("  $(length(matches)) package$(length(matches) == 1 ? "" : "s") found")
-    println("  Install: RepliBuild.use(\"<name>\")")
+    # `use(name)` alone fails for a name nobody registered, which is every Hub
+    # package on a fresh install; the footer used to say "Install: use(name)".
+    for line in _HUB_USE_STEPS
+        println("  ", line)
+    end
 end
+
+const _HUB_USE_STEPS = [
+    "search lists Hub configs; it does not install them. To use one:",
+    "  clone https://github.com/obsidianjulua/RepliBuild-Hub, then",
+    "  RepliBuild.register(\"<clone>/packages/<name>/replibuild.toml\")",
+    "  RepliBuild.use(\"<name>\")",
+]
 
 function _matches_query(name::String, info::Dict, query::String)::Bool
     # Match against name
@@ -689,6 +738,10 @@ end
 Load a wrapper by registry name. Resolves dependencies, checks environment,
 builds if needed, wraps, and returns the loaded Julia module.
 
+It builds from the copy `register` made of the project, not from the original
+tree. `force_rebuild=true` ignores the cached build and builds that copy again
+from nothing.
+
 ```julia
 Lua = RepliBuild.use("lua")
 Lua.luaL_newstate()
@@ -698,7 +751,9 @@ function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)::Modul
     # 1. Lookup in registry
     index = _load_index()
     if !haskey(index.entries, name)
-        error("Package '$name' not in registry. Use RepliBuild.list_registry() to see available packages,\nor RepliBuild.register(\"path/to/replibuild.toml\") to add one.")
+        error("Package '$name' not in registry. Use RepliBuild.list_registry() to see available packages,\n" *
+              "or RepliBuild.register(\"path/to/replibuild.toml\") to add one. A RepliBuild-Hub config is\n" *
+              "registered the same way, from a clone: <clone>/packages/<name>/replibuild.toml.")
     end
     entry = index.entries[name]
 
@@ -741,7 +796,10 @@ function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)::Modul
 
     # We need to call the parent module's build/wrap — access via Main.RepliBuild
     parent_mod = parentmodule(@__MODULE__)
-    library_path = parent_mod.build(entry.toml_path; clean=false)
+    # `force_rebuild` builds from nothing. Without `clean`, an unchanged project
+    # hash skipped the build, so it only re-wrapped: metadata extracted by an
+    # older RepliBuild survived the one call meant to replace it.
+    library_path = parent_mod.build(entry.toml_path; clean=force_rebuild)
 
     # 8. Wrap (generate Julia bindings)
     verbose && println("  wrapping...")

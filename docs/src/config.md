@@ -648,7 +648,7 @@ Types are TOML types. "Default" is what the parser uses when the key is
 | `parallel` | Bool | `true` | Multi-threaded per-file compilation |
 | `source_files` | Vector{String} | `[]` (auto-discovered) | Explicit list; relative entries resolve against `root` (§2.16); validated to exist at load |
 | `include_dirs` | Vector{String} | `[]` (auto-discovered) | Passed as `-I`; relative entries resolve against `root` (§2.16) |
-| `aot_thunks` | Bool | `false` | Pre-compile Tier-2 thunks into `<name>_thunks.so`; needs `libJLCS.so` |
+| `aot_thunks` | Bool | `false` | Pre-compile Tier-2 thunks into `<name>_thunks.so` at build time. The JLCS dialect library is still needed to build, and wherever the wrapper runs ([Ship a package](using-wrappers.md#Load-time)) |
 | `visibility` | `"default"` \| `"hidden"` *(preserved)* | `"default"` | `"hidden"` narrows the wrapper's API to what the library annotates. **Probe first — §2.12.** Any other value is a hard error |
 
 Changing `flags`, `defines`, `include_dirs` or `visibility` correctly invalidates
@@ -826,7 +826,7 @@ the C++ API surface of an ingested binary is unsupported.
 |---|---|---|---|
 | `library` | String | — (required) | Path to the pre-built `.so`; relative paths resolve against the TOML's directory. Missing → the section is **ignored with a warning** and you silently get source-build mode |
 | `headers` | Vector{String} | `[]` | Header search dirs for type extraction and the `noexcept` scan; merged into the include dirs |
-| `extra_link_libs` | Vector{String} | `[]` | Additional `-l` libraries the wrapper loads at runtime. **Ingest-only** — in a source build use `[link] link_libraries` |
+| `extra_link_libs` | Vector{String} | `[]` | Libraries the wrapper opens before the main one, for symbols the `.so` needs but does not record. A bare name follows the `-l` convention (`"m"` → libm); prefer a full soname or a path. On glibc ≥ 2.34 `m`, `pthread`, `dl` and `rt` are part of libc, there is nothing to open, and the wrapper warns. **Ingest-only** — in a source build use `[link] link_libraries` |
 
 Generate it with `RepliBuild.ingest("/path/to/libfoo.so", headers=[...])` rather
 than by hand.
@@ -1032,7 +1032,7 @@ name = "foo"
 [ingest]
 library         = "/path/to/libfoo.so"      # must have been built with -g
 headers         = ["/path/to/include"]
-extra_link_libs = ["m", "pthread"]
+extra_link_libs = ["libbar.so.2"]           # a dependency libfoo.so does not record
 
 [wrap]
 language = "c"

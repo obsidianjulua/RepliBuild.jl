@@ -329,12 +329,17 @@ end
 const _LLVM_ADVICE_UNIX = [
     "  Arch:          yay -S llvm mlir",
     "  Debian/Ubuntu: wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh $(MIN_LLVM_VERSION)",
+    "                 sudo apt install llvm-$(MIN_LLVM_VERSION)-dev libmlir-$(MIN_LLVM_VERSION)-dev mlir-$(MIN_LLVM_VERSION)-tools",
     "  Fedora:        dnf install llvm-devel mlir-devel clang-devel",
+    "Then put LLVM's bin directory on PATH (/usr/lib/llvm-$(MIN_LLVM_VERSION)/bin for apt.llvm.org).",
     "Tier 2 only — the C path needs none of this.",
 ]
+# The second line is the cause as often as the first: a toolchain that is
+# installed but whose bin directory is not on the Windows PATH is invisible here.
 const _LLVM_ADVICE_WINDOWS = [
     "In an MSYS2 CLANG64 shell:",
     "  pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir",
+    "Then put C:\\msys64\\clang64\\bin on the Windows PATH and restart Julia.",
 ]
 const _LLVM_ADVICE = Sys.iswindows() ? _LLVM_ADVICE_WINDOWS : _LLVM_ADVICE_UNIX
 
@@ -378,13 +383,33 @@ function _check_mlir_tblgen()::ToolStatus
         section=SEC_CPP, advice=_LLVM_ADVICE)
 end
 
+const _CMAKE_ADVICE = Sys.iswindows() ?
+    ["In an MSYS2 CLANG64 shell:  pacman -S --needed mingw-w64-clang-x86_64-cmake"] :
+    ["  Arch: pacman -S cmake   Debian: apt install cmake   Fedora: dnf install cmake"]
+
 function _check_cmake()::ToolStatus
     found, path = _find_tool("cmake")
     found || return ToolStatus("cmake", false, false, "", "", false,
         "cmake not found — cannot build the JLCS dialect"; section=SEC_CPP,
-        advice=["  Arch: pacman -S cmake   Debian: apt install cmake   Fedora: dnf install cmake"])
+        advice=_CMAKE_ADVICE)
     ToolStatus("cmake", false, true, path, _get_version(path), true,
         "CMake $(_get_version(path))"; section=SEC_CPP)
+end
+
+# Every JIT C++ wrapper runs `llvm-dwarfdump` by this bare name when it loads:
+# `DWARFParser.parse_vtables`, from the engine's init. A versioned name on PATH
+# (`llvm-dwarfdump-21`) does not help it, so this probes exactly that name. A
+# miss fails the library's engine, leaving only its ccall functions.
+function _check_llvm_dwarfdump()::ToolStatus
+    found, path = _find_tool("llvm-dwarfdump")
+    found || return ToolStatus("llvm-dwarfdump", false, false, "", "", false,
+        "not on PATH — C++ wrappers run it by this name when they load"; section=SEC_CPP,
+        advice=Sys.iswindows() ?
+            ["It is in C:\\msys64\\clang64\\bin: put that directory on the Windows PATH."] :
+            ["Put LLVM's bin directory on PATH (/usr/lib/llvm-<N>/bin for apt.llvm.org)."])
+    version = _get_version(path)
+    ToolStatus("llvm-dwarfdump", false, true, path, version, true,
+        "llvm-dwarfdump $version"; section=SEC_CPP)
 end
 
 # "dialect compiled" used to mean "the file exists". A package-manager LLVM upgrade
@@ -394,8 +419,7 @@ end
 # today's llvm-config and then asks the loader.
 function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
     lib_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
-    rebuild = ["cd $(joinpath(SRC_DIR, "mlir")) && ./build.sh",
-               "Rebuild after any system MLIR upgrade — the artifact pins the minor SONAME."]
+    rebuild = jlcs_build_advice()
     isfile(lib_path) || return ToolStatus("libJLCS", false, false, "", "", false,
         "dialect not built"; section=SEC_CPP, advice=rebuild)
     stamp = joinpath(dirname(lib_path), "jlcs_llvm_version")
@@ -406,12 +430,58 @@ function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
             section=SEC_CPP, advice=rebuild)
     end
     h = Libdl.dlopen(lib_path, Libdl.RTLD_LAZY; throw_error=false)
-    h === nothing && return ToolStatus("libJLCS", false, true, lib_path, built, false,
-        "does not load — the LLVM/MLIR libraries it was linked against are gone";
-        section=SEC_CPP, advice=rebuild)
+    if h === nothing
+        bin = _clang64_bin_off_path()
+        bin === nothing || return ToolStatus("libJLCS", false, true, lib_path, built, false,
+            "does not load — $bin is not on PATH"; section=SEC_CPP,
+            advice=["libJLCS.dll imports libLLVM and libc++ from there, and Windows finds them only through PATH.",
+                    "Add $bin to the Windows PATH, then restart Julia."])
+        return ToolStatus("libJLCS", false, true, lib_path, built, false,
+            "does not load — the LLVM/MLIR libraries it was linked against are gone";
+            section=SEC_CPP, advice=rebuild)
+    end
     Libdl.dlclose(h)
     ToolStatus("libJLCS", false, true, lib_path, built, true,
         isempty(built) ? "dialect compiled" : "dialect compiled against LLVM $built"; section=SEC_CPP)
+end
+
+"""
+    jlcs_build_advice() -> Vector{String}
+
+How to build the JLCS dialect on this host, and when to build it again. One copy
+for the doctor and `MLIRNative.check_library`. The folder is written with `/`,
+because bash strips backslashes and the Windows build runs in MSYS2 bash.
+"""
+function jlcs_build_advice()::Vector{String}
+    dir = replace(joinpath(SRC_DIR, "mlir"), '\\' => '/')
+    if Sys.iswindows()
+        return ["From an MSYS2 CLANG64 shell:",
+                "  cd \"$dir\" && ./build.sh",
+                "Build it again after MSYS2 upgrades LLVM, and after upgrading RepliBuild:",
+                "each version installs into a new folder."]
+    end
+    return ["Pkg.build(\"RepliBuild\") builds it when cmake, llvm-config and mlir-tblgen are on PATH. By hand:",
+            "  cd \"$dir\" && ./build.sh",
+            "Build it again after a system LLVM/MLIR upgrade that changes the minor version."]
+end
+
+"""
+    _clang64_bin_off_path(; windows, root, path) -> Union{String,Nothing}
+
+CLANG64's `bin` directory when it holds the libraries `libJLCS.dll` imports but is
+missing from `PATH`, else `nothing`. Such a library fails to load exactly like one
+whose LLVM was uninstalled, but the fix is a `PATH` entry, not a rebuild. The
+keywords exist so the test can drive the Windows answer on any host.
+"""
+function _clang64_bin_off_path(; windows::Bool=Sys.iswindows(),
+                               root::AbstractString=get(ENV, "MSYS2_ROOT", "C:/msys64"),
+                               path::AbstractString=get(ENV, "PATH", ""))::Union{String,Nothing}
+    windows || return nothing
+    bin = joinpath(root, "clang64", "bin")
+    isfile(joinpath(bin, "libc++.dll")) || return nothing
+    norm(p) = lowercase(rstrip(replace(String(p), '/' => '\\'), '\\'))
+    any(p -> norm(p) == norm(bin), split(path, ';')) && return nothing
+    return bin
 end
 
 """
@@ -431,25 +501,39 @@ end
 # PROBES — MSYS2 (Windows only)
 # =============================================================================
 
-# Which MSYS2 environment the process is in decides the C++ ABI of every wrapper
-# DLL. CLANG64 is the supported one because it matches Julia's own mingw build.
-function _check_msys2()::ToolStatus
-    prefix = get(ENV, "MSYSTEM", "")
-    if isempty(prefix)
-        return ToolStatus("MSYSTEM", false, false, "", "", false,
-            "not running inside an MSYS2 shell"; section=SEC_MSYS,
-            advice=["RepliBuild's Windows target is x86_64-w64-windows-gnu under MSYS2 CLANG64.",
-                    "Launch the CLANG64 shell (not MSYS, not MINGW64) and re-run."])
-    end
-    if uppercase(prefix) != "CLANG64"
-        return ToolStatus("MSYSTEM", false, true, "", prefix, false,
-            "$prefix — CLANG64 is the supported environment"; section=SEC_MSYS,
+# Which MSYS2 environment the C++ toolchain comes from decides the C++ ABI of
+# every wrapper DLL. CLANG64 is the supported one because it matches Julia's own
+# mingw build. This asks it of the clang++ a build will run, not of MSYSTEM: Julia
+# is usually started outside any MSYS2 shell, and Git Bash sets MSYSTEM=MINGW64
+# while every tool still comes from clang64. Nothing else reads MSYSTEM.
+function _check_msys2(clangxx::AbstractString)::ToolStatus
+    isempty(clangxx) && return ToolStatus("MSYS2 env", false, false, "", "", false,
+        "no clang++ found — see the C++ section"; section=SEC_MSYS,
+        advice=["RepliBuild's Windows target is x86_64-w64-windows-gnu, from MSYS2 CLANG64."])
+    env = _msys2_env(clangxx)
+    if env != "clang64"
+        from = isempty(env) ? "outside MSYS2" : uppercase(env)
+        return ToolStatus("MSYS2 env", false, true, clangxx, from, false,
+            "clang++ comes from $from — CLANG64 is the supported environment"; section=SEC_MSYS,
             advice=["CLANG64 matches Julia's own mingw build, so a wrapper DLL shares the",
-                    "process C++ ABI. $prefix uses a different stdlib/EH model — C++",
-                    "exceptions crossing a thunk are what break first."])
+                    "process C++ ABI. Another environment's stdlib/EH model breaks C++",
+                    "exceptions crossing a thunk first.",
+                    "Put C:\\msys64\\clang64\\bin ahead of other toolchains on PATH."])
     end
-    ToolStatus("MSYSTEM", false, true, get(ENV, "MINGW_PREFIX", ""), prefix, true,
-        "CLANG64 $(DIM)($(get(ENV, "MINGW_PREFIX", "?")))$(RESET)"; section=SEC_MSYS)
+    ToolStatus("MSYS2 env", false, true, clangxx, "CLANG64", true,
+        "CLANG64 $(DIM)(clang++ in $(dirname(clangxx)))$(RESET)"; section=SEC_MSYS)
+end
+
+"""
+The MSYS2 environment a tool comes from (`"clang64"`, `"mingw64"`, `"ucrt64"`,
+`"msys"`, …), read from its `<env>/bin` directory, or `""` outside that layout.
+"""
+function _msys2_env(tool::AbstractString)::String
+    bin = dirname(replace(String(tool), '\\' => '/'))
+    lowercase(basename(bin)) == "bin" || return ""
+    env = lowercase(basename(dirname(bin)))
+    env == "usr" && return "msys"
+    return env in ("clang64", "clangarm64", "clang32", "mingw64", "mingw32", "ucrt64") ? env : ""
 end
 
 # =============================================================================
@@ -464,7 +548,8 @@ the capability it enables, with fix advice under whatever failed.
 
 Probes the C bucket (Clang_unified_jll + sysroot), DWARF extraction (GNU dumper
 + symbol reader), the C++/Tier-2 chain (llvm-config, clang++, mlir-tblgen,
-cmake, libJLCS), and on Windows the MSYS2 environment.
+cmake, llvm-dwarfdump, libJLCS), and on Windows which MSYS2 environment the C++
+toolchain comes from.
 
 The result is iterable, so the REPL can pick it apart:
 
@@ -482,6 +567,7 @@ first(t for t in status if t.name == "sysroot")     # one probe
 """
 function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)::ToolchainStatus
     llvm_config = _check_llvm_config()
+    clangxx = _check_clang()
     tools = ToolStatus[
         _check_platform(),
         _check_c_bucket_clang(),
@@ -489,15 +575,15 @@ function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)::To
         _check_dwarf_dumper(),
         _check_symbol_reader(),
         llvm_config,
-        _check_clang(),
+        clangxx,
         _check_mlir_tblgen(),
         _check_cmake(),
+        _check_llvm_dwarfdump(),
         _check_libJLCS(llvm_config.version),
     ]
-    Sys.iswindows() && push!(tools, _check_msys2())
+    Sys.iswindows() && push!(tools, _check_msys2(clangxx.found ? clangxx.path : ""))
 
-    by(name) = (i = findfirst(t -> t.name == name, tools); i === nothing ? nothing : tools[i])
-    ok(name) = (t = by(name); t !== nothing && t.found && t.meets_requirement)
+    ok(name) = _probe_ok(tools, name)
 
     # DWARF extraction gates EVERY tier — a wrapper is generated from the dump.
     # This is the dependency the old report left out, which is how it could
@@ -505,7 +591,7 @@ function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)::To
     dwarf_ok = ok("DWARF dumper") && ok("symbol reader")
     tier3 = dwarf_ok && ok("clang (JLL)") && ok("sysroot")
     tier2 = tier3 && ok("llvm-config") && ok("clang++") &&
-            ok("mlir-tblgen") && ok("cmake") && ok("libJLCS")
+            ok("mlir-tblgen") && ok("cmake") && ok("llvm-dwarfdump") && ok("libJLCS")
 
     status = ToolchainStatus(tools, tier3, tier3, tier2)
     verbose && _print_report(status)
@@ -523,6 +609,12 @@ function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)::To
 end
 
 _plain(s::AbstractString) = replace(s, r"\e\[[0-9;]*m" => "")
+
+"""Whether the probe called `name` ran and passed."""
+function _probe_ok(tools, name::AbstractString)::Bool
+    i = findfirst(t -> t.name == name, tools)
+    return i !== nothing && tools[i].found && tools[i].meets_requirement
+end
 
 function _icon(v::Symbol)
     v === :ok   && return "$(GREEN)OK$(RESET)  "
@@ -554,17 +646,35 @@ function _print_report(status::ToolchainStatus)
 
     println()
     println("$(BOLD)Summary $(DIM)~$(RESET)")
-    if status.tier1_ready
-        println("  $(_icon(:ok)) $(GREEN)Tier 3 (ccall)$(RESET) — C and C++ wrappers will build")
-    else
-        println("  $(_icon(:fail)) $(RED)Tier 3 (ccall) unavailable — no wrapper can be generated$(RESET)")
-    end
-    if status.tier2_ready
-        println("  $(_icon(:ok)) $(GREEN)Tier 2 (MLIR thunks)$(RESET) — C++ virtual dispatch and exception-safe calls")
-    else
-        println("  $(_icon(:warn)) $(YELLOW)Tier 2 (MLIR thunks) unavailable$(RESET) — C++ falls back to ccall where it can")
+    for line in _summary_lines(status)
+        println(line)
     end
     println()
+end
+
+# Each line claims only what its probes proved. "C and C++ wrappers will build"
+# used to follow from the C bucket alone, on a box with no clang++ at all; and a
+# C++ wrapper without Tier 2 keeps only its noexcept, ccall-safe functions, since
+# every other C++ function routes to a thunk.
+function _summary_lines(status::ToolchainStatus)::Vector{String}
+    ok(name) = _probe_ok(status.tools, name)
+    lines = String[]
+    if status.tier1_ready
+        push!(lines, "  $(_icon(:ok)) $(GREEN)Tier 3 (ccall)$(RESET) — C wrappers will build")
+    else
+        push!(lines, "  $(_icon(:fail)) $(RED)Tier 3 (ccall) unavailable — no wrapper can be generated$(RESET)")
+    end
+    if ok("DWARF dumper") && ok("symbol reader") && ok("llvm-config") && ok("clang++")
+        push!(lines, "  $(_icon(:ok)) $(GREEN)C++ builds$(RESET) — clang++ and LLVM $(MIN_LLVM_VERSION)+ found")
+    else
+        push!(lines, "  $(_icon(:warn)) $(YELLOW)C++ builds unavailable$(RESET) — they need clang++ and LLVM $(MIN_LLVM_VERSION)+ (C++ section above)")
+    end
+    if status.tier2_ready
+        push!(lines, "  $(_icon(:ok)) $(GREEN)Tier 2 (MLIR thunks)$(RESET) — C++ methods, virtual dispatch, by-value records, exceptions")
+    else
+        push!(lines, "  $(_icon(:warn)) $(YELLOW)Tier 2 (MLIR thunks) unavailable$(RESET) — a C++ wrapper keeps only its noexcept functions that ccall can pass")
+    end
+    return lines
 end
 
 end # module EnvironmentDoctor

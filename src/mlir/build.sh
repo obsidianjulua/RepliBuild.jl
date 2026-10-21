@@ -30,12 +30,16 @@ fi
 # One install hint, used by every failure path below. There were four before
 # (two spellings of the Arch line, three of the Ubuntu line), and they
 # disagreed with each other and with the Julia-side advice.
-# Keep these three lines in step with `_LLVM_ADVICE` in
+# Keep these lines in step with `_LLVM_ADVICE_UNIX` in
 # src/Builder/EnvironmentDoctor.jl — test_toolchain_advice.jl asserts it.
+# llvm.sh alone installs clang and LLVM but not MLIR; the apt line is what the
+# Tier 2 Linux CI job installs.
 install_hint() {
     echo "  Arch:          yay -S llvm mlir"
     echo "  Debian/Ubuntu: wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh ${LLVM_MIN_MAJOR}"
+    echo "                 sudo apt install llvm-${LLVM_MIN_MAJOR}-dev libmlir-${LLVM_MIN_MAJOR}-dev mlir-${LLVM_MIN_MAJOR}-tools"
     echo "  Fedora:        dnf install llvm-devel mlir-devel clang-devel"
+    echo "  Then put LLVM's bin directory on PATH (/usr/lib/llvm-${LLVM_MIN_MAJOR}/bin for apt.llvm.org)."
     echo
     echo "  Full diagnostics, including the C path and DWARF tools:"
     echo "    julia --project=\"${SCRIPT_DIR}/../..\" -e 'using RepliBuild; RepliBuild.check_environment()'"

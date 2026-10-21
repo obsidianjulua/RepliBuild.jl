@@ -242,7 +242,11 @@ If you are asked to work on it:
 - `Builder/DWARFParser.jl` — llvm-dwarfdump + nm → ClassInfo/VtableInfo.
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
-- `Builder/PackageRegistry.jl` — `~/.replibuild/` registry and build cache.
+- `Builder/PackageRegistry.jl` — `~/.replibuild/` registry and build cache. Each
+  entry stages its project into a folder of its own (`_entry_dir`), because a
+  relative `root` resolves to the stored TOML's folder: in one shared folder, two
+  projects with the same relative paths overwrote each other, and `use` built the
+  wrong library. `use` builds from that copy, never from the user's tree.
 - `Wrapper/Generator.jl` — orchestration and the write-time refusals
   (`_assert_wrapper_loadable`, `_assert_wrapper_parses`, `_assert_base_calls_qualified`,
   `_assert_cstring_policy`, …). `exclude_symbols` and `surface_types_only` filtering
@@ -632,6 +636,12 @@ Linux and Windows are supported; macOS is refused at load (no AAPCS64 classifier
 Setup and full findings: `docs/updates/WINDOWS_PORT.md`. The rules that bite code
 changes:
 
+- `check_environment` judges the MSYS2 environment by where `clang++` lives, never
+  by `MSYSTEM`: Julia usually runs outside any MSYS2 shell, and Git Bash sets
+  `MSYSTEM=MINGW64`. A `libJLCS.dll` that will not load is a missing
+  `clang64\bin` PATH entry as often as a gone LLVM (`_clang64_bin_off_path`).
+  JIT C++ wrappers run `llvm-dwarfdump` by its bare name at load
+  (`DWARFParser.parse_vtables`), so the doctor probes that name.
 - DWARF dumper: GNU `objdump` on Windows. `_is_gnu_binutils` must reject llvm-objdump
   (on PATH in CLANG64), which otherwise parses **zero functions** silently. Use
   `Compiler._gnu_objdump()` wherever GNU objdump specifically is needed.
