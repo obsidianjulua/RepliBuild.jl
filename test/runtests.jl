@@ -159,6 +159,13 @@ include(joinpath(@__DIR__, "test_c_sret_classification.jl"))
 
 include(joinpath(@__DIR__, "test_record_natural_layout.jl"))
 
+# ── C++ records emitted as `mutable struct` (no toolchain) ──────────────────
+# A named union or bitfield record moves by value only through its bytes:
+# the Tier 2 sret return (abi_fuzz X1), member accessors (X5), and bitfields
+# wider than 32 bits (X6).
+
+include(joinpath(@__DIR__, "test_cpp_mutable_records.jl"))
+
 # ── DWARF member sizes through typedefs, enums, qualifiers, arrays (no toolchain)
 # A member typed as an enum or a typedef'd record came out with size 0, and the
 # C++ layout proof turned the whole record into a byte blob. A real GNU dump.
