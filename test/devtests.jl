@@ -227,7 +227,8 @@ include(joinpath(TEST_DIR, "test_jit_unwind.jl"))
 
 # ── 5c. AOT thunks end to end ────────────────────────────────────────────────
 # `[compile] aot_thunks = true` through discover → build → wrap on its own C++
-# fixture (test/aot_test/), cold and again once the thunk manifest exists. Calls
+# fixture (test/aot_test/), cold and again: the first wrap must compile exactly
+# the thunks it binds. Calls
 # through the companion `_thunks` library in a child process: member, by-value
 # records, virtual override, and a C++ throw for every return shape. Placed
 # with §5/§5b, which drive the same thunks through the JIT.

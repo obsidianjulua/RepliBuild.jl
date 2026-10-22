@@ -51,6 +51,10 @@ registered release, which can be older than what is described here;
     projects with the same relative paths can no longer overwrite each other.
   - A project registered by an earlier RepliBuild keeps building the copy that
     version made. Register it again, from the project.
+- **AOT thunks in one pass.** With `[compile] aot_thunks = true`, `wrap`
+  compiles the thunks library as its last step, for exactly the thunks the
+  wrapper binds; `build` no longer compiles thunks. A new package used to need
+  `build` and `wrap` twice.
 
 ## v4.2.1 (2026-10-17)
 

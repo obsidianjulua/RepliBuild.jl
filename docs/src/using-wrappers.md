@@ -111,9 +111,10 @@ raises. To degrade features instead, check the engine in your `__init__`:
 `RepliBuild.JITManager.GLOBAL_JIT.engines` holds one entry per library, with
 `binary_path` and `init_error` (`nothing` when it worked).
 
-`[compile] aot_thunks = true` at build time ships a companion `_thunks.so`
-instead of compiling at load: faster startup, a second binary, and no JIT
-compilation in the consumer. It does not remove the dialect library: the AOT
+With `[compile] aot_thunks = true`, `wrap` compiles the thunks the wrapper binds
+into a companion `_thunks.so` instead of leaving them to be compiled at load:
+faster startup, a second binary, and no JIT compilation in the consumer. It
+does not remove the dialect library: the AOT
 thunks still need `libJLCS` when they run. On Linux they import
 `jlcs_catch_current_exception` from it, and on Windows every thunk call goes
 through its `jlcs_guard_*` frame, which is what catches a C++ exception there.

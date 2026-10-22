@@ -6,12 +6,18 @@
     wrap_library(config::RepliBuildConfig, library_path::String;
                  headers::Vector{String}=String[],
                  generate_tests::Bool=false,
-                 generate_docs::Bool=true)
+                 generate_docs::Bool=true,
+                 aot_compile=nothing)
 
 Generate Julia wrapper for compiled library.
 
 Wraps from the DWARF metadata (`compilation_metadata.json`) that `build` writes
 beside the library, and refuses when that file is missing.
+
+With `[compile] aot_thunks = true`, a C++ wrap ends by compiling the thunks its
+call sites bind into `lib<name>_thunks.<ext>` (`ThunkBuilder.build_aot_thunks`),
+from the thunk set the generator has just decided. When that compile fails, the
+wrapper is generated again with JIT dispatch.
 
 # Arguments
 - `config`: RepliBuildConfig with wrapper settings
@@ -23,6 +29,9 @@ beside the library, and refuses when that file is missing.
   manifest. Inert when `use_clang_jl = false`.
 - `generate_tests`: Generate test file (default: false, TODO)
 - `generate_docs`: Include comprehensive documentation (default: true)
+- `aot_compile`: The AOT stage, called as
+  `aot_compile(config, library_path; needed_symbols) -> Bool`. Defaults to
+  `ThunkBuilder.build_aot_thunks`; tests pass a stand-in.
 
 # Returns
 Path to generated Julia wrapper file
@@ -30,7 +39,8 @@ Path to generated Julia wrapper file
 function wrap_library(config::RepliBuildConfig, library_path::String;
                      headers::Vector{String}=String[],
                      generate_tests::Bool=false,
-                     generate_docs::Bool=true)
+                     generate_docs::Bool=true,
+                     aot_compile=nothing)
 
 
     if !isfile(library_path)
@@ -56,8 +66,13 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
         is not skipped as cached.""")
     end
 
-    return wrap_introspective(config, library_path, headers, generate_docs=generate_docs)
+    return wrap_introspective(config, library_path, headers, generate_docs=generate_docs,
+                              aot_compile=aot_compile)
 end
+
+# ThunkBuilder is loaded after Wrapper (it imports from it), so the default AOT
+# stage is looked up when a wrap runs, the way Discovery reaches `build`.
+_thunk_builder() = getfield(parentmodule(@__MODULE__), :ThunkBuilder)
 
 """
     _write_wrapper(output_file, wrapper_content, module_name) -> String
@@ -1027,7 +1042,8 @@ end
 # =============================================================================
 
 """
-    wrap_introspective(config::RepliBuildConfig, library_path::String, headers::Vector{String}; generate_docs::Bool=true)
+    wrap_introspective(config::RepliBuildConfig, library_path::String, headers::Vector{String};
+                       generate_docs::Bool=true, aot_compile=nothing)
 
 Generate introspective Julia wrapper using compilation metadata for perfect type accuracy.
 
@@ -1035,9 +1051,10 @@ Quality: ~95% - Exact types from compilation, language-agnostic, zero manual con
 Use when: Metadata available from RepliBuild compilation, need perfect bindings.
 
 This is the culmination of RepliBuild's vision: automatic, accurate, language-agnostic wrapping.
+`aot_compile` is the AOT stage; see `wrap_library`.
 """
 function wrap_introspective(config::RepliBuildConfig, library_path::String, headers::Vector{String};
-                           generate_docs::Bool=true)
+                           generate_docs::Bool=true, aot_compile=nothing)
 
     if !isfile(library_path)
         error("Library not found: $library_path")
@@ -1299,21 +1316,35 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     typedef_custom = Dict{String,String}(String(k) => String(v) for (k, v) in typedef_table if v != "Any")
     registry = create_type_registry(config, custom_types=typedef_custom)
 
-    # AOT Compilation Pass
+    # AOT thunks: the last stage of this wrap.
+    #
+    # Which thunks a wrapper binds is decided by the generator below, so the
+    # thunks library is compiled after it: the C++ generator calls `aot_stage`
+    # with its thunk set, then checks the library before shipping the call
+    # sites. It used to be compiled at the end of `build`, before that set
+    # existed. The first build of a package guessed it (every function in the
+    # metadata), one thunk the guess could not compile or link sank the whole
+    # library, and wrap then refused or fell back to JIT. It saved the real set
+    # to `thunk_manifest.json`, and only a second build and wrap converged.
     thunks_lib_path = ""
+    aot_stage = nothing
     if config.compile.aot_thunks
         output_dir = get_output_path(config)
         lib_name = basename(library_path)
         thunks_name = replace(lib_name, ".so" => "_thunks.so", ".dylib" => "_thunks.dylib", ".dll" => "_thunks.dll")
         thunks_so = joinpath(output_dir, thunks_name)
-        if isfile(thunks_so)
+        if registry.language != :c && config.binary.type != :executable
+            thunks_lib_path = abspath(thunks_so)
+            compile = aot_compile === nothing ? _thunk_builder().build_aot_thunks : aot_compile
+            stage_config = config
+            aot_stage = needed -> compile(stage_config, library_path;
+                                          needed_symbols = Set{String}(needed))
+        elseif isfile(thunks_so)
             thunks_lib_path = abspath(thunks_so)
         else
-            # The companion library is gone: AOT failed and deleted it, or it
-            # was never produced. Emitting AOT call sites anyway either refuses
-            # the wrap (leaving the previous wrapper, bound to the old thunks)
-            # or, when a stale file is still there, runs those thunks. JIT
-            # dispatch is built from this build's metadata.
+            # Only the C++ generator has an AOT stage; nothing compiles a C
+            # wrapper's thunks library. JIT dispatch is built from this build's
+            # metadata.
             @warn "AOT thunks enabled but $thunks_so is absent; emitting JIT dispatch"
             config = with_aot_thunks(config, false)
         end
@@ -1329,8 +1360,19 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
                                          module_name, registry, generate_docs, thunks_lib_path), nothing)
     else
         # C++ path: Tier 2 is decided by is_ccall_safe alone.
-        generate_introspective_module_cpp(config, library_path, metadata,
-                                          module_name, registry, generate_docs, thunks_lib_path)
+        try
+            generate_introspective_module_cpp(config, library_path, metadata,
+                                              module_name, registry, generate_docs, thunks_lib_path;
+                                              aot_stage = aot_stage)
+        catch e
+            e isa AOTStageFailed || rethrow()
+            # The stage logged why. JIT dispatch needs no companion library, and
+            # the generator does not modify `metadata`, so it can run again.
+            @warn "AOT thunks were not compiled, so $(basename(e.thunks_lib)) is absent; emitting JIT dispatch"
+            config = with_aot_thunks(config, false)
+            generate_introspective_module_cpp(config, library_path, metadata,
+                                              module_name, registry, generate_docs, "")
+        end
     end
 
     # Write to file
@@ -1341,16 +1383,12 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     _write_wrapper(output_file, wrapper_content, module_name)
 
     # Thunk manifest for dead-thunk elimination — read by JITManager to skip
-    # generating MLIR thunks for functions dispatched via ccall, and by
-    # ThunkBuilder at build time to know what to emit AOT.
+    # generating MLIR thunks for functions dispatched via ccall.
     #
-    # Written by `_write_thunk_manifest` inside the C++ generator, NOT here.
-    # It has to land before that generator's AOT assert, because the assert is
-    # what a stale manifest trips — writing it here, after the generator
-    # returned, meant a failed assert left the stale file in place and the next
-    # build read it again. One writer, and it is the one on the early side of
-    # the refusal. Nothing to do on the C path: it derives no thunk set
-    # (`needed_thunks === nothing`) and never had a manifest.
+    # Written by `_write_thunk_manifest` inside the C++ generator, NOT here,
+    # ahead of its AOT stage and on every wrap, so a refused wrap still leaves
+    # the set it derived on disk. Nothing to do on the C path: it derives no
+    # thunk set (`needed_thunks === nothing`) and never had a manifest.
 
     println("  wrap: $(basename(output_file))")
 

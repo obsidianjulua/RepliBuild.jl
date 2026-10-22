@@ -283,7 +283,8 @@ end
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
-                                      thunks_lib_path::String="")
+                                      thunks_lib_path::String="";
+                                      aot_stage::Union{Nothing,Function}=nothing)
 
     # Track exported symbols
     exports = String[]
@@ -4084,33 +4085,28 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     thunk_slots = config.compile.aot_thunks ?
         _aot_thunk_slot_chunk(_funcs, aot_fptr_taken) : ""
 
-    # AOT (build time, from compilation metadata) and this generator (wrap time,
-    # from the dispatch decision) can disagree about which thunks exist. Ask the
-    # library what it defines before shipping call sites that assume it — a slot
-    # resolving to C_NULL is a hard error on first call, found by a user rather
-    # than by the build.
+    # The manifest is written on every wrap, JIT mode included: JITManager
+    # compiles only the thunks it lists, and without one it compiles a thunk for
+    # every function in metadata (`test_thunk_manifest.jl`). It lands before the
+    # AOT stage, so a refused wrap still records the set it derived.
+    _write_thunk_manifest(get_output_path(config), needed_function_thunks)
+
+    # AOT: wrap's last stage compiles exactly the thunks this text binds, then
+    # the library is asked what it defines before call sites that assume it ship
+    # — a slot resolving to C_NULL is a hard error on first call, found by a
+    # user rather than by the wrap. When the stage writes no library,
+    # `wrap_library` generates the wrapper again with JIT dispatch.
     #
-    # THE MANIFEST IS WRITTEN FIRST, AND THAT ORDER IS THE WHOLE FIX. AOT reads
-    # `thunk_manifest.json` to decide what to emit (ThunkBuilder), and only wrap
-    # can compute that set — so when the assert threw before the write, a package
-    # whose manifest was absent or stale could never converge: AOT emitted
-    # nothing, wrap demanded N, wrap died, the manifest stayed stale, and the
-    # next build read the same stale file. The old message said "rebuild so AOT
-    # sees the same symbols", which was unreachable advice — rebuilding re-read
-    # the file wrap had refused to update. Recording what wrap needs is not the
-    # same act as certifying the library provides it; doing the first
-    # unconditionally makes the second reachable on the next build.
-    #
-    # Unconditionally includes JIT mode. Generator.jl turns a wrap whose thunks
-    # library is missing (a failed AOT link) into a JIT wrap; if that wrap wrote
-    # nothing, the next build emitted the same unfiltered thunk set and failed
-    # the same way, and JITManager compiled a thunk for every function in
-    # metadata. (`test_thunk_manifest.jl`.)
-    manifest_note = _write_thunk_manifest(get_output_path(config),
-                                          needed_function_thunks)
+    # The set comes from here and nowhere else. AOT used to run at build, before
+    # this generator had decided it, and read the manifest an earlier wrap left:
+    # a new package had none, its first wrap refused or fell back to JIT, and only
+    # a second build and wrap converged. Without a stage (a direct call), the
+    # caller supplies `thunks_lib_path` already built.
     if config.compile.aot_thunks
-        _assert_aot_thunks_present(_funcs, aot_fptr_taken, thunks_lib_path;
-                                   manifest_note = manifest_note)
+        if aot_stage !== nothing
+            aot_stage(needed_function_thunks) || throw(AOTStageFailed(thunks_lib_path))
+        end
+        _assert_aot_thunks_present(_funcs, aot_fptr_taken, thunks_lib_path)
     end
 
     export_statement = _export_statement(all_exports,

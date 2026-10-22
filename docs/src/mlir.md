@@ -695,11 +695,12 @@ Deliberately unbuilt, so they are not chased as bugs:
 
 ## 12. AOT thunks
 
-`[compile] aot_thunks = true` runs the identical generator and lowering at build
-time, emits an object, and links it against the library into a companion
-`lib<name>_thunks.so`. The wrapper then `ccall`s that library instead of calling
-`JITManager.invoke`: no JIT at load, no MLIR runtime dependency at all after the
-build. `libJLCS.so` is still required *to build*.
+`[compile] aot_thunks = true` runs the identical generator and lowering as the
+last step of `wrap`, for the thunk set the wrapper binds, emits an object, and
+links it against the library into a companion `lib<name>_thunks.so`. The
+wrapper then calls that library instead of `JITManager.invoke`: no JIT at load.
+`libJLCS.so` is still required, to compile the thunks and when they run: they
+import its exception helpers, and on Windows its guard frame catches for them.
 
 ## 13. Building the dialect
 

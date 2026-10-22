@@ -1687,46 +1687,38 @@ function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,Str
 end
 
 """
-    _write_thunk_manifest(output_dir, needed) -> String
+    _write_thunk_manifest(output_dir, needed)
 
-Record the thunk set wrap decided on, and describe how it moved.
+Record the thunk set wrap decided on, in JIT mode as well as AOT.
 
-`ThunkBuilder.build_aot_thunks` reads this file at BUILD time to know which
-thunks to emit; only wrap can compute the set. So the write has to happen even
-on the run that then refuses to ship the wrapper — otherwise the next build
-re-reads a stale file and reproduces the same refusal forever. Returns a note
-for that refusal to quote, empty when the set was already correct on disk.
+`JITManager` reads `thunk_manifest.json` when the wrapper loads, to compile only
+the thunks it lists; without one it compiles a thunk for every function in the
+metadata. AOT is handed the same set directly by wrap's last stage
+(`wrap_library`), so it never waits on this file.
 """
 function _write_thunk_manifest(output_dir::AbstractString, needed)
-    needed === nothing && return ""
-    wanted = sort!(collect(needed))
-    path = joinpath(output_dir, "thunk_manifest.json")
-
-    previous = if isfile(path)
-        try
-            sort!(collect(String.(get(_read_json(path),
-                                      "function_thunks", String[]))))
-        catch
-            nothing   # unreadable counts as "moved" — rewrite it
-        end
-    else
-        String[]
-    end
-
+    needed === nothing && return nothing
     mkpath(output_dir)
-    open(path, "w") do io
-        JSON.print(io, Dict{String,Any}("function_thunks" => wanted, "version" => 1), 2)
+    open(joinpath(output_dir, "thunk_manifest.json"), "w") do io
+        JSON.print(io, Dict{String,Any}("function_thunks" => sort!(collect(needed)),
+                                        "version" => 1), 2)
     end
-
-    previous == wanted && return ""
-    had = previous === nothing ? "unreadable" : string(length(previous))
-    return """
-    The thunk manifest has been UPDATED ($had → $(length(wanted)) symbol(s)):
-      $path
-    AOT reads that file, so this run's refusal is expected on a package whose
-    manifest was absent or stale. Re-run build() and then wrap() — the second
-    pass emits the thunks this wrapper binds."""
+    return nothing
 end
+
+"""
+    AOTStageFailed(thunks_lib)
+
+Thrown by the C++ generator when the AOT stage it was handed wrote no thunks
+library. `wrap_library` catches it and generates the wrapper again with JIT
+dispatch.
+"""
+struct AOTStageFailed <: Exception
+    thunks_lib::String
+end
+
+Base.showerror(io::IO, e::AOTStageFailed) =
+    print(io, "AOTStageFailed: the AOT stage did not write ", e.thunks_lib)
 
 """
     _assert_aot_thunks_present(func_text, taken, thunks_lib_path)
@@ -1734,28 +1726,22 @@ end
 Refuse to ship a wrapper that binds AOT thunks the thunks library does not
 define.
 
-**The thunk set is derived twice and the two derivations can disagree.** AOT runs
-at BUILD, from `compilation_metadata.json` via `JLCSIRGenerator`; wrap runs later
-and takes a thunk for every method `is_ccall_safe` rejects.
-A header-inline method that only became a symbol because some later TU emitted it
-can appear in wrap's list and be absent from AOT's. Nothing reconciled them, so
-the wrapper emitted `invoke_aot_ptr` sites whose slots resolve to `C_NULL`, and
-the failure surfaced as a load-time warning plus a hard error on whichever call
-the user made first — the silent-until-you-touch-it class.
+A slot that resolves to `C_NULL` raises on whichever call the user makes first,
+so the library is asked what it defines before the call sites ship. The slots
+come from the final text, and the library is the one wrap's AOT stage has just
+compiled from this wrapper's own thunk set.
 
-This does not fix the double derivation; it makes the disagreement stop the wrap
-instead of reaching a caller. Both facts are available here: the slots come from
-the final text, and the thunks library exists by now (AOT ran at build, wrap runs
-after), so it can simply be asked what it defines.
-
-Reported by Clipper2 2.0.1 — 7 of 12 thunk sites missing, the set growing 1 → 7
-when an export TU instantiated more header-inline methods
-(`packages/clipper2/GENERATOR-aot-thunk-gap.md`).
+While AOT ran at build, the set was derived twice: by AOT, from a guess or the
+manifest an earlier wrap left, and by wrap. A header-inline method that only
+became a symbol because some later TU emitted it could be in wrap's set and not
+in AOT's. Reported by Clipper2 2.0.1 — 7 of 12 thunk sites missing, the set
+growing 1 → 7 when an export TU instantiated more header-inline methods
+(`packages/clipper2/GENERATOR-aot-thunk-gap.md`). Now a missing symbol means
+the MLIR generator was given it and emitted no thunk.
 """
 function _assert_aot_thunks_present(func_text::AbstractString,
                                     taken::Dict{String,String},
-                                    thunks_lib_path::AbstractString;
-                                    manifest_note::AbstractString="")
+                                    thunks_lib_path::AbstractString)
     slots = _aot_thunk_slot_names(func_text, taken)
     isempty(slots) && return nothing
 
@@ -1763,9 +1749,9 @@ function _assert_aot_thunks_present(func_text::AbstractString,
         error("""
         Wrapper binds $(length(slots)) AOT thunk(s) but the thunks library is missing:
           $(isempty(thunks_lib_path) ? "<no path>" : thunks_lib_path)
-        Every `invoke_aot_ptr` call site would raise. Rebuild with
-        `[compile] aot_thunks = true`, or turn it off so the generator emits the
-        JIT dispatch path instead.""")
+        Every `invoke_aot_ptr` call site would raise. wrap() compiles that
+        library when `[compile] aot_thunks = true`; turn it off and the generator
+        emits the JIT dispatch path instead.""")
     end
 
     # What the thunks library actually offers. `nm -D` asks ELF's dynamic
@@ -1799,16 +1785,11 @@ function _assert_aot_thunks_present(func_text::AbstractString,
 
     Library: $thunks_lib_path
 
-    The AOT pass (build) and the wrapper generator (wrap) derived different thunk
-    sets. Wrap's set is the one the emitted call sites use, so these would resolve
-    to C_NULL and raise on first call. Typical cause: header-inline or template
-    methods that only became symbols in a TU compiled after AOT ran.
-    $(isempty(manifest_note) ? """
-
-    The manifest already named these symbols, so AOT saw them and still did not
-    emit them — this is a real disagreement, not a stale-manifest bootstrap.
-    Check that the symbols exist in the main library, or set
-    `[compile] aot_thunks = false` to take the JIT dispatch path.""" : manifest_note)""")
+    These would resolve to C_NULL and raise on first call. The library was
+    compiled from this wrapper's own thunk set, so the MLIR generator was asked
+    for these thunks and did not emit them. Check that the symbols exist in the
+    main library, or set `[compile] aot_thunks = false` to take the JIT dispatch
+    path.""")
 end
 
 """
