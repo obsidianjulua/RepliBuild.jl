@@ -23,7 +23,11 @@ registered release, which can be older than what is described here;
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
   folder ([Install](install.md#The-JLCS-dialect)).
 
-## Not yet released (on `main`)
+## v4.3.0 (2026-10-22)
+
+**The registry builds a project where it lives; AOT thunks come from `wrap`.**
+`register` and `use` change what they do (below), so this is a minor release.
+v4.2.1 was never registered: its changes reach users with this release.
 
 - **ABI fixes from the differential fuzzer**, which generates C records and
   functions and checks both tiers against the compiler.
@@ -56,7 +60,7 @@ registered release, which can be older than what is described here;
   wrapper binds; `build` no longer compiles thunks. A new package used to need
   `build` and `wrap` twice.
 
-## v4.2.1 (2026-10-17)
+## v4.2.1 (2026-10-17, released in v4.3.0)
 
 **LLVM.jl 10.** LLVM.jl compat widens to `9, 10`. Tier 1 (experimental, off by
 default) reads the names LLVM.jl 10 changed the meaning of, so it behaves the same

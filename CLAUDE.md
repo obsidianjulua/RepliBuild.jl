@@ -690,7 +690,9 @@ changes:
 - JIT `.pdata` is registered with `RtlAddFunctionTable` in the dialect-owned LLJIT
   (`JlcsJIT.cpp`). Never call `__register_frame` on COFF; it poisons unwind
   process-wide.
-- AOT thunks import from libJLCS. `JITManager.open_thunks_library` opens libJLCS by
+- AOT thunks reach libJLCS: on ELF the thunks library links it (the exception
+  buffer); on PE it imports only the wrapped DLL and the CRT, and libJLCS is the
+  caller's guard (below). `JITManager.open_thunks_library` opens libJLCS by
   absolute path first. **Never vendor a second copy** — two exception buffers swallow
   every C++ exception.
 - **Thunks do not catch on Windows**, JIT or AOT: the dialect lowers `try_call` to a
@@ -749,8 +751,9 @@ check before claiming portability again; reading `.gitignore` does not settle it
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles
   it: their Tier 1 code makes the reads 4.2.1 fixed. 4.2.0 is capped at `"9"`.
-  Once 4.2.1 is registered the resolver prefers it, so the old versions are
-  reached only when another package holds RepliBuild back. Capping them is a
+  4.2.1 was never registered; its fixes ship in 4.3.0. Once 4.3.0 is registered
+  the resolver prefers it, so the old versions are reached only when another
+  package holds RepliBuild back. Capping them is a
   General PR (outward-facing, ask first).
 
 ### Confirmed defects — 2026-09-26 audit
