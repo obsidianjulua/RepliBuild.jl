@@ -2,7 +2,37 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## Unreleased
+## v4.3.0 (2026-10-22)
+
+**The registry builds a project where it lives; AOT thunks come from wrap.**
+Minor, because two public calls change what they do. `register(toml)` builds
+and wraps the project in place, vendors the build to
+`~/.replibuild/builds/<hash>/`, and adds a Julia package around it to a Julia
+environment, so `using MyProject` works; `use` follows edits by rebuilding in
+place. A bare `discover` no longer registers anything. With `[compile]
+aot_thunks = true`, `wrap` compiles the thunks library for exactly the thunks
+it binds, in one pass, and `build` no longer compiles thunks. Also in this
+release: the ABI fixes the differential fuzzer found (Tier 3 records return
+where the target says, through a buffer with the record's alignment; Tier 2
+unions and bitfield records cross by value as their bytes, and `#pragma pack`
+bodies stay packed), and switching Julia or the C++ toolchain rebuilds what
+the switch affects. v4.2.1 was never registered, so its changes (LLVM.jl 10,
+Julia 1.13 in the support window, Tier 1 on Windows) ship here too.
+
+Upgrading from 4.2.0: rebuild, then re-wrap (`build(toml; clean=true)`, or
+delete `.replibuild_cache/project_hash`), because the metadata now records
+member sizes and record alignment. A project registered by an earlier
+RepliBuild keeps building the copy that version made; register it again, from
+the project.
+
+Verified on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) on the release commit:
+runtests.jl 2702 and devtests.jl 1331 plus 1 broken (already broken on main),
+each on Julia 1.12.7 and 1.13.2, and the docs build. PR #23's CI ran Linux
+devtests against LLVM/MLIR 22 and 23. The Hub was swept on Windows the same day:
+all 26 packages at their old pins, then 18 upstream version bumps. imgui and
+llamacpp were rebuilt for PR #22 from their previous manifests and finished
+in one pass. hello_world, fmt, tinyxml2, pugixml and box2d were re-wrapped on
+the release commit and pass.
 
 ### AOT thunks are compiled by wrap, in one pass (2026-10-22)
 
@@ -630,7 +660,7 @@ The C++ generator emits a named union and a bitfield record as a `mutable struct
   without the toolchain the project hash did not move; without the major, the
   cache key did not either.
 
-## v4.2.1 (2026-10-17)
+## v4.2.1 (2026-10-17, never registered; released in v4.3.0)
 
 **LLVM.jl 10.** Patch. LLVM.jl compat widens to `9, 10`. Tier 1's Slicer and
 static promotion read the names whose meaning LLVM.jl 10 changed through
