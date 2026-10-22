@@ -38,6 +38,10 @@ registered release, which can be older than what is described here;
 - **Switching Julia or the C++ toolchain** rebuilds what the switch affects.
 - **Rebuild, then re-wrap.** Member sizes and record alignment are now
   recorded in the metadata.
+- **AOT thunks in one pass.** With `[compile] aot_thunks = true`, `wrap`
+  compiles the thunks library as its last step, for exactly the thunks the
+  wrapper binds; `build` no longer compiles thunks. A new package used to need
+  `build` and `wrap` twice.
 
 ## v4.2.1 (2026-10-17)
 

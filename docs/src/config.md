@@ -648,7 +648,7 @@ Types are TOML types. "Default" is what the parser uses when the key is
 | `parallel` | Bool | `true` | Multi-threaded per-file compilation |
 | `source_files` | Vector{String} | `[]` (auto-discovered) | Explicit list; relative entries resolve against `root` (§2.16); validated to exist at load |
 | `include_dirs` | Vector{String} | `[]` (auto-discovered) | Passed as `-I`; relative entries resolve against `root` (§2.16) |
-| `aot_thunks` | Bool | `false` | Pre-compile Tier-2 thunks into `<name>_thunks.so` at build time. The JLCS dialect library is still needed to build, and wherever the wrapper runs ([Ship a package](using-wrappers.md#Load-time)) |
+| `aot_thunks` | Bool | `false` | Pre-compile Tier-2 thunks into `<name>_thunks.so`. `wrap` does it as its last step, for exactly the thunks the wrapper binds; if it fails, the wrapper uses the JIT. The JLCS dialect library is needed for that, and wherever the wrapper runs ([Ship a package](using-wrappers.md#Load-time)) |
 | `visibility` | `"default"` \| `"hidden"` *(preserved)* | `"default"` | `"hidden"` narrows the wrapper's API to what the library annotates. **Probe first — §2.12.** Any other value is a hard error |
 
 Changing `flags`, `defines`, `include_dirs` or `visibility` correctly invalidates

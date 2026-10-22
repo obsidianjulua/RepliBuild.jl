@@ -440,7 +440,7 @@ end
 # AOT thunk invocation
 #
 # The same thunks, reached without a JIT. `build_aot_thunks` compiles the MLIR
-# at build time into `lib<name>_thunks.so`, so the wrapper dlopens that instead
+# at wrap time into `lib<name>_thunks.so`, so the wrapper dlopens that instead
 # of constructing an MLIR module in every process — the difference is ~34s of
 # startup for a large library, and nothing else. The thunk is byte-for-byte the
 # IR the JIT would have built; only the way its address is found differs.
@@ -477,7 +477,8 @@ function _lookup_aot(handle::Ptr{Cvoid}, name::String)
     handle == C_NULL && error(
         "AOT thunks library is not loaded (THUNKS_HANDLE is null). The wrapper " *
         "was generated with `aot_thunks = true` but lib*_thunks.so did not " *
-        "open — rebuild the package, or set aot_thunks = false to use the JIT.")
+        "open — run wrap() again, which compiles it, or set aot_thunks = false " *
+        "to use the JIT.")
     lock(_AOT_SYMBOL_LOCK) do
         get!(_AOT_SYMBOLS, (handle, name)) do
             p = Libdl.dlsym(handle, name; throw_error = false)
@@ -561,7 +562,8 @@ end
     error("AOT thunk pointer is null: this function's thunk was not resolved " *
           "when the wrapper loaded. The wrapper's `__init__` warns at load " *
           "naming every thunk it could not find — the thunks library is stale " *
-          "or was built from different sources. Rebuild the package.")
+          "or was built from different sources. Run wrap() again; it compiles " *
+          "the thunks library.")
 end
 
 """
@@ -663,7 +665,8 @@ function warn_missing_thunks(missing::Vector{String}, library_path::AbstractStri
     shown = length(missing) > 20 ? vcat(missing[1:20], ["… and $(length(missing) - 20) more"]) : missing
     @warn "AOT thunks missing from the thunks library — calling any of these " *
           "will raise. The thunks .so is generated from the same MLIR the JIT " *
-          "would build, so a gap here means it is stale: rebuild the package." *
+          "would build, so a gap here means it is stale: run wrap() again, " *
+          "which compiles it." *
           "\n  " * join(shown, "\n  ") library = library_path count = length(missing)
     return nothing
 end
