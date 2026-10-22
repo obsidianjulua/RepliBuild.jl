@@ -4,6 +4,22 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### AOT thunks are compiled by wrap, in one pass (2026-10-22)
+
+- **A new `[compile] aot_thunks = true` package needed `build` and `wrap` twice.** `build` compiled the thunks library, but which thunks a wrapper binds is decided by `wrap`'s generator, which saved that set to `thunk_manifest.json` only afterwards. With no manifest yet, the first build guessed: a thunk for every function in the metadata.
+  - One thunk the guess could not compile or link sank the whole library (on Windows every function a thunk calls must resolve at link time), so the first wrap fell back to JIT.
+  - Or the wrap bound a thunk the guess lacked, and refused.
+  - Either way only a second build and wrap, reading the manifest, converged. The 2026-09-10 fix made that second pass reachable; it did not remove it.
+- **`wrap` compiles the thunks now, as its last stage.** The C++ generator decides the set, writes the manifest, then calls the AOT stage with exactly that set, and `_assert_aot_thunks_present` checks the library's exports. The stage is `ThunkBuilder.build_aot_thunks(config, lib; needed_symbols)`, passed down by `Wrapper.wrap_library` (`aot_compile`). One derivation, one pass. `build` no longer compiles thunks, and `wrap` takes the time it used to spend on them.
+- **When the stage writes no library**, the generator throws `AOTStageFailed` and `wrap_library` generates the wrapper again with JIT dispatch, as a missing library did before. `build_aot_thunks` returns whether it wrote the library.
+- **Messages.** The export check no longer tells you to re-run `build()` and `wrap()`: a missing symbol now means the MLIR generator was asked for it and emitted no thunk. The load-time messages say to run `wrap()` again rather than rebuild.
+- **Docs.** config, Ship a package, internals and the MLIR page say `wrap` compiles AOT thunks. The internals and MLIR pages also said AOT thunks need no MLIR at run time. They need `libJLCS` there, as Ship a package already said.
+- **Tests.**
+  - test_aot_thunks.jl (devtests §5c): a cold `build` leaves no thunks library, and the first `wrap` compiles exactly the thunks it binds. Against main's code the same test fails there, because build's guess also compiled thunks for the Tier-3 `extern "C"` factories.
+  - test_thunk_manifest.jl: the stage gets the generator's set once, after the manifest; `wrap_library` falls back to JIT when the stage fails; the export check still refuses a stage that reports success without a library. Removing the stage call, the fallback, or the manifest-first order each fails its testset.
+  - imgui, the smaller of the two Hub packages that use AOT, built cold from a copy (the Hub clone was not touched). Main's first pass compiled a 731.5 KB thunks library from the guess, and its second pass the 696.0 KB exact set. This branch compiles the 696.0 KB set on the first wrap (1384 AOT call sites, no JIT), and imgui's test_deep.jl passes 202/202 against it. imgui's guess happened to compile on this box, so it does not show the two-pass failure itself.
+  - runtests 2677 on Julia 1.12.7 and 1.13.2; test_aot_thunks.jl 175 on both; devtests (1.12.7) 1320 + 1 broken (already broken on main). The docs build has no new warnings.
+
 ### User docs and messages say what RepliBuild does; registry entries get their own folders (2026-10-21)
 
 Two checks found these. One followed the user docs alone, as a new user, in a fresh environment: a small C library and a small C++ library, the registry, and six deliberate mistakes. The other audited every user-facing message. Every call in the walkthrough returned the right value; what failed was the guidance around it.

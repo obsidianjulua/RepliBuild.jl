@@ -13,15 +13,30 @@ import ..MLIRNative
 
 export build_aot_thunks
 
-function build_aot_thunks(config, library_path)
+"""
+    build_aot_thunks(config, library_path; needed_symbols=nothing) -> Bool
+
+Compile the Tier-2 thunks a wrapper binds into `lib<name>_thunks.<ext>` beside
+the library. Returns whether that library was written.
+
+`wrap` runs this as its last stage (`Wrapper.wrap_library`), passing the thunk
+set its generator has just decided as `needed_symbols`, so the library holds
+exactly the thunks the wrapper's call sites resolve. It used to run at the end
+of `build`, before that set existed: the first build of a package had to guess
+it, wrap then wrote the real set to `thunk_manifest.json` and refused or fell
+back to JIT, and only a second build and wrap converged. Called without
+`needed_symbols`, it reads that manifest, as the build-time pass did.
+"""
+function build_aot_thunks(config, library_path;
+                          needed_symbols::Union{Set{String},Nothing}=nothing)::Bool
     output_dir = ConfigurationManager.get_output_path(config)
     metadata_path = joinpath(output_dir, "compilation_metadata.json")
 
-    # The previous build's thunk library is invalid the moment this build
-    # starts: layouts may have moved, and a failure below used to leave the
-    # old file in place. Wrap then checked symbol *names*, which still
-    # matched, and the stale thunks ran. Remove it first. A successful link
-    # writes a new one; a failure leaves nothing to run.
+    # The previous thunk library is invalid the moment this pass starts:
+    # layouts may have moved, and a failure below used to leave the old file
+    # in place. Wrap then checked symbol *names*, which still matched, and the
+    # stale thunks ran. Remove it first. A successful link writes a new one; a
+    # failure leaves nothing to run.
     lib_name = basename(library_path)
     thunks_name = replace(lib_name, ".so" => "_thunks.so", ".dylib" => "_thunks.dylib", ".dll" => "_thunks.dll")
     thunks_so = joinpath(output_dir, thunks_name)
@@ -29,7 +44,7 @@ function build_aot_thunks(config, library_path)
 
     if !isfile(metadata_path)
         @warn "Cannot AOT compile thunks: metadata not found."
-        return
+        return false
     end
 
     println("  aot: Generating MLIR thunks...")
@@ -38,8 +53,8 @@ function build_aot_thunks(config, library_path)
     vtable_info = DWARFParser.parse_vtables(library_path)
     metadata = _read_json(metadata_path)
 
-    # AOT MUST READ THE THUNK MANIFEST, for the same reason the JIT path does
-    # (JITManager, "Load thunk manifest").
+    # AOT MUST HAVE THE WRAPPER'S THUNK SET, for the same reason the JIT path
+    # reads the manifest (JITManager, "Load thunk manifest").
     #
     # `needed_symbols` is not only dead-thunk elimination — it is what ROUTES a
     # virtual method to the right emitter. A virtual the wrapper binds has to go
@@ -49,22 +64,26 @@ function build_aot_thunks(config, library_path)
     # has looked up since 2026-07-17 (see JLCSIRGenerator's comment above
     # `gen_pre`). Passing nothing here sent every virtual down the legacy pass,
     # so AOT built a symbol the wrapper never asks for and omitted the one it
-    # does — clipper2's 7 unresolved slots of 156.
-    manifest_path = joinpath(output_dir, "thunk_manifest.json")
-    needed_symbols = if isfile(manifest_path)
-        try
-            manifest = _read_json(manifest_path)
-            Set{String}(get(manifest, "function_thunks", String[]))
-        catch
+    # does — clipper2's 7 unresolved slots of 156. Wrap passes the set it
+    # derived; a direct call reads the manifest the last wrap wrote.
+    if needed_symbols === nothing
+        manifest_path = joinpath(output_dir, "thunk_manifest.json")
+        needed_symbols = if isfile(manifest_path)
+            try
+                manifest = _read_json(manifest_path)
+                Set{String}(get(manifest, "function_thunks", String[]))
+            catch
+                nothing
+            end
+        else
             nothing
         end
-    else
-        nothing
     end
 
     ir_source = JLCSIRGenerator.generate_jlcs_ir(vtable_info, metadata;
                                                  needed_symbols = needed_symbols)
 
+    linked = false
     ctx = MLIRNative.create_context()
     try
         # debug_base puts the generated MLIR beside the wrapper it describes, so
@@ -132,6 +151,7 @@ function build_aot_thunks(config, library_path)
         if exitcode != 0
             error("Failed to link thunks.o: $output")
         end
+        linked = true
 
         # Emit LTO text IR for AOT thunks if LTO is enabled
         if config.link.enable_lto
@@ -161,6 +181,8 @@ function build_aot_thunks(config, library_path)
     finally
         MLIRNative.destroy_context(ctx)
     end
+    # A link that exited nonzero may still have left an output file behind.
+    return linked && isfile(thunks_so)
 end
 
 end # module ThunkBuilder

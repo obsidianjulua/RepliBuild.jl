@@ -1,21 +1,24 @@
 #!/usr/bin/env julia
 # test/test_aot_thunks.jl — the AOT thunk path, end to end, through the real pipeline.
 #
-# `[compile] aot_thunks = true` compiles the Tier-2 thunks at BUILD time into
-# lib<name>_thunks.<dlext> beside the library (`ThunkBuilder.build_aot_thunks`).
-# The wrapper then dlopens that library and resolves every thunk address in
-# `__init__` (`_THUNK_SLOTS`) instead of building an MLIR JIT. Before this file
-# the path had no end-to-end coverage: stress_test/verify.jl hand-rolls its own
-# link, and test_introspection.jl only checks that a failed AOT build leaves no
-# stale library behind.
+# `[compile] aot_thunks = true` compiles the Tier-2 thunks into
+# lib<name>_thunks.<dlext> beside the library, as the LAST STAGE OF WRAP
+# (`ThunkBuilder.build_aot_thunks`, handed the thunk set the generator has just
+# decided by `Wrapper.wrap_library`). The wrapper then dlopens that library and
+# resolves every thunk address in `__init__` (`_THUNK_SLOTS`) instead of
+# building an MLIR JIT. Before this file the path had no end-to-end coverage:
+# stress_test/verify.jl hand-rolls its own link, and test_introspection.jl only
+# checks that a failed AOT pass leaves no stale library behind.
 #
 # Fixture: test/aot_test/ (C++, no STL; see the header of src/aot_api.cpp).
 # discover → build → wrap, in two passes:
-#   1. cold — no thunk_manifest.json yet, so AOT takes its thunk set from
-#      metadata's function list (a superset of what wrap binds);
-#   2. steady state — rebuilt after wrap wrote the manifest, so AOT reads it.
-#      Every later build of an AOT package takes this path, and it emits
-#      exactly the manifest's thunks, which is how the test tells it ran.
+#   1. cold — build compiles no thunks, and the first wrap compiles exactly the
+#      set it derived. AOT used to run at build, before any wrap had derived
+#      that set, and guessed it: every function in the metadata. Here the guess
+#      compiled, with thunks for the Tier-3 extern "C" factories no wrapper
+#      binds. A package whose guess did not compile or link got a refused or
+#      JIT first wrap and needed a second build and wrap;
+#   2. again — a second build and wrap derive and compile the same set.
 # After each pass a child process loads the wrapper and calls through it
 # (aot_test/probe_aot.jl). A C++ throw that escapes a thunk ends the process,
 # and that has to take the child, not the suite: on Windows a void-returning
@@ -25,6 +28,9 @@
 # Nothing here loads the fixture's libraries in THIS process. A DLL this process
 # holds open cannot be replaced, so pass 2's relink would fail on Windows. The
 # exports are read from the file instead.
+#
+# Pass 1 is the regression test for the stage's move: with AOT back in build,
+# the cold thunks library holds the guessed thunks, and pass 1 fails.
 #
 # devtests includes every file into one `Main`, hence the `aot_`/`AOT_` names.
 
@@ -107,8 +113,8 @@ end
 aot_manifest_set(lib) = Set{String}(RepliBuild._read_json(
     joinpath(dirname(lib), "thunk_manifest.json"))["function_thunks"])
 
-# What build and wrap left on disk, and what the wrapper binds. Returns the
-# mangled names behind the wrapper's thunk slots.
+# What wrap left on disk, and what the wrapper binds. Returns the mangled names
+# behind the wrapper's thunk slots.
 function check_aot_artifacts(lib, wrapper)
     thunks = aot_thunks_path(lib)
     @test isfile(thunks)
@@ -139,7 +145,7 @@ function check_aot_artifacts(lib, wrapper)
     for mangled in AOT_EXPECTED_THUNKS
         @test aot_ciface(mangled) in slots     # bound by the wrapper
         @test aot_ciface(mangled) in exports   # defined by the thunks library
-        @test mangled in listed                # recorded for the next build
+        @test mangled in listed                # recorded in the manifest
     end
     # Everything the wrapper binds, the library defines (wrap's own
     # `_assert_aot_thunks_present` refuses otherwise; this is the independent
@@ -177,32 +183,35 @@ end
         lib = ""
         cold_slots = Set{String}()
 
-        @testset "cold build: no manifest yet" begin
+        @testset "cold: build compiles no thunks, the first wrap compiles its own set" begin
             lib = RepliBuild.build(toml)
             @test isfile(lib)
-            @test isfile(aot_thunks_path(lib))   # build_aot_thunks linked it beside the library
+            @test !isfile(aot_thunks_path(lib))      # no AOT pass in build
+            @test !isfile(joinpath(dirname(lib), "thunk_manifest.json"))   # no wrap yet
             wrapper = RepliBuild.wrap(toml)
             cold_slots = check_aot_artifacts(lib, wrapper)
+
+            # Exactly the set this wrap derived, on its first run. The build-time
+            # pass guessed instead, and its guess also emitted thunks for the
+            # Tier-3 extern "C" factories, which no wrapper binds.
+            built = Set(n for n in aot_exported_names(aot_thunks_path(lib))
+                        if startswith(n, "_mlir_ciface_"))
+            @test built == Set(aot_ciface(m) for m in aot_manifest_set(lib))
+            @test !any(n -> occursin("aot_new_", n), built)
             check_aot_probe(wrapper)
         end
 
-        @testset "steady-state rebuild: AOT reads the manifest" begin
+        @testset "a second build and wrap compile the same set" begin
             thunks = aot_thunks_path(lib)
             before = aot_manifest_set(lib)
-            # Removed here so that its presence below is this build's doing.
+            @test RepliBuild.build(toml) == lib
+            # Removed here so that its presence below is this wrap's doing.
             # `_rm_tree`: on Windows a scanner may still hold the fresh DLL.
             RepliBuild._rm_tree(thunks)
-            @test RepliBuild.build(toml) == lib
+            wrapper = RepliBuild.wrap(toml)
             @test isfile(thunks)
-
-            # Read from the manifest: exactly its thunks and nothing else. The
-            # cold build, working from the function list, also emitted thunks
-            # for the Tier-3 extern "C" factories, which no wrapper binds.
             built = Set(n for n in aot_exported_names(thunks) if startswith(n, "_mlir_ciface_"))
             @test built == Set(aot_ciface(m) for m in before)
-            @test !any(n -> occursin("aot_new_", n), built)
-
-            wrapper = RepliBuild.wrap(toml)
             @test aot_manifest_set(lib) == before   # wrap derives the same set again
             steady_slots = check_aot_artifacts(lib, wrapper)
             @test steady_slots == cold_slots

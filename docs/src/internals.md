@@ -254,9 +254,9 @@ Each `SliceResult` also records the symbols the slice `declare`s, post-DCE and e
 
 **Source:** `src/Builder/ThunkBuilder.jl`
 
-AOT compilation path for Tier 2 thunks. When `aot_thunks = true` in `replibuild.toml`, this module drives the same `JLCSIRGenerator.generate_jlcs_ir()` used by the JIT path, lowers the result with `MLIRNative.lower_to_llvm()`, emits an object file through `MLIRNative.emit_object()`, and links it against the user's compiled library (`clang`/`clang++ -shared`, rpath'd to the library directory) into a companion shared library named `<libname>_thunks.so`. With `[link] enable_lto` on it additionally emits and assembles the thunks' own LTO bitcode. An AOT failure is a warning, not a build failure — the JIT path remains available.
+AOT compilation path for Tier 2 thunks. When `aot_thunks = true` in `replibuild.toml`, `wrap` runs this module as its last step (`Wrapper.wrap_library`), with the thunk set the C++ generator has just decided. It drives the same `JLCSIRGenerator.generate_jlcs_ir()` used by the JIT path, lowers the result with `MLIRNative.lower_to_llvm()`, emits an object file through `MLIRNative.emit_object()`, and links it against the user's compiled library (`clang`/`clang++ -shared`, rpath'd to the library directory) into a companion shared library named `<libname>_thunks.so`, holding exactly the thunks the wrapper binds. With `[link] enable_lto` on it additionally emits and assembles the thunks' own LTO bitcode. An AOT failure is a warning, not a wrap failure: the wrapper is generated again with JIT dispatch.
 
-The Julia wrapper then `ccall`s into the AOT thunks rather than calling `JITManager.invoke`. There is no MLIR JIT at runtime — `libJLCS.so` is only needed at build time for the lowering step. After AOT compilation, the user can ship the wrapped library + thunks `.so` without bundling LLVM/MLIR runtime libraries.
+The Julia wrapper then calls the AOT thunks rather than `JITManager.invoke`. There is no MLIR JIT at run time, but `libJLCS` is still loaded: the thunks import its exception helpers, and on Windows every thunk call goes through its guard frame. A consumer of an AOT wrapper needs `libJLCS` as well ([Ship a package](using-wrappers.md#Load-time)).
 
 ## MLIRNative
 

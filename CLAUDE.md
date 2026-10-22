@@ -277,7 +277,8 @@ If you are asked to work on it:
   DWARF → JLCS MLIR.
 - `IRGen/MLIRNative.jl` — ccall bindings to libJLCS. `IRGen/JITManager.jl` — **one
   engine per wrapped binary** behind a shared thunk cache; a per-library init failure
-  degrades only that library. `Builder/ThunkBuilder.jl` — AOT thunks.
+  degrades only that library. `Builder/ThunkBuilder.jl` — AOT thunks, compiled
+  as wrap's last stage.
 - `Debug/Debug.jl` — static inspection of emitted thunks.
 - `src/mlir/` — the JLCS dialect (TableGen `JLCSOps.td`/`Types.td`, lowering in
   `impl/JLCSPasses.cpp`, C API and JIT in `impl/JLCSCAPIWrappers.cpp`, `JlcsJIT.cpp`).
@@ -310,9 +311,15 @@ the test named when you touch the area.
   twin wins) and stay unbound.
 - `nm -D` output is parsed only by `Compiler._nm_dynamic_names`, which cuts ELF
   `@VER`/`@@VER` suffixes. Mangled output only: demangled names can contain `@`.
-- The C++ generator writes `thunk_manifest.json` on **every** wrap, JIT or AOT. A
-  failed AOT link falls back to a JIT wrap, and a wrap that records nothing
-  reproduces the failure on the next build. (`test_thunk_manifest.jl`.)
+- **AOT thunks are compiled by wrap's last stage, never by build.** Only the C++
+  generator knows which thunks a wrapper binds. It writes that set to
+  `thunk_manifest.json` on **every** wrap, JIT included (JITManager compiles only
+  what it lists), then hands the same set to `ThunkBuilder.build_aot_thunks`
+  (`wrap_library`'s `aot_compile` stage), and `_assert_aot_thunks_present` checks
+  the library's exports. Build ran before the set existed and had to guess it, so
+  a new AOT package took two build-and-wrap passes. A stage that writes no library
+  (`AOTStageFailed`) gives a JIT wrapper. (`test_thunk_manifest.jl`,
+  `test_aot_thunks.jl`.)
 - **`-fvisibility=hidden` erases the API of a library that does not annotate its
   exports**, or whose export macro is conditional and inactive. cJSON's `CJSON_PUBLIC`
   needs `CJSON_API_VISIBILITY`; ggml/llama need their `*_SHARED`/`*_BUILD` defines.

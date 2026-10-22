@@ -344,8 +344,10 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     # WHAT THE WRAPPER CAN BIND — the routing key, and it must have an answer
     # even with no manifest.
     #
-    # A manifest is the exact set the wrapper emitted, so prefer it. But AOT runs
-    # at BUILD and the manifest is written at WRAP, so a cold build has none —
+    # A manifest is the exact set the wrapper emitted, so prefer it. AOT always
+    # has it now (wrap's last stage passes the set it derived); the JIT path of
+    # a wrapper loaded without a manifest does not. AOT used to run at build,
+    # before any wrap, so a cold build had none —
     # and `needed_symbols === nothing` used to mean "no virtual is
     # wrapper-needed", sending every one of them to the legacy vmethod pass.
     # That is backwards: absent a manifest the best available proxy is

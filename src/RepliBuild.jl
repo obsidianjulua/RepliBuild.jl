@@ -632,11 +632,9 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
             error("Compilation produced no library. Check that source files exist and are listed in the config.")
         end
 
-        # Build MLIR AOT thunks for C++ when enabled (C goes through ccall+LTO only,
-        # no thunks — packed/union returns use explicit-sret ccall).
-        if config.compile.aot_thunks && config.binary.type != :executable && config.wrap.language != :c
-            ThunkBuilder.build_aot_thunks(config, library_path)
-        end
+        # No AOT thunks here. `[compile] aot_thunks` thunks are compiled by wrap,
+        # as its last stage, from the thunk set its generator decides
+        # (Wrapper.wrap_library); this build would have had to guess that set.
 
         return abspath(library_path)
 
@@ -654,11 +652,14 @@ Generate Julia wrapper from compiled library
 1. Loads metadata from build (DWARF + symbols)
 2. Generates Julia module with ccall wrappers
 3. Creates type definitions from C++ structs
-4. Saves to julia/ directory
+4. With `[compile] aot_thunks = true` (C++), compiles the thunks the wrapper binds
+   into `lib<name>_thunks.<ext>` beside the library
+5. Saves to julia/ directory
 
 **Requirements:**
 - Must run `build()` first
 - Metadata must exist in julia/compilation_metadata.json
+- AOT thunks need the JLCS dialect library and clang++, as `build` does for C++
 
 # Arguments
 - `toml_path`: Path to replibuild.toml configuration file (default: "replibuild.toml")
@@ -697,8 +698,9 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
 
         # Load config
         config = ConfigurationManager.load_config(toml_path)
-        # Dependency resolution is a BUILD concern, and wrap() compiles nothing.
-        # What `resolve_dependencies` contributes — dep sources, link dirs, link
+        # Dependency resolution is a BUILD concern. wrap() compiles nothing of the
+        # project's (its one compile is the AOT thunks library, from the build's
+        # library and metadata). What `resolve_dependencies` contributes — dep sources, link dirs, link
         # libs, dep include dirs — is read on the wrap path by exactly one
         # consumer: `wrap_with_clang`'s `config.compile.include_dirs`
         # (Wrapper/Generator.jl:849), which returns at its own `isempty(headers)`

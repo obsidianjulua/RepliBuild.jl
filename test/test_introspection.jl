@@ -330,11 +330,11 @@ const W = RepliBuild.Wrapper
     end
 
     @testset "AOT thunk presence is checked at wrap, not at first call" begin
-        # The thunk set is derived TWICE — AOT at build from compilation
-        # metadata, wrap from the dispatch decision — and nothing reconciles
-        # them. A slot the thunks library does not define resolves to C_NULL
-        # and raises on whichever call the user makes first. Reported by
-        # Clipper2 (7 of 156 missing).
+        # A slot the thunks library does not define resolves to C_NULL and
+        # raises on whichever call the user makes first. While AOT ran at build
+        # the thunk set was derived twice — by AOT from metadata, by wrap from
+        # the dispatch decision — and Clipper2 lost 7 of 156. Wrap's AOT stage
+        # compiles from its own set now; this check still runs after it.
         taken = Dict("_FPTR__ZN1A1fEv" => "_ZN1A1fEv")
         text  = "RepliBuild.JITManager.invoke_aot_ptr(_FPTR__ZN1A1fEv[], Cint)"
 
@@ -373,13 +373,14 @@ const W = RepliBuild.Wrapper
         end
     end
 
-    @testset "a failed AOT build leaves no stale thunks library" begin
-        # build_aot_thunks named and replaced the companion library only at its
-        # link step, so a failure anywhere before that left the PREVIOUS build's
-        # `_thunks` library in place. Wrap checked thunk names, which still
-        # matched, and bound thunks compiled against the old layouts: a wrong
-        # answer, no error (audit F23, 2026-09-26). The file is removed before
-        # generation now, and wrap, finding none, emits JIT dispatch.
+    @testset "a failed AOT pass leaves no stale thunks library" begin
+        # build_aot_thunks (wrap's AOT stage, then a build step) named and
+        # replaced the companion library only at its link step, so a failure
+        # anywhere before that left the PREVIOUS `_thunks` library in place.
+        # Wrap checked thunk names, which still matched, and bound thunks
+        # compiled against the old layouts: a wrong answer, no error (audit F23,
+        # 2026-09-26). The file is removed before generation now, the pass
+        # reports failure, and wrap emits JIT dispatch.
         CM = RepliBuild.ConfigurationManager
         mktempdir() do dir
             write(joinpath(dir, "replibuild.toml"), """
@@ -404,7 +405,8 @@ const W = RepliBuild.Wrapper
             write(stale, "the previous build's thunks")
 
             # No compilation_metadata.json: the earliest way the AOT pass can fail.
-            @test_logs (:warn, r"metadata not found") match_mode=:any RepliBuild.ThunkBuilder.build_aot_thunks(cfg, lib)
+            ok = @test_logs (:warn, r"metadata not found") match_mode=:any RepliBuild.ThunkBuilder.build_aot_thunks(cfg, lib)
+            @test ok === false            # what tells wrap to emit JIT dispatch
             @test !isfile(stale)          # the regression
             @test isfile(lib)             # the library itself is not touched
 
