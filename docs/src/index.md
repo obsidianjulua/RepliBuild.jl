@@ -47,21 +47,23 @@ Then open the TOML and fill in what discovery cannot see — that edit is the
 whole skill. [Wrap a library](guide.md) walks it; [Edit the TOML](config.md)
 is the reference.
 
-`discover` also registers the project locally. Later you can reload it with
-`RepliBuild.use("myproject")` (`[project].name`) instead of `include`. A fresh
-install has an empty registry — `use("cjson")` does not work until you have
-registered that name yourself. See [Registry](use.md).
+The project builds where it lives. `RepliBuild.register(toml)` then vendors the
+build to `~/.replibuild/` and adds a Julia package around it to your Julia
+environment, so `RepliBuild.use("myproject")` (`[project].name`) or
+`using MyProject` loads it in any session. The one-shot `discover` above ends by
+registering. A fresh install has an empty registry — `use("cjson")` does not work
+until you have registered that name yourself. See [Registry](use.md).
 
 ## The verbs
 
 | Function | What it does |
 |:---------|:---------------|
-| `discover(path)` | Scan a source tree, write `replibuild.toml`, register locally. An existing `replibuild.toml` is kept unless `force=true`. |
-| `build(toml)` | Compile to a `.so` plus debug metadata. |
-| `wrap(toml)` | Emit `julia/<Module>.jl`. |
-| `register(toml)` | Put a project in the local registry so `use` finds it. |
-| `use("name")` | Build, wrap, and load a **registered** project (cached). |
-| `list_registry()` / `unregister("name")` | Inspect / drop local entries. |
+| `discover(path)` | Scan a source tree, write `replibuild.toml`. An existing one is kept unless `force=true`. With `build=true, wrap=true`, also build, wrap and `register`. |
+| `build(toml)` | Compile to a `.so` plus debug metadata, in the project. |
+| `wrap(toml)` | Emit `julia/<Module>.jl`, in the project. |
+| `register(toml)` | Build and wrap in place, vendor the build to `~/.replibuild/`, and add it to the Julia environment as a package. |
+| `use("name")` | Load a **registered** project: its vendored build, or a fresh one after an edit. |
+| `list_registry()` / `unregister("name")` | Inspect / drop registry entries. |
 | `search("xml")` | Browse Hub config *names* (does not install or register). |
 | `clean(toml)` | Remove `build/`, `julia/`, caches. |
 | `info(toml)` | Print whether the library and wrapper exist. |

@@ -171,8 +171,8 @@ function check_aot_probe(wrapper)
 end
 
 @testset "AOT thunks end to end" begin
-    # discover registers the project in the RepliBuild registry; keep that out
-    # of the real ~/.replibuild.
+    # A bare discover registers nothing, but nothing here may reach the real
+    # ~/.replibuild either (devtests sets the same at its top).
     mktempdir() do home
     withenv("REPLIBUILD_HOME" => home) do
         aot_clean_fixture()

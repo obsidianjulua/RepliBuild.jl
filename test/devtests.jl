@@ -9,6 +9,13 @@ using Test
 using TOML
 using RepliBuild
 
+# The registry and the Julia environments are the user's. The chained
+# `discover(...; build=true, wrap=true)` below ends in `register`, which writes
+# to ~/.replibuild and adds a package to the default Julia environment; every
+# devtests run used to register its fixtures in the real registry.
+ENV["REPLIBUILD_HOME"] = mktempdir()
+ENV["REPLIBUILD_JULIA_ENV"] = "none"
+
 const TEST_DIR = @__DIR__
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -70,7 +77,19 @@ end
     julia_dir = joinpath(dir, "julia")
     @test any(endswith(f, ".so") || endswith(f, ".dylib") || endswith(f, ".dll") for f in readdir(julia_dir))
     @test any(endswith(f, ".jl") for f in readdir(julia_dir))
+
+    # It ends in `register`: the build made in the project is vendored (to this
+    # suite's temp REPLIBUILD_HOME) under the hash `use` will look for.
+    cfg = RepliBuild.ConfigurationManager.load_config(toml_path)
+    entry = RepliBuild.PackageRegistry._load_index().entries[cfg.project.name]
+    @test entry.toml_path == abspath(toml_path)
+    @test isfile(joinpath(RepliBuild.PackageRegistry._cached_build_dir(entry.build_hash),
+                          RepliBuild.ConfigurationManager.get_module_name(cfg) * ".jl"))
 end
+
+# ── 1b. Local-first registry: vendor, follow edits, load by `using` ──────────
+
+include(joinpath(TEST_DIR, "test_registry_local_first.jl"))
 
 # ── 2. Integration tests (each in subprocess) ────────────────────────────────
 

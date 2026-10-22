@@ -1,63 +1,103 @@
 # Registry
 
-`use("name")` loads a project that is already in **your** local registry
-(`~/.replibuild/registry/`). A fresh install has none. It does not fetch Hub
-packages, and `search` does not register anything.
-
-## After you wrap something
-
-`discover()` registers the project (`[project].name`) when it writes the TOML.
-From then on you can skip `include`:
+A project builds where it lives. You develop it there with `discover`, `build`
+and `wrap`, and load `julia/<Module>.jl` with `include`. When the wrapper is
+ready, `register` makes it loadable from anywhere: it vendors the build to
+`~/.replibuild/` and adds a Julia package around it to your Julia environment.
+Then either of these loads it, in any session:
 
 ```julia
-toml = RepliBuild.discover("path/to/project", build=true, wrap=true)
-
-MyProject = RepliBuild.use("myproject")   # name from [project].name
-MyProject.some_function(...)
+M = RepliBuild.use("myproject")   # by registry name ([project].name)
+using MyProject                   # as a package, from the Julia environment
 ```
 
-Call `use` at top level. It defines the module while your code runs, so a
-function that calls `use` and then calls into the module fails with
-`method too new to be called from this world context`. Inside a function, call
-the module through `Base.invokelatest`.
+A fresh install has an empty registry. `use` does not fetch Hub packages, and
+`search` does not register anything.
 
-## What `use` builds from
+## Register a project
 
-Registering copies the TOML, and the include directories and source files it
-names relative to the project, into the registry: each project into a folder
-of its own under `~/.replibuild/registry/`. `use` builds from that copy, never
-from your tree. (A TOML whose `[project] root` is an absolute path is the
-exception: nothing is copied, and `use` builds the original tree.) So:
+```julia
+RepliBuild.register("path/to/project/replibuild.toml")
+```
 
-- The first `use` builds the project again, in the registry folder. Later calls
-  load the cached build from `~/.replibuild/builds/<hash>/` until the stored
-  TOML, the copied sources or RepliBuild itself change. The key includes
-  RepliBuild's version, so upgrading rebuilds once instead of serving a stale
-  wrapper.
-- After you edit the sources, run `register(toml)` again. Until then `use`, and
-  `use(name; force_rebuild=true)`, build the copy made last time.
-- Sources a `[dependencies]` entry fetches come from its pinned tag or commit,
-  not from a copy.
+That:
+
+1. runs `build` and `wrap` on the project itself. When its build is current, the
+   build is a cache hit.
+2. copies the result (the wrapper, the library, its metadata) to
+   `~/.replibuild/builds/<hash>/`, where the hash covers the TOML, the sources,
+   the headers, the toolchain and RepliBuild itself;
+3. writes a Julia package around that build, `~/.replibuild/packages/<Module>/`,
+   and adds it to a Julia environment — by default the `@v#.#` environment, which
+   every session can load from.
+
+`discover(path; build=true, wrap=true)` does all of that in one call: it builds
+and wraps the project, then registers it. A bare `discover(path)` registers
+nothing, because there is no build to vendor yet.
+
+Choose the environment with `env`:
+
+```julia
+RepliBuild.register(toml; env=:default)            # the @v#.# environment (default)
+RepliBuild.register(toml; env=:active)             # the active environment
+RepliBuild.register(toml; env="path/to/env")       # a specific environment
+RepliBuild.register(toml; env=nothing)             # none; `use` still loads it
+```
+
+`ENV["REPLIBUILD_JULIA_ENV"]` (`default`, `active`, `none`, or a path) changes
+the default. `register` only adds to environments: it never changes a package's
+own Project.toml. An environment without RepliBuild gets the copy that built the
+wrapper; one that already has RepliBuild keeps it.
+
+`register(toml; build=false)` records the project without building it. The
+first `use` builds and vendors it.
+
+## What `use` loads
+
+`use("name")` compares the project's inputs with the build it vendored:
+
+- **Unchanged:** it loads the vendored build. No compiler runs.
+- **Edited** (sources, headers, TOML, dependencies, the toolchain, or a new
+  RepliBuild): it builds and wraps the project where it lives, vendors the new
+  build, points the package at it, and loads it. You do not register again.
+- **The project moved or was deleted:** it loads the last vendored build, with
+  a warning. Register the project again from its new place to rebuild it.
+
+A project registered by an earlier RepliBuild points at the copy of its sources
+that version made inside the registry, and `use` keeps building that copy.
+Register the project again, from the project, to move it to the new scheme.
 
 ```julia
 RepliBuild.use("myproject"; force_rebuild=true)
 ```
 
-`force_rebuild=true` ignores the cached build and builds the registry copy again
-from nothing; git dependencies are fetched again. Use it once after an upgrade
-whose notes say a fix needs a rebuild ([Changelog](release-notes.md)).
+`force_rebuild=true` builds the project from nothing first: it deletes the
+project's `build/`, `julia/` and `.replibuild_cache/`, so git dependencies are
+fetched again. Use it once after an upgrade whose notes say a fix needs a
+rebuild ([Changelog](release-notes.md)).
 
-## Register by hand
+`using MyProject` loads whatever build was vendored last: after an edit, run
+`use("myproject")` (or `register` again) to vendor the new one, then start a new
+session. Each build is vendored to a folder of its own, so a session that has the
+old one loaded keeps it, and on Windows no open library is ever overwritten.
 
-If you wrote the TOML yourself (or copied one), register it before `use`:
+Call `use` at top level. It defines the module while your code runs, so a
+function that calls `use` and then calls into the module fails with
+`method too new to be called from this world context`. Inside such a function,
+write `Base.@invokelatest M.f(x)`.
+
+## Inspect and remove
 
 ```julia
-RepliBuild.register("path/to/replibuild.toml")   # name from [project].name
-RepliBuild.list_registry()
+RepliBuild.list_registry()          # each project, its vendored build, its environment
 RepliBuild.unregister("myproject")
 ```
 
-`ENV["REPLIBUILD_HOME"]` relocates the whole tree (`registry/` and `builds/`).
+`unregister` removes what the registry made: the vendored build, the package,
+and the package's place in the Julia environment. It never touches the project.
+
+`ENV["REPLIBUILD_HOME"]` relocates the whole tree (`registry/`, `builds/`,
+`packages/`).
 
 Missing name:
 
@@ -80,17 +120,17 @@ RepliBuild.search()          # names, versions, tags
 RepliBuild.search("xml")
 ```
 
-To actually load one, register its TOML, then `use` the name. `search` prints
-the same steps:
+To load one, register its TOML from a clone of the Hub, then `use` it or
+`using` it. `search` prints the same steps:
 
 ```julia
-# after cloning RepliBuild-Hub
 RepliBuild.register("path/to/RepliBuild-Hub/packages/cjson/replibuild.toml")
 C = RepliBuild.use("cjson")
 ```
 
-The first `use` fetches the library's source at the pinned commit and builds it,
-which can take minutes.
+`register` builds the package where its TOML lives, in the Hub clone: it fetches
+the library's source at the pinned commit and compiles it, which can take
+minutes.
 
 `ENV["REPLIBUILD_HUB_URL"]` points `search` at a private mirror of that index.
 It does not change `use`.

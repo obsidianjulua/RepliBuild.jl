@@ -68,7 +68,7 @@ const _CO = RepliBuild.Compiler
             """
             write(toml, text)
             mktempdir() do home
-                withenv("REPLIBUILD_HOME" => home) do
+                withenv("REPLIBUILD_HOME" => home, "REPLIBUILD_JULIA_ENV" => "none") do
                     # Without build=true nothing else runs.
                     @test RepliBuild.discover(dir) == toml
                     # With it, build runs against the kept file — which refuses

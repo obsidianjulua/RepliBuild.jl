@@ -585,8 +585,8 @@ replaces the base. Keep the base correct for one host and override only on the
 other: a RepliBuild older than this table ignores it and sees the base. Platform
 names are `linux`, `windows` and `macos`; any other name is a hard error, since a
 misspelled overlay would otherwise vanish on the one host it was written for.
-`discover(force=true)` preserves the tables, and `register` stages relative
-include dirs through the overlay of the host it runs on.
+`discover(force=true)` preserves the tables, and `register` reads the project's
+root through the overlay of the host it runs on.
 
 ### 2.16 Paths are relative to the project
 

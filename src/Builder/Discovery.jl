@@ -161,14 +161,15 @@ Main discovery pipeline - scans project and generates configuration.
 3. Detect and analyze binaries
 4. Walk AST dependencies using clang
 5. Generate or update replibuild.toml with discovered data
-6. Optionally run build and wrap pipeline
+6. Optionally build, or build, wrap and register (vendor the build)
 
 # Arguments
 - `target_dir`: Project directory (default: current directory)
 - `force`: Force rediscovery even if replibuild.toml exists
 - `unsafe`: Bypass safety checks (use with extreme caution)
 - `build`: Automatically run build() after discovery (default: false)
-- `wrap`: Automatically run wrap() after build (requires build=true, default: false)
+- `wrap`: With `build`, wrap too and then `register` the project, which vendors
+  the build system-wide and adds it to the Julia environment (default: false)
 
 # Safety Features
 - Discovery is scoped ONLY to target_dir and subdirectories
@@ -255,27 +256,19 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     ConfigurationManager.save_config(config)
     _restore_preserved_sections(config_path, preserved)
 
-    # Auto-register in global package registry
-    try
-        register_func = getfield(parentmodule(@__MODULE__), :register)
-        register_func(config_path)
-    catch e
-        @debug "Auto-registration skipped" exception=e
-    end
-
     return _build_and_wrap(config_path, build, wrap)
 end
 
-# The optional tail of `discover`: `build`, then `wrap` (which needs `build`).
+# The optional tail of `discover`: `build`, or `build` and `wrap` and then
+# `register`, which does both in the project and vendors the result. A bare
+# discover registers nothing: there is no build yet to vendor.
 function _build_and_wrap(config_path::String, build::Bool, wrap::Bool)::String
-    if build
-        build_func = getfield(parentmodule(@__MODULE__), :build)
-        build_func(config_path)
-
-        if wrap
-            wrap_func = getfield(parentmodule(@__MODULE__), :wrap)
-            wrap_func(config_path)
-        end
+    build || return config_path
+    parent_mod = parentmodule(@__MODULE__)
+    if wrap
+        parent_mod.register(config_path)
+    else
+        parent_mod.build(config_path)
     end
     return config_path
 end

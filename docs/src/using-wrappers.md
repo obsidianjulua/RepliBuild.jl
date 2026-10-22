@@ -61,10 +61,14 @@ The copy in `lib/` is self-contained:
    machine's RepliBuild install. That means a system LLVM/MLIR 21+ there, and the
    dialect built against it ([Install](install.md#The-JLCS-dialect)).
 
-Alternatives: `RepliBuild.use("box2d")` at runtime if that name is already in
-your local registry (scripts, not precompiled packages), or
-`RepliBuild.scaffold_package` for a skeleton that *builds* the library on the
-consumer's machine instead of shipping a binary.
+Alternatives:
+- `RepliBuild.use("box2d")` at runtime, once that name is registered (scripts,
+  not precompiled packages).
+- `using Box2d` after `register`: the package it adds to your Julia environment
+  precompiles like any other, but it points at the build vendored in
+  `~/.replibuild/`, so it is for this machine, not for shipping.
+- `RepliBuild.scaffold_package`, for a skeleton that *builds* the library on the
+  consumer's machine instead of shipping a binary.
 
 ## Precompilation
 

@@ -274,19 +274,22 @@ end
 Load a wrapper by **local registry** name. Resolves dependencies, checks
 environment, builds if needed, and returns the loaded Julia module.
 
-The name must already be registered (`discover` does this; otherwise
-`register(toml)`). There is no Hub fallback — a missing name errors.
+The name must already be registered (`register(toml)`, or
+`discover(path; build=true, wrap=true)`). There is no Hub fallback — a missing
+name errors.
 
-`use` builds from the copy `register` made of the project, so register again
-after editing its sources. `force_rebuild=true` ignores the cached build and
-builds that copy again from nothing (git dependencies are fetched again).
+`use` loads the build `register` vendored while the project's inputs still match
+it. After an edit it builds and wraps the project where it lives, vendors the
+new build, and loads that; a project that has moved still loads from its last
+vendored build. `force_rebuild=true` builds the project from nothing first (git
+dependencies are fetched again).
 
 Call it at top level: the module is defined while your code runs, so calling
 into it from the function that called `use` needs `Base.invokelatest`.
 
 # Example
 ```julia
-RepliBuild.register("path/to/replibuild.toml")   # or discover(), which registers
+RepliBuild.register("path/to/replibuild.toml")   # builds in place, vendors, adds to the Julia env
 M = RepliBuild.use("myproject")                  # [project].name
 ```
 """
@@ -295,13 +298,31 @@ function use(name::String; force_rebuild::Bool=false, verbose::Bool=true)
 end
 
 """
-    register(toml_path::String; name="", verified=false) -> RegistryEntry
+    register(toml_path::String; name="", build=true, env=:default) -> RegistryEntry
 
-Hash and store a replibuild.toml in the global registry (~/.replibuild/registry/).
-Name is inferred from [project].name if not provided. Called automatically by `discover()`.
+Record a project in the global registry and vendor its build, so it loads in any
+session by `RepliBuild.use(name)` and by `using <Module>`.
+
+The project builds where it lives: `register` runs `build` and `wrap` on it (a
+cache hit when its build is current), copies the result to
+`~/.replibuild/builds/<hash>/`, writes a Julia package around it in
+`~/.replibuild/packages/<Module>/`, and adds that package to the Julia
+environment `env`:
+
+- `:default` — the `@v#.#` environment, which every session can load from;
+- `:active` — the active environment;
+- a path to an environment;
+- `nothing` — no environment; `use` still loads it.
+
+`ENV["REPLIBUILD_JULIA_ENV"]` (`default`, `active`, `none`, or a path) changes
+the default. A package's own Project.toml is never changed. `build=false`
+records the project only, and `use(name)` builds it later. Name is inferred from
+`[project].name` if not provided. `discover(path; build=true, wrap=true)` ends
+by calling this.
 """
-function register(toml_path::String; name::String="", verified::Bool=false)
-    return PackageRegistry.register(toml_path; name=name, verified=verified)
+function register(toml_path::String; name::String="", verified::Bool=false,
+                  build::Bool=true, env=PackageRegistry._default_julia_env())
+    return PackageRegistry.register(toml_path; name=name, verified=verified, build=build, env=env)
 end
 
 """
@@ -344,12 +365,14 @@ end
 """
     discover(target_dir="."; force=false, build=false, wrap=false) -> String
 
-Scan a C or C++ project, generate its replibuild.toml, and register it locally.
+Scan a C or C++ project and generate its replibuild.toml.
 
 **This is the entry point for new projects.** Run this first to set up RepliBuild.
 
-An existing replibuild.toml is kept, not rescanned or registered again, unless
-`force=true`; `build` and `wrap` still run against it.
+An existing replibuild.toml is kept, not rescanned, unless `force=true`; `build`
+and `wrap` still run against it. With `build=true, wrap=true` it builds and
+wraps the project where it lives, then registers it (`register`): the build is
+vendored system-wide and added to the Julia environment.
 
 # Arguments
 - `target_dir`: Project directory to scan (default: current directory)

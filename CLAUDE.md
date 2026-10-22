@@ -252,11 +252,19 @@ If you are asked to work on it:
 - `Builder/DWARFParser.jl` — llvm-dwarfdump + nm → ClassInfo/VtableInfo.
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
-- `Builder/PackageRegistry.jl` — `~/.replibuild/` registry and build cache. Each
-  entry stages its project into a folder of its own (`_entry_dir`), because a
-  relative `root` resolves to the stored TOML's folder: in one shared folder, two
-  projects with the same relative paths overwrote each other, and `use` built the
-  wrong library. `use` builds from that copy, never from the user's tree.
+- `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
+  where it lives.** An entry points at the project's own TOML; `register` builds
+  and wraps in place, vendors the output to `builds/<hash_config>/` (immutable:
+  a session may hold a vendored DLL open), and writes `packages/<Module>/`, a
+  Julia package whose entry file `Base.include`s the vendored wrapper into
+  `Base.__toplevel__` (a bare `include` does not exist there). `use` re-vendors
+  when the hash moves and loads the last vendored build if the project is gone.
+  Never copy a project's sources into the registry: copies made two projects
+  with the same relative paths overwrite each other, and edits never reached
+  `use`. `register` adds the package only to environments (no `name` in their
+  Project.toml), never to a package's own; test suites set `REPLIBUILD_HOME` to a
+  temp dir and `REPLIBUILD_JULIA_ENV=none`, and a test that wants an
+  environment passes a temp one with Pkg offline.
 - `Wrapper/Generator.jl` — orchestration and the write-time refusals
   (`_assert_wrapper_loadable`, `_assert_wrapper_parses`, `_assert_base_calls_qualified`,
   `_assert_cstring_policy`, …). `exclude_symbols` and `surface_types_only` filtering

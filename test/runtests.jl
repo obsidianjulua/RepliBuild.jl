@@ -8,6 +8,12 @@
 using Test
 using RepliBuild
 
+# The registry and the Julia environments are the user's. `register` writes to
+# ~/.replibuild and adds packages to the default Julia environment, so the suite
+# points both somewhere else first; a test that wants either names it.
+ENV["REPLIBUILD_HOME"] = mktempdir()
+ENV["REPLIBUILD_JULIA_ENV"] = "none"
+
 @testset "RepliBuild.jl" begin
 
     @testset "Package loads" begin
