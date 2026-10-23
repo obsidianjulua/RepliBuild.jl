@@ -561,12 +561,36 @@ function _c_bucket_rtlib()::String
     return rtlib
 end
 
-# _clang_for_c_bucket(compiler, cmd_args) -> (output, exitcode)
+# _jll_clang() -> Union{Cmd,Nothing}
+#
+# Clang_unified_jll's clang, or `nothing` when the Clang package or that JLL
+# cannot be loaded. `nothing` is the one case in which the C bucket uses the
+# system clang (see _clang_for_c_bucket).
+function _jll_clang()
+    try
+        Clang_mod = Base.require(Base.PkgId(
+            Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
+        isdefined(Clang_mod, :Clang_unified_jll) || return nothing
+        return Clang_mod.Clang_unified_jll.clang()
+    catch
+        return nothing
+    end
+end
+
+# _clang_for_c_bucket(compiler, cmd_args; jll = _jll_clang) -> (output, exitcode)
 #
 # Run `compiler` over `cmd_args`, routing the C BUCKET (`compiler == "clang"`)
 # through Clang_unified_jll so the tool is version-locked to Julia's resident
-# libLLVM. Anything else — and any failure to reach the JLL — falls back to
-# BuildBridge.execute, i.e. the system PATH.
+# libLLVM. Anything else, and a JLL that cannot be loaded (`jll()` returns
+# `nothing`), falls back to BuildBridge.execute, i.e. the system PATH.
+#
+# A JLL clang that loads but does not START is reported, not replaced:
+# `(message, BuildBridge.SPAWN_FAILED)`. Falling back there ran the system clang
+# over the C bucket's IR without a word, which is the version mismatch below with
+# nothing to explain it. A binary the OS refuses to run would do that (Smart App
+# Control refused Clang_unified_jll's pkgimage and libclang.dll on 2026-10-18), and
+# so would a command line past Windows' 32,767 characters. `jll` exists for the
+# tests, which hand it a clang that is absent or cannot start.
 #
 # The C bucket's invariant is that every tool touching its IR is version-matched:
 # JLL clang emits it, Julia's libLLVM links and optimizes it. `create_library`
@@ -583,16 +607,13 @@ end
 # directory, misses the binary, and silently returns the bare name, landing back
 # on the system compiler. It is the right hook for llvm-link/opt, which that
 # package does ship.
-function _clang_for_c_bucket(compiler::String, cmd_args)
+function _clang_for_c_bucket(compiler::String, cmd_args; jll::Function = _jll_clang)
     compiler == "clang" || return BuildBridge.execute(compiler, cmd_args)
+    clang_cmd = jll()
+    clang_cmd === nothing && return BuildBridge.execute(compiler, cmd_args)
+
+    cmd = nothing
     try
-        Clang_mod = Base.require(Base.PkgId(
-            Base.UUID("40e3b903-d033-50b4-a0cc-940c62c95e31"), "Clang"))
-        isdefined(Clang_mod, :Clang_unified_jll) ||
-            return BuildBridge.execute(compiler, cmd_args)
-
-        clang_cmd = Clang_mod.Clang_unified_jll.clang()
-
         # On Windows the JLL compiler brings no libc of its own — see
         # _c_bucket_sysroot. This covers compiling AND linking: without a sysroot
         # the link step cannot find the mingw CRT and startup objects either. A
@@ -624,7 +645,13 @@ function _clang_for_c_bucket(compiler::String, cmd_args)
 
         return (String(take!(out_buf)) * "\n" * String(take!(err_buf)),
                 process.exitcode)
-    catch
+    catch e
+        if cmd !== nothing && BuildBridge._is_spawn_failure(e)
+            return ("The C bucket's clang (Clang_unified_jll) did not start, and the " *
+                    "system clang is not used in its place: its IR need not match Julia's " *
+                    "libLLVM. " * BuildBridge._spawn_failure_message(cmd, e),
+                    BuildBridge.SPAWN_FAILED)
+        end
         return BuildBridge.execute(compiler, cmd_args)
     end
 end

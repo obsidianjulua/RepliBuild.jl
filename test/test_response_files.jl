@@ -7,7 +7,8 @@
 # and the clang fallback, handed the same list, died with ENAMETOOLONG. A long
 # input list now goes to a response file (Compiler._args_with_response_file), and
 # a program that never started comes back as BuildBridge.SPAWN_FAILED with a
-# message that says so.
+# message that says so. That includes the C bucket's JLL clang, which used to be
+# swapped for the system clang without a word when it did not start.
 #
 # No toolchain: the writer is pure, and a missing program is enough for a spawn
 # failure. test_link_cmdline_limit.jl (devtests) runs the real llvm-link and
@@ -114,4 +115,35 @@ end
         @test occursin(r"\b4\d{4} characters of command line", out)   # sized...
         @test length(out) < 1_000                                       # ...not echoed back
     end
+end
+
+@testset "the C bucket's clang that does not start is reported, not replaced" begin
+    # One argument no host starts a process with: past Windows' 32,767-character
+    # command line, and past Linux's 128 KiB limit on a single argument (E2BIG).
+    too_long = ["-fsyntax-only", "-DX=" * repeat("y", 200_000)]
+
+    # The real JLL clang. The fallback this replaces ran the SYSTEM clang over the
+    # same arguments; that cannot start either, but its message names a different
+    # program and not the JLL.
+    jll = _RSP_C._jll_clang()
+    @test jll isa Cmd                    # RepliBuild depends on Clang, so it loads
+    (out, code) = _RSP_C._clang_for_c_bucket("clang", too_long)
+    @test code == _RSP_BB.SPAWN_FAILED
+    @test occursin("Clang_unified_jll", out) && occursin("not used in its place", out)
+    @test occursin(first(jll.exec), out)
+    @test length(out) < 2_000
+
+    # A JLL that loads but whose binary is gone (blocked, deleted artifact file):
+    # the same report, for an ordinary command line.
+    missing_clang = joinpath(mktempdir(), Sys.iswindows() ? "no-such-clang.exe" : "no-such-clang")
+    (out, code) = _RSP_C._clang_for_c_bucket("clang", ["--version"]; jll = () -> `$missing_clang`)
+    @test code == _RSP_BB.SPAWN_FAILED
+    @test occursin("Clang_unified_jll", out) && occursin(missing_clang, out)
+
+    # A JLL that cannot be loaded still falls back to the system clang, through
+    # BuildBridge: its own spawn report, without the JLL's.
+    (out, code) = _RSP_C._clang_for_c_bucket("clang", too_long; jll = () -> nothing)
+    @test code == _RSP_BB.SPAWN_FAILED
+    @test startswith(out, "could not start ")
+    @test !occursin("Clang_unified_jll", out)
 end

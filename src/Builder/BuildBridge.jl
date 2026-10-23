@@ -53,15 +53,16 @@ whose message would blame the tool for failing checks for this first.
 const SPAWN_FAILED = -1
 
 # Julia reports a program that never started as an IOError reading
-# "could not spawn `<the whole command>`: <reason> (<UV name>)". The command is
-# the long part when the reason is ENAMETOOLONG: llamacpp's 384-input link
-# echoed 45 KB of it into one log line. So the message names the program, how
-# big its command line was, and the reason, not the command.
+# "could not spawn <the whole command>: <reason> (<UV name>)", where the command
+# is `…` or, for a Cmd that carries an environment (a JLL's), setenv(`…`, [env]).
+# The command is the long part when the reason is ENAMETOOLONG: llamacpp's
+# 384-input link echoed 45 KB of it into one log line. So the message names the
+# program, how big its command line was, and the reason, not the command.
 _is_spawn_failure(e) = e isa Base.IOError && startswith(e.msg, "could not spawn")
 
 function _spawn_failure_message(cmd::Cmd, e::Base.IOError)
-    m = match(r"`: ([^`]*)$", e.msg)
-    reason = m === nothing ? e.msg : m.captures[1]
+    m = match(r": ([^:]*\([A-Z0-9_]+\))$", e.msg)
+    reason = m === nothing ? first(e.msg, 300) : m.captures[1]
     isempty(cmd.exec) && return "could not start an empty command: $reason"
     chars = sum(a -> length(a) + 1, cmd.exec)
     return "could not start $(first(cmd.exec)) ($(length(cmd.exec) - 1) arguments, " *

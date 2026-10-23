@@ -145,7 +145,9 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   failure is a hard error. `[link] fallback = true` selects the external
   `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`.
   Final `.ll → .so` still shells to clang. Check `DW_AT_producer` (`…jl`) to prove a
-  C artifact came from the JLL.
+  C artifact came from the JLL. `_clang_for_c_bucket` uses the system clang only
+  when the JLL cannot be loaded (`_jll_clang()` is `nothing`); a JLL clang that
+  does not start is reported as `BuildBridge.SPAWN_FAILED`, never replaced.
 - **C++ / Tier 2 uses system LLVM+MLIR 21+** (23.1.3 under MSYS2 CLANG64 on the
   reference host, which is Windows; on Linux, CI's `tier2-linux.yml` runs devtests
   against apt.llvm.org's LLVM/MLIR 22 and 23) for the dialect and the external
