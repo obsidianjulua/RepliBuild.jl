@@ -490,7 +490,12 @@ the test named when you touch the area.
   unexported, and uses each generator's own sanitizer. `_vptr$X` member names must be
   sanitized, because `$` in a const table breaks the load.
 - Build identity: wrappers carry `LIBRARY_SHA` (sha256 of the file — not a build ID,
-  which the JLL linker never emits) and `BUILD_GENERATOR`, and warn on drift.
+  which an ELF link carries only when asked) and `BUILD_GENERATOR`, and warn on drift.
+  **Links are reproducible**, so the same IR gives the same `LIBRARY_SHA`: every link
+  of a shipped binary passes `_reproducible_link_flags` (on PE, lld and GNU ld write
+  the clock into the header otherwise). A new link flag must keep the output a
+  function of the inputs: no clock, no temporary path, no randomness
+  (`test_reproducible_link.jl`).
 - **Emitted text must not depend on Dict or Set order.** A Dict's iteration order
   is the hash order of its keys, which differs between Julia releases, and for
   metadata read back from JSON it also follows the file's key order. That holds for

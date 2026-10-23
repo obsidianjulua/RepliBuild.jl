@@ -944,23 +944,25 @@ end
 
 SHA-256 of a library file as lowercase hex, or `""` if it cannot be read.
 
-Identifies a BUILD, not a version: two compilations of identical source differ
-here. That is exactly the question a generated wrapper needs answered, because
-its struct layouts, enum values and blob sizes are a snapshot of one
-compilation — point it at a different build and nothing complains, it just
-reads the wrong offsets.
+Identifies the library's bytes, not a version. That is exactly the question a
+generated wrapper needs answered, because its struct layouts, enum values and
+blob sizes are a snapshot of one compilation — point it at a different build
+and nothing complains, it just reads the wrong offsets. Links are reproducible
+(`Compiler._reproducible_link_flags`): relinking the same IR gives the same
+bytes, so a rebuild that changed nothing keeps the hash, and a wrapper diff
+shows a new one only when the library is different.
 
-This used to read the GNU build ID out of PT_NOTE. A build ID is only present
-if the linker was asked to emit one, and RepliBuild never asks: the C bucket
-links through `Clang_unified_jll` (see `_clang_for_c_bucket`), which unlike the
-system driver emits no note by default, so every C library built after that
-routing landed carried no build ID and the check silently did nothing. Hashing
+This used to read the GNU build ID out of PT_NOTE. On ELF a build ID is only
+present if the linker was asked to emit one, and RepliBuild never asks: the C
+bucket links through `Clang_unified_jll` (see `_clang_for_c_bucket`), which
+unlike the system driver emits no note by default, so every C library built
+after that routing landed carried no build ID and the check silently did nothing. Hashing
 the file depends on no linker flag, behaves identically for the C and C++
 buckets, and is stronger — it also catches post-link modification.
 
 The one thing it gives up: a build ID survives `strip`, a file hash does not.
-The `binary` stage strips before `wrap` runs, so the hash is taken of the
-already-stripped file and the normal flow is unaffected; stripping a library
+Nothing in the pipeline strips (`[binary] strip_symbols` is parsed, not
+consulted), so the hash is of the library as linked; stripping a library
 *after* generating its wrapper will warn.
 """
 function _library_sha256(path::AbstractString)::String
