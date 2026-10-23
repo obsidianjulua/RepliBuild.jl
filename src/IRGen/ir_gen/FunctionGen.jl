@@ -59,6 +59,11 @@ How a parameter or return of C type `c_type` crosses a Tier-2 thunk. `kind`:
                   `structs` (`std::string_view`), a derived class with no
                   members of its own, or a spelling the scalar map does not
                   know (`long double`).
+  * `:conflict` — the table entry for this name stands for several distinct
+                  types (see `conflicted_within`): a record whose definitions
+                  disagree, an enum whose definitions differ in width, or a
+                  record holding either by value. `key` is the conflicted
+                  entry, which is the crossing's own or one it holds.
 
 Every `:opaque` crossing used to become `!llvm.ptr`, from `map_cpp_type`'s
 fallback or `generate_jlcs_ir`'s bodyless-struct rewrite. A 16-byte
@@ -69,29 +74,17 @@ plausible wrong value. `GeneratorCpp` asks this same function, so a function
 the thunk cannot call is emitted as a trap on the Julia side, not as a call.
 """
 function by_value_crossing(c_type::AbstractString, structs, record_abi)
-    t = strip(String(c_type))
-    t = replace(t, r"^(?:(?:const|volatile)\s+)+" => "")
-    t = String(replace(t, r"(?:\s+(?:const|volatile))+$" => ""))
-    (isempty(t) || t in ("void", "unknown")) && return (:direct, nothing)
-    (occursin(r"[*&(\[]", t) || startswith(t, "function_ptr")) && return (:direct, nothing)
-
-    mapped = map_cpp_type(t)
-    named = startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
-    # A scalar the map knows: `i32`, `f64`, `i1`, …
-    (!named && mapped != "!llvm.ptr" && mapped != "") && return (:direct, nothing)
-    # STL containers keep their own paths (pointer in, byte blob out).
-    get_stl_container_size(t) > 0 && return (:direct, nothing)
-
-    # The tables are keyed on the bare DWARF name (`JoinType`, `Box<double>`);
-    # a signature inferred from the demangler spells it qualified
-    # (`Clipper2Lib::JoinType`). Longest suffix first, as `_has_receiver` does.
-    suffixes = _scope_suffixes(t)
-    for cand in suffixes
-        haskey(structs, "__enum__" * cand) && return (:enum, "__enum__" * cand)
-        key = _fuzzy_struct_lookup(cand, structs)
-        key !== nothing && return (:layout, key)
+    t = _strip_top_cv(c_type)
+    kind, key = _table_entry(t, structs)
+    kind === :direct && return (:direct, nothing)
+    if kind === :enum
+        return _conflicted_entry(key, structs) ? (:conflict, key) : (:enum, key)
+    elseif kind === :layout
+        held = conflicted_within(key, structs)
+        return held === nothing ? (:layout, key) : (:conflict, held)
     end
 
+    suffixes = _scope_suffixes(t)
     for cand in suffixes
         facts = get(record_abi, cand, nothing)
         (facts === nothing || get(facts, "conflict", false) == true) && continue
@@ -127,6 +120,148 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi)
         break
     end
     return (:opaque, nothing)
+end
+
+_strip_top_cv(c_type) = String(replace(replace(strip(String(c_type)), r"^(?:(?:const|volatile)\s+)+" => ""),
+                                       r"(?:\s+(?:const|volatile))+$" => ""))
+
+# The table entry a by-value `t` (top-level cv removed) is laid out from:
+# `(:direct, nothing)` for what needs none (a scalar, pointer, reference,
+# function pointer or STL container), `(:enum, key)`, `(:layout, key)`, or
+# `(:missing, nothing)` for a record with no entry. `by_value_crossing` and
+# `conflicted_within` both look types up here, so a member resolves as a
+# parameter of its type would.
+function _table_entry(t::AbstractString, structs)
+    (isempty(t) || t in ("void", "unknown")) && return (:direct, nothing)
+    (occursin(r"[*&(\[]", t) || startswith(t, "function_ptr")) && return (:direct, nothing)
+
+    mapped = map_cpp_type(t)
+    named = startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
+    # A scalar the map knows: `i32`, `f64`, `i1`, …
+    (!named && mapped != "!llvm.ptr" && mapped != "") && return (:direct, nothing)
+    # STL containers keep their own paths (pointer in, byte blob out).
+    get_stl_container_size(t) > 0 && return (:direct, nothing)
+
+    # The tables are keyed on the bare DWARF name (`JoinType`, `Box<double>`);
+    # a signature inferred from the demangler spells it qualified
+    # (`Clipper2Lib::JoinType`). Longest suffix first, as `_has_receiver` does.
+    for cand in _scope_suffixes(t)
+        haskey(structs, "__enum__" * cand) && return (:enum, "__enum__" * cand)
+        key = _fuzzy_struct_lookup(cand, structs)
+        key !== nothing && return (:layout, key)
+    end
+    return (:missing, nothing)
+end
+
+"""
+    _conflicted_entry(key, structs) -> Bool
+
+Whether the table entry `key` stands for several types a by-value crossing
+would tell apart. `parse_dwarf_dump` keys types by their bare DWARF name and
+keeps one definition per name; when the definitions disagree it marks the kept
+one `"conflict"` and records every definition's size in `"conflict_sizes"`.
+
+A conflicted record has more than one layout, and the one kept need not be the
+one a given function means. An enum crosses as an integer of its width, so a
+conflicted enum is wrong only when its definitions differ in width: five
+4-byte `Type`s with different enumerators (box2d) cross as one `i32`. An enum
+whose metadata predates `"conflict_sizes"` is treated as differing.
+"""
+function _conflicted_entry(key, structs)::Bool
+    info = get(structs, key, nothing)
+    info isa AbstractDict || return false
+    get(info, "conflict", false) == true || return false
+    startswith(String(key), "__enum__") || return true
+    sizes = get(info, "conflict_sizes", nothing)
+    return sizes === nothing || length(unique(sizes)) > 1
+end
+
+"""
+    conflicted_within(key, structs) -> Union{String,Nothing}
+
+The conflicted entry (`_conflicted_entry`) that passing the record or enum
+`key` by value would lay out: `key` itself, or one it holds by value at any
+depth, through a base or a placed member, arrays included. `nothing` when
+there is none. A pointer, reference, function pointer or STL container member
+holds nothing by value, and a static or other unplaced member is not part of
+the object.
+
+Types are keyed by bare name, so a record holding a conflicted one by value
+crosses with the kept definition's layout inside it, as wrong as passing that
+definition directly. llama.cpp's `graph` and `extra_buffer_type` even name
+themselves as their base; `seen` stops the walk there.
+"""
+function conflicted_within(key, structs, seen::Set{String} = Set{String}())
+    key = String(key)
+    _conflicted_entry(key, structs) && return key
+    (startswith(key, "__enum__") || key in seen) && return nothing
+    push!(seen, key)
+    info = get(structs, key, nothing)
+    info isa AbstractDict || return nothing
+    for b in get(info, "base_classes", [])
+        hit = _held_conflict(replace(String(get(b, "type", "")), r"^(?:class|struct)\s+" => ""), structs, seen)
+        hit === nothing || return hit
+    end
+    for m in get(info, "members", [])
+        (get(m, "offset", nothing) === nothing && !haskey(m, "data_bit_offset")) && continue
+        hit = _held_conflict(String(get(m, "c_type", "")), structs, seen)
+        hit === nothing || return hit
+    end
+    return nothing
+end
+
+# What a base or member of C type `c_type` holds by value; see `conflicted_within`.
+function _held_conflict(c_type::AbstractString, structs, seen::Set{String})
+    t = _strip_top_cv(replace(_strip_top_cv(c_type), r"(?:\[\d*\])+$" => ""))
+    kind, key = _table_entry(t, structs)
+    kind in (:enum, :layout) || return nothing
+    return conflicted_within(key, structs, seen)
+end
+
+"""
+    conflict_crossings(func, structs) -> Vector{String}
+
+One phrase per parameter or return of `func` whose by-value crossing is
+`:conflict` (`by_value_crossing`), in signature order; empty when none is. The
+thunk generator's reasons (`thunk_crossings`) and both Julia generators' trap
+stubs say it this way.
+"""
+function conflict_crossings(func, structs)::Vector{String}
+    out = String[]
+    for p in get(func, "parameters", [])
+        ct = String(get(p, "c_type", ""))
+        kind, key = by_value_crossing(ct, structs, Dict{String,Any}())
+        kind === :conflict && push!(out, "takes `$ct` by value" * _conflict_detail(ct, key, structs))
+    end
+    ret_c = String(get(get(func, "return_type", Dict()), "c_type", "void"))
+    kind, key = by_value_crossing(ret_c, structs, Dict{String,Any}())
+    kind === :conflict && push!(out, "returns `$ret_c` by value" * _conflict_detail(ret_c, key, structs))
+    return out
+end
+
+# ", which holds `impl` by value, and distinct records in this library are
+# named `impl` (8 and 24 bytes)": the rest of a `conflict_crossings` phrase for
+# the crossing of `c_type` whose conflicted entry is `key`.
+function _conflict_detail(c_type::AbstractString, key::AbstractString, structs)::String
+    is_enum = startswith(key, "__enum__")
+    name = is_enum ? key[length("__enum__")+1:end] : String(key)
+    own = _table_entry(_strip_top_cv(c_type), structs)[2]
+    held = own == key ? "" : ", which holds `$name` by value"
+    sizes = get(get(structs, key, Dict()), "conflict_sizes", nothing)
+    if is_enum
+        sizes === nothing &&
+            return "$held, and distinct enums in this library are named `$name`; this metadata " *
+                   "does not record their widths (rebuild to record them)"
+        return "$held, and enums of different widths in this library are named `$name` ($(_bytes_phrase(sizes)))"
+    end
+    what = "$held, and distinct records in this library are named `$name`"
+    (sizes === nothing || isempty(sizes)) && return what
+    return "$what ($(length(unique(sizes)) == 1 ? "all " : "")$(_bytes_phrase(sizes)))"
+end
+
+function _bytes_phrase(sizes)::String
+    s = string.(sort(unique(Int.(sizes))))
+    return (length(s) == 1 ? s[1] : join(s[1:end-1], ", ") * " and " * s[end]) * " bytes"
 end
 
 """
@@ -223,8 +358,12 @@ end
 
 The per-function answer both generators act on: `params` (one
 `by_value_crossing` per DWARF parameter, `this` excluded), `ret`, and `trap` —
-a human-readable reason when some crossing is `:opaque`, or when the return is
-`:indirect` (an sret the thunk does not model), else `nothing`.
+a human-readable reason when some crossing is `:opaque` or `:conflict`, or when
+the return is `:indirect` (an sret the thunk does not model), else `nothing`.
+`layout_trap` and `conflict_trap` split `trap` by cause, because the Julia
+stub explains them differently: `layout_trap` holds the reasons it has always
+explained as a layout missing from DWARF, which a build flag can recover, and
+`conflict_trap` the names several types share, which no flag can.
 """
 function thunk_crossings(func, structs, record_abi)
     # Typed so the thunk generator can prepend `this` as (:direct, nothing).
@@ -246,8 +385,12 @@ function thunk_crossings(func, structs, record_abi)
         push!(reasons, "returns `$ret_c` by value" * sse_note)
     ret[1] === :indirect && push!(reasons,
         "returns `$ret_c` by value, which C++ returns through a hidden pointer the thunk does not pass")
+    conflicts = conflict_crossings(func, structs)
+    all_reasons = vcat(reasons, conflicts)
     return (params = params, ret = ret,
-            trap = isempty(reasons) ? nothing : join(reasons, "; "))
+            trap = isempty(all_reasons) ? nothing : join(all_reasons, "; "),
+            layout_trap = isempty(reasons) ? nothing : join(reasons, "; "),
+            conflict_trap = isempty(conflicts) ? nothing : join(conflicts, "; "))
 end
 
 """

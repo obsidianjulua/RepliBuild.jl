@@ -2682,7 +2682,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 func_name, mangled, va_julia_name,
                 va_params, va_return, overloads,
                 generate_docs, demangled, :c,
-                cstring_free=get(config.wrap.cstring_owned, func_name, "")
+                cstring_free=get(config.wrap.cstring_owned, func_name, ""),
+                conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs)
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -2907,6 +2908,24 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                    _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
+        end
+
+        # A record whose name several types share in this library (two `.c`
+        # files each defining their own `struct state`), or an enum whose
+        # definitions differ in width, held by value at any depth: the Julia
+        # type is the definition the metadata kept, which need not be this
+        # function's. Trapped before BRANCH 0, so no sret buffer and no
+        # convenience overload is emitted for it either; both would ccall.
+        conflicts = JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs)
+        if !isempty(conflicts)
+            push!(func_chunks, """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_conflict_trap_body(julia_name, conflicts))end
+
+            """)
+            push!(exports, julia_name)
+            continue
         end
 
         # =========================================================

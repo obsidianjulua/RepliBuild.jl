@@ -2844,7 +2844,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 func_name, mangled, va_julia_name,
                 params, return_type, overloads,
                 generate_docs, demangled, :cpp,
-                cstring_free=get(config.wrap.cstring_owned, func_name, "")
+                cstring_free=get(config.wrap.cstring_owned, func_name, ""),
+                conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs)
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -2994,15 +2995,23 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # own) used to become a pointer in the thunk — plausible wrong
             # answers, NaN, or a segfault — so the call is refused where it is
             # made, with the reason, and the rest of the wrapper still loads.
+            # A record whose name several types share (`conflict_trap`) is
+            # refused the same way: the thunk would lay out whichever one the
+            # metadata kept.
             crossings = JLCSIRGenerator.FunctionGen.thunk_crossings(func, dwarf_structs, record_abi)
             if crossings.trap !== nothing
-                trap_msg = "ABI Safety Trap: cannot call '$julia_name' ($demangled). " *
-                    "It $(crossings.trap), and that record's layout is not in this " *
-                    "library's DWARF, so no call could pass it correctly. A type " *
-                    "only declared here (header-only, constructor homing) is " *
-                    "recovered by building with `-Xclang -fno-use-ctor-homing` or " *
-                    "`-fstandalone-debug` in [compile] flags; otherwise keep the " *
-                    "function out with [wrap] exclude_symbols."
+                trap_msg = "ABI Safety Trap: cannot call '$julia_name' ($demangled)."
+                if crossings.layout_trap !== nothing
+                    trap_msg *= " It $(crossings.layout_trap), and that record's layout is not in this " *
+                        "library's DWARF, so no call could pass it correctly. A type " *
+                        "only declared here (header-only, constructor homing) is " *
+                        "recovered by building with `-Xclang -fno-use-ctor-homing` or " *
+                        "`-fstandalone-debug` in [compile] flags; otherwise keep the " *
+                        "function out with [wrap] exclude_symbols."
+                end
+                if crossings.conflict_trap !== nothing
+                    trap_msg *= " It $(crossings.conflict_trap). " * _CONFLICT_TRAP_NOTE
+                end
                 push!(func_chunks, """
                 $doc_comment
                 function $julia_name($param_sig)

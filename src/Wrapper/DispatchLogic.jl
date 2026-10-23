@@ -146,6 +146,10 @@ function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
             s = String(t)
             (isempty(s) || occursin(r"[*&(\[]", s)) && continue
             FG.record_passes_by_reference(s, nothing, record_abi) && return false
+            # A name several types share (`FG.conflicted_within`): the Julia
+            # struct is one of them, maybe not this function's. The thunk path
+            # is where the trap is emitted.
+            FG.by_value_crossing(s, dwarf_structs, record_abi)[1] === :conflict && return false
         end
     end
 

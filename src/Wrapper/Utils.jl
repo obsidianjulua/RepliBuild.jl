@@ -2456,6 +2456,25 @@ _x87_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
         "cannot return it (x87 register ST0) or pass it (x87 memory class). Keep it " *
         "out with [wrap] exclude_symbols, or wrap a `double`-typed shim.") * ")\n"
 
+# Why a by-value crossing of a name several types share is refused: the text
+# after the `FunctionGen.conflict_crossings` phrases in every generator's stub.
+const _CONFLICT_TRAP_NOTE =
+    "RepliBuild keys types by their bare DWARF name and keeps one definition per " *
+    "name, which need not be the one this function means, so no call could pass " *
+    "it correctly. Keep the function out with [wrap] exclude_symbols."
+
+"""
+    _conflict_trap_body(julia_name, crossings) -> String
+
+The body of the trap `FunctionGen.conflict_crossings` calls for on the ccall
+paths: GeneratorC's, and the varargs path of both generators. GeneratorCpp's
+thunk path raises the same text from `thunk_crossings`.
+"""
+_conflict_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name'. It $(join(crossings, "; ")). " *
+        _CONFLICT_TRAP_NOTE) * ")\n"
+
 # A chunk whose function body only raises one of the generators' refusal
 # errors: GeneratorC's "ABI Safety Trap" / "FFI Safety Trap" stubs and
 # GeneratorCpp's untypable by-value record trap.
