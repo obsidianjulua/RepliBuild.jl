@@ -1494,7 +1494,8 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
                                   params::Vector, return_type,
                                   overloads::Vector{Vector{String}},
                                   generate_docs::Bool, demangled::String, lang::Symbol;
-                                  cstring_free::String="")
+                                  cstring_free::String="",
+                                  conflicts::Vector{String}=String[])
     code = ""
     export_names = String[]
 
@@ -1504,6 +1505,30 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
     if length(unique(overloads)) != length(overloads)
         error("RepliBuild: duplicate overload signature in [wrap.varargs.$func_name] — " *
               "each entry must list a distinct variadic type tuple.")
+    end
+
+    # A fixed parameter or the return crosses by value a record whose name
+    # several types share (`conflicts`, from `FunctionGen.conflict_crossings`):
+    # every @ccall below would declare whichever definition the metadata kept.
+    # This path `continue`s past both generators' own trap, so it traps here,
+    # under every name it would have defined.
+    if !isempty(conflicts)
+        names = vcat(julia_name, ["$(julia_name)_$(join(map(_vararg_name_part, va_types), "_"))"
+                                  for va_types in overloads])
+        trap = join(("""
+            \"\"\"
+                $n(args...)
+
+            **Unavailable.** `$demangled` passes a type by value whose name several types
+            in this library share, so no call can be emitted for it. The error says which.
+
+            - Mangled symbol: `$mangled`
+            \"\"\"
+            function $n(args...)
+            $(_conflict_trap_body(n, conflicts))end
+
+            """ for n in names), "")
+        return (trap, names)
     end
 
     # Build fixed parameter info

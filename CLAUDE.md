@@ -381,12 +381,20 @@ the test named when you touch the area.
 - **Types are keyed by bare name, and one name can have several definitions**: the
   same type spelled differently by C and C++ units (`_Bool`/`bool`, `_anon1`/`data`),
   or distinct types sharing a name (a pimpl `impl` per class). `_canonical_definition`
-  keeps one by content and marks `conflict` when layouts differ. A pass that lets one
+  keeps one by content and marks `conflict` when layouts differ, with every
+  definition's size in `conflict_sizes`. A pass that lets one
   DIE win iterates `_die_order`, never `type_refs`, whose hash order moves with the
   Julia release and every offset shift. Everything downstream keys on the bare name
   (`resolve_type`, member and signature `c_type`s, `_cpp_innermost_scope`), so
   qualified keys would be a cross-cutting change. (`test_emission_determinism.jl`,
   devtests `test_determinism_fixture.jl`.)
+- **No call passes a conflicted name by value**, nor a record holding one by value
+  at any depth. An enum crosses as an integer of its width, so it traps only when
+  its `conflict_sizes` differ. `FunctionGen.conflicted_within` is the one walk:
+  `by_value_crossing` returns `:conflict`, `is_ccall_safe` sends a C++ function to
+  BRANCH 1's trap, and GeneratorC and the shared varargs path trap with
+  `_conflict_trap_body`. (`test_conflicted_names.jl`, devtests
+  `test_conflict_trap_fixture.jl`.)
 - **Two parsers, two dialects.** `Compiler.jl` parses **GNU binutils** output only
   (readelf on Linux, GNU objdump on Windows; byte-identical). `DWARFParser.jl` parses
   llvm-dwarfdump. Never copy a regex between them, and never route the readelf
@@ -772,11 +780,13 @@ check before claiming portability again; reading `.gitignore` does not settle it
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them
-  (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). Every
-  reference by that name gets the kept layout. A by-value crossing of one does too,
-  because `by_value_crossing` asks the struct table before `record_abi`, whose
-  `conflict` would make it an ABI trap. Disambiguating needs scoped names through
-  `resolve_type`, the generators and the thunks.
+  (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). A by-value
+  crossing of one is an ABI trap, but every other reference by that name gets the
+  kept layout: a `Ptr{T}`/`Ref{T}` parameter, a method's receiver, a global, a
+  field of another record. No wrapped Hub function reached one by value or those
+  ways when measured. Disambiguating needs scoped names through `resolve_type`, the
+  generators and the thunks, and C's case (two `.c` files, two `struct state`s) has
+  no scope to qualify by.
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles
   it: their Tier 1 code makes the reads 4.2.1 fixed. 4.2.0 is capped at `"9"`.
