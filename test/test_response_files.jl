@@ -11,11 +11,16 @@
 # swapped for the system clang without a word when it did not start.
 #
 # No toolchain: the writer is pure, and a missing program is enough for a spawn
-# failure. test_link_cmdline_limit.jl (devtests) runs the real llvm-link and
-# clang over these files and builds a project past the limit.
+# failure. The one fallback to the system clang needs a system LLVM and is
+# skipped without one. test_link_cmdline_limit.jl (devtests) runs the real
+# llvm-link and clang over these files and builds a project past the limit.
 
 using Test
 using RepliBuild
+
+isdefined(@__MODULE__, :TestSupport) ||
+    include(joinpath(@__DIR__, "support", "TestSupport.jl"))
+using .TestSupport
 
 const _RSP_C  = RepliBuild.Compiler
 const _RSP_BB = RepliBuild.BuildBridge
@@ -141,9 +146,13 @@ end
     @test occursin("Clang_unified_jll", out) && occursin(missing_clang, out)
 
     # A JLL that cannot be loaded still falls back to the system clang, through
-    # BuildBridge: its own spawn report, without the JLL's.
-    (out, code) = _RSP_C._clang_for_c_bucket("clang", too_long; jll = () -> nothing)
-    @test code == _RSP_BB.SPAWN_FAILED
-    @test startswith(out, "could not start ")
-    @test !occursin("Clang_unified_jll", out)
+    # BuildBridge: its own spawn report, without the JLL's. BuildBridge finds
+    # that clang through the system LLVM, which a runtests CI runner does not
+    # have: there `execute` raises before anything is started.
+    if requires("the C bucket's fallback to the system clang", :llvm)
+        (out, code) = _RSP_C._clang_for_c_bucket("clang", too_long; jll = () -> nothing)
+        @test code == _RSP_BB.SPAWN_FAILED
+        @test startswith(out, "could not start ")
+        @test !occursin("Clang_unified_jll", out)
+    end
 end
