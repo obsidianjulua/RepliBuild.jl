@@ -45,7 +45,8 @@ members are bit flags is an integer alias plus named constants instead, so
 parameter is declared with a typedef that the headers spell
 (`typedef int (*progress_cb)(int done, void *user);`), its docstring shows the
 `@cfunction` call for that signature. A parameter declared without one gets no
-example, rather than a guess.
+example, rather than a guess. Its docstring shows the signature DWARF records,
+such as `function_ptr(int; int, int)*` for `int (*)(int, int)`.
 
 **Globals.** A value accessor plus a `_ptr` accessor. Unprovable types get the
 pointer only.

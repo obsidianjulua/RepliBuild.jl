@@ -676,8 +676,11 @@ function _struct_has_float_member(struct_name::String, dwarf_structs, seen::Set{
     info === nothing && return true
     for m in get(info, "members", [])
         ct = String(strip(get(m, "c_type", "")))
-        endswith(ct, "*") && continue
-        endswith(ct, "&") && continue
+        # An array is its element: `float*[4]` holds pointers, and so does
+        # `function_ptr(void; float)*[2]`, whose `float` is in the signature.
+        el = replace(ct, r"(?:\[\d*\])+$" => "")
+        endswith(el, "*") && continue
+        endswith(el, "&") && continue
         occursin("float", ct) && return true
         occursin("double", ct) && return true
         base = String(strip(replace(replace(ct, r"\[\d*\]" => ""), r"\bconst\b" => "")))
@@ -2784,8 +2787,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     end
 
                     # Second: the header signature of the typedef this parameter is
-                    # declared with, when it has one. DWARF's own signature has no
-                    # parameter list, so it never yields an example by itself.
+                    # declared with, when it has one. DWARF's own signature keeps the
+                    # pointer's `*`, which parse_function_pointer_signature does not
+                    # accept, so by itself it is shown as text and gives no example.
                     td_sig = _callback_typedef_signature(param, metadata)
                     td_sig === nothing || (fp_sig = td_sig)
 
@@ -2801,8 +2805,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                 callback = @cfunction($julia_sig) Ptr{Cvoid}
                                 ```""")
                         else
-                            # Fallback if parsing fails
-                            push!(arg_docs, "- `$(name)::$(julia_type)` - Callback function (signature: $fp_sig)")
+                            # Fallback if parsing fails. The text goes into a
+                            # docstring, where `\` escapes and `$` interpolates.
+                            push!(arg_docs, "- `$(name)::$(julia_type)` - Callback function (signature: $(escape_string(fp_sig, '$')))")
                         end
                     else
                         # No signature info available

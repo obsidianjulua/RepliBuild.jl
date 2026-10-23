@@ -369,6 +369,12 @@ the test named when you touch the area.
   with `copy`. Parameters must be **direct children** of the subprogram.
   `check_param_arity!` hard-errors on an over-count, since that would emit a wrong
   ccall. (`test_dwarf_attribution.jl`.)
+- **A type's parts are collected in pass 1, before pass 2 resolves any signature.**
+  That includes a subroutine type's parameters (its direct-child formal parameters,
+  then `...` for `DW_TAG_unspecified_parameters`): clang emits a type after the
+  first function that uses it. `resolve_type` gives each branch of a signature its
+  own cycle guard (`copy(visited)`); a shared one made the second `int` of
+  `int (*)(int, int)` a cycle. (`test_dwarf_attribution.jl`.)
 - By-value aggregate returns through a typedef are repaired in a post-pass (type and
   size). Do **not** swap the return mapper for the parameter mapper: it maps `char*`
   differently and would dismantle the Cstring policy.
@@ -488,8 +494,9 @@ the test named when you touch the area.
   regression diff below breaks, and a wrapper changes with the Julia release.
 - **A callback's `@cfunction` example comes from the typedef its parameter is
   declared with** (`function_pointer_typedef`, `_callback_typedef_signature`), or
-  there is none. DWARF's own signature has no parameter list, and matching typedef
-  names against parameter names documented other callbacks' signatures.
+  there is none: matching typedef names against parameter names documented other
+  callbacks' signatures. DWARF's own signature (`function_ptr(R; P1, P2)*`) is
+  shown as text, escaped for the docstring.
 - Validate generated or bulk-edited Julia with `Meta.parseall` **and** check for
   `head in (:incomplete, :error)`. It does not throw on an unterminated file.
   `module 3x` parses as a module named `3`, so `_assert_wrapper_parses` also
@@ -760,6 +767,12 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
+- **`const void` resolves to `unknown`** (2026-10-23). A `DW_TAG_const_type` with
+  no `DW_AT_type` is `const void`, but `resolve_type` answers `"unknown"` for it
+  (a target-less pointer and `volatile`/`restrict`/`_Atomic` fall back to `void`),
+  so every `const void *` `c_type` is `unknown*`.
+  Its `julia_type` is still `Ptr{Cvoid}`, so calls are right; the spelling is
+  wrong in metadata and in callback signatures. llama.cpp's tables have 1257.
 - **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
   GeneratorCpp's own ccall path has no aligned buffer; only a record-level
   `alignment` keeps a function off it, so a member-level `alignas` record can
@@ -827,11 +840,11 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
-- DWARF function-pointer signatures with parameter lists. Pass 2 of
-  `parse_dwarf_dump` never opens a `DW_TAG_subroutine_type`'s context, so its
-  formal parameters are not collected: a four-argument callback is
-  `function_ptr(bool)*`. With them a callback's `@cfunction` example would need no
-  header typedef (2026-10-23).
+- A `@cfunction` example from the DWARF signature for a callback parameter with no
+  header typedef. The signature is complete (`function_ptr(R; P1, P2)*`), but
+  `parse_function_pointer_signature` reads header spellings: it splits on every
+  comma, and it drops a last word it takes for a parameter name, so `unsigned int`
+  would be `unsigned` (2026-10-23).
 - Template parameters from GNU binutils dumps. binutils spells the tags
   `DW_TAG_template_type_param` and `DW_TAG_template_value_param`, which the
   parser's `…_parameter` match never sees, so `template_params` is always empty

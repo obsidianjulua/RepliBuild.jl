@@ -481,6 +481,14 @@ include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
 
 include(joinpath(@__DIR__, "test_emission_determinism.jl"))
 
+# ── Consumers of a function-pointer c_type with a parameter list ────────────
+# DWARF function pointers had no parameter lists until the parser collected a
+# subroutine type's parameters. With them a c_type holds brackets, words and
+# text that its consumers once never saw: array extents, the float-member
+# check, surface reachability and the callback docstring.
+
+include(joinpath(@__DIR__, "test_function_pointer_types.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

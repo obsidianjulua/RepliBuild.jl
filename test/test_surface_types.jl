@@ -11,8 +11,8 @@
 # wrapper does not load at all.
 #
 # OPT-IN, and these tests pin why it must stay opt-in: md4c's whole API is SAX
-# callbacks, a `function_ptr(int)*` member erases its signature types, and its
-# reachable set is genuinely 2 of 36 while it ships 231/231 on the other 34.
+# callbacks, each handed its detail struct as `void *`, which no signature
+# names, and its reachable set was 2 of 36 while it ships 231/231 on the other 34.
 #
 # Library-free: synthetic metadata, no toolchain.
 
@@ -186,10 +186,10 @@ end
     end
 
     @testset "default is OFF, and that is load-bearing" begin
-        # md4c is the reason. Its reachable set is 2 of 36 — every MD_*_DETAIL
-        # struct a user needs to write a callback is invisible, because
-        # `function_ptr(int)*` members erase their signature types. Flipping this
-        # default on would silently gut a package that ships 231/231 today.
+        # md4c is the reason. Its reachable set was 2 of 36 — every MD_*_DETAIL
+        # struct a user needs to write a callback is invisible, because the
+        # callbacks receive them as `void *`. Flipping this default on would
+        # silently gut a package that ships 231/231 today.
         dir = mktempdir()
         try
             toml = joinpath(dir, "replibuild.toml")
