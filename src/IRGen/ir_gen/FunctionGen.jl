@@ -10,16 +10,21 @@ export generate_function_thunks
 
 Fuzzy-match a C type name against struct definition keys.
 DWARF keys often have trailing " >" nesting artifacts from template types.
+Of several fuzzy matches, the smallest key: the first one met was the first in
+the Dict's order, so a thunk's by-value layout could change with the Julia
+release. GeneratorCpp's `_fuzzy_dwarf_lookup` answers the same way.
 """
 function _fuzzy_struct_lookup(c_type::String, structs::Any)
     haskey(structs, c_type) && return c_type
     key = c_type * " >"
     haskey(structs, key) && return key
     c_norm = rstrip(c_type, [' ', '>'])
+    hit = nothing
     for k in keys(structs)
-        rstrip(String(k), [' ', '>']) == c_norm && return String(k)
+        s = String(k)
+        rstrip(s, [' ', '>']) == c_norm && (hit === nothing || s < hit) && (hit = s)
     end
-    return nothing
+    return hit
 end
 
 """

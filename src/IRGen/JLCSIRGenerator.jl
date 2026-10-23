@@ -122,6 +122,16 @@ function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
 end
 
 """
+    _sorted_classes(vtinfo) -> Vector{Pair{String,ClassInfo}}
+
+`vtinfo.classes` by class name. It is a Dict, so iterating it directly ordered
+the emitted declarations and type_info ops by hash, which changes with the Julia
+release, and let that order decide which class a shared mangled name's vcall
+entry came from.
+"""
+_sorted_classes(vtinfo) = sort!(collect(vtinfo.classes); by = first)
+
+"""
     _sanitize_mlir_symbol(name) -> String
 
 C++ type name → valid MLIR symbol identifier (shared by type_info emission
@@ -365,7 +375,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         Set{String}(get(f, "mangled", "") for f in get(metadata, "functions", []))
 
     gen_pre = Set{String}()
-    for (class_name, class_info) in vtinfo.classes
+    for (class_name, class_info) in _sorted_classes(vtinfo)
         (class_info.size == 0 || isempty(class_info.members)) && continue
         for method in class_info.virtual_methods
             get(vtinfo.method_addresses, method.mangled_name, UInt64(0)) == 0 && continue
@@ -407,7 +417,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     # A genuine signature conflict would be a different bug and must not be
     # silently collapsed, so it is reported instead.
     declared_vmethods = Dict{String,String}()
-    for (class_name, class_info) in vtinfo.classes
+    for (class_name, class_info) in _sorted_classes(vtinfo)
         for method in class_info.virtual_methods
              method_addr = get(vtinfo.method_addresses, method.mangled_name, UInt64(0))
              if method_addr != 0
@@ -439,7 +449,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     # 3. Generate Type Info & VMethods
     generated_symbols = Set{String}()
 
-    for (class_name, class_info) in vtinfo.classes
+    for (class_name, class_info) in _sorted_classes(vtinfo)
         if class_info.size == 0; continue; end
         # Skip classes with no members (empty tag types, stdlib internals, etc.)
         if isempty(class_info.members); continue; end
@@ -513,7 +523,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         # finalizers and the RAII producer require exact-class direct calls,
         # not dynamic dispatch.
         vcall_info = Dict{String, NamedTuple{(:class, :slot, :vtable_offset), Tuple{String,Int,Int}}}()
-        for (class_name, class_info) in vtinfo.classes
+        for (class_name, class_info) in _sorted_classes(vtinfo)
             (class_info.size == 0 || isempty(class_info.members)) && continue
             cls_sym = _sanitize_mlir_symbol(class_name)
             for method in class_info.virtual_methods

@@ -831,7 +831,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     header_enums = get(metadata, "header_enums", Dict())
     if !isempty(header_enums)
         added_header_enums = 0
-        for (enum_name, members) in header_enums
+        # Sorted: emission order must not follow the Dict's (see the DWARF enums).
+        for enum_name in sort!(collect(keys(header_enums)); by = string)
+            members = header_enums[enum_name]
             # Skip if already defined from DWARF (match on the raw name)
             if enum_name in enum_names
                 continue
@@ -914,7 +916,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
     # Create a mapping from sanitized Julia name back to raw C++ name for resolving dependencies
     julia_to_cpp_struct = Dict{String, String}()
-    for struct_name in struct_types
+    # Sorted, so of two names that sanitize alike the same one is kept every time.
+    for struct_name in sort!(collect(struct_types))
         julia_to_cpp_struct[_sanitize_cpp_type_name(struct_name)] = struct_name
     end
 
@@ -2019,13 +2022,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     if !isnothing(best_key) && haskey(dwarf_structs, best_key)
                                         nested_info = dwarf_structs[best_key]
                                     else
-                                        # Fallback: search all structs for sanitized name match
-                                        for (sk, sv) in dwarf_structs
-                                            if _sanitize_cpp_type_name(sk) == m_sanitized
-                                                nested_info = sv
-                                                break
-                                            end
+                                        # Fallback: search all structs for sanitized name
+                                        # match. Of several, the smallest key: the first
+                                        # one met followed the Dict's order.
+                                        hit = nothing
+                                        for sk in keys(dwarf_structs)
+                                            k = String(sk)
+                                            _sanitize_cpp_type_name(k) == m_sanitized &&
+                                                (hit === nothing || k < hit) && (hit = k)
                                         end
+                                        hit === nothing || (nested_info = dwarf_structs[hit])
                                     end
                                     if !isnothing(nested_info)
                                         nested_bs_str = get(nested_info, "byte_size", "0x0")
@@ -2226,7 +2232,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
         
-        for (var_name, var_info) in global_vars
+        # Sorted: `globals` is a metadata Dict, iterated in hash order.
+        for var_name in sort!(collect(keys(global_vars)); by = string)
+            var_info = global_vars[var_name]
             julia_type = get(var_info, "julia_type", "Any")
             # Sanitize name
             safe_name = make_cpp_identifier(var_name)
@@ -2429,7 +2437,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
         
-        for (s_name, deleter) in deleters
+        # Sorted: `deleters` is a Dict, and its order is the hash order of the
+        # class names, which changes with the Julia release.
+        for s_name in sort!(collect(keys(deleters)))
+            deleter = deleters[s_name]
             # Skip: a full idiomatic wrapper will be generated for this class
             haskey(idiomatic_classes, s_name) && continue
             # Sanitize names
@@ -2937,65 +2948,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         fp_sig = param["function_pointer_signature"]
                     end
 
-                    # Second: Try to match against header typedef signatures (better than DWARF incomplete sigs)
-                    # Even if we have a DWARF signature, prefer typedef if available
-                    if haskey(metadata, "function_pointer_typedefs")
-                        # Try to find the best matching typedef
-                        # Strategy: Match by parameter name similarity or function name
-                        best_typedef = nothing
-                        best_score = 0
-
-                        for (typedef_name, typedef_info) in metadata["function_pointer_typedefs"]
-                            score = 0
-
-                            # Check if typedef name is contained in parameter name or vice versa
-                            # e.g., "TransformCallback" in "callback" or "transform" in "TransformCallback"
-                            typedef_lower = lowercase(typedef_name)
-                            param_lower = lowercase(name)
-                            func_lower = lowercase(func_name)
-
-                            if contains(typedef_lower, param_lower) || contains(param_lower, typedef_lower)
-                                score += 10
-                            end
-
-                            # Check if typedef name is related to function name
-                            # e.g., "Transform" in "register_transform_callback"
-                            typedef_base = replace(typedef_lower, "callback" => "")
-                            if contains(func_lower, typedef_base)
-                                score += 20
-                            end
-
-                            if score > best_score
-                                best_score = score
-                                best_typedef = (typedef_name, typedef_info)
-                            end
-                        end
-
-                        # Use best match, or first typedef if no good match
-                        if !isnothing(best_typedef)
-                            typedef_name, typedef_info = best_typedef
-                            ret_type = typedef_info["return_type"]
-                            params_list = typedef_info["parameters"]
-
-                            # Construct DWARF-style signature for parsing
-                            if isempty(params_list)
-                                fp_sig = "function_ptr($ret_type)"
-                            else
-                                fp_sig = "function_ptr($ret_type; $(join(params_list, ", ")))"
-                            end
-                        elseif !isempty(metadata["function_pointer_typedefs"])
-                            # Fallback: use first typedef
-                            typedef_name, typedef_info = first(metadata["function_pointer_typedefs"])
-                            ret_type = typedef_info["return_type"]
-                            params_list = typedef_info["parameters"]
-
-                            if isempty(params_list)
-                                fp_sig = "function_ptr($ret_type)"
-                            else
-                                fp_sig = "function_ptr($ret_type; $(join(params_list, ", ")))"
-                            end
-                        end
-                    end
+                    # Second: the header signature of the typedef this parameter is
+                    # declared with, when it has one. DWARF's own signature has no
+                    # parameter list, so it never yields an example by itself.
+                    td_sig = _callback_typedef_signature(param, metadata)
+                    td_sig === nothing || (fp_sig = td_sig)
 
                     # Generate documentation if we have a signature
                     if !isnothing(fp_sig)

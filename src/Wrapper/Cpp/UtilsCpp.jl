@@ -127,14 +127,18 @@ end
 
 Fuzzy-match a C type name against DWARF struct definition keys.
 DWARF keys for template types often have trailing " >" nesting artifacts.
+Of several fuzzy matches, the smallest key, so the answer does not follow the
+Dict's order (FunctionGen's `_fuzzy_struct_lookup` gives the same one).
 """
 function _fuzzy_dwarf_lookup(c_type::AbstractString, dwarf_structs)
     haskey(dwarf_structs, c_type) && return String(c_type)
     key = c_type * " >"
     haskey(dwarf_structs, key) && return key
     c_norm = rstrip(c_type, [' ', '>'])
+    hit = nothing
     for k in keys(dwarf_structs)
-        rstrip(String(k), [' ', '>']) == c_norm && return String(k)
+        s = String(k)
+        rstrip(s, [' ', '>']) == c_norm && (hit === nothing || s < hit) && (hit = s)
     end
-    return nothing
+    return hit
 end

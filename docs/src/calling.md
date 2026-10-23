@@ -41,7 +41,11 @@ members are bit flags is an integer alias plus named constants instead, so
 
 **Bitfields.** Accessors that read and write only the field's byte span.
 
-**Function pointers.** `@cfunction`-compatible types, signature in the docstring.
+**Function pointers.** `Ptr{Cvoid}`, which a `@cfunction` converts to. When the
+parameter is declared with a typedef that the headers spell
+(`typedef int (*progress_cb)(int done, void *user);`), its docstring shows the
+`@cfunction` call for that signature. A parameter declared without one gets no
+example, rather than a guess.
 
 **Globals.** A value accessor plus a `_ptr` accessor. Unprovable types get the
 pointer only.

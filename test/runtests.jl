@@ -473,6 +473,14 @@ include(joinpath(@__DIR__, "test_packed_layout.jl"))
 
 include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
 
+# ── Emission does not follow Dict order, the Julia release or DIE offsets ───
+# DWARF extraction kept the last definition in a Dict's hash order, GeneratorCpp
+# emitted Managed blocks in one, callback examples followed one, and IR file
+# names carried `Base.hash`: the same source wrapped differently on Julia 1.12
+# and 1.13, and every upstream bump re-rolled it. Synthetic DWARF, text output.
+
+include(joinpath(@__DIR__, "test_emission_determinism.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

@@ -182,12 +182,29 @@ tear the same output file. Found on llama.cpp, where 195 sources produced 190
 The extension is kept and the parent directory contributes an 8-hex digest, so
 the name stays readable (`ggml.c-3f2a1b9c.ll`) while being a pure function of
 the source path — no dependence on which other files happen to be in the build.
+
+The digest is SHA-256 (`_ir_dir_key`), like every persisted key (see
+`_key_feed!`). It was `Base.hash`, which 1.12 and 1.13 compute differently, so
+switching Julia renamed every IR file: each TU was compiled again, and the old
+set stayed beside the new one in `build/` (2.4 GB for llama.cpp).
 """
 function _ir_output_path(build_dir::AbstractString, source_file::AbstractString)::String
     src = abspath(source_file)
-    dir_key = string(hash(dirname(src)), base=16)
-    dir_key = lpad(last(dir_key, 8), 8, '0')
-    return joinpath(build_dir, string(basename(src), "-", dir_key, ".ll"))
+    return joinpath(build_dir, string(basename(src), "-", _ir_dir_key(dirname(src)), ".ll"))
+end
+
+"""
+    _ir_dir_key(dir) -> String
+
+The 8-hex digest of a source directory in its IR file name: the first 8 hex
+digits of the SHA-256 of `dir` through `_canon_path`, so one directory spelled
+with another drive-letter case or separator on Windows gives one name.
+"""
+function _ir_dir_key(dir::AbstractString)::String
+    ctx = SHA.SHA256_CTX()
+    _key_feed!(ctx, "replibuild-ir-dir-v1")
+    _key_feed!(ctx, _canon_path(dir))
+    return first(bytes2hex(SHA.digest!(ctx)), 8)
 end
 
 _compile_key_path(ir_file::String)::String = ir_file * ".key"
@@ -718,7 +735,9 @@ function compile_to_ir(config::RepliBuildConfig, cpp_files::Vector{String})
 
         prev = get(owner, ir_file, "")
         if !isempty(prev)
-            if abspath(prev) != abspath(cpp_file)
+            # `_canon_path`, as the IR name's directory key is: on Windows
+            # `C:\p\a.c` and `c:/p/a.c` are one file and one IR name.
+            if _canon_path(abspath(prev)) != _canon_path(abspath(cpp_file))
                 error("""
                       Two different sources map to the same IR output:
                         $(prev)
@@ -2175,11 +2194,18 @@ function _template_tu_compile_flags(cpp_file::AbstractString)::Vector{String}
     _is_template_instantiation_tu(cpp_file) ? ["-fno-inline"] : String[]
 end
 
-"Per-file compile fingerprint: the templates TU carries extra flags the others do not."
+"""
+Per-file compile fingerprint: the templates TU carries extra flags the others do
+not. It is written to the IR's `.key` sidecar, so it is SHA-256 (`_key_feed!`):
+under `Base.hash` a Julia switch recompiled the templates TU.
+"""
 function _file_compile_fingerprint(config_fp::String, cpp_file::AbstractString)::String
     isempty(config_fp) && return config_fp
     if _is_template_instantiation_tu(cpp_file)
-        return string(hash((config_fp, "template-tu-fno-inline-v1")), base=16)
+        ctx = SHA.SHA256_CTX()
+        _key_feed!(ctx, config_fp)
+        _key_feed!(ctx, "template-tu-fno-inline-v1")
+        return bytes2hex(SHA.digest!(ctx))
     end
     return config_fp
 end
@@ -5344,9 +5370,17 @@ function parse_dwarf_dump(output::AbstractString;
         end
     end
 
+    # Every pass below that can let one DIE win over another walks the DIEs in
+    # dump order, never in `type_refs`' own order: that is the hash order of the
+    # offset strings, which changes with the Julia release and with every shift
+    # of the offsets. See `_die_order`.
+    pass1_order = _die_order(type_refs)
+
     # Propagate typedef names to anonymous structs, unions, and enums
     # C-style code often defines structs as: typedef struct { ... } Name;
-    for (offset, type_info) in type_refs
+    # `typedef struct { … } A, B;` gives the struct the first name declared.
+    for offset in pass1_order
+        type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", "") == "typedef"
             typedef_name = get(type_info, "name", "")
             target_ref = get(type_info, "target", nothing)
@@ -5434,9 +5468,11 @@ function parse_dwarf_dump(output::AbstractString;
 
     for _round in 1:16
         progressed = false
-        # Deterministic order: type_refs is a Dict, and the synthetic names
-        # (plus their collision suffixes) must not depend on hash order.
-        for parent_off in sort(collect(keys(type_refs)))
+        # Dump order: the synthetic names and their collision suffixes depend
+        # on which parent claims a name first. Sorting the offset STRINGS was
+        # stable for one dump, but not across an upstream edit: "0xff00" sorts
+        # after "0x10000", so an offset gaining a digit reordered two parents.
+        for parent_off in pass1_order
             ti = type_refs[parent_off]
             (isa(ti, Dict) && haskey(ti, "members")) || continue
             pname = get(ti, "name", "")
@@ -5466,6 +5502,9 @@ function parse_dwarf_dump(output::AbstractString;
                     claim_type_name!(base)
                 end
                 child["anonymous"] = true
+                # The type is reachable only through this parent, so the
+                # parent's provenance is its own (see `drops_type`).
+                child["anon_parent"] = parent_off
                 progressed = true
             end
         end
@@ -6275,6 +6314,10 @@ function parse_dwarf_dump(output::AbstractString;
                         # If this is a function pointer, preserve the full signature
                         if startswith(c_type, "function_ptr(")
                             param_dict["function_pointer_signature"] = c_type
+                            # …and the typedef it is declared with, which is what
+                            # its docstring's `@cfunction` example comes from.
+                            fp_td = _function_pointer_typedef(type_ref, type_refs)
+                            fp_td === nothing || (param_dict["function_pointer_typedef"] = fp_td)
                         end
 
                         push!(params_for_this_function, param_dict)
@@ -6308,18 +6351,52 @@ function parse_dwarf_dump(output::AbstractString;
     # scans that found NOTHING — curl is C, so it has zero DW_TAG_inheritance and
     # zero template params. Every C library paid the full bill to build two empty
     # arrays. 415s → 3.5s with this index, byte-identical output.
+    #
+    # Built in dump order (pass 2 added parameter and variable DIEs, so the
+    # order is taken again), which puts each parent's children in declaration
+    # order: template parameters keep the order they are written in.
+    die_order = _die_order(type_refs)
     children_by_parent = Dict{Any,Vector{Any}}()
-    for (_, die) in type_refs
+    for off in die_order
+        die = type_refs[off]
         isa(die, Dict) || continue
         parent = get(die, "parent", nothing)
         parent === nothing && continue
         push!(get!(() -> Any[], children_by_parent, parent), die)
     end
 
-    # Extract struct definitions with member information
+    # A type the provenance gate drops: declared in a toolchain header, or an
+    # anonymous type named after a parent the gate drops. The second is how a
+    # lambda's closure type arrives. It is declared at the lambda, in the
+    # project's source, but it is reached only through the libc++ record that
+    # stores it (`__func<(lambda at <path>:<line>:<col>), …>`), and its name,
+    # taken from that record, carries the lambda's path and line. Emitted, it
+    # was a dead type that changed name whenever the checkout moved or the
+    # source above the lambda gained a line. Measured on llama.cpp: 53 of
+    # them, and no function, global or other struct reached one.
+    function drops_type(ti)
+        ti isa Dict || return false
+        _is_system_decl_file(get(ti, "decl_file_path", "")) && return true
+        parent = get(ti, "anon_parent", nothing)
+        return parent !== nothing && drops_type(get(type_refs, parent, nothing))
+    end
+
+    # Extract struct definitions with member information.
+    #
+    # Keys are the bare DWARF name, as everything downstream keys them
+    # (`resolve_type`, member and signature `c_type`s, a method's innermost
+    # class scope), so one name can have several definitions: the same type in
+    # many compile units, spelled differently by C and C++ (`_Bool`/`bool`, an
+    # anonymous member `_anon1` against a named `data`), with or without a
+    # vtable home's `__clang_vtable`; or distinct types that share a name (a
+    # pimpl `impl` per class). Every definition is collected and one is kept by
+    # content (`_canonical_definition`). The last one written used to win, in
+    # `type_refs`' hash order, so the choice changed with the Julia release.
     struct_defs = Dict{String,Dict{String,Any}}()
+    struct_candidates = Dict{String,Vector{Dict{String,Any}}}()
     record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
-    for (offset, type_info) in type_refs
+    for offset in die_order
+        type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class", "union"]
             struct_name = get(type_info, "name", "unknown")
             if struct_name != "unknown" && struct_name != "unknown_struct" && struct_name != "unknown_class" && struct_name != "unknown_union"
@@ -6478,20 +6555,25 @@ function parse_dwarf_dump(output::AbstractString;
                     # emission point, on the ACTUAL record being written — rather
                     # than post-filtering keeps the intent/output split that has
                     # bitten the generators repeatedly.
-                    if _is_system_decl_file(get(type_info, "decl_file_path", ""))
-                        continue
-                    end
+                    drops_type(type_info) && continue
 
-                    struct_defs[struct_name] = struct_def
+                    push!(get!(() -> Dict{String,Any}[], struct_candidates, struct_name), struct_def)
                 end
             end
         end
     end
+    for (struct_name, defs) in struct_candidates
+        struct_defs[struct_name] = _canonical_definition(defs)
+    end
 
 
-    # Extract enum definitions with enumerator information
+    # Extract enum definitions with enumerator information. Keyed and chosen
+    # like the records above: a nested enum's bare name (`Type`, `State`) can
+    # name several enums.
     enum_defs = Dict{String,Dict{String,Any}}()
-    for (offset, type_info) in type_refs
+    enum_candidates = Dict{String,Vector{Dict{String,Any}}}()
+    for offset in die_order
+        type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", nothing) == "enum"
             enum_name = get(type_info, "name", "unknown")
             if enum_name != "unknown" && enum_name != "unknown_enum"
@@ -6507,16 +6589,19 @@ function parse_dwarf_dump(output::AbstractString;
                 enumerators = get(type_info, "enumerators", [])
 
                 if !isempty(enumerators)
-                    enum_defs[enum_name] = Dict(
+                    push!(get!(() -> Dict{String,Any}[], enum_candidates, enum_name), Dict{String,Any}(
                         "kind" => "enum",
                         "underlying_type" => underlying_c_type,
                         "julia_type" => underlying_julia_type,
                         "byte_size" => get(type_info, "byte_size", "0x04"),
                         "enumerators" => enumerators
-                    )
+                    ))
                 end
             end
         end
+    end
+    for (enum_name, defs) in enum_candidates
+        enum_defs[enum_name] = _canonical_definition(defs)
     end
 
 
@@ -6593,32 +6678,42 @@ function parse_dwarf_dump(output::AbstractString;
         end
     end
     
-    # Process extracted variables into a clean dictionary
+    # Process extracted variables into a clean dictionary. A C++17 inline
+    # variable is defined in every compile unit that uses it, and C and C++
+    # spell a type differently, so the entry is chosen like a record's.
     global_vars = Dict{String,Any}()
-    for (offset, info) in type_refs
-        if isa(info, Dict) && get(info, "kind", nothing) == "variable" && 
+    global_candidates = Dict{String,Vector{Dict{String,Any}}}()
+    for offset in die_order
+        info = type_refs[offset]
+        if isa(info, Dict) && get(info, "kind", nothing) == "variable" &&
            get(info, "external", false) == true && !get(info, "declaration", false)
-           
+
            name = get(info, "name", "unknown")
            type_ref = get(info, "type", nothing)
-           
+
            if name != "unknown" && !isnothing(type_ref)
                c_type = resolve_type(type_ref, type_refs)
                julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
-               
-               global_vars[name] = Dict(
+
+               push!(get!(() -> Dict{String,Any}[], global_candidates, name), Dict{String,Any}(
                    "name" => name,
                    "c_type" => c_type,
                    "julia_type" => julia_type
-               )
+               ))
            end
         end
     end
-    
+    for (name, defs) in global_candidates
+        global_vars[name] = _canonical_definition(defs)
+    end
 
-    # Build typedef resolution table: typedef name -> resolved Julia type
+
+    # Build typedef resolution table: typedef name -> resolved Julia type. A
+    # member typedef's bare name (`value_type`, `size_type`) names one typedef
+    # per class, so of several targets the table keeps one by content too.
     typedef_table = Dict{String,String}()
-    for (offset, type_info) in type_refs
+    for offset in die_order
+        type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", nothing) == "typedef"
             td_name = get(type_info, "name", "")
             if !isempty(td_name)
@@ -6627,7 +6722,8 @@ function parse_dwarf_dump(output::AbstractString;
                     c_type = resolve_type(target_ref, type_refs)
                     julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
                     if julia_type != "Any"
-                        typedef_table[td_name] = julia_type
+                        prev = get(typedef_table, td_name, nothing)
+                        (prev === nothing || julia_type < prev) && (typedef_table[td_name] = julia_type)
                     end
                 end
             end
@@ -6662,6 +6758,42 @@ DW_CC_pass_by_value) or `"reference"` (4, DW_CC_pass_by_reference). `nothing`
 when the attribute is absent, which is every C record.
 """
 _record_pass_convention(cc) = cc == 5 ? "value" : cc == 4 ? "reference" : nothing
+
+"""
+    _function_pointer_typedef(type_ref, type_refs) -> Union{String,Nothing}
+
+The typedef a function-pointer parameter is declared with:
+`ggml_backend_eval_callback` for `ggml_backend_eval_callback callback`. Of a
+chain (`typedef cb_t my_cb;`) the innermost, the typedef of the pointer itself,
+which is the one a header spells `typedef R (*name)(…);`. `nothing` for a
+parameter declared without one (`void (*cb)(int)`).
+
+`resolve_type` resolves through the typedef, so the parameter's `c_type` has
+lost the name, and the signature it keeps has no parameter list (the
+subroutine DIE's parameters are not collected). A docstring's `@cfunction`
+example therefore comes from this typedef's header signature, or is not
+written (`_callback_typedef_signature`).
+"""
+function _function_pointer_typedef(type_ref, type_refs)
+    ref = type_ref
+    name = nothing
+    for _ in 1:16                                  # typedef chains are short; no cycles
+        t = get(type_refs, ref, nothing)
+        t isa Dict || return nothing
+        kind = get(t, "kind", nothing)
+        if kind == "pointer"
+            return name
+        elseif kind == "typedef"
+            n = get(t, "name", nothing)
+            n isa AbstractString && !isempty(n) && (name = String(n))
+        elseif !(kind in ("const", "volatile", "restrict"))
+            return nothing
+        end
+        ref = get(t, "target", nothing)
+        ref === nothing && return nothing
+    end
+    return nothing
+end
 
 """
     _is_vector_type(type_ref, type_refs) -> Bool
@@ -6705,6 +6837,90 @@ function _merge_record_facts!(facts::Dict{String,Dict{String,Any}}, name::String
 end
 
 """
+    _die_order(type_refs) -> Vector{String}
+
+The DIE offsets among `type_refs`' keys, in dump order (numeric offset order).
+
+`type_refs` is a `Dict` keyed by offset strings, so iterating it gives the hash
+order of those strings. That order changes with the Julia release (1.12 and 1.13
+hash strings differently) and with any shift of the offsets, which every upstream
+edit causes. A pass in which one DIE can win over another iterates this instead.
+Keys that are not offsets (`"last_tag_offset"`) are left out.
+"""
+function _die_order(type_refs::AbstractDict)::Vector{String}
+    keyed = Tuple{UInt64,String}[]
+    sizehint!(keyed, length(type_refs))
+    for k in keys(type_refs)
+        (k isa AbstractString && startswith(k, "0x")) || continue
+        v = tryparse(UInt64, SubString(k, 3); base = 16)
+        v === nothing || push!(keyed, (v, String(k)))
+    end
+    sort!(keyed; by = first)
+    return String[k for (_, k) in keyed]
+end
+
+"""
+    _canonical_text(x) -> String
+
+`x` as text, with every `Dict`'s keys sorted: equal contents give equal text on
+every Julia release, whatever order the keys were inserted in. The content that
+`_canonical_definition` orders definitions by.
+"""
+_canonical_text(x::AbstractDict) =
+    string("{", join((string(repr(string(k)), "=>", _canonical_text(x[k]))
+                      for k in sort!(collect(keys(x)); by = string)), ","), "}")
+_canonical_text(x::AbstractVector) = string("[", join((_canonical_text(v) for v in x), ","), "]")
+_canonical_text(x) = repr(x)
+
+"""
+    _layout_signature(def) -> String
+
+What two definitions under one name must share to be one type, as opposed to
+spellings of it. For a record: kind, size, alignment, where each placed member
+sits and how big it is, and where each base sits. Member names, member types and
+the members with no place (a static, a vtable home's `__clang_vtable`) are left
+out: those are what C and C++ compile units spell differently. For an enum: size
+and enumerators. Anything else has no layout and gives `""`.
+"""
+function _layout_signature(def::AbstractDict)::String
+    if haskey(def, "members")
+        placed = [(get(m, "offset", nothing), get(m, "size", nothing),
+                   get(m, "bit_size", nothing), get(m, "data_bit_offset", nothing))
+                  for m in def["members"]
+                  if get(m, "offset", nothing) !== nothing || haskey(m, "data_bit_offset")]
+        bases = [(get(b, "offset", 0), get(b, "virtual", false)) for b in get(def, "base_classes", [])]
+        return _canonical_text(Any[get(def, "kind", ""), get(def, "byte_size", nothing),
+                                   get(def, "alignment", nothing), placed, bases])
+    elseif haskey(def, "enumerators")
+        return _canonical_text(Any[get(def, "byte_size", nothing),
+                                   [(get(e, "name", nothing), get(e, "value", nothing))
+                                    for e in def["enumerators"]]])
+    end
+    return ""
+end
+
+"""
+    _canonical_definition(defs) -> Dict
+
+The definition `parse_dwarf_dump` keeps when one bare name has several: the one
+whose `_canonical_text` sorts first. It depends on the definitions alone, not on
+the order they were found in, so neither the Julia release, nor the DIE offsets,
+nor the order of the compile units can move it.
+
+Definitions that agree on `_layout_signature` are one type, differently spelled,
+and any of them is right. Definitions that disagree are distinct types sharing a
+name (a pimpl `impl` per class), and a bare-name key can describe only one: the
+kept one is marked `"conflict"`. It is still the layout every reference by that
+name gets, as it was before.
+"""
+function _canonical_definition(defs::AbstractVector)
+    length(defs) == 1 && return defs[1]
+    best = defs[argmin(map(_canonical_text, defs))]
+    length(unique(map(_layout_signature, defs))) > 1 && (best["conflict"] = true)
+    return best
+end
+
+"""
     _by_value_record_name(c_type) -> Union{String,Nothing}
 
 The record name a by-value parameter or return names, or `nothing` for a
@@ -6733,6 +6949,15 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
 
     # Extract return types and struct definitions from DWARF debug info (if available)
     (dwarf_return_types, struct_defs, global_vars, typedef_table, record_abi) = extract_dwarf_return_types(binary_path)
+
+    # Types are keyed by bare name, so distinct types sharing one (a nested
+    # `impl` per class) keep one definition between them; say which names.
+    conflicted = sort!([replace(k, r"^__enum__" => "enum ") for (k, v) in struct_defs
+                        if get(v, "conflict", false) == true])
+    isempty(conflicted) || println("  metadata: ", length(conflicted) == 1 ? "1 type name has" :
+                                   "$(length(conflicted)) type names have", " distinct definitions, ",
+                                   "one kept for each: ", join(first(conflicted, 8), ", "),
+                                   length(conflicted) > 8 ? ", …" : "")
 
     # Collect struct/enum names for type resolution in function signatures
     sig_struct_names = Set{String}()

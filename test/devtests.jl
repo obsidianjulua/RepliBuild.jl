@@ -339,6 +339,15 @@ include(joinpath(TEST_DIR, "test_c_sret_abi.jl"))
 
 include(joinpath(TEST_DIR, "test_cpp_record_routing.jl"))
 
+# ── 8d. Emission determinism on a real C/C++ build ───────────────────────────
+# A C unit and two C++ units define the same types differently, two pimpl
+# classes share `impl`, and a lambda sits in a std::function. The extracted
+# tables must not move with the DIE offsets or the unit order, the closure type
+# must not be emitted, and the wrapper must not follow the metadata's key order.
+# Needs clang++ and libJLCS.
+
+include(joinpath(TEST_DIR, "test_determinism_fixture.jl"))
+
 # ── 9. Per-file IR cache invalidation on compile-config change ────────────────
 # A compile-flag change must invalidate the per-file IR cache without a manual
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.

@@ -75,3 +75,32 @@ function parse_function_pointer_signature(fp_sig::String, registry::TypeRegistry
     end
 end
 
+"""
+    _callback_typedef_signature(param, metadata) -> Union{String,Nothing}
+
+The signature a callback parameter's `@cfunction` example is built from, in
+`parse_function_pointer_signature`'s input form: the header signature
+(`function_pointer_typedefs`) of the typedef the parameter is declared with
+(`function_pointer_typedef`, recorded from DWARF). `nothing` when the parameter
+has no typedef, or the headers do not spell that typedef, and then the docstring
+has no example. Both generators ask this.
+
+The example used to come from whichever header typedef's name best matched the
+parameter's or the function's name. The score tied often and fell back to the
+first typedef in the table, both in `Dict` order, so the example changed with
+the Julia release, and it was often another callback's: llama.cpp's
+`ggml_backend_compare_graph_backend` documented a signature unrelated to its
+`ggml_backend_eval_callback`. A wrong example is worse than none, since a
+callback built from it is called with the wrong arguments.
+"""
+function _callback_typedef_signature(param, metadata)::Union{String,Nothing}
+    td = get(param, "function_pointer_typedef", nothing)
+    td isa AbstractString || return nothing
+    table = get(metadata, "function_pointer_typedefs", nothing)
+    table isa AbstractDict || return nothing
+    info = get(table, td, nothing)
+    info isa AbstractDict || return nothing
+    ret = info["return_type"]
+    params = info["parameters"]
+    return isempty(params) ? "function_ptr($ret)" : "function_ptr($ret; $(join(params, ", ")))"
+end

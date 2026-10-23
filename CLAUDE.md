@@ -374,7 +374,19 @@ the test named when you touch the area.
   differently and would dismantle the Cstring policy.
 - Anonymous structs/unions get synthesized names (`Parent_u`, `Parent_anonN`), which
   must be pre-sanitized. They are deduplicated across CUs and emitted as aligned
-  opaque regions; C11 anonymous members are injected as fields.
+  opaque regions; C11 anonymous members are injected as fields. One named after a
+  parent the provenance gate drops is dropped with it (`drops_type`): that is a
+  lambda's closure, declared in the project but named after libc++'s
+  `__func<(lambda at <path>:<line>:<col>)>`.
+- **Types are keyed by bare name, and one name can have several definitions**: the
+  same type spelled differently by C and C++ units (`_Bool`/`bool`, `_anon1`/`data`),
+  or distinct types sharing a name (a pimpl `impl` per class). `_canonical_definition`
+  keeps one by content and marks `conflict` when layouts differ. A pass that lets one
+  DIE win iterates `_die_order`, never `type_refs`, whose hash order moves with the
+  Julia release and every offset shift. Everything downstream keys on the bare name
+  (`resolve_type`, member and signature `c_type`s, `_cpp_innermost_scope`), so
+  qualified keys would be a cross-cutting change. (`test_emission_determinism.jl`,
+  devtests `test_determinism_fixture.jl`.)
 - **Two parsers, two dialects.** `Compiler.jl` parses **GNU binutils** output only
   (readelf on Linux, GNU objdump on Windows; byte-identical). `DWARFParser.jl` parses
   llvm-dwarfdump. Never copy a regex between them, and never route the readelf
@@ -470,11 +482,19 @@ the test named when you touch the area.
   the clock into the header otherwise). A new link flag must keep the output a
   function of the inputs: no clock, no temporary path, no randomness
   (`test_reproducible_link.jl`).
-- **Emitted text must not depend on metadata key order.** The generators read
-  metadata back from JSON, and a Dict's or Set's iteration order follows the file's
-  key order, which JSON 0.21 and 1.x write differently. Iterate sorted keys wherever
-  order reaches the wrapper (export lists, STL factories; the struct topo sort breaks
-  ties with `sort(ready)`), or the byte-identical regression diff below breaks.
+- **Emitted text must not depend on Dict or Set order.** A Dict's iteration order
+  is the hash order of its keys, which differs between Julia releases, and for
+  metadata read back from JSON it also follows the file's key order. That holds for
+  a Dict the generator builds itself as much as for metadata. Iterate sorted keys
+  wherever order reaches the wrapper or picks a winner (export lists, STL
+  factories, `Managed` blocks, header enums, globals; the struct topo sort breaks
+  ties with `sort(ready)`), and a lookup with several matches takes the smallest key
+  (`_fuzzy_struct_lookup`, `_fuzzy_dwarf_lookup`). Otherwise the byte-identical
+  regression diff below breaks, and a wrapper changes with the Julia release.
+- **A callback's `@cfunction` example comes from the typedef its parameter is
+  declared with** (`function_pointer_typedef`, `_callback_typedef_signature`), or
+  there is none. DWARF's own signature has no parameter list, and matching typedef
+  names against parameter names documented other callbacks' signatures.
 - Validate generated or bulk-edited Julia with `Meta.parseall` **and** check for
   `head in (:incomplete, :error)`. It does not throw on an unterminated file.
   `module 3x` parses as a module named `3`, so `_assert_wrapper_parses` also
@@ -571,8 +591,10 @@ the test named when you touch the area.
    libLLVM for C, the system clang for C++, plus the triple). A Julia switch
    rebuilds a C project and leaves a C++ one built.
 
-Every persisted key (these two and the registry's `hash_config`) is SHA-256 fed
-through `_key_feed!`, never `Base.hash`, which differs between Julia releases.
+Every persisted key (these two, the registry's `hash_config`, the IR file name's
+directory digest `_ir_dir_key` and the templates TU's `.key` fingerprint) is
+SHA-256 fed through `_key_feed!`, never `Base.hash`, which differs between Julia
+releases.
 3. Registry build cache (`~/.replibuild/builds/<hash>/`, gates `use()`). It includes
    `_generator_fingerprint`: RepliBuild version, HEAD, **and a dirty-tree digest**, so
    uncommitted generator edits miss. `_store_build` copies directories.
@@ -753,6 +775,13 @@ check before claiming portability again; reading `.gitignore` does not settle it
   parameters are safe (LLVM's `byval` lowering puts the copy at 16). A SysV
   record holding a `long double` returns in `st0`, which no Julia type does.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
+- **Distinct types sharing a bare name keep one definition between them**
+  (2026-10-23). It is marked `conflict` in the metadata, and the build names them
+  (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). Every
+  reference by that name gets the kept layout. A by-value crossing of one does too,
+  because `by_value_crossing` asks the struct table before `record_abi`, whose
+  `conflict` would make it an ABI trap. Disambiguating needs scoped names through
+  `resolve_type`, the generators and the thunks.
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles
   it: their Tier 1 code makes the reads 4.2.1 fixed. 4.2.0 is capped at `"9"`.
@@ -803,6 +832,15 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
+- DWARF function-pointer signatures with parameter lists. Pass 2 of
+  `parse_dwarf_dump` never opens a `DW_TAG_subroutine_type`'s context, so its
+  formal parameters are not collected: a four-argument callback is
+  `function_ptr(bool)*`. With them a callback's `@cfunction` example would need no
+  header typedef (2026-10-23).
+- Template parameters from GNU binutils dumps. binutils spells the tags
+  `DW_TAG_template_type_param` and `DW_TAG_template_value_param`, which the
+  parser's `…_parameter` match never sees, so `template_params` is always empty
+  (2026-10-23).
 - STL members that live in the C++ runtime library are unbound: libc++'s
   `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
   them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches

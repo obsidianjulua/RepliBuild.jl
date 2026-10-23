@@ -771,8 +771,14 @@ function generate_struct_definitions(structs::Any)
     
     nodes = String[]
     node_map = Dict{String, Any}() # Name -> Info
-    
-    for (name, info) in structs
+
+    # Sorted, here and in the walk below: `structs` is a Dict, and its order
+    # decided both the alias order and, for an enum and a record sharing a bare
+    # name, which one `!Struct_<name>` described. Records come first and enums
+    # after, so the enum's entry is the one kept, as `by_value_crossing`, which
+    # looks for `__enum__X` before `X`, already decides.
+    for name in sort!(collect(keys(structs)); by = k -> (startswith(string(k), "__enum__"), string(k)))
+        info = structs[name]
         if name in ["int", "float", "double", "bool", "char", "void"]
             continue
         end
@@ -831,7 +837,7 @@ function generate_struct_definitions(structs::Any)
         
         push!(stack, n)
         if haskey(deps, n)
-            for d in deps[n]
+            for d in sort!(collect(deps[n]))
                 visit(d)
             end
         end
