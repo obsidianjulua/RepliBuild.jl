@@ -29,17 +29,38 @@ const _TOOLS = Dict(:clang => "clang", :clangxx => "clang++", :cmake => "cmake",
 """
     have(need::Symbol) -> Bool
 
-`:libJLCS` (the Tier-2 dialect library is built) or a tool on `PATH`: `:clang`,
-`:clangxx`, `:cmake`, `:git`, `:nm`. An unknown name is an error rather than
-`false`, because a misspelt prerequisite would otherwise skip its file forever
-and look like a machine without the tool.
+`:libJLCS` (the Tier-2 dialect library is built), `:llvm` (a system LLVM that
+`LLVMEnvironment.get_toolchain` finds: BuildBridge starts every tool it names
+through it, and the runtests CI runners have none), `:llvm_link` (the llvm-link a
+C++ link runs: BuildBridge starts it by bare name on the `PATH` that
+`LLVMEnvironment.with_llvm_env` sets, which can reach a bin, such as
+apt.llvm.org's `/usr/lib/llvm-N/bin`, that the user's `PATH` does not), or a tool
+on `PATH`:
+`:clang`, `:clangxx`, `:cmake`, `:git`, `:nm`. An unknown name is an error rather
+than `false`, because a misspelt prerequisite would otherwise skip its file
+forever and look like a machine without the tool.
 """
 function have(need::Symbol)
     need === :libJLCS && return isfile(RepliBuild.MLIRNative.libJLCS)
+    need === :llvm && return _system_llvm_found()
+    need === :llvm_link && return _system_llvm_found() &&
+        RepliBuild.LLVMEnvironment.with_llvm_env(() -> Sys.which("llvm-link") !== nothing)
     haskey(_TOOLS, need) ||
         error("TestSupport.have: unknown prerequisite :$need " *
-              "(known: :libJLCS, $(join(sort!([":$k" for k in keys(_TOOLS)]), ", ")))")
+              "(known: :libJLCS, :llvm, :llvm_link, $(join(sort!([":$k" for k in keys(_TOOLS)]), ", ")))")
     return Sys.which(_TOOLS[need]) !== nothing
+end
+
+# `get_toolchain` raises (`error`, so an ErrorException) when it finds no system
+# LLVM; anything else it raises is a bug and propagates.
+function _system_llvm_found()
+    try
+        RepliBuild.LLVMEnvironment.get_toolchain()
+        return true
+    catch e
+        e isa ErrorException || rethrow()
+        return false
+    end
 end
 
 """

@@ -145,7 +145,9 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   failure is a hard error. `[link] fallback = true` selects the external
   `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`.
   Final `.ll → .so` still shells to clang. Check `DW_AT_producer` (`…jl`) to prove a
-  C artifact came from the JLL.
+  C artifact came from the JLL. `_clang_for_c_bucket` uses the system clang only
+  when the JLL cannot be loaded (`_jll_clang()` is `nothing`); a JLL clang that
+  does not start is reported as `BuildBridge.SPAWN_FAILED`, never replaced.
 - **C++ / Tier 2 uses system LLVM+MLIR 21+** (23.1.3 under MSYS2 CLANG64 on the
   reference host, which is Windows; on Linux, CI's `tier2-linux.yml` runs devtests
   against apt.llvm.org's LLVM/MLIR 22 and 23) for the dialect and the external
@@ -762,6 +764,13 @@ changes:
 - PE has no RUNPATH. `[link] link_dirs` DLLs are opened before the library, at the
   build's load check and in the wrapper's `__init__` (`_link_dir_dlls`,
   `_link_dir_preload_snippet`).
+- A command line holds 32,767 characters. A command that takes one argument per
+  translation unit goes through `_args_with_response_file`, which passes a long
+  input list as `@file` (llamacpp + Vulkan, 384 TUs, needed ~39,000). llvm-link
+  reads the file by Windows rules and clang by GNU rules, where `\` escapes, so
+  inputs are written quoted with `/`. A program that never started returns
+  `BuildBridge.SPAWN_FAILED`, not 1: check it before blaming the tool
+  (`test_response_files.jl`, devtests §19).
 - `FILE` is `struct _iobuf`. Bake paths into generated Julia with `repr()` and into
   TOML with `TOML.print`. Read JSON only through `_read_json` (`JSON.parsefile` mmaps
   on 0.21, which blocks deletion, and rejects `use_mmap` on 1.x;

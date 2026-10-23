@@ -447,3 +447,14 @@ include(joinpath(TEST_DIR, "test_debug_inspection.jl"))
 # generated CMakeLists, so no network and no vendored library.
 
 include(joinpath(TEST_DIR, "test_sysconfiggen.jl"))
+
+# ── 19. A link with more inputs than one Windows command line holds ──────────
+# llamacpp with ggml-vulkan (384 TUs) could not link from the Hub's checkout
+# depth: ~39,000 characters of llvm-link command line, past the 32,767
+# CreateProcess accepts. Long input lists now go to a response file, which
+# llvm-link reads by Windows rules and clang by GNU rules; both real tools read
+# one here, on every host. Then 200 one-line TUs at a depth that passes the limit
+# on Windows build end to end. The writer itself is in test_response_files.jl
+# (runtests).
+
+include(joinpath(TEST_DIR, "test_link_cmdline_limit.jl"))

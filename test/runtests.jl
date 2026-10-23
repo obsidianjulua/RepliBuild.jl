@@ -401,6 +401,16 @@ include(joinpath(@__DIR__, "test_portable_paths.jl"))
 
 include(joinpath(@__DIR__, "test_codegen_flags.jl"))
 
+# ── Link inputs past one Windows command line (no toolchain) ─────────────────
+# CreateProcess takes at most 32,767 characters, and llamacpp with ggml-vulkan
+# (384 TUs) linked with ~39,000 from the Hub's checkout depth: llvm-link never
+# started, the warning blamed it with "exit 1", and the clang fallback died with
+# ENAMETOOLONG. Long input lists now go to a response file, and a program that
+# never started is reported as BuildBridge.SPAWN_FAILED. The real tools read
+# those files in test_link_cmdline_limit.jl (devtests).
+
+include(joinpath(@__DIR__, "test_response_files.jl"))
+
 # ── LLVM tool table probes only what get_tool looks up (no toolchain) ────────
 # A 51-name probe at init listed clang-format, mlir-*, FileCheck, clang-20 —
 # none of which get_tool or execute ever asked for. BuildBridge.execute

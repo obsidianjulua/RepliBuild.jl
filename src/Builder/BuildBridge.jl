@@ -44,6 +44,32 @@ function run_command(cmd::Cmd; capture_output::Bool=true, use_llvm_env::Bool=tru
 end
 
 """
+`exitcode` returned when the program never started: it does not exist, or (on
+Windows) its command line is longer than the 32,767 characters CreateProcess
+accepts. No process can report it: a Windows exit code comes back unsigned and a
+Unix one is 0-255. A caller that only tests `exitcode != 0` is unaffected; one
+whose message would blame the tool for failing checks for this first.
+"""
+const SPAWN_FAILED = -1
+
+# Julia reports a program that never started as an IOError reading
+# "could not spawn <the whole command>: <reason> (<UV name>)", where the command
+# is `…` or, for a Cmd that carries an environment (a JLL's), setenv(`…`, [env]).
+# The command is the long part when the reason is ENAMETOOLONG: llamacpp's
+# 384-input link echoed 45 KB of it into one log line. So the message names the
+# program, how big its command line was, and the reason, not the command.
+_is_spawn_failure(e) = e isa Base.IOError && startswith(e.msg, "could not spawn")
+
+function _spawn_failure_message(cmd::Cmd, e::Base.IOError)
+    m = match(r": ([^:]*\([A-Z0-9_]+\))$", e.msg)
+    reason = m === nothing ? first(e.msg, 300) : m.captures[1]
+    isempty(cmd.exec) && return "could not start an empty command: $reason"
+    chars = sum(a -> length(a) + 1, cmd.exec)
+    return "could not start $(first(cmd.exec)) ($(length(cmd.exec) - 1) arguments, " *
+           "$chars characters of command line): $reason"
+end
+
+"""
 Internal command execution implementation
 """
 function _run_command_impl(cmd::Cmd, capture_output::Bool)
@@ -64,6 +90,8 @@ function _run_command_impl(cmd::Cmd, capture_output::Bool)
     catch e
         if isa(e, ProcessFailedException)
             return ("Process failed: $e", 1)
+        elseif _is_spawn_failure(e)
+            return (_spawn_failure_message(cmd, e), SPAWN_FAILED)
         else
             return ("Error: $e", 1)
         end
