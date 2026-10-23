@@ -629,6 +629,7 @@ _ed_text(parsed) = _ED_C._canonical_text(Any[parsed...])
             "header_enums" => Dict{String,Any}(h => Any[("$(h)_ONE", 1), ("$(h)_TWO", 2)]
                                                for h in ["hz", "ha", "hm", "ho", "hb", "hk"]),
             "function_pointer_typedefs" => fp_typedefs,
+            "function_pointer_parameters" => true,
             "timestamp" => "2026-10-22T00:00:00")
     end
 
@@ -662,13 +663,15 @@ _ed_text(parsed) = _ED_C._canonical_text(Any[parsed...])
             @test issorted(hpos)
         end
 
-        @testset "$lang: a callback's example comes from its own typedef, or there is none" begin
+        @testset "$lang: a callback's example comes from its own typedef, or from DWARF" begin
             @test occursin("**Callback `handler`**", code)
             @test occursin("@cfunction(my_callback, Cint, (Cint, Ptr{Cvoid},))", code)
-            # Neither the decoy's signature nor any example for `other`.
+            # Never the decoy's signature. `other` has no typedef, and its
+            # example is its own DWARF signature's.
             @test !occursin("Cdouble, (Cdouble,)", code)
             @test !occursin("Cfloat, (Cfloat,)", code)
-            @test !occursin("**Callback `other`**", code)
+            @test occursin("**Callback `other`**", code)
+            @test occursin("@cfunction(my_callback, Cvoid, ())", code)
         end
     end
 
@@ -679,7 +682,7 @@ _ed_text(parsed) = _ED_C._canonical_text(Any[parsed...])
         @test managed == sort(classes)
     end
 
-    @testset "a callback without typedef metadata gets no example" begin
+    @testset "a callback without typedef metadata has no typedef signature" begin
         p = _ed_p("cb", "Ptr{Cvoid}", "function_ptr(int)*"; function_pointer_typedef = "progress_cb")
         @test _ED_W._callback_typedef_signature(p, Dict{String,Any}("function_pointer_typedefs" => fp_typedefs)) ==
               "function_ptr(int; int, void*)"

@@ -492,11 +492,15 @@ the test named when you touch the area.
   ties with `sort(ready)`), and a lookup with several matches takes the smallest key
   (`_fuzzy_struct_lookup`, `_fuzzy_dwarf_lookup`). Otherwise the byte-identical
   regression diff below breaks, and a wrapper changes with the Julia release.
-- **A callback's `@cfunction` example comes from the typedef its parameter is
-  declared with** (`function_pointer_typedef`, `_callback_typedef_signature`), or
-  there is none: matching typedef names against parameter names documented other
-  callbacks' signatures. DWARF's own signature (`function_ptr(R; P1, P2)*`) is
-  shown as text, escaped for the docstring.
+- **A callback's `@cfunction` example comes from the header typedef its parameter
+  is declared with** (`function_pointer_typedef`, `_callback_typedef_signature`),
+  else from its DWARF signature (`_dwarf_callback_signature`), never from a name
+  match: that documented other callbacks' signatures. The DWARF path strips exactly
+  one pointer, splits at depth 0, and spells each type through the generator's own
+  parameter step (`_ccall_param_type`), and it needs metadata marked
+  `function_pointer_parameters` (older metadata has empty lists). A variadic
+  callback, a pointer to one and an unspellable type get the signature as text,
+  escaped. Both generators document parameters through `_param_docs!`.
 - Validate generated or bulk-edited Julia with `Meta.parseall` **and** check for
   `head in (:incomplete, :error)`. It does not throw on an unterminated file.
   `module 3x` parses as a module named `3`, so `_assert_wrapper_parses` also
@@ -840,11 +844,6 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
-- A `@cfunction` example from the DWARF signature for a callback parameter with no
-  header typedef. The signature is complete (`function_ptr(R; P1, P2)*`), but
-  `parse_function_pointer_signature` reads header spellings: it splits on every
-  comma, and it drops a last word it takes for a parameter name, so `unsigned int`
-  would be `unsigned` (2026-10-23).
 - Template parameters from GNU binutils dumps. binutils spells the tags
   `DW_TAG_template_type_param` and `DW_TAG_template_value_param`, which the
   parser's `…_parameter` match never sees, so `template_params` is always empty

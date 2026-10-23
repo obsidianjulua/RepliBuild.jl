@@ -2662,6 +2662,59 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     _blob_names = @isdefined(blob_struct_names) ? union(blob_struct_names, sse_bytes_struct_names) :
                   Set{String}()
 
+    # A parameter's `ccall` type, from its metadata julia_type. The parameter
+    # loop below spells each parameter so, and a callback's `@cfunction`
+    # example spells the types of its signature so (`_callback_param_type`).
+    function _ccall_param_type(julia_type::AbstractString, c_type_name::AbstractString)::String
+        # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
+        let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+            if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
+                julia_type = "Ptr{Cvoid}"
+            end
+        end
+
+        # Sanitize C++ template types in parameter julia_type (e.g. "Ref{allocator<int> >}")
+        if occursin(r"[<>]", julia_type)
+            m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+            if m !== nothing
+                wrapper_kw, inner = m.captures
+                # If inner type is an STL-internal (allocator<>, char_traits<>, etc.),
+                # fall back to Ptr{Cvoid} — the type is opaque and not user-accessible.
+                if _is_stl_internal_type(String(inner))
+                    julia_type = "Ptr{Cvoid}"
+                else
+                    inner_safe = _sanitize_cpp_type_name(inner)
+                    julia_type = "$wrapper_kw{$inner_safe}"
+                end
+            else
+                julia_type = _sanitize_cpp_type_name(julia_type)
+            end
+        end
+        # Also sanitize namespace separators (::) and other non-identifier chars
+        # that can appear in Ptr{namespace::type} style references from DWARF
+        # Allow spaces (e.g. "NTuple{4, UInt8}") to pass through unsanitized
+        if occursin(r"::|[^A-Za-z0-9_{},\[\] ]", julia_type) && julia_type != "Any"
+            m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+            if m !== nothing
+                wrapper_kw, inner = m.captures
+                inner_safe = _sanitize_cpp_type_name(inner)
+                julia_type = isempty(inner_safe) ? "Ptr{Cvoid}" : "$wrapper_kw{$inner_safe}"
+            else
+                julia_type = _sanitize_cpp_type_name(julia_type)
+            end
+        end
+        julia_type = _record_name_as_emitted(julia_type, emitted_record_names)
+
+        # Determine the actual C type for ccall
+        # If julia_type is "Any" but c_type has a name, it's likely a struct
+        return if julia_type == "Any" && !isempty(c_type_name) && c_type_name in struct_types
+            String(c_type_name)  # Use the struct name directly
+        else
+            julia_type
+        end
+    end
+    _callback_type = _callback_param_type(_ccall_param_type, dwarf_structs)
+
     for func in functions
         func_name = func["name"]
         mangled = func["mangled"]
@@ -2812,56 +2865,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 safe_name = "$(safe_name)_$(i)"
             end
             push!(param_names, safe_name)
-            julia_type = param["julia_type"]
-
-            # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
-            let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
-                if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
-                    julia_type = "Ptr{Cvoid}"
-                end
-            end
-
-            # Sanitize C++ template types in parameter julia_type (e.g. "Ref{allocator<int> >}")
-            if occursin(r"[<>]", julia_type)
-                m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
-                if m !== nothing
-                    wrapper_kw, inner = m.captures
-                    # If inner type is an STL-internal (allocator<>, char_traits<>, etc.),
-                    # fall back to Ptr{Cvoid} — the type is opaque and not user-accessible.
-                    if _is_stl_internal_type(String(inner))
-                        julia_type = "Ptr{Cvoid}"
-                    else
-                        inner_safe = _sanitize_cpp_type_name(inner)
-                        julia_type = "$wrapper_kw{$inner_safe}"
-                    end
-                else
-                    julia_type = _sanitize_cpp_type_name(julia_type)
-                end
-            end
-            # Also sanitize namespace separators (::) and other non-identifier chars
-            # that can appear in Ptr{namespace::type} style references from DWARF
-            # Allow spaces (e.g. "NTuple{4, UInt8}") to pass through unsanitized
-            if occursin(r"::|[^A-Za-z0-9_{},\[\] ]", julia_type) && julia_type != "Any"
-                m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
-                if m !== nothing
-                    wrapper_kw, inner = m.captures
-                    inner_safe = _sanitize_cpp_type_name(inner)
-                    julia_type = isempty(inner_safe) ? "Ptr{Cvoid}" : "$wrapper_kw{$inner_safe}"
-                else
-                    julia_type = _sanitize_cpp_type_name(julia_type)
-                end
-            end
-            julia_type = _record_name_as_emitted(julia_type, emitted_record_names)
-            c_type_name = get(param, "c_type", "")
-
-            # Determine the actual C type for ccall
-            # If julia_type is "Any" but c_type has a name, it's likely a struct
-            actual_c_type = if julia_type == "Any" && !isempty(c_type_name) && c_type_name in struct_types
-                c_type_name  # Use the struct name directly
-            else
-                julia_type
-            end
-
+            actual_c_type = _ccall_param_type(param["julia_type"], get(param, "c_type", ""))
             push!(param_types, actual_c_type)
 
             # Map C integer types to natural Julia types with range checking
@@ -2933,52 +2937,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             arg_docs = String[]
             callback_docs = String[]
 
-            for (i, param) in enumerate(params)
-                name = param["name"]
-                c_type_name = get(param, "c_type", "")
-                julia_type = param["julia_type"]
-
-                # Check if this is a callback parameter (Ptr{Cvoid} from function pointer)
-                if julia_type == "Ptr{Cvoid}" && (startswith(c_type_name, "function_ptr") || contains(c_type_name, "(*"))
-                    # Try to resolve the actual signature from typedef or DWARF
-                    fp_sig = nothing
-
-                    # First: Check if we have a direct function pointer signature from DWARF
-                    if haskey(param, "function_pointer_signature")
-                        fp_sig = param["function_pointer_signature"]
-                    end
-
-                    # Second: the header signature of the typedef this parameter is
-                    # declared with, when it has one. DWARF's own signature keeps the
-                    # pointer's `*`, which parse_function_pointer_signature does not
-                    # accept, so by itself it is shown as text and gives no example.
-                    td_sig = _callback_typedef_signature(param, metadata)
-                    td_sig === nothing || (fp_sig = td_sig)
-
-                    # Generate documentation if we have a signature
-                    if !isnothing(fp_sig)
-                        julia_sig = parse_function_pointer_signature(fp_sig, registry)
-
-                        if !isnothing(julia_sig)
-                            push!(arg_docs, "- `$(name)::Ptr{Cvoid}` - Callback function")
-                            push!(callback_docs, """
-                                **Callback `$name`**: Create using `@cfunction`
-                                ```julia
-                                callback = @cfunction($julia_sig) Ptr{Cvoid}
-                                ```""")
-                        else
-                            # Fallback if parsing fails. The text goes into a
-                            # docstring, where `\` escapes and `$` interpolates.
-                            push!(arg_docs, "- `$(name)::$(julia_type)` - Callback function (signature: $(escape_string(fp_sig, '$')))")
-                        end
-                    else
-                        # No signature info available
-                        push!(arg_docs, "- `$(name)::$(julia_type)` - Callback function (signature unknown)")
-                    end
-                else
-                    # Regular parameter
-                    push!(arg_docs, "- `$(name)::$(julia_type)`")
-                end
+            for param in params
+                _param_docs!(arg_docs, callback_docs, param, metadata, registry, _callback_type)
             end
 
             # Advertise what the function actually returns. Every `char*` return

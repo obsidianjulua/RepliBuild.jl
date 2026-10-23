@@ -6754,8 +6754,8 @@ parameter declared without one (`void (*cb)(int)`).
 
 `resolve_type` resolves through the typedef, so the parameter's `c_type`
 (`function_ptr(R; P1, P2)*`) has lost the name. A docstring's `@cfunction`
-example comes from this typedef's header signature, or is not written
-(`_callback_typedef_signature`).
+example comes from this typedef's header signature (`_callback_typedef_signature`),
+and from that `c_type` when the headers spell none (`_dwarf_callback_signature`).
 """
 function _function_pointer_typedef(type_ref, type_refs)
     ref = type_ref
@@ -7089,6 +7089,10 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         "struct_definitions" => struct_defs,  # Struct member layout from DWARF
         "record_abi" => record_abi,            # By-value records: size, pass convention, empty
         "typedef_table" => typedef_table,      # Typedef name -> Julia type resolution
+        # Function-pointer c_types list their parameters (`function_ptr(R; P1, P2)*`).
+        # Older metadata spells every one `function_ptr(R)*`, so the generators
+        # build a callback's `@cfunction` example from it only when this is set.
+        "function_pointer_parameters" => true,
 
         # STL container method symbols (for JIT thunk generation)
         "stl_methods" => stl_methods,
