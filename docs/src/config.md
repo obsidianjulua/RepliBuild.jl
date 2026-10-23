@@ -528,10 +528,12 @@ seeds from every global: over-inclusion costs unused types, while guessing
 **`surface_types_extra` is the hatch for what reachability structurally cannot
 see**, and it is why this key is opt-in rather than the default. Two blind spots:
 
-- **Callback-only structs.** A `function_ptr(int)*` member erases its signature
-  types, so every struct a user needs in order to *write* the callback is
-  invisible. Hub md4c is entirely this shape — 36 types, reachable set **2** —
-  and it ships 231/231 tests against the other 34.
+- **Callback-only structs.** A callback's parameter types are reached through its
+  signature, but a struct it receives only as `void *` is named nowhere, so a
+  struct a user needs in order to *write* the callback can be invisible. md4c is
+  entirely this shape: every SAX callback gets its `MD_*_DETAIL` struct as
+  `void *`. Measured before callback signatures had parameters, its reachable
+  set was **2** of 36 types, and it ships 231/231 tests against the other 34.
 - **Constant-only enums.** A function returning plain `int` never names its error
   enum, so `argon2`'s `Argon2_ErrorCodes` is unreachable by construction.
 

@@ -41,11 +41,13 @@ members are bit flags is an integer alias plus named constants instead, so
 
 **Bitfields.** Accessors that read and write only the field's byte span.
 
-**Function pointers.** `Ptr{Cvoid}`, which a `@cfunction` converts to. When the
-parameter is declared with a typedef that the headers spell
-(`typedef int (*progress_cb)(int done, void *user);`), its docstring shows the
-`@cfunction` call for that signature. A parameter declared without one gets no
-example, rather than a guess.
+**Function pointers.** `Ptr{Cvoid}`, which a `@cfunction` converts to. The
+docstring shows the `@cfunction` call for the callback's signature: the header's
+when the parameter is declared with a typedef the headers spell
+(`typedef int (*progress_cb)(int done, void *user);`), and otherwise the one DWARF
+records, with each type spelled as the wrapper spells its own parameters. A
+variadic callback, or a pointer to one, has no example; its docstring shows the
+DWARF signature instead, such as `function_ptr(int; const char*, ...)*`.
 
 **Globals.** A value accessor plus a `_ptr` accessor. Unprovable types get the
 pointer only.

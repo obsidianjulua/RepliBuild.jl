@@ -57,7 +57,7 @@ Details and examples for each key: [Edit the TOML](config.md).
 
 | What you see | What to do |
 |--------------|------------|
-| `ABI Safety Trap: cannot call 'f'` | RepliBuild could not prove a safe way to call `f` (a `long double`, or a record it cannot pass by value, for example), so the wrapper has a stub that raises instead of a call that would corrupt memory. The message says which. The rest of the module works. |
+| `ABI Safety Trap: cannot call 'f'` | RepliBuild could not prove a safe way to call `f` (a `long double`, a record it cannot pass by value, or a type whose name several types in the library share, for example), so the wrapper has a stub that raises instead of a call that would corrupt memory. The message says which. The rest of the module works. |
 | `FFI Safety Trap: Cannot call function 'f'` | A type in `f`'s signature has no Julia mapping. Name one under `[types.custom]` (`MyHandle = "Ptr{Cvoid}"`), then build and wrap again. |
 | `C++ exception: …` | The C++ code threw. It arrives as `RepliBuild.JITManager.CxxException`; catch it like any Julia exception. |
 | `MethodError` passing a `Ref` to a struct parameter | A parameter declared as a struct takes the struct itself. Only a pointer parameter (`S*`) takes a `Ref` or a `Ptr`. |

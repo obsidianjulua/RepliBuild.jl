@@ -38,6 +38,24 @@ end
     @test occursin(r"vcat\(\[\"-c\", \"-fPIC\"\], _codegen_opt_flags\(config\)", src)  # per-TU fallback
 end
 
+# The same IR links to the same bytes. A PE image holds its link time, which lld
+# and GNU ld take from the clock unless told not to, so every relink changed a
+# wrapper's LIBRARY_SHA; ELF holds none. Each link of a shipped binary passes
+# the flags. The relinks themselves are in test_reproducible_link.jl (devtests).
+@testset "reproducible link flags" begin
+    @test _CG_C._reproducible_link_flags(windows=true) == ["-Wl,--no-insert-timestamp"]
+    @test _CG_C._reproducible_link_flags(windows=false) == String[]
+    @test _CG_C._reproducible_link_flags() == _CG_C._reproducible_link_flags(windows=Sys.iswindows())
+
+    # A function's text runs to the first `end` in column 0.
+    body(file, name) = something(match(Regex("\\nfunction $name\\(.*?\\nend\\n", "s"),
+                                       read(joinpath(pkgdir(RepliBuild), "src", "Builder", file), String)),
+                                 (; match = "")).match
+    @test occursin("_reproducible_link_flags()", body("Compiler.jl", "create_library"))
+    @test occursin("_reproducible_link_flags()", body("Compiler.jl", "create_executable"))
+    @test occursin("Compiler._reproducible_link_flags()", body("ThunkBuilder.jl", "build_aot_thunks"))
+end
+
 # One LLVM per module. A C++ package routed its .c files to the JLL clang 18 and
 # linked them with LLVM 23's llvm-link, which rejected their debug info and
 # dropped it with a warning: every ggml.c function wrapped from an inferred

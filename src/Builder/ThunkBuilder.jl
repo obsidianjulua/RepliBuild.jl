@@ -136,7 +136,8 @@ function build_aot_thunks(config, library_path;
         # RTLD_GLOBAL. PE cannot: every symbol in a DLL must resolve at link
         # time, so the main library AND libJLCS have to be named here.
         link_args = ["-shared", "-fPIC", "-o", thunks_so, thunks_obj,
-                     "-L", lib_dir, "-l:$lib_name"]
+                     "-L", lib_dir, "-l:$lib_name",
+                     Compiler._reproducible_link_flags()...]
         jlcs = MLIRNative.libJLCS
         isfile(jlcs) && push!(link_args, jlcs)
         if !Sys.iswindows()

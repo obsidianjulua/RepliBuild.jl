@@ -676,8 +676,11 @@ function _struct_has_float_member(struct_name::String, dwarf_structs, seen::Set{
     info === nothing && return true
     for m in get(info, "members", [])
         ct = String(strip(get(m, "c_type", "")))
-        endswith(ct, "*") && continue
-        endswith(ct, "&") && continue
+        # An array is its element: `float*[4]` holds pointers, and so does
+        # `function_ptr(void; float)*[2]`, whose `float` is in the signature.
+        el = replace(ct, r"(?:\[\d*\])+$" => "")
+        endswith(el, "*") && continue
+        endswith(el, "&") && continue
         occursin("float", ct) && return true
         occursin("double", ct) && return true
         base = String(strip(replace(replace(ct, r"\[\d*\]" => ""), r"\bconst\b" => "")))
@@ -2522,6 +2525,58 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         return q
     end
 
+    # A parameter's `ccall` type, from its declared julia_type. The parameter
+    # loop below spells each parameter so, and a callback's `@cfunction`
+    # example spells the types of its signature so (`_callback_param_type`).
+    function _ccall_param_type(julia_type::AbstractString, c_type_name::AbstractString)::String
+        # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
+        let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+            if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
+                julia_type = "Ptr{Cvoid}"
+            end
+        end
+
+        # Sanitize C++ template types in parameter julia_type (e.g. "Ref{allocator<int> >}")
+        if occursin(r"[<>]", julia_type)
+            m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+            if m !== nothing
+                wrapper_kw, inner = m.captures
+                inner_safe = _sanitize_c_type_name(inner)
+                julia_type = "$wrapper_kw{$inner_safe}"
+            else
+                julia_type = _sanitize_c_type_name(julia_type)
+            end
+        end
+        # Also sanitize namespace separators (::) and other non-identifier chars
+        # that can appear in Ptr{namespace::type} style references from DWARF
+        # Allow spaces (e.g. "NTuple{4, UInt8}") to pass through unsanitized
+        if occursin(r"::|[^A-Za-z0-9_{},\[\] ]", julia_type) && julia_type != "Any"
+            m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
+            if m !== nothing
+                wrapper_kw, inner = m.captures
+                inner_safe = _sanitize_c_type_name(inner)
+                julia_type = isempty(inner_safe) ? "Ptr{Cvoid}" : "$wrapper_kw{$inner_safe}"
+            else
+                julia_type = _sanitize_c_type_name(julia_type)
+            end
+        end
+
+        # Determine the actual C type for ccall
+        # If julia_type is "Any" but c_type has a name, it's likely a struct
+        actual_c_type = if julia_type == "Any" && !isempty(c_type_name) && c_type_name in struct_types
+            _as_declared(c_type_name)  # the struct, as it is declared
+        else
+            julia_type
+        end
+
+        # Degrade Ptr{X} to Ptr{Cvoid} when X is never declared in this
+        # module (blocklisted system type, or any name that reached a
+        # signature without reaching the struct emitters). Same ABI.
+        return _resolve_forward_ptr(actual_c_type, emitted_type_names)
+    end
+    _callback_type = _callback_param_type((jt, ct) -> _ccall_param_type(_as_declared(jt), ct),
+                                          dwarf_structs)
+
     for func in functions
         func_name = func["name"]
         mangled = func["mangled"]
@@ -2627,7 +2682,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 func_name, mangled, va_julia_name,
                 va_params, va_return, overloads,
                 generate_docs, demangled, :c,
-                cstring_free=get(config.wrap.cstring_owned, func_name, "")
+                cstring_free=get(config.wrap.cstring_owned, func_name, ""),
+                conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs)
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -2676,54 +2732,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 safe_name = "$(safe_name)_$(i)"
             end
             push!(param_names, safe_name)
-            julia_type = param["julia_type"]
-
-            # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
-            let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
-                if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
-                    julia_type = "Ptr{Cvoid}"
-                end
-            end
-
-            # Sanitize C++ template types in parameter julia_type (e.g. "Ref{allocator<int> >}")
-            if occursin(r"[<>]", julia_type)
-                m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
-                if m !== nothing
-                    wrapper_kw, inner = m.captures
-                    inner_safe = _sanitize_c_type_name(inner)
-                    julia_type = "$wrapper_kw{$inner_safe}"
-                else
-                    julia_type = _sanitize_c_type_name(julia_type)
-                end
-            end
-            # Also sanitize namespace separators (::) and other non-identifier chars
-            # that can appear in Ptr{namespace::type} style references from DWARF
-            # Allow spaces (e.g. "NTuple{4, UInt8}") to pass through unsanitized
-            if occursin(r"::|[^A-Za-z0-9_{},\[\] ]", julia_type) && julia_type != "Any"
-                m = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
-                if m !== nothing
-                    wrapper_kw, inner = m.captures
-                    inner_safe = _sanitize_c_type_name(inner)
-                    julia_type = isempty(inner_safe) ? "Ptr{Cvoid}" : "$wrapper_kw{$inner_safe}"
-                else
-                    julia_type = _sanitize_c_type_name(julia_type)
-                end
-            end
-            c_type_name = get(param, "c_type", "")
-
-            # Determine the actual C type for ccall
-            # If julia_type is "Any" but c_type has a name, it's likely a struct
-            actual_c_type = if julia_type == "Any" && !isempty(c_type_name) && c_type_name in struct_types
-                _as_declared(c_type_name)  # the struct, as it is declared
-            else
-                julia_type
-            end
-
-            # Degrade Ptr{X} to Ptr{Cvoid} when X is never declared in this
-            # module (blocklisted system type, or any name that reached a
-            # signature without reaching the struct emitters). Same ABI.
-            actual_c_type = _resolve_forward_ptr(actual_c_type, emitted_type_names)
-
+            actual_c_type = _ccall_param_type(param["julia_type"], get(param, "c_type", ""))
             push!(param_types, actual_c_type)
 
             # Map C integer types to natural Julia types with range checking
@@ -2768,50 +2777,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             arg_docs = String[]
             callback_docs = String[]
 
-            for (i, param) in enumerate(params)
-                name = param["name"]
-                c_type_name = get(param, "c_type", "")
-                julia_type = param["julia_type"]
-
-                # Check if this is a callback parameter (Ptr{Cvoid} from function pointer)
-                if julia_type == "Ptr{Cvoid}" && (startswith(c_type_name, "function_ptr") || contains(c_type_name, "(*"))
-                    # Try to resolve the actual signature from typedef or DWARF
-                    fp_sig = nothing
-
-                    # First: Check if we have a direct function pointer signature from DWARF
-                    if haskey(param, "function_pointer_signature")
-                        fp_sig = param["function_pointer_signature"]
-                    end
-
-                    # Second: the header signature of the typedef this parameter is
-                    # declared with, when it has one. DWARF's own signature has no
-                    # parameter list, so it never yields an example by itself.
-                    td_sig = _callback_typedef_signature(param, metadata)
-                    td_sig === nothing || (fp_sig = td_sig)
-
-                    # Generate documentation if we have a signature
-                    if !isnothing(fp_sig)
-                        julia_sig = parse_function_pointer_signature(fp_sig, registry)
-
-                        if !isnothing(julia_sig)
-                            push!(arg_docs, "- `$(name)::Ptr{Cvoid}` - Callback function")
-                            push!(callback_docs, """
-                                **Callback `$name`**: Create using `@cfunction`
-                                ```julia
-                                callback = @cfunction($julia_sig) Ptr{Cvoid}
-                                ```""")
-                        else
-                            # Fallback if parsing fails
-                            push!(arg_docs, "- `$(name)::$(julia_type)` - Callback function (signature: $fp_sig)")
-                        end
-                    else
-                        # No signature info available
-                        push!(arg_docs, "- `$(name)::$(julia_type)` - Callback function (signature unknown)")
-                    end
-                else
-                    # Regular parameter
-                    push!(arg_docs, "- `$(name)::$(julia_type)`")
-                end
+            for param in params
+                _param_docs!(arg_docs, callback_docs, param, metadata, registry, _callback_type)
             end
 
             # Build the docstring. Struct returns carry julia_type "Any" in the
@@ -2941,6 +2908,24 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                    _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
+        end
+
+        # A record whose name several types share in this library (two `.c`
+        # files each defining their own `struct state`), or an enum whose
+        # definitions differ in width, held by value at any depth: the Julia
+        # type is the definition the metadata kept, which need not be this
+        # function's. Trapped before BRANCH 0, so no sret buffer and no
+        # convenience overload is emitted for it either; both would ccall.
+        conflicts = JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs)
+        if !isempty(conflicts)
+            push!(func_chunks, """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_conflict_trap_body(julia_name, conflicts))end
+
+            """)
+            push!(exports, julia_name)
+            continue
         end
 
         # =========================================================

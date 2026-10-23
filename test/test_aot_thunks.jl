@@ -182,6 +182,7 @@ end
 
         lib = ""
         cold_slots = Set{String}()
+        cold_thunks = UInt8[]
 
         @testset "cold: build compiles no thunks, the first wrap compiles its own set" begin
             lib = RepliBuild.build(toml)
@@ -190,6 +191,7 @@ end
             @test !isfile(joinpath(dirname(lib), "thunk_manifest.json"))   # no wrap yet
             wrapper = RepliBuild.wrap(toml)
             cold_slots = check_aot_artifacts(lib, wrapper)
+            cold_thunks = read(aot_thunks_path(lib))
 
             # Exactly the set this wrap derived, on its first run. The build-time
             # pass guessed instead, and its guess also emitted thunks for the
@@ -210,6 +212,10 @@ end
             RepliBuild._rm_tree(thunks)
             wrapper = RepliBuild.wrap(toml)
             @test isfile(thunks)
+            # The same set links to the same bytes, although pass 1 linked it a
+            # child process's run earlier: no link time (test_reproducible_link.jl).
+            @test read(thunks) == cold_thunks
+            Sys.iswindows() && @test pe_link_times(thunks).header == 0
             built = Set(n for n in aot_exported_names(thunks) if startswith(n, "_mlir_ciface_"))
             @test built == Set(aot_ciface(m) for m in before)
             @test aot_manifest_set(lib) == before   # wrap derives the same set again

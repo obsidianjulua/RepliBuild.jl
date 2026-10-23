@@ -348,11 +348,28 @@ include(joinpath(TEST_DIR, "test_cpp_record_routing.jl"))
 
 include(joinpath(TEST_DIR, "test_determinism_fixture.jl"))
 
+# ── 8e. A name several types share never crosses by value, live ──────────────
+# Two C++ units give `impl`, `Mode` and `Kind` two definitions each, and two C
+# files each define their own `struct state`. Every function one of them
+# crosses by value must be a trap with no thunk; the rest must keep their tier
+# and return the right values. The C++ half needs clang++ and libJLCS.
+
+include(joinpath(TEST_DIR, "test_conflict_trap_fixture.jl"))
+
 # ── 9. Per-file IR cache invalidation on compile-config change ────────────────
 # A compile-flag change must invalidate the per-file IR cache without a manual
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.
 
 include(joinpath(TEST_DIR, "test_cache_invalidation.jl"))
+
+# ── 9b. A relink of unchanged IR gives the same library ─────────────────────
+# lld writes the link time into a PE image, so every relink of an unchanged
+# project gave a different DLL and a different LIBRARY_SHA, the one line a
+# rebuilt llamacpp's wrapper differed in. Builds a C and a C++ fixture twice
+# from the same per-file IR, a second apart, and links an executable twice: the
+# bytes must match, and on PE both link-time fields must be 0.
+
+include(joinpath(TEST_DIR, "test_reproducible_link.jl"))
 
 # ── 10. Convenience-overload ownership guard ─────────────────────────────────
 # Library-free trace: no struct-by-value convenience overloads may be emitted
