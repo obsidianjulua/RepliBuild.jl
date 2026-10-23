@@ -348,6 +348,14 @@ include(joinpath(TEST_DIR, "test_cpp_record_routing.jl"))
 
 include(joinpath(TEST_DIR, "test_determinism_fixture.jl"))
 
+# ── 8e. A name several types share never crosses by value, live ──────────────
+# Two C++ units give `impl`, `Mode` and `Kind` two definitions each, and two C
+# files each define their own `struct state`. Every function one of them
+# crosses by value must be a trap with no thunk; the rest must keep their tier
+# and return the right values. The C++ half needs clang++ and libJLCS.
+
+include(joinpath(TEST_DIR, "test_conflict_trap_fixture.jl"))
+
 # ── 9. Per-file IR cache invalidation on compile-config change ────────────────
 # A compile-flag change must invalidate the per-file IR cache without a manual
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.

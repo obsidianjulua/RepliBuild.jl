@@ -6887,13 +6887,31 @@ Definitions that agree on `_layout_signature` are one type, differently spelled,
 and any of them is right. Definitions that disagree are distinct types sharing a
 name (a pimpl `impl` per class), and a bare-name key can describe only one: the
 kept one is marked `"conflict"`. It is still the layout every reference by that
-name gets, as it was before.
+name gets, as it was before, so no call may pass it by value
+(`FunctionGen.conflicted_within`).
+
+A conflicted entry also records `"conflict_sizes"`, the distinct byte sizes of
+all its definitions in ascending order. An enum crosses a call as an integer of
+its width, so one whose definitions differ only in their enumerators still
+crosses correctly; the sizes say whether they do.
 """
 function _canonical_definition(defs::AbstractVector)
     length(defs) == 1 && return defs[1]
     best = defs[argmin(map(_canonical_text, defs))]
-    length(unique(map(_layout_signature, defs))) > 1 && (best["conflict"] = true)
+    if length(unique(map(_layout_signature, defs))) > 1
+        best["conflict"] = true
+        best["conflict_sizes"] = sort!(unique!(Int[s for s in map(_definition_byte_size, defs)
+                                                   if s !== nothing]))
+    end
     return best
+end
+
+# A record's or enum's `byte_size` (`"0x18"`) as an Int; `nothing` without one.
+function _definition_byte_size(def::AbstractDict)
+    bs = get(def, "byte_size", nothing)
+    bs === nothing && return nothing
+    s = string(bs)
+    return startswith(s, "0x") ? tryparse(Int, s[3:end]; base = 16) : tryparse(Int, s)
 end
 
 """
