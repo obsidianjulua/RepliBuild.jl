@@ -17,7 +17,7 @@ All notable changes to RepliBuild.jl are documented in this file.
   - test_aot_thunks.jl: the thunks library that pass 2 links again from the same thunk set has pass 1's bytes and a 0 header timestamp, although a child process ran between the two links. Neutered, both checks fail.
   - test_codegen_flags.jl (runtests): both host spellings, and that each of the three link functions passes the flags. Removing the call from any one of them fails it.
   - The eight devtests fixtures that build a library (stress, mi, vi, stl, c, c_abomination, callback, aot), relinked from the per-file IR devtests had just cached: all eight identical, stl_test's regenerated templates TU included. With the flags neutered, all eight differ in the header's four bytes and the debug entry's.
-  - runtests 2700 on Julia 1.12.7 and 2708 on 1.13.2; devtests 1354 plus 1 broken (already broken on main) on both. The new test and its negative check give the same results on both Julias.
+  - runtests 2700 on Julia 1.12.7 and 2708 on 1.13.2; devtests 1354 plus 1 broken (already broken on main) on both. The new test and its negative check give the same results on both Julias. With the emission-determinism change below merged in: runtests 2768 and devtests 1395 plus 1 broken, on both Julias.
 
 ### The same source wraps the same on every Julia release and after every upstream edit (2026-10-23)
 
