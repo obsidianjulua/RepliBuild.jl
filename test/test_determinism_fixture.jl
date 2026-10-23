@@ -199,7 +199,10 @@ if requires("emission determinism fixture", :libJLCS, :clangxx)
         @test count(l -> occursin(r"DW_AT_name\s*:.*: dt_traits$", l), split(dump, '\n')) >= 2
         @test occursin(r"DW_AT_name\s*:.*: _Bool\n", dump) && occursin(r"DW_AT_name\s*:.*: bool\n", dump)
         @test occursin("(lambda at ", dump)
-        @test occursin("__clang_vtable", dump)
+        # The dynamic class. clang 23 also lists `__clang_vtable` in its vtable
+        # home, a spelling `_canonical_definition` absorbs; clang 22 does not, so
+        # only what every clang emits is asserted.
+        @test occursin(r"DW_AT_name\s*:.*: _vptr\$dt_shape\n", dump)
         @test count(l -> occursin(r"DW_AT_name\s*:.*: impl$", l), split(dump, '\n')) >= 2
     end
 
