@@ -1477,6 +1477,29 @@ _codegen_opt_flags(config::RepliBuildConfig) =
     ["-O$(config.link.optimization_level)", "-Xclang", "-disable-llvm-passes"]
 
 """
+    _reproducible_link_flags(; windows = Sys.iswindows()) -> Vector{String}
+
+Linker flags under which the same inputs link to the same bytes. Every link of
+something RepliBuild ships passes them: `create_library`, `create_executable` and
+the AOT thunks library.
+
+A PE image holds its link time twice, in the COFF file header and in the debug
+directory, which lld writes whenever the image has debug info (its `.buildid`
+record). lld fills both from the clock, so every relink of unchanged IR gave a
+different DLL, and with it a different `LIBRARY_SHA`: the wrapper of a rebuilt,
+unchanged package differed from the last one in that line alone.
+`--no-insert-timestamp` writes 0 there, in lld's MinGW driver and in GNU ld's PE
+port (lld-link's `/Brepro` writes a hash of the image instead, and GNU ld has no
+such option). The build ID itself is a hash of the image without those fields, so
+it already repeated.
+
+ELF has no link time. A build ID, when the linker writes one, is a hash of the
+output, so it repeats too.
+"""
+_reproducible_link_flags(; windows::Bool = Sys.iswindows()) =
+    windows ? ["-Wl,--no-insert-timestamp"] : String[]
+
+"""
     _compile_ir_to_objects(config, ir_files, compiler) -> Vector{String}
 
 Compile each IR module to its own object file, in parallel. Each `clang -c` is
@@ -1675,6 +1698,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         "-shared",  # Create shared library
         "-fPIC",    # Position independent code
         _codegen_opt_flags(config)...,   # codegen at the link level, IR passes off
+        _reproducible_link_flags()...,   # same IR, same bytes: no PE link time
     ]
     cmd_tail = ["-o", lib_path]
     cmd_args = copy(cmd_head)
@@ -1937,7 +1961,7 @@ function create_executable(config::RepliBuildConfig, ir_files::Union{String,Vect
     exe_path = joinpath(output_dir, exe_name)
 
     # Compile IR to executable
-    cmd_args = vcat(files, ["-o", exe_path])
+    cmd_args = vcat(files, ["-o", exe_path], _reproducible_link_flags())
 
     # Add library directories
     for dir in lib_dirs

@@ -345,6 +345,15 @@ include(joinpath(TEST_DIR, "test_cpp_record_routing.jl"))
 
 include(joinpath(TEST_DIR, "test_cache_invalidation.jl"))
 
+# ── 9b. A relink of unchanged IR gives the same library ─────────────────────
+# lld writes the link time into a PE image, so every relink of an unchanged
+# project gave a different DLL and a different LIBRARY_SHA, the one line a
+# rebuilt llamacpp's wrapper differed in. Builds a C and a C++ fixture twice
+# from the same per-file IR, a second apart, and links an executable twice: the
+# bytes must match, and on PE both link-time fields must be 0.
+
+include(joinpath(TEST_DIR, "test_reproducible_link.jl"))
+
 # ── 10. Convenience-overload ownership guard ─────────────────────────────────
 # Library-free trace: no struct-by-value convenience overloads may be emitted
 # for Ptr{Struct} params (Ref(copy) handed to a function that frees/retains

@@ -1,6 +1,6 @@
-# test/support/TestSupport.jl — the two things toolchain tests used to hand-roll:
-# "skip when a prerequisite is missing" and "run this in a process that may
-# crash or hang".
+# test/support/TestSupport.jl — what toolchain tests used to hand-roll: "skip
+# when a prerequisite is missing", "run this in a process that may crash or
+# hang", and reading a PE image's link times.
 #
 # Included by the test files themselves, not by the suites, so a file run on its
 # own behaves exactly as it does inside devtests:
@@ -17,7 +17,7 @@ module TestSupport
 using Test
 import RepliBuild
 
-export have, requires, run_isolated, probe_verdicts
+export have, requires, run_isolated, probe_verdicts, pe_link_times
 
 const REPO_ROOT = dirname(dirname(@__DIR__))
 
@@ -130,6 +130,43 @@ function probe_verdicts(output::AbstractString)
         m === nothing || (v[m.captures[1]] = m.captures[2])
     end
     return v
+end
+
+# ── PE images ────────────────────────────────────────────────────────────────
+
+"""
+    pe_link_times(path) -> (; header::UInt32, debug::Vector{UInt32})
+
+The link-time fields of a PE32+ image: the COFF file header's `TimeDateStamp`
+and each debug directory entry's (empty when the image has no debug directory).
+lld and GNU ld write the clock into them unless the link says not to
+(`test_reproducible_link.jl`). Read from the file, so no tool is involved.
+"""
+function pe_link_times(path::AbstractString)
+    open(path) do io
+        at(off, T) = (seek(io, off); ltoh(read(io, T)))
+        pe = Int(at(0x3c, UInt32))
+        at(pe, UInt32) == 0x00004550 || error("$path: no PE signature")
+        nsections = Int(at(pe + 6, UInt16))
+        header = at(pe + 8, UInt32)
+        opt = pe + 24                            # after "PE\0\0" and the COFF header
+        at(opt, UInt16) == 0x20b || error("$path: not a PE32+ image")
+        sections = opt + Int(at(pe + 20, UInt16))
+        debug = UInt32[]
+        if at(opt + 108, UInt32) > 6             # NumberOfRvaAndSizes reaches the debug entry
+            rva, size = Int(at(opt + 112 + 6 * 8, UInt32)), Int(at(opt + 116 + 6 * 8, UInt32))
+            for s in (sections + 40i for i in 0:nsections-1)
+                va, vsize = Int(at(s + 12, UInt32)), Int(at(s + 8, UInt32))
+                rawsize, raw = Int(at(s + 16, UInt32)), Int(at(s + 20, UInt32))
+                if size > 0 && va <= rva < va + max(vsize, rawsize)
+                    dir = rva - va + raw
+                    append!(debug, at(dir + 28k + 4, UInt32) for k in 0:size ÷ 28 - 1)
+                    break
+                end
+            end
+        end
+        return (; header, debug)
+    end
 end
 
 end # module TestSupport

@@ -2,6 +2,23 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### The same IR links to the same library on Windows (2026-10-23)
+
+- **Every relink of an unchanged project gave a different DLL.** A PE image holds its link time in two fields: the COFF file header's `TimeDateStamp`, and the debug directory entry lld writes when the image has debug info (its `.buildid` CodeView record). lld fills both from the clock. Two links of the same IR a second apart differed in those two fields and nowhere else. A wrapper's `LIBRARY_SHA` is the SHA-256 of the library file, so it changed with them: llamacpp's cached IR, relinked on another day, changed that one line of a 60336-line wrapper. A CI job that judges a Hub bump by diffing regenerated wrappers would see it on every run.
+- **Every link of a shipped binary passes `Compiler._reproducible_link_flags()`**, which is `-Wl,--no-insert-timestamp` on Windows and nothing elsewhere. It writes 0 to both fields. It covers `create_library` (the IR link and the per-TU-object fallback), `create_executable`, and the AOT thunks library.
+  - Both PE linkers take that spelling: CLANG64's lld 23.1.3, which the system clang++ and the C bucket's JLL clang both link with, and GNU ld 2.47 from MSYS2's MINGW64. lld-link's `/Brepro` writes a hash of the image there instead, and GNU ld has no such option.
+  - lld's build ID is a hash of the image without those two fields, so it already repeated across relinks; the flag does not change it.
+- **ELF needed nothing.** It holds no link time, and a build ID, when a linker writes one, is a hash of the output. lld cross-linking `x86_64-linux-gnu` on the Windows box gave identical files a second apart, with and without `--build-id`. Linux devtests (`tier2-linux.yml`) will run the new test against the real toolchains; it has not run there yet.
+- **`LIBRARY_SHA` means what it did**: the SHA-256 of the library file, not a build ID. What changed is that it is stable. A rebuild that relinks the same IR keeps it, so it moves only when the library's bytes do. The bytes still move, correctly, when the project's path does (DWARF holds absolute paths), as well as with any change upstream of the link. The directory Julia is started from does not reach them: the IR's compile directory is the project root, and two cold builds from different working directories gave the same IR and the same library. The wrapper's other build-dependent lines are timestamps by name: `# Generated:` (the wrap) and `METADATA["generated_at"]` (the build).
+- **Tests.**
+  - test_reproducible_link.jl (devtests §9b): a C fixture (JLL clang, in-process link) and a C++ fixture (system clang++, llvm-link, opt) are each built, have their project hash deleted, and are built again in a later second from the same per-file IR. An executable is linked twice. The bytes must match, and on PE both link-time fields must be 0 (`TestSupport.pe_link_times`, which reads the image itself). With the flags neutered by their exact method signature, 9 of 21 fail, in all three fixtures; the files differed at exactly the two fields.
+  - test_aot_thunks.jl: the thunks library that pass 2 links again from the same thunk set has pass 1's bytes and a 0 header timestamp, although a child process ran between the two links. Neutered, both checks fail.
+  - test_codegen_flags.jl (runtests): both host spellings, and that each of the three link functions passes the flags. Removing the call from any one of them fails it.
+  - The eight devtests fixtures that build a library (stress, mi, vi, stl, c, c_abomination, callback, aot), relinked from the per-file IR devtests had just cached: all eight identical, stl_test's regenerated templates TU included. With the flags neutered, all eight differ in the header's four bytes and the debug entry's.
+  - runtests 2700 on Julia 1.12.7 and 2708 on 1.13.2; devtests 1354 plus 1 broken (already broken on main) on both. The new test and its negative check give the same results on both Julias.
+
 ## v4.3.0 (2026-10-22)
 
 **The registry builds a project where it lives; AOT thunks come from wrap.**
