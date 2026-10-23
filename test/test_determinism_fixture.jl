@@ -266,12 +266,13 @@ if requires("emission determinism fixture", :libJLCS, :clangxx)
         @test occursin("struct dt_hooks_u", code)
     end
 
-    @testset "wrapper: a callback's example is its typedef's, or there is none" begin
+    @testset "wrapper: a callback's example is its typedef's, or DWARF's" begin
         @test occursin("@cfunction(my_callback, Cint, (Cint, Ptr{Cvoid},))", code)
         # `dt_run`, the decoy the old scoring preferred for both functions.
         @test !occursin("Cdouble, (Cdouble,)", code)
-        # dt_run_raw's `cb` has no typedef: one example in the file, dt_run_with's.
-        @test count("**Callback `cb`**", code) == 1
+        # dt_run_raw's `cb` has no typedef: its example is its DWARF signature's.
+        @test occursin("@cfunction(my_callback, Cint, (Cint,))", code)
+        @test count("**Callback `cb`**", code) == 2
     end
 
     @testset "wrapper: the same text when the metadata's keys come in another order" begin

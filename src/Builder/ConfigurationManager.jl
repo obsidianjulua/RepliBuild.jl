@@ -161,11 +161,11 @@ struct WrapConfig
     #
     # OPT-IN, and it must stay opt-in. Measured across all 32 Hub packages with
     # metadata on disk: the filter is safe for onednn (37→33) and box2d (95%),
-    # and destroys md4c (36→2). md4c's whole API is SAX callbacks, and a
-    # `function_ptr(int)*` member erases its signature types, so every
-    # `MD_*_DETAIL` struct a user needs to WRITE a callback is invisible to
-    # reachability. "Always keep enums" does not rescue that class either — it
-    # would re-admit onednn's `Pipe`, which is the shadowing failure above.
+    # and destroys md4c (36→2). md4c's whole API is SAX callbacks, which receive
+    # every `MD_*_DETAIL` struct a user needs to WRITE one as `void *`, so no
+    # signature names those structs and reachability cannot see them. "Always
+    # keep enums" does not rescue that class either — it would re-admit
+    # onednn's `Pipe`, which is the shadowing failure above.
     surface_types_only::Bool
     # Globs for types to keep even when unreachable. The hatch for exactly the
     # md4c class: constant-only enums (a function returning plain `int` never

@@ -35,7 +35,7 @@ typedef int (*dt_progress_cb)(int done, void *user);
 typedef double (*dt_run)(double x);
 
 int dt_run_with(dt_progress_cb cb, void *user);   /* C unit */
-int dt_run_raw(int (*cb)(int));                   /* C unit: no typedef, no example */
+int dt_run_raw(int (*cb)(int));                   /* C unit: no typedef, DWARF's example */
 
 /* Globals, emitted as accessors in name order. */
 extern int dt_g_zeta;

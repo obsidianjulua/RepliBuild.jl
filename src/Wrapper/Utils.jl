@@ -638,10 +638,11 @@ Reduce `struct_definitions` to the wrap surface, MUTATING `metadata` in place so
 every downstream consumer sees the same type set.
 
 `extra_patterns` are globs for types to keep regardless. They exist for the class
-reachability structurally cannot see: a `function_ptr(int)*` member erases its
-signature types, so a callback-only struct is invisible, and a function returning
-plain `int` never names its error enum. md4c is both at once — 36 types, 2
-reachable, and it ships 231/231 on the other 34.
+reachability structurally cannot see: a struct a callback receives only as
+`void *` is named by no signature (a callback's own parameter types are reached
+through its `function_ptr(R; P1, P2)*`), and a function returning plain `int`
+never names its error enum. md4c is both at once: every SAX callback gets its
+`MD_*_DETAIL` struct as `void *`.
 
 Returns `(kept, dropped, unmatched)`. `unmatched` is the caller's problem to
 report, same contract as `_apply_symbol_filter!`.
