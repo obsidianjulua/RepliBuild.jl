@@ -53,7 +53,7 @@ A dry run of an unattended llama.cpp bump (b11819 → b11828, nine upstream comm
   - test_link_cmdline_limit.jl (devtests §19): the real llvm-link and clang read a forced response file on every host, from a directory with a space. Then 200 one-line TUs at a deep path build end to end; on Windows that link passes the limit. With the writer neutered, that build fails with `ENAMETOOLONG`.
   - TestSupport gains `:llvm_link`, found on the `PATH` that `with_llvm_env` sets.
   - The Hub's llamacpp with ggml-vulkan, built cold from a 70-character package path (the Hub checkout's is 64): llvm-link read all 384 inputs from `build/llamacpp_link.rsp`, test_deep.jl passes 33/33, and all 13 layers run on the Vulkan GPU.
-  - runtests 2743 on Julia 1.13.2 and 1.12.7; devtests (1.13.2) 1343 plus 1 broken (already broken on main). Two existing testsets count what is on disk: "Symbol hygiene" adds 8 once the MI/VI fixtures are built, and "Debug: static inspection" adds 1 per `.mlir` file in vi_test's `.debug/`.
+  - On main with #25 merged: runtests 2803 on Julia 1.13.2 and 1.12.7; devtests (1.13.2) 1384 plus 1 broken (already broken on main). Two existing testsets count what is on disk: "Symbol hygiene" adds 8 once the MI/VI fixtures are built, and "Debug: static inspection" adds 1 per `.mlir` file in vi_test's `.debug/`.
 
 ## v4.3.0 (2026-10-22)
 
