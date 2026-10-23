@@ -804,6 +804,54 @@ end
 # LINKING: LLVM IR → Optimized IR
 # =============================================================================
 
+# Windows' CreateProcess accepts at most 32,767 characters of command line, and a
+# link names every translation unit. llamacpp with ggml-vulkan has 384, whose IR
+# paths came to ~39,000 characters from the Hub's checkout depth: llvm-link never
+# started, and neither did the clang fallback after it. llvm-link and clang both
+# read arguments from a response file (`@file`), so past this many characters the
+# inputs go to one. Windows only: Linux's ARG_MAX is about 2 MB.
+const _RSP_THRESHOLD = 30_000   # of 32,767: room for the program path and quoting
+
+# What the command line costs: each argument plus a separator, and two quotes
+# around one that holds a space.
+_cmdline_chars(args) = sum(a -> length(a) + 1 + (occursin(' ', a) ? 2 : 0), args; init=0)
+
+"""
+    _args_with_response_file(head, inputs, tail, rsp_path;
+                             windows = Sys.iswindows(), threshold = _RSP_THRESHOLD)
+
+`vcat(head, inputs, tail)`, or, on Windows when that would be longer than
+`threshold` characters, `vcat(head, ["@rsp_path"], tail)` with `inputs` written to
+`rsp_path`. Only the inputs move: callers inspect the flags (`_clang_for_c_bucket`
+looks for `-S`, `-c`, `--sysroot`, `-rtlib`).
+
+The two readers tokenize differently. llvm-link, like any LLVM tool built for
+Windows, reads a response file by Windows rules, where a backslash is literal. The
+clang driver reads it by GNU rules unless it is clang-cl, and there a backslash
+escapes the next character, so `C:\\Users\\x.ll` reaches it as `C:Usersx.ll`. One
+double-quoted, `/`-separated path per line reads the same to both. An input with a
+quote or a line break cannot be written that way, and is refused.
+"""
+function _args_with_response_file(head::Vector{String}, inputs::Vector{String},
+                                  tail::Vector{String}, rsp_path::AbstractString;
+                                  windows::Bool = Sys.iswindows(),
+                                  threshold::Int = _RSP_THRESHOLD)
+    args = vcat(head, inputs, tail)
+    (windows && _cmdline_chars(args) > threshold) || return args
+    for f in inputs
+        any(c -> c in ('"', '\n', '\r'), f) &&
+            error("Cannot pass $(repr(f)) to the linker in a response file: " *
+                  "the path contains a quote or a line break.")
+    end
+    mkpath(dirname(rsp_path))
+    open(rsp_path, "w") do io
+        for f in inputs
+            print(io, '"', replace(f, '\\' => '/'), "\"\n")
+        end
+    end
+    return vcat(head, ["@" * rsp_path], tail)
+end
+
 """
 Link multiple LLVM IR files and optimize.
 Returns linked IR path (String) or original IR files (Vector{String}) on llvm-link failure.
@@ -849,13 +897,20 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
                   "REPLIBUILD_LLVM_C_BIN to a matching bin.")
         end
         llvm_link_tool = LLVMEnvironment.resolve_tool("llvm-link", config.wrap.language)
-        (output, exitcode) = BuildBridge.execute(llvm_link_tool, vcat(["-S"], ir_files, ["-o", linked_ir]))
+        link_args = _args_with_response_file(["-S"], ir_files, ["-o", linked_ir],
+                                             joinpath(build_dir, output_name * "_link.rsp"))
+        (output, exitcode) = BuildBridge.execute(llvm_link_tool, link_args)
         _assert_debug_info_kept(output, "llvm-link")
 
         if exitcode != 0 || !isfile(linked_ir)
             # llvm-link crashed or failed (common with very large IR modules).
-            # Fall back: let clang handle linking at binary creation time.
-            @warn "llvm-link failed (exit $exitcode), falling back to clang-based linking"
+            # Fall back: let clang handle linking at binary creation time. A tool
+            # that never started did not fail, so that warning says what stopped it.
+            if exitcode == BuildBridge.SPAWN_FAILED
+                @warn "llvm-link was not run, falling back to clang-based linking: $output"
+            else
+                @warn "llvm-link failed (exit $exitcode), falling back to clang-based linking"
+            end
             return ir_files
         end
     end
@@ -1689,16 +1744,14 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     #
     # `cmd_tail` is everything after the inputs, kept separate because the
     # inputs can be swapped for per-TU objects on the source-location fallback
-    # below and every other flag must be identical across both attempts.
+    # below, or for a response file, and every other flag must be identical
+    # across both attempts.
     cmd_head = [
         "-shared",  # Create shared library
         "-fPIC",    # Position independent code
         _codegen_opt_flags(config)...,   # codegen at the link level, IR passes off
     ]
     cmd_tail = ["-o", lib_path]
-    cmd_args = copy(cmd_head)
-    append!(cmd_args, files)
-    append!(cmd_args, cmd_tail)
 
     # A dllexport ANYWHERE turns mingw's auto-export off for the WHOLE image,
     # and the macro-shim TU carries one on Windows now. For a library that
@@ -1761,7 +1814,10 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     end
 
     compiler = config.wrap.language == :c ? "clang" : "clang++"
-    cmd_args = vcat(cmd_head, files, cmd_tail)
+    # `files` is one merged module unless llvm-link declined to merge, and then it
+    # is every translation unit: a response file past the command-line limit.
+    rsp_path = joinpath(get_build_path(config), lib_name * ".rsp")
+    cmd_args = _args_with_response_file(cmd_head, files, cmd_tail, rsp_path)
     (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
     _assert_debug_info_kept(output, "clang (IR -> library)")
 
@@ -1804,7 +1860,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         @info "link: clang ran out of source locations on the merged module — " *
               "recompiling $(length(split_inputs)) translation unit(s) separately"
         objs = _compile_ir_to_objects(config, split_inputs, compiler)
-        cmd_args = vcat(cmd_head, objs, cmd_tail)
+        cmd_args = _args_with_response_file(cmd_head, objs, cmd_tail, rsp_path)
         (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
     end
 
@@ -1956,20 +2012,22 @@ function create_executable(config::RepliBuildConfig, ir_files::Union{String,Vect
     exe_path = joinpath(output_dir, exe_name)
 
     # Compile IR to executable
-    cmd_args = vcat(files, ["-o", exe_path])
+    cmd_tail = ["-o", exe_path]
 
     # Add library directories
     for dir in lib_dirs
-        push!(cmd_args, "-L$dir")
+        push!(cmd_tail, "-L$dir")
     end
 
     # Add link libraries (config + additional)
     all_libs = vcat(config.link.link_libraries, link_libraries)
     for lib in all_libs
-        push!(cmd_args, "-l$lib")
+        push!(cmd_tail, "-l$lib")
     end
 
     compiler = config.wrap.language == :c ? "clang" : "clang++"
+    cmd_args = _args_with_response_file(String[], files, cmd_tail,
+                                        joinpath(get_build_path(config), exe_name * ".rsp"))
     (output, exitcode) = _clang_for_c_bucket(compiler, cmd_args)
 
     if exitcode != 0

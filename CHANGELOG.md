@@ -40,6 +40,20 @@ A dry run of an unattended llama.cpp bump (b11819 → b11828, nine upstream comm
     - Against the Hub's wrapper (v4.3.0 code, same pin): 1053 functions with no signature change, 1088 API functions at the same tiers, 0 trap stubs before and after. The 53 lambda types are gone. The one-time move to content-chosen definitions changes 4 sizes and 13 layouts. The sizes are 4 of the 7 conflicted names (`extra_buffer_type`, `graph`, `graph_mtp`, `impl`, `input_decision`, `layer`, `llm_graph_input_kpool`). The layouts are spellings: the C unit's (`block_q4_K` keeps `_anon1`, `ggml_cplan` and `ggml_compute_params` keep `_Bool`), and a vtable home's `__clang_vtable`, which is no field, on 9 classes. `extra_buffer_type` is the one conflicted name among them.
     - `test_deep.jl` with the nomic model: 33/33.
 
+### A link longer than one Windows command line goes through a response file (2026-10-22)
+
+- **A C++ build with enough translation units could not link on Windows.** CreateProcess accepts at most 32,767 characters of command line, and the link put every per-TU `.ll` on one `llvm-link` command line. The Hub's llamacpp with ggml-vulkan (384 TUs) came to ~39,000 characters from its checkout depth. llvm-link never started, and the `clang++ -shared` fallback, handed the same list, failed with `ENAMETOOLONG`. The CPU-only build (226 TUs, ~25,000 characters) fits.
+- **Long input lists go to a response file.** On Windows, when a link's command line would pass 30,000 characters, `Compiler._args_with_response_file` writes the inputs to `build/<name>.rsp` and passes `@<file>`. Flags stay on the command line. It covers llvm-link in `link_optimize_ir`, both `clang -shared` calls in `create_library` (the IR list and the per-TU objects), and `create_executable`.
+  - llvm-link reads a response file by Windows rules, but the clang driver reads it by GNU rules, where `\` is an escape (measured: `C:\Users\…` reached clang as `C:Users…`). So each input is written double-quoted with `/` separators, which both read the same. A path holding a quote or a line break is refused.
+  - Off Windows nothing changes.
+- **A program that never started is reported as one.** `BuildBridge._run_command_impl` returned a spawn failure as `("Error: <the whole command>", 1)`. So `link_optimize_ir` warned "llvm-link failed (exit 1)" about a tool that had not run, and 45 KB of command reached the log. It now returns `BuildBridge.SPAWN_FAILED` (-1) and "could not start <program> (<n> arguments, <chars> characters of command line): <reason>". The llvm-link warning then says the tool was not run, and why.
+- **Tests.**
+  - test_response_files.jl (runtests): the writer's threshold, both host spellings, the file's encoding, the refusal, and the four call sites; then spawn failures: a missing program on every host, and on Windows a 40,000-character command line. Neutering the writer, or the spawn check, fails its testset.
+  - test_link_cmdline_limit.jl (devtests §19): the real llvm-link and clang read a forced response file on every host, from a directory with a space. Then 200 one-line TUs at a deep path build end to end; on Windows that link passes the limit. With the writer neutered, that build fails with `ENAMETOOLONG`.
+  - TestSupport gains `:llvm_link`, found on the `PATH` that `with_llvm_env` sets.
+  - The Hub's llamacpp with ggml-vulkan, built cold from a 70-character package path (the Hub checkout's is 64): llvm-link read all 384 inputs from `build/llamacpp_link.rsp`, test_deep.jl passes 33/33, and all 13 layers run on the Vulkan GPU.
+  - runtests 2725 on Julia 1.13.2 and 1.12.7; devtests (1.13.2) 1344 plus 1 broken (already broken on main).
+
 ## v4.3.0 (2026-10-22)
 
 **The registry builds a project where it lives; AOT thunks come from wrap.**

@@ -738,6 +738,13 @@ changes:
 - PE has no RUNPATH. `[link] link_dirs` DLLs are opened before the library, at the
   build's load check and in the wrapper's `__init__` (`_link_dir_dlls`,
   `_link_dir_preload_snippet`).
+- A command line holds 32,767 characters. A command that takes one argument per
+  translation unit goes through `_args_with_response_file`, which passes a long
+  input list as `@file` (llamacpp + Vulkan, 384 TUs, needed ~39,000). llvm-link
+  reads the file by Windows rules and clang by GNU rules, where `\` escapes, so
+  inputs are written quoted with `/`. A program that never started returns
+  `BuildBridge.SPAWN_FAILED`, not 1: check it before blaming the tool
+  (`test_response_files.jl`, devtests §19).
 - `FILE` is `struct _iobuf`. Bake paths into generated Julia with `repr()` and into
   TOML with `TOML.print`. Read JSON only through `_read_json` (`JSON.parsefile` mmaps
   on 0.21, which blocks deletion, and rejects `use_mmap` on 1.x;
