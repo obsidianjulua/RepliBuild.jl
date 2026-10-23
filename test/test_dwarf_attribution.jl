@@ -288,6 +288,275 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         rt, _, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
 
         @test [p["name"] for p in rt["execute_outer"]["parameters"]] == ["f", "a"]
+        @test rt["execute_outer"]["parameters"][1]["c_type"] == "function_ptr(int; int)*"
+    end
+
+    # ── A subroutine type's parameters are its signature ────────────────────
+    #
+    # Pass 2 read formal parameters only inside an open subprogram, and it
+    # never opened a DW_TAG_subroutine_type's context, so no function pointer
+    # had a parameter list: llama.cpp's four-argument
+    # `ggml_backend_eval_callback` was `function_ptr(bool)*`. Pass 1 now
+    # collects them, because clang emits a subroutine type AFTER the first
+    # function that takes it: collected in pass 2, a signature resolved before
+    # the type was met would have stayed empty. And `resolve_type` shared one
+    # cycle guard between a signature's branches, so `int (*)(int, int)` came
+    # out `function_ptr(int; unknown, unknown)` once there were parameters.
+    #
+    # GNU objdump of (clang 23.1.3, -g -O0, MinGW), trimmed to the DIEs and
+    # attributes the parser reads; every subroutine type follows its users:
+    #   typedef bool (*eval_cb)(void *t, bool ask, void *user_data);
+    #   typedef int (*logf_cb)(const char *fmt, ...);
+    #   struct hooks { int (*cmp)(int, int); void (*nested)(void (*inner)(int), double); };
+    #   int run_eval(eval_cb cb, void *ud);
+    #   int run_log(logf_cb f);
+    #   int run_hooks(struct hooks *h, int (*raw)(int, int));
+    dump_fp = """
+     <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+        <c>   DW_AT_producer    : (indirect string, offset: 0): clang version 23.1.3
+        <10>   DW_AT_language    : 29	(C11)
+        <12>   DW_AT_name        : (indirect string, offset: 0x68): fp.c
+     <1><2a>: Abbrev Number: 2 (DW_TAG_base_type)
+        <2b>   DW_AT_name        : (indirect string, offset: 0x126): int
+        <2f>   DW_AT_encoding    : 5	(signed)
+        <30>   DW_AT_byte_size   : 4
+     <1><31>: Abbrev Number: 3 (DW_TAG_subprogram)
+        <32>   DW_AT_low_pc      : 0
+        <3a>   DW_AT_high_pc     : 0x45
+        <40>   DW_AT_name        : (indirect string, offset: 0x143): run_eval
+        <46>   DW_AT_prototyped  : 1
+        <46>   DW_AT_type        : <0x2a>
+        <4a>   DW_AT_external    : 1
+     <2><4a>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+        <4b>   DW_AT_location    : 2 byte block: 91 30 	(DW_OP_fbreg: 48)
+        <4e>   DW_AT_name        : (indirect string, offset: 0x15e): cb
+        <54>   DW_AT_type        : <0xf0>
+     <2><58>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+        <59>   DW_AT_location    : 2 byte block: 91 28 	(DW_OP_fbreg: 40)
+        <5c>   DW_AT_name        : (indirect string, offset: 0x16f): ud
+        <62>   DW_AT_type        : <0x11c>
+     <2><66>: Abbrev Number: 0
+     <1><67>: Abbrev Number: 3 (DW_TAG_subprogram)
+        <68>   DW_AT_low_pc      : 0x50
+        <70>   DW_AT_high_pc     : 0x3b
+        <76>   DW_AT_name        : (indirect string, offset: 0x14c): run_log
+        <7c>   DW_AT_prototyped  : 1
+        <7c>   DW_AT_type        : <0x2a>
+        <80>   DW_AT_external    : 1
+     <2><80>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+        <81>   DW_AT_location    : 2 byte block: 91 30 	(DW_OP_fbreg: 48)
+        <84>   DW_AT_name        : (indirect string, offset: 0x172): f
+        <8a>   DW_AT_type        : <0x11d>
+     <2><8e>: Abbrev Number: 0
+     <1><8f>: Abbrev Number: 3 (DW_TAG_subprogram)
+        <90>   DW_AT_low_pc      : 0x90
+        <98>   DW_AT_high_pc     : 0x43
+        <9e>   DW_AT_name        : (indirect string, offset: 0x154): run_hooks
+        <a4>   DW_AT_prototyped  : 1
+        <a4>   DW_AT_type        : <0x2a>
+        <a8>   DW_AT_external    : 1
+     <2><a8>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+        <a9>   DW_AT_location    : 2 byte block: 91 30 	(DW_OP_fbreg: 48)
+        <ac>   DW_AT_name        : (indirect string, offset: 0x17c): h
+        <b2>   DW_AT_type        : <0x143>
+     <2><b6>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+        <b7>   DW_AT_location    : 2 byte block: 91 28 	(DW_OP_fbreg: 40)
+        <ba>   DW_AT_name        : (indirect string, offset: 0x196): raw
+        <c0>   DW_AT_type        : <0x169>
+     <2><c4>: Abbrev Number: 0
+     <1><e2>: Abbrev Number: 2 (DW_TAG_base_type)
+        <e3>   DW_AT_name        : (indirect string, offset: 0x12a): char
+        <e7>   DW_AT_encoding    : 6	(signed char)
+        <e8>   DW_AT_byte_size   : 1
+     <1><f0>: Abbrev Number: 9 (DW_TAG_typedef)
+        <f1>   DW_AT_type        : <0xfb>
+        <f5>   DW_AT_name        : (indirect string, offset: 0x167): eval_cb
+        <f9>   DW_AT_decl_file   : 1
+        <fa>   DW_AT_decl_line   : 2
+     <1><fb>: Abbrev Number: 10 (DW_TAG_pointer_type)
+        <fc>   DW_AT_type        : <0x100>
+     <1><100>: Abbrev Number: 11 (DW_TAG_subroutine_type)
+        <101>   DW_AT_type        : <0x115>
+        <105>   DW_AT_prototyped  : 1
+     <2><105>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <106>   DW_AT_type        : <0x11c>
+     <2><10a>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <10b>   DW_AT_type        : <0x115>
+     <2><10f>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <110>   DW_AT_type        : <0x11c>
+     <2><114>: Abbrev Number: 0
+     <1><115>: Abbrev Number: 2 (DW_TAG_base_type)
+        <116>   DW_AT_name        : (indirect string, offset: 0x161): _Bool
+        <11a>   DW_AT_encoding    : 2	(boolean)
+        <11b>   DW_AT_byte_size   : 1
+     <1><11c>: Abbrev Number: 13 (DW_TAG_pointer_type)
+     <1><11d>: Abbrev Number: 9 (DW_TAG_typedef)
+        <11e>   DW_AT_type        : <0x128>
+        <122>   DW_AT_name        : (indirect string, offset: 0x174): logf_cb
+        <126>   DW_AT_decl_file   : 1
+        <127>   DW_AT_decl_line   : 3
+     <1><128>: Abbrev Number: 10 (DW_TAG_pointer_type)
+        <129>   DW_AT_type        : <0x12d>
+     <1><12d>: Abbrev Number: 11 (DW_TAG_subroutine_type)
+        <12e>   DW_AT_type        : <0x2a>
+        <132>   DW_AT_prototyped  : 1
+     <2><132>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <133>   DW_AT_type        : <0x139>
+     <2><137>: Abbrev Number: 14 (DW_TAG_unspecified_parameters)
+     <2><138>: Abbrev Number: 0
+     <1><139>: Abbrev Number: 10 (DW_TAG_pointer_type)
+        <13a>   DW_AT_type        : <0x13e>
+     <1><13e>: Abbrev Number: 15 (DW_TAG_const_type)
+        <13f>   DW_AT_type        : <0xe2>
+     <1><143>: Abbrev Number: 10 (DW_TAG_pointer_type)
+        <144>   DW_AT_type        : <0x148>
+     <1><148>: Abbrev Number: 16 (DW_TAG_structure_type)
+        <149>   DW_AT_name        : (indirect string, offset: 0x190): hooks
+        <14d>   DW_AT_byte_size   : 16
+        <14e>   DW_AT_decl_file   : 1
+        <14f>   DW_AT_decl_line   : 4
+     <2><150>: Abbrev Number: 17 (DW_TAG_member)
+        <151>   DW_AT_name        : (indirect string, offset: 0x17e): cmp
+        <155>   DW_AT_type        : <0x169>
+        <159>   DW_AT_decl_file   : 1
+        <15a>   DW_AT_decl_line   : 4
+        <15b>   DW_AT_data_member_location: 0
+     <2><15c>: Abbrev Number: 17 (DW_TAG_member)
+        <15d>   DW_AT_name        : (indirect string, offset: 0x182): nested
+        <161>   DW_AT_type        : <0x17e>
+        <165>   DW_AT_decl_file   : 1
+        <166>   DW_AT_decl_line   : 4
+        <167>   DW_AT_data_member_location: 8
+     <2><168>: Abbrev Number: 0
+     <1><169>: Abbrev Number: 10 (DW_TAG_pointer_type)
+        <16a>   DW_AT_type        : <0x16e>
+     <1><16e>: Abbrev Number: 11 (DW_TAG_subroutine_type)
+        <16f>   DW_AT_type        : <0x2a>
+        <173>   DW_AT_prototyped  : 1
+     <2><173>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <174>   DW_AT_type        : <0x2a>
+     <2><178>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <179>   DW_AT_type        : <0x2a>
+     <2><17d>: Abbrev Number: 0
+     <1><17e>: Abbrev Number: 10 (DW_TAG_pointer_type)
+        <17f>   DW_AT_type        : <0x183>
+     <1><183>: Abbrev Number: 18 (DW_TAG_subroutine_type)
+        <184>   DW_AT_prototyped  : 1
+     <2><184>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <185>   DW_AT_type        : <0x18f>
+     <2><189>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <18a>   DW_AT_type        : <0x19b>
+     <2><18e>: Abbrev Number: 0
+     <1><18f>: Abbrev Number: 10 (DW_TAG_pointer_type)
+        <190>   DW_AT_type        : <0x194>
+     <1><194>: Abbrev Number: 18 (DW_TAG_subroutine_type)
+        <195>   DW_AT_prototyped  : 1
+     <2><195>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <196>   DW_AT_type        : <0x2a>
+     <2><19a>: Abbrev Number: 0
+     <1><19b>: Abbrev Number: 2 (DW_TAG_base_type)
+        <19c>   DW_AT_name        : (indirect string, offset: 0x189): double
+        <1a0>   DW_AT_encoding    : 4	(float)
+        <1a1>   DW_AT_byte_size   : 8
+     <1><1a2>: Abbrev Number: 0
+    """
+
+    @testset "subroutine types carry their parameters" begin
+        rt, structs, _, typedefs = DWARF_COMPILER.parse_dwarf_dump(dump_fp)
+        param(fn, name) = only(p for p in rt[fn]["parameters"] if p["name"] == name)
+
+        # In declaration order, each type spelled once per parameter: `void *`
+        # twice, around `_Bool`, which is also the return type.
+        cb = param("run_eval", "cb")
+        @test cb["c_type"] == "function_ptr(_Bool; void*, _Bool, void*)*"
+        @test cb["function_pointer_signature"] == cb["c_type"]
+        @test cb["function_pointer_typedef"] == "eval_cb"
+        @test cb["julia_type"] == "Ptr{Cvoid}"
+
+        # `...` is DW_TAG_unspecified_parameters, the last child.
+        @test param("run_log", "f")["c_type"] == "function_ptr(int; const char*, ...)*"
+
+        # No typedef; the return type and both parameters name one DIE, `int`.
+        raw = param("run_hooks", "raw")
+        @test raw["c_type"] == "function_ptr(int; int, int)*"
+        @test !haskey(raw, "function_pointer_typedef")
+
+        # Members, including a function pointer taking a function pointer.
+        members = Dict(m["name"] => m for m in structs["hooks"]["members"])
+        @test members["cmp"]["c_type"] == "function_ptr(int; int, int)*"
+        @test members["nested"]["c_type"] == "function_ptr(void; function_ptr(void; int)*, double)*"
+        @test members["nested"]["julia_type"] == "Ptr{Cvoid}"
+        @test members["nested"]["size"] == 8
+
+        # A subroutine type's parameters are not its users'.
+        @test [p["name"] for p in rt["run_eval"]["parameters"]] == ["cb", "ud"]
+        @test [p["name"] for p in rt["run_log"]["parameters"]] == ["f"]
+        @test [p["name"] for p in rt["run_hooks"]["parameters"]] == ["h", "raw"]
+        @test typedefs["eval_cb"] == "Ptr{Cvoid}"
+    end
+
+    @testset "subroutine parameters stay with their own type" begin
+        # The other order: one subroutine type before the first subprogram,
+        # one after it. Each gets exactly its own parameters, and the struct
+        # after the first keeps its member. (Pass 1 used to leave its
+        # subroutine context on the dump's last subroutine type, and pass 2
+        # started with it, so the first type's parameter DIEs named the last
+        # type as their parent. Nothing was pushed, since pass 2 read
+        # parameters only inside an open subprogram.)
+        dump = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : (indexed string: 0x0): clang version 18.1.7jl
+         <1><20>: Abbrev Number: 2 (DW_TAG_base_type)
+            <21>   DW_AT_byte_size   : 4
+            <22>   DW_AT_encoding    : 5	(signed)
+            <23>   DW_AT_name        : (indexed string: 0x1): int
+         <1><28>: Abbrev Number: 2 (DW_TAG_base_type)
+            <29>   DW_AT_byte_size   : 8
+            <2a>   DW_AT_encoding    : 4	(float)
+            <2b>   DW_AT_name        : (indexed string: 0x2): double
+         <1><30>: Abbrev Number: 7 (DW_TAG_pointer_type)
+            <31>   DW_AT_type        : <0x38>
+         <1><38>: Abbrev Number: 19 (DW_TAG_subroutine_type)
+            <39>   DW_AT_type        : <0x20>
+            <3d>   DW_AT_prototyped  : 1
+         <2><3e>: Abbrev Number: 20 (DW_TAG_formal_parameter)
+            <3f>   DW_AT_type        : <0x20>
+         <2><43>: Abbrev Number: 20 (DW_TAG_formal_parameter)
+            <44>   DW_AT_type        : <0x28>
+         <2><48>: Abbrev Number: 0
+         <1><50>: Abbrev Number: 21 (DW_TAG_structure_type)
+            <51>   DW_AT_name        : (indexed string: 0x6): after
+            <52>   DW_AT_byte_size   : 8
+         <2><53>: Abbrev Number: 10 (DW_TAG_member)
+            <54>   DW_AT_name        : (indexed string: 0x7): field
+            <55>   DW_AT_type        : <0x28>
+            <56>   DW_AT_data_member_location: 0
+         <2><57>: Abbrev Number: 0
+         <1><60>: Abbrev Number: 14 (DW_TAG_subprogram)
+            <61>   DW_AT_name        : (indexed string: 0x3): takes_two
+            <62>   DW_AT_type        : <0x20>
+            <63>   DW_AT_external    : 1
+         <2><68>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+            <69>   DW_AT_name        : (indexed string: 0x4): early
+            <6a>   DW_AT_type        : <0x30>
+         <2><6e>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+            <6f>   DW_AT_name        : (indexed string: 0x5): late
+            <70>   DW_AT_type        : <0x80>
+         <2><74>: Abbrev Number: 0
+         <1><80>: Abbrev Number: 7 (DW_TAG_pointer_type)
+            <81>   DW_AT_type        : <0x88>
+         <1><88>: Abbrev Number: 19 (DW_TAG_subroutine_type)
+            <89>   DW_AT_prototyped  : 1
+         <2><8a>: Abbrev Number: 20 (DW_TAG_formal_parameter)
+            <8b>   DW_AT_type        : <0x28>
+         <2><8f>: Abbrev Number: 0
+         <1><90>: Abbrev Number: 0
+        """
+        rt, structs, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
+
+        @test dwarf_params_of(rt, "takes_two") == [("early", "function_ptr(int; int, double)*"),
+                                                   ("late", "function_ptr(void; double)*")]
+        @test [(m["name"], m["c_type"]) for m in structs["after"]["members"]] == [("field", "double")]
     end
 
     @testset "restrict / volatile / _Atomic resolve through" begin

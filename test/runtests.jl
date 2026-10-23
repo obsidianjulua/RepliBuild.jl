@@ -481,6 +481,23 @@ include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
 
 include(joinpath(@__DIR__, "test_emission_determinism.jl"))
 
+# ── Consumers of a function-pointer c_type with a parameter list ────────────
+# DWARF function pointers had no parameter lists until the parser collected a
+# subroutine type's parameters. With them a c_type holds brackets, words and
+# text that its consumers once never saw: array extents, the float-member
+# check, surface reachability and the callback docstring.
+
+include(joinpath(@__DIR__, "test_function_pointer_types.jl"))
+
+# ── A name several types share never crosses by value (no toolchain) ────────
+# Types are keyed by bare name and one definition is kept per name, so a pimpl
+# `impl` per class all got one layout, by-value crossings included. Each such
+# crossing (or a record holding one) is now a trap in the thunk generator, both
+# Julia generators and the varargs path; an enum only when its widths differ.
+# Synthetic DWARF for two units, text output.
+
+include(joinpath(@__DIR__, "test_conflicted_names.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

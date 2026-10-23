@@ -4513,7 +4513,17 @@ function parse_dwarf_dump(output::AbstractString;
     offset_to_kind = Dict{String,Symbol}()  # Track what kind each offset is
     current_type_offset = nothing  # Track current type/struct being processed
     current_struct_context = nothing  # Track parent struct for members
-    current_subroutine_offset = nothing  # Track current subroutine type for parameters
+
+    # The open DW_TAG_subroutine_type, its depth, and whether the open DIE is one
+    # of its formal parameters (a direct child). Its parameter types are
+    # collected here, in dump order, and not in pass 2: pass 2 resolves each
+    # signature as it meets it, and clang emits a subroutine type after the
+    # first function that takes it, so a list built there would be complete for
+    # some signatures and empty for others. Pass 2 never collected one at all,
+    # so every function pointer was `function_ptr(R)*`.
+    current_subroutine_offset = nothing
+    current_subroutine_depth = nothing
+    subroutine_param_open = false
 
     # Depth-indexed context: readelf DIE headers carry the tree depth
     # (`<2><2331>: ...`). A member/enumerator/inheritance DIE at depth d
@@ -4598,6 +4608,31 @@ function parse_dwarf_dump(output::AbstractString;
                 tag_offset = "0x" * offset_match.captures[1]
                 type_refs["last_tag_offset"] = tag_offset  # Always update for ANY tag
             end
+        end
+
+        # A DIE header, terminators included, ends the previous DIE's attributes,
+        # and a header back at the subroutine type's depth or above ends its
+        # children. A direct child is a parameter, or `...`.
+        let hm = match(r"^<(\d+)><[^>]+>", line)
+            if hm !== nothing
+                subroutine_param_open = false
+                hdr_depth = parse(Int, hm.captures[1])
+                if current_subroutine_depth !== nothing && hdr_depth <= current_subroutine_depth
+                    current_subroutine_offset = nothing
+                    current_subroutine_depth = nothing
+                elseif current_subroutine_depth !== nothing && hdr_depth == current_subroutine_depth + 1
+                    if contains(line, "DW_TAG_formal_parameter")
+                        subroutine_param_open = true
+                    elseif contains(line, "DW_TAG_unspecified_parameters")
+                        type_refs[current_subroutine_offset]["variadic"] = true
+                    end
+                end
+            end
+        end
+        if subroutine_param_open && contains(line, "DW_AT_type")
+            pm = match(r"<(0x[^>]+)>", line)
+            pm === nothing || push!(type_refs[current_subroutine_offset]["parameters"], String(pm.captures[1]))
+            subroutine_param_open = false
         end
 
         # Record where a type was DECLARED. This is the only provenance DWARF
@@ -4842,11 +4877,13 @@ function parse_dwarf_dump(output::AbstractString;
         # Extract subroutine type (function pointer signature)
         # Example: <1><jkl>: DW_TAG_subroutine_type
         #          DW_AT_type: <0x27>  (return type)
+        #          <2><jkm>: DW_TAG_formal_parameter  (a parameter; see above)
         if contains(line, "DW_TAG_subroutine_type")
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 current_type_offset = "0x" * offset_match.captures[1]
                 current_subroutine_offset = current_type_offset  # Track for param collection
+                current_subroutine_depth = something(die_depth(line), 1)
                 # Store function signature info
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "subroutine",
@@ -5603,28 +5640,21 @@ function parse_dwarf_dump(output::AbstractString;
                 return_type_ref = get(type_info, "return_type", nothing)
                 param_refs = get(type_info, "parameters", [])
 
-                # Resolve return type
+                # Each branch gets its own copy of `visited`, which guards one
+                # chain against cycles: shared, the second `int` of `int (*)(int,
+                # int)` was a cycle, and resolved to "unknown".
                 ret_type_str = if !isnothing(return_type_ref)
-                    resolve_type(return_type_ref, type_refs, visited)
+                    resolve_type(return_type_ref, type_refs, copy(visited))
                 else
                     "void"
                 end
 
-                # Resolve parameter types
+                # Parameter type refs, in dump order (collected in pass 1)
                 param_type_strs = String[]
                 for param_ref in param_refs
-                    if isa(param_ref, String)
-                        param_type = resolve_type(param_ref, type_refs, visited)
-                        push!(param_type_strs, param_type)
-                    elseif isa(param_ref, Dict)
-                        # Parameter might have additional info (name, etc.)
-                        param_type_ref = get(param_ref, "type", nothing)
-                        if !isnothing(param_type_ref)
-                            param_type = resolve_type(param_type_ref, type_refs, visited)
-                            push!(param_type_strs, param_type)
-                        end
-                    end
+                    push!(param_type_strs, resolve_type(param_ref, type_refs, copy(visited)))
                 end
+                get(type_info, "variadic", false) == true && push!(param_type_strs, "...")
 
                 # Build signature: function_ptr(return_type; param1, param2, ...)
                 # Using semicolon to separate return from params for easier parsing
@@ -5933,7 +5963,6 @@ function parse_dwarf_dump(output::AbstractString;
                 current_fn_saw_object_pointer = false
                 current_fn_is_inline = false
                 current_fn_is_concrete = false
-                current_subroutine_offset = nothing  # Reset subroutine context when entering function
 
                 # RESET VARIABLE CONTEXT to prevent leakage
                 current_variable_offset = nothing
@@ -5986,7 +6015,8 @@ function parse_dwarf_dump(output::AbstractString;
             end
         end
 
-        # Detect formal parameter (child of subprogram or subroutine_type)
+        # Detect formal parameter. Only a subprogram's are read here; a
+        # DW_TAG_subroutine_type's were collected in pass 1.
         # Example: <2><7a>: DW_TAG_formal_parameter
         if contains(line, "DW_TAG_formal_parameter")
             offset_match = match(r"<\d+><([^>]+)>", line)
@@ -6005,27 +6035,17 @@ function parse_dwarf_dump(output::AbstractString;
                 # RESET VARIABLE CONTEXT
                 current_variable_offset = nothing
 
-                # Determine position based on context (function or subroutine type)
-                position = if !isnothing(current_subroutine_offset) && haskey(type_refs, current_subroutine_offset)
-                    # Parameter belongs to subroutine type
-                    length(type_refs[current_subroutine_offset]["parameters"])
-                else
-                    # Parameter belongs to function
-                    length(params_for_this_function)
-                end
-
                 type_refs[current_param_offset] = Dict{String,Any}(
                     "kind" => "parameter",
                     "name" => nothing,
                     "type" => nothing,
-                    "position" => position,
+                    "position" => length(params_for_this_function),
                     # DW_AT_artificial marks a parameter the compiler synthesized
                     # rather than the programmer writing it — for a member function
                     # that is the implicit `this`. It is the only way to recognise a
                     # receiver on a DECLARATION DIE, where the parameter has a type
                     # but no name, so it decides the synthesized name below.
-                    "artificial" => false,
-                    "parent_subroutine" => current_subroutine_offset  # Track which subroutine this belongs to
+                    "artificial" => false
                 )
                 offset_to_kind[current_param_offset] = :parameter
             end
@@ -6265,68 +6285,56 @@ function parse_dwarf_dump(output::AbstractString;
                 if !isnothing(type_match)
                     param_info["type"] = String(type_match.captures[1])
 
-                    # Check if this parameter belongs to a subroutine type or a function
-                    parent_subroutine = get(param_info, "parent_subroutine", nothing)
+                    # A parameter's ABI identity is its TYPE and POSITION; the name
+                    # is documentation. Requiring a name here dropped every
+                    # parameter of every declaration-only DIE — which is where the
+                    # implicit `this` lives, and which is the whole of a function
+                    # whose definition is in another TU. That produced signatures
+                    # short by one or more arguments (the "extracted 0, DIE tree
+                    # has N" warnings) and, for a method, a receiver the generators
+                    # then had to guess at. Keep it and synthesize a name.
+                    #
+                    # DW_AT_artificial distinguishes a compiler-synthesized
+                    # parameter from a programmer-written one — on a member
+                    # function that is exactly the implicit `this`. Naming it
+                    # "this" is load-bearing: both generators skip receiver
+                    # synthesis when `params[1]["name"] == "this"`, so calling it
+                    # `arg0` would let them inject a SECOND receiver.
+                    type_ref = param_info["type"]
+                    c_type = resolve_type(type_ref, type_refs)
+                    julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
 
-                    if !isnothing(parent_subroutine) && haskey(type_refs, parent_subroutine)
-                        # Add to subroutine type's parameter list
-                        type_ref = param_info["type"]
-                        # Store just the type reference for now, will resolve later
-                        push!(type_refs[parent_subroutine]["parameters"], type_ref)
-                        current_param_offset = nothing
-                        current_param_level = nothing
-                    elseif !isnothing(param_info["type"])
-                        # A parameter's ABI identity is its TYPE and POSITION; the name
-                        # is documentation. Requiring a name here dropped every
-                        # parameter of every declaration-only DIE — which is where the
-                        # implicit `this` lives, and which is the whole of a function
-                        # whose definition is in another TU. That produced signatures
-                        # short by one or more arguments (the "extracted 0, DIE tree
-                        # has N" warnings) and, for a method, a receiver the generators
-                        # then had to guess at. Keep it and synthesize a name.
-                        #
-                        # DW_AT_artificial distinguishes a compiler-synthesized
-                        # parameter from a programmer-written one — on a member
-                        # function that is exactly the implicit `this`. Naming it
-                        # "this" is load-bearing: both generators skip receiver
-                        # synthesis when `params[1]["name"] == "this"`, so calling it
-                        # `arg0` would let them inject a SECOND receiver.
-                        type_ref = param_info["type"]
-                        c_type = resolve_type(type_ref, type_refs)
-                        julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
-
-                        pos = get(param_info, "position", length(params_for_this_function))
-                        resolved_name = if !isnothing(param_info["name"])
-                            param_info["name"]
-                        elseif get(param_info, "artificial", false) && pos == 0
-                            "this"
-                        else
-                            "arg$(pos)"
-                        end
-
-                        param_dict = Dict(
-                            "name" => resolved_name,
-                            "c_type" => c_type,
-                            "julia_type" => julia_type,
-                            "position" => param_info["position"]
-                        )
-
-                        # If this is a function pointer, preserve the full signature
-                        if startswith(c_type, "function_ptr(")
-                            param_dict["function_pointer_signature"] = c_type
-                            # …and the typedef it is declared with, which is what
-                            # its docstring's `@cfunction` example comes from.
-                            fp_td = _function_pointer_typedef(type_ref, type_refs)
-                            fp_td === nothing || (param_dict["function_pointer_typedef"] = fp_td)
-                        end
-
-                        push!(params_for_this_function, param_dict)
-                        pending_param_dict = param_dict  # for a trailing DW_AT_artificial
-
-                        # Reset param offset to avoid re-processing
-                        current_param_offset = nothing
-                        current_param_level = nothing
+                    pos = get(param_info, "position", length(params_for_this_function))
+                    resolved_name = if !isnothing(param_info["name"])
+                        param_info["name"]
+                    elseif get(param_info, "artificial", false) && pos == 0
+                        "this"
+                    else
+                        "arg$(pos)"
                     end
+
+                    param_dict = Dict(
+                        "name" => resolved_name,
+                        "c_type" => c_type,
+                        "julia_type" => julia_type,
+                        "position" => param_info["position"]
+                    )
+
+                    # If this is a function pointer, preserve the full signature
+                    if startswith(c_type, "function_ptr(")
+                        param_dict["function_pointer_signature"] = c_type
+                        # …and the typedef it is declared with, which is what
+                        # its docstring's `@cfunction` example comes from.
+                        fp_td = _function_pointer_typedef(type_ref, type_refs)
+                        fp_td === nothing || (param_dict["function_pointer_typedef"] = fp_td)
+                    end
+
+                    push!(params_for_this_function, param_dict)
+                    pending_param_dict = param_dict  # for a trailing DW_AT_artificial
+
+                    # Reset param offset to avoid re-processing
+                    current_param_offset = nothing
+                    current_param_level = nothing
                 end
             end
         end
@@ -6768,11 +6776,10 @@ chain (`typedef cb_t my_cb;`) the innermost, the typedef of the pointer itself,
 which is the one a header spells `typedef R (*name)(…);`. `nothing` for a
 parameter declared without one (`void (*cb)(int)`).
 
-`resolve_type` resolves through the typedef, so the parameter's `c_type` has
-lost the name, and the signature it keeps has no parameter list (the
-subroutine DIE's parameters are not collected). A docstring's `@cfunction`
-example therefore comes from this typedef's header signature, or is not
-written (`_callback_typedef_signature`).
+`resolve_type` resolves through the typedef, so the parameter's `c_type`
+(`function_ptr(R; P1, P2)*`) has lost the name. A docstring's `@cfunction`
+example comes from this typedef's header signature (`_callback_typedef_signature`),
+and from that `c_type` when the headers spell none (`_dwarf_callback_signature`).
 """
 function _function_pointer_typedef(type_ref, type_refs)
     ref = type_ref
@@ -6911,13 +6918,31 @@ Definitions that agree on `_layout_signature` are one type, differently spelled,
 and any of them is right. Definitions that disagree are distinct types sharing a
 name (a pimpl `impl` per class), and a bare-name key can describe only one: the
 kept one is marked `"conflict"`. It is still the layout every reference by that
-name gets, as it was before.
+name gets, as it was before, so no call may pass it by value
+(`FunctionGen.conflicted_within`).
+
+A conflicted entry also records `"conflict_sizes"`, the distinct byte sizes of
+all its definitions in ascending order. An enum crosses a call as an integer of
+its width, so one whose definitions differ only in their enumerators still
+crosses correctly; the sizes say whether they do.
 """
 function _canonical_definition(defs::AbstractVector)
     length(defs) == 1 && return defs[1]
     best = defs[argmin(map(_canonical_text, defs))]
-    length(unique(map(_layout_signature, defs))) > 1 && (best["conflict"] = true)
+    if length(unique(map(_layout_signature, defs))) > 1
+        best["conflict"] = true
+        best["conflict_sizes"] = sort!(unique!(Int[s for s in map(_definition_byte_size, defs)
+                                                   if s !== nothing]))
+    end
     return best
+end
+
+# A record's or enum's `byte_size` (`"0x18"`) as an Int; `nothing` without one.
+function _definition_byte_size(def::AbstractDict)
+    bs = get(def, "byte_size", nothing)
+    bs === nothing && return nothing
+    s = string(bs)
+    return startswith(s, "0x") ? tryparse(Int, s[3:end]; base = 16) : tryparse(Int, s)
 end
 
 """
@@ -7106,6 +7131,10 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         "struct_definitions" => struct_defs,  # Struct member layout from DWARF
         "record_abi" => record_abi,            # By-value records: size, pass convention, empty
         "typedef_table" => typedef_table,      # Typedef name -> Julia type resolution
+        # Function-pointer c_types list their parameters (`function_ptr(R; P1, P2)*`).
+        # Older metadata spells every one `function_ptr(R)*`, so the generators
+        # build a callback's `@cfunction` example from it only when this is set.
+        "function_pointer_parameters" => true,
 
         # STL container method symbols (for JIT thunk generation)
         "stl_methods" => stl_methods,
@@ -7782,9 +7811,12 @@ function cpp_to_julia_type(cpp_type::AbstractString,
     # Handle arrays: type[size] or type[size1][size2]
     # Examples: "double[3]" -> "NTuple{3, Cdouble}"
     #           "int[3][4]" -> "NTuple{12, Cint}"  (flattened)
+    # The extents are the trailing run only. An element can hold brackets of
+    # its own: `function_ptr(void; int[4]*)*[2]` is two function pointers, and
+    # `int[4]*[2]` two pointers, where the first `[` gave eight of each.
     if contains(cpp_type, "[") && contains(cpp_type, "]")
         # Extract element type and dimensions
-        array_match = match(r"^(.+?)(\[.+\])$", cpp_type)
+        array_match = match(r"^(.+?)((?:\[\d+\])+)$", cpp_type)
         if !isnothing(array_match)
             element_type_str = strip(array_match.captures[1])
             dims_str = array_match.captures[2]
