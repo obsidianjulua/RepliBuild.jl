@@ -61,7 +61,10 @@ function generate_stl_thunks(stl_methods::Dict, metadata::Dict=Dict())::String
 
     generated = Set{String}()
 
-    for (container_type, methods) in stl_methods
+    # Sorted, as GeneratorCpp's STL factories are: `stl_methods` is a metadata
+    # Dict, and the dedup below keeps the first container to name a symbol.
+    for container_type in sort!(collect(keys(stl_methods)); by = string)
+        methods = stl_methods[container_type]
         println(io, "// --- $container_type ---")
 
         for method_info in methods

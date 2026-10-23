@@ -122,7 +122,9 @@ function generate_array_view_thunks(structs; needed_symbols=nothing)::String
     io = IOBuffer()
     emitted = Set{String}()
 
-    for (sname_raw, info) in structs
+    # Sorted: `structs` is a metadata Dict, iterated in hash order.
+    for sname_raw in sort!(collect(keys(structs)); by = string)
+        info = structs[sname_raw]
         sname = String(sname_raw)
         startswith(sname, "__enum__") && continue
         sname in INTERNAL_TYPE_BLOCKLIST && continue
