@@ -4,6 +4,50 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.3.0 (2026-10-23)
+
+**The registry builds a project where it lives; AOT thunks come from wrap.**
+Minor, because two public calls change what they do. `register(toml)` builds
+and wraps the project in place, vendors the build to
+`~/.replibuild/builds/<hash>/`, and adds a Julia package around it to a Julia
+environment, so `using MyProject` works; `use` follows edits by rebuilding in
+place. A bare `discover` no longer registers anything. With `[compile]
+aot_thunks = true`, `wrap` compiles the thunks library for exactly the thunks
+it binds, in one pass, and `build` no longer compiles thunks. Also in this
+release: the ABI fixes the differential fuzzer found (Tier 3 records return
+where the target says, through a buffer with the record's alignment; Tier 2
+unions and bitfield records cross by value as their bytes, and `#pragma pack`
+bodies stay packed), and switching Julia or the C++ toolchain rebuilds what
+the switch affects. v4.2.1 was never registered, so its changes (LLVM.jl 10,
+Julia 1.13 in the support window, Tier 1 on Windows) ship here too.
+
+Merged after the release commit and registered with it (the first five entries
+below, PRs #25 to #29): the same source wraps the same on Julia 1.12 and 1.13
+and after an upstream edit, and lambda closure types are no longer emitted; a
+call that passes by value a type whose name several types share is an ABI trap;
+function-pointer types carry their parameter lists, and a callback's
+`@cfunction` example comes from its own signature; Windows links are
+reproducible, and a link longer than one Windows command line goes through a
+response file.
+
+Upgrading from 4.2.0: rebuild, then re-wrap (`build(toml; clean=true)`, or
+delete `.replibuild_cache/project_hash`), because the metadata now records
+member sizes, record alignment, conflicted names and function-pointer
+parameters. The first build also compiles every file once more, because IR
+file names changed. A project registered by an earlier RepliBuild keeps
+building the copy that version made; register it again, from the project.
+
+Verified on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) on the release commit:
+runtests.jl 2702 and devtests.jl 1331 plus 1 broken (already broken on main),
+each on Julia 1.12.7 and 1.13.2, and the docs build. PR #23's CI ran Linux
+devtests against LLVM/MLIR 22 and 23. The Hub was swept on Windows the same day:
+all 26 packages at their old pins, then 18 upstream version bumps. imgui and
+llamacpp were rebuilt for PR #22 from their previous manifests and finished
+in one pass. hello_world, fmt, tinyxml2, pugixml and box2d were re-wrapped on
+the release commit and pass. Each of PRs #25 to #29 was verified on its own
+branch (its entry gives the counts) and passed its PR's CI, Linux devtests
+against LLVM/MLIR 22 and 23 included; CI passed again on the final commit.
+
 ### The same IR links to the same library on Windows (2026-10-23)
 
 - **Every relink of an unchanged project gave a different DLL.** A PE image holds its link time in two fields: the COFF file header's `TimeDateStamp`, and the debug directory entry lld writes when the image has debug info (its `.buildid` CodeView record). lld fills both from the clock. Two links of the same IR a second apart differed in those two fields and nowhere else. A wrapper's `LIBRARY_SHA` is the SHA-256 of the library file, so it changed with them: llamacpp's cached IR, relinked on another day, changed that one line of a 60336-line wrapper. A CI job that judges a Hub bump by diffing regenerated wrappers would see it on every run.
@@ -132,38 +176,6 @@ A dry run of an unattended llama.cpp bump (b11819 → b11828, nine upstream comm
   - TestSupport gains `:llvm_link`, found on the `PATH` that `with_llvm_env` sets.
   - The Hub's llamacpp with ggml-vulkan, built cold from a 70-character package path (the Hub checkout's is 64): llvm-link read all 384 inputs from `build/llamacpp_link.rsp`, test_deep.jl passes 33/33, and all 13 layers run on the Vulkan GPU.
   - On main with #25 merged: runtests 2803 on Julia 1.13.2 and 1.12.7; devtests (1.13.2) 1384 plus 1 broken (already broken on main). Two existing testsets count what is on disk: "Symbol hygiene" adds 8 once the MI/VI fixtures are built, and "Debug: static inspection" adds 1 per `.mlir` file in vi_test's `.debug/`.
-
-## v4.3.0 (2026-10-22)
-
-**The registry builds a project where it lives; AOT thunks come from wrap.**
-Minor, because two public calls change what they do. `register(toml)` builds
-and wraps the project in place, vendors the build to
-`~/.replibuild/builds/<hash>/`, and adds a Julia package around it to a Julia
-environment, so `using MyProject` works; `use` follows edits by rebuilding in
-place. A bare `discover` no longer registers anything. With `[compile]
-aot_thunks = true`, `wrap` compiles the thunks library for exactly the thunks
-it binds, in one pass, and `build` no longer compiles thunks. Also in this
-release: the ABI fixes the differential fuzzer found (Tier 3 records return
-where the target says, through a buffer with the record's alignment; Tier 2
-unions and bitfield records cross by value as their bytes, and `#pragma pack`
-bodies stay packed), and switching Julia or the C++ toolchain rebuilds what
-the switch affects. v4.2.1 was never registered, so its changes (LLVM.jl 10,
-Julia 1.13 in the support window, Tier 1 on Windows) ship here too.
-
-Upgrading from 4.2.0: rebuild, then re-wrap (`build(toml; clean=true)`, or
-delete `.replibuild_cache/project_hash`), because the metadata now records
-member sizes and record alignment. A project registered by an earlier
-RepliBuild keeps building the copy that version made; register it again, from
-the project.
-
-Verified on Windows (MSYS2 CLANG64, LLVM/MLIR 23.1.3) on the release commit:
-runtests.jl 2702 and devtests.jl 1331 plus 1 broken (already broken on main),
-each on Julia 1.12.7 and 1.13.2, and the docs build. PR #23's CI ran Linux
-devtests against LLVM/MLIR 22 and 23. The Hub was swept on Windows the same day:
-all 26 packages at their old pins, then 18 upstream version bumps. imgui and
-llamacpp were rebuilt for PR #22 from their previous manifests and finished
-in one pass. hello_world, fmt, tinyxml2, pugixml and box2d were re-wrapped on
-the release commit and pass.
 
 ### AOT thunks are compiled by wrap, in one pass (2026-10-22)
 

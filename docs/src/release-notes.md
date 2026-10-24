@@ -23,7 +23,7 @@ registered release, which can be older than what is described here;
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
   folder ([Install](install.md#The-JLCS-dialect)).
 
-## v4.3.0 (2026-10-22)
+## v4.3.0 (2026-10-23)
 
 **The registry builds a project where it lives; AOT thunks come from `wrap`.**
 `register` and `use` change what they do (below), so this is a minor release.
@@ -40,8 +40,10 @@ v4.2.1 was never registered: its changes reach users with this release.
     bytes; `#pragma pack` bodies stay packed; bitfields wider than 32 bits get
     working accessors.
 - **Switching Julia or the C++ toolchain** rebuilds what the switch affects.
-- **Rebuild, then re-wrap.** Member sizes and record alignment are now
-  recorded in the metadata.
+- **Rebuild, then re-wrap.** Member sizes, record alignment, names that
+  several types share, and function-pointer parameters are now recorded in the
+  metadata. The first build also compiles every file once more, because IR file
+  names changed.
 - **The registry builds a project where it lives.**
   - `register` builds and wraps the project in place, vendors the build to
     `~/.replibuild/builds/<hash>/`, and adds a Julia package around it to your
@@ -59,6 +61,18 @@ v4.2.1 was never registered: its changes reach users with this release.
   compiles the thunks library as its last step, for exactly the thunks the
   wrapper binds; `build` no longer compiles thunks. A new package used to need
   `build` and `wrap` twice.
+- **The same source wraps the same** on Julia 1.12 and 1.13 and after an
+  upstream edit. A regenerated wrapper changes once: lambda closure types are no
+  longer emitted, and where several types share a name, the definition kept is
+  chosen by content.
+- **A call that passes by value a type whose name several types share** is an
+  ABI-trap stub that says why, instead of using whichever layout was kept.
+- **Function-pointer types carry their parameter lists**, and a callback's
+  `@cfunction` example comes from its own typedef or DWARF signature, never
+  from a name match.
+- **Windows links are reproducible**: the same IR gives the same DLL, so
+  `LIBRARY_SHA` changes only when the library does. A link longer than one
+  Windows command line goes through a response file.
 
 ## v4.2.1 (2026-10-17, released in v4.3.0)
 
