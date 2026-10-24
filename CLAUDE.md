@@ -155,8 +155,10 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   imports `libLLVM-<major>.dll` and links MLIR statically) is a gitignored build
   artifact pinned to the installed MLIR minor SONAME: rebuild after a minor upgrade. A patch
   bump inside a minor needs nothing. `deps/build.jl` builds it at install time when
-  possible (Linux; on Windows it only reports whether `libJLCS.dll` loads, since
-  `Pkg.build` is not a CLANG64 shell) and never throws. Tier 3 alone is the whole
+  possible and never throws. On Windows it runs build.sh through MSYS2's
+  `bash.exe -l` with `MSYSTEM=CLANG64`, which is a CLANG64 shell from any
+  process; `src/mlir/windows_build.jl` is that command's one copy (the doctor's
+  advice uses it too). Tier 3 alone is the whole
   product for C.
 - Julia's bundled libLLVM and system libLLVM coexist in one process. The GDB JIT
   descriptor resolves to Julia's copy; this is correct, do not "fix" it.

@@ -445,6 +445,9 @@ function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
         isempty(built) ? "dialect compiled" : "dialect compiled against LLVM $built"; section=SEC_CPP)
 end
 
+# The MSYS2 command, shared with deps/build.jl.
+include(joinpath(SRC_DIR, "mlir", "windows_build.jl"))
+
 """
     jlcs_build_advice() -> Vector{String}
 
@@ -455,10 +458,13 @@ because bash strips backslashes and the Windows build runs in MSYS2 bash.
 function jlcs_build_advice()::Vector{String}
     dir = replace(joinpath(SRC_DIR, "mlir"), '\\' => '/')
     if Sys.iswindows()
-        return ["From an MSYS2 CLANG64 shell:",
-                "  cd \"$dir\" && ./build.sh",
-                "Build it again after MSYS2 upgrades LLVM, and after upgrading RepliBuild:",
-                "each version installs into a new folder."]
+        return ["From Julia (it runs build.sh in MSYS2 CLANG64; output in deps/build.log):",
+                "  using Pkg; Pkg.build(\"RepliBuild\")",
+                "or from PowerShell:",
+                "  " * jlcs_msys2_line(dir),
+                "Then restart Julia. To rebuild, close the Julia sessions using it first:",
+                "Windows will not overwrite a loaded DLL. Pkg builds it for each new",
+                "RepliBuild version; build it again after MSYS2 upgrades LLVM."]
     end
     return ["Pkg.build(\"RepliBuild\") builds it when cmake, llvm-config and mlir-tblgen are on PATH. By hand:",
             "  cd \"$dir\" && ./build.sh",
@@ -671,10 +677,28 @@ function _summary_lines(status::ToolchainStatus)::Vector{String}
     end
     if status.tier2_ready
         push!(lines, "  $(_icon(:ok)) $(GREEN)Tier 2 (MLIR thunks)$(RESET) — C++ methods, virtual dispatch, by-value records, exceptions")
+    elseif _only_dialect_missing(status)
+        # Every tool passed and one build is all that is missing. A plain WARN
+        # line here read as green among the OKs, on a box one command from Tier 2.
+        push!(lines, "  $(_icon(:warn)) $(YELLOW)Tier 2 (MLIR thunks) not built yet$(RESET) — every tool it needs is here. Build the dialect:")
+        push!(lines, "       $(CYAN)using Pkg; Pkg.build(\"RepliBuild\")$(RESET)  $(DIM)(other ways under libJLCS above)$(RESET)")
     else
         push!(lines, "  $(_icon(:warn)) $(YELLOW)Tier 2 (MLIR thunks) unavailable$(RESET) — a C++ wrapper keeps only its noexcept functions that ccall can pass")
     end
     return lines
+end
+
+"""
+Whether Tier 2 lacks only the dialect library, with every tool that builds it
+passing, so that `Pkg.build` is the whole fix. A library that exists but is stale
+or will not load is not this case: its advice is under the libJLCS probe.
+"""
+function _only_dialect_missing(status::ToolchainStatus)::Bool
+    ok(name) = _probe_ok(status.tools, name)
+    i = findfirst(t -> t.name == "libJLCS", status.tools)
+    i === nothing && return false
+    status.tools[i].found && return false
+    return status.tier1_ready && all(ok, ("llvm-config", "clang++", "mlir-tblgen", "cmake", "llvm-dwarfdump"))
 end
 
 end # module EnvironmentDoctor

@@ -23,14 +23,18 @@ const BUILD_DIR  = joinpath(MLIR_DIR, "build")
 const LIB_PATH   = joinpath(BUILD_DIR, "libJLCS." * Base.Libc.Libdl.dlext)
 const LOG_PATH   = joinpath(@__DIR__, "build.log")
 
+# The MSYS2 command, shared with the doctor's advice.
+include(joinpath(MLIR_DIR, "windows_build.jl"))
+
 # How to build it by hand, for this host. The Windows package list is not
 # repeated here: check_environment() prints it from the doctor's one copy.
 function build_steps()
     if Sys.iswindows()
-        dir = replace(abspath(MLIR_DIR), '\\' => '/')
         return """
-        To build it, from an MSYS2 CLANG64 shell:
-            cd "$dir" && ./build.sh
+        To build it again, close the Julia sessions using RepliBuild, then run
+            julia -e 'using Pkg; Pkg.build("RepliBuild")'
+        or from PowerShell:
+            $(jlcs_msys2_line(abspath(MLIR_DIR)))
 
         `RepliBuild.check_environment()` lists the CLANG64 packages it needs, and
         docs/src/install.md (Windows) has the setup."""
@@ -86,14 +90,75 @@ end
 
 haveit(prog) = Sys.which(prog) !== nothing
 
-function main()
-    if Sys.iswindows()
-        # build.sh needs bash and the CLANG64 toolchain and MLIR on PATH, which is
-        # an MSYS2 CLANG64 shell; Pkg.build does not run in one. Report what is
-        # there instead of trying.
-        usable_library() && return println("RepliBuild: JLCS dialect already built and loadable.")
-        advise("On Windows it is built from an MSYS2 CLANG64 shell, which `Pkg.build` does not run in.")
+# Run build.sh with its output in the log. True when it exited 0.
+function run_logged(cmd::Cmd)
+    try
+        open(LOG_PATH, "w") do log
+            run(pipeline(cmd; stdout = log, stderr = log))
+        end
+        return true
+    catch
+        return false
     end
+end
+
+# Built, but prove it loads before claiming success — a linkable-but-not-
+# loadable library is exactly what this script exists to catch.
+function finish(ok::Bool)
+    if !ok || !isfile(LIB_PATH)
+        advise("The build failed."; detail = "Build log: $LOG_PATH")
+    end
+    usable_library() ||
+        advise("The build produced a library that will not load.";
+               detail = "Build log: $LOG_PATH")
+    println("RepliBuild: JLCS dialect built — $LIB_PATH")
+end
+
+# Windows: build.sh runs in a CLANG64 login shell started from here
+# (windows_build.jl says why that is a CLANG64 shell). The toolchain is checked
+# where that shell will look for it, not on this process's PATH.
+function main_windows()
+    root = msys2_root()
+    bin = "$root/clang64/bin"
+    version = try
+        strip(read(`$bin/llvm-config.exe --version`, String))
+    catch
+        "unknown"
+    end
+    # libLLVM-<major>.dll is named by major alone, so a library built against
+    # another minor still loads. build.sh stamps the version it built against.
+    stamp = joinpath(BUILD_DIR, "jlcs_llvm_version")
+    mm(v) = match(r"^\d+\.\d+", v)
+    built = isfile(stamp) ? strip(read(stamp, String)) : ""
+    stale = mm(built) !== nothing && mm(version) !== nothing &&
+            mm(built).match != mm(version).match
+    stale && println("RepliBuild: libJLCS.dll was built against LLVM $built; CLANG64 has $version. Rebuilding.")
+    !stale && usable_library() &&
+        return println("RepliBuild: JLCS dialect already built and loadable.")
+
+    isfile(msys2_bash(root)) ||
+        advise("MSYS2 was not found at $root (set MSYS2_ROOT if it is elsewhere).")
+    missing = filter(t -> !isfile("$bin/$t.exe"), ["cmake", "mlir-tblgen", "llvm-config"])
+    isempty(missing) ||
+        advise("MSYS2 CLANG64 has no $(join(missing, ", ")) in $bin.")
+
+    println("RepliBuild: building JLCS dialect against LLVM/MLIR $version in MSYS2 CLANG64 …")
+    ok = run_logged(jlcs_msys2_cmd(MLIR_DIR; root))
+
+    # libJLCS.dll imports libLLVM and libc++ from clang64\bin, which Windows
+    # finds only through PATH. A library that built but cannot load for that
+    # reason needs a PATH entry, not another build.
+    if ok && isfile(LIB_PATH) && !usable_library()
+        onpath = any(p -> lowercase(rstrip(replace(p, '\\' => '/'), '/')) == lowercase(bin),
+                     split(get(ENV, "PATH", ""), ';'))
+        onpath || advise("It built, but $bin is not on PATH, and libJLCS.dll loads its LLVM from there.";
+                         detail = "Add $(replace(bin, '/' => '\\')) to the Windows PATH, then restart Julia.")
+    end
+    finish(ok)
+end
+
+function main()
+    Sys.iswindows() && return main_windows()
     Sys.islinux() || advise("This platform is not supported; RepliBuild runs on Linux and Windows.")
 
     usable_library() && return println("RepliBuild: JLCS dialect already built and loadable.")
@@ -112,27 +177,7 @@ function main()
     # Output goes to a log rather than the terminal: a CMake build is a few
     # hundred lines and `Pkg.add` is not the place for them. The path is named
     # in the warning, so a failure is still diagnosable.
-    ok = try
-        open(LOG_PATH, "w") do log
-            run(pipeline(`bash $(joinpath(MLIR_DIR, "build.sh"))`;
-                         stdout = log, stderr = log))
-        end
-        true
-    catch e
-        false
-    end
-
-    if !ok || !isfile(LIB_PATH)
-        advise("The build failed."; detail = "Build log: $LOG_PATH")
-    end
-
-    # Built, but prove it loads before claiming success — a linkable-but-not-
-    # loadable library is exactly what this script exists to catch.
-    usable_library() ||
-        advise("The build produced a library that will not load.";
-               detail = "Build log: $LOG_PATH")
-
-    println("RepliBuild: JLCS dialect built — $LIB_PATH")
+    finish(run_logged(`bash $(joinpath(MLIR_DIR, "build.sh"))`))
 end
 
 try
