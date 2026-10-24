@@ -294,6 +294,8 @@ If you are asked to work on it:
 - `Debug/Debug.jl` — static inspection of emitted thunks.
 - `src/mlir/` — the JLCS dialect (TableGen `JLCSOps.td`/`Types.td`, lowering in
   `impl/JLCSPasses.cpp`, C API and JIT in `impl/JLCSCAPIWrappers.cpp`, `JlcsJIT.cpp`).
+  `impl/JLCSAbiOracle.cpp` is test only, compiled when CMake finds LLVM 23+'s ABI
+  library.
 
 ## Invariants — do not break these
 
@@ -533,6 +535,14 @@ the test named when you touch the area.
   one scalar per eightbyte. MEMORY-class by-value args use alloca + `llvm.byval(T)`
   **on the call site and the declaration**. `ffe_call`/`try_call` share one
   `buildSysVCallShape`. Win64 is a separate `classifyWin64Struct` behind `AbiTarget`.
+- **`test_sysv_abi_oracle.jl` diffs the SysV half against LLVM's ABI library**
+  (`llvm/ABI`, LLVM 23+; skips elsewhere). `jlcs_probe_sysv_call_shapes` and
+  `jlcs_abi_oracle_sysv` are test seams: nothing on the JIT or wrap path calls
+  them, and the oracle must stay optional so libJLCS builds against 21 and 22. A
+  change to SysV classification moves that test's `@test_broken` entries: update
+  `SAO_CURATED` and `SAO_FUZZ_KNOWN` in the same change. `thunk_crossings` asks
+  `_byte_region_unclassifiable` for the host's ABI, so a module generated on
+  Windows keeps records a SysV host refuses; the test applies the SysV answer.
   (`test_struct_abi.jl`: only a system-clang callee catches a mismatch, because
   self-JIT'd callees share the bug. `gap_probe` is the discriminating case.)
 - **Emitted struct size must equal DWARF `byte_size`.** StructGen lays members out at
@@ -810,6 +820,25 @@ check before claiming portability again; reading `.gitignore` does not settle it
   SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
   parameters are safe (LLVM's `byval` lowering puts the copy at 16). A SysV
   record holding a `long double` returns in `st0`, which no Julia type does.
+- **Tier 2 SysV records that LLVM's classifier passes elsewhere** (2026-10-24,
+  `test_sysv_abi_oracle.jl`, where each family is `@test_broken` with a
+  hand-written repro and a minimal record; clang's own lowering agrees with the
+  oracle on every repro). A thunk for one of them puts the record where the callee
+  does not look. Not yet run as a live call on Linux.
+  - Padding is INTEGER: StructGen's explicit pad arrays, an unnamed bitfield's
+    bytes included, make an eightbyte holding a float a GPR (`{float; double}`,
+    `{void*; float}`, `aligned(16) float`), and a tiled (`is_struct_packed`) body
+    spells a nested untiled record as bytes, hiding its floats.
+  - Bytes hide misaligned fields: a nested untiled record or an enum in a tiled
+    body, or a union's members, at an odd offset cross in registers; C uses memory.
+  - A tiled body puts a bitfield's storage unit at its byte offset with its whole
+    type, which reads as misaligned (`#pragma pack(1) {char; int b : 31;}`): memory,
+    where C uses one register.
+  - `long double` and `_Complex` members map to `!llvm.ptr`, so a tiled 16-byte
+    record emits as 8 bytes; FunctionGen does not trap them. This one is wrong on
+    Win64 too, where the 8-byte body goes in a register.
+  - A 16-aligned record (`aligned(16)`, `__int128`) gets byval and sret
+    alignment 8.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them

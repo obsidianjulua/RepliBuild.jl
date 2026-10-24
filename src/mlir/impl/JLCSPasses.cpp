@@ -1733,6 +1733,121 @@ struct LowerJLCSToLLVMPass
     }
 };
 
+//===----------------------------------------------------------------------===//
+// SysV call-shape probe (test seam)
+//===----------------------------------------------------------------------===//
+//
+// What buildCallShape makes of each jlcs.ffe_call and jlcs.try_call under the
+// x86-64 SysV rules, on any host. test/test_sysv_abi_oracle.jl diffs it against
+// LLVM's own ABI lowering library (JLCSAbiOracle.cpp). It calls the real
+// buildCallShape with an explicit AbiTarget::SysV, so it shares every line of
+// the decision with the lowering instead of restating it. The pass above is
+// untouched and still takes kHostAbi.
+//
+// A conversion is the only way to get the ConversionPatternRewriter that
+// buildCallShape takes. The IR it emits on the way (allocas, loads) is thrown
+// away with the clone the probe runs on.
+
+// One line per call: the callee, the return, then one field per argument.
+//   return:   void | scalar:<type> | sret:<slot align> | regs:<t>[,<t>]
+//   argument: scalar:<type> | byval:<align> | regs:<t>[,<t>]
+// `regs` lists the scalar per eightbyte, i64 for INTEGER and f64 for SSE.
+// `unmodelled:` replaces the fields when an operand or result is not an LLVM
+// type yet: the real pass converts those first, and this probe does not.
+//
+// A probed op is marked, not replaced, which is what makes it legal: the
+// conversion then never needs a value of its result type.
+static constexpr llvm::StringLiteral kSysVProbedAttr = "jlcs.sysv_probed";
+
+struct SysVCallShapeProbe : public ConversionPattern {
+    SysVCallShapeProbe(LLVMTypeConverter& typeConverter, MLIRContext* ctx,
+        StringRef opName, std::string& out)
+        : ConversionPattern(typeConverter, opName, 1, ctx), out(out)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        MLIRContext* ctx = rewriter.getContext();
+        llvm::raw_string_ostream os(out);
+        auto calleeAttr = op->getAttrOfType<FlatSymbolRefAttr>("callee");
+        os << (calleeAttr ? calleeAttr.getValue() : StringRef("?"));
+
+        // Both ops take exactly their call arguments as operands.
+        SmallVector<Type, 1> resultTypeVec;
+        for (Type t : op->getResultTypes())
+            resultTypeVec.push_back(typeConverter->convertType(t));
+        bool modelled = resultTypeVec.size() <= 1 &&
+            llvm::all_of(resultTypeVec, [](Type t) { return t && LLVM::isCompatibleType(t); }) &&
+            llvm::all_of(operands, [](Value v) { return LLVM::isCompatibleType(v.getType()); });
+
+        if (!modelled) {
+            os << "\tunmodelled:operand or result is not an LLVM type\n";
+        } else {
+            CallShape s = buildCallShape(rewriter, op->getLoc(), resultTypeVec,
+                ValueRange(operands), AbiTarget::SysV);
+
+            os << '\t';
+            if (resultTypeVec.empty()) {
+                os << "void";
+            } else if (s.needsSret) {
+                os << "sret:" << memorySlotAlign(s.sretStructType, s.target);
+            } else if (s.coercedRetType) {
+                os << "regs:";
+                if (auto lit = dyn_cast<LLVM::LLVMStructType>(s.coercedRetType))
+                    llvm::interleave(lit.getBody(), os, ",");
+                else
+                    os << s.coercedRetType;
+            } else {
+                os << "scalar:" << resultTypeVec[0];
+            }
+
+            // Walk the flattened argument list the shape built, one original
+            // operand at a time. A by-value struct is either one byval pointer
+            // or classifyStruct's registers, which is what buildCallShape
+            // pushed for it.
+            unsigned j = s.needsSret ? 1 : 0;
+            for (Value arg : operands) {
+                os << '\t';
+                auto st = dyn_cast<LLVM::LLVMStructType>(arg.getType());
+                if (!st) {
+                    os << "scalar:" << arg.getType();
+                    ++j;
+                    continue;
+                }
+                auto byval = llvm::find_if(s.byval,
+                    [&](const std::pair<unsigned, Type>& b) { return b.first == j; });
+                if (byval != s.byval.end()) {
+                    os << "byval:" << memorySlotAlign(byval->second, s.target);
+                    ++j;
+                    continue;
+                }
+                StructABI abi = classifyStruct(st, ctx, s.target);
+                if (abi.memoryClass || j + abi.regs.size() > s.argTypes.size()) {
+                    os << "inconsistent";
+                    j = s.argTypes.size() + 1;
+                    break;
+                }
+                os << "regs:";
+                llvm::interleave(ArrayRef<Type>(s.argTypes).slice(j, abi.regs.size()), os, ",");
+                j += abi.regs.size();
+            }
+            if (j != s.argTypes.size())
+                os << "\tinconsistent:" << j << "/" << s.argTypes.size();
+            os << '\n';
+        }
+
+        rewriter.modifyOpInPlace(op, [&] {
+            op->setAttr(kSysVProbedAttr, rewriter.getUnitAttr());
+        });
+        return success();
+    }
+
+    std::string& out;
+};
+
 } // end anonymous namespace
 
 //===----------------------------------------------------------------------===//
@@ -1745,6 +1860,28 @@ namespace jlcs {
 std::unique_ptr<Pass> createLowerJLCSToLLVMPass()
 {
     return std::make_unique<LowerJLCSToLLVMPass>();
+}
+
+std::string describeSysVCallShapes(ModuleOp module)
+{
+    MLIRContext* ctx = module.getContext();
+    OwningOpRef<ModuleOp> clone(cast<ModuleOp>(module->clone()));
+    std::string out;
+
+    LLVMTypeConverter typeConverter(ctx);
+    ConversionTarget target(*ctx);
+    target.addDynamicallyLegalOp<FFECallOp, TryCallOp>(
+        [](Operation* op) { return op->hasAttr(kSysVProbedAttr); });
+    target.markUnknownOpDynamicallyLegal([](Operation*) { return true; });
+
+    RewritePatternSet patterns(ctx);
+    patterns.add<SysVCallShapeProbe>(typeConverter, ctx,
+        FFECallOp::getOperationName(), out);
+    patterns.add<SysVCallShapeProbe>(typeConverter, ctx,
+        TryCallOp::getOperationName(), out);
+    if (failed(applyPartialConversion(*clone, target, std::move(patterns))))
+        out += "?\terror:the probe conversion failed\n";
+    return out;
 }
 
 } // namespace jlcs

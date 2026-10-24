@@ -397,6 +397,15 @@ include(joinpath(TEST_DIR, "test_jlcs_producers.jl"))
 
 include(joinpath(TEST_DIR, "test_struct_abi.jl"))
 
+# ── 12b. SysV struct classification against LLVM's ABI library ───────────────
+# classifySysVStruct + buildCallShape, with the SysV target on any host, diffed
+# against LLVM 23's own x86-64 classifier (llvm/ABI) over abi_fuzz's records and
+# hand-written ones. Known disagreements are @test_broken, one per crossing,
+# grouped in families named after their defect; anything else fails. Skips
+# unless libJLCS was built with the oracle (LLVM 23+).
+
+include(joinpath(TEST_DIR, "test_sysv_abi_oracle.jl"))
+
 # ── 13. Multi-library JIT: one engine per wrapped binary ─────────────────────
 # Two generated wrappers in one session. The old single-engine singleton let
 # the first library win and silently killed the second's Tier 2 (found live

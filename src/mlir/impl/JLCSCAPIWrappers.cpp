@@ -443,6 +443,16 @@ extern "C" {
         return ok;
     }
 
+    // Test seam: the SysV call shape of every jlcs.ffe_call / jlcs.try_call in
+    // the module, as mlir::jlcs::describeSysVCallShapes writes it. The module
+    // is not changed. The pointer is into a thread-local buffer the next call
+    // overwrites, so the caller copies it (Julia's unsafe_string does).
+    const char *jlcs_probe_sysv_call_shapes(MlirModule module) {
+        static thread_local std::string shapes;
+        shapes = mlir::jlcs::describeSysVCallShapes(unwrap(module));
+        return shapes.c_str();
+    }
+
     // --- JIT Execution Engine ---
 
     // Forward declaration
