@@ -837,7 +837,13 @@ function sao_report(io::IO)
 end
 
 @testset "SysV struct classification vs LLVM's ABI library" begin
-    @info sprint(sao_report)
+    # Its own testset, so that an error while minimising is reported there and
+    # the assertions below still run.
+    @testset "report" begin
+        report = sprint(sao_report)
+        @info report
+        @test occursin("$(count(c -> !sao_agree(c.jlcs, c.llvm), SAO_CASES)) disagree", report)
+    end
 
     @testset "harness" begin
         @test isempty(SAO_GAPS)

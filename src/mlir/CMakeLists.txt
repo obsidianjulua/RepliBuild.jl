@@ -124,11 +124,20 @@ target_link_libraries(JLCS PRIVATE
 # links. With LLVM as one shared library that is the dylib, so only the archive
 # FILE is linked: the LLVMABI target would add static copies of LLVMSupport,
 # and two copies of Support in one process register every cl::opt twice.
+#
+# Nothing here may outlive the LLVM it was found in. build.sh reconfigures the
+# same build directory after an LLVM upgrade, and a cached archive path would
+# link one LLVM's library into a build against another. So the searches run
+# on every configure, and the compile check's result is keyed on the version.
 set(JLCS_LLVM_ABI_ORACLE OFF)
+unset(JLCS_LLVM_ABI_INCLUDE_DIR CACHE)
+unset(JLCS_LLVM_ABI_LIBRARY CACHE)
 find_path(JLCS_LLVM_ABI_INCLUDE_DIR llvm/ABI/TargetInfo.h
   PATHS ${LLVM_INCLUDE_DIRS} NO_DEFAULT_PATH)
 find_library(JLCS_LLVM_ABI_LIBRARY NAMES LLVMABI
   PATHS ${LLVM_LIBRARY_DIR} ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH)
+string(MAKE_C_IDENTIFIER "JLCS_LLVM_ABI_X86_64_COMPILES_${LLVM_PACKAGE_VERSION}"
+  JLCS_LLVM_ABI_CHECK)
 if(JLCS_LLVM_ABI_INCLUDE_DIR AND JLCS_LLVM_ABI_LIBRARY)
   include(CheckCXXSourceCompiles)
   set(CMAKE_REQUIRED_INCLUDES ${LLVM_INCLUDE_DIRS})
@@ -153,11 +162,11 @@ if(JLCS_LLVM_ABI_INCLUDE_DIR AND JLCS_LLVM_ABI_LIBRARY)
       TI->computeInfo(*FI);
       return FI->getReturnInfo().isDirect() && FI->arguments()[0].Info.isExtend();
     }
-  ]=] JLCS_LLVM_ABI_X86_64_COMPILES)
+  ]=] ${JLCS_LLVM_ABI_CHECK})
   unset(CMAKE_REQUIRED_INCLUDES)
   unset(CMAKE_REQUIRED_DEFINITIONS)
   unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
-  if(JLCS_LLVM_ABI_X86_64_COMPILES)
+  if(${JLCS_LLVM_ABI_CHECK})
     set(JLCS_LLVM_ABI_ORACLE ON)
   endif()
 endif()

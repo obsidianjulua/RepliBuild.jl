@@ -462,6 +462,10 @@ prose because every by-value struct crossing in RepliBuild runs through it:
    overlapping leaf is FP; otherwise **INTEGER**.
 5. Emit one coercion scalar per eightbyte: `f64` for SSE, `i64` for INTEGER.
 
+`test_sysv_abi_oracle.jl` checks these steps, and the call shape below, against
+LLVM 23's own SysV classifier (`llvm/ABI`), on any host. §11 lists where the two
+disagree.
+
 From that classification the shared `buildSysVCallShape` derives the entire call:
 
 | Shape | Lowering |
@@ -688,6 +692,18 @@ Deliberately unbuilt, so they are not chased as bugs:
 - **The classifier is x86-64 SysV only.** The 16-byte MEMORY threshold, 64-bit
   pointers, and i64/f64 eightbytes are hardcoded. Win64 and AAPCS are not
   modeled.
+- **LLVM's own SysV classifier disagrees with it in five places**, found by
+  `test_sysv_abi_oracle.jl` (2026-10-24). That test lists each with a minimal
+  record:
+  - The explicit padding StructGen inserts counts as INTEGER in step 4, so
+    `{ float; double }` crosses in RDI and XMM0 instead of XMM0 and XMM1. A
+    padding-free body also spells a nested record that has padding as bytes,
+    which hides its floats.
+  - A misaligned field inside a member spelled as bytes (a nested record, a
+    union's members) is invisible to step 3.
+  - A bitfield's storage unit in a padding-free body reads as a misaligned field.
+  - `long double` and `_Complex` members are spelled `!llvm.ptr`, 8 bytes.
+  - A 16-aligned record gets slots aligned to 8.
 - **No in-IR virtual-base upcast op.** Virtual inheritance works through a
   dynamic upcast on the *Julia* side ([The inheritance ABI](inheritance-abi.md)),
   which needed zero dialect changes. An op would only be required for IR that
@@ -729,7 +745,8 @@ semantics: CStructs, RAII, vcall, sret, MI and the VI diamond),
 `test_jlcs_invariants.jl` (op arity/liveness probes, the `RTLD_NOW` symbol
 guard), `test_jlcs_producers.jl` (scope-RAII and array-view producers executing
 through the real JIT), `test_struct_abi.jl` (SysV small-struct and `byval` ABI
-against a real `clang++` callee), `test_struct_layout.jl` (DWARF-offset layout,
+against a real `clang++` callee), `test_sysv_abi_oracle.jl` (the SysV
+classification against LLVM's ABI library), `test_struct_layout.jl` (DWARF-offset layout,
 no toolchain), `test_multilib_jit.jl` (two wrappers, one session),
 `test_debug_inspection.jl` (the debug surfaces above), and the fixtures
 `test/mi_test/`, `test/vi_test/`, `test/stl_test/`.
