@@ -80,27 +80,30 @@ joinpath(pkgdir(RepliBuild), "src", "mlir")
   are on `PATH`. Installed LLVM/MLIR afterwards? Run `Pkg.build("RepliBuild")`.
   Pkg writes the build's output to a log file (it prints the path), not to the
   REPL, so check the result with `check_environment()`.
-- **Windows:** build it yourself, once, from an **MSYS2 CLANG64** shell.
-  `Pkg.build` cannot do it, because it does not run in a CLANG64 shell. Write the
-  path with forward slashes, since bash strips backslashes:
+- **Windows:** `Pkg.add` builds it too, once the [Windows](#Windows) toolchain
+  is installed. It runs `build.sh` in MSYS2's bash as a CLANG64 login shell,
+  from `C:\msys64` (or `MSYS2_ROOT`), so Julia does not have to be started from
+  MSYS2. Installed the toolchain afterwards? Run `Pkg.build("RepliBuild")`, and
+  check the result with `check_environment()`. To run it by hand instead, this
+  line works from PowerShell; `check_environment()` prints it with your path
+  filled in:
 
   ```bash
-  cd "C:/Users/<you>/.julia/packages/RepliBuild/<slug>/src/mlir" && ./build.sh
+  C:/msys64/usr/bin/env.exe MSYSTEM=CLANG64 /usr/bin/bash -l 'C:/Users/<you>/.julia/packages/RepliBuild/<slug>/src/mlir/build.sh'
   ```
 
-  `replace(joinpath(pkgdir(RepliBuild), "src", "mlir"), '\\' => '/')` prints that
-  path.
+  Close the Julia sessions using RepliBuild before you rebuild: Windows will
+  not overwrite a DLL a process has loaded.
 - **From a clone of the repository:** `cd src/mlir && ./build.sh`.
 
 Build it again:
 
 - **after a system LLVM/MLIR upgrade that changes the minor version.** The library is
   pinned to the MLIR it was built against, and `check_environment()` reports a
-  mismatch. On Linux, `Pkg.build("RepliBuild")` rebuilds a library that no
-  longer loads.
-- **on Windows, after upgrading RepliBuild.** Each version installs into a new
-  folder, which has no dialect library yet. On Linux, Pkg builds it for the new
-  version.
+  mismatch. `Pkg.build("RepliBuild")` rebuilds it.
+
+Each RepliBuild version installs into a new folder, which has no dialect library
+yet; Pkg builds it there when it installs the version.
 
 A C++ wrapper needs the dialect when it **runs**, not only when it is
 generated, with JIT and AOT thunks alike — see

@@ -91,9 +91,9 @@ lists every key, what discovery cannot infer, and a symptom → key index.
   distribution has. Clang ships as a JLL, and link/optimize/assemble run on
   Julia's own libLLVM. On Windows, MSYS2 CLANG64 and GNU `objdump` (below).
 - **C++ libraries:** system LLVM/MLIR 21+, and the JLCS dialect library built
-  against it. On Linux `Pkg.build("RepliBuild")` builds it when the LLVM/MLIR
-  tools are on `PATH`; on Windows you run `build.sh` from an MSYS2 CLANG64
-  shell. [Install](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/)
+  against it. `Pkg.build("RepliBuild")` builds it when the LLVM/MLIR tools are
+  installed (on Windows, in MSYS2 CLANG64).
+  [Install](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/)
   has the steps.
 
 `RepliBuild.check_environment()` reports which of those this machine has.

@@ -199,13 +199,49 @@ const _CO = RepliBuild.Compiler
         cxx = summary(vcat(c_ok, [probe("llvm-config", true), probe("clang++", true)]), false)
         @test occursin("C++ builds —", cxx)
         @test !occursin("C++ builds unavailable", cxx)
+
+        # Every Tier 2 tool here and no dialect yet: one command away, and the
+        # summary names it instead of a WARN that reads as green.
+        tier2_tools = [probe(n, true) for n in
+                       ("llvm-config", "clang++", "mlir-tblgen", "cmake", "llvm-dwarfdump")]
+        unbuilt = _ED.ToolStatus("libJLCS", false, false, "", "", false, "dialect not built")
+        one_step = summary(vcat(c_ok, tier2_tools, [unbuilt]), false)
+        @test occursin("not built yet", one_step)
+        @test occursin("Pkg.build(\"RepliBuild\")", one_step)
+        # A library that exists but is stale or will not load is not this case.
+        stale = _ED.ToolStatus("libJLCS", false, true, "x", "22.1", false, "built against LLVM 22.1")
+        @test !occursin("not built yet", summary(vcat(c_ok, tier2_tools, [stale]), false))
+        # Nor is a box missing a tool the build needs.
+        no_tblgen = [probe(n, n != "mlir-tblgen") for n in
+                     ("llvm-config", "clang++", "mlir-tblgen", "cmake", "llvm-dwarfdump")]
+        @test !occursin("not built yet", summary(vcat(c_ok, no_tblgen, [unbuilt]), false))
+    end
+
+    @testset "doctor: the Windows dialect build runs from any shell" begin
+        # Driven with explicit spellings, so it holds on either host.
+        dir = "C:\\Users\\a b\\.julia\\packages\\RepliBuild\\x\\src\\mlir\\"
+        script = "C:/Users/a b/.julia/packages/RepliBuild/x/src/mlir/build.sh"
+        @test _ED.jlcs_build_script(dir) == script
+        @test _ED.jlcs_msys2_line(dir; root="D:/m") ==
+              "D:/m/usr/bin/env.exe MSYSTEM=CLANG64 /usr/bin/bash -l '$script'"
+        cmd = _ED.jlcs_msys2_cmd(dir; root="D:/m")
+        @test cmd.exec == ["D:/m/usr/bin/bash.exe", "-l", script]
+        @test "MSYSTEM=CLANG64" in cmd.env
+        withenv("MSYS2_ROOT" => "E:\\tools\\msys64") do
+            @test _ED.msys2_root() == "E:/tools/msys64"
+        end
+        # deps/build.jl runs that command on Windows; it no longer refuses.
+        build_jl = read(joinpath(pkgdir(RepliBuild), "deps", "build.jl"), String)
+        @test occursin("jlcs_msys2_cmd(", build_jl)
+        @test !occursin("which `Pkg.build` does not run in", build_jl)
     end
 
     @testset "doctor: dialect advice is runnable, llvm-dwarfdump is probed" begin
         advice = join(_ED.jlcs_build_advice(), "\n")
         @test occursin("build.sh", advice)
         @test !occursin('\\', advice)                 # bash strips backslashes
-        @test occursin(Sys.iswindows() ? "MSYS2 CLANG64" : "Pkg.build", advice)
+        @test occursin("Pkg.build", advice)
+        Sys.iswindows() && @test occursin("MSYSTEM=CLANG64", advice)
 
         # Probed under the bare name C++ wrappers run it by, as a Tier 2 probe.
         t = _ED._check_llvm_dwarfdump()
