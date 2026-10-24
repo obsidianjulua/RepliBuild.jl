@@ -73,6 +73,9 @@ v4.2.1 was never registered: its changes reach users with this release.
 - **Windows links are reproducible**: the same IR gives the same DLL, so
   `LIBRARY_SHA` changes only when the library does. A link longer than one
   Windows command line goes through a response file.
+- **`scaffold_package`** writes a RepliBuild compat entry that admits the
+  RepliBuild that generated the package. It wrote `RepliBuild = "2"`, which
+  resolved RepliBuild 2.x.
 
 ## v4.2.1 (2026-10-17, released in v4.3.0)
 

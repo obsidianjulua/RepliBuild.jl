@@ -16,6 +16,7 @@ using RepliBuild
 using TOML
 using Dates
 using UUIDs
+import Pkg
 
 isdefined(@__MODULE__, :TestSupport) ||
     include(joinpath(@__DIR__, "support", "TestSupport.jl"))
@@ -826,5 +827,23 @@ end
             @test occursin("not built yet", out)
             @test occursin(proj, out)
         end
+    end
+end
+
+# scaffold_package wrote `RepliBuild = "2"` into the package it generates, so
+# Pkg resolved that package against RepliBuild 2.x, the newest version that
+# compat admitted. The entry now comes from `_replibuild_compat`, like the
+# registry's own packages: at least the RepliBuild that wrote it.
+@testset "scaffold_package's Project.toml admits the RepliBuild that wrote it" begin
+    mktempdir() do dir
+        pkg = RepliBuild.scaffold_package("ScaffoldProbe"; path=dir, from_registry=false)
+        proj = TOML.parsefile(joinpath(pkg, "Project.toml"))
+        @test proj["deps"]["RepliBuild"] == string(Base.PkgId(RepliBuild).uuid)
+        spec = Pkg.Versions.semver_spec(proj["compat"]["RepliBuild"])
+        @test RepliBuild.VERSION in spec
+        @test !(v"2.5.3" in spec)                       # the 2.x the old entry resolved
+        @test !(VersionNumber(RepliBuild.VERSION.major + 1) in spec)
+        # The registry's packages take their entry from the same place.
+        @test proj["compat"]["RepliBuild"] == PR._replibuild_compat()
     end
 end

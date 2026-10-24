@@ -21,14 +21,15 @@ bodies stay packed), and switching Julia or the C++ toolchain rebuilds what
 the switch affects. v4.2.1 was never registered, so its changes (LLVM.jl 10,
 Julia 1.13 in the support window, Tier 1 on Windows) ship here too.
 
-Merged after the release commit and registered with it (the first five entries
-below, PRs #25 to #29): the same source wraps the same on Julia 1.12 and 1.13
-and after an upstream edit, and lambda closure types are no longer emitted; a
-call that passes by value a type whose name several types share is an ABI trap;
-function-pointer types carry their parameter lists, and a callback's
-`@cfunction` example comes from its own signature; Windows links are
-reproducible, and a link longer than one Windows command line goes through a
-response file.
+Merged after the release commit and registered with it (the first six entries
+below: PRs #25 to #29, and the `scaffold_package` compat): the same source wraps
+the same on Julia 1.12 and 1.13 and after an upstream edit, and lambda closure
+types are no longer emitted; a call that passes by value a type whose name
+several types share is an ABI trap; function-pointer types carry their
+parameter lists, and a callback's `@cfunction` example comes from its own
+signature; Windows links are reproducible, and a link longer than one Windows
+command line goes through a response file; `scaffold_package` writes a
+RepliBuild compat that admits the RepliBuild that wrote it.
 
 Upgrading from 4.2.0: rebuild, then re-wrap (`build(toml; clean=true)`, or
 delete `.replibuild_cache/project_hash`), because the metadata now records
@@ -47,6 +48,13 @@ in one pass. hello_world, fmt, tinyxml2, pugixml and box2d were re-wrapped on
 the release commit and pass. Each of PRs #25 to #29 was verified on its own
 branch (its entry gives the counts) and passed its PR's CI, Linux devtests
 against LLVM/MLIR 22 and 23 included; CI passed again on the final commit.
+
+### `scaffold_package` writes a RepliBuild compat its package can resolve (2026-10-23)
+
+- **A scaffolded package asked for RepliBuild 2.** `_project_toml` wrote `RepliBuild = "2"` into the generated `Project.toml`, a literal left from the 2.x line. Pkg therefore resolved the package against RepliBuild 2.x, the newest version that entry admits, not the RepliBuild whose `replibuild.toml` template and `deps/build.jl` it was given.
+- **The entry is now `_replibuild_compat()`**: the caret spelling of the running RepliBuild's version, which the registry's own packages (`_write_package`) already wrote. Both take it from that one function.
+- **Not covered; the scaffold is stale in other ways too.** Its `replibuild.toml` sets `root` to the absolute path of the scaffolded folder, so the package breaks when moved, and turns `[link] enable_lto` on, which is parked. Its `src/<Name>.jl` includes `julia/<Name>.jl`, but `wrap` names the file after `get_module_name` (`Scaffoldprobe.jl` for `ScaffoldProbe`), which only a case-insensitive filesystem finds, and the wrapper's module then nests inside the package's.
+- **Tests.** `test_registry.jl` (runtests): a scaffolded `Project.toml` names RepliBuild's UUID, and its compat, read by `Pkg.Versions.semver_spec`, admits `RepliBuild.VERSION`, excludes 2.5.3 and the next major, and equals `_replibuild_compat()`. With `"2"` put back, the testset fails.
 
 ### The same IR links to the same library on Windows (2026-10-23)
 

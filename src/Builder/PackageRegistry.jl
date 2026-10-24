@@ -337,6 +337,17 @@ end
 _replibuild_version()::VersionNumber = getfield(parentmodule(@__MODULE__), :VERSION)
 
 """
+The `[compat]` entry for RepliBuild in a package RepliBuild writes: caret, so at
+least the RepliBuild that wrote it and below the next major. Both the registry's
+packages and `scaffold_package` use it; the scaffold's literal `"2"` resolved
+RepliBuild 2.x.
+"""
+function _replibuild_compat()::String
+    rb = _replibuild_version()
+    return "$(rb.major).$(rb.minor).$(rb.patch)"
+end
+
+"""
 Write `packages/<Module>/`: a Julia package whose `src/<Module>.jl` includes
 the vendored wrapper in `builds/<hash>/`.
 
@@ -348,7 +359,6 @@ function _write_package(module_name::String, uuid::UUID, version::VersionNumber,
                         wrapper_path::String)::String
     pkg_dir = joinpath(_packages_dir(), module_name)
     mkpath(joinpath(pkg_dir, "src"))
-    rb = _replibuild_version()
     project = Dict{String,Any}(
         "name" => module_name,
         "uuid" => string(uuid),
@@ -359,7 +369,7 @@ function _write_package(module_name::String, uuid::UUID, version::VersionNumber,
         ),
         # Caret compat: at least the RepliBuild that generated the wrapper.
         "compat" => Dict{String,Any}(
-            "RepliBuild" => "$(rb.major).$(rb.minor).$(rb.patch)",
+            "RepliBuild" => _replibuild_compat(),
             "julia" => "1.10",
         ),
     )
@@ -1152,7 +1162,7 @@ function _project_toml(name::String, uuid::UUID)::String
 
     [compat]
     julia = "1.10"
-    RepliBuild = "2"
+    RepliBuild = "$(_replibuild_compat())"
     """
 end
 
