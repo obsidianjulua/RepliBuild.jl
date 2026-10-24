@@ -15,6 +15,7 @@
 module TestSupport
 
 using Test
+import Libdl
 import RepliBuild
 
 export have, requires, run_isolated, probe_verdicts, pe_link_times
@@ -29,11 +30,13 @@ const _TOOLS = Dict(:clang => "clang", :clangxx => "clang++", :cmake => "cmake",
 """
     have(need::Symbol) -> Bool
 
-`:libJLCS` (the Tier-2 dialect library is built), `:llvm` (a system LLVM that
-`LLVMEnvironment.get_toolchain` finds: BuildBridge starts every tool it names
-through it, and the runtests CI runners have none), `:llvm_link` (the llvm-link a
-C++ link runs: BuildBridge starts it by bare name on the `PATH` that
-`LLVMEnvironment.with_llvm_env` sets, which can reach a bin, such as
+`:libJLCS` (the Tier-2 dialect library is built), `:llvm_abi` (that library
+loads and has the SysV ABI oracle, which it gets only when built against an LLVM
+whose ABI lowering library has the x86-64 classifier: LLVM 23+), `:llvm` (a
+system LLVM that `LLVMEnvironment.get_toolchain` finds: BuildBridge starts every
+tool it names through it, and the runtests CI runners have none), `:llvm_link`
+(the llvm-link a C++ link runs: BuildBridge starts it by bare name on the `PATH`
+that `LLVMEnvironment.with_llvm_env` sets, which can reach a bin, such as
 apt.llvm.org's `/usr/lib/llvm-N/bin`, that the user's `PATH` does not), or a tool
 on `PATH`:
 `:clang`, `:clangxx`, `:cmake`, `:git`, `:nm`. An unknown name is an error rather
@@ -42,13 +45,22 @@ forever and look like a machine without the tool.
 """
 function have(need::Symbol)
     need === :libJLCS && return isfile(RepliBuild.MLIRNative.libJLCS)
+    need === :llvm_abi && return have(:libJLCS) && _libjlcs_exports(:jlcs_abi_oracle_sysv)
     need === :llvm && return _system_llvm_found()
     need === :llvm_link && return _system_llvm_found() &&
         RepliBuild.LLVMEnvironment.with_llvm_env(() -> Sys.which("llvm-link") !== nothing)
     haskey(_TOOLS, need) ||
         error("TestSupport.have: unknown prerequisite :$need " *
-              "(known: :libJLCS, :llvm, :llvm_link, $(join(sort!([":$k" for k in keys(_TOOLS)]), ", ")))")
+              "(known: :libJLCS, :llvm_abi, :llvm, :llvm_link, $(join(sort!([":$k" for k in keys(_TOOLS)]), ", ")))")
     return Sys.which(_TOOLS[need]) !== nothing
+end
+
+# Whether libJLCS loads and exports `sym`. Optional parts of the library are
+# compiled in or left out at build time, and only the export says which.
+function _libjlcs_exports(sym::Symbol)
+    h = Libdl.dlopen(RepliBuild.MLIRNative.libJLCS; throw_error = false)
+    h === nothing && return false
+    return Libdl.dlsym(h, sym; throw_error = false) !== nothing
 end
 
 # `get_toolchain` raises (`error`, so an ErrorException) when it finds no system

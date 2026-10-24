@@ -26,7 +26,7 @@ using Printf
 export Unit, Record, Member, EnumDef, Func, Param, CT, Prim, EnumT, RecT, ArrT, Leaf,
        PathEntry, Slot
 export generate, leaves, paths, call_slots, bitfield_probes, named_records, planned_checks,
-       emit_main, emit_twin, src_names, unit_tag, rec_spell, type_spell, prim_signed,
+       emit_main, emit_twin, emit_enum, emit_record, src_names, unit_tag, rec_spell, type_spell, prim_signed,
        isptrparam, arg_value, ret_value, access_value, enum_index, recorded_bits,
        max_slots, PRIM_ORDER, PRIM_C, lit_width, Plan
 
@@ -822,6 +822,17 @@ function _emit_enum(io, u::Unit, e::EnumDef)
     body = join(("    $(nm) = $(_int_lit(v, true))" for (nm, v) in zip(e.names, e.values)), ",\n")
     println(io, "typedef enum", isempty(e.tag) ? "" : " " * e.tag, fx, " {\n", body, "\n} ", e.name, ";\n")
 end
+
+"""
+    emit_enum(io, u, e)
+    emit_record(io, u, r)
+
+One enum, or the named record `u.records[r]` with its `#pragma pack`, as
+`emit_main` writes them. For a caller that wants the unit's types without its
+harness: test/test_sysv_abi_oracle.jl builds its corpus from them.
+"""
+emit_enum(io, u::Unit, e::EnumDef) = _emit_enum(io, u, e)
+emit_record(io, u::Unit, r::Int) = _emit_record(io, u, r)
 
 # A value as a C expression of type `ty`, for the return formulas.
 function _c_value(u::Unit, ty::CT, v)
