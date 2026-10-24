@@ -429,6 +429,16 @@ include(joinpath(@__DIR__, "test_llvm_tool_table.jl"))
 
 include(joinpath(@__DIR__, "test_llvm_prefix_search.jl"))
 
+# ── The toolchain environment rides on the command, not on ENV (no toolchain) ─
+# `with_llvm_env` saved, set and restored the process-global ENV around every
+# tool BuildBridge ran, and the per-TU compiles run concurrently. Overlapping
+# cycles do not nest, so a parallel C++ build deleted the user's
+# LD_LIBRARY_PATH and CPATH. The devtests verify children then lost the path
+# libJLCS needed (2026-10-02). The toolchain is fabricated, and the children
+# are julia.
+
+include(joinpath(@__DIR__, "test_llvm_env_isolation.jl"))
+
 # ── Toolchain advice has one source (no toolchain) ───────────────────────────
 # The LLVM floor was stated three times and the install lines four; build.sh
 # alone carried two Arch spellings and three Ubuntu ones, including a
