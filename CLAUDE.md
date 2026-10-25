@@ -271,8 +271,9 @@ If you are asked to work on it:
 ### Key modules
 
 - `Builder/Compiler.jl` — build engine: per-file IR, caches, link/opt, promotion,
-  DWARF parse (`parse_dwarf_dump`, text-only seam), symbol extraction, metadata,
-  `verify_wrap_surface`.
+  DWARF parse (`parse_dwarf_dump`, text-only seam), symbol extraction, the facts
+  read off the linked IR's `define` lines (`_nounwind_definitions`,
+  `_byval_definitions`), metadata, `verify_wrap_surface`.
 - `Builder/ConfigurationManager.jl` — TOML → immutable `RepliBuildConfig`.
   `test_config_surface.jl` requires every field to be consumed or listed in
   `RESERVED_UNUSED` with a reason.
@@ -501,10 +502,16 @@ the test named when you touch the area.
   - GeneratorCpp sends to Tier 2 a function that crosses by value a ≤16-byte
     byte blob, or a record whose fields put bytes over a `float` or `double`,
     because bytes classify INTEGER (`_crosses_small_blob`).
-  - BRANCH 0 runs only when no blob trap fired.
+  - BRANCH 0 runs only when no refusal fired.
+  - **Both emission paths take one verdict.** `_c_byvalue_verdict` (the
+    register-window refusals, the stack slots and their carriers, `long
+    double`, BRANCH 0's return shape) is computed once per function and
+    consumed by the plain path and by the `[wrap.varargs]` branch, which
+    hands `generate_vararg_wrappers` its `trap`, `sret` and per-parameter
+    `byval_carrier`. A guard added to one path and not the other is W5 again.
 
   Tests: `test_c_sret_classification.jl`, `test_c_sret_abi.jl`,
-  `test_record_natural_layout.jl`.
+  `test_record_natural_layout.jl`, `test_varargs_emission.jl`.
 - **A hidden return buffer has the record's alignment.** Julia's own sret
   buffer is aligned to the stand-in (a byte blob: 1), and the callee may store
   with `movaps`. `_c_record_align` is the record's (the parser records
@@ -513,6 +520,24 @@ the test named when you touch the area.
   exceeds the stand-in's and 8 (`_c_sret_buffer_align`). The metadata needs a
   rebuild to carry it. Record-level `alignment` also routes C++ to Tier 2
   (`_is_struct_unsafe`).
+- **A by-value MEMORY record's stack slot is placed by the compiler's `byval`
+  alignment, never by DWARF.** Julia's `ccall` writes no alignment on its
+  `byval`, so the backend uses the stand-in's (8), and a record C aligns to 16
+  lands one slot early behind any stack-resident argument (W2: a plausible
+  wrong value). The build reads each definition's `byval(...) align N` off
+  the linked IR (`Compiler._byval_definitions`, beside `nounwind`) into
+  `byval_params`; GeneratorC matches them to the parameters its classifier
+  calls MEMORY (`_c_byval_facts`: counts and names must agree, else no fact)
+  and `_c_byval_param_shape` decides. An exact 16 on a record over 16 bytes
+  and a multiple of 16 crosses inside `_RB_ByVal16{N}` (chunks of `<2 x
+  double>`, whose LLVM type is 16-aligned); anything else above 8 is an ABI
+  Safety Trap, including an alignment DWARF alone asserts (metadata without
+  the key: the trap says to rebuild) and 32 and above (Julia's allocas and
+  heap are 16-aligned at most, and a `<4 x double>` carrier faults in the
+  byval copy). Where the IR says 8 and DWARF says 16, the IR is right: a
+  `packed` record with naturally placed members has the unpacked record's
+  DIEs. `_c_record_align` over-estimating is harmless for a return buffer and
+  wrong for a slot, so it never chooses a carrier. Win64 marks no `byval`.
 - **A signature spells a record or enum the way it is declared**, which is
   `_sanitize_c_type_name` of its C name. GeneratorC re-spells every return and
   parameter type through `_as_declared`, a table of the names the sanitizer
@@ -881,21 +906,21 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
-- **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
-  GeneratorCpp's own ccall path has no aligned buffer; only a record-level
-  `alignment` keeps a function off it, so a member-level `alignas` record can
-  still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
-  path, which skips BRANCH 0 altogether. An alignment only a typedef carries
-  (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
-  **SysV byval parameters of 16-aligned MEMORY records are wrong when they
-  follow another stack argument** (run 2026-10-24, Linux, Tier 3 C:
-  `take2(Big24, D4A)` with `D4A` `aligned(16)` of four doubles reads the record
-  from the next 16-aligned slot after the 24-byte argument, Julia's ccall placed
-  it 8 bytes earlier; `take1(D4A)` and `take3(Big24, Big24, D4A)` pass because
-  their slots happen to be 16-aligned; fixture in the gitignored
-  `.claude/albig-2026-10-24/`). GeneratorC's parameter traps stop at 16 bytes
-  and never read alignment; `_c_record_align` reaches returns only. Win64
-  parameters are safe (LLVM's `byval` lowering puts the copy at 16).
+- **Over-aligned records, what the C alignment fixes do not cover**
+  (2026-10-18, revised 2026-10-25). GeneratorCpp's own ccall path has no
+  aligned buffer and no byval carrier; only a record-level `alignment` keeps
+  a function off it, so a member-level `alignas` record can still get a
+  misaligned sret or slot there. SysV parameters in a slot aligned above 16
+  (`aligned(32)`, `__m256` members) are an ABI trap, since Julia cannot
+  place one. A return buffer's alignment still comes from DWARF
+  (`_c_record_align`), so an alignment only a typedef carries (`typedef
+  struct S T __attribute__((aligned(16)))`) is missed for returns; for
+  parameters the IR `byval` carries it, but a size that is not a multiple of
+  16 is then a trap. GeneratorCpp's varargs branch applies the `long double`
+  trap only: a C++ variadic function with a ≤16-byte blob fixed parameter
+  (`_crosses_small_blob`) still gets a plain `@ccall`, where the plain path
+  would take a thunk. Win64 parameters are safe (a record goes by reference
+  to a copy).
 - **Tier 2 SysV records that LLVM's classifier passes elsewhere** (2026-10-24,
   `test_sysv_abi_oracle.jl`, where each family is `@test_broken` with a
   hand-written repro and a minimal record; clang's own lowering agrees with the

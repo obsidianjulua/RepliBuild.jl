@@ -249,4 +249,88 @@ probe("make_nesta") do p                    # nested aligned record
     (a.x, a.y, a.z, a.w, r.t) == (0.5f0, -0.5f0, 2.0f0, 0.25f0, 9.0f0) || push!(p, "ret = $r")
 end
 
+
+# The over-aligned records as arguments, after a 24-byte argument that lives
+# on the stack. C reads each at its own alignment past `p`; a byval at the
+# stand-in's alignment (8) read D4A one slot early (W2). On SysV the wrapper
+# passes a 16-aligned record inside `_RB_ByVal16`, refuses the 32-aligned A32
+# (Julia's allocations are 16-aligned at most) and the float blob AB16 (the
+# register window), and V4A travels in registers. Win64 passes every one by
+# reference to a copy. Every value is exact in binary, so the sums are exact.
+const BIG = CSret.with(Big24(); a = Clonglong(1), b = Clonglong(2), c = Int32(3))
+bytes32(x) = reinterpret(NTuple{4,UInt8}, x)
+
+probe("take_ab16") do p                     # SysV: refused (float blob); Win64: by reference
+    reset_rec()
+    # a = 1.5, b = 3.0, c = -2 (0b110 in a signed 3-bit field at byte 8)
+    v = AB16((bytes32(1.5f0)..., bytes32(3.0f0)..., 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
+    if ABI === :sysv
+        refused(p, () -> call(take_ab16, BIG, v))
+    else
+        r = call(take_ab16, BIG, v)
+        args_read(p, 4, [0 => s64(3), 1 => f32(1.5f0), 2 => f32(3.0f0), 3 => s64(-2)])
+        r == -165.5 || push!(p, "take_ab16 = $r want -165.5")
+    end
+end
+
+probe("take_v4a") do p                      # SysV: SSE,SSE in registers; Win64: by reference
+    reset_rec()
+    v = CSret.with(V4A(); x = 1.5f0, y = 2.0f0, z = 3.0f0, w = 4.0f0)
+    r = call(take_v4a, BIG, v)
+    args_read(p, 5, [0 => s64(3), 1 => f32(1.5f0), 2 => f32(2.0f0), 3 => f32(3.0f0), 4 => f32(4.0f0)])
+    r == 4324.5f0 || push!(p, "take_v4a = $r want 4324.5")
+end
+
+probe("take_d4a") do p                      # W2: the 16-aligned slot after Big24
+    reset_rec()
+    v = CSret.with(D4A(); a = 1.5, b = 2.0, c = 3.0, d = 4.0)
+    r = call(take_d4a, BIG, v)
+    args_read(p, 5, [0 => s64(3), 1 => f64(1.5), 2 => f64(2.0), 3 => f64(3.0), 4 => f64(4.0)])
+    r == 4324.5 || push!(p, "take_d4a = $r want 4324.5 (494.5-style: the record was read one slot early)")
+end
+
+probe("take_ma32") do p                     # member _Alignas(16)
+    reset_rec()
+    v = CSret.with(MA32(); c = 0x07, i = Int32(-11))
+    r = call(take_ma32, BIG, v)
+    args_read(p, 3, [0 => s64(3), 1 => s64(7), 2 => s64(-11)])
+    r == -100 || push!(p, "take_ma32 = $r want -100")
+end
+
+probe("take_a32") do p                      # 32-aligned slot: SysV refused; Win64 by reference
+    reset_rec()
+    v = CSret.with(A32(); d = (1.5, 2.5))
+    if ABI === :sysv
+        refused(p, () -> call(take_a32, BIG, v))
+    else
+        r = call(take_a32, BIG, v)
+        args_read(p, 3, [0 => s64(3), 1 => f64(1.5), 2 => f64(2.5)])
+        r == 29.5 || push!(p, "take_a32 = $r want 29.5")
+    end
+end
+
+probe("take_hvec") do p                     # vector member
+    reset_rec()
+    v = CSret.with(HVec(); v = (1.25f0, 2.25f0, 3.25f0, 4.25f0), k = Int32(41))
+    r = call(take_hvec, BIG, v)
+    args_read(p, 6, [0 => s64(3), 1 => f32(1.25f0), 2 => f32(2.25f0), 3 => f32(3.25f0), 4 => f32(4.25f0), 5 => s64(41)])
+    r == 4642.75f0 || push!(p, "take_hvec = $r want 4642.75")
+end
+
+probe("take_hv4") do p                      # member of an over-aligned typedef
+    reset_rec()
+    v = CSret.with(HV4(); v = (2.0f0, 4.0f0, 6.0f0, 8.0f0), s = -1.0f0)
+    r = call(take_hv4, BIG, v)
+    args_read(p, 6, [0 => s64(3), 1 => f32(2.0f0), 2 => f32(4.0f0), 3 => f32(6.0f0), 4 => f32(8.0f0), 5 => f32(-1.0f0)])
+    r == 8644.0f0 || push!(p, "take_hv4 = $r want 8644")
+end
+
+probe("take_nesta") do p                    # nested aligned record
+    reset_rec()
+    v = CSret.with(NestA(); a = CSret.with(V4A(); x = 0.5f0, y = -0.5f0, z = 2.0f0, w = 0.25f0), t = 9.0f0)
+    r = call(take_nesta, BIG, v)
+    args_read(p, 6, [0 => s64(3), 1 => f32(0.5f0), 2 => f32(-0.5f0), 3 => f32(2.0f0), 4 => f32(0.25f0), 5 => f32(9.0f0)])
+    r == 457.5f0 || push!(p, "take_nesta = $r want 457.5")
+end
+
 println("PROBE_DONE")

@@ -12,6 +12,14 @@
 # hand the callee a buffer at the record's alignment, which Julia's own lowering
 # of the stand-in does not.
 #
+# The `take_*` functions pass those records by value after a 24-byte argument
+# that lives on the stack. C places a MEMORY-class record at its own alignment
+# past it, and a byval at the stand-in's alignment (8) read `take_d4a`'s record
+# one slot early (W2, 2026-10-24). The build records each definition's `byval`
+# slot alignment off the linked IR (`byval_params`), and the wrapper passes a
+# 16-aligned record inside `_RB_ByVal16`, refuses what it cannot place (A32,
+# 32-aligned), and leaves a register-class record (V4A) to the plain ccall.
+#
 # The probe runs this host's convention only. The second testset checks the
 # classifier against clang's own lowering of the same file for BOTH targets,
 # using this build's DWARF metadata: clang marks a hidden-pointer return
@@ -35,9 +43,12 @@ const C_SRET_DIR = joinpath(@__DIR__, "c_sret_test")
 # Every function in c_sret.h, and the ones that return a record by value.
 const C_SRET_ALIGNED = ["make_ab16", "make_v4a", "make_d4a", "make_ma32", "make_a32",
                         "make_hvec", "make_hv4", "make_nesta"]
+# The same records as arguments, after a 24-byte stack argument (W2).
+const C_SRET_TAKES = ["take_ab16", "take_v4a", "take_d4a", "take_ma32", "take_a32",
+                      "take_hvec", "take_hv4", "take_nesta"]
 const C_SRET_FUNCTIONS = ["f4", "f2", "make_ic12", "ic12_sum", "make_p4", "make_p8",
                           "take_p8", "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12",
-                          C_SRET_ALIGNED...]
+                          C_SRET_ALIGNED..., C_SRET_TAKES...]
 const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
                                "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12",
                                C_SRET_ALIGNED...]
@@ -98,6 +109,32 @@ const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
         @test checked == length(C_SRET_FUNCTIONS)
     end
 
+    @testset "the wrapper's shape for the over-aligned arguments, this host" begin
+        wsrc = read(wrapper, String)      # not `src`: that is the C file the clang testsets compile
+        body(name) = let i = findfirst("function $name(", wsrc)
+            i === nothing ? "" : (r = SubString(wsrc, first(i)); j = findfirst(r"\nend\b", r);
+                                  j === nothing ? String(r) : String(r[1:last(j)]))
+        end
+        if RepliBuild.Wrapper._c_record_abi() === :sysv
+            checked = 0
+            for f in ("take_d4a", "take_ma32", "take_hvec", "take_hv4", "take_nesta")
+                @test (f, occursin("_rb_byval16(v, _RB_ByVal16{2})", body(f))) == (f, true)
+                @test (f, occursin("(Big24, _RB_ByVal16{2},), p, _rb_byval16(v, _RB_ByVal16{2}))", body(f))) == (f, true)
+                checked += 1
+            end
+            @test checked == 5
+            @test occursin("ABI Safety Trap", body("take_a32"))
+            @test occursin("32-byte-aligned stack slot", body("take_a32"))
+            @test occursin("ABI Safety Trap", body("take_ab16"))          # the register window, as before
+            @test occursin("ccall((:take_v4a, LIBRARY_PATH), Cfloat, (Big24, V4A,), p, v)", body("take_v4a"))
+            @test count("struct _RB_ByVal16{N}", wsrc) == 1
+        else
+            @test !occursin("_RB_ByVal16", wsrc)
+            @test occursin("ccall((:take_d4a, LIBRARY_PATH), Cdouble, (Big24, D4A,), p, v)", body("take_d4a"))
+            @test occursin("ccall((:take_a32, LIBRARY_PATH), Cdouble, (Big24, A32,), p, v)", body("take_a32"))
+        end
+    end
+
     if requires("C record return class vs clang", :clang)
         @testset "return class agrees with clang, SysV and Win64" begin
             W = RepliBuild.Wrapper
@@ -139,6 +176,41 @@ const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
                 end
             end
             @test checked == 2 * length(C_SRET_ALIGNED)
+        end
+
+        @testset "byval slot alignments: the build records what clang lowers" begin
+            C = RepliBuild.Compiler
+            meta = RepliBuild._read_json(joinpath(C_SRET_DIR, "julia", "compilation_metadata.json"))
+            fns = Dict(String(f["name"]) => f for f in meta["functions"])
+            # SysV: a MEMORY-class record is `byval` at its alignment; a
+            # register-class one (V4A, AB16) and an sret return are not. Win64
+            # passes records by reference and marks nothing `byval`.
+            want = Dict("take_ab16" => [("Big24", 8)], "take_v4a" => [("Big24", 8)],
+                        "take_d4a" => [("Big24", 8), ("D4A", 16)], "take_ma32" => [("Big24", 8), ("MA32", 16)],
+                        "take_a32" => [("Big24", 8), ("A32", 32)], "take_hvec" => [("Big24", 8), ("HVec", 16)],
+                        "take_hv4" => [("Big24", 8), ("HV4", 16)], "take_nesta" => [("Big24", 8), ("NestA", 16)],
+                        "take_p8" => [("P8", 8)], "f2" => [], "make_d4a" => [])
+            pairs_of(facts) = [(String(f["record"]), Int(f["align"])) for f in facts]
+            checked = 0
+            for (triple, abi) in (("x86_64-unknown-linux-gnu", :sysv), ("x86_64-w64-windows-gnu", :win64))
+                ll = joinpath(mktempdir(), "c_sret.ll")
+                @test success(`$(Sys.which("clang")) --target=$triple -O1 -S -emit-llvm -I$inc -o $ll $src`)
+                defs = C._byval_definitions([ll])
+                for (f, w) in sort(collect(want))
+                    @test (f, abi, haskey(defs, f)) == (f, abi, true)
+                    @test (f, abi, pairs_of(get(defs, f, []))) == (f, abi, abi === :sysv ? w : [])
+                    checked += 1
+                end
+            end
+            # This build's metadata, read off the IR the library was linked
+            # from, says the same for this host.
+            host = RepliBuild.Wrapper._c_record_abi()
+            for (f, w) in sort(collect(want))
+                @test (f, haskey(fns[f], "byval_params")) == (f, true)
+                @test (f, pairs_of(get(fns[f], "byval_params", []))) == (f, host === :sysv ? w : [])
+                checked += 1
+            end
+            @test checked == 3 * length(want)
         end
     end # requires
 end

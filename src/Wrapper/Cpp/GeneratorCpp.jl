@@ -2840,12 +2840,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 @warn "Varargs function '$func_name' has no overloads configured in [wrap.varargs]. Generating base wrapper only."
             end
 
+            # A `long double` crossing is the same trap the plain path emits
+            # below; this branch used to `continue` past it.
+            va_x87 = _x87_crossings(func)
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 params, return_type, overloads,
                 generate_docs, demangled, :cpp,
                 cstring_free=get(config.wrap.cstring_owned, func_name, ""),
-                conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs)
+                conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs),
+                trap=isempty(va_x87) ? nothing : (n -> _x87_trap_body(n, va_x87))
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
