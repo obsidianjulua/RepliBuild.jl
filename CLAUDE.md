@@ -420,6 +420,12 @@ the test named when you touch the area.
 - By-value aggregate returns through a typedef are repaired in a post-pass (type and
   size). Do **not** swap the return mapper for the parameter mapper: it maps `char*`
   differently and would dismantle the Cstring policy.
+- **A DIE with no `DW_AT_type` is `void`**, pointed at or qualified: a
+  target-less pointer is `void*`, a target-less `const` is `const void` (clang's
+  `const void *`), and the transparent qualifiers (`volatile`, `restrict`,
+  `_Atomic`) give `void`. `resolve_type` never answers `unknown` for one; that
+  spelling once reached 1257 parameters in llama.cpp's metadata.
+  (`test_dwarf_attribution.jl`.)
 - Anonymous structs/unions get synthesized names (`Parent_u`, `Parent_anonN`), which
   must be pre-sanitized. They are deduplicated across CUs and emitted as aligned
   opaque regions; C11 anonymous members are injected as fields. One named after a
@@ -865,12 +871,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
-- **`const void` resolves to `unknown`** (2026-10-23). A `DW_TAG_const_type` with
-  no `DW_AT_type` is `const void`, but `resolve_type` answers `"unknown"` for it
-  (a target-less pointer and `volatile`/`restrict`/`_Atomic` fall back to `void`),
-  so every `const void *` `c_type` is `unknown*`.
-  Its `julia_type` is still `Ptr{Cvoid}`, so calls are right; the spelling is
-  wrong in metadata and in callback signatures. llama.cpp's tables have 1257.
 - **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
   GeneratorCpp's own ccall path has no aligned buffer; only a record-level
   `alignment` keeps a function off it, so a member-level `alignas` record can
