@@ -195,8 +195,10 @@ it" until 2026-09-26; it was wrong for as long as those recipes existed.) Its su
 (`test_static_promotion`, `test_slicer`, `test_tier1_dispatch`) are **deliberately
 unwired** from devtests; `runtests.jl`'s wiring guard names them in an `experimental`
 list. They also need `test/slice_test/replibuild.toml`, which is gitignored and
-machine-local (John's call: document it, don't track it). **Do not un-quarantine,
-re-wire or invest in it (M4/perf) unless John asks.**
+machine-local (John's call: document it, don't track it). The one Tier 1 test
+devtests runs is `test_tier1_alias_binding.jl` (§7e, John's call, 2026-10-24): it
+guards how a slice binds, which every Hub recipe with slicing on depends on. **Do
+not un-quarantine, re-wire or invest in it (M4/perf) unless John asks.**
 
 If you are asked to work on it:
 - Two independent payloads. `[link] enable_lto` (default true for C) embeds the whole
@@ -230,6 +232,31 @@ If you are asked to work on it:
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.
+- **A slice declares its library's own symbols by their `__rb_<lib>_` alias,
+  never by the public name** (2026-10-24, Linux). ORC resolves a `declare`
+  process-wide and the pre-flight only asks whether the library *has* the
+  symbol, so a slice that called another public function of its library bound
+  whichever library defined that name first. Julia loads its own `libz.so.1` at
+  startup, and the Hub's zlib ran `gzclose` as a slice whose `gzclose_w` was
+  Julia's, which freed a handle the other zlib allocated (`double free or
+  corruption`); Julia bundles zlib, zstd, pcre2, curl, ssh2, git2,
+  mbedtls/openssl, gmp, mpfr, openlibm, nghttp2. So with `[wrap.tier1] enable`,
+  promotion also gives every exported definition the exported LLVM alias
+  `__rb_<lib>_<name>` (`_alias_exports!`, `exported_aliases` in the metadata, a
+  `dllexport` aliasee giving a `dllexport` alias), and the Slicer declares the
+  alias (`_claim_rb_aliases!`). A reached exported definition with no alias is a
+  **refusal** that names the rebuild, never a public-name declare and never an
+  error; declarations the library does not define (libc) keep their names; a
+  tier1-off build is unchanged. An alias shares its aliasee's address, so
+  anything that keys `nm` output by address must let the real name win
+  (`extract_symbols_from_binary`). The project-hash tag is v3 so a stale Tier 1
+  build relinks once. Windows has no process-wide namespace and never showed
+  it. Julia's crash reporter then deadlocks in `malloc`, so the symptom is a
+  process in a futex wait at zero CPU: run it under gdb (`handle SIGSEGV nostop
+  noprint pass`). The alias is only half of it: the library's **native** calls
+  to its own exports go through the PLT and are interposed the same way (the
+  rule below under symbol tables), and `LD_DEBUG=bindings` is the evidence for
+  which library a reference bound to. (`test_tier1_alias_binding.jl`.)
 - **A slice is IR for the libLLVM that printed it**, and newer IR does not parse
   in an older LLVM (`icmp samesign` is LLVM 20; Julia 1.12 is 18). The slice cache
   is per libLLVM major (`_slice_cache_key`), and a kernel keeps its ccall body
@@ -361,6 +388,15 @@ the test named when you touch the area.
 - `[link] link_dirs` emits `-Wl,-rpath` (`$ORIGIN` first) alongside `-L`. `-L` alone
   loads the distro copy at runtime, giving two copies of process-global state. This is
   what makes Hub packages composable.
+- **A library binds its own exported symbols to itself.** On ELF a library's own
+  PLT calls and GOT loads resolve through the global scope first, so a library
+  loaded earlier with the same names takes them: the Hub's zlib called Julia's
+  `libz.so.1` from its own `gzclose` (2026-10-24). Every library `create_library`
+  links passes `_self_binding_link_flags` (`-Wl,-Bsymbolic` on ELF, nothing on PE,
+  where a DLL never imports its own symbols). A new link site must pass it too, and
+  a Tier 1 slice, being code outside the library, needs the `__rb_` aliases on top
+  (Tier 1 section). `LD_DEBUG=bindings` says which file a reference bound to.
+  (`test_codegen_flags.jl`, `test_tier1_alias_binding.jl`.)
 
 ### DWARF extraction
 
@@ -451,10 +487,7 @@ the test named when you touch the area.
   - GeneratorCpp sends to Tier 2 a function that crosses by value a ≤16-byte
     byte blob, or a record whose fields put bytes over a `float` or `double`,
     because bytes classify INTEGER (`_crosses_small_blob`).
-  - BRANCH 0 runs only when no blob trap fired and no `long double` crosses.
-    A function the x87 trap refuses goes to BRANCH 2's stub, never to an
-    explicit-sret ccall that would declare the `long double` as `Any` and get the
-    whole wrapper refused (abi_fuzz C2).
+  - BRANCH 0 runs only when no blob trap fired.
 
   Tests: `test_c_sret_classification.jl`, `test_c_sret_abi.jl`,
   `test_record_natural_layout.jl`.
@@ -830,8 +863,7 @@ check before claiming portability again; reading `.gitignore` does not settle it
   path, which skips BRANCH 0 altogether. An alignment only a typedef carries
   (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
   SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
-  parameters are safe (LLVM's `byval` lowering puts the copy at 16). A SysV
-  record holding a `long double` returns in `st0`, which no Julia type does.
+  parameters are safe (LLVM's `byval` lowering puts the copy at 16).
 - **Tier 2 SysV records that LLVM's classifier passes elsewhere** (2026-10-24,
   `test_sysv_abi_oracle.jl`, where each family is `@test_broken` with a
   hand-written repro and a minimal record; clang's own lowering agrees with the
@@ -846,9 +878,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
   - A tiled body puts a bitfield's storage unit at its byte offset with its whole
     type, which reads as misaligned (`#pragma pack(1) {char; int b : 31;}`): memory,
     where C uses one register.
-  - `long double` and `_Complex` members map to `!llvm.ptr`, so a tiled 16-byte
-    record emits as 8 bytes; FunctionGen does not trap them. This one is wrong on
-    Win64 too, where the 8-byte body goes in a register.
   - A 16-aligned record (`aligned(16)`, `__int128`) gets byval and sret
     alignment 8.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
@@ -873,11 +902,11 @@ check before claiming portability again; reading `.gitignore` does not settle it
 
 Re-reproduced from clean builds of library-free fixtures (runner and fixtures in the
 gitignored `.claude/audit-2026-09-26/`, `run_all.sh`; each line prints CONFIRMED,
-GUARDED or NOT REPRODUCED). Fixed, with the story in CHANGELOG: F1–F3 and F6–F28;
-F5 (`long double`) is an ABI trap both ways. A fix that lives in metadata reaches a
-Hub package only on a **rebuild** (delete `.replibuild_cache/project_hash`), not a
-re-wrap. Every fixed finding has an in-repo regression test, negative-checked by
-neutering its fix; the harness is no longer the only proof. Still open:
+GUARDED or NOT REPRODUCED). Fixed, with the story in CHANGELOG: F1–F3 and F6–F28.
+A fix that lives in metadata reaches a Hub package only on a **rebuild** (delete
+`.replibuild_cache/project_hash`), not a re-wrap. Every fixed finding has an
+in-repo regression test, negative-checked by neutering its fix; the harness is no
+longer the only proof. Still open:
 
 - **A by-value type only declared in this binary** (F4, constructor homing) is now an
   ABI trap instead of a SIGSEGV, but the function is still uncallable until the package
@@ -895,8 +924,6 @@ DWARF-resolved destructors — **is** built.)
 - By-value toolchain types (`std::string_view`, `back_insert_iterator`, …) have ABI
   facts in `record_abi` but no layout, so their functions are ABI traps. Keeping the
   layout of records reachable by value would make them callable (2026-09-27).
-- `long double` through a C++ thunk as `f80` (`fpext`/`fptrunc` against `Float64`).
-  It is an ABI trap on both tiers today; the C bucket has no thunks.
 - Default `-Xclang -fno-use-ctor-homing` for C++ builds. It restores the definition of
   header-only value types at a fraction of `-fstandalone-debug`'s size, but changes
   every C++ package's metadata, so it needs a Hub-wide measurement first.
