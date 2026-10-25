@@ -528,18 +528,38 @@ the test named when you touch the area.
 - **Thunk arg slots hold a pointer to the argument's storage.** One load gives the
   storage and a second gives the value; pointer args double-load. Callers put `&struct`
   in the slot, not `&Ref`.
-- `classifySysVStruct` decides MEMORY vs register class. Register-class structs coerce
-  one scalar per eightbyte. MEMORY-class by-value args use alloca + `llvm.byval(T)`
-  **on the call site and the declaration**. `ffe_call`/`try_call` share one
-  `buildSysVCallShape`. Win64 is a separate `classifyWin64Struct` behind `AbiTarget`.
-- **`test_sysv_abi_oracle.jl` diffs the SysV half against LLVM's ABI library**
-  (`llvm/ABI`, LLVM 23+; skips elsewhere). `jlcs_probe_sysv_call_shapes` and
-  `jlcs_abi_oracle_sysv` are test seams: nothing on the JIT or wrap path calls
-  them, and the oracle must stay optional so libJLCS builds against 21 and 22. A
-  change to SysV classification moves that test's `@test_broken` entries: update
-  `SAO_CURATED` and `SAO_FUZZ_KNOWN` in the same change. `thunk_crossings` asks
-  `_byte_region_unclassifiable` for the host's ABI, so a module generated on
-  Windows keeps records a SysV host refuses; the test applies the SysV answer.
+- **A record's SysV class comes from its DWARF facts, never from the body it
+  crosses as.** `FunctionGen.sysv_record_abi` (`ir_gen/SysVRecordABI.jl`)
+  classifies members at their offsets, bitfields by bit range, nested records
+  and unions recursively, `long double` as X87, `_Complex` as two halves,
+  `__int128` as two INTEGER eightbytes, with the record's alignment from
+  `DW_AT_alignment` or its members'; the generator states the verdict on every
+  `ffe_call`/`try_call` (`sysv_args`, one per operand, and `sysv_ret`:
+  `mem:<align>`, `regs:int,sse`, `regs:none,sse`, `ignore`) and
+  `buildCallShape` acts on it under the SysV target. A body cannot carry these
+  facts: StructGen's pad arrays are bytes, a tiled body spells a nested record
+  or a union as bytes, a bitfield sits in its unit's whole type, and no body
+  is aligned above 8. `classifySysVStruct` (the body reading) stays only for
+  IR with no statement, which is hand-written test IR. Register-class records
+  coerce one scalar per eightbyte; MEMORY-class by-value args use alloca +
+  `llvm.byval(T)` **on the call site and the declaration**, at the stated
+  alignment. `ffe_call`/`try_call` share one `buildCallShape`. Win64 is a
+  separate `classifyWin64Struct` behind `AbiTarget` and never reads the
+  statement. A `long double` record returned by value is refused on SysV
+  (`sysv_trap_reason`: st0), so is a record of 16 bytes or less whose
+  member kinds DWARF does not settle; `thunk_crossings` reports both as
+  `abi_trap`, which GeneratorCpp explains apart from a missing layout.
+  (`test_sysv_record_abi.jl`, `test_sysv_live.jl`.)
+- **`test_sysv_abi_oracle.jl` diffs the SysV classification against LLVM's ABI
+  library** (`llvm/ABI`, LLVM 23+; skips elsewhere). `jlcs_probe_sysv_call_shapes`
+  and `jlcs_abi_oracle_sysv` are test seams: nothing on the JIT or wrap path
+  calls them, and the oracle must stay optional so libJLCS builds against 21 and
+  22. Every disagreement fails; `SAO_CURATED` says `:trap` only where the
+  refusal is the right answer (the `long double` return). A change to the
+  classification that moves a verdict must move that table and
+  `test_sysv_live.jl`'s expectations in the same change. `thunk_crossings` asks
+  `sysv_trap_reason` for the host's ABI, so a module generated on Windows keeps
+  records a SysV host refuses; the test applies the SysV answer.
   (`test_struct_abi.jl`: only a system-clang callee catches a mismatch, because
   self-JIT'd callees share the bug. `gap_probe` is the discriminating case.)
 - **Emitted struct size must equal DWARF `byte_size`.** StructGen lays members out at
@@ -814,24 +834,8 @@ check before claiming portability again; reading `.gitignore` does not settle it
   still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
   path, which skips BRANCH 0 altogether. An alignment only a typedef carries
   (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
-  SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
-  parameters are safe (LLVM's `byval` lowering puts the copy at 16).
-- **Tier 2 SysV records that LLVM's classifier passes elsewhere** (2026-10-24,
-  `test_sysv_abi_oracle.jl`, where each family is `@test_broken` with a
-  hand-written repro and a minimal record; clang's own lowering agrees with the
-  oracle on every repro). A thunk for one of them puts the record where the callee
-  does not look. Not yet run as a live call on Linux.
-  - Padding is INTEGER: StructGen's explicit pad arrays, an unnamed bitfield's
-    bytes included, make an eightbyte holding a float a GPR (`{float; double}`,
-    `{void*; float}`, `aligned(16) float`), and a tiled (`is_struct_packed`) body
-    spells a nested untiled record as bytes, hiding its floats.
-  - Bytes hide misaligned fields: a nested untiled record or an enum in a tiled
-    body, or a union's members, at an odd offset cross in registers; C uses memory.
-  - A tiled body puts a bitfield's storage unit at its byte offset with its whole
-    type, which reads as misaligned (`#pragma pack(1) {char; int b : 31;}`): memory,
-    where C uses one register.
-  - A 16-aligned record (`aligned(16)`, `__int128`) gets byval and sret
-    alignment 8.
+  Tier 2 passes and returns 16-aligned records at 16 (`test_sysv_live.jl`);
+  Win64 parameters are safe (LLVM's `byval` lowering puts the copy at 16).
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them

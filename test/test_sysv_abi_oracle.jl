@@ -1,12 +1,13 @@
 # =============================================================================
-# The dialect's SysV struct classification against LLVM's ABI lowering library
+# The SysV struct classification against LLVM's ABI lowering library
 #
-# classifySysVStruct and buildCallShape (src/mlir/impl/JLCSPasses.cpp) decide
-# how a record passed or returned by value crosses a Tier-2 thunk on x86-64
-# SysV: in memory (byval, sret) or in registers, one scalar per eightbyte. LLVM
-# 23 ships its own classifier for those rules (llvm/ABI), written to match
-# clang. This test asks both about the same records and lists every
-# disagreement.
+# FunctionGen classifies a record passed or returned by value from its DWARF
+# facts (`sysv_record_abi`, src/IRGen/ir_gen/SysVRecordABI.jl) and states the
+# verdict on the call (`sysv_args`, `sysv_ret`); buildCallShape
+# (src/mlir/impl/JLCSPasses.cpp) decides the call from it on x86-64 SysV: in
+# memory (byval, sret) or in registers, one scalar per eightbyte. LLVM 23 ships
+# its own classifier for those rules (llvm/ABI), written to match clang. This
+# test asks both about the same records and lists every disagreement.
 #
 #   corpus  one C unit: the records abi_fuzz generates for SAO_SEEDS (its own
 #           generator, test/tools/abi_fuzz/model.jl) with the functions it
@@ -31,9 +32,10 @@
 # A disagreement is reported with its function and position, both answers, the
 # record's C definition, and a minimal record: its DWARF members (and those of
 # the records inside it) deleted one at a time while the same two answers
-# persist. Known disagreements are `@test_broken`, one per crossing; each
-# disagreement family in SAO_FAMILIES names the defect behind it, and a
-# disagreement in no family fails.
+# persist. Every disagreement fails. The report names the shape of each
+# (SAO_SHAPES), which is what the classification got wrong; until 2026-10-24,
+# when the dialect classified from StructGen's emitted body, five of those
+# shapes were known defects and `@test_broken`.
 #
 # Needs libJLCS built against an LLVM whose ABI library has the x86-64
 # classifier (LLVM 23+; `:llvm_abi`). Skips elsewhere.
@@ -60,53 +62,41 @@ const SAO_FG = RepliBuild.JLCSIRGenerator.FunctionGen
 const SAO_W = RepliBuild.Wrapper
 const SAO_SEEDS = 1:60
 
-# ── Disagreement families ─────────────────────────────────────────────────────
+# ── Disagreement shapes ───────────────────────────────────────────────────────
 #
-# What a disagreement looks like, named after the defect that produces it.
-# REG lists the class of each eightbyte, MEM is memory with the byval
-# alignment, SRET a hidden return pointer with the alignment the callee may
-# assume (see SaoVerdict).
-const SAO_FAMILIES = Dict(
-    :int_for_sse => "an eightbyte C passes in an SSE register, or in none, goes in a general " *
-                    "register: classifySysVStruct counts StructGen's explicit padding (`!llvm.array<N x i8>`, " *
-                    "including an unnamed bitfield's bytes) as INTEGER, and a tiled (`is_struct_packed`) " *
-                    "body spells a nested record that is not tiled as bytes, which hides its floats",
-    :reg_for_mem => "C passes the record in memory, JLCS in registers: a misaligned field inside a member " *
-                    "JLCS spells as bytes (a nested record in a tiled body, a union's members) is " *
-                    "invisible to classifySysVStruct; or a member StructGen maps to `!llvm.ptr` " *
-                    "(`long double`) hides an X87 class",
-    :mem_for_reg => "JLCS passes in memory a record C passes in registers: a tiled body gives a bitfield's " *
-                    "storage unit its whole declared type at the unit's byte offset, which " *
-                    "classifySysVStruct calls misaligned; C never checks a bitfield's alignment",
-    :underaligned => "C gives a 16-aligned record a 16-aligned byval slot or sret buffer, JLCS 8: " *
-                     "abiAlign caps at 8 and StructGen keeps no DW_AT_alignment",
-    :x87 => "C returns the record in st0 (X87), JLCS in RAX: StructGen maps `long double` to `!llvm.ptr`",
-    :short_reg => "JLCS passes fewer eightbytes than the record has: a member StructGen maps to an " *
-                  "8-byte `!llvm.ptr` (`_Complex double`) makes the tiled body smaller than the record",
+# What a disagreement looks like, for the report. REG lists the class of each
+# eightbyte, MEM is memory with the byval alignment, SRET a hidden return
+# pointer with the alignment the callee may assume (see SaoVerdict). Every one
+# fails; the shape says which way the classification went wrong.
+const SAO_SHAPES = Dict(
+    :int_for_sse => "an eightbyte C passes in an SSE register, or in none, goes in a general register",
+    :reg_for_mem => "C passes the record in memory, JLCS in registers",
+    :mem_for_reg => "JLCS passes in memory a record C passes in registers",
+    :underaligned => "C gives the record a more aligned byval slot or sret buffer than JLCS does",
+    :x87 => "C returns the record in st0 (X87), JLCS in a register",
+    :short_reg => "JLCS passes fewer eightbytes than C does",
     :cascade => "a later crossing of a call in which an earlier record already disagreed: the two " *
                 "sides have different registers left",
     :context => "a record both sides agree on alone disagrees inside a call: register accounting " *
-                "(buildCallShape's free-register counts) differs, which no known defect explains",
+                "(buildCallShape's free-register counts) differs",
 )
-
-# The families the abi_fuzz records can show. Its generator never puts
-# `long double` or `_Complex` in a record, so :x87 and :short_reg there would
-# be something new.
-const SAO_FUZZ_KNOWN = (:int_for_sse, :reg_for_mem, :mem_for_reg, :underaligned, :cascade)
 
 # ── Corpus ────────────────────────────────────────────────────────────────────
 #
 # Hand-written records: (name, C definition, expected answer as an argument and
-# as a return). `:agree`, a family of SAO_FAMILIES (a known disagreement,
-# `@test_broken`), or `:trap` (FunctionGen refuses it on SysV). Each is the
-# smallest record for one feature of the classification, and none depends on
-# the host's layout. In dependency order.
+# as a return): `:agree`, or `:trap` where FunctionGen refuses the crossing on
+# SysV and that is the right answer. Each is the smallest record for one
+# feature of the classification, and none depends on the host's layout. In
+# dependency order. The comments name what the record exercises; before
+# 2026-10-24 the first group, the nested records, the long double, `_Complex`
+# and 16-aligned records all disagreed with the oracle, and the float union
+# and the two-bitfield record were refused as unclassifiable.
 const SAO_CURATED = [
     # an eightbyte holding a float and padding is SSE
-    ("c_f_d",      "typedef struct { float x; double y; } c_f_d;", :int_for_sse, :int_for_sse),
-    ("c_d_f",      "typedef struct { double d; float f; } c_d_f;", :int_for_sse, :int_for_sse),
-    ("c_f_pad",    "typedef struct { float x; int : 32; double y; } c_f_pad;", :int_for_sse, :int_for_sse),
-    ("c_p_f",      "typedef struct { void *p; float f; } c_p_f;", :int_for_sse, :int_for_sse),
+    ("c_f_d",      "typedef struct { float x; double y; } c_f_d;", :agree, :agree),
+    ("c_d_f",      "typedef struct { double d; float f; } c_d_f;", :agree, :agree),
+    ("c_f_pad",    "typedef struct { float x; int : 32; double y; } c_f_pad;", :agree, :agree),
+    ("c_p_f",      "typedef struct { void *p; float f; } c_p_f;", :agree, :agree),
     ("c_c_d",      "typedef struct { char c; double d; } c_c_d;", :agree, :agree),
     ("c_f_i",      "typedef struct { float x; int i; } c_f_i;", :agree, :agree),
     ("c_f2",       "typedef struct { float x, y; } c_f2;", :agree, :agree),
@@ -119,33 +109,40 @@ const SAO_CURATED = [
     ("c_ll_c",     "typedef struct { long long a, b; char c; } c_ll_c;", :agree, :agree),
     ("c_nest_f2d", "typedef struct { c_f2 in; double d; } c_nest_f2d;", :agree, :agree),
     # a nested record that is not tiled, inside one that is
-    ("c_wrap_df",  "typedef struct { c_d_f in; } c_wrap_df;", :int_for_sse, :int_for_sse),
-    ("c_pk_sf",    "typedef struct __attribute__((packed)) { char c; c_s_f in; } c_pk_sf;", :reg_for_mem, :reg_for_mem),
-    # misaligned fields make a record MEMORY
+    ("c_wrap_df",  "typedef struct { c_d_f in; } c_wrap_df;", :agree, :agree),
+    ("c_pk_sf",    "typedef struct __attribute__((packed)) { char c; c_s_f in; } c_pk_sf;", :agree, :agree),
+    # misaligned fields make a record MEMORY, a nested record's own position included
     ("c_pk_ci",    "typedef struct __attribute__((packed)) { char c; int i; } c_pk_ci;", :agree, :agree),
     ("c_pk_cf",    "typedef struct __attribute__((packed)) { char c; float f; } c_pk_cf;", :agree, :agree),
     ("c_pk_ii",    "typedef struct __attribute__((packed)) { int a, b; } c_pk_ii;", :agree, :agree),
     ("c_pp2_cd",   "#pragma pack(push, 2)\ntypedef struct { char c; double d; } c_pp2_cd;\n#pragma pack(pop)", :agree, :agree),
-    # unions: a byte region, refused on SysV when it may hold a float
-    ("c_u_fi",     "typedef union { float f; int i; } c_u_fi;", :trap, :trap),
+    ("c_al8_c",    "typedef struct __attribute__((aligned(8))) { char x; } c_al8_c;", :agree, :agree),
+    ("c_pk_alnest", "#pragma pack(push, 1)\ntypedef struct { char c; c_al8_c s; } c_pk_alnest;\n#pragma pack(pop)", :agree, :agree),
+    # unions merge every member
+    ("c_u_fi",     "typedef union { float f; int i; } c_u_fi;", :agree, :agree),
+    ("c_u_ff",     "typedef union { float f; float g; } c_u_ff;", :agree, :agree),
     ("c_u_ip",     "typedef union { int i; void *p; } c_u_ip;", :agree, :agree),
-    ("c_u_pk",     "typedef union { c_pk_ci p; int i; } c_u_pk;", :reg_for_mem, :reg_for_mem),
-    # bitfields, and the padding an unnamed one is
+    ("c_u_pk",     "typedef union { c_pk_ci p; int i; } c_u_pk;", :agree, :agree),
+    ("c_u_ld_i",   "typedef union { long double x; int i; } c_u_ld_i;", :agree, :agree),
+    # bitfields classify by their bits; an unnamed one is padding
     ("c_bf",       "typedef struct { int a : 3; int b : 5; } c_bf;", :agree, :agree),
     ("c_bf_f",     "typedef struct { int a : 3; float f; } c_bf_f;", :agree, :agree),
-    ("c_bf2_f",    "typedef struct { int a : 3; int b : 5; float f; } c_bf2_f;", :trap, :trap),
-    ("c_pp1_bf",   "#pragma pack(push, 1)\ntypedef struct { char c; int b : 31; } c_pp1_bf;\n#pragma pack(pop)", :mem_for_reg, :mem_for_reg),
-    ("c_ubf_f",    "typedef struct { int : 32; float f; } c_ubf_f;", :int_for_sse, :int_for_sse),
-    ("c_ubf_d",    "typedef struct { long long : 64; double d; } c_ubf_d;", :int_for_sse, :int_for_sse),
-    # x87, __int128 and over-alignment
-    ("c_ld",       "typedef struct { long double x; } c_ld;", :reg_for_mem, :x87),
+    ("c_bf2_f",    "typedef struct { int a : 3; int b : 5; float f; } c_bf2_f;", :agree, :agree),
+    ("c_pp1_bf",   "#pragma pack(push, 1)\ntypedef struct { char c; int b : 31; } c_pp1_bf;\n#pragma pack(pop)", :agree, :agree),
+    ("c_ubf_f",    "typedef struct { int : 32; float f; } c_ubf_f;", :agree, :agree),
+    ("c_ubf_d",    "typedef struct { long long : 64; double d; } c_ubf_d;", :agree, :agree),
+    # x87, __int128 and over-alignment. A `long double` record comes back in
+    # st0, where no thunk looks: FunctionGen refuses the return.
+    ("c_ld",       "typedef struct { long double x; } c_ld;", :agree, :trap),
+    ("c_pk_c_ld",  "typedef struct __attribute__((packed)) { char c; long double x; } c_pk_c_ld;", :agree, :agree),
     ("c_i128",     "typedef struct { __int128 x; } c_i128;", :agree, :agree),
-    ("c_i128_l",   "typedef struct { __int128 x; long long y; } c_i128_l;", :underaligned, :underaligned),
-    ("c_al16_f",   "typedef struct { float f __attribute__((aligned(16))); } c_al16_f;", :int_for_sse, :int_for_sse),
-    ("c_al16_big", "typedef struct __attribute__((aligned(16))) { long long a, b, c; } c_al16_big;", :underaligned, :underaligned),
+    ("c_i128_l",   "typedef struct { __int128 x; long long y; } c_i128_l;", :agree, :agree),
+    ("c_al16_f",   "typedef struct { float f __attribute__((aligned(16))); } c_al16_f;", :agree, :agree),
+    ("c_al16_big", "typedef struct __attribute__((aligned(16))) { long long a, b, c; } c_al16_big;", :agree, :agree),
     # _Complex
-    ("c_cf",       "typedef struct { _Complex float z; } c_cf;", :int_for_sse, :int_for_sse),
-    ("c_cd",       "typedef struct { _Complex double z; } c_cd;", :short_reg, :short_reg),
+    ("c_cf",       "typedef struct { _Complex float z; } c_cf;", :agree, :agree),
+    ("c_cd",       "typedef struct { _Complex double z; } c_cd;", :agree, :agree),
+    ("c_f_cf",     "typedef struct { float a; _Complex float z; } c_f_cf;", :agree, :agree),
     # an empty record takes no register (GNU C)
     ("c_empty",    "typedef struct { } c_empty;", :agree, :agree),
 ]
@@ -440,7 +437,9 @@ Base.show(io::IO, v::SaoVerdict) = print(io,
     v.kind === :SRET ? "SRET(align $(v.align))" :
     v.kind === :IGNORE ? "IGNORE" : "?($(v.raw))")
 
-const SAO_JLCS_CLASS = Dict("i64" => "INTEGER", "f64" => "SSE")
+# `none` is a low eightbyte of padding, which the probe prints before the one
+# scalar it passes for the high eightbyte.
+const SAO_JLCS_CLASS = Dict("i64" => "INTEGER", "f64" => "SSE", "none" => "NONE")
 const SAO_DROPPED = SaoVerdict(:IGNORE, String[], 0, "no operand")
 
 function sao_jlcs_verdict(field::AbstractString)
@@ -450,7 +449,7 @@ function sao_jlcs_verdict(field::AbstractString)
         return SaoVerdict(:MEM, String[], parse(Int, field[7:end]), field)
     elseif startswith(field, "sret:")
         return SaoVerdict(:SRET, String[], parse(Int, field[6:end]), field)
-    elseif field == "void"
+    elseif field == "void" || field == "ignore"
         return SaoVerdict(:IGNORE, String[], 0, field)
     end
     return SaoVerdict(:ODD, String[], 0, field)
@@ -477,7 +476,7 @@ function sao_agree(j::SaoVerdict, o::SaoVerdict)
     return j.kind === :IGNORE
 end
 
-"The family of SAO_FAMILIES a disagreement belongs to, or `nothing`."
+"The shape of a disagreement (a key of SAO_SHAPES), or `nothing` when none fits."
 function sao_family(j::SaoVerdict, o::SaoVerdict)
     if j.kind === :REG && o.kind === :REG
         "X87" in o.classes && return :x87
@@ -513,16 +512,17 @@ sao_crossings(f, sd, rabi) =
     sao_sysv_trapped(f, meta) -> Bool
 
 Whether FunctionGen refuses `f` on a SysV host. `thunk_crossings` asks
-`_byte_region_unclassifiable` for the host's convention, so on Windows it
-builds thunks a SysV host refuses (a union or bitfield record of 16 bytes or
-less that may hold a float). Asked here for SysV, the one answer this test is
+`sysv_trap_reason` for the host's convention, so on Windows it builds thunks a
+SysV host refuses (a `long double` record returned in st0, a record whose
+class DWARF does not settle). Asked here for SysV, the one answer this test is
 about.
 """
 function sao_sysv_trapped(f, meta)
     sd = meta["struct_definitions"]
     (ret, params) = sao_crossings(f, sd, get(meta, "record_abi", Dict{String,Any}()))
-    return any(((k, key),) -> k === :layout && SAO_FG._byte_region_unclassifiable(key, sd; abi = :sysv),
-               vcat([ret], params))
+    ret[1] === :layout && SAO_FG.sysv_trap_reason(ret[2], sd; ret = true, abi = :sysv) !== nothing && return true
+    return any(((k, key),) -> k === :layout && SAO_FG.sysv_trap_reason(key, sd; ret = false, abi = :sysv) !== nothing,
+               params)
 end
 
 """
@@ -811,7 +811,7 @@ function sao_report(io::IO)
     end
     for fam in sort!(collect(keys(groups)); by = string)
         cs = groups[fam]
-        println(io, "\n[$(something(fam, "UNKNOWN"))] ", get(SAO_FAMILIES, fam, "no known family"))
+        println(io, "\n[$(something(fam, "UNKNOWN"))] ", get(SAO_SHAPES, fam, "no known shape"))
         byrec = Dict{String,Vector{SaoCase}}()
         for c in cs
             push!(get!(byrec, something(sao_subject(c.fn), c.fn), SaoCase[]), c)
@@ -917,18 +917,14 @@ end
                       sao_sysv_trapped(f, SAO_META) || haskey(SAO_TRAPS, fn) ? :trap :
                       length(cs) != 1 ? :missing :
                       sao_agree(cs[1].jlcs, cs[1].llvm) ? :agree : something(cs[1].family, :unknown)
-                if want in (:agree, :trap)
-                    @test (fn, got) == (fn, want)
-                else
-                    # A known disagreement: broken until JLCS is fixed, and of
-                    # the documented kind meanwhile.
-                    @test_broken (fn, got) == (fn, :agree)
-                    @test (fn, got) == (fn, want)
-                end
+                @test (fn, got) == (fn, want)
                 checked += 1
             end
         end
         @test checked == 2 * length(SAO_CURATED)
+        # The refusals are the ones SAO_CURATED says, and no other.
+        @test sort!([n for (n, _, a, r) in SAO_CURATED for (fn, w) in (("take_$n", a), ("make_$n", r)) if w === :trap]) ==
+              ["c_ld"]
     end
 
     @testset "abi_fuzz records and functions" begin
@@ -938,10 +934,8 @@ end
             sao_subject(c.fn) in curated && continue
             if sao_agree(c.jlcs, c.llvm)
                 @test true
-            elseif c.family in SAO_FUZZ_KNOWN
-                @test_broken (c.fn, c.pos, string(c.jlcs)) == (c.fn, c.pos, string(c.llvm))
             else
-                @test (c.fn, c.pos, string(c.jlcs), c.family) == (c.fn, c.pos, string(c.llvm), :agree)
+                @test (c.fn, c.pos, string(c.jlcs), c.family) == (c.fn, c.pos, string(c.llvm), nothing)
             end
             checked += 1
         end

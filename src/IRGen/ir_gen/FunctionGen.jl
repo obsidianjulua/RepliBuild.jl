@@ -5,6 +5,14 @@ using ..StructGen # for get_struct_type_string
 
 export generate_function_thunks
 
+# `offset`, `byte_size` and `bit_size` arrive as hex strings or integers.
+_parse_num(x) = StructGen._parse_num(x)
+
+# How a by-value record crosses under x86-64 SysV, from its DWARF facts:
+# `sysv_record_abi`, the `sysv_args`/`sysv_ret` statements this generator puts
+# on a call, and `sysv_trap_reason`.
+include("SysVRecordABI.jl")
+
 """
     _fuzzy_struct_lookup(c_type, structs) -> Union{String, Nothing}
 
@@ -137,8 +145,10 @@ function _table_entry(t::AbstractString, structs)
 
     mapped = map_cpp_type(t)
     named = startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
-    # A scalar the map knows: `i32`, `f64`, `i1`, …
-    (!named && mapped != "!llvm.ptr" && mapped != "") && return (:direct, nothing)
+    # A scalar the map knows: `i32`, `f64`, `i1`, …; not `f80`, which the map
+    # knows for a record member and no Julia value can hold (`long double` by
+    # itself stays `:opaque`, and both generators trap it).
+    (!named && mapped != "!llvm.ptr" && mapped != "" && mapped != "f80") && return (:direct, nothing)
     # STL containers keep their own paths (pointer in, byte blob out).
     get_stl_container_size(t) > 0 && return (:direct, nothing)
 
@@ -310,60 +320,20 @@ function _byte_region_size(key, structs)
 end
 
 """
-    _record_float_risk(info, structs) -> Bool
-
-Whether a record's bytes may hold a `float`, `double` or `long double`, at any
-depth. A member whose type is unknown counts, since its class is unknown too.
-"""
-function _record_float_risk(info, structs, seen::Set{String}=Set{String}())
-    for m in get(info, "members", [])
-        ct = strip(replace(String(get(m, "c_type", "")), r"\b(?:const|volatile)\b" => ""))
-        (endswith(ct, "*") || endswith(ct, "&")) && continue
-        base = String(strip(replace(ct, r"\[\d*\]" => "")))
-        occursin(r"\b(?:float|double)\b", base) && return true
-        mapped = map_cpp_type(base)
-        mapped in ("f16", "f32", "f64", "f80", "f128") && return true
-        if startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
-            key = mapped[15:end-2]
-            haskey(structs, "__enum__" * key) && continue
-            sub = get(structs, key, nothing)
-            sub === nothing && return true
-            key in seen && continue
-            push!(seen, key)
-            _record_float_risk(sub, structs, seen) && return true
-        elseif mapped == "" || mapped == "!llvm.ptr"
-            return true          # a spelling the scalar map does not know
-        end
-    end
-    return false
-end
-
-"""
-    _byte_region_unclassifiable(key, structs) -> Bool
-
-A byte region SysV would pass in registers whose classes the bytes cannot
-state: 16 bytes or less and possibly holding a float, which C puts in an SSE
-eightbyte where the byte blob claims INTEGER. Win64 crosses a record by size
-alone, so there it never is.
-"""
-function _byte_region_unclassifiable(key, structs; abi::Symbol = Sys.iswindows() ? :win64 : :sysv)
-    abi === :win64 && return false
-    abi === :sysv || throw(ArgumentError("unknown record ABI `$abi`; expected :sysv or :win64"))
-    n = _byte_region_size(key, structs)
-    return n !== nothing && n <= 16 && _record_float_risk(structs[key], structs)
-end
-
-"""
     thunk_crossings(func, structs, record_abi) -> NamedTuple
 
 The per-function answer both generators act on: `params` (one
 `by_value_crossing` per DWARF parameter, `this` excluded), `ret`, and `trap` —
-a human-readable reason when some crossing is `:opaque` or `:conflict`, or when
-the return is `:indirect` (an sret the thunk does not model), else `nothing`.
-`layout_trap` and `conflict_trap` split `trap` by cause, because the Julia
-stub explains them differently: `layout_trap` holds the reasons it has always
-explained as a layout missing from DWARF, which a build flag can recover, and
-`conflict_trap` the names several types share, which no flag can.
+a human-readable reason when some crossing is `:opaque` or `:conflict`, when
+the return is `:indirect` (an sret the thunk does not model), or when a
+`:layout` record is one this host's convention refuses (`sysv_trap_reason`:
+a SysV class DWARF does not settle, or a `long double` record returned in
+st0), else `nothing`. `layout_trap`, `abi_trap` and `conflict_trap` split
+`trap` by cause, because the Julia stub explains them differently:
+`layout_trap` holds the reasons it has always explained as a layout missing
+from DWARF, which a build flag can recover; `abi_trap` the convention's own
+refusals, which a shim taking a pointer or returning a `double` gets around;
+and `conflict_trap` the names several types share, which no flag can.
 """
 function thunk_crossings(func, structs, record_abi)
     # Typed so the thunk generator can prepend `this` as (:direct, nothing).
@@ -373,23 +343,27 @@ function thunk_crossings(func, structs, record_abi)
     ret_c = String(get(get(func, "return_type", Dict()), "c_type", "void"))
     ret = by_value_crossing(ret_c, structs, record_abi)
     reasons = String[]
-    sse_note = " (a union or bitfield record of 16 bytes or less that may hold a float: " *
-               "SysV passes it in SSE registers its bytes cannot state)"
+    abi_reasons = String[]
     for (p, (k, key)) in zip(get(func, "parameters", []), params)
         k === :opaque && push!(reasons, "takes `$(get(p, "c_type", "?"))` by value")
-        k === :layout && _byte_region_unclassifiable(key, structs) &&
-            push!(reasons, "takes `$(get(p, "c_type", "?"))` by value" * sse_note)
+        if k === :layout
+            why = sysv_trap_reason(key, structs; ret = false)
+            why === nothing || push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $why")
+        end
     end
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
-    ret[1] === :layout && _byte_region_unclassifiable(ret[2], structs) &&
-        push!(reasons, "returns `$ret_c` by value" * sse_note)
+    if ret[1] === :layout
+        why = sysv_trap_reason(ret[2], structs; ret = true)
+        why === nothing || push!(abi_reasons, "returns `$ret_c` by value, $why")
+    end
     ret[1] === :indirect && push!(reasons,
         "returns `$ret_c` by value, which C++ returns through a hidden pointer the thunk does not pass")
     conflicts = conflict_crossings(func, structs)
-    all_reasons = vcat(reasons, conflicts)
+    all_reasons = vcat(reasons, abi_reasons, conflicts)
     return (params = params, ret = ret,
             trap = isempty(all_reasons) ? nothing : join(all_reasons, "; "),
             layout_trap = isempty(reasons) ? nothing : join(reasons, "; "),
+            abi_trap = isempty(abi_reasons) ? nothing : join(abi_reasons, "; "),
             conflict_trap = isempty(conflicts) ? nothing : join(conflicts, "; "))
 end
 
@@ -692,6 +666,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 push!(arg_types, "!llvm.ptr")
                 continue
             end
+            # What the call states about this record's SysV class
+            # (`sysv_call_fact`); "" for anything that is not a record by
+            # value. The body the record crosses as says nothing the
+            # classifier can use, so the facts travel on the call.
+            sysv_fact = ""
             if lookup_key !== nothing
                 # Scope-RAII takes precedence over both by-value marshalling
                 # paths: a class with an emitted destructor is non-trivial
@@ -710,6 +689,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
                     mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
                     is_packed_param = true
+                    kind === :layout && (sysv_fact = sysv_call_fact(sysv_record_abi(lookup_key, structs)))
                 else
                     # Use FULL definition string to avoid alias parser issues in function signatures
                     mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
@@ -717,12 +697,13 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     # crosses as a packed struct of its bytes (`_byte_region_size`).
                     br = match(r"^!llvm\.array<(\d+) x i8>$", mlir_t)
                     br === nothing || (mlir_t = _byte_blob_type(parse(Int, br.captures[1])))
+                    kind === :layout && (sysv_fact = sysv_call_fact(sysv_record_abi(lookup_key, structs)))
                 end
             end
 
             param_load[pi] = (type = mlir_t, packed = is_packed_param,
                               info = lookup_key === nothing ? nothing : structs[lookup_key],
-                              address = false)
+                              address = false, sysv = sysv_fact)
             push!(arg_types, mlir_t)
         end
         has_raii = any(!isnothing, raii_specs)
@@ -854,6 +835,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         ret_sret = ret_kind === :layout && ret_type != "" &&
                    record_passes_by_reference(ret_c_type, ret_key, record_abi)
         sret_slot_type = is_packed_ret ? ret_packed_type : ret_type
+        # The SysV class of a record the call itself returns (`sysv_call_fact`).
+        # One that comes back through the hidden pointer the thunk passes
+        # (`ret_sret`) is no call result, and states nothing.
+        ret_fact = ret_kind === :layout && ret_type != "" && !ret_sret && callee_discard_ret == "" ?
+                   sysv_call_fact(sysv_record_abi(ret_key, structs)) : ""
 
         # External declaration uses the actual C type (packed for packed structs).
         # `callee_discard_ret` is the Win64 empty-record return: real on the
@@ -912,6 +898,9 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         end
 
         call_args = String[]
+        # One statement per call operand, aligned with `call_args`: the SysV
+        # class of a record crossing by value, "" for everything else.
+        arg_facts = String[]
 
         for (i, p) in enumerate(params)
             # The type decided with arg_types above; `nothing` is an ignored
@@ -922,8 +911,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             if get(load, :pad, false)
                 println(io, "  %pad_$(i) = llvm.mlir.constant(0 : $(load.type)) : $(load.type)")
                 push!(call_args, "%pad_$(i)")
+                push!(arg_facts, "")
                 continue
             end
+            push!(arg_facts, get(load, :sysv, ""))
             mlir_t = load.type
             is_packed_struct = load.packed
             struct_info = load.info
@@ -997,7 +988,17 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         end
 
         # The hidden return pointer is the first argument (declared above).
-        ret_sret && pushfirst!(call_args, "%sret_slot")
+        ret_sret && (pushfirst!(call_args, "%sret_slot"); pushfirst!(arg_facts, ""))
+
+        # The call's attributes: the callee, and the SysV class of every record
+        # it passes or returns by value (`sysv_args`, one entry per operand;
+        # `sysv_ret`), which `buildCallShape` reads instead of the record's
+        # body. A call with no record crossing states nothing, so its IR is
+        # what it always was.
+        call_attrs = "callee = @$(mangled)"
+        any(!isempty, arg_facts) &&
+            (call_attrs *= ", sysv_args = [" * join(("\"$f\"" for f in arg_facts), ", ") * "]")
+        isempty(ret_fact) || (call_attrs *= ", sysv_ret = \"$ret_fact\"")
 
         # Determine whether to use jlcs.try_call (exception-safe) or jlcs.ffe_call
         # Per-function noexcept: if the function is marked noexcept, use ffe_call even when may_throw is set
@@ -1075,13 +1076,13 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
             if func_ret == ""
                 if callee_discard_ret == ""
-                    println(io, "    $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+                    println(io, "    $(call_op) $(join(call_args, ", ")) { $(call_attrs) } : ($(join(arg_types, ", "))) -> ()")
                 else
-                    println(io, "    %discard_ret = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(callee_discard_ret)")
+                    println(io, "    %discard_ret = $(call_op) $(join(call_args, ", ")) { $(call_attrs) } : ($(join(arg_types, ", "))) -> $(callee_discard_ret)")
                 end
             else
                 inner_ret = is_packed_ret ? ret_packed_type : func_ret
-                println(io, "    %raii_ret = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(inner_ret)")
+                println(io, "    %raii_ret = $(call_op) $(join(call_args, ", ")) { $(call_attrs) } : ($(join(arg_types, ", "))) -> $(inner_ret)")
                 println(io, "    llvm.store %raii_ret, %raii_retslot : $(inner_ret), !llvm.ptr")
             end
             println(io, "    jlcs.yield")
@@ -1104,15 +1105,15 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                  println(io, "  jlcs.dtor_call @$(mangled)($(call_args[1]))$(dtor_attrs) : (!llvm.ptr) -> ()")
              else
                  if callee_discard_ret == ""
-                     println(io, "  $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> ()")
+                     println(io, "  $(call_op) $(join(call_args, ", ")) { $(call_attrs) } : ($(join(arg_types, ", "))) -> ()")
                  else
-                     println(io, "  %discard_ret = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(callee_discard_ret)")
+                     println(io, "  %discard_ret = $(call_op) $(join(call_args, ", ")) { $(call_attrs) } : ($(join(arg_types, ", "))) -> $(callee_discard_ret)")
                  end
              end
              emit_void_epilogue()
         elseif is_packed_ret
              # Packed struct return: call returns packed type, marshal to aligned for Julia
-             println(io, "  %ret_packed = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(ret_packed_type)")
+             println(io, "  %ret_packed = $(call_op) $(join(call_args, ", ")) { $(call_attrs) } : ($(join(arg_types, ", "))) -> $(ret_packed_type)")
              println(io, "  %ret_aligned = jlcs.marshal_ret %ret_packed { numMembers = $(ret_num_members) : i64 } : ($(ret_packed_type)) -> $(ret_aligned_type)")
              println(io, "  return %ret_aligned : $(ret_aligned_type)")
         else
@@ -1120,7 +1121,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
              if use_vcall
                  println(io, "  %ret_val = \"jlcs.vcall\"($(join(call_args, ", "))) { $(vcall_attrs) } : ($(join(arg_types, ", "))) -> $(func_ret)")
              else
-                 println(io, "  %ret_val = $(call_op) $(join(call_args, ", ")) { callee = @$(mangled) } : ($(join(arg_types, ", "))) -> $(func_ret)")
+                 println(io, "  %ret_val = $(call_op) $(join(call_args, ", ")) { $(call_attrs) } : ($(join(arg_types, ", "))) -> $(func_ret)")
              end
              println(io, "  return %ret_val : $(func_ret)")
         end

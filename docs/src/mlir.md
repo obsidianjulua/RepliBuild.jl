@@ -449,31 +449,51 @@ emits `llvm.call` ops referencing `func.func` symbols that do not become
 
 ### The SysV classifier
 
-The heart of the whole thing is `classifySysVStruct`, and it is worth reading as
-prose because every by-value struct crossing in RepliBuild runs through it:
+Every by-value record crossing in RepliBuild is classified twice over, and it is
+worth reading the division as prose:
 
-1. Compute `abiSize`. `0` or `> 16` bytes → **MEMORY class**, full stop.
-2. Otherwise flatten the struct to leaves with absolute offsets
-   (`collectAbiLeaves`, recursing through nested structs and arrays).
-3. If any leaf sits at an offset that is not a multiple of its natural size, the
-   struct is genuinely misaligned (attribute-packed) → **MEMORY class**.
-4. Otherwise mark, per eightbyte, whether any overlapping leaf is integer and
-   whether any is floating point. An eightbyte is **SSE** only if every
-   overlapping leaf is FP; otherwise **INTEGER**.
-5. Emit one coercion scalar per eightbyte: `f64` for SSE, `i64` for INTEGER.
+1. **The facts are read on the Julia side.** `FunctionGen.sysv_record_abi`
+   (`src/IRGen/ir_gen/SysVRecordABI.jl`) walks the record's DWARF metadata:
+   members at their byte offsets, bitfields by bit range, nested records at
+   their real offsets, a union's members at its start, the scalar kinds
+   (`float`/`double` SSE, integers, pointers and enums INTEGER, `long double`
+   X87, `_Complex` as two halves, `__int128` two INTEGER eightbytes), and the
+   record's alignment (`DW_AT_alignment`, else the members' lowered to what the
+   layout shows). It applies the ABI's rules as clang does: padding never
+   classifies, a misaligned field makes MEMORY except a bitfield, classes merge
+   per eightbyte, over 16 bytes is MEMORY, an X87UP not under X87 is MEMORY.
+2. **The verdict travels on the call.** The thunk generator states it as
+   `sysv_args` (one entry per operand) and `sysv_ret` on each `jlcs.ffe_call` /
+   `jlcs.try_call`: `mem:<align>`, `regs:int,sse`, `regs:none,sse` (a low
+   eightbyte of padding, passed nowhere), or `ignore`.
+3. **`buildCallShape` acts on it.** Under the SysV target a stated operand or
+   result takes its class from the statement; one with no statement (hand-written
+   IR, `test_struct_abi.jl`) is still classified from its LLVM body by
+   `classifySysVStruct`. The Win64 rules never read the statement: they cross a
+   record by size alone.
 
-`test_sysv_abi_oracle.jl` checks these steps, and the call shape below, against
-LLVM 23's own SysV classifier (`llvm/ABI`), on any host. §11 lists where the two
-disagree.
+Why not classify the emitted body, as the dialect did until 2026-10-24? Because
+the body cannot say what the convention asks. StructGen's explicit pad arrays
+are bytes like a field's, so an eightbyte of a float and padding went in a
+general register (`{float; double}` crossed in RDI and XMM0 where C uses XMM0
+and XMM1). A tiled body spells a nested record or a union as bytes, which hid a
+misaligned field inside, so a packed `{char; {short; float}}` went in registers
+where C uses memory (two abi_fuzz units segfaulted on that shape). A bitfield's
+storage unit sat at its byte offset with its whole type, which read as
+misaligned where C checks only the bits. `long double` and `_Complex` were
+`!llvm.ptr`. And no body says `aligned(16)`. `test_sysv_abi_oracle.jl` diffs the
+result, as the call shape, against LLVM 23's own SysV classifier (`llvm/ABI`)
+on any host, and `test_sysv_live.jl` calls one record of each kind.
 
 From that classification the shared `buildSysVCallShape` derives the entire call:
 
 | Shape | Lowering |
 |---|---|
-| MEMORY-class **return** | alloca (`memorySlotAlign`), pass as first argument, call returns void, load the result back |
-| Register-class **return** | call returns the coerced scalar(s); store to a slot, reload as the original struct type |
+| MEMORY-class **return** | alloca at the record's alignment (`memorySlotAlign`), pass as first argument, call returns void, load the result back |
+| Register-class **return** | call returns the coerced scalar(s); store to a slot (at offset 8 when the low eightbyte is padding), reload as the original struct type |
 | Register-class **argument** | store to a slot, load one scalar per eightbyte, pass them as separate arguments — exactly clang's coercion |
-| MEMORY-class **argument** | alloca + store + pass the pointer with `llvm.byval(T)` and `llvm.align` |
+| MEMORY-class **argument** | alloca + store + pass the pointer with `llvm.byval(T)` and `llvm.align` at the record's alignment |
+| `ignore` **argument** / **return** | no operand; a void call and the record's zero |
 | Everything else | passed through unchanged |
 
 Two details are load-bearing and were each a bug first:
@@ -482,11 +502,14 @@ Two details are load-bearing and were each a bug first:
   site is what the backend lowers; the declaration is what the verifier checks
   it against. `retargetCallee` rewrites the external declaration to the coerced
   signature and copies the attributes onto it.
-- **Slot alignment is explicit** (`memorySlotAlign` = `max(8, abiAlign)`).
-  Clang never emits an sret/byval slot below 8 on x86-64, and a struct RepliBuild
-  failed to model field-by-field degrades to `!llvm.array<N x i8>`, whose natural
-  alignment is 1 — leaving alignment implicit would hand native code an
-  underaligned buffer for exactly the types least understood.
+- **Slot alignment is explicit** (`memorySlotAlign` = `max(8, abiAlign)`, raised
+  to the record's DWARF alignment when the call states one). Clang never emits
+  an sret/byval slot below 8 on x86-64, and a struct RepliBuild failed to model
+  field-by-field degrades to `!llvm.array<N x i8>`, whose natural alignment is
+  1 — leaving alignment implicit would hand native code an underaligned buffer
+  for exactly the types least understood. A 16-aligned record (`aligned(16)`,
+  `__int128`, `long double`) needs the statement: no body of ours is aligned
+  above 8.
 
 `ffe_call` and `try_call` share one derivation of all of this. They used to
 carry independent copies, which is precisely how a fix to one silently missed
@@ -690,19 +713,17 @@ Deliberately unbuilt, so they are not chased as bugs:
   — all three lowerings take a pointer operand on faith, which ODS's `AnyType`
   accepts and LLVM translation then rejects far from the mistake.
 - **The classifier is x86-64 SysV only.** The 16-byte MEMORY threshold, 64-bit
-  pointers, and i64/f64 eightbytes are hardcoded. Win64 and AAPCS are not
-  modeled.
-- **LLVM's own SysV classifier disagrees with it in five places**, found by
-  `test_sysv_abi_oracle.jl` (2026-10-24). That test lists each with a minimal
-  record:
-  - The explicit padding StructGen inserts counts as INTEGER in step 4, so
-    `{ float; double }` crosses in RDI and XMM0 instead of XMM0 and XMM1. A
-    padding-free body also spells a nested record that has padding as bytes,
-    which hides its floats.
-  - A misaligned field inside a member spelled as bytes (a nested record, a
-    union's members) is invisible to step 3.
-  - A bitfield's storage unit in a padding-free body reads as a misaligned field.
-  - `long double` and `_Complex` members are spelled `!llvm.ptr`, 8 bytes.
+  pointers, and i64/f64 eightbytes are hardcoded. Win64 crosses a record by
+  size alone (`classifyWin64Struct`); AAPCS is not modeled.
+- **A `long double` record returned by value is a trap on SysV.** C returns it
+  in st0, which the thunk does not read; FunctionGen refuses the return
+  (`sysv_trap_reason`) and the wrapper's stub says so. As an argument it goes in
+  memory, byval 16, and works. A record of 16 bytes or less holding a member
+  whose kind DWARF does not settle (a typedef the metadata cannot resolve, a
+  record with no definition) is refused the same way: its class is unknowable.
+- **Vectors and `__float128` are not classified.** SSEUP never arises: a
+  record holding one is refused as unknown rather than passed in a scalar
+  register.
   - A 16-aligned record gets slots aligned to 8.
 - **No in-IR virtual-base upcast op.** Virtual inheritance works through a
   dynamic upcast on the *Julia* side ([The inheritance ABI](inheritance-abi.md)),
