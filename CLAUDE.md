@@ -508,6 +508,18 @@ the test named when you touch the area.
   ties with `sort(ready)`), and a lookup with several matches takes the smallest key
   (`_fuzzy_struct_lookup`, `_fuzzy_dwarf_lookup`). Otherwise the byte-identical
   regression diff below breaks, and a wrapper changes with the Julia release.
+- **Supplementary header enums are the project's own.** The Clang.jl walk in
+  `ClangJLBridge._extract_enums_via_ast!` keeps an `EnumDecl` only when its file
+  lies under a named header's directory or an include dir. Clang.jl's libclang is
+  the running Julia's LLVM generation, so anything it pulls in from system
+  headers (libstdc++'s `errc`) would make the wrapper follow the Julia release.
+  (`test_header_enum_provenance.jl`.)
+- **The wrapper file is `julia/<module name>.jl`, and the module name has one
+  derivation**, `ConfigurationManager.module_name_for` (`[wrap] module_name`, else
+  CamelCase of `[project] name`), behind `get_module_name` and
+  `wrapper_module_name(toml_path)`. Anything that must find the file wrap writes
+  asks that, never the package name: a scaffold's `[project] name` is lowercased
+  and a registry TOML names the library. Windows folds case and hides a guess.
 - **A callback's `@cfunction` example comes from the header typedef its parameter
   is declared with** (`function_pointer_typedef`, `_callback_typedef_signature`),
   else from its DWARF signature (`_dwarf_callback_signature`), never from a name

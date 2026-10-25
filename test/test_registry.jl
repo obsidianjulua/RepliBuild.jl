@@ -845,5 +845,30 @@ end
         @test !(VersionNumber(RepliBuild.VERSION.major + 1) in spec)
         # The registry's packages take their entry from the same place.
         @test proj["compat"]["RepliBuild"] == PR._replibuild_compat()
+
+        # src/<Name>.jl includes the file wrap writes, julia/<module name>.jl.
+        # The blank TOML pins `[wrap] module_name` to the package name, and the
+        # module asks the TOML instead of assuming the file is named after the
+        # package: with the name lowercased in `[project]`, wrap wrote
+        # julia/Scaffoldprobe.jl and the module looked for ScaffoldProbe.jl,
+        # which only a case-folding filesystem found.
+        toml = joinpath(pkg, "replibuild.toml")
+        parsed = TOML.parsefile(toml)          # a Windows path in a basic string did not parse
+        @test parsed["project"]["root"] == "."  # relocatable, like discover's
+        @test parsed["wrap"]["module_name"] == "ScaffoldProbe"
+        @test RepliBuild.ConfigurationManager.wrapper_module_name(toml) == "ScaffoldProbe"
+        cfg = RepliBuild.ConfigurationManager.load_config(toml)
+        @test RepliBuild.ConfigurationManager.get_module_name(cfg) == "ScaffoldProbe"
+        @test normpath(cfg.project.root) == normpath(pkg)
+        src = read(joinpath(pkg, "src", "ScaffoldProbe.jl"), String)
+        @test occursin("wrapper_module_name", src)
+        @test !occursin("\"ScaffoldProbe.jl\"", src)
+        # A registry TOML names the library, and the package is called after it
+        # with a suffix: the module name comes from the TOML, not the package.
+        other = joinpath(dir, "lua.toml")
+        write(other, "[project]\nname = \"lua\"\n")
+        @test RepliBuild.ConfigurationManager.wrapper_module_name(other) == "Lua"
+        write(other, "[project]\nname = \"lua\"\n[wrap]\nmodule_name = \"LuaRaw\"\n")
+        @test RepliBuild.ConfigurationManager.wrapper_module_name(other) == "LuaRaw"
     end
 end

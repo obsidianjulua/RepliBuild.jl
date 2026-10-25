@@ -192,6 +192,14 @@ include(joinpath(@__DIR__, "test_shim_header_guard.jl"))
 
 include(joinpath(@__DIR__, "test_stl_extract.jl"))
 
+# ── Supplementary header enums come from the project's headers (no toolchain) ─
+# The Clang.jl enum walk took every EnumDecl in the translation unit, so a
+# header including <system_error> brought libstdc++'s enums into the wrapper,
+# and which ones depended on the running Julia's libclang. Declarations outside
+# the named headers' directories and the include dirs are dropped.
+
+include(joinpath(@__DIR__, "test_header_enum_provenance.jl"))
+
 # ── Git dependency cache is version-aware (local git upstream; needs git) ────
 
 include(joinpath(@__DIR__, "test_dep_cache.jl"))
