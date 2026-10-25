@@ -54,6 +54,17 @@ end
     @test occursin("_reproducible_link_flags()", body("Compiler.jl", "create_library"))
     @test occursin("_reproducible_link_flags()", body("Compiler.jl", "create_executable"))
     @test occursin("Compiler._reproducible_link_flags()", body("ThunkBuilder.jl", "build_aot_thunks"))
+
+    # A library binds its own exported symbols to itself. On ELF the dynamic
+    # linker resolves a library's own PLT calls and GOT loads through the
+    # process first, so a library loaded earlier with the same name took them
+    # (Julia's own libz, for the Hub's zlib); `-Bsymbolic` makes the library
+    # search itself first. A DLL never goes through its import table for its
+    # own symbols, so PE needs nothing. Every library link passes the flags.
+    @test _CG_C._self_binding_link_flags(windows=false) == ["-Wl,-Bsymbolic"]
+    @test _CG_C._self_binding_link_flags(windows=true) == String[]
+    @test _CG_C._self_binding_link_flags() == _CG_C._self_binding_link_flags(windows=Sys.iswindows())
+    @test occursin("_self_binding_link_flags()", body("Compiler.jl", "create_library"))
 end
 
 # One LLVM per module. A C++ package routed its .c files to the JLL clang 18 and

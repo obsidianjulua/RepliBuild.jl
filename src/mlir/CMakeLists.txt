@@ -118,32 +118,31 @@ target_link_libraries(JLCS PRIVATE
 # Decided by compiling the calls the oracle makes rather than by version: the
 # library is new and its API may still move.
 #
-# The static archive is linked where it exists, not whatever libLLVM exports:
-# whether a distro's libLLVM carries the ABI component is not something to rely
-# on. Its own dependencies (Core, Support) come from the LLVM libJLCS already
-# links. With LLVM as one shared library that is the dylib, so only the archive
-# FILE is linked: the LLVMABI target would add static copies of LLVMSupport,
-# and two copies of Support in one process register every cl::opt twice.
+# The component can be in two places. The static archive (libLLVMABI.a, what
+# apt.llvm.org and a default LLVM install ship) is linked where it exists. Its
+# own dependencies (Core, Support) come from the LLVM libJLCS already links.
+# With LLVM as one shared library that is the dylib, so only the archive FILE
+# is linked: the LLVMABI target would add static copies of LLVMSupport, and two
+# copies of Support in one process register every cl::opt twice. With no
+# archive, a distro that ships LLVM as one shared library may have built the
+# component into it (Arch's llvm 23.1 does; that any did is not something to
+# assume), so the probe is then LINKED against the dylib libJLCS links anyway:
+# resolved, the oracle is on and nothing new is linked.
 #
 # Nothing here may outlive the LLVM it was found in. build.sh reconfigures the
 # same build directory after an LLVM upgrade, and a cached archive path would
 # link one LLVM's library into a build against another. So the searches run
-# on every configure, and the compile check's result is keyed on the version.
+# on every configure, and each check's result is keyed on the version.
 set(JLCS_LLVM_ABI_ORACLE OFF)
+set(JLCS_LLVM_ABI_SOURCE "")
 unset(JLCS_LLVM_ABI_INCLUDE_DIR CACHE)
 unset(JLCS_LLVM_ABI_LIBRARY CACHE)
 find_path(JLCS_LLVM_ABI_INCLUDE_DIR llvm/ABI/TargetInfo.h
   PATHS ${LLVM_INCLUDE_DIRS} NO_DEFAULT_PATH)
 find_library(JLCS_LLVM_ABI_LIBRARY NAMES LLVMABI
   PATHS ${LLVM_LIBRARY_DIR} ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH)
-string(MAKE_C_IDENTIFIER "JLCS_LLVM_ABI_X86_64_COMPILES_${LLVM_PACKAGE_VERSION}"
-  JLCS_LLVM_ABI_CHECK)
-if(JLCS_LLVM_ABI_INCLUDE_DIR AND JLCS_LLVM_ABI_LIBRARY)
-  include(CheckCXXSourceCompiles)
-  set(CMAKE_REQUIRED_INCLUDES ${LLVM_INCLUDE_DIRS})
-  set(CMAKE_REQUIRED_DEFINITIONS ${LLVM_DEFINITIONS_LIST})
-  set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-  check_cxx_source_compiles([=[
+# The calls the oracle makes: one copy for both checks.
+set(JLCS_LLVM_ABI_PROBE [=[
     #include "llvm/ABI/FunctionInfo.h"
     #include "llvm/ABI/TargetInfo.h"
     #include "llvm/ABI/Types.h"
@@ -162,23 +161,48 @@ if(JLCS_LLVM_ABI_INCLUDE_DIR AND JLCS_LLVM_ABI_LIBRARY)
       TI->computeInfo(*FI);
       return FI->getReturnInfo().isDirect() && FI->arguments()[0].Info.isExtend();
     }
-  ]=] ${JLCS_LLVM_ABI_CHECK})
+]=])
+string(MAKE_C_IDENTIFIER "JLCS_LLVM_ABI_X86_64_COMPILES_${LLVM_PACKAGE_VERSION}"
+  JLCS_LLVM_ABI_CHECK)
+string(MAKE_C_IDENTIFIER "JLCS_LLVM_ABI_X86_64_IN_DYLIB_${LLVM_PACKAGE_VERSION}"
+  JLCS_LLVM_ABI_DYLIB_CHECK)
+if(JLCS_LLVM_ABI_INCLUDE_DIR)
+  include(CheckCXXSourceCompiles)
+  set(CMAKE_REQUIRED_INCLUDES ${LLVM_INCLUDE_DIRS})
+  set(CMAKE_REQUIRED_DEFINITIONS ${LLVM_DEFINITIONS_LIST})
+  if(JLCS_LLVM_ABI_LIBRARY)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+    check_cxx_source_compiles("${JLCS_LLVM_ABI_PROBE}" ${JLCS_LLVM_ABI_CHECK})
+    unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+    if(${JLCS_LLVM_ABI_CHECK})
+      set(JLCS_LLVM_ABI_ORACLE ON)
+      set(JLCS_LLVM_ABI_SOURCE "${JLCS_LLVM_ABI_LIBRARY}")
+    endif()
+  elseif(LLVM_LINK_LLVM_DYLIB AND TARGET LLVM)
+    set(CMAKE_REQUIRED_LIBRARIES LLVM)
+    check_cxx_source_compiles(
+      "${JLCS_LLVM_ABI_PROBE}\n    int main() { return jlcs_abi_probe(); }\n"
+      ${JLCS_LLVM_ABI_DYLIB_CHECK})
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(${JLCS_LLVM_ABI_DYLIB_CHECK})
+      set(JLCS_LLVM_ABI_ORACLE ON)
+      set(JLCS_LLVM_ABI_SOURCE "the LLVM shared library, which carries llvm/ABI")
+    endif()
+  endif()
   unset(CMAKE_REQUIRED_INCLUDES)
   unset(CMAKE_REQUIRED_DEFINITIONS)
-  unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
-  if(${JLCS_LLVM_ABI_CHECK})
-    set(JLCS_LLVM_ABI_ORACLE ON)
-  endif()
 endif()
 
 if(JLCS_LLVM_ABI_ORACLE)
   target_sources(JLCS PRIVATE impl/JLCSAbiOracle.cpp)
-  if(LLVM_LINK_LLVM_DYLIB)
-    target_link_libraries(JLCS PRIVATE ${JLCS_LLVM_ABI_LIBRARY})
-  else()
-    target_link_libraries(JLCS PRIVATE LLVMABI)
+  if(JLCS_LLVM_ABI_LIBRARY)
+    if(LLVM_LINK_LLVM_DYLIB)
+      target_link_libraries(JLCS PRIVATE ${JLCS_LLVM_ABI_LIBRARY})
+    else()
+      target_link_libraries(JLCS PRIVATE LLVMABI)
+    endif()
   endif()
-  message(STATUS "JLCS: SysV ABI oracle ON (${JLCS_LLVM_ABI_LIBRARY})")
+  message(STATUS "JLCS: SysV ABI oracle ON (${JLCS_LLVM_ABI_SOURCE})")
 else()
   message(STATUS "JLCS: SysV ABI oracle OFF: no LLVM ABI library with an x86-64 "
                  "classifier (LLVM 23+); test_sysv_abi_oracle.jl will skip")
