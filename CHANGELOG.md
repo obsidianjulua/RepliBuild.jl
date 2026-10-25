@@ -4,6 +4,10 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Template parameters parse from GNU binutils dumps (2026-10-25)
+
+- **`template_params` was empty for every instantiation on Linux.** The readelf parser matched `DW_TAG_template_type_parameter` and `DW_TAG_template_value_parameter`, llvm-dwarfdump's spelling; GNU binutils writes `DW_TAG_template_type_param` and `DW_TAG_template_value_param`, so the match never hit. It now matches the short spelling, which is a prefix of both. `S<int, 3>` from a real readelf dump gives `T = int` and `N = int, 3`. Metadata only: nothing in the generators reads `template_params` yet. `test_dwarf_attribution.jl` parses the readelf dump and the same dump respelled the llvm-dwarfdump way.
+
 ### The SysV struct classifier, diffed against LLVM's ABI library (2026-10-24)
 
 - **A second opinion for `classifySysVStruct` and `buildCallShape`.** LLVM 23 ships an ABI lowering library (`llvm/ABI`) with an x86-64 SysV classifier written to match clang. `test/test_sysv_abi_oracle.jl` (devtests §12b) asks it and the dialect about the same records and lists every disagreement. The corpus is one C unit: the records and functions `test/tools/abi_fuzz` generates for 60 seeds, 38 hand-written records for what the generator never makes (`long double`, `__int128`, `_Complex`, `aligned(16)`, unnamed bitfields, an empty record), and `take_R(R)`/`make_R(void)` for each record. It is built once as C, and both sides read the records from the build's DWARF metadata: about 1100 by-value crossings in 900 functions.

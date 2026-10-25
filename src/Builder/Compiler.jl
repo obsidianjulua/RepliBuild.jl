@@ -5021,7 +5021,7 @@ function parse_dwarf_dump(output::AbstractString;
         # Example: <2><2448>: DW_TAG_template_type_parameter
         #          <2449>   DW_AT_type        : <0x1d9>  (actual type in instantiation)
         #          <244d>   DW_AT_name        : T
-        if contains(line, "DW_TAG_template_type_parameter")
+        if contains(line, "DW_TAG_template_type_param")   # binutils: _param; llvm-dwarfdump: _parameter (a prefix match takes both)
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 template_offset = "0x" * offset_match.captures[1]
@@ -5040,7 +5040,7 @@ function parse_dwarf_dump(output::AbstractString;
         #          <247c>   DW_AT_type        : <0x1d9>
         #          <2480>   DW_AT_name        : N
         #          <2481>   DW_AT_const_value : 10
-        if contains(line, "DW_TAG_template_value_parameter")
+        if contains(line, "DW_TAG_template_value_param")  # both spellings, as above
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
                 template_offset = "0x" * offset_match.captures[1]
