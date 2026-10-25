@@ -295,7 +295,10 @@ If you are asked to work on it:
   `use`. `register` adds the package only to environments (no `name` in their
   Project.toml), never to a package's own; test suites set `REPLIBUILD_HOME` to a
   temp dir and `REPLIBUILD_JULIA_ENV=none`, and a test that wants an
-  environment passes a temp one with Pkg offline.
+  environment passes a temp one with Pkg offline. Any tool that calls
+  `discover(…, wrap=true)` must set both too: `register` otherwise
+  `Pkg.develop`s every project into the default environment (abi_fuzz put 180
+  scratch path deps into `@v1.13` on 2026-10-24 before it set the variable).
 - `Wrapper/Generator.jl` — orchestration and the write-time refusals
   (`_assert_wrapper_loadable`, `_assert_wrapper_parses`, `_assert_base_calls_qualified`,
   `_assert_cstring_policy`, …). `exclude_symbols` and `surface_types_only` filtering
@@ -932,14 +935,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
   fixed parameters include a packed or float-bearing record of 16 bytes or less
   gets a plain `@ccall` with the record spelled by name. Hub varargs are
   printf-style with scalar fixed arguments, so nothing shipped hits it.
-- **`abi_fuzz.jl` registered every unit into the default Julia environment**
-  (2026-10-24). It set `REPLIBUILD_HOME` but not `REPLIBUILD_JULIA_ENV`, and
-  4.3.0's `discover(build=true, wrap=true)` registers, which `Pkg.develop`s the
-  package into `@v1.13`: 180 path deps into a tmpfs scratch directory after one
-  `--seeds=1:60` run. Removed with `Pkg.rm`; the tool now sets the variable to
-  `none`. Anything that calls `discover(…, wrap=true)` from a test or tool must
-  set both variables; a `REPLIBUILD_HOME` that is not `~/.replibuild` with a
-  default env is the shape to refuse.
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them
   (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). A by-value
