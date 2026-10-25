@@ -4,6 +4,10 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### The registry's dirty digest follows the generator's inputs (2026-10-25)
+
+- **Every note in CLAUDE.md re-vendored every build.** `hash_config` mixes in `_generator_fingerprint`, which hashes the checkout's uncommitted state so a generator edit cannot be served from a stale vendored build. It hashed the whole tree, and a dev checkout is dirty in CLAUDE.md or CHANGELOG.md most of the time, so `use` missed its cache after each saved sentence. The digest now covers `src/` and `Project.toml` (`_GENERATOR_DIRTY_PATHS`): tracked diffs and untracked files there, nothing elsewhere. `test_registry.jl`: a scratch git repo with edits to CLAUDE.md, docs/ and an untracked note keeps an empty digest; a source edit, an untracked source file and a Project.toml edit each change it. Widening the paths back to the whole tree fails the first assertion.
+
 ### The SysV struct classifier, diffed against LLVM's ABI library (2026-10-24)
 
 - **A second opinion for `classifySysVStruct` and `buildCallShape`.** LLVM 23 ships an ABI lowering library (`llvm/ABI`) with an x86-64 SysV classifier written to match clang. `test/test_sysv_abi_oracle.jl` (devtests §12b) asks it and the dialect about the same records and lists every disagreement. The corpus is one C unit: the records and functions `test/tools/abi_fuzz` generates for 60 seeds, 38 hand-written records for what the generator never makes (`long double`, `__int128`, `_Complex`, `aligned(16)`, unnamed bitfields, an empty record), and `take_R(R)`/`make_R(void)` for each record. It is built once as C, and both sides read the records from the build's DWARF metadata: about 1100 by-value crossings in 900 functions.
