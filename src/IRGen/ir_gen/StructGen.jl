@@ -289,6 +289,10 @@ to prevent, so the caller must degrade instead of guessing.
 const _SCALAR_LAYOUT = Dict{String,Tuple{Int,Int}}(
     "i1"  => (1, 1), "i8"  => (1, 1), "i16" => (2, 2), "i32" => (4, 4),
     "i64" => (8, 8), "f32" => (4, 4), "f64" => (8, 8), "!llvm.ptr" => (8, 8),
+    # `long double`: 10 bytes stored, 16 allocated, in a packed body too (LLVM
+    # lays a packed struct out by alloc size). `__int128` is 16-aligned since
+    # LLVM 18's x86-64 data layout, as it is in C.
+    "f16" => (2, 2), "f80" => (16, 16), "i128" => (16, 16),
 )
 
 _align_to(x::Int, a::Int) = a <= 1 ? x : ((x + a - 1) ÷ a) * a

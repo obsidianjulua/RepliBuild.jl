@@ -7,9 +7,10 @@
 #       array; LLVM splits an array argument into one register per element, so
 #       the callee read only the first byte, and on Win64 a size passed by
 #       reference arrived as that byte read as an address. It now crosses as a
-#       packed struct of the same bytes, which the dialect's classifiers place
-#       as C does. On SysV a region of 16 bytes or less that may hold a float is
-#       refused: C passes it in SSE registers its bytes cannot state.
+#       packed struct of the same bytes. Its class comes from the record's
+#       DWARF facts, not the bytes (`sysv_record_abi`, stated on the call as
+#       `sysv_args`), so a float union of 16 bytes or less, which SysV used to
+#       refuse as unclassifiable, is INTEGER like C's and gets a thunk.
 #   X8  A `#pragma pack` record holding a pointer-aligned record: the member
 #       was measured by its bytes (alignment 1) while emitted as an alias of an
 #       8-aligned struct, so the body came out unpacked and LLVM moved the member
@@ -91,12 +92,17 @@ const _TB_STRUCTS = Dict{String,Any}(
         @test _TBFG._byte_region_size("U12", S) == 12
         @test _TBFG._byte_region_size("BF8", S) == 8
         @test _TBFG._byte_region_size("PR", S) === nothing      # a real body
-        # SysV: at 16 bytes or less a float makes the classes unknowable from bytes.
-        for (key, sysv) in (("U4", false), ("U12", false), ("BF8", false), ("UF4", true), ("UF24", false))
-            @test (key, :sysv, _TBFG._byte_region_unclassifiable(key, S; abi = :sysv)) == (key, :sysv, sysv)
-            @test (key, :win64, _TBFG._byte_region_unclassifiable(key, S; abi = :win64)) == (key, :win64, false)
+        # The bytes say nothing about the class; the record's facts do. A
+        # float union of 16 bytes or less, once refused on SysV, is INTEGER,
+        # as C merges its members. Neither host refuses any of these.
+        want = Dict("U4" => "regs:int", "U12" => "regs:int,int", "BF8" => "regs:int",
+                    "UF4" => "regs:int", "UF24" => "mem:8")
+        for key in sort!(collect(keys(want)))
+            @test (key, _TBFG.sysv_call_fact(_TBFG.sysv_record_abi(key, S))) == (key, want[key])
+            @test (key, :sysv, _TBFG.sysv_trap_reason(key, S; ret = false, abi = :sysv)) == (key, :sysv, nothing)
+            @test (key, :win64, _TBFG.sysv_trap_reason(key, S; ret = true, abi = :win64)) == (key, :win64, nothing)
         end
-        @test_throws ArgumentError _TBFG._byte_region_unclassifiable("U4", S; abi = :aapcs64)
+        @test_throws ArgumentError _TBFG.sysv_trap_reason("U4", S; ret = false, abi = :aapcs64)
     end
 
     @testset "X2: a byte region crosses as a packed struct of its bytes" begin
@@ -113,13 +119,13 @@ const _TB_STRUCTS = Dict{String,Any}(
                          "func.func private @pk28_sum(!llvm.struct<\"PK28\", packed (i8, !llvm.array<3 x i8>, ")
         # No declaration takes or returns a bare byte array any more.
         @test !any(d -> occursin("!llvm.array<", replace(d, r"!llvm\.struct<\"[^\"]*\",[^>]*>" => "")), values(decls))
-        # The float union: refused on SysV, a call on Win64 (this host's answer).
-        if Sys.iswindows()
-            @test haskey(decls, "uf4_sum")
-        else
-            @test !haskey(decls, "uf4_sum")
-            @test occursin(r"// no thunk for uf4_sum: .*SSE", ir)
-        end
+        # The float union gets a thunk on both hosts, and the call states its
+        # class, which the bytes alone would have got wrong on SysV.
+        @test haskey(decls, "uf4_sum")
+        @test !occursin("// no thunk for", ir)
+        @test occursin(r"callee = @uf4_sum, sysv_args = \[\"regs:int\"\]", ir)
+        @test occursin(r"callee = @make_u12, sysv_ret = \"regs:int,int\"", ir)
+        @test occursin(r"callee = @pk28_sum, sysv_args = \[\"mem:8\"\]", ir)
     end
 
     @testset "X9: a tiled record's bitfield is read where the body puts it" begin

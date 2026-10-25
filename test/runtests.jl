@@ -501,6 +501,14 @@ include(joinpath(@__DIR__, "test_packed_layout.jl"))
 
 include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
 
+# ── SysV record classes from DWARF facts (no toolchain) ─────────────────────
+# `FunctionGen.sysv_record_abi` classifies a by-value record for x86-64 SysV
+# from its metadata, not from the body StructGen emits, and states the verdict
+# on the call (`sysv_args`, `sysv_ret`) for the dialect's buildCallShape. One
+# synthetic record per rule; the live calls are test_sysv_live.jl.
+
+include(joinpath(@__DIR__, "test_sysv_record_abi.jl"))
+
 # ── Emission does not follow Dict order, the Julia release or DIE offsets ───
 # DWARF extraction kept the last definition in a Dict's hash order, GeneratorCpp
 # emitted Managed blocks in one, callback examples followed one, and IR file

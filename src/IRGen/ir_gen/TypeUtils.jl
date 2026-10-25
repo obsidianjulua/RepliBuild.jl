@@ -57,8 +57,30 @@ function map_cpp_type(type_str::String)
     # C built-in types that DWARF may strip qualifiers from
     elseif type_str == "ptrdiff_t" || type_str == "ssize_t" || type_str == "intptr_t" || type_str == "uintptr_t"
         return "i64"
+    # The three types a record can hold that are neither a word nor a double.
+    # Each used to map to `!llvm.ptr` (or to a named struct no definition
+    # backs), so a 16-byte `{ long double x; }` or `{ _Complex double z; }`
+    # emitted as 8 bytes and `{ __int128 x; }` as 16 bytes of alignment 1,
+    # against the rule that an emitted struct is its DWARF size and layout.
+    # `f80` is LLVM's x86 extended precision: 10 bytes stored, 16 allocated
+    # and 16-aligned, which is what `long double` is on x86-64. A `_Complex`
+    # is its two parts side by side, as clang lays it out.
+    elseif type_str == "long double"
+        return "f80"
+    elseif type_str == "complex float" || type_str == "_Complex float"
+        return "!llvm.struct<(f32, f32)>"
+    elseif type_str == "complex double" || type_str == "_Complex double"
+        return "!llvm.struct<(f64, f64)>"
+    elseif type_str == "complex long double" || type_str == "_Complex long double"
+        return "!llvm.struct<(f80, f80)>"
+    elseif type_str == "__int128" || type_str == "unsigned __int128" ||
+           type_str == "__int128_t" || type_str == "__uint128_t" || type_str == "Int128" || type_str == "UInt128"
+        return "i128"
+    elseif type_str == "_Float16" || type_str == "__fp16" || type_str == "Float16"
+        return "f16"
     elseif type_str == "complex"
-        # _Complex T — DWARF strips the element type; use opaque pointer since size is unknown
+        # `_Complex` with its element type lost: metadata from a parser that
+        # recorded only the tag. The size is unknown; keep the old answer.
         return "!llvm.ptr"
     # Fixed-size arrays — MUST be tested before the pointer branch below, or
     # `char *[4]` matches on the '*' and collapses to a single pointer.

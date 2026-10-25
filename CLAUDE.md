@@ -615,21 +615,41 @@ the test named when you touch the area.
 - **Thunk arg slots hold a pointer to the argument's storage.** One load gives the
   storage and a second gives the value; pointer args double-load. Callers put `&struct`
   in the slot, not `&Ref`.
-- `classifySysVStruct` decides MEMORY vs register class. Register-class structs coerce
-  one scalar per eightbyte. MEMORY-class by-value args use alloca + `llvm.byval(T)`
-  **on the call site and the declaration**. `ffe_call`/`try_call` share one
-  `buildSysVCallShape`. Win64 is a separate `classifyWin64Struct` behind `AbiTarget`.
-- **`test_sysv_abi_oracle.jl` diffs the SysV half against LLVM's ABI library**
-  (`llvm/ABI`, LLVM 23+; skips elsewhere). `jlcs_probe_sysv_call_shapes` and
-  `jlcs_abi_oracle_sysv` are test seams: nothing on the JIT or wrap path calls
-  them, and the oracle must stay optional so libJLCS builds against 21 and 22.
-  CMake takes the component from `libLLVMABI.a` where one exists, else
+- **A record's SysV class comes from its DWARF facts, never from the body it
+  crosses as.** `FunctionGen.sysv_record_abi` (`ir_gen/SysVRecordABI.jl`)
+  classifies members at their offsets, bitfields by bit range, nested records
+  and unions recursively, `long double` as X87, `_Complex` as two halves,
+  `__int128` as two INTEGER eightbytes, with the record's alignment from
+  `DW_AT_alignment` or its members'; the generator states the verdict on every
+  `ffe_call`/`try_call` (`sysv_args`, one per operand, and `sysv_ret`:
+  `mem:<align>`, `regs:int,sse`, `regs:none,sse`, `ignore`) and
+  `buildCallShape` acts on it under the SysV target. A body cannot carry these
+  facts: StructGen's pad arrays are bytes, a tiled body spells a nested record
+  or a union as bytes, a bitfield sits in its unit's whole type, and no body
+  is aligned above 8. `classifySysVStruct` (the body reading) stays only for
+  IR with no statement, which is hand-written test IR. Register-class records
+  coerce one scalar per eightbyte; MEMORY-class by-value args use alloca +
+  `llvm.byval(T)` **on the call site and the declaration**, at the stated
+  alignment. `ffe_call`/`try_call` share one `buildCallShape`. Win64 is a
+  separate `classifyWin64Struct` behind `AbiTarget` and never reads the
+  statement. A `long double` record returned by value is refused on SysV
+  (`sysv_trap_reason`: st0), so is a record of 16 bytes or less whose
+  member kinds DWARF does not settle; `thunk_crossings` reports both as
+  `abi_trap`, which GeneratorCpp explains apart from a missing layout.
+  (`test_sysv_record_abi.jl`, `test_sysv_live.jl`.)
+- **`test_sysv_abi_oracle.jl` diffs the SysV classification against LLVM's ABI
+  library** (`llvm/ABI`, LLVM 23+; skips elsewhere). `jlcs_probe_sysv_call_shapes`
+  and `jlcs_abi_oracle_sysv` are test seams: nothing on the JIT or wrap path
+  calls them, and the oracle must stay optional so libJLCS builds against 21 and
+  22. CMake takes the component from `libLLVMABI.a` where one exists, else
   link-probes the LLVM dylib for it (Arch ships only the dylib, and it carries
-  `llvm::abi`); a dylib without it means the test skips, never a build error. A
-  change to SysV classification moves that test's `@test_broken` entries: update
-  `SAO_CURATED` and `SAO_FUZZ_KNOWN` in the same change. `thunk_crossings` asks
-  `_byte_region_unclassifiable` for the host's ABI, so a module generated on
-  Windows keeps records a SysV host refuses; the test applies the SysV answer.
+  `llvm::abi`); a dylib without it means the test skips, never a build error.
+  Every disagreement fails; `SAO_CURATED` says `:trap` only where the
+  refusal is the right answer (the `long double` return). A change to the
+  classification that moves a verdict must move that table and
+  `test_sysv_live.jl`'s expectations in the same change. `thunk_crossings` asks
+  `sysv_trap_reason` for the host's ABI, so a module generated on Windows keeps
+  records a SysV host refuses; the test applies the SysV answer.
   (`test_struct_abi.jl`: only a system-clang callee catches a mismatch, because
   self-JIT'd callees share the bug. `gap_probe` is the discriminating case.)
 - **Emitted struct size must equal DWARF `byte_size`.** StructGen lays members out at
@@ -684,9 +704,9 @@ the test named when you touch the area.
   field-by-field body (a union, a bitfield record, overlapping members) is
   `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one
   register per element (abi_fuzz X2). By value it crosses as `_byte_blob_type(N)`,
-  a packed struct of the same bytes. On SysV one of 16 bytes or less that may hold
-  a float is refused (`_byte_region_unclassifiable`): C passes it in SSE registers
-  its bytes cannot state. (`test_thunk_byte_regions.jl`.)
+  a packed struct of the same bytes, and its SysV class comes from the record's
+  facts, not the bytes (`sysv_record_abi`): a float union of 16 bytes or less,
+  once refused as unclassifiable, is INTEGER like C's. (`test_thunk_byte_regions.jl`.)
 - `dtor_call` has no VTT operand. Its arity gate (exactly one final arg) is
   load-bearing for D2 destructors of classes with virtual bases.
 - vcall uses class-local coordinates (`vtable_offset = this_offset = 0` plus own slot).
@@ -906,53 +926,22 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
-- **Over-aligned records, what the C alignment fixes do not cover**
-  (2026-10-18, revised 2026-10-25). GeneratorCpp's own ccall path has no
-  aligned buffer and no byval carrier; only a record-level `alignment` keeps
-  a function off it, so a member-level `alignas` record can still get a
-  misaligned sret or slot there. SysV parameters in a slot aligned above 16
-  (`aligned(32)`, `__m256` members) are an ABI trap, since Julia cannot
-  place one. A return buffer's alignment still comes from DWARF
-  (`_c_record_align`), so an alignment only a typedef carries (`typedef
-  struct S T __attribute__((aligned(16)))`) is missed for returns; for
-  parameters the IR `byval` carries it, but a size that is not a multiple of
-  16 is then a trap. GeneratorCpp's varargs branch applies the `long double`
-  trap only: a C++ variadic function with a ≤16-byte blob fixed parameter
-  (`_crosses_small_blob`) still gets a plain `@ccall`, where the plain path
-  would take a thunk. Win64 parameters are safe (a record goes by reference
-  to a copy).
-- **Tier 2 SysV records that LLVM's classifier passes elsewhere** (2026-10-24,
-  `test_sysv_abi_oracle.jl`, where each family is `@test_broken` with a
-  hand-written repro and a minimal record; clang's own lowering agrees with the
-  oracle on every repro). A thunk for one of them puts the record where the callee
-  does not look. **Run live on Linux 2026-10-24** (Arch, clang 23.1.3; a C++
-  fixture with one record per family and C++-linkage functions, so every call
-  takes a thunk; callee at -O0 and at -O2, same result; fixture in the
-  gitignored `.claude/sysv-live-2026-10-24/`): every family but `underaligned`
-  gives wrong values. Each `int_for_sse` record returns garbage in its float
-  eightbyte, and four of the seven are wrong as arguments too; the other three
-  pass only because Julia's own copy of the value leaves the second eightbyte in
-  XMM1. `reg_for_mem`, `mem_for_reg`, `long double` and `_Complex double` are
-  wrong in both directions. The two `underaligned` records pass at both levels,
-  so showing that family needs a callee that loads the byval slot with an
-  aligned instruction. The agreeing controls all pass. `test/tools/abi_fuzz.jl
-  --seeds=1:60` on the same box: 3 of the 60 C++ units fail live (seeds 21, 22,
-  24; the C units all pass), two of them by segfault, because a packed record
-  with an enum at an odd offset goes in a register where C uses memory and the
-  callee then reads a pointer argument, or writes its sret result, through a
-  shifted register (`.claude/abi-fuzz-linux-2026-10-24/`). Win64 passes the
-  same seeds, which is why the Windows runs were green.
-  - Padding is INTEGER: StructGen's explicit pad arrays, an unnamed bitfield's
-    bytes included, make an eightbyte holding a float a GPR (`{float; double}`,
-    `{void*; float}`, `aligned(16) float`), and a tiled (`is_struct_packed`) body
-    spells a nested untiled record as bytes, hiding its floats.
-  - Bytes hide misaligned fields: a nested untiled record or an enum in a tiled
-    body, or a union's members, at an odd offset cross in registers; C uses memory.
-  - A tiled body puts a bitfield's storage unit at its byte offset with its whole
-    type, which reads as misaligned (`#pragma pack(1) {char; int b : 31;}`): memory,
-    where C uses one register.
-  - A 16-aligned record (`aligned(16)`, `__int128`) gets byval and sret
-    alignment 8.
+- **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
+  GeneratorCpp's own ccall path has no aligned buffer; only a record-level
+  `alignment` keeps a function off it, so a member-level `alignas` record can
+  still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
+  path, which skips BRANCH 0 altogether. An alignment only a typedef carries
+  (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
+  **SysV byval parameters of 16-aligned MEMORY records are wrong when they
+  follow another stack argument** (run 2026-10-24, Linux, Tier 3 C:
+  `take2(Big24, D4A)` with `D4A` `aligned(16)` of four doubles reads the record
+  from the next 16-aligned slot after the 24-byte argument, Julia's ccall placed
+  it 8 bytes earlier; `take1(D4A)` and `take3(Big24, Big24, D4A)` pass because
+  their slots happen to be 16-aligned; fixture in the gitignored
+  `.claude/albig-2026-10-24/`). GeneratorC's parameter traps stop at 16 bytes
+  and never read alignment; `_c_record_align` reaches returns only. Tier 2
+  passes and returns 16-aligned records at 16 (`test_sysv_live.jl`); Win64
+  parameters are safe (LLVM's `byval` lowering puts the copy at 16).
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **The `[wrap.varargs]` path skips every SysV by-value guard** (2026-10-24).
   GeneratorC's varargs interception `continue`s before `blob_abi_offenders`,

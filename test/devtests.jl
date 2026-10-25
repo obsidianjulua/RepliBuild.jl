@@ -408,13 +408,22 @@ include(joinpath(TEST_DIR, "test_jlcs_producers.jl"))
 include(joinpath(TEST_DIR, "test_struct_abi.jl"))
 
 # ── 12b. SysV struct classification against LLVM's ABI library ───────────────
-# classifySysVStruct + buildCallShape, with the SysV target on any host, diffed
-# against LLVM 23's own x86-64 classifier (llvm/ABI) over abi_fuzz's records and
-# hand-written ones. Known disagreements are @test_broken, one per crossing,
-# grouped in families named after their defect; anything else fails. Skips
-# unless libJLCS was built with the oracle (LLVM 23+).
+# FunctionGen's DWARF-fact classification, as buildCallShape acts on it with
+# the SysV target on any host, diffed against LLVM 23's own x86-64 classifier
+# (llvm/ABI) over abi_fuzz's records and hand-written ones. Every disagreement
+# fails; the report names the shape of each. Skips unless libJLCS was built
+# with the oracle (LLVM 23+).
 
 include(joinpath(TEST_DIR, "test_sysv_abi_oracle.jl"))
+
+# ── 12c. SysV record classes, live ───────────────────────────────────────────
+# One record per way a by-value record is classified under SysV, built as C++
+# at -O0 and -O2, every take_R/make_R called through its Tier 2 thunk with the
+# SSE registers poisoned, values checked against a C-side image. The families
+# the oracle used to list as @test_broken all returned garbage live before the
+# classification moved from the emitted body to the DWARF facts (2026-10-24).
+
+include(joinpath(TEST_DIR, "test_sysv_live.jl"))
 
 # ── 13. Multi-library JIT: one engine per wrapped binary ─────────────────────
 # Two generated wrappers in one session. The old single-engine singleton let

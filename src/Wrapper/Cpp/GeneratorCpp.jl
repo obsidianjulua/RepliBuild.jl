@@ -3013,6 +3013,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         "`-fstandalone-debug` in [compile] flags; otherwise keep the " *
                         "function out with [wrap] exclude_symbols."
                 end
+                # The convention's own refusal: the record's layout is known,
+                # and SysV still has no register the thunk could read it from,
+                # or its class cannot be told from DWARF.
+                if crossings.abi_trap !== nothing
+                    trap_msg *= " It $(crossings.abi_trap), so no thunk could call it. Keep the " *
+                        "function out with [wrap] exclude_symbols, or wrap a shim that takes " *
+                        "the record by pointer or returns a `double`."
+                end
                 if crossings.conflict_trap !== nothing
                     trap_msg *= " It $(crossings.conflict_trap). " * _CONFLICT_TRAP_NOTE
                 end
