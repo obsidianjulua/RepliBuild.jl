@@ -666,7 +666,7 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 | `link_libraries` | Vector{String} | `[]` | `-l` entries |
 | `link_dirs` | Vector{String} | `[]` | `-L` entries |
 | `fallback` | Bool | `false` | **C only.** `false` = link/optimize/assemble in-process on Julia's resident libLLVM, and a failure is a hard error. `true` = external `llvm-link`/`opt`. C++ always uses the external pipeline |
-| `promote_statics` | Bool | `true` | **C in-process bucket only.** Rename anything a slice may bind by `declare` but that cannot reach the `.so` dynamic symbol table to an exported `__rb_<lib>_<name>`. Required by `[wrap.tier1]`, harmless otherwise |
+| `promote_statics` | Bool | `true` | **C in-process bucket only.** Rename anything a slice may bind by `declare` but that cannot reach the `.so` dynamic symbol table to an exported `__rb_<lib>_<name>`. With `[wrap.tier1] enable`, also give every exported definition the exported alias `__rb_<lib>_<name>` (`exported_aliases` in the metadata), the name its slices bind it by, so a slice never takes a same-named export of a library loaded earlier. Required by `[wrap.tier1]`, harmless otherwise |
 
 !!! warning "Leave `enable_lto = false`"
     `enable_lto` embeds the **entire linked module** at every `llvmcall` site. At
