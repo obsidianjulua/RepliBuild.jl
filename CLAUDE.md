@@ -544,6 +544,18 @@ the test named when you touch the area.
   ties with `sort(ready)`), and a lookup with several matches takes the smallest key
   (`_fuzzy_struct_lookup`, `_fuzzy_dwarf_lookup`). Otherwise the byte-identical
   regression diff below breaks, and a wrapper changes with the Julia release.
+- **Supplementary header enums are the project's own.** The Clang.jl walk in
+  `ClangJLBridge._extract_enums_via_ast!` keeps an `EnumDecl` only when its file
+  lies under a named header's directory or an include dir. Clang.jl's libclang is
+  the running Julia's LLVM generation, so anything it pulls in from system
+  headers (libstdc++'s `errc`) would make the wrapper follow the Julia release.
+  (`test_header_enum_provenance.jl`.)
+- **The wrapper file is `julia/<module name>.jl`, and the module name has one
+  derivation**, `ConfigurationManager.module_name_for` (`[wrap] module_name`, else
+  CamelCase of `[project] name`), behind `get_module_name` and
+  `wrapper_module_name(toml_path)`. Anything that must find the file wrap writes
+  asks that, never the package name: a scaffold's `[project] name` is lowercased
+  and a registry TOML names the library. Windows folds case and hides a guess.
 - **A callback's `@cfunction` example comes from the header typedef its parameter
   is declared with** (`function_pointer_typedef`, `_callback_typedef_signature`),
   else from its DWARF signature (`_dwarf_callback_signature`), never from a name
@@ -907,24 +919,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
   - A 16-aligned record (`aligned(16)`, `__int128`) gets byval and sret
     alignment 8.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
-- **The header-enum supplement follows the Julia release** (2026-10-24, Linux).
-  `ClangJLBridge._extract_enums_via_ast!` collects every `EnumDecl` in the
-  translation unit with no location filter, and Clang.jl's libclang is Julia's
-  LLVM generation (18 on 1.12, 20 on 1.13), each with its own resource headers.
-  pugixml (`use_clang_jl = true`, no `[wrap] headers`) wraps with libstdc++'s
-  `errc` and `_Integer_kind` as "supplementary" enums on 1.13.2 and without
-  them on 1.12.7: 101 diff lines in an otherwise identical wrapper, thunk
-  manifest included. The determinism rule (sorted keys) holds; the input does
-  not. A cursor-location gate (only headers under the project root or its
-  include dirs) would fix both the drift and the system-enum pollution.
-- **`scaffold_package` names a wrapper file the scaffold does not look for**
-  (2026-10-24, Linux). `_replibuild_toml` writes `[project] name` lowercased
-  (`luawrapper`), `get_module_name` derives `Luawrapper`, so wrap writes
-  `julia/Luawrapper.jl` while the scaffolded `src/LuaWrapper.jl` includes
-  `julia/LuaWrapper.jl` and warns "wrapper not built yet" on every case-sensitive
-  filesystem. Windows folds case, which is how the release missed it. Fix: write
-  `[wrap] module_name = name` in the scaffold, or derive the include path from
-  `get_module_name`. (`test_registry.jl` checks the compat line only.)
 - **The `[wrap.varargs]` path skips every SysV by-value guard** (2026-10-24).
   GeneratorC's varargs interception `continue`s before `blob_abi_offenders`,
   BRANCH 0's sret handling and the x87 trap run, so a variadic function whose
