@@ -4,6 +4,10 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### `const void` is a type, not an unknown (2026-10-25)
+
+- **Every `const void *` parameter and return had c_type `unknown*`.** clang writes `const void *` as a pointer to a `DW_TAG_const_type` with no `DW_AT_type`, since `void` has no DIE. `resolve_type` already answered `void*` for a target-less pointer and `void` for a target-less `volatile`/`restrict`/`_Atomic`, but `unknown` for a target-less `const`. llama.cpp's metadata carried 1257 of them. The julia_type was right (`Ptr{Cvoid}`, the mappers strip `const` and see `void*`), so calls were correct; the metadata and the callback signatures built from it were misspelled. A target-less const now resolves to `const void`. `test_dwarf_attribution.jl`: a synthetic dump with `const void *`, `const volatile void *` and `const char *` parameters and a `const void *` return; nothing about the function may be `unknown`.
+
 ### The SysV struct classifier, diffed against LLVM's ABI library (2026-10-24)
 
 - **A second opinion for `classifySysVStruct` and `buildCallShape`.** LLVM 23 ships an ABI lowering library (`llvm/ABI`) with an x86-64 SysV classifier written to match clang. `test/test_sysv_abi_oracle.jl` (devtests §12b) asks it and the dialect about the same records and lists every disagreement. The corpus is one C unit: the records and functions `test/tools/abi_fuzz` generates for 60 seeds, 38 hand-written records for what the generator never makes (`long double`, `__int128`, `_Complex`, `aligned(16)`, unnamed bitfields, an empty record), and `take_R(R)`/`make_R(void)` for each record. It is built once as C, and both sides read the records from the build's DWARF metadata: about 1100 by-value crossings in 900 functions.

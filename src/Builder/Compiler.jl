@@ -5797,8 +5797,15 @@ function parse_dwarf_dump(output::AbstractString;
             end
 
             if isnothing(target)
-                # Pointer/const/reference without target (shouldn't happen but handle it)
-                return kind == "pointer" ? "void*" : "unknown"
+                # A DIE with no DW_AT_type points at, or qualifies, `void`. clang
+                # writes `const void *` as a pointer to a const_type with no type,
+                # so that const is `const void`, spelled like every other `const T`
+                # (the mappers strip the qualifier and see `void*`). llama.cpp's
+                # tables had 1257 `unknown*` parameters from this one case. A
+                # reference to nothing cannot be written in C or C++.
+                kind == "pointer" && return "void*"
+                kind == "const" && return "const void"
+                return "unknown"
             end
 
             # Recursively resolve the target type
