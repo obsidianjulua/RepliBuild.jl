@@ -465,6 +465,44 @@ end
         end
     end
 
+    # The dirty digest covers the generator's inputs only. On a dev checkout
+    # CLAUDE.md and CHANGELOG.md are dirty most of the time, and hashing the
+    # whole tree re-vendored every build after every note. A scratch git repo
+    # stands in for the checkout, so this test never touches the real one.
+    @testset "dirty digest follows src/ and Project.toml, not docs" begin
+        mktempdir() do repo
+            run(pipeline(`git -C $repo init -q`; stdout=devnull, stderr=devnull))
+            run(`git -C $repo config user.email t@example.com`)
+            run(`git -C $repo config user.name t`)
+            run(`git -C $repo config commit.gpgsign false`)
+            mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "docs"))
+            write(joinpath(repo, "src", "a.jl"), "a = 1\n")
+            write(joinpath(repo, "Project.toml"), "name = \"X\"\nversion = \"0.1.0\"\n")
+            write(joinpath(repo, "CLAUDE.md"), "notes\n")
+            write(joinpath(repo, "docs", "d.md"), "doc\n")
+            run(`git -C $repo add -A`)
+            run(pipeline(`git -C $repo commit -q -m init`; stdout=devnull, stderr=devnull))
+            @test PR._get_git_dirty_digest(repo) == ""
+            # Docs and notes: not the generator's.
+            write(joinpath(repo, "CLAUDE.md"), "notes, edited\n")
+            write(joinpath(repo, "docs", "d.md"), "doc, edited\n")
+            write(joinpath(repo, "scratch.txt"), "untracked\n")
+            @test PR._get_git_dirty_digest(repo) == ""
+            # A source edit is.
+            write(joinpath(repo, "src", "a.jl"), "a = 2\n")
+            d1 = PR._get_git_dirty_digest(repo)
+            @test startswith(d1, "+dirty-")
+            # And so is an untracked source file, and a Project.toml edit; each
+            # changes the digest.
+            write(joinpath(repo, "src", "b.jl"), "b = 1\n")
+            d2 = PR._get_git_dirty_digest(repo)
+            @test startswith(d2, "+dirty-") && d2 != d1
+            write(joinpath(repo, "Project.toml"), "name = \"X\"\nversion = \"0.2.0\"\n")
+            d3 = PR._get_git_dirty_digest(repo)
+            @test startswith(d3, "+dirty-") && d3 != d2
+        end
+    end
+
     @testset "no cached build for unknown hash" begin
         with_temp_registry() do home
             @test !PR._has_cached_build("0000000000000000000000000000000000000000000000000000000000000000")

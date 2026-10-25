@@ -4,6 +4,9 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### The registry's dirty digest follows the generator's inputs (2026-10-25)
+
+- **Every note in CLAUDE.md re-vendored every build.** `hash_config` mixes in `_generator_fingerprint`, which hashes the checkout's uncommitted state so a generator edit cannot be served from a stale vendored build. It hashed the whole tree, and a dev checkout is dirty in CLAUDE.md or CHANGELOG.md most of the time, so `use` missed its cache after each saved sentence. The digest now covers `src/` and `Project.toml` (`_GENERATOR_DIRTY_PATHS`): tracked diffs and untracked files there, nothing elsewhere. `test_registry.jl`: a scratch git repo with edits to CLAUDE.md, docs/ and an untracked note keeps an empty digest; a source edit, an untracked source file and a Project.toml edit each change it. Widening the paths back to the whole tree fails the first assertion.
 ### `const void` is a type, not an unknown (2026-10-25)
 
 - **Every `const void *` parameter and return had c_type `unknown*`.** clang writes `const void *` as a pointer to a `DW_TAG_const_type` with no `DW_AT_type`, since `void` has no DIE. `resolve_type` already answered `void*` for a target-less pointer and `void` for a target-less `volatile`/`restrict`/`_Atomic`, but `unknown` for a target-less `const`. llama.cpp's metadata carried 1257 of them. The julia_type was right (`Ptr{Cvoid}`, the mappers strip `const` and see `void*`), so calls were correct; the metadata and the callback signatures built from it were misspelled. A target-less const now resolves to `const void`. `test_dwarf_attribution.jl`: a synthetic dump with `const void *`, `const volatile void *` and `const char *` parameters and a `const void *` return; nothing about the function may be `unknown`.

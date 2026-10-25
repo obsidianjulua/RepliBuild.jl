@@ -695,8 +695,10 @@ directory digest `_ir_dir_key` and the templates TU's `.key` fingerprint) is
 SHA-256 fed through `_key_feed!`, never `Base.hash`, which differs between Julia
 releases.
 3. Registry build cache (`~/.replibuild/builds/<hash>/`, gates `use()`). It includes
-   `_generator_fingerprint`: RepliBuild version, HEAD, **and a dirty-tree digest**, so
-   uncommitted generator edits miss. `_store_build` copies directories.
+   `_generator_fingerprint`: RepliBuild version, HEAD, **and a dirty digest of
+   `src/` and `Project.toml`** (`_GENERATOR_DIRTY_PATHS`), so uncommitted generator
+   edits miss while a dirty CLAUDE.md or CHANGELOG.md does not re-vendor every
+   build. `_store_build` copies directories.
 
 `RepliBuild.VERSION` is derived from `Project.toml`; never reintroduce a literal. It
 feeds the fingerprint and `BUILD_GENERATOR`. To check what is registered in General,

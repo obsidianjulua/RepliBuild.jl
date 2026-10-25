@@ -183,16 +183,27 @@ function _generator_fingerprint()::String
 end
 
 """
-Content digest of the checkout's uncommitted state: tracked-file diffs plus
-the status listing (which names untracked files). Empty string for a clean
-tree or when git is unavailable — degrading to the HEAD-only fingerprint
-rather than disabling caching outright.
+The paths whose uncommitted edits can change what the generator emits: the
+source tree and the package's own Project.toml (its version is in
+`BUILD_GENERATOR`). CLAUDE.md, CHANGELOG.md, docs/ and test/ are not among
+them: an edit there made every vendored build miss its cache and re-vendor,
+on a checkout that is dirty in those files most of the time.
+"""
+const _GENERATOR_DIRTY_PATHS = ("src", "Project.toml")
+
+"""
+Content digest of the checkout's uncommitted state under
+`_GENERATOR_DIRTY_PATHS`: tracked-file diffs plus the status listing (which
+names untracked files). Empty string for a tree that is clean there or when git
+is unavailable — degrading to the HEAD-only fingerprint rather than disabling
+caching outright.
 """
 function _get_git_dirty_digest(root::String)::String
     try
-        status = read(`git -C $root status --porcelain`, String)
+        paths = collect(_GENERATOR_DIRTY_PATHS)
+        status = read(`git -C $root status --porcelain -- $paths`, String)
         isempty(strip(status)) && return ""
-        diff = read(`git -C $root diff HEAD --no-color`, String)
+        diff = read(`git -C $root diff HEAD --no-color -- $paths`, String)
         return "+dirty-" * bytes2hex(SHA.sha256(status * diff))[1:12]
     catch
         return ""
