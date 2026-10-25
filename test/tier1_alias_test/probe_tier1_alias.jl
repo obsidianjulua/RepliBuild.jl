@@ -81,6 +81,21 @@ decoy_state = unsafe_load(Ptr{Cint}(Libdl.dlsym(DECOY_HANDLE, :z_verbose)))
 probe("state", seen == 5 && own_state == 5 && decoy_state == -70,
       "read $seen, library's z_verbose $own_state, decoy's $decoy_state")
 
+# The library's own native code binds to itself as well (`-Bsymbolic` on ELF):
+# a plain ccall of `gzclose` runs the library's `gzclose`, whose PLT call to
+# `gzclose_w` must reach its own, not the process's first. Likewise its reads
+# of its own exported globals (`z_verbose`, written to 5 above through Tier 1).
+native_gzclose = ccall((:gzclose, Z.LIBRARY_PATH), Cint, (Ptr{Cvoid},), C_NULL)
+probe("native_gzclose", native_gzclose == 4243, "got $native_gzclose")
+native_gzclose_r = ccall((:gzclose_r, Z.LIBRARY_PATH), Cint, (Ptr{Cvoid},), C_NULL)
+probe("native_gzclose_r", native_gzclose_r == 4343, "got $native_gzclose_r")
+native_adler = ccall((:adler32, Z.LIBRARY_PATH), Culong, (Culong, Ptr{UInt8}, Cuint), 1, C_NULL, 2)
+probe("native_adler32", native_adler == 1 + 2 + 4242 + 1, "got $native_adler")
+native_verbosity = ccall((:zc_verbosity, Z.LIBRARY_PATH), Cint, ())
+probe("native_state", native_verbosity == 5, "got $native_verbosity (decoy's is -70)")
+native_table = [ccall((:zc_table_at, Z.LIBRARY_PATH), Clong, (Cint,), i) for i in 0:3]
+probe("native_table", native_table == [11, 13, 17, 19], "got $native_table")
+
 # The calls above were the slices, not the ccall bodies: the kernel's native IR
 # calls the alias. (`gzclose` is spliced, so its callee is visible here.)
 llvm = sprint(io -> code_llvm(io, Z._TIER1_gzclose, (Ptr{Cvoid},); debuginfo = :none))

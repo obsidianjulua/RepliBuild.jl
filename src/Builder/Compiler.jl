@@ -1685,6 +1685,33 @@ _reproducible_link_flags(; windows::Bool = Sys.iswindows()) =
     windows ? ["-Wl,--no-insert-timestamp"] : String[]
 
 """
+    _self_binding_link_flags(; windows = Sys.iswindows()) -> Vector{String}
+
+Linker flags that bind a library's references to its own exported symbols to
+its own definitions. Every library `create_library` links passes them.
+
+On ELF a library's call to its own exported function goes through the PLT, and
+a load of its own exported global through the GOT, and the dynamic linker
+resolves both through the process: the global scope first, then the library.
+So a library loaded earlier that exports the same name takes the reference
+(symbol interposition). Julia loads its own `libz.so.1` at startup, and the
+Hub's zlib called Julia's `gzclose_w`, `deflate`, `inflate` and `deflateEnd`
+from its own code (`LD_DEBUG=bindings` names the file each symbol bound to):
+its `gzclose` handed Julia's zlib a `gz_state` the other zlib laid out, and the
+process died of heap corruption. `-Bsymbolic` sets `DF_SYMBOLIC`, under which
+the dynamic linker searches the library itself first, so the wrapped library
+is one self-contained copy of its code and state, the same copy a Tier 1 slice
+binds through the `__rb_` aliases and the wrapper reaches through `dlsym` and
+`cglobal`. Nothing RepliBuild builds is linked against by an executable, so
+there is no copy relocation for the data half of `-Bsymbolic` to split.
+
+A PE image has no such thing to prevent: a DLL's own calls and loads never go
+through its import table, so Windows binds a DLL to itself already.
+"""
+_self_binding_link_flags(; windows::Bool = Sys.iswindows()) =
+    windows ? String[] : ["-Wl,-Bsymbolic"]
+
+"""
     _compile_ir_to_objects(config, ir_files, compiler) -> Vector{String}
 
 Compile each IR module to its own object file, in parallel. Each `clang -c` is
@@ -1885,6 +1912,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         "-fPIC",    # Position independent code
         _codegen_opt_flags(config)...,   # codegen at the link level, IR passes off
         _reproducible_link_flags()...,   # same IR, same bytes: no PE link time
+        _self_binding_link_flags()...,   # its own symbols are its own, whatever loaded first
     ]
     cmd_tail = ["-o", lib_path]
 

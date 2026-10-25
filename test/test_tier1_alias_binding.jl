@@ -293,6 +293,20 @@ end
         @test !occursin(r"ccall\(\(:__rb_", text)
     end
 
+    @testset "the library binds its own symbols to itself" begin
+        # The native half of the same rule: on ELF the library is linked
+        # `-Bsymbolic`, so its own PLT calls and GOT loads of its exported
+        # symbols resolve to its own definitions, not to a library loaded
+        # earlier. The dynamic section says so; the probe below proves it live.
+        if Sys.iswindows()
+            @test TAB_C._self_binding_link_flags() == String[]
+        else
+            @test TAB_C._self_binding_link_flags() == ["-Wl,-Bsymbolic"]
+            dynamic = read(`readelf -d $lib`, String)
+            @test occursin(r"\(SYMBOLIC\)|\(FLAGS\)\s+SYMBOLIC", dynamic)
+        end
+    end
+
     @testset "the shipped slices declare the aliases" begin
         text = read(wrapper, String)
         @test occursin("\"gzclose\" => [\"__rb_zcollide_gzclose_w\"]", text)
@@ -337,7 +351,9 @@ end
                   "declares_gzclose", "declares_adler32", "declares_zc_verbosity",
                   "declares_zc_set_verbosity", "declares_zc_table_at", "declares_gzclose_r",
                   "no_public_declare",
-                  "gzclose", "gzclose_r", "adler32", "table", "state", "spliced"]
+                  "gzclose", "gzclose_r", "adler32", "table", "state",
+                  "native_gzclose", "native_gzclose_r", "native_adler32", "native_state",
+                  "native_table", "spliced"]
         for name in probes
             @test startswith(get(v, name, "no PROBE line"), "PASS")
         end

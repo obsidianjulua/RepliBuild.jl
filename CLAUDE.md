@@ -195,8 +195,10 @@ it" until 2026-09-26; it was wrong for as long as those recipes existed.) Its su
 (`test_static_promotion`, `test_slicer`, `test_tier1_dispatch`) are **deliberately
 unwired** from devtests; `runtests.jl`'s wiring guard names them in an `experimental`
 list. They also need `test/slice_test/replibuild.toml`, which is gitignored and
-machine-local (John's call: document it, don't track it). **Do not un-quarantine,
-re-wire or invest in it (M4/perf) unless John asks.**
+machine-local (John's call: document it, don't track it). The one Tier 1 test
+devtests runs is `test_tier1_alias_binding.jl` (§7e, John's call, 2026-10-24): it
+guards how a slice binds, which every Hub recipe with slicing on depends on. **Do
+not un-quarantine, re-wire or invest in it (M4/perf) unless John asks.**
 
 If you are asked to work on it:
 - Two independent payloads. `[link] enable_lto` (default true for C) embeds the whole
@@ -230,6 +232,31 @@ If you are asked to work on it:
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.
+- **A slice declares its library's own symbols by their `__rb_<lib>_` alias,
+  never by the public name** (2026-10-24, Linux). ORC resolves a `declare`
+  process-wide and the pre-flight only asks whether the library *has* the
+  symbol, so a slice that called another public function of its library bound
+  whichever library defined that name first. Julia loads its own `libz.so.1` at
+  startup, and the Hub's zlib ran `gzclose` as a slice whose `gzclose_w` was
+  Julia's, which freed a handle the other zlib allocated (`double free or
+  corruption`); Julia bundles zlib, zstd, pcre2, curl, ssh2, git2,
+  mbedtls/openssl, gmp, mpfr, openlibm, nghttp2. So with `[wrap.tier1] enable`,
+  promotion also gives every exported definition the exported LLVM alias
+  `__rb_<lib>_<name>` (`_alias_exports!`, `exported_aliases` in the metadata, a
+  `dllexport` aliasee giving a `dllexport` alias), and the Slicer declares the
+  alias (`_claim_rb_aliases!`). A reached exported definition with no alias is a
+  **refusal** that names the rebuild, never a public-name declare and never an
+  error; declarations the library does not define (libc) keep their names; a
+  tier1-off build is unchanged. An alias shares its aliasee's address, so
+  anything that keys `nm` output by address must let the real name win
+  (`extract_symbols_from_binary`). The project-hash tag is v3 so a stale Tier 1
+  build relinks once. Windows has no process-wide namespace and never showed
+  it. Julia's crash reporter then deadlocks in `malloc`, so the symptom is a
+  process in a futex wait at zero CPU: run it under gdb (`handle SIGSEGV nostop
+  noprint pass`). The alias is only half of it: the library's **native** calls
+  to its own exports go through the PLT and are interposed the same way (the
+  rule below under symbol tables), and `LD_DEBUG=bindings` is the evidence for
+  which library a reference bound to. (`test_tier1_alias_binding.jl`.)
 - **A slice is IR for the libLLVM that printed it**, and newer IR does not parse
   in an older LLVM (`icmp samesign` is LLVM 20; Julia 1.12 is 18). The slice cache
   is per libLLVM major (`_slice_cache_key`), and a kernel keeps its ccall body
@@ -361,6 +388,15 @@ the test named when you touch the area.
 - `[link] link_dirs` emits `-Wl,-rpath` (`$ORIGIN` first) alongside `-L`. `-L` alone
   loads the distro copy at runtime, giving two copies of process-global state. This is
   what makes Hub packages composable.
+- **A library binds its own exported symbols to itself.** On ELF a library's own
+  PLT calls and GOT loads resolve through the global scope first, so a library
+  loaded earlier with the same names takes them: the Hub's zlib called Julia's
+  `libz.so.1` from its own `gzclose` (2026-10-24). Every library `create_library`
+  links passes `_self_binding_link_flags` (`-Wl,-Bsymbolic` on ELF, nothing on PE,
+  where a DLL never imports its own symbols). A new link site must pass it too, and
+  a Tier 1 slice, being code outside the library, needs the `__rb_` aliases on top
+  (Tier 1 section). `LD_DEBUG=bindings` says which file a reference bound to.
+  (`test_codegen_flags.jl`, `test_tier1_alias_binding.jl`.)
 
 ### DWARF extraction
 
