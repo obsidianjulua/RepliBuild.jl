@@ -602,6 +602,149 @@ function _c_register_class_misstated(byte_size::Integer, class_risk::Bool;
 end
 
 """
+    _c_byval_param_shape(byte_size, in_memory, slot_align, exact; abi = _c_record_abi())
+        -> :own | :carrier | :trap
+
+How a Tier-3 wrapper passes a record by value, given where C puts it.
+`in_memory` is [`_c_return_in_memory`](@ref) for the record (SysV's MEMORY
+class is one classification for arguments and returns), `slot_align` the
+alignment C gives its stack slot, and `exact` whether that number is the
+compiler's own ([`_c_byval_facts`](@ref)) rather than the DWARF model's
+([`_c_record_align`](@ref)).
+
+  * `:own`: Julia's own `byval` lands where C looks. Win64 (a record goes in a
+    register or by reference to a copy, never in a slot its alignment places);
+    a record that is not MEMORY class (it travels in registers); a slot aligned
+    to 8 or less, which is what Julia's lowering gives every stand-in, since it
+    writes no `align` on its `byval` and the backend takes `max(type, 8)`.
+  * `:carrier`: the slot is 16-aligned, the number is exact, and the record is
+    over 16 bytes and a multiple of 16: the wrapper copies the value into
+    `_RB_ByVal16{N}` (`N` = size ÷ 16), a struct of `<2 x double>` chunks whose
+    LLVM type is 16-aligned, so the backend places the slot at 16.
+  * `:trap`: everything else above 8. Above 16 Julia cannot help: its allocas
+    and heap are 16-aligned at most, and the byval copy from a buffer the
+    backend assumes more aligned faults (a `<4 x double>` carrier segfaults,
+    measured). A 16-aligned slot for a record whose size is not a multiple of
+    16 (an alignment a typedef added) would move the next stack argument. At
+    16 bytes or less a carrier would classify SSE and travel in XMM registers.
+    An inexact 16 (metadata without `byval_params`) is refused rather than
+    guessed; the trap says a rebuild records it.
+
+`take2(Big24, D4A)` with `D4A` an `aligned(16)` record of four doubles: C reads
+`D4A` at the 16-aligned slot after the 24-byte `Big24`, Julia's byval put it 8
+bytes earlier, and the call returned 494.5 for 4883.5 with no error (W2,
+2026-10-24). `take1(D4A)` passed, its slot being 16-aligned by luck.
+"""
+function _c_byval_param_shape(byte_size::Integer, in_memory::Union{Bool,Nothing},
+                              slot_align::Integer, exact::Bool; abi::Symbol = _c_record_abi())
+    abi === :win64 && return :own
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    in_memory === true || return :own
+    slot_align <= 8 && return :own
+    (exact && slot_align == 16 && byte_size > 16 && byte_size % 16 == 0) && return :carrier
+    return :trap
+end
+
+"""
+    _c_byval_facts(ir_facts, memory_params) -> Dict{Int,Int} | nothing
+
+The slot alignment the compiler gave each MEMORY-class record parameter, by
+parameter index. `ir_facts` is the function's `byval_params` metadata
+(`Compiler._byval_definitions`: the `byval` parameters of its IR definition, in
+order, each with the record's name and `align`), and `memory_params` the
+`(index, DWARF key)` pairs of the parameters the DWARF model classifies MEMORY,
+in signature order. Only a MEMORY-class record is `byval`, and a register-class
+one is coerced into scalars that carry no name, so the two lists describe the
+same parameters in the same order.
+
+`nothing` when nothing was recorded (no key: ingest, or metadata from before
+it), or when the lists disagree in length or in any record's name: the model and
+the compiler then classified some parameter differently, and no alignment is
+attributed to any of them.
+"""
+function _c_byval_facts(ir_facts, memory_params::Vector{Tuple{Int,String}})
+    ir_facts isa AbstractVector || return nothing
+    length(ir_facts) == length(memory_params) || return nothing
+    out = Dict{Int,Int}()
+    for (f, (i, rec)) in zip(ir_facts, memory_params)
+        f isa AbstractDict || return nothing
+        name, al = get(f, "record", nothing), get(f, "align", nothing)
+        (name isa AbstractString && al isa Integer && al > 0) || return nothing
+        _c_byval_record_matches(String(name), rec) || return nothing
+        out[i] = Int(al)
+    end
+    return out
+end
+
+# The IR type name (`D4A`, `ns::T`) and the DWARF key spell the same record:
+# equal, or equal once the IR name's scope is dropped, since types are keyed by
+# their bare name.
+_c_byval_record_matches(ir::String, dwarf::String) =
+    ir == dwarf || String(last(split(ir, "::"))) == dwarf
+
+# The phrase a slot refusal names a parameter with, and the trap body for them.
+# `exact` says whether `slot_align` is the compiler's (`_c_byval_facts`).
+function _c_slot_trap_phrase(jname::AbstractString, byte_size::Integer, slot_align::Integer,
+                             exact::Bool; placeholder::Bool = false)::String
+    why = if placeholder
+        "its Julia type is a placeholder with no value layout to copy from"
+    elseif !exact
+        "this metadata does not record the slot alignment the compiler used; " *
+        "rebuild the package (delete .replibuild_cache/project_hash) and wrap again, " *
+        "which records it and passes a 16-byte-aligned slot through an aligned carrier"
+    elseif slot_align > 16
+        "Julia's stack and heap allocations are 16-byte-aligned at most, so no ccall can place it"
+    elseif byte_size <= 16
+        "a 16-byte carrier would travel in SSE registers, not in the slot"
+    else
+        "its $byte_size bytes are not a multiple of 16, so no carrier type has both its size and its alignment"
+    end
+    return "takes `$jname` by value in a $slot_align-byte-aligned stack slot ($why)"
+end
+
+_c_slot_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name' through ccall. It $(join(crossings, "; ")). " *
+        "Julia's ccall passes a by-value record at 8-byte alignment, so the callee would read " *
+        "it from the wrong slot and return a plausible wrong value. Use a pointer-taking " *
+        "variant of this C function.") * ")\n"
+
+# The body of the SysV register-window refusal (`blob_abi_offenders`), shared
+# by the plain path and the `[wrap.varargs]` path.
+_c_blob_trap_body(julia_name::AbstractString, offenders::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name' through ccall. This function crosses an " *
+        "opaque byte-blob struct by value inside the SysV register window (≤16 bytes, " *
+        "float-bearing or packed): $(join(offenders, "; ")). A byte blob cannot reproduce the " *
+        "struct's real argument classes (SSE eightbytes, or MEMORY-class stack passing for " *
+        "packed layouts), so the call would silently corrupt data. The struct is opaque because " *
+        "its layout could not be reproduced exactly (packed layout, bitfields, or unresolvable " *
+        "member types). Use a pointer-taking variant of this C function, or make the struct's " *
+        "members resolvable.") * ")\n"
+
+# Emitted once into a wrapper whose functions pass a record through
+# `_RB_ByVal16` (`_c_byval_param_shape` → `:carrier`), ahead of the functions:
+# a ccall type position resolves when the method is defined.
+const _C_BYVAL16_HELPER = """
+# A record C passes by value in a 16-byte-aligned stack slot (`aligned(16)`,
+# `_Alignas(16)`, a vector or `__int128` member) crosses `ccall` inside this
+# type. Julia writes no alignment on its `byval`, so the backend takes the
+# argument type's, and a `<2 x double>` chunk is 16-aligned where a struct of
+# fields is 8. Only the bytes travel; the callee reads its own record.
+struct _RB_ByVal16{N}
+    chunks::NTuple{N, NTuple{2, VecElement{Float64}}}
+end
+@inline function _rb_byval16(v::T, ::Type{C}) where {T, C <: _RB_ByVal16}
+    Base.sizeof(T) == Base.sizeof(C) ||
+        Base.error("RepliBuild: \$T is \$(Base.sizeof(T)) bytes, its byval carrier \$C \$(Base.sizeof(C))")
+    r = Base.RefValue{C}()
+    Base.GC.@preserve r Base.unsafe_store!(Ptr{T}(Base.unsafe_convert(Ptr{C}, r)), v)
+    return r[]
+end
+
+"""
+
+"""
     _aligned_region_storage(byte_size, align; all_float=false) -> (elem_type, count) | nothing
 
 Julia storage for a `byte_size`-byte opaque region that must carry a C
@@ -2577,6 +2720,179 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     _callback_type = _callback_param_type((jt, ct) -> _ccall_param_type(_as_declared(jt), ct),
                                           dwarf_structs)
 
+    # =========================================================================
+    # PER-FUNCTION BY-VALUE RECORD VERDICT — one answer for both emission paths
+    # =========================================================================
+    # The plain path below and the `[wrap.varargs]` branch (which `continue`s
+    # before the plain path's guards, and until W5 applied only the conflict
+    # trap) ask this about a function's by-value records:
+    #
+    #   * `blob_abi_offenders`: the SysV register-window refusals. An opaque
+    #     byte-blob struct of 16 bytes or less with float members has
+    #     unknowable register classes from its byte image (the record travels
+    #     in SSE eightbytes, `NTuple{N,UInt8}` claims INTEGER), and one with an
+    #     unaligned member is MEMORY class where the blob classifies INTEGER.
+    #     Either would silently read or write the wrong registers. Pointer
+    #     crossings and >16-byte blobs (MEMORY on both views) stay callable.
+    #     Win64 gives a record no register class: C and Julia both pass and
+    #     return it by size alone, so the guard is SysV's only
+    #     (`_c_register_class_misstated`, `_c_blob_param_misclassified`).
+    #   * `slot_traps` and `carriers`: a MEMORY-class record C passes in a
+    #     stack slot aligned above 8 (`_c_byval_param_shape`). Julia's byval
+    #     puts it at 8, one slot early whenever a stack-resident argument
+    #     precedes it (W2). The compiler's own slot alignment (`byval_params`,
+    #     matched to the parameters by `_c_byval_facts`) decides: a 16-aligned
+    #     slot of an exact size goes through `_RB_ByVal16{N}` (`carriers`:
+    #     parameter index => carrier type), anything else above 8 is refused
+    #     with its reason.
+    #   * `x87`: a `long double` crossing, the trap both generators emit.
+    #   * `sret`: BRANCH 0's decision for the return, `nothing` or
+    #     `(; type, size, align)`: a record C returns through a hidden pointer
+    #     that Julia's own lowering would not pass (`_c_explicit_sret`), or
+    #     whose buffer must be more aligned than the stand-in's
+    #     (`_c_sret_buffer_align`, `align > 0`). `nothing` when any refusal
+    #     above fires: a trap stub makes no call.
+    #
+    # `param_types` are the ccall types in parameter order (`_ccall_param_type`).
+    needs_byval16 = Ref(false)
+    function _c_byvalue_verdict(func, param_types::Vector{String}, return_type)
+        blob_abi_offenders = String[]
+        let _rjt = String(get(return_type, "julia_type", "Any")),
+            _rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
+            _rname = _rjt == "Any" ? _sanitize_c_type_name(_rct) : _rjt
+            if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16
+                _rsz = blob_struct_sizes[_rname]
+                _rinfo = get(dwarf_structs, _rct, nothing)
+                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi)
+                    # A record C returns through a hidden pointer has no register
+                    # class to get wrong: the caller's buffer is exact even for a
+                    # blob (BRANCH 0 passes it explicitly wherever Julia's own
+                    # lowering would not). Only a register return is unfixable, and
+                    # so is one whose class cannot be proven. Where C returns a
+                    # record is per target; see `_c_return_in_memory`.
+                    if _ret_in_memory(_rsz, _rinfo) !== true
+                        push!(blob_abi_offenders, "returns `$_rname` by value")
+                    end
+                elseif _rinfo !== nothing && _ret_in_memory(_rsz, _rinfo) === nothing
+                    # No float member, but no proof of the fields' alignment
+                    # either: on SysV an unaligned field would make the record
+                    # MEMORY class while its byte image comes back in registers.
+                    # The parameter path refuses the same case
+                    # (`_c_blob_param_misclassified`). Win64 decides by size
+                    # alone, so `_c_return_in_memory` never answers `nothing` there.
+                    push!(blob_abi_offenders, "returns `$_rname` by value")
+                end
+            end
+            # Same refusal for a named-field struct that carries an opaque region
+            # of mixed SysV class (see `abi_class_risk`): it has real fields, so
+            # the blob test above never sees it, but its register class is just
+            # as unknowable from the Julia side.
+            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16 &&
+               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi)
+                push!(blob_abi_offenders, "returns `$_rname` by value")
+            end
+        end
+        # A ≤16B blob param with an unaligned member is MEMORY class in SysV —
+        # passed on the stack — while its NTuple byte image classifies INTEGER
+        # and travels in registers. That mismatch corrupts arguments silently
+        # even with no float member, so trap it alongside the SSE-class
+        # (float-risk) case. Aligned all-integer blobs classify INTEGER on both
+        # views and stay callable; >16B blobs are MEMORY on both views. Win64
+        # passes a record by size alone, as Julia passes the blob, so it has no
+        # mismatch to trap. See `_c_blob_param_misclassified`; alignment is the
+        # field type's (`_c_has_unaligned_field`), never its size.
+        _blob_param_misaligned = function(jname::String)
+            raw = get(_unaligned_bdk, jname, jname)
+            info = get(dwarf_structs, raw, nothing)
+            info === nothing && return false
+            return _c_blob_param_misclassified(get(blob_struct_sizes, jname, 0), _rec_unaligned(info); abi)
+        end
+        for _pt in param_types
+            if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
+               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi) ||
+                _blob_param_misaligned(_pt))
+                push!(blob_abi_offenders, "takes `$_pt` by value")
+            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16 &&
+                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
+                push!(blob_abi_offenders, "takes `$_pt` by value")
+            end
+        end
+
+        # A MEMORY-class record in a stack slot C aligns above 8 (W2). The
+        # parameters the DWARF model calls MEMORY, in order, are matched to the
+        # `byval` parameters of the function's IR definition (`_c_byval_facts`):
+        # the compiler's slot alignment is exact where DWARF is not (a `packed`
+        # record with naturally placed members, an alignment only a typedef
+        # carries). Without that record, the DWARF alignment decides between a
+        # plain call and a refusal, never a carrier.
+        slot_traps = String[]
+        carriers = Dict{Int,String}()
+        if abi === :sysv
+            memory_params = Tuple{Int,String}[]
+            mem_info = Dict{Int,Any}()
+            for (i, _pt) in enumerate(param_types)
+                startswith(_pt, "Ptr{") && continue
+                raw = get(_unaligned_bdk, _pt, _pt)
+                info = get(dwarf_structs, raw, nothing)
+                (info isa AbstractDict && haskey(info, "members")) || continue
+                sz = _parse_dwarf_size(info)
+                (sz > 0 && _ret_in_memory(sz, info) === true) || continue
+                push!(memory_params, (i, raw))
+                mem_info[i] = info
+            end
+            facts = _c_byval_facts(get(func, "byval_params", nothing), memory_params)
+            for (i, raw) in memory_params
+                info = mem_info[i]
+                sz = _parse_dwarf_size(info)
+                exact = facts !== nothing
+                slot = exact ? facts[i] : _rec_align(info)
+                shape = _c_byval_param_shape(sz, true, slot, exact; abi)
+                shape === :own && continue
+                placeholder = _stand_in_align(param_types[i]) === nothing
+                if shape === :carrier && !placeholder
+                    carriers[i] = "_RB_ByVal16{$(sz ÷ 16)}"
+                    needs_byval16[] = true
+                else
+                    push!(slot_traps, _c_slot_trap_phrase(param_types[i], sz, slot, exact; placeholder))
+                end
+            end
+        end
+
+        # BRANCH 0's return decision; its reasoning is at the branch. `c_safe`
+        # (`is_c_lto_safe`) only nominates candidates: a return whose layout is
+        # not natural.
+        c_safe = is_c_lto_safe(func, dwarf_structs)
+        sret_c_ret = get(return_type, "c_type", "void")
+        cleaned_c_ret = String(strip(replace(sret_c_ret, r"\bconst\b" => "")))
+        ret_struct_info = get(dwarf_structs, cleaned_c_ret, nothing)
+        rs_size = ret_struct_info === nothing ? 0 : _parse_dwarf_size(ret_struct_info)
+        sret_ret_type = return_type["julia_type"]
+        if sret_ret_type == "Any" && sret_c_ret != "void"
+            if haskey(dwarf_structs, sret_c_ret)
+                sret_ret_type = _sanitize_c_type_name(sret_c_ret)
+            else
+                matched_key = _fuzzy_dwarf_lookup(sret_c_ret, dwarf_structs)
+                if matched_key !== nothing
+                    sret_ret_type = _sanitize_c_type_name(matched_key)
+                end
+            end
+        end
+        # A function that crosses a `long double` is a trap stub. BRANCH 0 must
+        # leave it alone: its ccall would declare the `long double` as `Any`,
+        # and `_assert_no_any_ccall_argument` would then refuse the whole
+        # wrapper instead of one function (abi_fuzz C2).
+        x87 = _x87_crossings(func)
+        sret_align = (ret_struct_info !== nothing && isempty(x87) &&
+                      _ret_in_memory(rs_size, ret_struct_info) === true) ?
+            _c_sret_buffer_align(_rec_align(ret_struct_info), _stand_in_align(sret_ret_type)) : 0
+        needs_sret = isempty(x87) && (sret_align > 0 || (ret_struct_info !== nothing &&
+            _c_explicit_sret(rs_size, _rec_unaligned(ret_struct_info); abi)))
+        emit_sret = needs_sret && (!c_safe || rs_size <= 16 || sret_align > 0) &&
+                    isempty(blob_abi_offenders) && isempty(slot_traps)
+        sret = emit_sret ? (; type = String(sret_ret_type), size = rs_size, align = sret_align) : nothing
+        return (; blob_abi_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret)
+    end
+
     for func in functions
         func_name = func["name"]
         mangled = func["mangled"]
@@ -2649,10 +2965,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # include: the miniaudio class of 2026-08-02, reappearing on the one
             # path that skips the fix. Same shape as the Cstring-policy bug —
             # a branch that emits and `continue`s past shared policy.
+            # `_ccall_param_type` is the plain path's whole parameter step: the
+            # degradation, the blocklist, template sanitizing, and a by-value
+            # record named only by its `c_type`.
             va_params = [copy(p) for p in params]
             for p in va_params
-                p["julia_type"] = _resolve_forward_ptr(get(p, "julia_type", "Ptr{Cvoid}"),
-                                                       emitted_type_names)
+                p["name"] == "varargs..." && continue
+                p["julia_type"] = _ccall_param_type(String(something(get(p, "julia_type", nothing), "Ptr{Cvoid}")),
+                                                    String(something(get(p, "c_type", nothing), "")))
             end
             va_return = copy(return_type)
             va_return["julia_type"] = _resolve_forward_ptr(get(va_return, "julia_type", "Cvoid"),
@@ -2678,12 +2998,27 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 va_return["julia_type"] = cand in emitted_type_names ? cand : "Cvoid"
             end
 
+            # The plain path's verdict on the fixed parameters and the return
+            # (`_c_byvalue_verdict`), applied here too: the trap stubs in the
+            # plain path's order (`long double`, then the register window, then
+            # the stack slot), an over-aligned record inside its carrier, and
+            # BRANCH 0's explicit sret. This branch used to `continue` past all
+            # of them and @ccall the record by name (W5).
+            va_fixed = [p for p in va_params if p["name"] != "varargs..."]
+            vd = _c_byvalue_verdict(func, [String(p["julia_type"]) for p in va_fixed], va_return)
+            for (i, carrier) in vd.carriers
+                va_fixed[i]["byval_carrier"] = carrier
+            end
+            va_trap = !isempty(vd.x87) ? (n -> _x87_trap_body(n, vd.x87)) :
+                      !isempty(vd.blob_abi_offenders) ? (n -> _c_blob_trap_body(n, vd.blob_abi_offenders)) :
+                      !isempty(vd.slot_traps) ? (n -> _c_slot_trap_body(n, vd.slot_traps)) : nothing
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 va_params, va_return, overloads,
                 generate_docs, demangled, :c,
                 cstring_free=get(config.wrap.cstring_owned, func_name, ""),
-                conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs)
+                conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs),
+                trap=va_trap, sret=vd.sret
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -2838,77 +3173,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # are compiled by the same Clang that built the library — no LLVM
         # version mismatch, no sanitizing needed.  DAG is not wired to the
         # C path — Julia's internal LLVM handles the C ABI natively.
-        c_safe = is_c_lto_safe(func, dwarf_structs)
-
-        # SysV register-class guard: an opaque byte-blob struct ≤16 bytes with
-        # float members has unknowable register classes from the byte image
-        # (the real struct travels in SSE eightbytes, NTuple{N,UInt8} claims
-        # INTEGER). A by-value crossing would silently read/write the wrong
-        # registers — refuse loudly instead. Pointer crossings and >16-byte
-        # blobs (MEMORY class on both views) remain fine. Win64 gives a record
-        # no register class: C and Julia both pass and return it by size
-        # alone, so the guard is SysV's only (`_c_register_class_misstated`).
-        blob_abi_offenders = String[]
-        let _rjt = String(get(return_type, "julia_type", "Any")),
-            _rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
-            _rname = _rjt == "Any" ? _sanitize_c_type_name(_rct) : _rjt
-            if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16
-                _rsz = blob_struct_sizes[_rname]
-                _rinfo = get(dwarf_structs, _rct, nothing)
-                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi)
-                    # A record C returns through a hidden pointer has no register
-                    # class to get wrong: the caller's buffer is exact even for a
-                    # blob (BRANCH 0 passes it explicitly wherever Julia's own
-                    # lowering would not). Only a register return is unfixable, and
-                    # so is one whose class cannot be proven. Where C returns a
-                    # record is per target; see `_c_return_in_memory`.
-                    if _ret_in_memory(_rsz, _rinfo) !== true
-                        push!(blob_abi_offenders, "returns `$_rname` by value")
-                    end
-                elseif _rinfo !== nothing && _ret_in_memory(_rsz, _rinfo) === nothing
-                    # No float member, but no proof of the fields' alignment
-                    # either: on SysV an unaligned field would make the record
-                    # MEMORY class while its byte image comes back in registers.
-                    # The parameter path refuses the same case
-                    # (`_c_blob_param_misclassified`). Win64 decides by size
-                    # alone, so `_c_return_in_memory` never answers `nothing` there.
-                    push!(blob_abi_offenders, "returns `$_rname` by value")
-                end
-            end
-            # Same refusal for a named-field struct that carries an opaque region
-            # of mixed SysV class (see `abi_class_risk`): it has real fields, so
-            # the blob test above never sees it, but its register class is just
-            # as unknowable from the Julia side.
-            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16 &&
-               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi)
-                push!(blob_abi_offenders, "returns `$_rname` by value")
-            end
-        end
-        # A ≤16B blob param with an unaligned member is MEMORY class in SysV —
-        # passed on the stack — while its NTuple byte image classifies INTEGER
-        # and travels in registers. That mismatch corrupts arguments silently
-        # even with no float member, so trap it alongside the SSE-class
-        # (float-risk) case. Aligned all-integer blobs classify INTEGER on both
-        # views and stay callable; >16B blobs are MEMORY on both views. Win64
-        # passes a record by size alone, as Julia passes the blob, so it has no
-        # mismatch to trap. See `_c_blob_param_misclassified`; alignment is the
-        # field type's (`_c_has_unaligned_field`), never its size.
-        _blob_param_misaligned = function(jname::String)
-            raw = get(best_dwarf_key, jname, jname)
-            info = get(dwarf_structs, raw, nothing)
-            info === nothing && return false
-            return _c_blob_param_misclassified(get(blob_struct_sizes, jname, 0), _rec_unaligned(info); abi)
-        end
-        for _pt in param_types
-            if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
-               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi) ||
-                _blob_param_misaligned(_pt))
-                push!(blob_abi_offenders, "takes `$_pt` by value")
-            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16 &&
-                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
-                push!(blob_abi_offenders, "takes `$_pt` by value")
-            end
-        end
+        # One verdict for the function's by-value records, shared with the
+        # varargs path (`_c_byvalue_verdict` above): the SysV register-window
+        # refusals, the over-aligned stack slots and their carriers, `long
+        # double`, and BRANCH 0's return shape.
+        (; blob_abi_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret) =
+            _c_byvalue_verdict(func, param_types, return_type)
+        # The ccall's parameter types and argument expressions, each
+        # over-aligned record inside its carrier (`_rb_byval16`).
+        ccall_param_types = [get(carriers, i, t) for (i, t) in enumerate(param_types)]
+        ccall_arg_exprs = [haskey(carriers, i) ? "_rb_byval16($n, $(carriers[i]))" : n
+                           for (i, n) in enumerate(param_names)]
 
         # A record whose name several types share in this library (two `.c`
         # files each defining their own `struct state`), or an enum whose
@@ -2958,73 +3233,54 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # (`_c_sret_buffer_align`), the wrapper passes a buffer it aligned
         # itself, whatever `c_safe` says. A function the `long double` trap
         # refuses below needs no buffer, and must not reach this branch (C2).
-        sret_c_ret = get(return_type, "c_type", "void")
-        cleaned_c_ret = String(strip(replace(sret_c_ret, r"\bconst\b" => "")))
-        ret_struct_info = get(dwarf_structs, cleaned_c_ret, nothing)
-        rs_size = ret_struct_info === nothing ? 0 : _parse_dwarf_size(ret_struct_info)
-        sret_ret_type = return_type["julia_type"]
-        if sret_ret_type == "Any" && sret_c_ret != "void"
-            if haskey(dwarf_structs, sret_c_ret)
-                sret_ret_type = _sanitize_c_type_name(sret_c_ret)
+        # The decision itself (`sret`: type, size and buffer alignment, or
+        # `nothing`) is `_c_byvalue_verdict`'s, so the varargs path makes the
+        # same one. A function the `long double` trap refuses, or one with a
+        # register-window or stack-slot refusal, never gets here: its ccall
+        # would declare the `long double` as `Any`, and
+        # `_assert_no_any_ccall_argument` would then refuse the whole wrapper
+        # instead of one function (abi_fuzz C2).
+        if sret !== nothing
+            sret_ret_type, rs_size, sret_align = sret.type, sret.size, sret.align
+            sret_ccall_types = "(Ptr{$sret_ret_type}, $(join(ccall_param_types, ", "))$(isempty(ccall_param_types) ? "" : ","))"
+            sret_ccall_args  = "ret_buf, $(join(ccall_arg_exprs, ", "))"
+
+            func_def = if sret_align > 0
+                # Over-allocate by `align - 1` bytes and start the record at
+                # the first aligned address inside.
+                sret_mask = sret_align - 1
+                """
+                $doc_comment
+                function $julia_name($param_sig)
+                    # `$cleaned_c_ret` is $sret_align-byte aligned in C: the buffer must be too.
+                    ret_buf = Ref{NTuple{$(rs_size + sret_mask), UInt8}}()
+                    GC.@preserve ret_buf begin
+                        ret_ptr = Ptr{$sret_ret_type}((UInt(Base.unsafe_convert(Ptr{Cvoid}, ret_buf)) + $sret_mask) & ~UInt($sret_mask))
+                        ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, ret_ptr, $(join(ccall_arg_exprs, ", ")))
+                        return unsafe_load(ret_ptr)
+                    end
+                end
+
+                """
             else
-                matched_key = _fuzzy_dwarf_lookup(sret_c_ret, dwarf_structs)
-                if matched_key !== nothing
-                    sret_ret_type = _sanitize_c_type_name(matched_key)
-                end
-            end
-        end
-        # A function that crosses a `long double` is a trap stub, emitted below
-        # in BRANCH 2. BRANCH 0 must leave it alone: its ccall would declare the
-        # `long double` as `Any`, and `_assert_no_any_ccall_argument` would then
-        # refuse the whole wrapper instead of one function (abi_fuzz C2).
-        x87 = _x87_crossings(func)
-        sret_align = (ret_struct_info !== nothing && isempty(x87) &&
-                      _ret_in_memory(rs_size, ret_struct_info) === true) ?
-            _c_sret_buffer_align(_rec_align(ret_struct_info), _stand_in_align(sret_ret_type)) : 0
-        needs_sret = isempty(x87) && (sret_align > 0 || (ret_struct_info !== nothing &&
-            _c_explicit_sret(rs_size, _rec_unaligned(ret_struct_info); abi)))
-        if (!c_safe || rs_size <= 16 || sret_align > 0) && isempty(blob_abi_offenders)
-            if needs_sret
-                sret_ccall_types = "(Ptr{$sret_ret_type}, $(join(param_types, ", "))$(isempty(param_types) ? "" : ","))"
-                sret_ccall_args  = "ret_buf, $(join(param_names, ", "))"
-
-                func_def = if sret_align > 0
-                    # Over-allocate by `align - 1` bytes and start the record at
-                    # the first aligned address inside.
-                    sret_mask = sret_align - 1
-                    """
-                    $doc_comment
-                    function $julia_name($param_sig)
-                        # `$cleaned_c_ret` is $sret_align-byte aligned in C: the buffer must be too.
-                        ret_buf = Ref{NTuple{$(rs_size + sret_mask), UInt8}}()
-                        GC.@preserve ret_buf begin
-                            ret_ptr = Ptr{$sret_ret_type}((UInt(Base.unsafe_convert(Ptr{Cvoid}, ret_buf)) + $sret_mask) & ~UInt($sret_mask))
-                            ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, ret_ptr, $(join(param_names, ", ")))
-                            return unsafe_load(ret_ptr)
-                        end
+                """
+                $doc_comment
+                function $julia_name($param_sig)
+                    ret_buf = Ref($sret_ret_type())
+                    GC.@preserve ret_buf begin
+                        ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
                     end
-
-                    """
-                else
-                    """
-                    $doc_comment
-                    function $julia_name($param_sig)
-                        ret_buf = Ref($sret_ret_type())
-                        GC.@preserve ret_buf begin
-                            ccall((:$mangled, LIBRARY_PATH), Cvoid, $sret_ccall_types, $sret_ccall_args)
-                        end
-                        return ret_buf[]
-                    end
-
-                    """
+                    return ret_buf[]
                 end
 
-                push!(func_chunks, func_def)
-                push!(exports, julia_name)
-                continue
+                """
             end
-            # else: fall through to BRANCH 2 — INTEGER-class register return
+
+            push!(func_chunks, func_def)
+            push!(exports, julia_name)
+            continue
         end
+        # else: BRANCH 2 — a register return, or Julia's own sret
 
         # =========================================================
         # BRANCH 2: CCALL (Fast Path) - Existing Logic
@@ -3042,17 +3298,18 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 # Generate range-checked conversion
                 conversion_code *= "    $converted_name = $c_type($name)\n"
             else
-                push!(ccall_param_names, name)
+                # The name, or the record inside its carrier (`carriers`).
+                push!(ccall_param_names, ccall_arg_exprs[i])
             end
         end
 
         ccall_args = join(ccall_param_names, ", ")
 
         # ccall needs tuple expression (Type1, Type2) not Tuple{Type1, Type2}
-        ccall_types = if isempty(param_types)
+        ccall_types = if isempty(ccall_param_types)
             "()"
         else
-            "($(join(param_types, ", ")),)"  # Note: trailing comma for single-element tuples
+            "($(join(ccall_param_types, ", ")),)"  # Note: trailing comma for single-element tuples
         end
 
         # llvmcall needs Tuple{Type1, Type2} — built from raw param_types (no trailing comma)
@@ -3165,6 +3422,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             !any(t -> t == "Bool", param_types) &&
             !any(t -> t in struct_types, param_types)
 
+        # A record inside its byval carrier is a ccall shape only; neither
+        # llvmcall path takes it.
+        lto_shape_ok = lto_shape_ok && isempty(carriers)
+
         # Whole-module LTO path (legacy, scale-limited — see CLAUDE.md caveats)
         lto_eligible = config.link.enable_lto && lto_shape_ok
 
@@ -3186,22 +3447,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
             """
         elseif !isempty(blob_abi_offenders)
-            offender_list = join(blob_abi_offenders, "; ")
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
-                Base.error(\"\"\"
-                ABI Safety Trap: cannot call '$julia_name' through ccall.
-                This function crosses an opaque byte-blob struct by value inside
-                the SysV register window (≤16 bytes, float-bearing or packed): $offender_list.
-                A byte blob cannot reproduce the struct's real argument classes
-                (SSE eightbytes, or MEMORY-class stack passing for packed layouts),
-                so the call would silently corrupt data. The struct is opaque because
-                its layout could not be reproduced exactly (packed layout, bitfields,
-                or unresolvable member types). Use a pointer-taking variant of this
-                C function, or make the struct's members resolvable.
-                \"\"\")
-            end
+            $(_c_blob_trap_body(julia_name, blob_abi_offenders))end
+
+            """
+        elseif !isempty(slot_traps)
+            # A MEMORY-class record in a stack slot C aligns above 8 that no
+            # carrier can reproduce (`_c_byval_param_shape`): the phrase says
+            # why, and whether a rebuild would record the alignment.
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_c_slot_trap_body(julia_name, slot_traps))end
 
             """
         elseif has_unknown_param || is_unknown_return
@@ -3635,6 +3894,11 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
 
     # Same precompilation-safety dedup as the C++ generator: exactly one
     # definition per dispatch signature (last one wins, as include() would).
+    # The byval carrier, ahead of the first function that names it in a ccall
+    # type tuple (`_c_byvalue_verdict`); a wrapper with no such function has no
+    # trace of it.
+    needs_byval16[] && pushfirst!(func_chunks, _C_BYVAL16_HELPER)
+
     func_chunks = _dedup_method_chunks(func_chunks)
 
     # Slices are written from the FINAL chunks, after dedup — see the docstring.

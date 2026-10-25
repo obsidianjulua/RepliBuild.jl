@@ -3271,7 +3271,10 @@ function compile_project(config::RepliBuildConfig)
     # exact module(s) the binary was linked from — the one merged module, or the
     # per-TU list when llvm-link declined to merge.
     nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
-    metadata_path = save_compilation_metadata(config, cpp_files, binary_path; nounwind=nounwind)
+    # So is each definition's `byval` slot alignment (`_byval_definitions`).
+    byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+    metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
+                                              nounwind=nounwind, byval=byval)
 
     # Guard: the functions metadata says are wrappable must actually be reachable
     # through the dynamic symbol table the generated wrapper will dlsym against.
@@ -3509,6 +3512,128 @@ function _nounwind_definitions(ir_files)::Set{String}
             push!(out, name)
         end
     end
+    return out
+end
+
+"""
+    _byval_definitions(ir_files) -> Dict{String,Vector{Dict{String,Any}}}
+
+For every symbol DEFINED in `ir_files`, its `byval` parameters in order: the
+record each one carries (`"record"`, the LLVM type's name without its
+`%struct.`/`%union.`/`%class.` prefix, quotes and the `.N` suffix llvm-link adds
+to a duplicate) and the alignment of its stack slot (`"align"`). A definition
+with no `byval` parameter maps to an empty list; a function the IR only declares
+is absent.
+
+This is the compiler's own answer to where a MEMORY-class record goes when it
+is passed by value on SysV: clang stamps `byval(%struct.T) align N` with the
+record's alignment, and the X86 backend places the slot at that alignment.
+Julia's `ccall` lowering writes no `align` on its `byval`, so the backend uses
+the Julia stand-in's (8 for any struct of fields), and a record C aligns to 16
+lands one slot early whenever a stack-resident argument precedes it (W2,
+2026-10-24). DWARF cannot always say which alignment C used: a `packed` record
+whose members happen to sit at their natural offsets, or `#pragma pack(8)`
+capping an `__int128` member, has the same DIEs as the unpacked record, and an
+alignment only a typedef carries (`typedef struct S T
+__attribute__((aligned(16)))`) is not in DWARF at all. The IR attribute is
+exact in every one of those cases. GeneratorC matches these against the
+record parameters its own classifier calls MEMORY (`_c_byval_facts`), and
+passes the record through a type of that alignment where it can
+(`_c_byval_param_shape`).
+
+Read from the same `define` lines as `_nounwind_definitions`. A `byval` with
+no `align` is not recorded: the function then has no fact, and the generator
+falls back to DWARF. Win64 definitions carry no `byval` at all (a record goes
+by reference to a copy), so every function there maps to an empty list.
+"""
+function _byval_definitions(ir_files)::Dict{String,Vector{Dict{String,Any}}}
+    unquote(n) = startswith(n, "\"") ?
+        replace(n[2:end-1], r"\\([0-9A-Fa-f]{2})" => h -> string(Char(parse(UInt8, h[2:3], base=16)))) : n
+    out = Dict{String,Vector{Dict{String,Any}}}()
+    for f in ir_files
+        isfile(f) || continue
+        for line in eachline(f)
+            startswith(line, "define ") || continue
+            m = match(r"@(\"(?:[^\"\\]|\\.)*\"|[-a-zA-Z$._][-a-zA-Z$._0-9]*)\(", line)
+            m === nothing && continue
+            # The parameter list: from after `@name(` to its matching paren.
+            i = m.offset + ncodeunits(m.match)
+            start = i
+            depth = 1
+            while i <= ncodeunits(line) && depth > 0
+                c = codeunit(line, i)
+                c == UInt8('(') && (depth += 1)
+                c == UInt8(')') && (depth -= 1)
+                i += 1
+            end
+            depth == 0 || continue
+            params = line[start:i-2]
+            facts = Dict{String,Any}[]
+            complete = true
+            for p in _ir_split_params(params)
+                bv = match(r"\bbyval\(", p)
+                bv === nothing && continue
+                # The type inside `byval(...)`, with its own parens balanced.
+                j = bv.offset + ncodeunits(bv.match)
+                tstart = j
+                d = 1
+                while j <= ncodeunits(p) && d > 0
+                    c = codeunit(p, j)
+                    c == UInt8('(') && (d += 1)
+                    c == UInt8(')') && (d -= 1)
+                    j += 1
+                end
+                al = match(r"\balign (\d+)\b", p[j:end])
+                if d != 0 || al === nothing
+                    complete = false
+                    break
+                end
+                push!(facts, Dict{String,Any}("record" => _ir_record_name(p[tstart:j-2]),
+                                              "align" => parse(Int, al.captures[1])))
+            end
+            complete || continue
+            out[unquote(String(m.captures[1]))] = facts
+        end
+    end
+    return out
+end
+
+# The record an LLVM struct type name spells: `%struct.D4A` is `D4A`,
+# `%struct.state.3` (llvm-link's rename of a duplicate) is `state`,
+# `%"class.ns::T"` is `ns::T`, and `%union.U` is `U`. Anything else (an
+# anonymous literal `{ i64, i64 }`, an array) is returned as written.
+function _ir_record_name(t::AbstractString)::String
+    s = String(strip(t))
+    startswith(s, "%") || return s
+    s = s[2:end]
+    if startswith(s, "\"") && endswith(s, "\"")
+        s = s[2:end-1]
+    end
+    s = replace(s, r"^(?:struct|union|class)\." => "")
+    return replace(s, r"\.\d+$" => "")
+end
+
+# Split an LLVM `define` line's parameter list on the commas between
+# parameters: those at bracket depth 0, counting `(`/`[`/`{`/`<` and their
+# closers. An attribute's argument (`byval(%struct.T)`, `dereferenceable(8)`)
+# and a literal type (`{ i64, i64 }`, `<2 x double>`) carry commas of their own.
+function _ir_split_params(s::AbstractString)::Vector{String}
+    out = String[]
+    depth = 0
+    buf = IOBuffer()
+    for c in s
+        if c in ('(', '[', '{', '<')
+            depth += 1
+        elseif c in (')', ']', '}', '>')
+            depth -= 1
+        end
+        if c == ',' && depth == 0
+            push!(out, String(take!(buf)))
+        else
+            write(buf, c)
+        end
+    end
+    push!(out, String(take!(buf)))
     return out
 end
 
@@ -7053,7 +7178,8 @@ This is the core of automatic wrapper generation!
 """
 function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
                                       binary_path::String;
-                                      nounwind::Union{Nothing,Set{String}}=nothing)::Dict{String,Any}
+                                      nounwind::Union{Nothing,Set{String}}=nothing,
+                                      byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
@@ -7148,6 +7274,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     candidates = config.wrap.language == :c ? Set{String}() :
                  _scan_noexcept_functions(source_files, get_include_dirs(config))
     _mark_noexcept!(functions, candidates, nounwind)
+    _mark_byval_params!(functions, byval)
 
     # Build type registry (basic types + inferred types)
     type_registry = build_type_registry(functions)
@@ -7287,6 +7414,27 @@ function _mark_noexcept!(functions, candidates::Set{String},
         func["is_noexcept"] = nounwind !== nothing &&
                               get(func, "name", "") in candidates &&
                               get(func, "mangled", "") in nounwind
+    end
+    return functions
+end
+
+"""
+    _mark_byval_params!(functions, byval)
+
+Record on every function the IR defines the `byval` parameters of its
+definition, as `byval_params`: a list of `{"record", "align"}` in parameter
+order (`_byval_definitions`), empty when the definition passes nothing `byval`.
+A function the IR only declares, and every function when there is no IR
+(`byval === nothing`: ingest), gets no key, which the generator reads as "not
+recorded" and decides from DWARF alone (`_c_byval_facts`). Metadata from
+before this key has the same effect, so an over-aligned record parameter is
+callable only after a rebuild.
+"""
+function _mark_byval_params!(functions, byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}})
+    byval === nothing && return functions
+    for func in functions
+        facts = get(byval, get(func, "mangled", ""), nothing)
+        facts === nothing || (func["byval_params"] = Any[copy(f) for f in facts])
     end
     return functions
 end
@@ -8033,9 +8181,11 @@ This enables automatic wrapper generation!
 """
 function save_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
                                    binary_path::String;
-                                   nounwind::Union{Nothing,Set{String}}=nothing)::String
+                                   nounwind::Union{Nothing,Set{String}}=nothing,
+                                   byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing)::String
     # Extract metadata
-    metadata = extract_compilation_metadata(config, source_files, binary_path; nounwind=nounwind)
+    metadata = extract_compilation_metadata(config, source_files, binary_path;
+                                            nounwind=nounwind, byval=byval)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their
