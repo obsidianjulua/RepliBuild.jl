@@ -136,6 +136,12 @@ const _SRET_STRUCTS = Dict{String,Any}(
                         _sm("k", "Cint", "int", "0x10", 4)),
     "LD16" => _srec(16, _sm("x", "NTuple{2, UInt64}", "long double", "0x0", 16)),
     "NestA" => _srec(32, _sm("a", "V4A", "V4A", "0x0", 0), _sm("t", "Cfloat", "float", "0x10", 4)),
+    "MA32" => _srec(32, _sm("c", "UInt8", "char", "0x0", 1), _salign(_sm("i", "Cint", "int", "0x10", 4), 16)),
+    # A 32-byte record DWARF says is 16-aligned. The IR can say its slot is 8
+    # (a `packed` record whose members sit at their natural offsets has the
+    # same DIEs as the unpacked one): the compiler's answer wins.
+    "PA32" => _salign(_srec(32, _sm("a", "Clonglong", "long long", "0x0", 8), _sm("b", "Clonglong", "long long", "0x8", 8),
+                               _sm("c", "Clonglong", "long long", "0x10", 8), _sm("d", "Clonglong", "long long", "0x18", 8)), 16),
     # A member type nothing can measure: the size bounds the alignment.
     "Mys48" => _srec(48, _sm("q", "Any", "Mystery", "0x0", 0)),
     "Mys24" => _srec(24, _sm("q", "Any", "Mystery", "0x0", 0)),
@@ -562,6 +568,106 @@ Contents of the .debug_info section:
         @test checked == length(table)
     end
 
+    @testset "byval slot: Julia's own, a carrier, or refused" begin
+        # (size, MEMORY class, slot alignment, exact) → SysV, Win64
+        table = [(24, true,  8,  true,  :own,     :own),   # Big24: Julia's byval is at 8 too
+                 (32, true,  16, true,  :carrier, :own),   # D4A, MA32, HVec, HV4, NestA (W2)
+                 (48, true,  16, true,  :carrier, :own),
+                 (32, true,  16, false, :trap,    :own),   # metadata without byval_params: refused, not guessed
+                 (32, true,  32, true,  :trap,    :own),   # A32: Julia's allocas are 16-aligned at most
+                 (32, true,  32, false, :trap,    :own),
+                 (24, true,  16, true,  :trap,    :own),   # an alignment a typedef added: not a multiple of 16
+                 (16, true,  16, true,  :trap,    :own),   # a 16-byte carrier would travel in XMM
+                 (32, false, 16, true,  :own,     :own),   # not MEMORY: registers, no slot
+                 (16, false, 16, true,  :own,     :own),   # V4A: SSE,SSE
+                 (16, nothing, 16, true, :own,    :own),   # unproven at 16 bytes: the blob trap's case, not this one
+                 (32, true,  8,  false, :own,     :own)]   # a packed 32-byte record, DWARF alignment 8
+        checked = 0
+        for (n, mem, al, exact, sysv, win64) in table
+            @test (n, mem, al, exact, :sysv, _SW._c_byval_param_shape(n, mem, al, exact; abi = :sysv)) ==
+                  (n, mem, al, exact, :sysv, sysv)
+            @test (n, mem, al, exact, :win64, _SW._c_byval_param_shape(n, mem, al, exact; abi = :win64)) ==
+                  (n, mem, al, exact, :win64, win64)
+            checked += 1
+        end
+        @test checked == length(table)
+        @test_throws ArgumentError _SW._c_byval_param_shape(32, true, 16, true; abi = :aapcs64)
+    end
+
+    @testset "the compiler's byval facts are matched to the MEMORY parameters" begin
+        fact(r, a) = Dict{String,Any}("record" => r, "align" => a)
+        mem = [(1, "Big24"), (2, "D4A")]
+        @test _SW._c_byval_facts(Any[fact("Big24", 8), fact("D4A", 16)], mem) == Dict(1 => 8, 2 => 16)
+        # In parameter order, with the register-class parameter in between absent from both lists.
+        @test _SW._c_byval_facts(Any[fact("Big24", 8), fact("D4A", 16)], [(1, "Big24"), (3, "D4A")]) == Dict(1 => 8, 3 => 16)
+        @test _SW._c_byval_facts(Any[], Tuple{Int,String}[]) == Dict{Int,Int}()
+        # Not recorded: no key (ingest, older metadata).
+        @test _SW._c_byval_facts(nothing, mem) === nothing
+        # The lists disagree: in length, or in a record's name. Nothing is attributed.
+        @test _SW._c_byval_facts(Any[fact("D4A", 16)], mem) === nothing
+        @test _SW._c_byval_facts(Any[fact("Big24", 8), fact("D4A", 16), fact("D4A", 16)], mem) === nothing
+        @test _SW._c_byval_facts(Any[fact("Big24", 8), fact("MA32", 16)], mem) === nothing
+        @test _SW._c_byval_facts(Any[fact("Big24", 8), Dict{String,Any}("record" => "D4A")], mem) === nothing
+        @test _SW._c_byval_facts(Any[fact("Big24", 8), fact("D4A", 0)], mem) === nothing
+        # A C++ record is keyed by its bare name; the IR type carries the scope.
+        @test _SW._c_byval_facts(Any[fact("ns::D4A", 16)], [(1, "D4A")]) == Dict(1 => 16)
+        @test _SW._c_byval_record_matches("D4A", "D4A") && _SW._c_byval_record_matches("a::b::D4A", "D4A")
+        @test !_SW._c_byval_record_matches("D4A", "MA32") && !_SW._c_byval_record_matches("D4Ax", "D4A")
+    end
+
+    @testset "the build reads each definition's byval slot alignments off the IR" begin
+        C = RepliBuild.Compiler
+        # clang 23.1.3, `-O1 -S -emit-llvm`, with the attributes it writes; one
+        # quoted name, one renamed duplicate, one coerced register-class record,
+        # a declaration, and a `byval` without `align`.
+        ll = """
+        ; ModuleID = 'c_sret.c'
+        %struct.Big24 = type { i64, i64, i32 }
+        %struct.D4A = type { double, double, double, double }
+        define dso_local double @take_d4a(ptr nofree noundef readonly byval(%struct.Big24) align 8 captures(none) %0, ptr nofree noundef readonly byval(%struct.D4A) align 16 captures(none) %1) local_unnamed_addr #5 {
+        define dso_local float @take_v4a(ptr nofree noundef readonly byval(%struct.Big24) align 8 captures(none) %0, <2 x float> %1, <2 x float> %2) #10 {
+        define dso_local void @make_d4a(ptr dead_on_unwind noalias writable sret(%struct.D4A) align 16 %0, double noundef %1) #3 {
+        define dso_local i64 @f2(i64 %0, i64 %1, i64 %2) #0 {
+        define void @"quoted name"(ptr byval(%"struct.ns::T") align 16 %0, { i64, i64 } %1) #0 {
+        define i32 @dup(ptr byval(%struct.state.3) align 8 %0, ptr byval(%union.U) align 8 %1, ...) #0 {
+        define i32 @noalign(ptr byval(%struct.D4A) %0) #0 {
+        declare double @extern_take(ptr byval(%struct.D4A) align 16)
+        attributes #5 = { nounwind }
+        """
+        path = joinpath(mktempdir(), "scan.ll")
+        write(path, ll)
+        d = C._byval_definitions([path])
+        pairs_of(v) = v === nothing ? :absent : [(f["record"], f["align"]) for f in v]
+        facts_of(k) = pairs_of(get(d, k, nothing))
+        @test sort(collect(keys(d))) == ["dup", "f2", "make_d4a", "quoted name", "take_d4a", "take_v4a"]
+        @test facts_of("take_d4a") == [("Big24", 8), ("D4A", 16)]
+        @test facts_of("take_v4a") == [("Big24", 8)]             # the coerced V4A carries no name
+        @test facts_of("make_d4a") == []                         # sret is not byval
+        @test facts_of("f2") == []
+        @test facts_of("quoted name") == [("ns::T", 16)]
+        @test facts_of("dup") == [("state", 8), ("U", 8)]        # llvm-link's `.3`, a union
+        @test !haskey(d, "noalign")                              # no `align`: no fact, not a guess
+        @test !haskey(d, "extern_take")                          # a declaration defines nothing
+        @test C._byval_definitions([joinpath(mktempdir(), "absent.ll")]) == Dict{String,Vector{Dict{String,Any}}}()
+        @test C._ir_record_name("%struct.D4A") == "D4A"
+        @test C._ir_record_name("%struct.state.3") == "state"
+        @test C._ir_record_name("%\"class.ns::T\"") == "ns::T"
+        @test C._ir_record_name("%union.U") == "U"
+        @test C._ir_record_name("[4 x double]") == "[4 x double]"
+        @test C._ir_split_params("ptr byval(%struct.A) align 16 %0, { i64, i64 } %1, <2 x double> %2, ptr dereferenceable(8) %3") ==
+              ["ptr byval(%struct.A) align 16 %0", " { i64, i64 } %1", " <2 x double> %2", " ptr dereferenceable(8) %3"]
+        # The marker: a function the IR defines gets the key, empty or not; one it does not gets none.
+        fns = Any[Dict{String,Any}("name" => "take_d4a", "mangled" => "take_d4a"),
+                  Dict{String,Any}("name" => "f2", "mangled" => "f2"),
+                  Dict{String,Any}("name" => "only_declared", "mangled" => "only_declared")]
+        C._mark_byval_params!(fns, d)
+        @test pairs_of(get(fns[1], "byval_params", nothing)) == [("Big24", 8), ("D4A", 16)]
+        @test get(fns[2], "byval_params", nothing) == Any[]
+        @test !haskey(fns[3], "byval_params")
+        C._mark_byval_params!(fns, nothing)
+        @test haskey(fns[1], "byval_params") && !haskey(fns[3], "byval_params")   # nothing marks nothing
+    end
+
     # ── What the generator emits for each shape, per target ──────────────────
     dir = mktempdir()
     write(joinpath(dir, "replibuild.toml"), """
@@ -583,6 +689,8 @@ Contents of the .debug_info section:
     fn(name, ret, params...) = Dict{String,Any}("name" => name, "mangled" => name, "demangled" => name,
         "parameters" => Any[params...],
         "return_type" => Dict{String,Any}("julia_type" => ret, "c_type" => ret))
+    # `byval_params`, as `Compiler._mark_byval_params!` writes it.
+    facts(f, pairs...) = (f["byval_params"] = Any[Dict{String,Any}("record" => r, "align" => a) for (r, a) in pairs]; f)
     meta = Dict{String,Any}(
         "struct_definitions" => _SRET_STRUCTS,
         "globals" => Dict{String,Any}(),
@@ -625,6 +733,27 @@ Contents of the .debug_info section:
             fn("kw_ptr", "Cint", rec_param("p", "Ptr{baremodule}")),
             fn("kw_any", "Cint", Dict{String,Any}("name" => "a", "julia_type" => "Any", "c_type" => "baremodule")),
             fn("make_bfm12", "BFM12"),
+            # The over-aligned records as arguments after a 24-byte stack
+            # argument (W2), with the slot alignments the build recorded.
+            facts(fn("take_d4a", "Cdouble", rec_param("p", "Big24"), rec_param("v", "D4A")), ("Big24", 8), ("D4A", 16)),
+            facts(fn("take_ma32", "Cint", rec_param("p", "Big24"), rec_param("v", "MA32")), ("Big24", 8), ("MA32", 16)),
+            facts(fn("take_hvec", "Cfloat", rec_param("p", "Big24"), rec_param("v", "HVec")), ("Big24", 8), ("HVec", 16)),
+            facts(fn("take_nesta", "Cfloat", rec_param("p", "Big24"), rec_param("v", "NestA")), ("Big24", 8), ("NestA", 16)),
+            facts(fn("take_a32", "Cdouble", rec_param("p", "Big24"), rec_param("v", "A32")), ("Big24", 8), ("A32", 32)),
+            facts(fn("take_v4a", "Cfloat", rec_param("p", "Big24"), rec_param("v", "V4A")), ("Big24", 8)),
+            facts(fn("take_ab16", "Cdouble", rec_param("p", "Big24"), rec_param("v", "AB16")), ("Big24", 8)),
+            facts(fn("take_mys48", "Cint", rec_param("v", "Mys48")), ("Mys48", 16)),
+            facts(fn("take_pa32", "Cint", rec_param("p", "Big24"), rec_param("v", "PA32")), ("Big24", 8), ("PA32", 8)),
+            # ...and without them: metadata from before `byval_params`, or
+            # facts that do not match the parameters.
+            fn("take_d4a_old", "Cdouble", rec_param("p", "Big24"), rec_param("v", "D4A")),
+            fn("take_big24_old", "Cint", rec_param("p", "Big24")),
+            fn("take_mys48_old", "Cint", rec_param("v", "Mys48")),
+            facts(fn("take_d4a_short", "Cdouble", rec_param("p", "Big24"), rec_param("v", "D4A")), ("D4A", 16)),
+            facts(fn("take_d4a_named", "Cdouble", rec_param("p", "Big24"), rec_param("v", "D4A")), ("Big24", 8), ("MA32", 16)),
+            # An over-aligned argument on a function BRANCH 0 returns through
+            # its own aligned buffer: both at once.
+            facts(fn("make_take_d4a", "D4A", rec_param("p", "Big24"), rec_param("v", "D4A")), ("Big24", 8), ("D4A", 16)),
         ])
     libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
     gen(abi) = _SW.generate_introspective_module_c(cfg, libref, meta, "SretSynth",
@@ -637,7 +766,9 @@ Contents of the .debug_info section:
         isempty(b) ? :missing :
         occursin("ABI Safety Trap", b) ? :trap :
         occursin("ret_ptr", b) ? :aligned :
-        occursin("ret_buf", b) ? :sret : occursin("ccall((:$name, LIBRARY_PATH)", b) ? :ccall : :other
+        occursin("ret_buf", b) ? :sret :
+        occursin("_rb_byval16(", b) ? :carrier :
+        occursin("ccall((:$name, LIBRARY_PATH)", b) ? :ccall : :other
     end
 
     @test_throws ArgumentError gen(:aapcs64)
@@ -681,7 +812,26 @@ Contents of the .debug_info section:
              ("ld_p8",      :trap,   :trap),    # same on SysV, where P8 is MEMORY (C2)
              ("kw_make",    :ccall,  :ccall),   # 4-byte natural record: RAX on both (I1)
              ("kw_take",    :ccall,  :ccall),
-             ("make_bfm12", :trap,   :ccall)]   # alignment unprovable: SysV refuses, Win64 by size
+             ("make_bfm12", :trap,   :ccall),   # alignment unprovable: SysV refuses, Win64 by size
+             # A MEMORY-class argument in a stack slot C aligns above 8 (W2).
+             # SysV: inside `_RB_ByVal16` where the compiler recorded a
+             # 16-aligned slot, refused where it recorded more, or nothing.
+             # Win64: by reference to a copy on both sides, the plain ccall.
+             ("take_d4a",   :carrier, :ccall),
+             ("take_ma32",  :carrier, :ccall),
+             ("take_hvec",  :carrier, :ccall),
+             ("take_nesta", :carrier, :ccall),
+             ("take_a32",   :trap,   :ccall),   # 32: Julia's allocations are 16-aligned at most
+             ("take_v4a",   :ccall,  :ccall),   # SSE,SSE: no slot
+             ("take_ab16",  :trap,   :ccall),   # the register window, as before
+             ("take_mys48", :carrier, :ccall),  # unmeasurable member; the IR says 16, 48 bytes
+             ("take_pa32",  :ccall,  :ccall),   # DWARF says 16, the IR says 8: the compiler's answer
+             ("take_d4a_old", :trap, :ccall),   # no `byval_params`: refused, not guessed
+             ("take_big24_old", :ccall, :ccall),# 8-aligned without facts: Julia's byval is right
+             ("take_mys48_old", :trap, :ccall), # DWARF bounds it to 16 from the size: refused
+             ("take_d4a_short", :trap, :ccall), # one fact for two MEMORY parameters: no fact
+             ("take_d4a_named", :trap, :ccall), # the fact names another record: no fact
+             ("make_take_d4a", :aligned, :aligned)]   # BRANCH 0's buffer, and the carrier (below)
     checked = 0
     for (name, want_sysv, want_win64) in table
         @test (name, :sysv, form(sysv, name)) == (name, :sysv, want_sysv)
@@ -736,4 +886,34 @@ Contents of the .debug_info section:
     end
     @test occursin("returns `BFM12` by value", body(sysv, "make_bfm12"))
     @test occursin("ccall((:make_bfm12, LIBRARY_PATH), BFM12, (), )", body(win64, "make_bfm12"))
+    # The carrier: the record's bytes inside `_RB_ByVal16{N}` in the ccall's
+    # argument and type positions, the record itself in the signature, and the
+    # type defined once, ahead of the functions. Win64 has no trace of it.
+    @test occursin("function take_d4a(p::Big24, v::D4A)", body(sysv, "take_d4a"))
+    @test occursin("ccall((:take_d4a, LIBRARY_PATH), Cdouble, (Big24, _RB_ByVal16{2},), p, _rb_byval16(v, _RB_ByVal16{2}))", body(sysv, "take_d4a"))
+    @test occursin("(Mys48,)", body(win64, "take_mys48")) && occursin("(_RB_ByVal16{3},), _rb_byval16(v, _RB_ByVal16{3})", body(sysv, "take_mys48"))
+    @test count("struct _RB_ByVal16{N}", sysv) == 1 && count("function _rb_byval16(", sysv) == 1
+    @test (i = findfirst("struct _RB_ByVal16{N}", sysv); j = findfirst("function take_d4a(", sysv);
+           i !== nothing && j !== nothing && first(i) < first(j))
+    @test !occursin("_RB_ByVal16", win64) && !occursin("_rb_byval16", win64)
+    @test occursin("ccall((:take_d4a, LIBRARY_PATH), Cdouble, (Big24, D4A,), p, v)", body(win64, "take_d4a"))
+    @test occursin("ccall((:take_a32, LIBRARY_PATH), Cdouble, (Big24, A32,), p, v)", body(win64, "take_a32"))
+    @test occursin("ccall((:take_pa32, LIBRARY_PATH), Cint, (Big24, PA32,), p, v)", body(sysv, "take_pa32"))
+    # BRANCH 0's aligned buffer and the carrier on one function.
+    @test occursin("ccall((:make_take_d4a, LIBRARY_PATH), Cvoid, (Ptr{D4A}, Big24, _RB_ByVal16{2},), ret_ptr, p, _rb_byval16(v, _RB_ByVal16{2}))", body(sysv, "make_take_d4a"))
+    @test occursin("ccall((:make_take_d4a, LIBRARY_PATH), Cvoid, (Ptr{D4A}, Big24, D4A,), ret_ptr, p, v)", body(win64, "make_take_d4a"))
+    # The refusals say why, and what a rebuild would change.
+    @test occursin("takes `A32` by value in a 32-byte-aligned stack slot", body(sysv, "take_a32"))
+    @test occursin("16-byte-aligned at most", body(sysv, "take_a32"))
+    @test occursin("takes `D4A` by value in a 16-byte-aligned stack slot", body(sysv, "take_d4a_old"))
+    @test occursin("does not record the slot alignment", body(sysv, "take_d4a_old")) &&
+          occursin("project_hash", body(sysv, "take_d4a_old"))
+    @test occursin("does not record the slot alignment", body(sysv, "take_d4a_short"))
+    @test occursin("takes `Mys48` by value in a 16-byte-aligned stack slot", body(sysv, "take_mys48_old"))
+    @test !occursin("stack slot", win64)
+    # Every emitted module still parses (the carrier helper is part of it).
+    for (code, abi) in ((sysv, :sysv), (win64, :win64))
+        ex = Meta.parseall(code)
+        @test (abi, any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)) == (abi, false)
+    end
 end

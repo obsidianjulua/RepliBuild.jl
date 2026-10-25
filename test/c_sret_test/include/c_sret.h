@@ -10,7 +10,8 @@
    and 8 bytes in RAX); SysV by size (> 16) or an unaligned field.
 
    Every function records what it read in c1_rec[], so the probe compares each
-   argument member with what it passed. No system headers: the test also asks
+   argument member with what it passed. The `take_*` functions pass the
+   over-aligned records by value after a stack-resident argument. No system headers: the test also asks
    clang to lower this file for both targets. */
 
 typedef struct { char m1; short m2[3]; } T4;            /* 8 B: RAX on both (C1, abi_fuzz seed 36) */
@@ -72,5 +73,21 @@ A32   make_a32(double d);
 HVec  make_hvec(float v, int k);
 HV4   make_hv4(float v, float s);
 NestA make_nesta(float x, float t);
+
+/* The same records as arguments, each AFTER a 24-byte argument that lives on
+   the stack. C places a MEMORY-class record at its own alignment past it; a
+   byval at the stand-in's alignment (8) puts it one slot early, and the callee
+   reads the wrong bytes with no error (W2, 2026-10-24: take_d4a is the live
+   case). V4A and AB16 travel in registers on SysV, so their slot does not
+   exist there; A32 is 32-aligned, above what Julia can place. Each callee
+   records p.c and every member it read, and returns a formula on them. */
+double take_ab16(Big24 p, AB16 v);     /* SysV: refused (float blob); Win64: by reference */
+float  take_v4a(Big24 p, V4A v);       /* SysV: SSE,SSE; Win64: by reference */
+double take_d4a(Big24 p, D4A v);       /* SysV: 16-aligned slot, the carrier */
+int    take_ma32(Big24 p, MA32 v);
+double take_a32(Big24 p, A32 v);       /* SysV: 32-aligned slot, refused */
+float  take_hvec(Big24 p, HVec v);
+float  take_hv4(Big24 p, HV4 v);
+float  take_nesta(Big24 p, NestA v);
 
 #endif

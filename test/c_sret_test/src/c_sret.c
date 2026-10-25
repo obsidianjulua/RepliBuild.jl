@@ -237,3 +237,95 @@ NestA make_nesta(float x, float t)
     g_nesta.t = t;
     return g_nesta;
 }
+
+/* The over-aligned records as arguments, after a 24-byte stack argument. Each
+   callee reads the record where C placed it: at its own alignment past `p`,
+   not at the 8-aligned slot a byval of the Julia stand-in would use (W2). */
+#define RECF(i, e) do { union { float f; unsigned int u; } _b; _b.f = (e); c1_rec[i] = _b.u; } while (0)
+#define RECD(i, e) do { union { double d; unsigned long long u; } _b; _b.d = (e); c1_rec[i] = _b.u; } while (0)
+
+double take_ab16(Big24 p, AB16 v)
+{
+    REC(0, p.c);
+    RECF(1, v.a);
+    RECF(2, v.b);
+    REC(3, v.c);
+    c1_rec_n = 4;
+    return p.c + v.a + 10.0 * v.b + 100.0 * v.c;
+}
+
+float take_v4a(Big24 p, V4A v)
+{
+    REC(0, p.c);
+    RECF(1, v.x);
+    RECF(2, v.y);
+    RECF(3, v.z);
+    RECF(4, v.w);
+    c1_rec_n = 5;
+    return (float)p.c + v.x + 10.0f * v.y + 100.0f * v.z + 1000.0f * v.w;
+}
+
+double take_d4a(Big24 p, D4A v)
+{
+    REC(0, p.c);
+    RECD(1, v.a);
+    RECD(2, v.b);
+    RECD(3, v.c);
+    RECD(4, v.d);
+    c1_rec_n = 5;
+    return p.c + v.a + 10.0 * v.b + 100.0 * v.c + 1000.0 * v.d;
+}
+
+int take_ma32(Big24 p, MA32 v)
+{
+    REC(0, p.c);
+    REC(1, v.c);
+    REC(2, v.i);
+    c1_rec_n = 3;
+    return p.c + v.c + 10 * v.i;
+}
+
+double take_a32(Big24 p, A32 v)
+{
+    REC(0, p.c);
+    RECD(1, v.d[0]);
+    RECD(2, v.d[1]);
+    c1_rec_n = 3;
+    return p.c + v.d[0] + 10.0 * v.d[1];
+}
+
+float take_hvec(Big24 p, HVec v)
+{
+    REC(0, p.c);
+    RECF(1, v.v[0]);
+    RECF(2, v.v[1]);
+    RECF(3, v.v[2]);
+    RECF(4, v.v[3]);
+    REC(5, v.k);
+    c1_rec_n = 6;
+    return (float)p.c + v.v[0] + 10.0f * v.v[1] + 100.0f * v.v[2] + 1000.0f * v.v[3] + (float)v.k;
+}
+
+float take_hv4(Big24 p, HV4 v)
+{
+    REC(0, p.c);
+    RECF(1, v.v[0]);
+    RECF(2, v.v[1]);
+    RECF(3, v.v[2]);
+    RECF(4, v.v[3]);
+    RECF(5, v.s);
+    c1_rec_n = 6;
+    return (float)p.c + v.v[0] + 10.0f * v.v[1] + 100.0f * v.v[2] + 1000.0f * v.v[3] + v.s;
+}
+
+float take_nesta(Big24 p, NestA v)
+{
+    REC(0, p.c);
+    RECF(1, v.a.x);
+    RECF(2, v.a.y);
+    RECF(3, v.a.z);
+    RECF(4, v.a.w);
+    RECF(5, v.t);
+    c1_rec_n = 6;
+    return (float)p.c + v.a.x + 10.0f * v.a.y + 100.0f * v.a.z + 1000.0f * v.a.w + v.t;
+}

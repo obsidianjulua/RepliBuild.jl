@@ -1495,7 +1495,9 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
                                   overloads::Vector{Vector{String}},
                                   generate_docs::Bool, demangled::String, lang::Symbol;
                                   cstring_free::String="",
-                                  conflicts::Vector{String}=String[])
+                                  conflicts::Vector{String}=String[],
+                                  trap::Union{Nothing,Function}=nothing,
+                                  sret=nothing)
     code = ""
     export_names = String[]
 
@@ -1507,35 +1509,44 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
               "each entry must list a distinct variadic type tuple.")
     end
 
-    # A fixed parameter or the return crosses by value a record whose name
-    # several types share (`conflicts`, from `FunctionGen.conflict_crossings`):
-    # every @ccall below would declare whichever definition the metadata kept.
-    # This path `continue`s past both generators' own trap, so it traps here,
-    # under every name it would have defined.
-    if !isempty(conflicts)
+    # This path `continue`s past the generators' own refusals, so they trap
+    # here, under every name it would have defined:
+    #   * a fixed parameter or the return crosses by value a record whose name
+    #     several types share (`conflicts`, from `FunctionGen.conflict_crossings`):
+    #     every @ccall below would declare whichever definition the metadata kept;
+    #   * `trap`, the generator's own verdict on the fixed parameters and the
+    #     return (`long double`, a SysV register-window blob, an over-aligned
+    #     stack slot: `GeneratorC._c_byvalue_verdict`), as a function of the
+    #     Julia name that returns the stub's body. The plain path used to be
+    #     the only one that asked (W5, 2026-10-24).
+    trap_body = !isempty(conflicts) ? (n -> _conflict_trap_body(n, conflicts)) : trap
+    if trap_body !== nothing
         names = vcat(julia_name, ["$(julia_name)_$(join(map(_vararg_name_part, va_types), "_"))"
                                   for va_types in overloads])
-        trap = join(("""
+        why = !isempty(conflicts) ?
+            "passes a type by value whose name several types\n            in this library share, so no call can be emitted for it. The error says which." :
+            "crosses a type by value that no `ccall` can carry\n            correctly, so no call is emitted for it. The error says which."
+        stubs = join(("""
             \"\"\"
                 $n(args...)
 
-            **Unavailable.** `$demangled` passes a type by value whose name several types
-            in this library share, so no call can be emitted for it. The error says which.
+            **Unavailable.** `$demangled` $why
 
             - Mangled symbol: `$mangled`
             \"\"\"
             function $n(args...)
-            $(_conflict_trap_body(n, conflicts))end
+            $(trap_body(n))end
 
             """ for n in names), "")
-        return (trap, names)
+        return (stubs, names)
     end
 
     # Build fixed parameter info
     fixed_param_names = String[]
     fixed_param_types = String[]  # Julia/ccall types
     fixed_julia_sig_types = String[]  # Ergonomic types for signature
-    fixed_needs_conversion = Bool[]
+    # The expression the @ccall argument is bound to, `nothing` for the name itself
+    fixed_convert = Union{Nothing,String}[]
 
     for param in params
         # Skip the varargs placeholder — compare the raw name: sanitization
@@ -1548,18 +1559,28 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
         push!(fixed_param_names, safe_name)
 
         julia_type = param["julia_type"]
+        carrier = get(param, "byval_carrier", nothing)
+        if carrier !== nothing
+            # A record C passes in a 16-byte-aligned stack slot crosses inside
+            # the carrier type the generator chose (`GeneratorC._c_byval_param_shape`);
+            # the signature keeps the record's own type.
+            push!(fixed_param_types, String(carrier))
+            push!(fixed_julia_sig_types, julia_type)
+            push!(fixed_convert, "_rb_byval16($safe_name, $carrier)")
+            continue
+        end
         push!(fixed_param_types, julia_type)
 
         # Ergonomic type mapping (same logic as main wrapper gen)
         if julia_type in ["Cint", "Clong", "Cshort"]
             push!(fixed_julia_sig_types, "Integer")
-            push!(fixed_needs_conversion, true)
+            push!(fixed_convert, "$julia_type($safe_name)")
         elseif startswith(julia_type, "Ptr{")
             push!(fixed_julia_sig_types, "Any")
-            push!(fixed_needs_conversion, false)
+            push!(fixed_convert, nothing)
         else
             push!(fixed_julia_sig_types, julia_type)
-            push!(fixed_needs_conversion, false)
+            push!(fixed_convert, nothing)
         end
     end
 
@@ -1627,11 +1648,11 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
     # Build conversion code for fixed params
     fixed_conversion = ""
     fixed_ccall_names = String[]
-    for (name, ctype, needs_conv) in zip(fixed_param_names, fixed_param_types, fixed_needs_conversion)
-        if needs_conv
+    for (name, rhs) in zip(fixed_param_names, fixed_convert)
+        if rhs !== nothing
             converted = "$(name)_c"
             push!(fixed_ccall_names, converted)
-            fixed_conversion *= "    $converted = $ctype($name)\n"
+            fixed_conversion *= "    $converted = $rhs\n"
         else
             push!(fixed_ccall_names, name)
         end
@@ -1643,6 +1664,40 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
     # is what makes codegen set AL on x86-64 SysV instead of leaving garbage in it.
     # `var"…"` keeps the symbol position safe for any C identifier.
     fixed_atccall = join(["$(n)::$(t)" for (n, t) in zip(fixed_ccall_names, fixed_param_types)], ", ")
+
+    # The call itself, for the fixed arguments `fixed` and the variadic tail
+    # `va` (empty for the base wrapper). Three shapes: the Cstring policy, an
+    # explicit sret for a record C returns through a hidden pointer that Julia's
+    # own lowering would not pass (`sret`, from GeneratorC's BRANCH 0 decision:
+    # `(; type, size, align)`, the buffer aligned by the wrapper when `align > 0`),
+    # and the plain call. The sret buffer goes first, before the fixed arguments
+    # and the `;`, exactly as the plain path's ccall places it.
+    function call_lines(va::String)
+        tail = isempty(va) ? ";" : "; $va"
+        if is_cstring_ret
+            return "    ptr = @ccall LIBRARY_PATH.var\"$mangled\"($fixed_atccall$tail)::Cstring\n" *
+                   _cstring_policy_lines(cstring_free)
+        elseif sret === nothing
+            return "    return @ccall LIBRARY_PATH.var\"$mangled\"($fixed_atccall$tail)::$julia_return_type"
+        end
+        rt = String(sret.type)
+        with_buf(buf) = join(filter(!isempty, ["$buf::Ptr{$rt}", fixed_atccall]), ", ") * tail
+        if sret.align > 0
+            mask = sret.align - 1
+            return join(["    # `$rt` is $(sret.align)-byte aligned in C: the buffer must be too.",
+                         "    ret_buf = Ref{NTuple{$(sret.size + mask), UInt8}}()",
+                         "    GC.@preserve ret_buf begin",
+                         "        ret_ptr = Ptr{$rt}((UInt(Base.unsafe_convert(Ptr{Cvoid}, ret_buf)) + $mask) & ~UInt($mask))",
+                         "        @ccall LIBRARY_PATH.var\"$mangled\"($(with_buf("ret_ptr")))::Cvoid",
+                         "        return unsafe_load(ret_ptr)",
+                         "    end"], "\n")
+        end
+        return join(["    ret_buf = Ref($rt())",
+                     "    GC.@preserve ret_buf begin",
+                     "        @ccall LIBRARY_PATH.var\"$mangled\"($(with_buf("ret_buf")))::Cvoid",
+                     "    end",
+                     "    return ret_buf[]"], "\n")
+    end
 
     doc = ""
     if generate_docs
@@ -1657,24 +1712,13 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
         """)
     end
 
-    if is_cstring_ret
-        code *= """
-        $doc
-        function $julia_name($fixed_sig)::Union{String,Nothing}
-        $fixed_conversion    ptr = @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall;)::Cstring
-        $(_cstring_policy_lines(cstring_free))
-        end
-
-        """
-    else
-        code *= """
-        $doc
-        function $julia_name($fixed_sig)::$julia_return_type
-        $fixed_conversion    return @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall;)::$julia_return_type
-        end
-
-        """
+    code *= """
+    $doc
+    function $julia_name($fixed_sig)::$sig_return_type
+    $fixed_conversion$(call_lines(""))
     end
+
+    """
     push!(export_names, julia_name)
 
     # --- Typed overloads ---
@@ -1711,24 +1755,13 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
             """)
         end
 
-        if is_cstring_ret
-            code *= """
-            $overload_doc
-            function $overload_name($all_sig)::Union{String,Nothing}
-            $fixed_conversion    ptr = @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall; $va_atccall)::Cstring
-            $(_cstring_policy_lines(cstring_free))
-            end
-
-            """
-        else
-            code *= """
-            $overload_doc
-            function $overload_name($all_sig)::$julia_return_type
-            $fixed_conversion    return @ccall LIBRARY_PATH.var"$mangled"($fixed_atccall; $va_atccall)::$julia_return_type
-            end
-
-            """
+        code *= """
+        $overload_doc
+        function $overload_name($all_sig)::$sig_return_type
+        $fixed_conversion$(call_lines(va_atccall))
         end
+
+        """
         push!(export_names, overload_name)
     end
 
