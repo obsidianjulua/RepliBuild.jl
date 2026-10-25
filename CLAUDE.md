@@ -571,7 +571,10 @@ the test named when you touch the area.
 - **`test_sysv_abi_oracle.jl` diffs the SysV half against LLVM's ABI library**
   (`llvm/ABI`, LLVM 23+; skips elsewhere). `jlcs_probe_sysv_call_shapes` and
   `jlcs_abi_oracle_sysv` are test seams: nothing on the JIT or wrap path calls
-  them, and the oracle must stay optional so libJLCS builds against 21 and 22. A
+  them, and the oracle must stay optional so libJLCS builds against 21 and 22.
+  CMake takes the component from `libLLVMABI.a` where one exists, else
+  link-probes the LLVM dylib for it (Arch ships only the dylib, and it carries
+  `llvm::abi`); a dylib without it means the test skips, never a build error. A
   change to SysV classification moves that test's `@test_broken` entries: update
   `SAO_CURATED` and `SAO_FUZZ_KNOWN` in the same change. `thunk_crossings` asks
   `_byte_region_unclassifiable` for the host's ABI, so a module generated on
@@ -862,13 +865,36 @@ check before claiming portability again; reading `.gitignore` does not settle it
   still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
   path, which skips BRANCH 0 altogether. An alignment only a typedef carries
   (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
-  SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
+  **SysV byval parameters of 16-aligned MEMORY records are wrong when they
+  follow another stack argument** (run 2026-10-24, Linux, Tier 3 C:
+  `take2(Big24, D4A)` with `D4A` `aligned(16)` of four doubles reads the record
+  from the next 16-aligned slot after the 24-byte argument, Julia's ccall placed
+  it 8 bytes earlier; `take1(D4A)` and `take3(Big24, Big24, D4A)` pass because
+  their slots happen to be 16-aligned; fixture in the gitignored
+  `.claude/albig-2026-10-24/`). GeneratorC's parameter traps stop at 16 bytes
+  and never read alignment; `_c_record_align` reaches returns only. Win64
   parameters are safe (LLVM's `byval` lowering puts the copy at 16).
 - **Tier 2 SysV records that LLVM's classifier passes elsewhere** (2026-10-24,
   `test_sysv_abi_oracle.jl`, where each family is `@test_broken` with a
   hand-written repro and a minimal record; clang's own lowering agrees with the
   oracle on every repro). A thunk for one of them puts the record where the callee
-  does not look. Not yet run as a live call on Linux.
+  does not look. **Run live on Linux 2026-10-24** (Arch, clang 23.1.3; a C++
+  fixture with one record per family and C++-linkage functions, so every call
+  takes a thunk; callee at -O0 and at -O2, same result; fixture in the
+  gitignored `.claude/sysv-live-2026-10-24/`): every family but `underaligned`
+  gives wrong values. Each `int_for_sse` record returns garbage in its float
+  eightbyte, and four of the seven are wrong as arguments too; the other three
+  pass only because Julia's own copy of the value leaves the second eightbyte in
+  XMM1. `reg_for_mem`, `mem_for_reg`, `long double` and `_Complex double` are
+  wrong in both directions. The two `underaligned` records pass at both levels,
+  so showing that family needs a callee that loads the byval slot with an
+  aligned instruction. The agreeing controls all pass. `test/tools/abi_fuzz.jl
+  --seeds=1:60` on the same box: 3 of the 60 C++ units fail live (seeds 21, 22,
+  24; the C units all pass), two of them by segfault, because a packed record
+  with an enum at an odd offset goes in a register where C uses memory and the
+  callee then reads a pointer argument, or writes its sret result, through a
+  shifted register (`.claude/abi-fuzz-linux-2026-10-24/`). Win64 passes the
+  same seeds, which is why the Windows runs were green.
   - Padding is INTEGER: StructGen's explicit pad arrays, an unnamed bitfield's
     bytes included, make an eightbyte holding a float a GPR (`{float; double}`,
     `{void*; float}`, `aligned(16) float`), and a tiled (`is_struct_packed`) body
@@ -881,6 +907,38 @@ check before claiming portability again; reading `.gitignore` does not settle it
   - A 16-aligned record (`aligned(16)`, `__int128`) gets byval and sret
     alignment 8.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
+- **The header-enum supplement follows the Julia release** (2026-10-24, Linux).
+  `ClangJLBridge._extract_enums_via_ast!` collects every `EnumDecl` in the
+  translation unit with no location filter, and Clang.jl's libclang is Julia's
+  LLVM generation (18 on 1.12, 20 on 1.13), each with its own resource headers.
+  pugixml (`use_clang_jl = true`, no `[wrap] headers`) wraps with libstdc++'s
+  `errc` and `_Integer_kind` as "supplementary" enums on 1.13.2 and without
+  them on 1.12.7: 101 diff lines in an otherwise identical wrapper, thunk
+  manifest included. The determinism rule (sorted keys) holds; the input does
+  not. A cursor-location gate (only headers under the project root or its
+  include dirs) would fix both the drift and the system-enum pollution.
+- **`scaffold_package` names a wrapper file the scaffold does not look for**
+  (2026-10-24, Linux). `_replibuild_toml` writes `[project] name` lowercased
+  (`luawrapper`), `get_module_name` derives `Luawrapper`, so wrap writes
+  `julia/Luawrapper.jl` while the scaffolded `src/LuaWrapper.jl` includes
+  `julia/LuaWrapper.jl` and warns "wrapper not built yet" on every case-sensitive
+  filesystem. Windows folds case, which is how the release missed it. Fix: write
+  `[wrap] module_name = name` in the scaffold, or derive the include path from
+  `get_module_name`. (`test_registry.jl` checks the compat line only.)
+- **The `[wrap.varargs]` path skips every SysV by-value guard** (2026-10-24).
+  GeneratorC's varargs interception `continue`s before `blob_abi_offenders`,
+  BRANCH 0's sret handling and the x87 trap run, so a variadic function whose
+  fixed parameters include a packed or float-bearing record of 16 bytes or less
+  gets a plain `@ccall` with the record spelled by name. Hub varargs are
+  printf-style with scalar fixed arguments, so nothing shipped hits it.
+- **`abi_fuzz.jl` registered every unit into the default Julia environment**
+  (2026-10-24). It set `REPLIBUILD_HOME` but not `REPLIBUILD_JULIA_ENV`, and
+  4.3.0's `discover(build=true, wrap=true)` registers, which `Pkg.develop`s the
+  package into `@v1.13`: 180 path deps into a tmpfs scratch directory after one
+  `--seeds=1:60` run. Removed with `Pkg.rm`; the tool now sets the variable to
+  `none`. Anything that calls `discover(…, wrap=true)` from a test or tool must
+  set both variables; a `REPLIBUILD_HOME` that is not `~/.replibuild` with a
+  default env is the shape to refuse.
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them
   (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). A by-value
