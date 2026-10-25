@@ -1074,6 +1074,8 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
             checked += 1
         end
         @test checked == 2
+    end
+
     # ── `const void` is a type, not an unknown ─────────────────────────────
     #
     # clang writes `const void *` as DW_TAG_pointer_type -> DW_TAG_const_type
