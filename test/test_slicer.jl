@@ -579,7 +579,11 @@ end  # top-level testset
     hub_ir = SR["st_sc_hub"].ir
     @test all(m -> occursin(m, hub_ir), mids)          # hub still CALLS the mids
     for m in mids
-        @test occursin(Regex("^declare[^\n]*@$m\\(", "m"), hub_ir)   # …as declares
+        # …as declares of the library's `__rb_` alias for each (the mids are
+        # public, and a public name resolves through the whole process), never
+        # of the public name itself.
+        @test occursin(Regex("^declare[^\n]*@__rb_slicetest_$m\\(", "m"), hub_ir)
+        @test !occursin(Regex("@$m\\b"), hub_ir)
     end
     @test !occursin(r"^define[^\n]*@st_sc_mid_"m, hub_ir)        # …never bodies
     @test !occursin(r"^define[^\n]*@st_sc_leaf_"m, hub_ir)       # nor two layers down

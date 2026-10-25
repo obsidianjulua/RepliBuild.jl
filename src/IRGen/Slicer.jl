@@ -9,8 +9,22 @@
 # contract, `_promote_statics_libllvm`), and `Base.llvmcall` embeds kilobytes
 # instead of the whole linked module (the box2d3-scale segfault class).
 #
+# That lookup is PROCESS-wide, not library-wide: ORC takes the first definition
+# of a name in the process, and the pre-flight only asks whether the library
+# has it. So a slice never declares a symbol its own library defines by the
+# public name. Promotion gives every exported definition an exported alias
+# `__rb_<lib>_<name>` (`_alias_exports!`), and the slice declares that
+# (`_claim_rb_aliases!`): a name no other library carries. Julia loads its
+# own `libz.so.1` at startup, and the Hub's zlib ran `gzclose` as a slice whose
+# `gzclose_w` was Julia's (2026-10-24). A module without the aliases (built
+# before the pass, or with Tier 1 off) refuses such slices rather than guess.
+#
 # Boundary policy per reached GlobalValue:
-#   function                        → declare (promotion guarantees a symbol)
+#   function / global the library    → declare its `__rb_` alias; refuse when
+#     defines and exports               the module has none for it
+#   function only declared           → declare (libc and friends: the library
+#                                      binds them through the process as well)
+#   function promoted to `__rb_*`    → declare (already a unique name)
 #   mutable global                  → declare (never embed — cJSON class)
 #   internal constant, unnamed_addr → embed   (no symbol exists, and only the
 #                                     contents are observable, so a second copy
@@ -54,7 +68,9 @@ export SliceResult, slice_library, slice_function, sliced
 # written on LLVM.jl 10 can lack its `:setjmp_family` hazard, which would let a
 # setjmp closure through to llvmcall, and on LLVM.jl 9 module asm was never
 # actually cleared.
-const SLICER_VERSION = "5"
+# 6: a slice declares the library's own exported symbols by their `__rb_` alias.
+# A v5 entry declares the public name, which binds through the whole process.
+const SLICER_VERSION = "6"
 
 struct SliceResult
     name::String
@@ -157,6 +173,62 @@ _is_weak_linkage(gv) =
                          LLVM.API.LLVMLinkOnceAnyLinkage, LLVM.API.LLVMLinkOnceODRLinkage,
                          LLVM.API.LLVMExternalWeakLinkage, LLVM.API.LLVMCommonLinkage)
 
+"""
+Whether `gv` reaches the dynamic symbol table under its own name: a definition
+with external linkage and default visibility. Weak, `available_externally` and
+local definitions do not qualify, nor does any declaration.
+"""
+_is_exported_definition(gv) =
+    !LLVM.isdeclaration(gv) &&
+    LLVM.linkage(gv) == LLVM.API.LLVMExternalLinkage &&
+    LLVM.visibility(gv) == LLVM.API.LLVMDefaultVisibility
+
+"The name of a raw `LLVMValueRef`; aliases have no LLVM.jl wrapper type."
+function _ref_name(ref::LLVM.API.LLVMValueRef)::String
+    len = Ref{Csize_t}(0)
+    p = LLVM.API.LLVMGetValueName2(ref, len)
+    return p == C_NULL ? "" : unsafe_string(Ptr{UInt8}(p), len[])
+end
+
+# ── exported aliases ─────────────────────────────────────────────────────────
+
+"""
+    _claim_rb_aliases!(mod) -> Dict{String,String}
+
+The module's exported `__rb_*` aliases (`Compiler._alias_exports!`) as
+`aliasee name => alias name`, with every alias in the module then taken out of
+the slice's way: internal linkage, so `globaldce` removes it (there is no C API
+to erase an alias), and for the `__rb_` ones a scratch name, so the aliasee can
+take the alias name when `_extract!` turns it into a declaration. No alias ever
+survives into a slice: an alias to a function whose body the slice deleted is
+not valid IR, and a reached alias is refused by the closure walk before this
+matters.
+
+Only an alias whose aliasee is a function or global variable directly (not a
+constant expression over one) is recorded; nothing else produces one.
+"""
+function _claim_rb_aliases!(mod)
+    alias_of = Dict{String,String}()
+    a = LLVM.API.LLVMGetFirstGlobalAlias(mod)
+    while a != C_NULL
+        nxt = LLVM.API.LLVMGetNextGlobalAlias(a)
+        name = _ref_name(a)
+        if startswith(name, "__rb_")
+            aliasee = LLVM.API.LLVMAliasGetAliasee(a)
+            kind = LLVM.API.LLVMGetValueKind(aliasee)
+            if kind == LLVM.API.LLVMFunctionValueKind ||
+               kind == LLVM.API.LLVMGlobalVariableValueKind
+                alias_of[_ref_name(aliasee)] = name
+            end
+            scratch = name * ".slicer_claimed"
+            LLVM.API.LLVMSetValueName2(a, scratch, Csize_t(sizeof(scratch)))
+        end
+        LLVM.API.LLVMSetLinkage(a, LLVM.API.LLVMInternalLinkage)
+        a = nxt
+    end
+    return alias_of
+end
+
 # ── closure walk ─────────────────────────────────────────────────────────────
 
 """
@@ -165,15 +237,38 @@ the transitive constant DAG of every *embedded* (internal constant) global.
 Reached functions get their bodies deleted and reached mutable globals get
 their initializers dropped, so neither contributes further edges.
 
-Returns `(reached_fns, reached_gvs, embedded_gvs, hazards, refusal)` where the
-sets hold names. `refusal` is `nothing` when the closure is sliceable.
+`alias_of` is the module's exported-alias map (`_claim_rb_aliases!`). A reached
+function or global the library defines and exports under its own name must have
+an entry, which `renames` then maps it to (`name => alias`): the slice declares
+the alias, never the public name. One without an entry refuses the slice.
+
+Returns `(reached_fns, reached_gvs, embedded_gvs, renames, hazards, refusal)`
+where the sets hold names. `refusal` is `nothing` when the closure is sliceable.
 """
-function _closure(mod, target)
+function _closure(mod, target, alias_of::Dict{String,String})
     reached_fns = Set{String}()
     reached_gvs = Set{String}()
     embedded_gvs = Set{String}()
+    renames = Dict{String,String}()
     hazards = Set{Symbol}()
     refusal = Ref{Union{Nothing,String}}(nothing)
+
+    # An exported definition is a name the process may already hold from
+    # another library, so the slice may only bind it through its alias.
+    bind_via_alias!(v, name) = begin
+        startswith(name, "__rb_") && return         # promoted: already unique
+        alias = get(alias_of, name, nothing)
+        if alias === nothing
+            refusal[] = "reached exported definition '$name', which has no `__rb_` " *
+                        "alias in the module. A slice declaring the public name " *
+                        "binds through the whole process, where a library loaded " *
+                        "earlier may define it (Julia ships zlib, zstd, pcre2, …). " *
+                        "Rebuild so promotion adds the aliases (delete " *
+                        ".replibuild_cache/project_hash), or exclude this function."
+        else
+            renames[name] = alias
+        end
+    end
 
     target_name = LLVM.name(target)
     seen = Set{UInt}()  # visited constant/value refs
@@ -200,6 +295,8 @@ function _closure(mod, target)
             if !startswith(name, "llvm.") && !LLVM.isdeclaration(v) && _is_local_linkage(v)
                 refusal[] = "reached internal-linkage function '$name' — module is not " *
                             "static-promoted (slice from <name>_abi.ll, not _opt.ll)"
+            elseif !startswith(name, "llvm.") && _is_exported_definition(v)
+                bind_via_alias!(v, name)
             end
             _is_weak_linkage(v) && push!(hazards, :weak)
         elseif kind == LLVM.API.LLVMGlobalVariableValueKind
@@ -223,6 +320,8 @@ function _closure(mod, target)
             elseif !is_const && _is_local_linkage(v)
                 refusal[] = "reached internal-linkage mutable global '$name' — module " *
                             "is not static-promoted (slice from <name>_abi.ll)"
+            elseif _is_exported_definition(v)
+                bind_via_alias!(v, name)
             end
             # non-local (declared) globals: initializer will be dropped, no edges
         elseif kind == LLVM.API.LLVMGlobalAliasValueKind
@@ -260,7 +359,7 @@ function _closure(mod, target)
         visit(init)
     end
 
-    return reached_fns, reached_gvs, embedded_gvs, collect(hazards), refusal[]
+    return reached_fns, reached_gvs, embedded_gvs, renames, collect(hazards), refusal[]
 end
 
 # ── extraction ───────────────────────────────────────────────────────────────
@@ -298,7 +397,13 @@ function _extract!(mod, target_name::String)
         LLVM.API.LLVMSetModuleInlineAsm2(mod, "", 0)
     end
 
-    reached_fns, reached_gvs, embedded_gvs, closure_hazards, refusal = _closure(mod, target)
+    # The exported aliases, claimed before the walk so the walk can demand one
+    # for every exported definition it reaches, and moved aside so the renames
+    # below find their names free.
+    alias_of = _claim_rb_aliases!(mod)
+
+    reached_fns, reached_gvs, embedded_gvs, renames, closure_hazards, refusal =
+        _closure(mod, target, alias_of)
     refusal === nothing || return _refuse(target_name, refusal, closure_hazards)
     append!(hazards, closure_hazards)
 
@@ -337,8 +442,21 @@ function _extract!(mod, target_name::String)
         end
     end
 
-    # Aliases can't be internalized away reliably — the closure already refused
-    # any *reached* alias; unreached ones are swept by DCE if unreferenced.
+    # Exported definitions the slice reached are declarations now; give each
+    # the alias name it binds by. The alias itself was renamed away by
+    # `_claim_rb_aliases!`, so the name is free: a suffix here means something
+    # else in the module holds it, which is a Slicer bug, not a verdict.
+    for (old, new) in renames
+        gv = haskey(LLVM.functions(mod), old) ? LLVM.functions(mod)[old] :
+                                                LLVM.globals(mod)[old]
+        LLVM.name!(gv, new)
+        LLVM.name(gv) == new ||
+            error("Slicer: '$old' could not take its alias name '$new' " *
+                  "(got '$(LLVM.name(gv))')")
+    end
+
+    # Aliases are all internal now (`_claim_rb_aliases!`) and nothing references
+    # one — the closure refused any *reached* alias — so DCE sweeps them.
 
     tm = LLVM.JITTargetMachine()
     LLVM.run!("globaldce,strip-dead-prototypes", mod, tm)
@@ -359,10 +477,12 @@ function _extract!(mod, target_name::String)
 
     # Post-DCE inventory of what actually survived. The declaration names are
     # the slice's binding contract: at llvmcall time ORC resolves each one
-    # against the process (the RTLD_GLOBAL-loaded `.so` plus its dependencies),
-    # and a single miss deadlocks the JIT rather than erroring. M3 pre-flights
-    # this list with dlsym so a miss demotes the function to ccall instead.
-    # `llvm.*` intrinsics are lowered by the backend and never looked up.
+    # against the process (the RTLD_GLOBAL-loaded `.so` plus its dependencies,
+    # plus everything loaded before them — which is why the library's own
+    # symbols are declared by their `__rb_` alias), and a single miss deadlocks
+    # the JIT rather than erroring. M3 pre-flights this list with dlsym so a
+    # miss demotes the function to ccall instead. `llvm.*` intrinsics are
+    # lowered by the backend and never looked up.
     decl_fns = [LLVM.name(f) for f in LLVM.functions(mod)
                 if LLVM.isdeclaration(f) && LLVM.name(f) != target_name]
     decl_gvs = [LLVM.name(g) for g in LLVM.globals(mod) if LLVM.isdeclaration(g)]
