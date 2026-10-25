@@ -105,7 +105,7 @@ skill drives adding a package.
 
 Unblocks libraries whose headers come from cmake's configure step (`config.h`,
 `configure_file`'d public headers, generated `.c`). `cmake_probe` (configure only,
-under `with_llvm_env`, `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` by default) →
+in the toolchain env, `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` by default) →
 `capture_config` (copies into `packages/<name>/config/`, writes `SYSCONFIG.md`) →
 `toml_fragment`. Tests: `test/test_sysconfiggen.jl` (devtests §18). pcre2 is the
 reference package and the byte-identical regression case.
@@ -195,8 +195,10 @@ it" until 2026-09-26; it was wrong for as long as those recipes existed.) Its su
 (`test_static_promotion`, `test_slicer`, `test_tier1_dispatch`) are **deliberately
 unwired** from devtests; `runtests.jl`'s wiring guard names them in an `experimental`
 list. They also need `test/slice_test/replibuild.toml`, which is gitignored and
-machine-local (John's call: document it, don't track it). **Do not un-quarantine,
-re-wire or invest in it (M4/perf) unless John asks.**
+machine-local (John's call: document it, don't track it). The one Tier 1 test
+devtests runs is `test_tier1_alias_binding.jl` (§7e, John's call, 2026-10-24): it
+guards how a slice binds, which every Hub recipe with slicing on depends on. **Do
+not un-quarantine, re-wire or invest in it (M4/perf) unless John asks.**
 
 If you are asked to work on it:
 - Two independent payloads. `[link] enable_lto` (default true for C) embeds the whole
@@ -230,6 +232,31 @@ If you are asked to work on it:
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.
+- **A slice declares its library's own symbols by their `__rb_<lib>_` alias,
+  never by the public name** (2026-10-24, Linux). ORC resolves a `declare`
+  process-wide and the pre-flight only asks whether the library *has* the
+  symbol, so a slice that called another public function of its library bound
+  whichever library defined that name first. Julia loads its own `libz.so.1` at
+  startup, and the Hub's zlib ran `gzclose` as a slice whose `gzclose_w` was
+  Julia's, which freed a handle the other zlib allocated (`double free or
+  corruption`); Julia bundles zlib, zstd, pcre2, curl, ssh2, git2,
+  mbedtls/openssl, gmp, mpfr, openlibm, nghttp2. So with `[wrap.tier1] enable`,
+  promotion also gives every exported definition the exported LLVM alias
+  `__rb_<lib>_<name>` (`_alias_exports!`, `exported_aliases` in the metadata, a
+  `dllexport` aliasee giving a `dllexport` alias), and the Slicer declares the
+  alias (`_claim_rb_aliases!`). A reached exported definition with no alias is a
+  **refusal** that names the rebuild, never a public-name declare and never an
+  error; declarations the library does not define (libc) keep their names; a
+  tier1-off build is unchanged. An alias shares its aliasee's address, so
+  anything that keys `nm` output by address must let the real name win
+  (`extract_symbols_from_binary`). The project-hash tag is v3 so a stale Tier 1
+  build relinks once. Windows has no process-wide namespace and never showed
+  it. Julia's crash reporter then deadlocks in `malloc`, so the symptom is a
+  process in a futex wait at zero CPU: run it under gdb (`handle SIGSEGV nostop
+  noprint pass`). The alias is only half of it: the library's **native** calls
+  to its own exports go through the PLT and are interposed the same way (the
+  rule below under symbol tables), and `LD_DEBUG=bindings` is the evidence for
+  which library a reference bound to. (`test_tier1_alias_binding.jl`.)
 - **A slice is IR for the libLLVM that printed it**, and newer IR does not parse
   in an older LLVM (`icmp samesign` is LLVM 20; Julia 1.12 is 18). The slice cache
   is per libLLVM major (`_slice_cache_key`), and a kernel keeps its ccall body
@@ -361,6 +388,15 @@ the test named when you touch the area.
 - `[link] link_dirs` emits `-Wl,-rpath` (`$ORIGIN` first) alongside `-L`. `-L` alone
   loads the distro copy at runtime, giving two copies of process-global state. This is
   what makes Hub packages composable.
+- **A library binds its own exported symbols to itself.** On ELF a library's own
+  PLT calls and GOT loads resolve through the global scope first, so a library
+  loaded earlier with the same names takes them: the Hub's zlib called Julia's
+  `libz.so.1` from its own `gzclose` (2026-10-24). Every library `create_library`
+  links passes `_self_binding_link_flags` (`-Wl,-Bsymbolic` on ELF, nothing on PE,
+  where a DLL never imports its own symbols). A new link site must pass it too, and
+  a Tier 1 slice, being code outside the library, needs the `__rb_` aliases on top
+  (Tier 1 section). `LD_DEBUG=bindings` says which file a reference bound to.
+  (`test_codegen_flags.jl`, `test_tier1_alias_binding.jl`.)
 
 ### DWARF extraction
 
@@ -384,6 +420,12 @@ the test named when you touch the area.
 - By-value aggregate returns through a typedef are repaired in a post-pass (type and
   size). Do **not** swap the return mapper for the parameter mapper: it maps `char*`
   differently and would dismantle the Cstring policy.
+- **A DIE with no `DW_AT_type` is `void`**, pointed at or qualified: a
+  target-less pointer is `void*`, a target-less `const` is `const void` (clang's
+  `const void *`), and the transparent qualifiers (`volatile`, `restrict`,
+  `_Atomic`) give `void`. `resolve_type` never answers `unknown` for one; that
+  spelling once reached 1257 parameters in llama.cpp's metadata.
+  (`test_dwarf_attribution.jl`.)
 - Anonymous structs/unions get synthesized names (`Parent_u`, `Parent_anonN`), which
   must be pre-sanitized. They are deduplicated across CUs and emitted as aligned
   opaque regions; C11 anonymous members are injected as fields. One named after a
@@ -513,6 +555,18 @@ the test named when you touch the area.
   ties with `sort(ready)`), and a lookup with several matches takes the smallest key
   (`_fuzzy_struct_lookup`, `_fuzzy_dwarf_lookup`). Otherwise the byte-identical
   regression diff below breaks, and a wrapper changes with the Julia release.
+- **Supplementary header enums are the project's own.** The Clang.jl walk in
+  `ClangJLBridge._extract_enums_via_ast!` keeps an `EnumDecl` only when its file
+  lies under a named header's directory or an include dir. Clang.jl's libclang is
+  the running Julia's LLVM generation, so anything it pulls in from system
+  headers (libstdc++'s `errc`) would make the wrapper follow the Julia release.
+  (`test_header_enum_provenance.jl`.)
+- **The wrapper file is `julia/<module name>.jl`, and the module name has one
+  derivation**, `ConfigurationManager.module_name_for` (`[wrap] module_name`, else
+  CamelCase of `[project] name`), behind `get_module_name` and
+  `wrapper_module_name(toml_path)`. Anything that must find the file wrap writes
+  asks that, never the package name: a scaffold's `[project] name` is lowercased
+  and a registry TOML names the library. Windows folds case and hides a guess.
 - **A callback's `@cfunction` example comes from the header typedef its parameter
   is declared with** (`function_pointer_typedef`, `_callback_typedef_signature`),
   else from its DWARF signature (`_dwarf_callback_signature`), never from a name
@@ -540,7 +594,10 @@ the test named when you touch the area.
 - **`test_sysv_abi_oracle.jl` diffs the SysV half against LLVM's ABI library**
   (`llvm/ABI`, LLVM 23+; skips elsewhere). `jlcs_probe_sysv_call_shapes` and
   `jlcs_abi_oracle_sysv` are test seams: nothing on the JIT or wrap path calls
-  them, and the oracle must stay optional so libJLCS builds against 21 and 22. A
+  them, and the oracle must stay optional so libJLCS builds against 21 and 22.
+  CMake takes the component from `libLLVMABI.a` where one exists, else
+  link-probes the LLVM dylib for it (Arch ships only the dylib, and it carries
+  `llvm::abi`); a dylib without it means the test skips, never a build error. A
   change to SysV classification moves that test's `@test_broken` entries: update
   `SAO_CURATED` and `SAO_FUZZ_KNOWN` in the same change. `thunk_crossings` asks
   `_byte_region_unclassifiable` for the host's ABI, so a module generated on
@@ -617,6 +674,18 @@ the test named when you touch the area.
   `uwtable` is stamped on every function with a body, independent of landing pads.
   The landing pads are still required on Linux.
 
+### Subprocesses
+
+- **The toolchain environment rides on the `Cmd`, never on `ENV`.**
+  `LLVMEnvironment.llvm_cmd` attaches it for `BuildBridge.run_command`, `run_tool`
+  and Discovery's include scan. `run_command` runs concurrently (`Threads.@threads`
+  for the IR compile, `asyncmap` for objects). Overlapping `with_llvm_env`
+  save/restore cycles deleted the user's `LD_LIBRARY_PATH`/`CPATH` after a parallel
+  C++ build. `with_llvm_env` is lock-serialized but still global, so it must not be
+  called anywhere in `src/`. A key the toolchain maps to `""` is a force-clear: the
+  child must get it empty, not inherit the parent's value. On Windows the merge is
+  case-insensitive (`_overlay_env`). (`test_llvm_env_isolation.jl`.)
+
 ### Caching
 
 1. Per-file IR cache (`.replibuild_cache/`), keyed on a compile-fingerprint `.key`
@@ -631,8 +700,10 @@ directory digest `_ir_dir_key` and the templates TU's `.key` fingerprint) is
 SHA-256 fed through `_key_feed!`, never `Base.hash`, which differs between Julia
 releases.
 3. Registry build cache (`~/.replibuild/builds/<hash>/`, gates `use()`). It includes
-   `_generator_fingerprint`: RepliBuild version, HEAD, **and a dirty-tree digest**, so
-   uncommitted generator edits miss. `_store_build` copies directories.
+   `_generator_fingerprint`: RepliBuild version, HEAD, **and a dirty digest of
+   `src/` and `Project.toml`** (`_GENERATOR_DIRTY_PATHS`), so uncommitted generator
+   edits miss while a dirty CLAUDE.md or CHANGELOG.md does not re-vendor every
+   build. `_store_build` copies directories.
 
 `RepliBuild.VERSION` is derived from `Project.toml`; never reintroduce a literal. It
 feeds the fingerprint and `BUILD_GENERATOR`. To check what is registered in General,
@@ -807,25 +878,42 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
-- **`const void` resolves to `unknown`** (2026-10-23). A `DW_TAG_const_type` with
-  no `DW_AT_type` is `const void`, but `resolve_type` answers `"unknown"` for it
-  (a target-less pointer and `volatile`/`restrict`/`_Atomic` fall back to `void`),
-  so every `const void *` `c_type` is `unknown*`.
-  Its `julia_type` is still `Ptr{Cvoid}`, so calls are right; the spelling is
-  wrong in metadata and in callback signatures. llama.cpp's tables have 1257.
 - **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
   GeneratorCpp's own ccall path has no aligned buffer; only a record-level
   `alignment` keeps a function off it, so a member-level `alignas` record can
   still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
   path, which skips BRANCH 0 altogether. An alignment only a typedef carries
   (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
-  SysV byval parameters of 16-aligned MEMORY records have not been run; Win64
+  **SysV byval parameters of 16-aligned MEMORY records are wrong when they
+  follow another stack argument** (run 2026-10-24, Linux, Tier 3 C:
+  `take2(Big24, D4A)` with `D4A` `aligned(16)` of four doubles reads the record
+  from the next 16-aligned slot after the 24-byte argument, Julia's ccall placed
+  it 8 bytes earlier; `take1(D4A)` and `take3(Big24, Big24, D4A)` pass because
+  their slots happen to be 16-aligned; fixture in the gitignored
+  `.claude/albig-2026-10-24/`). GeneratorC's parameter traps stop at 16 bytes
+  and never read alignment; `_c_record_align` reaches returns only. Win64
   parameters are safe (LLVM's `byval` lowering puts the copy at 16).
 - **Tier 2 SysV records that LLVM's classifier passes elsewhere** (2026-10-24,
   `test_sysv_abi_oracle.jl`, where each family is `@test_broken` with a
   hand-written repro and a minimal record; clang's own lowering agrees with the
   oracle on every repro). A thunk for one of them puts the record where the callee
-  does not look. Not yet run as a live call on Linux.
+  does not look. **Run live on Linux 2026-10-24** (Arch, clang 23.1.3; a C++
+  fixture with one record per family and C++-linkage functions, so every call
+  takes a thunk; callee at -O0 and at -O2, same result; fixture in the
+  gitignored `.claude/sysv-live-2026-10-24/`): every family but `underaligned`
+  gives wrong values. Each `int_for_sse` record returns garbage in its float
+  eightbyte, and four of the seven are wrong as arguments too; the other three
+  pass only because Julia's own copy of the value leaves the second eightbyte in
+  XMM1. `reg_for_mem`, `mem_for_reg`, `long double` and `_Complex double` are
+  wrong in both directions. The two `underaligned` records pass at both levels,
+  so showing that family needs a callee that loads the byval slot with an
+  aligned instruction. The agreeing controls all pass. `test/tools/abi_fuzz.jl
+  --seeds=1:60` on the same box: 3 of the 60 C++ units fail live (seeds 21, 22,
+  24; the C units all pass), two of them by segfault, because a packed record
+  with an enum at an odd offset goes in a register where C uses memory and the
+  callee then reads a pointer argument, or writes its sret result, through a
+  shifted register (`.claude/abi-fuzz-linux-2026-10-24/`). Win64 passes the
+  same seeds, which is why the Windows runs were green.
   - Padding is INTEGER: StructGen's explicit pad arrays, an unnamed bitfield's
     bytes included, make an eightbyte holding a float a GPR (`{float; double}`,
     `{void*; float}`, `aligned(16) float`), and a tiled (`is_struct_packed`) body
@@ -838,6 +926,20 @@ check before claiming portability again; reading `.gitignore` does not settle it
   - A 16-aligned record (`aligned(16)`, `__int128`) gets byval and sret
     alignment 8.
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
+- **The `[wrap.varargs]` path skips every SysV by-value guard** (2026-10-24).
+  GeneratorC's varargs interception `continue`s before `blob_abi_offenders`,
+  BRANCH 0's sret handling and the x87 trap run, so a variadic function whose
+  fixed parameters include a packed or float-bearing record of 16 bytes or less
+  gets a plain `@ccall` with the record spelled by name. Hub varargs are
+  printf-style with scalar fixed arguments, so nothing shipped hits it.
+- **`abi_fuzz.jl` registered every unit into the default Julia environment**
+  (2026-10-24). It set `REPLIBUILD_HOME` but not `REPLIBUILD_JULIA_ENV`, and
+  4.3.0's `discover(build=true, wrap=true)` registers, which `Pkg.develop`s the
+  package into `@v1.13`: 180 path deps into a tmpfs scratch directory after one
+  `--seeds=1:60` run. Removed with `Pkg.rm`; the tool now sets the variable to
+  `none`. Anything that calls `discover(…, wrap=true)` from a test or tool must
+  set both variables; a `REPLIBUILD_HOME` that is not `~/.replibuild` with a
+  default env is the shape to refuse.
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them
   (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). A by-value

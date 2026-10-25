@@ -183,16 +183,27 @@ function _generator_fingerprint()::String
 end
 
 """
-Content digest of the checkout's uncommitted state: tracked-file diffs plus
-the status listing (which names untracked files). Empty string for a clean
-tree or when git is unavailable — degrading to the HEAD-only fingerprint
-rather than disabling caching outright.
+The paths whose uncommitted edits can change what the generator emits: the
+source tree and the package's own Project.toml (its version is in
+`BUILD_GENERATOR`). CLAUDE.md, CHANGELOG.md, docs/ and test/ are not among
+them: an edit there made every vendored build miss its cache and re-vendor,
+on a checkout that is dirty in those files most of the time.
+"""
+const _GENERATOR_DIRTY_PATHS = ("src", "Project.toml")
+
+"""
+Content digest of the checkout's uncommitted state under
+`_GENERATOR_DIRTY_PATHS`: tracked-file diffs plus the status listing (which
+names untracked files). Empty string for a tree that is clean there or when git
+is unavailable — degrading to the HEAD-only fingerprint rather than disabling
+caching outright.
 """
 function _get_git_dirty_digest(root::String)::String
     try
-        status = read(`git -C $root status --porcelain`, String)
+        paths = collect(_GENERATOR_DIRTY_PATHS)
+        status = read(`git -C $root status --porcelain -- $paths`, String)
         isempty(strip(status)) && return ""
-        diff = read(`git -C $root diff HEAD --no-color`, String)
+        diff = read(`git -C $root diff HEAD --no-color -- $paths`, String)
         return "+dirty-" * bytes2hex(SHA.sha256(status * diff))[1:12]
     catch
         return ""
@@ -1098,7 +1109,7 @@ function scaffold_package(name::String; path::String=".", from_registry::Bool=tr
         if !isnothing(registry_toml)
             write(io, registry_toml)
         else
-            write(io, _replibuild_toml(name, uuid, pkg_dir))
+            write(io, _replibuild_toml(name, uuid))
         end
     end
 
@@ -1166,13 +1177,16 @@ function _project_toml(name::String, uuid::UUID)::String
     """
 end
 
-function _replibuild_toml(name::String, uuid::UUID, root::String)::String
+function _replibuild_toml(name::String, uuid::UUID)::String
     lower = lowercase(name)
+    # root is the TOML's own folder, as discover writes it: relocatable, and
+    # never a machine path in a TOML basic string (a Windows path's `\a`
+    # is an escape, and the file did not parse).
     """
     [project]
     name = "$lower"
     uuid = "$uuid"
-    root = "$root"
+    root = "."
 
     [compile]
     flags = ["-std=c++17", "-fPIC"]
@@ -1188,6 +1202,8 @@ function _replibuild_toml(name::String, uuid::UUID, root::String)::String
 
     [wrap]
     style = "clang"
+    # wrap writes julia/<module_name>.jl, and src/$name.jl includes that file.
+    module_name = "$name"
 
     [types]
     strictness = "warn"
@@ -1203,8 +1219,13 @@ function _main_module(name::String)::String
 
     using RepliBuild
 
-    # Generated wrapper is loaded at build time via deps/build.jl
-    const _wrapper_path = joinpath(@__DIR__, "..", "julia", "$name.jl")
+    # Generated wrapper is loaded at build time via deps/build.jl. Its file is
+    # named after the TOML's module name, not after this package: a registry
+    # TOML names the library (`lua` gives `julia/Lua.jl` inside `LuaWrapper`),
+    # and a case-sensitive filesystem does not forgive a guess.
+    const _wrapper_path = joinpath(@__DIR__, "..", "julia",
+        RepliBuild.ConfigurationManager.wrapper_module_name(
+            joinpath(@__DIR__, "..", "replibuild.toml")) * ".jl")
 
     if isfile(_wrapper_path)
         include(_wrapper_path)

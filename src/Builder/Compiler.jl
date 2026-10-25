@@ -270,7 +270,12 @@ is the same under every Julia release (see `_key_feed!`).
 function compute_project_hash(config::RepliBuildConfig;
                               toolchain::AbstractString=_toolchain_identity(config))::String
     ctx = SHA.SHA256_CTX()
-    _key_feed!(ctx, "replibuild-project-hash-v2")
+    # The tag names the shape of what a build leaves behind. v3: a Tier 1
+    # build's promoted module carries the `__rb_` exported aliases
+    # (`_alias_exports!`), which a wrap needs and a v2 build does not have;
+    # bumping it rebuilds every project once rather than leaving a stale
+    # module whose slices the Slicer must refuse.
+    _key_feed!(ctx, "replibuild-project-hash-v3")
 
     # Hash the replibuild.toml content
     toml_path = config.config_file
@@ -976,11 +981,17 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
     # link/opt steps. Always clear a stale map first so a knob flip or a
     # fallback build can't serve a previous build's map.
     promoted_map_path = joinpath(build_dir, "promoted_symbols.json")
+    aliases_map_path = joinpath(build_dir, "exported_aliases.json")
     rm(promoted_map_path, force=true)
+    rm(aliases_map_path, force=true)
     if use_inprocess && config.link.promote_statics
         lib_token = replace(output_name, r"[^A-Za-z0-9]" => "_")
         abi_ir = joinpath(build_dir, output_name * "_abi.ll")
-        promoted = _promote_statics_libllvm(linked_ir, abi_ir, lib_token)
+        # With Tier 1 on, every exported definition also gets its `__rb_` alias,
+        # the name a slice declares it by (see `_alias_exports!`). Off, the
+        # module and the library's symbol table are exactly what they were.
+        aliases = config.wrap.tier1.enable ? Dict{String,String}() : nothing
+        promoted = _promote_statics_libllvm(linked_ir, abi_ir, lib_token; aliases)
         if promoted === nothing
             error("In-process static promotion failed for C source. " *
                   "Set `[link] promote_statics = false` to skip promotion, or " *
@@ -989,6 +1000,11 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
         linked_ir = abi_ir
         open(promoted_map_path, "w") do io
             JSON.print(io, promoted, 2)
+        end
+        if aliases !== nothing
+            open(aliases_map_path, "w") do io
+                JSON.print(io, aliases, 2)
+            end
         end
     end
 
@@ -1382,7 +1398,7 @@ function _optimize_ir_libllvm(in_ll::String, out_ll::String, opt_level::String):
 end
 
 """
-    _promote_statics_libllvm(in_ll, out_ll, lib_token) -> Union{Nothing,Dict{String,String}}
+    _promote_statics_libllvm(in_ll, out_ll, lib_token; aliases=nothing) -> Union{Nothing,Dict{String,String}}
 
 Static-promotion pass for the llvmcall slicing contract: rename every
 **function or mutable global** that is not already exportable from the `.so`'s
@@ -1401,12 +1417,26 @@ bloat the dynamic symbol table for nothing. Constants that are external-but-
 hidden are promoted anyway — the Slicer binds those by `declare`, not by
 embedding, so they have to be dlsym-able.
 
+With `aliases` a `Dict`, the pass also gives every symbol the module defines
+AND exports — external linkage, default visibility: the public API — a second
+exported name, the LLVM alias `__rb_<lib_token>_<name>`, and records
+`public name => alias name` in it (`_alias_exports!`). A slice that calls another
+public function of its own library declares that function, and ORC resolves a
+`declare` process-wide, so declaring the public name binds whichever library
+defined it first: Julia loads its own `libz.so.1` at startup, and the Hub's zlib
+ran `gzclose` as a slice whose `gzclose_w` was Julia's. The alias is a name no
+other library carries, so the Slicer declares it instead
+(`Slicer._claim_rb_aliases!`). `link_optimize_ir` asks for the aliases only when
+`[wrap.tier1] enable` is set: nothing else binds by `declare`, and a tier1-off
+build keeps its dynamic symbol table, and so its `LIBRARY_SHA`, as before.
+
 Runs post-optimization so internal linkage still fed IPO, on the exact module
 that becomes both the `.so` and the slice source — one truth, bit-identical
 code on both sides. Returns the old→new name map (possibly empty), or
 `nothing` on failure so the caller can hard-error (in-process doctrine).
 """
-function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::String)
+function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::String;
+                                  aliases::Union{Nothing,Dict{String,String}} = nothing)
     local_linkages = (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage)
     hidden_viz     = (LLVM.API.LLVMHiddenVisibility, LLVM.API.LLVMProtectedVisibility)
     # A symbol is dlsym-bindable from a slice only if it reaches the .so's dynamic
@@ -1464,6 +1494,10 @@ function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::Stri
                 promote!(gv, old)
             end
 
+            # After the renames, so a promoted `__rb_*` definition is never
+            # aliased a second time and the alias set is exactly the public API.
+            aliases === nothing || _alias_exports!(mod, lib_token, aliases)
+
             open(out_ll, "w") do io
                 print(io, string(mod))
             end
@@ -1473,6 +1507,57 @@ function _promote_statics_libllvm(in_ll::String, out_ll::String, lib_token::Stri
         @debug "LLVM.jl in-process static promotion failed" exception=(e, catch_backtrace())
         return nothing
     end
+end
+
+"""
+    _alias_exports!(mod, lib_token, aliases)
+
+Give every exported definition of `mod` — a function or global with external
+linkage and default visibility, which is what reaches the dynamic symbol table
+under its own name — the exported LLVM alias `__rb_<lib_token>_<name>`, and
+record `name => alias name` in `aliases`. The alias is the same address under a
+name only this library carries, so a slice can bind the library's own symbol
+without sharing a namespace with every other library the process loaded first
+(`Slicer._claim_rb_aliases!` turns the slice's `declare @name` into
+`declare @__rb_<lib>_name`).
+
+Skipped, and therefore declared by their public name as before: declarations
+(the library does not define them, so there is nothing of its own to bind),
+weak and `available_externally` definitions (a slice reaching a weak symbol
+carries the `:weak` hazard and is demoted), `llvm.*` intrinsics, symbols already
+promoted to `__rb_*`, and thread-local globals, which the C API cannot declare an
+alias for. The Slicer then keeps a declaration's name, demotes a weak symbol
+through its hazard, and refuses a thread-local global. A `dllexport`
+definition gets a `dllexport` alias, so on PE the alias reaches the export
+directory whenever its aliasee does; on ELF the storage class is a no-op.
+
+The alias name is read back after creation: LLVM uniquifies on collision, and
+the map must hold what the module actually says.
+"""
+function _alias_exports!(mod, lib_token::String, aliases::Dict{String,String})
+    for gv in Iterators.flatten((LLVM.functions(mod), LLVM.globals(mod)))
+        LLVM.isdeclaration(gv) && continue
+        LLVM.linkage(gv) == LLVM.API.LLVMExternalLinkage || continue
+        LLVM.visibility(gv) == LLVM.API.LLVMDefaultVisibility || continue
+        name = LLVM.name(gv)
+        (isempty(name) || startswith(name, "llvm.") || startswith(name, "__rb_")) && continue
+        gv isa LLVM.GlobalVariable && LLVM.API.LLVMIsThreadLocal(gv) != 0 && continue
+        addrspace = LLVM.API.LLVMGetPointerAddressSpace(LLVM.API.LLVMTypeOf(gv))
+        alias = LLVM.API.LLVMAddAlias2(mod, LLVM.API.LLVMGlobalGetValueType(gv), addrspace,
+                                       gv, "__rb_$(lib_token)_$(name)")
+        LLVM.API.LLVMSetLinkage(alias, LLVM.API.LLVMExternalLinkage)
+        LLVM.API.LLVMSetVisibility(alias, LLVM.API.LLVMDefaultVisibility)
+        LLVM.API.LLVMSetDLLStorageClass(alias, LLVM.API.LLVMGetDLLStorageClass(gv))
+        aliases[name] = _llvm_value_name(alias)
+    end
+    return aliases
+end
+
+"The name of a raw `LLVMValueRef` (an alias has no LLVM.jl wrapper type)."
+function _llvm_value_name(ref::LLVM.API.LLVMValueRef)::String
+    len = Ref{Csize_t}(0)
+    p = LLVM.API.LLVMGetValueName2(ref, len)
+    return p == C_NULL ? "" : unsafe_string(Ptr{UInt8}(p), len[])
 end
 
 # =============================================================================
@@ -1599,6 +1684,33 @@ output, so it repeats too.
 """
 _reproducible_link_flags(; windows::Bool = Sys.iswindows()) =
     windows ? ["-Wl,--no-insert-timestamp"] : String[]
+
+"""
+    _self_binding_link_flags(; windows = Sys.iswindows()) -> Vector{String}
+
+Linker flags that bind a library's references to its own exported symbols to
+its own definitions. Every library `create_library` links passes them.
+
+On ELF a library's call to its own exported function goes through the PLT, and
+a load of its own exported global through the GOT, and the dynamic linker
+resolves both through the process: the global scope first, then the library.
+So a library loaded earlier that exports the same name takes the reference
+(symbol interposition). Julia loads its own `libz.so.1` at startup, and the
+Hub's zlib called Julia's `gzclose_w`, `deflate`, `inflate` and `deflateEnd`
+from its own code (`LD_DEBUG=bindings` names the file each symbol bound to):
+its `gzclose` handed Julia's zlib a `gz_state` the other zlib laid out, and the
+process died of heap corruption. `-Bsymbolic` sets `DF_SYMBOLIC`, under which
+the dynamic linker searches the library itself first, so the wrapped library
+is one self-contained copy of its code and state, the same copy a Tier 1 slice
+binds through the `__rb_` aliases and the wrapper reaches through `dlsym` and
+`cglobal`. Nothing RepliBuild builds is linked against by an executable, so
+there is no copy relocation for the data half of `-Bsymbolic` to split.
+
+A PE image has no such thing to prevent: a DLL's own calls and loads never go
+through its import table, so Windows binds a DLL to itself already.
+"""
+_self_binding_link_flags(; windows::Bool = Sys.iswindows()) =
+    windows ? String[] : ["-Wl,-Bsymbolic"]
 
 """
     _compile_ir_to_objects(config, ir_files, compiler) -> Vector{String}
@@ -1801,6 +1913,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         "-fPIC",    # Position independent code
         _codegen_opt_flags(config)...,   # codegen at the link level, IR passes off
         _reproducible_link_flags()...,   # same IR, same bytes: no PE link time
+        _self_binding_link_flags()...,   # its own symbols are its own, whatever loaded first
     ]
     cmd_tail = ["-o", lib_path]
 
@@ -3700,7 +3813,18 @@ function extract_symbols_from_binary(binary_path::String)
         if length(parts) >= 3 && parts[2] in code_symbol_types
             address = parts[1]
             mangled = parts[3]
-            address_to_mangled[address] = mangled
+            # Several symbols can share an address, and since 2026-10-24 every
+            # exported definition of a Tier 1 build does: its `__rb_<lib>_`
+            # alias (`_alias_exports!`) sits on the same code. The alias is
+            # slice-binding surface, never API, and must not stand in for the
+            # real name here — which it did for every function whose alias nm
+            # listed after it (nm sorts by the locale's collation, so which
+            # names those were depended on the host). A `__rb_` name never
+            # displaces another name at its address; any other name may.
+            prev = get(address_to_mangled, address, nothing)
+            if prev === nothing || !startswith(mangled, "__rb_") || startswith(prev, "__rb_")
+                address_to_mangled[address] = mangled
+            end
         end
     end
 
@@ -5797,8 +5921,15 @@ function parse_dwarf_dump(output::AbstractString;
             end
 
             if isnothing(target)
-                # Pointer/const/reference without target (shouldn't happen but handle it)
-                return kind == "pointer" ? "void*" : "unknown"
+                # A DIE with no DW_AT_type points at, or qualifies, `void`. clang
+                # writes `const void *` as a pointer to a const_type with no type,
+                # so that const is `const void`, spelled like every other `const T`
+                # (the mappers strip the qualifier and see `void*`). llama.cpp's
+                # tables had 1257 `unknown*` parameters from this one case. A
+                # reference to nothing cannot be written in C or C++.
+                kind == "pointer" && return "void*"
+                kind == "const" && return "const void"
+                return "unknown"
             end
 
             # Recursively resolve the target type
@@ -8043,6 +8174,13 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
     promoted_map_path = joinpath(get_build_path(config), "promoted_symbols.json")
     if isfile(promoted_map_path)
         metadata["promoted_symbols"] = _read_json(promoted_map_path)
+    end
+    # Exported-alias map (public name → exported `__rb_*` alias), written only
+    # when `[wrap.tier1] enable` asked for it. A slice declares the library's
+    # own symbols by these names; `nm` shows each beside its aliasee.
+    aliases_map_path = joinpath(get_build_path(config), "exported_aliases.json")
+    if isfile(aliases_map_path)
+        metadata["exported_aliases"] = _read_json(aliases_map_path)
     end
 
     # Save to JSON file next to binary
