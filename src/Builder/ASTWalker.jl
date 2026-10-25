@@ -95,11 +95,15 @@ function is_cpp_header(filepath::String)
 end
 
 """
-    extract_includes_clang(filepath::String, clang_path::String, include_dirs::Vector{String}) -> FileDependencies
+    extract_includes_clang(filepath::String, clang_path::String, include_dirs::Vector{String};
+                           prepare_cmd=identity) -> FileDependencies
 
 Use clang -E preprocessor to get detailed include information.
+`prepare_cmd` is applied to the clang `Cmd` before it runs; Discovery passes
+`LLVMEnvironment.llvm_cmd` to give it the toolchain environment.
 """
-function extract_includes_clang(filepath::String, clang_path::String, include_dirs::Vector{String})
+function extract_includes_clang(filepath::String, clang_path::String, include_dirs::Vector{String};
+                                prepare_cmd=identity)
     deps = FileDependencies(
         filepath,
         String[],
@@ -128,7 +132,7 @@ function extract_includes_clang(filepath::String, clang_path::String, include_di
 
     try
         # Run clang -E to get preprocessed output with line markers
-        cmd = `$clang_path -E $lang_flag $include_flags -H $filepath`
+        cmd = prepare_cmd(`$clang_path -E $lang_flag $include_flags -H $filepath`)
         
         # Capture stderr for -H output (include tree)
         output = IOBuffer()
@@ -299,7 +303,8 @@ end
 
 """
     build_dependency_graph(files::Vector{String}, include_dirs::Vector{String};
-                          use_clang::Bool=true, clang_path::String="") -> DependencyGraph
+                          use_clang::Bool=true, clang_path::String="",
+                          prepare_cmd=identity) -> DependencyGraph
 
 Build complete dependency graph for source files.
 
@@ -308,12 +313,14 @@ Build complete dependency graph for source files.
 - `include_dirs`: Include search paths
 - `use_clang`: Use clang for detailed parsing (requires clang_path)
 - `clang_path`: Path to clang++ executable
+- `prepare_cmd`: Applied to each clang `Cmd` before it runs (see `extract_includes_clang`)
 
 # Returns
 - `DependencyGraph`: Complete dependency information
 """
 function build_dependency_graph(files::Vector{String}, include_dirs::Vector{String};
-                                use_clang::Bool=true, clang_path::String="")
+                                use_clang::Bool=true, clang_path::String="",
+                                prepare_cmd=identity)
     (" Building dependency graph for $(length(files)) files...")
 
     file_deps = Dict{String,FileDependencies}()
@@ -325,7 +332,7 @@ function build_dependency_graph(files::Vector{String}, include_dirs::Vector{Stri
 
         # Choose parsing method
         if use_clang && !isempty(clang_path) && isfile(clang_path)
-            deps = extract_includes_clang(filepath, clang_path, include_dirs)
+            deps = extract_includes_clang(filepath, clang_path, include_dirs; prepare_cmd)
             # Enhance with structure parsing
             struct_info = parse_source_structure(filepath)
             deps.namespaces = struct_info.namespaces

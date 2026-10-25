@@ -45,10 +45,12 @@ import .._read_json
 # so the dependency is explicit and local rather than a round trip through the
 # top-level package.
 #
-# `execute` runs the probe under `with_llvm_env` by default (its `use_llvm_env`
-# keyword), which is the point: cmake's feature probes get answered by the same
-# clang that will later compile the sources. A header captured from the system
-# compiler can disagree with the toolchain that consumes it.
+# `execute` runs the probe in the toolchain environment by default (its
+# `use_llvm_env` keyword; the environment rides on the cmake command, see
+# `LLVMEnvironment.llvm_cmd`), which is the point: cmake's feature probes get
+# answered by the same clang that will later compile the sources. A header
+# captured from the system compiler can disagree with the toolchain that
+# consumes it.
 using ..BuildBridge: execute
 
 export CMakeProbe, cmake_probe, capture_config, toml_fragment,

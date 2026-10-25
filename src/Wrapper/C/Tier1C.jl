@@ -234,6 +234,13 @@ by `declare` must be supplied by the `.so` itself or its `DT_NEEDED` chain.
 Functions with a miss are deleted from `accepted` and returned in the
 `function => missing symbols` map.
 
+This asks whether the library HAS each name, not whether the process will pick
+the library's copy: ORC resolves a `declare` process-wide, and a library loaded
+earlier (Julia's own libz, for a zlib wrapper) wins a public name. That is why
+the Slicer declares the library's own symbols by their `__rb_` alias
+(`Slicer._claim_rb_aliases!`), a name only this library carries; a hit here on
+one of those is the library's copy, and nothing else can answer to it.
+
 This exists because an unresolved slice declaration does NOT surface as a
 catchable error: ORC blocks on the pending symbol and the JIT deadlocks on the
 first call ("Symbols not found"), with no stack to read. Checking the same
@@ -299,8 +306,8 @@ function _tier1_preflight!(accepted::Set{String}, results, lib_path::String)
         `declare` symbols that '$(basename(lib_path))' and its dependencies do not
         supply. Each would have deadlocked the JIT on first call instead of
         erroring. A miss here means static promotion did not export something the
-        slice reached: check `promoted_symbols` in compilation_metadata.json and
-        `[link] promote_statics`.
+        slice reached: check `promoted_symbols` and `exported_aliases` in
+        compilation_metadata.json and `[link] promote_statics`.
             $detail
         """
     end
@@ -618,7 +625,9 @@ function _tier1_registry_chunk(emitted::Vector{String},
     The wrap-time pre-flight already checked this against the library it was
     generated from — but a wrapper is portable source, and the library beside it
     at RUNTIME may not be that library. A JLL or distro build has none of the
-    `__rb_*` promoted statics RepliBuild's own build exports, and an unresolved
+    `__rb_*` names RepliBuild's own build exports (promoted statics, and the
+    aliases a slice binds this library's own API by, so that a same-named
+    export of a library loaded earlier cannot answer instead), and an unresolved
     slice declare does not raise: ORC prints `Symbols not found` and then blocks
     FOREVER on the first call. So the check is repeated here, against the
     library actually loaded, before any slice is trusted. A miss silently uses

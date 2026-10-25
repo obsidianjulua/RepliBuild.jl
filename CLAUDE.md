@@ -105,7 +105,7 @@ skill drives adding a package.
 
 Unblocks libraries whose headers come from cmake's configure step (`config.h`,
 `configure_file`'d public headers, generated `.c`). `cmake_probe` (configure only,
-under `with_llvm_env`, `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` by default) →
+in the toolchain env, `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` by default) →
 `capture_config` (copies into `packages/<name>/config/`, writes `SYSCONFIG.md`) →
 `toml_fragment`. Tests: `test/test_sysconfiggen.jl` (devtests §18). pcre2 is the
 reference package and the byte-identical regression case.
@@ -195,8 +195,10 @@ it" until 2026-09-26; it was wrong for as long as those recipes existed.) Its su
 (`test_static_promotion`, `test_slicer`, `test_tier1_dispatch`) are **deliberately
 unwired** from devtests; `runtests.jl`'s wiring guard names them in an `experimental`
 list. They also need `test/slice_test/replibuild.toml`, which is gitignored and
-machine-local (John's call: document it, don't track it). **Do not un-quarantine,
-re-wire or invest in it (M4/perf) unless John asks.**
+machine-local (John's call: document it, don't track it). The one Tier 1 test
+devtests runs is `test_tier1_alias_binding.jl` (§7e, John's call, 2026-10-24): it
+guards how a slice binds, which every Hub recipe with slicing on depends on. **Do
+not un-quarantine, re-wire or invest in it (M4/perf) unless John asks.**
 
 If you are asked to work on it:
 - Two independent payloads. `[link] enable_lto` (default true for C) embeds the whole
@@ -230,25 +232,31 @@ If you are asked to work on it:
 - Slice constants are keyed on the **mangled** symbol (`julia_name` is not
   injective). Slices are `include_dependency`s; Julia 1.11+ tracks those by content,
   so `touch` does not invalidate.
-- **A slice's `declare` binds through the whole process, not through the
-  library** (2026-10-24, Linux). ORC resolves it with a process-wide lookup, and
-  the pre-flight only asks whether the library *has* the symbol. Static promotion
-  renames internal symbols to `__rb_<lib>_*`, but a slice that calls another
-  **public** function of the same library declares that public name, and if a
-  library already loaded in the process exports it too, the earlier load wins.
-  Julia itself loads `libz.so.1` (zlib 1.3.2) at startup: the Hub's zlib wrapper
-  (zlib 1.3.1, Tier 1 on) runs `gzclose` as a slice whose `gzclose_w` resolves
-  to Julia's libz, which frees a handle the Hub's zlib allocated, and
-  `test_deep.jl` aborts with `double free or corruption`; most sliced zlib
-  functions declare such a name (`deflate`, `deflateEnd`, `inflate`,
-  `deflateInit2_`, …). Julia bundles zlib, zstd, pcre2, curl, ssh2, git2,
-  mbedtls/openssl, gmp, mpfr, openlibm, nghttp2: a Tier 1 recipe for any of
-  those is wrong on Linux today. Windows has no process-wide namespace, so it
-  does not show. The fix would bind every declared public symbol through the
-  library handle (or promote it to a `__rb_` alias too); not built, Tier 1 is
-  quarantined. Julia's own crash reporter then deadlocks in `malloc` on the
-  corrupted heap, so the symptom is a process stuck in a futex wait with no
-  CPU: run it under gdb to see the abort.
+- **A slice declares its library's own symbols by their `__rb_<lib>_` alias,
+  never by the public name** (2026-10-24, Linux). ORC resolves a `declare`
+  process-wide and the pre-flight only asks whether the library *has* the
+  symbol, so a slice that called another public function of its library bound
+  whichever library defined that name first. Julia loads its own `libz.so.1` at
+  startup, and the Hub's zlib ran `gzclose` as a slice whose `gzclose_w` was
+  Julia's, which freed a handle the other zlib allocated (`double free or
+  corruption`); Julia bundles zlib, zstd, pcre2, curl, ssh2, git2,
+  mbedtls/openssl, gmp, mpfr, openlibm, nghttp2. So with `[wrap.tier1] enable`,
+  promotion also gives every exported definition the exported LLVM alias
+  `__rb_<lib>_<name>` (`_alias_exports!`, `exported_aliases` in the metadata, a
+  `dllexport` aliasee giving a `dllexport` alias), and the Slicer declares the
+  alias (`_claim_rb_aliases!`). A reached exported definition with no alias is a
+  **refusal** that names the rebuild, never a public-name declare and never an
+  error; declarations the library does not define (libc) keep their names; a
+  tier1-off build is unchanged. An alias shares its aliasee's address, so
+  anything that keys `nm` output by address must let the real name win
+  (`extract_symbols_from_binary`). The project-hash tag is v3 so a stale Tier 1
+  build relinks once. Windows has no process-wide namespace and never showed
+  it. Julia's crash reporter then deadlocks in `malloc`, so the symptom is a
+  process in a futex wait at zero CPU: run it under gdb (`handle SIGSEGV nostop
+  noprint pass`). The alias is only half of it: the library's **native** calls
+  to its own exports go through the PLT and are interposed the same way (the
+  rule below under symbol tables), and `LD_DEBUG=bindings` is the evidence for
+  which library a reference bound to. (`test_tier1_alias_binding.jl`.)
 - **A slice is IR for the libLLVM that printed it**, and newer IR does not parse
   in an older LLVM (`icmp samesign` is LLVM 20; Julia 1.12 is 18). The slice cache
   is per libLLVM major (`_slice_cache_key`), and a kernel keeps its ccall body
@@ -380,6 +388,15 @@ the test named when you touch the area.
 - `[link] link_dirs` emits `-Wl,-rpath` (`$ORIGIN` first) alongside `-L`. `-L` alone
   loads the distro copy at runtime, giving two copies of process-global state. This is
   what makes Hub packages composable.
+- **A library binds its own exported symbols to itself.** On ELF a library's own
+  PLT calls and GOT loads resolve through the global scope first, so a library
+  loaded earlier with the same names takes them: the Hub's zlib called Julia's
+  `libz.so.1` from its own `gzclose` (2026-10-24). Every library `create_library`
+  links passes `_self_binding_link_flags` (`-Wl,-Bsymbolic` on ELF, nothing on PE,
+  where a DLL never imports its own symbols). A new link site must pass it too, and
+  a Tier 1 slice, being code outside the library, needs the `__rb_` aliases on top
+  (Tier 1 section). `LD_DEBUG=bindings` says which file a reference bound to.
+  (`test_codegen_flags.jl`, `test_tier1_alias_binding.jl`.)
 
 ### DWARF extraction
 
@@ -633,6 +650,18 @@ the test named when you touch the area.
   `MLIRNative.CXX_PERSONALITY`); `test_cxx_personality.jl` holds them equal.
   `uwtable` is stamped on every function with a body, independent of landing pads.
   The landing pads are still required on Linux.
+
+### Subprocesses
+
+- **The toolchain environment rides on the `Cmd`, never on `ENV`.**
+  `LLVMEnvironment.llvm_cmd` attaches it for `BuildBridge.run_command`, `run_tool`
+  and Discovery's include scan. `run_command` runs concurrently (`Threads.@threads`
+  for the IR compile, `asyncmap` for objects). Overlapping `with_llvm_env`
+  save/restore cycles deleted the user's `LD_LIBRARY_PATH`/`CPATH` after a parallel
+  C++ build. `with_llvm_env` is lock-serialized but still global, so it must not be
+  called anywhere in `src/`. A key the toolchain maps to `""` is a force-clear: the
+  child must get it empty, not inherit the parent's value. On Windows the merge is
+  case-insensitive (`_overlay_env`). (`test_llvm_env_isolation.jl`.)
 
 ### Caching
 
