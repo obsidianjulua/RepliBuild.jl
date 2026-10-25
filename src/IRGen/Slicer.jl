@@ -20,11 +20,11 @@
 # before the pass, or with Tier 1 off) refuses such slices rather than guess.
 #
 # Boundary policy per reached GlobalValue:
-#   function / global the library    → declare its `__rb_` alias; refuse when
-#     defines and exports               the module has none for it
-#   function only declared           → declare (libc and friends: the library
-#                                      binds them through the process as well)
-#   function promoted to `__rb_*`    → declare (already a unique name)
+#   exported definition (fn/global) → declare its `__rb_` alias; refuse when
+#                                     the module has none for it
+#   function only declared          → declare (libc and friends: the library
+#                                     binds them through the process as well)
+#   function promoted to `__rb_*`   → declare (already a unique name)
 #   mutable global                  → declare (never embed — cJSON class)
 #   internal constant, unnamed_addr → embed   (no symbol exists, and only the
 #                                     contents are observable, so a second copy

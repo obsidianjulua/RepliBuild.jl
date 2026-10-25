@@ -1526,7 +1526,8 @@ Skipped, and therefore declared by their public name as before: declarations
 weak and `available_externally` definitions (a slice reaching a weak symbol
 carries the `:weak` hazard and is demoted), `llvm.*` intrinsics, symbols already
 promoted to `__rb_*`, and thread-local globals, which the C API cannot declare an
-alias for; a slice reaching one of those is refused by the Slicer. A `dllexport`
+alias for. The Slicer then keeps a declaration's name, demotes a weak symbol
+through its hazard, and refuses a thread-local global. A `dllexport`
 definition gets a `dllexport` alias, so on PE the alias reaches the export
 directory whenever its aliasee does; on ELF the storage class is a no-op.
 
