@@ -21,26 +21,25 @@ export run_command, execute, capture,
 """
 Execute command and capture output (stdout + stderr combined)
 Uses LLVMEnvironment if the command is an LLVM tool
+
+The toolchain environment is attached to `cmd` (`LLVMEnvironment.llvm_cmd`),
+never set in `ENV`. This function runs concurrently: under `Threads.@threads`
+for the per-TU IR compile and under `asyncmap` for per-TU objects.
+`with_llvm_env` used to be called here, and overlapping save/restore cycles
+on the process-global `ENV` left the user's `LD_LIBRARY_PATH` and `CPATH`
+deleted after a parallel build.
 """
 function run_command(cmd::Cmd; capture_output::Bool=true, use_llvm_env::Bool=true)
-    # Wrapper function that executes with LLVM environment
-    execute_fn = if use_llvm_env
-        () -> _run_command_impl(cmd, capture_output)
-    else
-        () -> _run_command_impl(cmd, capture_output)
-    end
-
-    # Execute with LLVM environment if requested
     if use_llvm_env
-        try
-            return LLVMEnvironment.with_llvm_env(execute_fn)
+        cmd = try
+            LLVMEnvironment.llvm_cmd(cmd)
         catch
-            # Fallback to direct execution if LLVM env fails
-            return _run_command_impl(cmd, capture_output)
+            # No toolchain to take the environment from: run with the
+            # inherited one, as before.
+            cmd
         end
-    else
-        return execute_fn()
     end
+    return _run_command_impl(cmd, capture_output)
 end
 
 """

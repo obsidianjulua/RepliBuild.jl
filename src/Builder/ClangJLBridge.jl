@@ -435,6 +435,28 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
         end
     catch; end
 
+    # Only enums declared under the project's own headers count. A header that
+    # includes <system_error> or <charconv> brings libstdc++'s enums into the
+    # translation unit, and which ones depends on the libclang Clang.jl ships
+    # for this Julia (18 on 1.12, 20 on 1.13): pugixml wrapped with `errc` on
+    # 1.13 and without it on 1.12. The scope is the directory of every header
+    # named plus every include dir, normalised; a declaration elsewhere is not
+    # this library's.
+    scope = String[]
+    for h in headers
+        push!(scope, normpath(dirname(abspath(h))))
+    end
+    for d in include_dirs
+        push!(scope, normpath(abspath(d)))
+    end
+    unique!(scope)
+    _norm(p) = Sys.iswindows() ? lowercase(normpath(p)) : normpath(p)
+    scope = map(_norm, scope)
+    sep = Base.Filesystem.path_separator
+    in_scope(path) = (isempty(path) && return false;
+                      p = _norm(path);
+                      any(d -> p == d || startswith(p, d * sep), scope))
+
     enums = Dict{String,Vector{Tuple{String,Int}}}()
     idx = Clang.Index()
 
@@ -461,6 +483,7 @@ function _extract_enums_via_ast!(result::Dict, headers::Vector{String}, include_
                 for child in Clang.children(cursor)
                     k = Clang.kind(child)
                     if k == Clang.CXCursor_EnumDecl
+                        in_scope(Clang.get_filename(child)) || continue
                         enum_name = Clang.spelling(child)
                         (isempty(enum_name) || startswith(enum_name, "(") || !occursin(r"^[A-Za-z_]\\w*\$", enum_name)) && continue
                         haskey(enums, enum_name) && continue

@@ -317,6 +317,16 @@ include(joinpath(TEST_DIR, "test_c_inprocess.jl"))
 # Slicer.jl, the promotion pass and the [wrap.tier1] knob all stay shipped and
 # unchanged — this removes the SUITE cost, not the feature.
 
+# ── 7e. Tier 1 binds a library's own symbols by alias, not by name ───────────
+# The one Tier 1 test that runs here, on John's call (2026-10-24): Hub recipes
+# do enable slicing (zlib, lua, sqlite, …), and a slice that declared another
+# public function of its library by name bound whichever library defined that
+# name first in the process — Julia's own libz, for the Hub's zlib. Small
+# fixture named after zlib's exports, a decoy with the same names loaded first,
+# every call in a child. Needs the C bucket only.
+
+include(joinpath(TEST_DIR, "test_tier1_alias_binding.jl"))
+
 # ── 8. Nested-struct ABI resolution (pure ccall path) ────────────────────────
 # Library-free trace: structs with struct-typed members must come out with
 # verified named fields (SysV register classes preserved by value), and

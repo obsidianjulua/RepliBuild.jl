@@ -175,6 +175,10 @@ const _AS_SCRIPT = abspath(PROGRAM_FILE) == abspath(@__FILE__)
 const OPT = options(_AS_SCRIPT ? ARGS : String.(split(get(ENV, "ABI_FUZZ_ARGS", ""))))
 mkpath(OPT.dir)
 ENV["REPLIBUILD_HOME"] = joinpath(OPT.dir, "_rbhome")
+# `discover(build=true, wrap=true)` registers each unit, and `register` adds the
+# package to the default Julia environment unless told otherwise. One
+# `--seeds=1:60` run put 180 path deps into `@v1.13` (2026-10-24).
+ENV["REPLIBUILD_JULIA_ENV"] = "none"
 
 import RepliBuild
 isdefined(@__MODULE__, :TestSupport) || include(joinpath(TEST_DIR, "support", "TestSupport.jl"))

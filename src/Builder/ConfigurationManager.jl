@@ -1399,12 +1399,24 @@ end
 
 """Get wrapper module name (uses config or auto-generates)"""
 function get_module_name(c::RepliBuildConfig)::String
-    if !isempty(c.wrap.module_name)
-        return c.wrap.module_name
+    return module_name_for(c.project.name, c.wrap.module_name)
+end
+
+"""
+    module_name_for(project_name, module_name="") -> String
+
+The wrapper's module name, which is also the wrapper file's stem under
+`[paths] output`: `[wrap] module_name` when set, else CamelCase of
+`[project] name`. One derivation for `get_module_name`, for
+`wrapper_module_name`, and for anything that must find the file wrap writes.
+"""
+function module_name_for(project_name::AbstractString, module_name::AbstractString="")::String
+    if !isempty(module_name)
+        return String(module_name)
     end
 
     # Auto-generate: CamelCase from project name
-    name = replace(c.project.name, r"[^a-zA-Z0-9]" => "_")
+    name = replace(String(project_name), r"[^a-zA-Z0-9]" => "_")
     parts = split(name, "_")
     modname = join([uppercasefirst(p) for p in parts if !isempty(p)], "")
     # A module name must be an identifier. A project directory starting with a
@@ -1413,6 +1425,24 @@ function get_module_name(c::RepliBuildConfig)::String
     isempty(modname) && return "Wrapper"
     isdigit(first(modname)) && return "_" * modname
     return modname
+end
+
+"""
+    wrapper_module_name(toml_path) -> String
+
+The module name a `replibuild.toml` leads to, read from the file alone (no
+`load_config`, so a scaffold or a package can call it at load time). A
+scaffolded package's `src/<Name>.jl` includes `julia/<this>.jl`: the package's
+own name need not spell it, because a registry TOML names the library (`lua`
+gives `Lua`, in a package called `LuaWrapper`).
+"""
+function wrapper_module_name(toml_path::AbstractString)::String
+    data = TOML.parsefile(String(toml_path))
+    project = get(data, "project", Dict{String,Any}())
+    wrap = get(data, "wrap", Dict{String,Any}())
+    pname = project isa Dict ? string(get(project, "name", "")) : ""
+    mname = wrap isa Dict ? string(get(wrap, "module_name", "")) : ""
+    return module_name_for(pname, mname)
 end
 
 """Check if a stage is in the workflow"""
