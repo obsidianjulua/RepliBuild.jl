@@ -999,4 +999,145 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test DWARF_COMPILER.check_param_arity!(rt, Dict{String,Int}()) === nothing
     end
 
+    # ── Template parameters, in both dumper dialects ───────────────────────
+    #
+    # GNU binutils spells the tags `DW_TAG_template_type_param` and
+    # `DW_TAG_template_value_param`; llvm-dwarfdump spells them `…_parameter`.
+    # The readelf parser matched the long spelling only, so on every GNU
+    # binutils host `template_params` was empty for every instantiation. The
+    # match is now the short spelling, a prefix of both. The dump below is
+    # readelf's own output for `template<typename T, int N> struct S { T v[N];
+    # int n; }; S<int, 3> s;`, trimmed; the second copy rewrites the tags the
+    # way llvm-dwarfdump does, and must parse the same.
+    dump_tparams_binutils = """
+     <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+        <c>   DW_AT_producer    : (indexed string: 0x0): clang version 23.1.3
+        <d>   DW_AT_language    : 33	(C++14)
+     <1><4a>: Abbrev Number: 5 (DW_TAG_structure_type)
+        <4b>   DW_AT_calling_convention: 5	(pass by value)
+        <4c>   DW_AT_name        : (indexed string: 0xa): S<int, 3>
+        <4d>   DW_AT_byte_size   : 16
+        <4e>   DW_AT_decl_file   : 0
+        <4f>   DW_AT_decl_line   : 1
+     <2><50>: Abbrev Number: 6 (DW_TAG_template_type_param)
+        <51>   DW_AT_type        : <0x70>
+        <55>   DW_AT_name        : (indexed string: 0x5): T
+     <2><56>: Abbrev Number: 7 (DW_TAG_template_value_param)
+        <57>   DW_AT_type        : <0x70>
+        <5b>   DW_AT_name        : (indexed string: 0x6): N
+        <5c>   DW_AT_const_value : 3
+     <2><5d>: Abbrev Number: 8 (DW_TAG_member)
+        <5e>   DW_AT_name        : (indexed string: 0x7): v
+        <5f>   DW_AT_type        : <0x74>
+        <63>   DW_AT_decl_file   : 0
+        <64>   DW_AT_decl_line   : 1
+        <65>   DW_AT_data_member_location: 0
+     <2><66>: Abbrev Number: 8 (DW_TAG_member)
+        <67>   DW_AT_name        : (indexed string: 0x8): n
+        <68>   DW_AT_type        : <0x70>
+        <6c>   DW_AT_decl_file   : 0
+        <6d>   DW_AT_decl_line   : 1
+        <6e>   DW_AT_data_member_location: 12
+     <2><6f>: Abbrev Number: 0
+     <1><70>: Abbrev Number: 9 (DW_TAG_base_type)
+        <71>   DW_AT_name        : (indexed string: 0x9): int
+        <72>   DW_AT_encoding    : 5	(signed)
+        <73>   DW_AT_byte_size   : 4
+     <1><74>: Abbrev Number: 10 (DW_TAG_array_type)
+        <75>   DW_AT_type        : <0x70>
+     <2><79>: Abbrev Number: 11 (DW_TAG_subrange_type)
+        <7a>   DW_AT_type        : <0x7c>
+        <7e>   DW_AT_count       : 3
+     <2><7f>: Abbrev Number: 0
+     <1><7c>: Abbrev Number: 12 (DW_TAG_base_type)
+        <7d>   DW_AT_name        : (indexed string: 0xb): __ARRAY_SIZE_TYPE__
+        <7e>   DW_AT_byte_size   : 8
+        <7f>   DW_AT_encoding    : 7	(unsigned)
+    """
+    dump_tparams_llvm = replace(dump_tparams_binutils,
+        "DW_TAG_template_type_param)" => "DW_TAG_template_type_parameter)",
+        "DW_TAG_template_value_param)" => "DW_TAG_template_value_parameter)")
+    @test dump_tparams_llvm != dump_tparams_binutils
+
+    @testset "template parameters parse from both dumper spellings" begin
+        checked = 0
+        for (label, dump) in (("binutils", dump_tparams_binutils), ("llvm-dwarfdump", dump_tparams_llvm))
+            _, structs, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump)
+            @test haskey(structs, "S<int, 3>")
+            tp = get(structs["S<int, 3>"], "template_params", [])
+            @test (label, length(tp)) == (label, 2)
+            length(tp) == 2 || continue
+            @test (tp[1]["kind"], tp[1]["name"], tp[1]["type"]) == ("type", "T", "int")
+            @test (tp[2]["kind"], tp[2]["name"], tp[2]["type"], tp[2]["value"]) == ("value", "N", "int", 3)
+            # The members are still the struct's, not the parameters'.
+            @test [m["name"] for m in structs["S<int, 3>"]["members"]] == ["v", "n"]
+            checked += 1
+        end
+        @test checked == 2
+    end
+
+    # ── `const void` is a type, not an unknown ─────────────────────────────
+    #
+    # clang writes `const void *` as DW_TAG_pointer_type -> DW_TAG_const_type
+    # with no DW_AT_type: the qualifier applies to `void`, which has no DIE.
+    # `resolve_type` answered "unknown" for a target-less const (a target-less
+    # pointer and the transparent qualifiers already said `void`), so every
+    # `const void *` parameter and return had c_type `unknown*`: 1257 of them in
+    # llama.cpp's tables. The julia_type was right (`Ptr{Cvoid}`), the spelling
+    # in metadata and in callback signatures was not.
+    dump_const_void = """
+     <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+        <c>   DW_AT_producer    : (indexed string: 0x0): clang version 18.1.7jl
+        <d>   DW_AT_language    : 29	(C11)
+     <1><100>: Abbrev Number: 14 (DW_TAG_subprogram)
+        <101>   DW_AT_low_pc      : (index: 0x6): 0x1000
+        <102>   DW_AT_name        : (indexed string: 0x1): takes_cv
+        <103>   DW_AT_type        : <0x400>
+        <104>   DW_AT_external    : 1
+     <2><105>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <106>   DW_AT_location    : 2 byte block: 91 78 	(DW_OP_fbreg: -8)
+        <107>   DW_AT_name        : (indexed string: 0x2): p
+        <108>   DW_AT_type        : <0x400>
+     <2><109>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <10a>   DW_AT_location    : 2 byte block: 91 70 	(DW_OP_fbreg: -16)
+        <10b>   DW_AT_name        : (indexed string: 0x3): q
+        <10c>   DW_AT_type        : <0x420>
+     <2><10d>: Abbrev Number: 12 (DW_TAG_formal_parameter)
+        <10e>   DW_AT_location    : 2 byte block: 91 68 	(DW_OP_fbreg: -24)
+        <10f>   DW_AT_name        : (indexed string: 0x4): r
+        <110>   DW_AT_type        : <0x440>
+     <2><111>: Abbrev Number: 0
+     <1><400>: Abbrev Number: 7 (DW_TAG_pointer_type)
+        <401>   DW_AT_type        : <0x410>
+     <1><410>: Abbrev Number: 9 (DW_TAG_const_type)
+     <1><420>: Abbrev Number: 7 (DW_TAG_pointer_type)
+        <421>   DW_AT_type        : <0x430>
+     <1><430>: Abbrev Number: 9 (DW_TAG_const_type)
+        <431>   DW_AT_type        : <0x435>
+     <1><435>: Abbrev Number: 11 (DW_TAG_volatile_type)
+     <1><440>: Abbrev Number: 7 (DW_TAG_pointer_type)
+        <441>   DW_AT_type        : <0x450>
+     <1><450>: Abbrev Number: 9 (DW_TAG_const_type)
+        <451>   DW_AT_type        : <0x460>
+     <1><460>: Abbrev Number: 5 (DW_TAG_base_type)
+        <461>   DW_AT_name        : (indexed string: 0x5): char
+        <462>   DW_AT_byte_size   : 1
+    """
+
+    @testset "const void is spelled, never unknown" begin
+        rt, _, _, _ = DWARF_COMPILER.parse_dwarf_dump(dump_const_void)
+        @test haskey(rt, "takes_cv")
+        params = dwarf_params_of(rt, "takes_cv")
+        @test params == [("p", "const void*"), ("q", "const void*"), ("r", "const char*")]
+        @test rt["takes_cv"]["c_type"] == "const void*"          # the return
+        @test rt["takes_cv"]["julia_type"] == "Ptr{Cvoid}"
+        # Nothing about this function is unknown to the parser.
+        @test !occursin("unknown", string(rt["takes_cv"]))
+        # The call type was already right; it must stay so.
+        for prm in rt["takes_cv"]["parameters"]
+            prm["name"] == "r" && continue
+            haskey(prm, "julia_type") && @test prm["julia_type"] == "Ptr{Cvoid}"
+        end
+    end
+
 end

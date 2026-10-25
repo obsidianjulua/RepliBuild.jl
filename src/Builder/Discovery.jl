@@ -539,15 +539,15 @@ function walk_dependencies(root_dir::String, scan::ScanResults, include_dirs::Ve
         return nothing
     end
 
-    # Build dependency graph
-    dep_graph = LLVMEnvironment.with_llvm_env() do
-        ASTWalker.build_dependency_graph(
-            all_sources,
-            include_dirs,
-            use_clang=true,
-            clang_path=clang_path
-        )
-    end
+    # Build dependency graph. The toolchain environment rides on each clang
+    # command (`llvm_cmd`) rather than on ENV for the duration of the scan.
+    dep_graph = ASTWalker.build_dependency_graph(
+        all_sources,
+        include_dirs,
+        use_clang=true,
+        clang_path=clang_path,
+        prepare_cmd=LLVMEnvironment.llvm_cmd
+    )
 
     # Print summary
     ASTWalker.print_dependency_summary(dep_graph)
