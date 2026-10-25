@@ -105,7 +105,7 @@ skill drives adding a package.
 
 Unblocks libraries whose headers come from cmake's configure step (`config.h`,
 `configure_file`'d public headers, generated `.c`). `cmake_probe` (configure only,
-under `with_llvm_env`, `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` by default) →
+in the toolchain env, `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` by default) →
 `capture_config` (copies into `packages/<name>/config/`, writes `SYSCONFIG.md`) →
 `toml_fragment`. Tests: `test/test_sysconfiggen.jl` (devtests §18). pcre2 is the
 reference package and the byte-identical regression case.
@@ -647,6 +647,18 @@ the test named when you touch the area.
   `MLIRNative.CXX_PERSONALITY`); `test_cxx_personality.jl` holds them equal.
   `uwtable` is stamped on every function with a body, independent of landing pads.
   The landing pads are still required on Linux.
+
+### Subprocesses
+
+- **The toolchain environment rides on the `Cmd`, never on `ENV`.**
+  `LLVMEnvironment.llvm_cmd` attaches it for `BuildBridge.run_command`, `run_tool`
+  and Discovery's include scan. `run_command` runs concurrently (`Threads.@threads`
+  for the IR compile, `asyncmap` for objects). Overlapping `with_llvm_env`
+  save/restore cycles deleted the user's `LD_LIBRARY_PATH`/`CPATH` after a parallel
+  C++ build. `with_llvm_env` is lock-serialized but still global, so it must not be
+  called anywhere in `src/`. A key the toolchain maps to `""` is a force-clear: the
+  child must get it empty, not inherit the parent's value. On Windows the merge is
+  case-insensitive (`_overlay_env`). (`test_llvm_env_isolation.jl`.)
 
 ### Caching
 

@@ -688,10 +688,107 @@ function get_toolchain()
 end
 
 """
+    _overlay_env(base, overlay; casefold=Sys.iswindows()) -> Dict{String,String}
+
+`base` (a dict, or `ENV`) with every key of `overlay` set to its value. A key
+mapped to `""` stays set and empty. That is how `build_environment_vars`
+force-clears `LD_LIBRARY_PATH` and `CPATH` for a system toolchain, and it is
+not the same as leaving the inherited value in place.
+
+`casefold` is for Windows, where variable names are case-insensitive. An
+inherited `Path` or `CLANG_DIR` is dropped before ours is added. Otherwise the
+child gets both spellings, and which one it reads depends on the order of its
+environment block.
+"""
+function _overlay_env(base, overlay; casefold::Bool=Sys.iswindows())
+    env = Dict{String,String}(base)
+    for (key, value) in overlay
+        if casefold
+            for old in [k for k in keys(env) if uppercase(k) == uppercase(key)]
+                delete!(env, old)
+            end
+        end
+        env[key] = value
+    end
+    return env
+end
+
+"""
+    _env_dict(entries::Vector{String}) -> Dict{String,String}
+
+A `Cmd`'s `env` field (`"KEY=value"` strings) as a dict. The search for `=`
+starts at the second character because Windows keeps per-drive cwd entries
+such as `=C:=C:\\work`, whose name begins with `=`.
+"""
+function _env_dict(entries::Vector{String})
+    env = Dict{String,String}()
+    for entry in entries
+        i = findnext('=', entry, nextind(entry, firstindex(entry)))
+        i === nothing && continue
+        env[entry[firstindex(entry):prevind(entry, i)]] = entry[nextind(entry, i):end]
+    end
+    return env
+end
+
+"""
+    llvm_cmd(cmd::Cmd) -> Cmd
+
+`cmd` carrying the toolchain environment (`toolchain.env_vars`) in its own
+`env`, merged over the environment it already has: its own `env` if one was
+set, otherwise a copy of `ENV` taken now. This process's `ENV` is not
+written. Each child gets the toolchain environment, and nothing else sees it.
+
+This is how a tool runs under the toolchain. `BuildBridge.run_command` and
+everything that goes through it use this, and so do `run_tool` and Discovery's
+include scan. It replaces `with_llvm_env` on those paths because they run
+concurrently. The per-TU compiles in `Compiler.compile_to_ir` run under
+`Threads.@threads`, and the per-TU object compiles under `asyncmap`. Two
+overlapping save/set/restore cycles on `ENV` are not nested, so the later
+restore writes back the values the earlier call had set (see `with_llvm_env`).
+
+Bare command names still resolve against the toolchain's `PATH`. libuv looks
+the executable up through the child's environment, which is where the old
+global `PATH` change took effect too.
+
+# Example
+```julia
+run(llvm_cmd(`clang++ --version`))
+```
+"""
+function llvm_cmd(cmd::Cmd)::Cmd
+    toolchain = get_toolchain()
+    base = cmd.env === nothing ? ENV : _env_dict(cmd.env)
+    return setenv(cmd, _overlay_env(base, toolchain.env_vars))
+end
+
+"""
+Serializes `with_llvm_env`. See there for why the lock is not a fix by itself.
+"""
+const _WITH_LLVM_ENV_LOCK = ReentrantLock()
+
+"""
     with_llvm_env(f::Function)
 
-Execute function with LLVM environment variables set.
-Temporarily modifies ENV for the duration of the function call.
+Run `f` with the toolchain environment set in this process's `ENV`, and
+restore the previous values afterwards.
+
+Prefer `llvm_cmd`, which attaches the environment to one command and leaves
+`ENV` alone. Nothing in RepliBuild calls this; `test_llvm_env_isolation.jl`
+keeps it that way.
+
+The save/set/restore cycle is global and cannot nest across tasks. Two
+overlapping calls corrupt each other. Suppose A saves the user's
+`LD_LIBRARY_PATH` and sets it to `""`. B saves `""`. A restores the user's
+value. Then B restores `""`, which deletes the variable. The user's value is
+gone, and every later subprocess inherits the wrong environment. That is how a
+parallel C++ compile through `BuildBridge` used to strip `LD_LIBRARY_PATH`
+from the devtests `verify` children (2026-10-02).
+
+Calls are serialized on a lock, so overlapping calls queue instead of
+interleaving. The lock does not hide `ENV` from other code: any process
+started by any task while `f` runs inherits the toolchain environment. That is
+why no internal path uses this. The lock also means an `f` that waits on
+another task calling `with_llvm_env` deadlocks.
 
 # Example
 ```julia
@@ -703,27 +800,30 @@ end
 function with_llvm_env(f::Function)
     toolchain = get_toolchain()
 
-    # Save original environment
-    original_env = Dict{String,String}()
-    for (key, value) in toolchain.env_vars
-        original_env[key] = get(ENV, key, "")
-    end
-
-    try
-        # Set LLVM environment
+    lock(_WITH_LLVM_ENV_LOCK) do
+        # Save original environment. `nothing` means unset; a variable set to
+        # "" is restored as "", not deleted.
+        original_env = Dict{String,Union{String,Nothing}}()
         for (key, value) in toolchain.env_vars
-            ENV[key] = value
+            original_env[key] = get(ENV, key, nothing)
         end
 
-        # Execute function
-        return f()
-    finally
-        # Restore original environment
-        for (key, original_value) in original_env
-            if isempty(original_value)
-                delete!(ENV, key)
-            else
-                ENV[key] = original_value
+        try
+            # Set LLVM environment
+            for (key, value) in toolchain.env_vars
+                ENV[key] = value
+            end
+
+            # Execute function
+            return f()
+        finally
+            # Restore original environment
+            for (key, original_value) in original_env
+                if original_value === nothing
+                    delete!(ENV, key)
+                else
+                    ENV[key] = original_value
+                end
             end
         end
     end
@@ -806,29 +906,27 @@ function run_tool(tool_name::String, args::Vector{String}; capture_output::Bool=
         return ("Tool not found: $tool_name", 1)
     end
 
-    # Run with LLVM environment
-    return with_llvm_env() do
-        cmd = `$tool_path $args`
+    # Run with LLVM environment, attached to the command (see `llvm_cmd`)
+    cmd = llvm_cmd(`$tool_path $args`)
 
-        try
-            if capture_output
+    try
+        if capture_output
+            output = read(cmd, String)
+            return (output, 0)
+        else
+            run(cmd)
+            return ("", 0)
+        end
+    catch e
+        if isa(e, ProcessFailedException)
+            try
                 output = read(cmd, String)
-                return (output, 0)
-            else
-                run(cmd)
-                return ("", 0)
+                return (output, 1)
+            catch
+                return ("Process failed: $e", 1)
             end
-        catch e
-            if isa(e, ProcessFailedException)
-                try
-                    output = read(cmd, String)
-                    return (output, 1)
-                catch
-                    return ("Process failed: $e", 1)
-                end
-            else
-                return ("Error: $e", 1)
-            end
+        else
+            return ("Error: $e", 1)
         end
     end
 end
@@ -1054,6 +1152,7 @@ end
 export LLVMToolchain,
     get_toolchain,
     init_toolchain,
+    llvm_cmd,
     with_llvm_env,
     get_tool,
     has_tool,

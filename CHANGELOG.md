@@ -4,6 +4,43 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Parallel builds no longer rewrite the caller's environment (2026-10-24; found 2026-10-02)
+
+`BuildBridge.run_command` ran every tool inside `LLVMEnvironment.with_llvm_env`.
+That function saved the toolchain's keys from the process-global `ENV`, set them,
+ran the tool and restored them. The per-TU IR compile calls `run_command` under
+`Threads.@threads`, and the per-TU object compile under `asyncmap`. Overlapping
+save/restore cycles do not nest. Say A saves the user's `LD_LIBRARY_PATH` and
+sets `""` (a system toolchain force-clears it). B saves `""`, A restores the
+user's value, and then B restores `""` by deleting the variable. After a parallel
+C++ build the user's `LD_LIBRARY_PATH` and `CPATH` were gone, `PATH` kept the LLVM
+bin prefix, and `LLVM_ROOT`/`LLVM_DIR`/`Clang_DIR` stayed set. Every later
+subprocess inherited that. With `JULIA_NUM_THREADS=auto`, `stress_test`'s three
+TUs were enough. In two of three parallel devtests runs, the `verify` child lost
+the `LD_LIBRARY_PATH` that libJLCS needed and died on `libLLVM.so.22.1`.
+Repeated discover+build of `stress_test` with sentinel values corrupted builds
+2 and 3 of 3 on the old code, and 0 of 6 with the fix.
+
+- The environment rides on the command. `LLVMEnvironment.llvm_cmd(cmd)` merges
+  `toolchain.env_vars` over the command's own environment (or a copy of `ENV`)
+  with `setenv`. This process's `ENV` is not written. `run_command`, `run_tool`
+  and Discovery's include scan use it; `ASTWalker` takes a new `prepare_cmd`
+  keyword for that. A key mapped to `""` still reaches the child set and empty.
+  A bare command name still resolves against the toolchain `PATH`, because libuv
+  searches the child's environment.
+- On Windows the merge is case-insensitive. An inherited `Path` or `CLANG_DIR` is
+  dropped before `PATH`/`Clang_DIR` is added. `addenv` would hand the child both
+  spellings.
+- `with_llvm_env` stays exported, with no caller in `src/`. It is serialized on a
+  lock, so overlapping calls queue instead of corrupting each other. A variable
+  that was set to `""` is now restored as `""`; it used to be deleted.
+- `test_llvm_env_isolation.jl` (CI) builds a toolchain with the real
+  `build_environment_vars`, runs julia children that print what they received,
+  and samples `ENV` while overlapping `BuildBridge.execute` calls run in both
+  concurrent shapes. Run against the old tree, the sampler fails in both shapes on
+  every run. Each part of the fix was also neutered alone, and its assertions
+  failed. An AST guard refuses a call to `with_llvm_env` anywhere in `src/`; it
+  found three in the old tree.
 ### A Tier 1 slice binds its library's own symbols by alias, never by public name (2026-10-24)
 
 - **The defect.** A slice is declarations-only, ORC resolves a `declare` process-wide, and the pre-flight (`_tier1_preflight!`) only asks whether the library *has* each symbol. Static promotion covered internal and hidden symbols, but a slice that called another **public** function of its own library declared that public name, and the process gave it the first library that defined it. Julia loads its own `lib/julia/libz.so.1` (zlib 1.3.2) at startup, before any wrapper's library. The Hub's zlib (1.3.1, `[wrap.tier1] enable = true`) ran `gzclose` as a slice whose `gzclose_w` was Julia's: it freed a `gz_state` the Hub's zlib had allocated with another layout, and `packages/zlib/test_deep.jl` aborted with `double free or corruption (!prev)`. 24 of the 45 sliced zlib functions declared a name Julia's libz also exports (`deflate`, `deflateEnd`, `inflate`, `deflateInit2_`, `gzclose_w`, `adler32_z`, `crc32_z`, …). Julia bundles zlib, zstd, pcre2, curl, ssh2, git2, mbedtls/openssl, gmp, mpfr, openlibm and nghttp2, so a Tier 1 recipe for any of those was wrong on Linux. Windows has no process-wide namespace and did not show it. Julia's crash reporter then deadlocks in `malloc` on the corrupted heap, so the failing process looked hung in a futex wait with no CPU; gdb with `handle SIGSEGV nostop noprint pass` shows the abort.
