@@ -453,6 +453,11 @@ the test named when you touch the area.
   (readelf on Linux, GNU objdump on Windows; byte-identical). `DWARFParser.jl` parses
   llvm-dwarfdump. Never copy a regex between them, and never route the readelf
   parser to llvm-dwarfdump.
+  The two dumpers also spell tags differently: binutils writes
+  `DW_TAG_template_type_param`, llvm-dwarfdump `…_parameter`. The readelf parser
+  matches the short spelling, a prefix of both; a new tag match must be checked
+  against a real readelf dump, not against llvm-dwarfdump's
+  (`test_dwarf_attribution.jl`).
 
 ### Generators
 
@@ -992,10 +997,6 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
-- Template parameters from GNU binutils dumps. binutils spells the tags
-  `DW_TAG_template_type_param` and `DW_TAG_template_value_param`, which the
-  parser's `…_parameter` match never sees, so `template_params` is always empty
-  (2026-10-23).
 - STL members that live in the C++ runtime library are unbound: libc++'s
   `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
   them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches

@@ -4,6 +4,9 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Template parameters parse from GNU binutils dumps (2026-10-25)
+
+- **`template_params` was empty for every instantiation on Linux.** The readelf parser matched `DW_TAG_template_type_parameter` and `DW_TAG_template_value_parameter`, llvm-dwarfdump's spelling; GNU binutils writes `DW_TAG_template_type_param` and `DW_TAG_template_value_param`, so the match never hit. It now matches the short spelling, which is a prefix of both. `S<int, 3>` from a real readelf dump gives `T = int` and `N = int, 3`. Metadata only: nothing in the generators reads `template_params` yet. `test_dwarf_attribution.jl` parses the readelf dump and the same dump respelled the llvm-dwarfdump way.
 ### The registry's dirty digest follows the generator's inputs (2026-10-25)
 
 - **Every note in CLAUDE.md re-vendored every build.** `hash_config` mixes in `_generator_fingerprint`, which hashes the checkout's uncommitted state so a generator edit cannot be served from a stale vendored build. It hashed the whole tree, and a dev checkout is dirty in CLAUDE.md or CHANGELOG.md most of the time, so `use` missed its cache after each saved sentence. The digest now covers `src/` and `Project.toml` (`_GENERATOR_DIRTY_PATHS`): tracked diffs and untracked files there, nothing elsewhere. `test_registry.jl`: a scratch git repo with edits to CLAUDE.md, docs/ and an untracked note keeps an empty digest; a source edit, an untracked source file and a Project.toml edit each change it. Widening the paths back to the whole tree fails the first assertion.
