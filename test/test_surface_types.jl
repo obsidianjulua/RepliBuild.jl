@@ -149,6 +149,58 @@ end
         @test !haskey(md["struct_definitions"], "Unrelated")
     end
 
+    @testset "a template-spelled record is reached in every dress" begin
+        # THE boostmath BUG (2026-10-25). A key keeps its template arguments, so
+        # no identifier token equals it, and a signature never spells it whole:
+        # every `pdf(const normal_distribution<…>&, double)` reached its record
+        # as `const T<…>&` / `Ref{T<…>}`, which matched nothing, and the five
+        # distributions were emitted as empty structs. Each dress is the ONLY
+        # route in its case, so each is proven on its own.
+        key = "dist<double, ns::policy<ns::p, ns::p> >"
+        structs() = Dict{String,Any}(
+            key          => Dict{String,Any}("kind" => "class", "members" => Any[]),
+            "noise<int>" => Dict{String,Any}("kind" => "class", "members" => Any[]))
+        fn(; ret=("Cvoid", "void"), params=Any[], class="") = Dict{String,Any}(
+            "name" => "f", "class" => class,
+            "return_type" => Dict{String,Any}("julia_type" => ret[1], "c_type" => ret[2]),
+            "parameters" => params)
+        param(jt, ct) = Dict{String,Any}("name" => "d", "julia_type" => jt, "c_type" => ct)
+        cases = [
+            "const T<…>&, c_type only" => fn(params=Any[param("Cvoid", "const " * key * "&")]),
+            "Ref{T<…>}, julia_type only" => fn(params=Any[param("Ref{" * key * "}", "void")]),
+            "T<…>*, c_type only"        => fn(params=Any[param("Cvoid", key * "*")]),
+            "Ptr{T<…>}, julia_type only" => fn(params=Any[param("Ptr{" * key * "}", "void")]),
+            "T<…> const* const, return"  => fn(ret=("Cvoid", key * " const* const")),
+            "NTuple{2, T<…>}, return"    => fn(ret=("NTuple{2, " * key * "}", "void")),
+            "ns::T<…> as the class"      => fn(class="boost::math::" * key),
+            "const ns::T<…>&&, c_type"   => fn(params=Any[param("Cvoid", "const boost::math::" * key * "&&")]),
+        ]
+        checked = 0
+        for (label, f) in cases
+            md = Dict{String,Any}("functions" => Any[f], "globals" => Dict{String,Any}(),
+                                  "struct_definitions" => structs())
+            r = W._apply_surface_type_filter!(md, String[]; runtime_defined=Set(["f"]))
+            @test haskey(md["struct_definitions"], key)
+            @test !haskey(md["struct_definitions"], "noise<int>")
+            @test r.kept == 1
+            checked += 1
+        end
+        @test checked == length(cases)
+
+        # The template argument's own scope is part of the key and must stay:
+        # peeling `ns::` off an argument would make a different type.
+        md = Dict{String,Any}(
+            "functions" => Any[fn(params=Any[param("Cvoid", "const dist<double, policy<p, p> >&")])],
+            "globals" => Dict{String,Any}(), "struct_definitions" => structs())
+        W._apply_surface_type_filter!(md, String[]; runtime_defined=Set(["f"]))
+        @test !haskey(md["struct_definitions"], key)
+
+        # A bare name is still a token match, dressed or not; a name that merely
+        # ends in `const` is not undressed into something else.
+        @test "my_const" in W._surface_core_spellings("my_const")
+        @test W._surface_core_spellings("my_const") == ["my_const"]
+    end
+
     @testset "config plumbing" begin
         # Both keys must survive a TOML round trip and be PRESERVED across a
         # forced re-discovery — losing them regenerates a wrapper that is broken

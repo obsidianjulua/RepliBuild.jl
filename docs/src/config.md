@@ -537,6 +537,12 @@ see**, and it is why this key is opt-in rather than the default. Two blind spots
 - **Constant-only enums.** A function returning plain `int` never names its error
   enum, so `argon2`'s `Argon2_ErrorCodes` is unreachable by construction.
 
+A record is reached in whatever dress a signature gives it: `const T&`, `T*`,
+`Ref{T}`, `Ptr{T}`, `NTuple{N, T}`, or `ns::T` as a method's receiver, including
+a template instantiation keyed with its arguments
+(`normal_distribution<double, policies::policy<…> >`), which no identifier
+inside the spelling equals.
+
 Patterns are the same anchored globs as `exclude_symbols`, matched against both
 the raw key and the bare name, so `ErrCodes` catches a record keyed
 `__enum__ErrCodes`. **A keep-pattern that matches nothing is a hard error** —

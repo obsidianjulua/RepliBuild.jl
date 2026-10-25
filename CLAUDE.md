@@ -86,9 +86,10 @@ skill drives adding a package.
   (varargs, macros, excludes) and discover would strip them.
 - **`test.jl` REBUILDS, `test_deep.jl` verifies.** `test.jl` calls `RepliBuild.clean`,
   which deletes `build/`, `julia/` and `.replibuild_cache/` including the vendored
-  clone, then rebuilds from cold (minutes, needs network). To check a wrapper works,
-  use `test_deep.jl`. Read a test script before running it. (box2d/tinyxml2/pugixml
-  `test.jl` are exceptions — verifiers only.)
+  clone, then rebuilds from cold (minutes, needs network); `clean(toml;
+  deps=false)` keeps the clone and re-checks its pin instead. To check a wrapper
+  works, use `test_deep.jl`. Read a test script before running it.
+  (box2d/tinyxml2/pugixml `test.jl` are exceptions — verifiers only.)
 - Julia block-buffers redirected stdout: an empty log from a running or killed job is
   normal. Judge progress from artifacts on disk and `pgrep`.
 - **A fix computed at build time needs a rebuild, not a re-wrap.** `class`, signatures
@@ -383,6 +384,13 @@ the test named when you touch the area.
   pattern is a hard error. Seed the walk from method `class` and from globals that are
   **in dynsym**. `_runtime_defined_names` returns `nothing` when it could not look, and
   callers must fail safe on it. **Check public enums by hand** when a package enables it.
+  **A spelling reaches a key in every dress** (`_surface_core_spellings`: `const
+  T&`, `T*`, `Ref{T}`/`Ptr{T}`/`NTuple{N, T}`, and `ns::T` with the scope cut at
+  depth 0 of the template arguments), because a key keeps its template arguments
+  and no identifier token equals `normal_distribution<double, policy<…> >`; before
+  that, boostmath's five distributions were emitted as empty structs (2026-10-25).
+  A new way a signature spells a record goes into that function, never into a
+  second resolver. (`test_surface_types.jl`.)
 - `_drop_unresolvable_globals!` removes globals absent from dynsym before either
   generator runs, unconditionally.
 - `extract_symbols_from_binary` filters `__rb_*` and Itanium adjustor thunks
@@ -926,29 +934,17 @@ check before claiming portability again; reading `.gitignore` does not settle it
   args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
-- **Over-aligned records, what the C sret fix does not cover** (2026-10-18).
-  GeneratorCpp's own ccall path has no aligned buffer; only a record-level
-  `alignment` keeps a function off it, so a member-level `alignas` record can
-  still get a misaligned sret there. Nor does GeneratorC's `[wrap.varargs]`
-  path, which skips BRANCH 0 altogether. An alignment only a typedef carries
-  (`typedef struct S T __attribute__((aligned(16)))`) is not in clang's DWARF.
-  **SysV byval parameters of 16-aligned MEMORY records are wrong when they
-  follow another stack argument** (run 2026-10-24, Linux, Tier 3 C:
-  `take2(Big24, D4A)` with `D4A` `aligned(16)` of four doubles reads the record
-  from the next 16-aligned slot after the 24-byte argument, Julia's ccall placed
-  it 8 bytes earlier; `take1(D4A)` and `take3(Big24, Big24, D4A)` pass because
-  their slots happen to be 16-aligned; fixture in the gitignored
-  `.claude/albig-2026-10-24/`). GeneratorC's parameter traps stop at 16 bytes
-  and never read alignment; `_c_record_align` reaches returns only. Tier 2
-  passes and returns 16-aligned records at 16 (`test_sysv_live.jl`); Win64
-  parameters are safe (LLVM's `byval` lowering puts the copy at 16).
+- **Over-aligned records, what the C sret and byval fixes do not cover**
+  (2026-10-18, narrowed 2026-10-25). GeneratorCpp's own ccall path has no
+  aligned buffer; only a record-level `alignment` keeps a function off it, so a
+  member-level `alignas` record can still get a misaligned sret there. An
+  alignment only a typedef carries (`typedef struct S T
+  __attribute__((aligned(16)))`) is not in clang's DWARF, so a return buffer
+  for one is placed by the stand-in; a parameter's slot is read off the IR's
+  `byval` and is right. GeneratorC's parameters, its `[wrap.varargs]` path and
+  Tier 2 are covered (the invariants above; `test_c_sret_abi.jl`,
+  `test_varargs_emission.jl`, `test_sysv_live.jl`).
 - `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
-- **The `[wrap.varargs]` path skips every SysV by-value guard** (2026-10-24).
-  GeneratorC's varargs interception `continue`s before `blob_abi_offenders`,
-  BRANCH 0's sret handling and the x87 trap run, so a variadic function whose
-  fixed parameters include a packed or float-bearing record of 16 bytes or less
-  gets a plain `@ccall` with the record spelled by name. Hub varargs are
-  printf-style with scalar fixed arguments, so nothing shipped hits it.
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them
   (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). A by-value
@@ -1006,6 +1002,18 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
+- Git dependencies are cloned without their submodules (`_clone_dep` runs a
+  plain `git clone`), so a superproject such as boostorg/boost comes back as an
+  empty tree and each Boost module that stands alone (Math, with
+  `BOOST_MATH_STANDALONE`) has to be its own dep (2026-10-25). Fetching them
+  needs a per-dependency key, since a superproject's submodule set can be
+  hundreds of clones.
+- A template instantiation's Julia name carries its full template arguments
+  (`_julia_function_name`, `_sanitize_c_type_name`), and there is no rename
+  key: Boost.Math's thirteen `default_policy` arguments put `pdf` past 600
+  characters, and a consumer finds it by regex (2026-10-25). A short alias
+  needs a `[wrap]` table from mangled symbol or key to name, through both
+  generators' name derivations.
 - STL members that live in the C++ runtime library are unbound: libc++'s
   `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
   them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches

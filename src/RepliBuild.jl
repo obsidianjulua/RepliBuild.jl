@@ -772,6 +772,9 @@ Remove build artifacts (build/, julia/, caches)
 
 # Arguments
 - `toml_path`: Path to replibuild.toml configuration file (default: "replibuild.toml")
+- `deps`: also remove the vendored git dependencies under `.replibuild_cache/deps/`
+  (default `true`). `deps=false` keeps the clones, so the next build checks their
+  pins instead of fetching them again; everything else in the cache still goes.
 
 # Examples
 ```julia
@@ -780,9 +783,12 @@ RepliBuild.clean()
 
 # Clean specific project
 RepliBuild.clean("path/to/replibuild.toml")
+
+# Rebuild from cold without re-cloning the dependencies
+RepliBuild.clean("path/to/replibuild.toml"; deps=false)
 ```
 """
-function clean(toml_path::String="replibuild.toml")
+function clean(toml_path::String="replibuild.toml"; deps::Bool=true)
     # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)
 
@@ -791,7 +797,7 @@ function clean(toml_path::String="replibuild.toml")
     end
 
     project_dir = dirname(toml_path)
-    clean_internal(project_dir)
+    clean_internal(project_dir; deps=deps)
 end
 
 """
@@ -848,17 +854,36 @@ function _rm_tree(path::String; attempts::Int = Sys.iswindows() ? 5 : 1)
 end
 
 # Internal clean function
-function clean_internal(path::String)
+function clean_internal(path::String; deps::Bool=true)
     # .debug holds the generated MLIR the JIT'd thunks carry in their DWARF, so
     # gdb can show source when you break in one. Regenerated at the next JIT
     # init from the module text, so removing it costs nothing but a rebuild.
     dirs_to_remove = ["build", "julia", ".replibuild_cache", ".debug"]
 
+    # `deps=false` keeps `.replibuild_cache/deps/`, the vendored git clones, and
+    # removes the rest of the cache entry by entry: the IR cache, the project
+    # hash and the slices. The next build re-checks each clone's pin marker
+    # (DependencyResolver) instead of fetching it, which for a Boost-sized
+    # dependency is the difference between seconds and minutes.
+    keep_deps = !deps
     removed = String[]
     for dir in dirs_to_remove
         dir_path = joinpath(path, dir)
         if isdir(dir_path)
             try
+                if keep_deps && dir == ".replibuild_cache"
+                    kept = false
+                    for entry in readdir(dir_path)
+                        if entry == "deps"
+                            kept = true
+                            continue
+                        end
+                        _rm_tree(joinpath(dir_path, entry))
+                    end
+                    kept || _rm_tree(dir_path)
+                    push!(removed, kept ? ".replibuild_cache (deps/ kept)" : dir)
+                    continue
+                end
                 _rm_tree(dir_path)
             catch e
                 # Windows will not delete a file a running process has loaded,

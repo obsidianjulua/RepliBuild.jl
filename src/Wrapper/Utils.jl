@@ -449,11 +449,21 @@ return type, parameter types and receiver `class`, plus the type of every
 global, then their members transitively.
 
 Resolution is deliberately over-inclusive. A spelling is matched whole (`Ptr{X}`
-is itself a key for some template spellings) AND every identifier token inside
-it is tried, both bare and under the `__enum__` prefix the enum records use.
+is itself a key for some template spellings), in each of its undressed forms
+(`_surface_core_spellings`: `const T&` and `T*` from a C++ signature,
+`Ref{T}`/`Ptr{T}`/`NTuple{N, T}` from its Julia type, and `ns::T` as a method's
+`class`, peeled down to the bare key `T`), AND every identifier token inside it
+is tried, all of them bare and under the `__enum__` prefix the enum records use.
 Over-inclusion costs a few unused structs in the module; under-inclusion drops
 API silently, and only one of those is recoverable by the person reading the
 generated source.
+
+The undressing is what reaches a template-spelled record. A key keeps its
+template arguments (`normal_distribution<double, policies::policy<…> >`), so no
+identifier token equals it, and the one spelling that would, the signature's
+`const normal_distribution<…>&` / `Ref{normal_distribution<…>}`, is never the
+key whole. boostmath's five distributions, every `pdf`/`cdf` of which takes one
+by `const&`, were dropped and emitted as empty structs (2026-10-25).
 
 Seeding from `class` is not decorative: a C++ method records its receiver there
 rather than as a parameter, so without it `std::vector<int>` is unreachable from
@@ -490,6 +500,41 @@ function _runtime_defined_names(library_path::AbstractString)
     return _nm_dynamic_names(out)
 end
 
+"""
+    _surface_core_spellings(spelling) -> Vector{String}
+
+The spelling and every form of it with one dress removed, repeated to a fixed
+point: a Julia `Ptr{…}`/`Ref{…}`/`NTuple{N, …}` unwrapped, a C `const`/
+`volatile`/`struct`/`class`/`union`/`enum` prefix cut, a trailing `*`, `&`,
+`&&`, `const`, `volatile` or `[N]` cut, and a leading scope cut at depth 0 of
+the template arguments (`_cpp_innermost_scope`, which keeps the `<…>`). The
+input comes first. `const ns::T<ns::A>&` gives `ns::T<ns::A>&`, `ns::T<ns::A>`
+and `T<ns::A>`, among others; the template argument's `ns::` is untouched,
+because the key carries it.
+"""
+function _surface_core_spellings(spelling::AbstractString)::Vector{String}
+    out = String[]
+    seen = Set{String}()
+    work = [String(strip(spelling))]
+    while !isempty(work)
+        t = pop!(work)
+        (isempty(t) || t in seen) && continue
+        push!(seen, t)
+        push!(out, t)
+        m = match(r"^(?:Ptr|Ref)\{(.*)\}$"s, t)
+        m === nothing || push!(work, String(strip(m.captures[1])))
+        m = match(r"^NTuple\{\s*\d+\s*,(.*)\}$"s, t)
+        m === nothing || push!(work, String(strip(m.captures[1])))
+        u = replace(t, r"^(?:const|volatile|struct|class|union|enum)\s+" => "")
+        u = replace(u, r"(?:\s*(?:\*|&|\bconst|\bvolatile|\[\d*\]))+$" => "")
+        u = String(strip(u))
+        u == t || push!(work, u)
+        inner = _cpp_innermost_scope(t)
+        inner == t || push!(work, inner)
+    end
+    return out
+end
+
 function _surface_type_keys_impl(metadata::Dict{String,Any},
                                  runtime_defined::Union{Set{String},Nothing})::Set{String}
     structs = get(metadata, "struct_definitions", nothing)
@@ -501,8 +546,10 @@ function _surface_type_keys_impl(metadata::Dict{String,Any},
         spelling === nothing && return out
         s = string(spelling)
         isempty(s) && return out
-        s in keyset && push!(out, s)
-        ("__enum__" * s) in keyset && push!(out, "__enum__" * s)
+        for c in _surface_core_spellings(s)
+            c in keyset && push!(out, c)
+            ("__enum__" * c) in keyset && push!(out, "__enum__" * c)
+        end
         for m in eachmatch(r"[A-Za-z_][A-Za-z0-9_:]*", s)
             t = m.match
             t in keyset && push!(out, t)
