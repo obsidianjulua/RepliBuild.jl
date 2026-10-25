@@ -186,10 +186,17 @@ const _SR = Dict{String,Any}(
         @test occursin("callee = @take_big, sysv_args = [\"mem:16\"]", ir)
         # A call with no record by value states nothing, so its IR is unchanged.
         @test occursin("{ callee = @scalars }", ir)
+        # A record whose class cannot be read states nothing either: on SysV it
+        # never reaches a call (refused below), on Win64 the statement is not
+        # read. Throwing instead took every thunk of a Win64 library with it.
+        @test _SRFG.sysv_statement("c_mystery", _SR) == ""
+        @test _SRFG.sysv_statement("c_f_d", _SR) == "regs:sse,sse"
         # The refusals, with the convention's own reason, apart from the layout ones.
         c = _SRFG.thunk_crossings(_srfn("make_ld", "c_ld"), _SR, Dict{String,Any}())
         if Sys.iswindows()
             @test c.trap === nothing
+            @test occursin("{ callee = @take_mystery }", ir)
+            @test occursin("callee = @make_ld, sysv_ret = \"mem:16\"", ir)
         else
             @test occursin("st0", c.abi_trap)
             @test c.layout_trap === nothing

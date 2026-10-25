@@ -689,7 +689,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
                     mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
                     is_packed_param = true
-                    kind === :layout && (sysv_fact = sysv_call_fact(sysv_record_abi(lookup_key, structs)))
+                    kind === :layout && (sysv_fact = sysv_statement(lookup_key, structs))
                 else
                     # Use FULL definition string to avoid alias parser issues in function signatures
                     mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
@@ -697,7 +697,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     # crosses as a packed struct of its bytes (`_byte_region_size`).
                     br = match(r"^!llvm\.array<(\d+) x i8>$", mlir_t)
                     br === nothing || (mlir_t = _byte_blob_type(parse(Int, br.captures[1])))
-                    kind === :layout && (sysv_fact = sysv_call_fact(sysv_record_abi(lookup_key, structs)))
+                    kind === :layout && (sysv_fact = sysv_statement(lookup_key, structs))
                 end
             end
 
@@ -839,7 +839,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # One that comes back through the hidden pointer the thunk passes
         # (`ret_sret`) is no call result, and states nothing.
         ret_fact = ret_kind === :layout && ret_type != "" && !ret_sret && callee_discard_ret == "" ?
-                   sysv_call_fact(sysv_record_abi(ret_key, structs)) : ""
+                   sysv_statement(ret_key, structs) : ""
 
         # External declaration uses the actual C type (packed for packed structs).
         # `callee_discard_ret` is the Win64 empty-record return: real on the

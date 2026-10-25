@@ -427,6 +427,21 @@ function sysv_call_fact(abi::SysVRecordABI)::String
 end
 
 """
+    sysv_statement(key, structs) -> String
+
+What the thunk generator states on a call for the record `key` crossing by
+value: `sysv_call_fact` of its class, or nothing (`""`) for a record whose
+class cannot be read. Such a record reaches emission only on a host whose
+convention does not read the statement: SysV refuses it first
+(`sysv_trap_reason`), and Win64 crosses it by size. Throwing here took every
+thunk of a Win64 library with it (CI, 2026-10-25).
+"""
+function sysv_statement(key, structs)::String
+    abi = sysv_record_abi(key, structs)
+    return abi.kind === :unknown ? "" : sysv_call_fact(abi)
+end
+
+"""
     sysv_trap_reason(key, structs; ret, abi = host) -> Union{String,Nothing}
 
 Why the thunk generator refuses to pass (`ret = false`) or return (`ret = true`)
