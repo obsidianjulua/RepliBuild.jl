@@ -25,9 +25,11 @@ IR. They are configured independently.
 
 A **slice** is a declarations-only module: one function's body, and every
 callee and global it reaches left as a bare `declare`, resolved at JIT time
-against the `.so` the wrapper already `dlopen`'d `RTLD_GLOBAL`. Size tracks
-the *function*, not the library — in Lua, `lua_gettop` is a 2.8 KB slice cut
-from a 15.8 MB module.
+through the process, where the `.so` the wrapper `dlopen`'d `RTLD_GLOBAL` is
+one library among those loaded before it (which is why the library's own
+symbols are declared by alias; guarantee 4 below). Size tracks the
+*function*, not the library — in Lua, `lua_gettop` is a 2.8 KB slice cut from
+a 15.8 MB module.
 
 ```toml
 [link]
@@ -70,7 +72,7 @@ accepted emits the same `ccall` it always did. The module exports
 slice. Slicing successfully is necessary but not sufficient — the ABI shape
 gate still refuses Cstring and struct crossings.
 
-Three guarantees make this safe where whole-module embedding was not:
+Four guarantees make this safe where whole-module embedding was not:
 
 1. **One copy of internal state.** Static promotion (`[link] promote_statics`)
    renames anything a slice might bind by `declare` but that cannot reach the
@@ -88,6 +90,19 @@ Three guarantees make this safe where whole-module embedding was not:
    every name the slice declares. A miss demotes that one function to `ccall`
    with a warning naming the symbol; a `.so` that will not `dlopen` disables
    Tier 1 for the whole wrap.
+4. **The library's own symbols bind to the library.** ORC resolves a
+   `declare` process-wide, and the pre-flight only asks whether the library
+   *has* the symbol, so a public name a slice declared went to whichever
+   library defined it first: Julia loads its own `libz.so.1` at startup, and a
+   zlib wrapper's `gzclose` slice called Julia's `gzclose_w`. With Tier 1 on,
+   promotion also gives every exported definition the exported alias
+   `__rb_<lib>_<name>` (`exported_aliases` in the metadata), and the slice
+   declares the alias. A module built without the aliases refuses such a
+   slice. Symbols the library only declares (libc) keep their names. The
+   library's own native calls to its exports are the same problem one layer
+   down (the dynamic linker resolves its PLT through the process first), so
+   every library is linked `-Bsymbolic` on ELF; the alias covers the slice,
+   which is code outside the library.
 
 Each slice const is paired with an `include_dependency` on the same path, so
 the `.ll` files are real precompilation dependencies. On Julia 1.11+ that
