@@ -197,6 +197,18 @@ const metadata = JSON.parsefile(joinpath(FIXTURE, "julia", "compilation_metadata
                 "st_scaled", "st_table_at")
         @test !haskey(promoted, api)
     end
+
+    # With Tier 1 on, the public API gets an exported ALIAS each instead: the
+    # name a slice declares it by, so that a slice never binds a public name
+    # through the whole process (test_tier1_alias_binding.jl has the story).
+    @test haskey(metadata, "exported_aliases")
+    aliases = metadata["exported_aliases"]
+    for api in ("st_bump", "st_get_count", "st_apply", "st_sum", "st_guarded_div",
+                "st_scaled", "st_table_at", "st_sc_hub")
+        @test get(aliases, api, nothing) == "__rb_slicetest_$api"
+    end
+    @test !haskey(aliases, "st_hidden_scale")      # promoted, so already unique
+    @test !haskey(aliases, "OP_TABLE")             # internal
 end
 
 @testset "Dynamic symbol table matches" begin
@@ -218,6 +230,14 @@ end
     # De-hidden LUAI_DDEF table: read-only data, exported under __rb_ only
     @test occursin(r" R __rb_slicetest_ST_HIDDEN_TABLE\b", dynsyms)
     @test !occursin(r"\bST_HIDDEN_TABLE\b", dynsyms)
+
+    # The public API is in the table under BOTH names: its own, and the alias a
+    # slice binds it by, both text.
+    @test occursin(r" T st_bump\b", dynsyms)
+    @test occursin(r" T __rb_slicetest_st_bump\b", dynsyms)
+    for (api, alias) in metadata["exported_aliases"]
+        @test occursin(alias, dynsyms)
+    end
 end
 
 @testset "Single copy of state (dlsym ↔ API coherence)" begin
