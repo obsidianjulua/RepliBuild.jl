@@ -96,6 +96,34 @@ using RepliBuild
         end
     end
 
+    # discover's rule: only `build=true, wrap=true` registers, and `register`
+    # builds, vendors, and adds a package to a Julia environment. Until
+    # 2026-10-26 the default (`build=false`) registered too, which since 4.3.0
+    # built, wrapped and changed `@v#.#`, with any failure logged at `@debug`.
+    @testset "ingest() registers only with build and wrap" begin
+        mktempdir() do dir
+            fake_lib = joinpath(dir, "libfake.so.6")
+            touch(fake_lib)
+            home = joinpath(dir, "rb_home")
+            withenv("REPLIBUILD_HOME" => home, "REPLIBUILD_JULIA_ENV" => "none") do
+                toml_path = RepliBuild.ingest(fake_lib, project_dir=joinpath(dir, "bare"))
+                @test isfile(toml_path)
+                @test isempty(RepliBuild.PackageRegistry._load_index().entries)
+                @test !isdir(joinpath(dir, "bare", "julia"))
+
+                # A registration failure surfaces. A file where the registry
+                # home should be makes `register` fail before it builds; a
+                # swallowed failure would reach the build instead, which
+                # refuses the empty library with an ErrorException.
+                write(home * "_file", "")
+                withenv("REPLIBUILD_HOME" => home * "_file") do
+                    @test_throws Base.IOError RepliBuild.ingest(
+                        fake_lib, project_dir=joinpath(dir, "full"), build=true, wrap=true)
+                end
+            end
+        end
+    end
+
     @testset "ingest() rejects missing libraries" begin
         @test_throws Exception RepliBuild.ingest("/nonexistent/libfoo.so")
     end

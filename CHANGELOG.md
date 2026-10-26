@@ -4,6 +4,12 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### `ingest` registers the way `discover` does (2026-10-26)
+
+- **A bare `ingest` built, wrapped and changed the user's Julia environment.** `ingest` defaulted `register=true` and called `PackageRegistry.register` right after writing the TOML, before its own `build`/`wrap`, inside a `try` that logged failures at `@debug`. Since 4.3.0 `register` builds and wraps in place, vendors to `~/.replibuild/builds/<hash>/` and adds a package to `@v#.#`, so `ingest(lib; headers=…)` with the default `build=false` did all of that, and a failure (a library without DWARF, say) left a registry entry and said nothing. The comment claimed this mirrored `discover`, which registers only with `build=true, wrap=true`. Found in a walkthrough of the user docs.
+- **Now `discover`'s rule.** A bare call writes the TOML and nothing else; `build=true, wrap=true` calls `register`, which builds, wraps, and then vendors; `register=false` builds and wraps only. A registration failure is thrown. The docstring and the Ingest sections of `guide.md` and `api.md` say so.
+- **Tests.** `test_ingest.jl` (runtests), with `REPLIBUILD_HOME` in a temp dir and `REPLIBUILD_JULIA_ENV=none`: a default call leaves the registry empty and builds nothing, and with the registry home blocked by a file, `build=true, wrap=true` throws the registry's `IOError` instead of reaching the build. With the old tail restored both fail (an entry `fake` is registered; the build's `ErrorException` is thrown instead). devtests' ingest block: `build=true, wrap=true` on the c_test library leaves an entry with a vendored wrapper and no Julia environment.
+
 ### `surface_types_only` reaches a template-spelled record (2026-10-25)
 
 - **A record keyed with its template arguments was unreachable from every signature that names it.** `_surface_type_keys` matched a spelling whole or by identifier token. A template instantiation's key keeps its arguments (`normal_distribution<double, boost::math::policies::policy<…> >`), so no token equals it, and a signature never spells it whole: boostmath's `pdf`/`cdf`/`quantile` take their distribution as `const T<…>&` (`Ref{T<…>}`), its constructors and accessors as `T<…>*`, and its methods record `boost::math::T<…>` as the class. All five distributions were dropped with the internals and emitted as empty structs, with no error; the Hub package kept them through `surface_types_extra`. Found wrapping Boost.Math, 2026-10-25.

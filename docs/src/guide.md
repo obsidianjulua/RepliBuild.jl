@@ -196,3 +196,9 @@ toml = RepliBuild.ingest("/path/to/libfoo.so",
 
 That writes an `[ingest]` section. Its presence is the mode switch. Prefer
 `discover`/`build`/`wrap` whenever the sources compile under one flag set.
+
+Registration follows `discover`: a bare `ingest(so; headers=…)` writes the TOML
+and does nothing else, while `build=true, wrap=true` builds, wraps, and then
+registers the project, which vendors it to `~/.replibuild/` and adds it to your
+Julia environment (`REPLIBUILD_JULIA_ENV` changes which). Pass `register=false`
+to build and wrap without registering.

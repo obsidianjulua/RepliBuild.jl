@@ -79,6 +79,9 @@ toml = RepliBuild.ingest("/path/to/libfoo.so",
                          build=true, wrap=true)
 ```
 
+As with `discover`, only `build=true, wrap=true` registers (after wrapping);
+`register=false` skips it, and a bare call writes the TOML only.
+
 ```@docs
 ingest
 ```

@@ -429,7 +429,8 @@ end
 
 """
     ingest(library_path; headers=String[], extra_link_libs=String[],
-                         name="", project_dir=".", language=:c, build=false, wrap=false) -> String
+                         name="", project_dir=".", language=:c, build=false, wrap=false,
+                         register=true) -> String
 
 **EXPERIMENTAL.** Scaffold a `replibuild.toml` for **ingest mode**: wrap a pre-built
 `.so` (built by upstream's own build system) without recompiling. RepliBuild only runs
@@ -463,6 +464,15 @@ reproduce.
 - `language`: `:c` or `:cpp` — drives wrapper generator selection
 - `build`: also run `build()` after scaffolding
 - `wrap`: also run `wrap()` (requires `build=true`)
+- `register`: with `build=true, wrap=true`, register the project afterwards
+  (`register`), as `discover` does; `false` builds and wraps only
+
+Registration follows `discover`: a bare call writes the TOML and does nothing
+else. With `build=true, wrap=true` it builds and wraps the project in
+`project_dir`, then registers it, which vendors the build to
+`~/.replibuild/builds/` and adds a package to a Julia environment (`@v#.#`
+unless `ENV["REPLIBUILD_JULIA_ENV"]` names another). A registration failure
+is thrown, not logged.
 
 # Returns
 Path to the generated `replibuild.toml`.
@@ -554,22 +564,16 @@ function ingest(library_path::String;
         )))
     end
 
-    # Auto-register, mirroring discover()'s behavior so `RepliBuild.use(name)` works.
-    if register
-        try
-            PackageRegistry.register(toml_path)
-        catch e
-            @debug "Auto-registration skipped" exception=e
-        end
-    end
-
-    if build
-        build_func = getfield(@__MODULE__, :build)
-        build_func(toml_path)
-        if wrap
-            wrap_func = getfield(@__MODULE__, :wrap)
-            wrap_func(toml_path)
-        end
+    # discover's rule (`Discovery._build_and_wrap`): only `build=true, wrap=true`
+    # registers, and `register` itself builds and wraps in place before it
+    # vendors. A bare ingest writes the TOML and nothing else. A failure
+    # propagates: `register` adds a package to a Julia environment.
+    build || return toml_path
+    if wrap && register
+        PackageRegistry.register(toml_path)
+    else
+        getfield(@__MODULE__, :build)(toml_path)
+        wrap && getfield(@__MODULE__, :wrap)(toml_path)
     end
 
     return toml_path
