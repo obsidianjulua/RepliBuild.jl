@@ -23,6 +23,34 @@ registered release, which can be older than what is described here;
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
   folder ([Install](install.md#The-JLCS-dialect)).
 
+## Unreleased (on `main`)
+
+In this manual, and not yet in a registered release, so not in what `Pkg.add`
+installs:
+
+- **`clean(toml; deps=false)`** keeps the vendored git clones, so a rebuild from
+  cold checks their pins instead of fetching them again.
+- **`ingest` registers the way `discover` does:** only with `build=true,
+  wrap=true`, after wrapping. A bare call writes the TOML and nothing else.
+- **`Pkg.build` builds the JLCS dialect on Windows**, and rebuilds it after an
+  LLVM minor upgrade.
+- **Fixes in what `build` extracts — rebuild, then re-wrap:**
+  - Tier 2 on Linux classifies a record passed or returned by value from its
+    DWARF facts, not from the body it crosses as. Records with padding, nested
+    records, unions, bitfields, `long double` or `__int128` crossed wrong.
+  - Tier 3 on Linux places a by-value record C aligns to 16 in the stack slot C
+    reads, or refuses the call.
+  - Template parameters are read on Linux, and `const void *` is recorded as
+    itself instead of an unknown type.
+  - On Linux every library binds its own exported functions to itself
+    (`-Bsymbolic`), and Tier 1 slices name them by alias: a library that Julia
+    also loads (zlib) no longer calls Julia's copy.
+- **`surface_types_only`** keeps the records a signature spells with template
+  arguments.
+- **Header enums** come only from the project's own headers, and
+  **`scaffold_package`** includes the wrapper file `wrap` writes.
+- Parallel builds no longer clear the caller's `LD_LIBRARY_PATH` and `CPATH`.
+
 ## v4.3.0 (2026-10-23)
 
 **The registry builds a project where it lives; AOT thunks come from `wrap`.**

@@ -86,6 +86,18 @@ function that calls `use` and then calls into the module fails with
 `method too new to be called from this world context`. Inside such a function,
 write `Base.@invokelatest M.f(x)`.
 
+**Iterating in one session.** `use` is also the REPL loop. Edit the project or
+its TOML, call `use` again, and in the same session it rebuilds, vendors the
+new build to a folder of its own and returns a new module: about 2.5 s after an
+edit on a one-header C library, 3 s on a C++ one. Keep the module it returns
+(`M = RepliBuild.use("myproject")`). One you got earlier keeps calling the
+build it was loaded from, so nothing you hold breaks. Including the project's
+own `julia/MyProject.jl` cannot iterate like this: the rebuild in place has to
+replace a library the session has loaded, which Windows refuses. Each edit
+leaves its vendored build under `~/.replibuild/builds/`, and nothing deletes
+the older ones (`unregister` removes the last), so clear them out by hand now
+and then.
+
 ## Inspect and remove
 
 ```julia
@@ -95,6 +107,9 @@ RepliBuild.unregister("myproject")
 
 `unregister` removes what the registry made: the vendored build, the package,
 and the package's place in the Julia environment. It never touches the project.
+On Windows, a session that has loaded the vendored build (through `use`, or
+`using` the package) still has its DLL open, so `unregister` there warns and
+leaves that build's folder behind; delete it after the session ends.
 
 `ENV["REPLIBUILD_HOME"]` relocates the whole tree (`registry/`, `builds/`,
 `packages/`).

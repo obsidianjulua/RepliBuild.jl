@@ -103,6 +103,7 @@ Not exported. Qualified access only. Full usage: [Call a wrapper](calling.md#Int
 |------|-----------------|
 | `struct_size(name)` | Byte size of a wrapped struct |
 | `member_offset(name, member)` | Byte offset of a member |
+| `STRUCT_SIZES` / `STRUCT_OFFSETS` | Every size and member offset those two read, as `Dict`s |
 | `LIBRARY_PATH` | The library the wrapper calls (the copy beside the wrapper first, else the build-time path) |
 | `LIBRARY_SHA` / `BUILD_TARGET` / `BUILD_GENERATOR` | SHA-256 of the library it was generated against, the target triple, and the RepliBuild version that wrote it |
 | `dispatch_tier(f)` | Which path `f` will actually take (`:tier1` / `:tier2` / `:tier3`, or `:unknown` / `:mixed` / `:deferred`) |

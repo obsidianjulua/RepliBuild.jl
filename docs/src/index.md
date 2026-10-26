@@ -9,6 +9,9 @@ compiler actually emitted, and writes a Julia module you can call. You drive it
 with a few verbs and a `replibuild.toml`. You do not write `ccall`s, and you do
 not maintain generated bindings.
 
+It wraps a library from its source, on your machine. It is not a replacement for
+BinaryBuilder and JLL packages, which ship prebuilt binaries for every platform.
+
 This site is the user manual: how to install, how to wrap a library, what to
 edit in the TOML, and how to call the result.
 
@@ -34,7 +37,6 @@ under [Developer](developer.md). You do not need it to wrap a library.
 using RepliBuild
 
 toml = RepliBuild.discover("path/to/project")   # writes replibuild.toml
-# edit the TOML: flags, excludes, macros, varargs, ownership
 RepliBuild.build(toml)                          # clang → .so
 RepliBuild.wrap(toml)                           # .so → julia/MyProject.jl
 
@@ -43,9 +45,10 @@ using .MyProject
 ```
 
 Or all at once: `RepliBuild.discover("path/to/project", build=true, wrap=true)`.
-Then open the TOML and fill in what discovery cannot see — that edit is the
-whole skill. [Wrap a library](guide.md) walks it; [Edit the TOML](config.md)
-is the reference.
+Then see what the wrapper is missing, fill in what discovery cannot see, and
+build and wrap again. That edit is the whole skill.
+[Wrap a library](guide.md) walks it; [Edit the TOML](config.md) is the
+reference.
 
 The project builds where it lives. `RepliBuild.register(toml)` then vendors the
 build to `~/.replibuild/` and adds a Julia package around it to your Julia
@@ -103,6 +106,9 @@ the thing, or leaks, or wraps an empty struct. The symptom → key table is in
   own libLLVM. On Windows that JLL borrows the MSYS2 CLANG64 sysroot for its
   headers and CRT, and DWARF extraction needs GNU `objdump`.
 - **C++ libraries:** system LLVM/MLIR 21+, CMake 3.20+, and the JLCS dialect
-  library built against that LLVM. See [Install](install.md).
+  library built against that LLVM. See [Install](install.md). Every machine
+  that *runs* a C++ wrapper needs the LLVM/MLIR and the dialect too, not only
+  the one that generated it ([Ship a package](using-wrappers.md#Deployment)).
+- **git**, for a `[dependencies]` entry of `type = "git"`.
 
 This manual writes `.so`; on Windows read `.dll`.
