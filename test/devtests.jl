@@ -194,6 +194,21 @@ end
         @test isfile(wrapper)
         @test endswith(wrapper, ".jl")
     end
+
+    # `build=true, wrap=true` registers after wrapping, as discover does: the
+    # entry carries a vendored build.
+    mktempdir() do tmp
+        withenv("REPLIBUILD_HOME" => joinpath(tmp, "rb_home"), "REPLIBUILD_JULIA_ENV" => "none") do
+            toml = RepliBuild.ingest(src_lib, headers=[joinpath(src_dir, "include")],
+                                     name="c_ingest_reg", project_dir=joinpath(tmp, "proj"),
+                                     language=:c, build=true, wrap=true)
+            entry = RepliBuild.PackageRegistry._load_index().entries["c_ingest_reg"]
+            @test entry.toml_path == abspath(toml)
+            @test !isempty(entry.build_hash)
+            @test isfile(joinpath(tmp, "rb_home", "builds", entry.build_hash, entry.module_name * ".jl"))
+            @test isempty(entry.julia_env)
+        end
+    end
 end
 
 # ── 3. Registry tests — OWNED BY runtests.jl, deliberately not included here ──
