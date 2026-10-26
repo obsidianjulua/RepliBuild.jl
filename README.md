@@ -10,6 +10,9 @@ compiler actually emitted, and writes a Julia module you can call. You drive it
 with a few verbs and a `replibuild.toml`. You do not write `ccall`s, and you do
 not maintain generated bindings.
 
+It wraps a library from its source, on your machine. It is not a replacement for
+BinaryBuilder and JLL packages, which ship prebuilt binaries for every platform.
+
 **[User manual](https://obsidianjulua.github.io/RepliBuild.jl/stable/)** — install,
 wrap a library, edit the TOML, call the result.
 
@@ -19,7 +22,6 @@ wrap a library, edit the TOML, call the result.
 using RepliBuild
 
 toml = RepliBuild.discover("path/to/project")   # scan sources, write replibuild.toml
-# edit the TOML: flags, excludes, macros, varargs, ownership
 RepliBuild.build(toml)                          # clang → .so
 RepliBuild.wrap(toml)                           # .so → julia/MyProject.jl
 
@@ -28,8 +30,9 @@ using .MyProject
 ```
 
 Or `RepliBuild.discover("path/to/project", build=true, wrap=true)` in one call.
-Then open the TOML — discovery writes the shape of the tree; you add the things
-it cannot see.
+Then see what the wrapper is missing, add it to the TOML (macros, variadic
+overloads, `char*` ownership, flags, excludes) and build and wrap again:
+discovery writes the shape of the tree; you add the things it cannot see.
 
 The project builds where it lives. When the wrapper is ready,
 `RepliBuild.register(toml)` vendors that build to `~/.replibuild/` and adds a
@@ -94,9 +97,13 @@ lists every key, what discovery cannot infer, and a symptom → key index.
   against it. `Pkg.build("RepliBuild")` builds it when the LLVM/MLIR tools are
   installed (on Windows, in MSYS2 CLANG64).
   [Install](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/)
-  has the steps.
+  has the steps. Every machine that *runs* a C++ wrapper needs them too, not
+  only the one that generated it
+  ([Ship a package](https://obsidianjulua.github.io/RepliBuild.jl/stable/using-wrappers/#Deployment)).
+- **git**, for a `[dependencies]` entry of `type = "git"`: RepliBuild runs the
+  `git` command, and `check_environment()` does not check for it.
 
-`RepliBuild.check_environment()` reports which of those this machine has.
+`RepliBuild.check_environment()` reports which of the others this machine has.
 
 ### Windows
 

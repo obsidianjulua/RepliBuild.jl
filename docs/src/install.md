@@ -38,24 +38,32 @@ the `clang` on `PATH`, then under `MSYS2_ROOT` (default `C:\msys64`);
 `REPLIBUILD_C_SYSROOT` overrides both, and a candidate is accepted only if it
 really holds `include/math.h`.
 
+**git**, on either system, if a `[dependencies]` entry fetches source from git
+(every RepliBuild-Hub config does). RepliBuild runs the `git` command, and
+`check_environment()` does not check for it: without it the clone fails with a
+`Failed to clone dependency` warning and the build fails later on missing files.
+
 ## C++ libraries
 
-C++ needs a system LLVM/MLIR **21 or newer** (verified against 23.1.3 under
-MSYS2 CLANG64, and 22.x on Linux), CMake 3.20+, and the JLCS dialect built
-against that LLVM (below).
+C++ needs a system LLVM/MLIR **21 or newer**, CMake 3.20+, and the JLCS dialect
+built against that LLVM (below). 21 is the oldest the dialect builds against;
+what is tested is 22 and 23 (the Linux CI job, from apt.llvm.org) and 23.1.3
+(MSYS2 CLANG64 on Windows), so install one of those.
 
 Put LLVM's `bin` directory on `PATH`, so that `llvm-config`, `clang++`,
 `mlir-tblgen` and `llvm-dwarfdump` resolve to it. A C++ wrapper runs
 `llvm-dwarfdump` by that name when it loads, unless it was built with AOT
 thunks. apt.llvm.org packages keep those names in `/usr/lib/llvm-<N>/bin`.
 
-OS-specific install hints (`check_environment()` prints the same ones):
+OS-specific install hints (`check_environment()` prints the same ones, for the
+minimum version, 21):
 
 ```bash
-# Ubuntu/Debian — what the Tier 2 Linux CI job installs
-wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 21
-sudo apt install llvm-21-dev libmlir-21-dev mlir-21-tools
-export PATH="/usr/lib/llvm-21/bin:$PATH"
+# Ubuntu/Debian, from apt.llvm.org. The Linux CI job installs these packages
+# (and clang-N) for N = 22 and 23.
+wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 23
+sudo apt install llvm-23-dev libmlir-23-dev mlir-23-tools
+export PATH="/usr/lib/llvm-23/bin:$PATH"
 
 # Fedora/RHEL
 sudo dnf install llvm-devel mlir-devel clang-devel
@@ -139,7 +147,10 @@ MSYS2 repo carrying MLIR.
    finds the toolchain through it, and `libJLCS.dll` imports `libLLVM-<N>.dll`
    and `libc++.dll` from it. Julia itself can run from any shell or editor; it
    does not have to be started from MSYS2.
-5. For C++, build the dialect ([above](#The-JLCS-dialect)).
+5. For git dependencies, have a `git` on the Windows `PATH`, such as Git for
+   Windows. MSYS2's own `git` package installs into `C:\msys64\usr\bin`, which
+   these steps do not put on `PATH`.
+6. For C++, build the dialect ([above](#The-JLCS-dialect)).
 
 To work from a clone, run `git config --global core.longpaths true` before
 cloning. Line endings take care of themselves: the repository's

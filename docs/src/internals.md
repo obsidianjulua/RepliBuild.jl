@@ -5,7 +5,7 @@
     Sister pages: [JLCS / MLIR](mlir.md), [Inheritance ABI](inheritance-abi.md),
     [Developer index](developer.md).
 
-RepliBuild compiles C/C++ with Clang, reads the DWARF debug metadata the compiler emits about its own output, and generates Julia bindings that are correct by construction — struct offsets, enum underlying types, vtable slots, base-subobject offsets, and calling conventions all come from the compiler's own record rather than being guessed. Where DWARF is incomplete (enums the optimizer folded away, macro definitions, function-pointer typedefs) the Clang.jl AST fills the gap; where Julia's computed struct alignment disagrees with the DWARF size, the struct is treated as packed and routed away from `ccall`.
+RepliBuild compiles C/C++ with Clang, reads the DWARF debug metadata the compiler emits about its own output, and generates Julia bindings that are correct by construction — struct offsets, enum underlying types, vtable slots, base-subobject offsets, and calling conventions all come from the compiler's own record rather than being guessed. Where DWARF is incomplete (enums the optimizer folded away, function-pointer typedefs) the Clang.jl AST fills the gap (macros come only from `[wrap.macros]`, which compiles a shim per macro); where Julia's computed struct alignment disagrees with the DWARF size, the struct is treated as packed and routed away from `ccall`.
 
 This page is the technical reference for how that pipeline is assembled — the stages, the three dispatch tiers, and the modules behind each.
 

@@ -22,24 +22,38 @@ do both in one function, call through `Base.@invokelatest M.f(x)`.
 Never hand-edit `julia/MyProject.jl`. Regenerate with `wrap()`. Put Julia-shaped
 API in your own module — [Ship a package](using-wrappers.md).
 
+A name that would shadow one of Base's or Core's is defined but not exported: a
+C union called `Number` is `MyProject.Number`, never plain `Number`. `wrap`
+prints those names, and the wrapper lists them in a "Withheld from `export`"
+comment.
+
 ## Types
 
 **Structs.** Named fields when Julia's layout reproduces every DWARF offset and
 the total size. Otherwise an opaque byte blob with typed getters/setters. Padding
 fields are explicit. Circular references are ordered so the module loads.
-Structs are values, because they cross the ABI by value: `setproperty(x, :f, v)`
-returns a copy with the field changed, and `x.f = v` is an error. `T()` returns
-one with every byte zero.
+Structs are values, because they cross the ABI by value: `x.f = v` is an error,
+and `T()` returns one with every byte zero. To change a field, make a new value:
+`Vec2(9.0, v.y)`, or `setproperty(x, :f, v)` / `setproperties(x; f = v)` where
+the wrapper defines them, which return a copy. A C++ wrapper defines them for
+every struct, a C wrapper for its byte-blob structs.
 
 **Enums.** `@enum` with the underlying type from the headers. A C enum whose
 members are bit flags is an integer alias plus named constants instead, so
 `A | B` works.
 
 **Unions.** A `mutable struct` holding the union's bytes
-(`data::NTuple{N,UInt8}`), with `U()` for a zeroed one and typed `get_…` /
-`set_…!` accessors for each member.
+(`data::NTuple{N,UInt8}`), with `U()` for a zeroed one and, for each member, a
+getter and a setter that writes into the union: `get_U_m(u)` / `set_U_m!(u, v)`
+in a C wrapper, `get_m(u)` / `set_m!(u, v)` in a C++ wrapper.
 
-**Bitfields.** Accessors that read and write only the field's byte span.
+**Bitfields.** A getter and a setter for each field, which read and write only
+its bits: `get_f(s)`, and in a C wrapper `set_f(s, v)`, which returns a new
+struct; in a C++ wrapper the record is a `mutable struct` and `set_f!(s, v)`
+writes into it.
+
+**Macros** declared in `[wrap.macros]` are functions: `lua_pop(L, 1)`. A value
+macro takes no arguments: `LUA_REGISTRYINDEX()`.
 
 **Function pointers.** `Ptr{Cvoid}`, which a `@cfunction` converts to. The
 docstring shows the `@cfunction` call for the callback's signature: the header's
@@ -63,6 +77,11 @@ variant: no copy, no NULL check, never freed.
 cJSON_Print = "cJSON_free"
 ```
 
+A `<name>_ptr` result is a `Cstring`. To free it yourself, pass the library's
+free function a `Ptr{Cvoid}` (`M.cJSON_free(Ptr{Cvoid}(p))`; the `Cstring` itself
+is a `MethodError`), or give a buffer the library got from `malloc` to
+`M.libc_free(p)`.
+
 **Pointers and references.** `T*` → `Ptr{T}`, `T**` → `Ptr{Ptr{T}}`, `T&` → `Ref{T}`.
 
 ## Arguments
@@ -79,6 +98,11 @@ Some take exactly one Julia type — fixed-width integers such as `int32_t`
 (`Int32`), and floating point in a C++ wrapper (`Cdouble`): write `2.0`, not
 `2`. Each function's signature says which.
 
+**Variadic functions** have one function per overload declared in
+`[wrap.varargs]`, named after its variadic types: `lua_pushfstring_Cstring(L,
+fmt, s)`. The plain name takes the fixed parameters only
+([Edit the TOML](config.md#2.3-Variadic-functions)).
+
 **Memory the library allocated** is freed by the library: through its own free
 function, or `M.libc_free(ptr)` for memory it got from `malloc`. Never
 `Libc.free` it. On Windows Julia's `Libc` is a different C runtime from the
@@ -88,7 +112,9 @@ memory you allocated with `Libc.malloc`.
 ## C++
 
 **Methods** are `Class_method(this, …)` and expect `this` to already point at
-the **`Class` subobject**.
+the **`Class` subobject**. A namespace is part of the name:
+`tinyxml2::XMLComment::ParseDeep` is `tinyxml2_XMLComment_ParseDeep`, and a
+template's arguments are too (`hol::Box<double>::get` is `hol_Box_double_get`).
 
 ### Objects
 
@@ -123,10 +149,13 @@ retains ownership (a `b2Body*` owned by its world).
 **Factory/destructor pairs** (`create_X` / `destroy_X`) also become a `mutable
 struct` with a GC finalizer and method proxies.
 
-**Upcasts.** Multiple inheritance emits `<Derived>_as_<Base>(p)` (a constant
-offset). Virtual inheritance emits `<Derived>_as_<VBase>(p)` (offset read from
-the object's vtable). To call a `Base` method on a `Derived`, pass
-`Derived_as_Base(obj)` as the handle. That is the only rule.
+**Upcasts.** When a base subobject does not start where the object does, the
+wrapper emits `<Derived>_as_<Base>(p)`: a constant offset for a non-virtual base
+(multiple inheritance), an offset read from the object's vtable for a virtual
+base. To call a `Base` method on a `Derived`, pass `Derived_as_Base(obj)` as the
+handle. Where there is no such helper, as in plain single inheritance, the base
+starts at the object: pass the derived pointer itself (`Shape_id(p)` for a
+`p::Ptr{Rect}`).
 
 MI base *members* are flattened onto the derived type. Virtual-base members are
 not — upcast, then use the base's accessors.
@@ -149,8 +178,9 @@ None of these are exported. Reach for them qualified:
 
 | Name | What it answers |
 |------|-----------------|
-| `M.struct_size(:Type)` | Byte size, from DWARF |
+| `M.struct_size(:Type)` | Byte size, from DWARF (a `String` works too) |
 | `M.member_offset(:Type, :field)` | Byte offset of a member |
+| `M.STRUCT_SIZES`, `M.STRUCT_OFFSETS` | Every size and member offset those two read, as `Dict`s |
 | `M.BUILD_GENERATOR` | RepliBuild version that wrote this wrapper |
 | `M.LIBRARY_SHA` | SHA-256 of the library the wrapper was generated against |
 | `M.dispatch_tier(f)` | Which calling path `f` **actually** uses right now |

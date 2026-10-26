@@ -40,8 +40,11 @@ destroying your intent. The preserved set is:
 | `[wrap]` | `exclude_symbols` |
 | `[wrap]` | `surface_types_only` |
 | `[wrap]` | `surface_types_extra` |
+| `[wrap]` | `headers` |
 | `[wrap]` | `tier1` |
 | `[link]` | `promote_statics` |
+| `[compile]` | `visibility` |
+| `[platform]` | `linux`, `windows`, `macos` |
 
 A regenerated *non-empty* value wins; an empty or absent one gets the preserved
 value. A hand-edited key **not** in that table is wiped by `force=true`.
@@ -67,6 +70,7 @@ things or is wrong.
 |---|---|---|
 | is C++ and you want STL/template types | `[types] templates` + `template_headers` | The type never appears in DWARF; members typed `Any`, methods missing |
 | exposes API through preprocessor macros | `[wrap.macros.*]` + `[wrap] shim_headers` | The macro simply does not exist in the wrapper — no error |
+| is header-only, or keeps API in inline functions | `[wrap] shim_defines`, a file that compiles them, `[wrap.macros.*]` or `[types] templates` ([Header-only libraries](guide.md#Header-only-libraries)) | Header-only: `build` produces no library. Inline functions: absent from the wrapper, no error |
 | has variadic functions worth calling with arguments | `[wrap.varargs]` | Only the zero-variadic base wrapper is generated |
 | returns malloc'd `char*` | `[wrap.cstring_owned]` | Every call leaks the C buffer |
 | links generated or vendored C++ you don't want wrapped | `[wrap] exclude_symbols` | Thousands of non-API symbols wrap; reaching for `-fvisibility=hidden` instead can erase the whole API |
@@ -111,6 +115,10 @@ template_headers = ["<vector>", "<string>", "<map>"]
   same for `wstring` / `u16string` / `u32string`.
 - Entries starting with `<` are emitted as `#include <…>`; anything else becomes
   `#include "…"`.
+- With no other source, the stub is the whole build, so a header-only template
+  library needs nothing more. A function template cannot be named here:
+  instantiate it in a file of your own
+  ([Header-only libraries](guide.md#Header-only-libraries)).
 
 Once instantiated, the STL method symbols are extracted
 (`extract_stl_method_symbols`) and become container accessor thunks. A C++
@@ -152,6 +160,12 @@ ret = "int"
   survive `-fvisibility=hidden` builds and LTO internalization — without that,
   projects like box2d3 would silently lose every macro.
 - In Julia the `replibuild_shim_` prefix is stripped: you call `lua_pop(L, 1)`.
+  A value macro is a function of no arguments: `LUA_REGISTRYINDEX()`.
+- The shim calls the name the way C calls a function, so an entry works for a
+  `static inline` function too, which never becomes a symbol of the library
+  ([Header-only libraries](guide.md#Header-only-libraries)).
+- `shim_headers` does nothing without entries here or in `shim_defines` (below):
+  no shim file is written.
 
 !!! warning "The shim's `#include` must resolve inside your tree"
     The shim TU is generated under the build cache, not inside the source tree,
@@ -210,10 +224,31 @@ Three rules, each of which has bitten someone:
 3. **It is a list of lists.** `f = ["Cint"]` is one overload taking… nothing
    coherent; the parser rejects it and tells you to write `f = [["Cint"]]`.
 
+Each overload is a function of its own, named after its variadic types:
+`lua_pushfstring_Cstring(L, fmt, s)`, `lua_pushfstring_Cstring_Cint(L, fmt, s, i)`.
+The plain `lua_pushfstring(L, fmt)` takes the fixed parameters only. A
+`Ptr{X}` type sanitizes to `_PtrX` in the name.
+
 Vararg wrappers lower as **true variadic calls** (the `@ccall` semicolon form), so
 the x86-64 SysV variadic protocol — including the `AL` register-count setup that
-gates the callee's `va_start` — is formally correct, float varargs included. A
-`Ptr{X}` overload sanitizes to `_PtrX` in the generated function name.
+gates the callee's `va_start` — is formally correct, float varargs included.
+
+**`proven_at`.** The overloads are a reading of upstream's API that no rebuild
+can check, so `wrap` warns on every run (`[wrap.varargs] … is unversioned`)
+until the table names the upstream commit they were checked against:
+
+```toml
+[wrap.varargs]
+proven_at       = "1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3"
+lua_pushfstring = [["Cstring"], ["Cint"], ["Cstring", "Cint"]]
+```
+
+It is compared with the `commit` of the `[dependencies]` entry named like
+`[project] name`, or else of the only entry that has a `commit`; a prefix of
+either matches. A different commit is a hard error: check the overloads against
+the new sources, then update `proven_at`. So is a `proven_at` with no commit to
+compare against, or with several and none named like the project: a project
+with no pinned dependency cannot set it, and keeps the warning.
 
 ### 2.4 `char*` return ownership
 
@@ -319,8 +354,14 @@ the directory containing `replibuild.toml`, because `build()` runs there.
 ```toml
 [link]
 link_libraries = ["m", "pthread", "dl"]   # → -lm -lpthread -ldl
-link_dirs      = ["/opt/thing/lib"]       # → -L/opt/thing/lib
+link_dirs      = ["/opt/thing/lib"]       # → -L/opt/thing/lib, plus an rpath
 ```
+
+A `link_dirs` entry also becomes an rpath (`$ORIGIN` first, then the directory),
+so at run time the library loads the copy it was linked against, not a
+distribution's. Windows has no rpath: there the wrapper opens the
+`link_libraries` DLLs it finds in `link_dirs` before the library, looking next
+to the wrapper first.
 
 A shared library links happily with `sin` left undefined, so omitting `-lm` is not
 a build error — it is a `.so` whose `DT_NEEDED` chain is short. That matters
@@ -692,7 +733,7 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 | `optimization_level` | String | `"0"` | `"0"`–`"3"`, `"s"`, `"z"`; a leading `O`/`o` is stripped, so `"O2"` works. `discover()` writes `"0"`; Hub configs use `"2"` |
 | `enable_lto` | Bool | `true` for `language = "c"`, else `false` | Whole-module `llvmcall` payload — see the warning below |
 | `link_libraries` | Vector{String} | `[]` | `-l` entries |
-| `link_dirs` | Vector{String} | `[]` | `-L` entries |
+| `link_dirs` | Vector{String} | `[]` | `-L` entries, each also an rpath (`$ORIGIN` first). On Windows the wrapper opens the `link_libraries` DLLs found there before the library — §2.8 |
 | `fallback` | Bool | `false` | **C only.** `false` = link/optimize/assemble in-process on Julia's resident libLLVM, and a failure is a hard error. `true` = external `llvm-link`/`opt`. C++ always uses the external pipeline |
 | `promote_statics` | Bool | `true` | **C in-process bucket only.** Rename anything a slice may bind by `declare` but that cannot reach the `.so` dynamic symbol table to an exported `__rb_<lib>_<name>`. With `[wrap.tier1] enable`, also give every exported definition the exported alias `__rb_<lib>_<name>` (`exported_aliases` in the metadata), the name its slices bind it by, so a slice never takes a same-named export of a library loaded earlier. Required by `[wrap.tier1]`, harmless otherwise |
 
@@ -715,11 +756,12 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `language` | String | `"cpp"` | `"c"`, `"cpp"`, `"rust"` (experimental). Selects generator, toolchain, and the `enable_lto` default. `discover()` sets it from the scanned extensions |
+| `language` | String | `"cpp"` | `"c"` or `"cpp"`. Selects generator, toolchain, and the `enable_lto` default. `discover()` sets it from the scanned extensions. **Not checked**: any other value, `"C"` included, is treated as `"cpp"` |
 | `enabled` | Bool | `true` | |
 | `module_name` | String | `""` → CamelCase of the project name | |
 | `use_clang_jl` | Bool | `true` | `false` skips AST extraction (DWARF-only path) |
-| `shim_headers` | Vector{String} | `[]` | Headers the macro-shim TU includes *(preserved)* |
+| `headers` | Vector{String} | `[]` (every header at the top of each include dir) | The headers the Clang.jl walk starts from. The walk reads enums (including constant-only enums, which DWARF lacks) and callback typedefs, not macros: a macro reaches the wrapper only through `[wrap.macros]`. `#include`s are still followed. Spelled as in an `#include`: tried as an absolute path, then against the project root and each include dir. An entry that resolves to no file is a hard error at `wrap` *(preserved)* |
+| `shim_headers` | Vector{String} | `[]` | Headers the macro-shim TU includes. Does nothing without `[wrap.macros]` entries or `shim_defines`: no shim TU is written *(preserved)* |
 | `exclude_symbols` | Vector{String} | `[]` | Anchored globs for symbols to keep out of the wrapper; see §2.13 *(preserved)* |
 | `shim_defines` | Vector{String} | `[]` | `#define`s at the top of the shim file, before its includes, and in no other file: `NAME` (defined as `1`) or `NAME=VALUE`. Builds a single-header library's implementation section from the TOML (§2.2). Needs `shim_headers` *(preserved)* |
 | `surface_types_only` | Bool | `false` | Emit only types reachable from the wrap surface instead of every type in DWARF; see §2.14 *(preserved)* |
@@ -729,10 +771,13 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 ### `[wrap.varargs]` *(preserved)*
 
 Typed overloads for variadic functions. Julia type names, variadic arguments
-only, list-of-lists. See §2.3 for the full rules and the allowed type names.
+only, list-of-lists, one generated function per overload. `proven_at` names the
+upstream commit they were checked against. See §2.3 for the full rules and the
+allowed type names.
 
 ```toml
 [wrap.varargs]
+proven_at       = "<upstream commit>"
 lua_pushfstring = [["Cstring"], ["Cint"], ["Cstring", "Cint"]]
 ```
 
@@ -941,6 +986,9 @@ afternoon.
   refused build does not read as cached-and-fine on the next run.
 - A macro shim `#include` that resolved outside the project/dependency tree.
 - A vararg overload naming a type outside the allowed set (§2.3).
+- A `[wrap.varargs] proven_at` that differs from the dependency's `commit`, or
+  that has no single `commit` to compare against (§2.3).
+- A `[wrap] headers` entry that resolves to no file.
 - A wrapper whose `ccall` signatures would name an undeclared type — refused
   before it is written.
 - A generated wrapper containing an unqualified `error("…")` call — refused,
@@ -956,6 +1004,7 @@ afternoon.
 - `[ingest]` alongside `source_files` or fetchable dependencies.
 - Invalid `binary.type` / `wrap.style` / `llvm.toolchain` → default substituted.
 - A `[wrap.cstring_owned]` value that is not a non-empty string → entry ignored.
+- A `[wrap.varargs]` table without `proven_at`, on every `wrap` (§2.3).
 - A struct whose layout cannot be modelled consistently → degrades to a
   correctly-sized opaque region (capped at ten warnings plus a summary).
 
@@ -963,7 +1012,10 @@ afternoon.
 
 - `[discovery]` (whole section), `[workflow] stages`, `[wrap] style`,
   `[binary] strip_symbols`, `[paths] source` / `include` / `cache`.
+  `discover()` writes all of them.
 - `extra_link_libs` outside `[ingest]`.
+- A `[wrap] language` other than `"c"` or `"cpp"`: it is not checked, and
+  anything but `"c"` builds as C++.
 - Any key not in the schema — TOML parses it, the config drops it. **There is no
   unknown-key warning**, so a typo'd key name is silent. Check your spelling
   against §3 when a setting appears to have no effect.
