@@ -91,7 +91,8 @@ extraction but keeps the compiled IR.
 
 `~/.replibuild/builds/<hash>/` is the `use()` cache. The hash includes the
 generator version. `clean(toml)` removes project-local `build/`, `julia/`, and
-`.replibuild_cache/`. It does not touch the registry or the `use()` cache;
+`.replibuild_cache/` (`deps=false` keeps the git clones under
+`.replibuild_cache/deps/`). It does not touch the registry or the `use()` cache;
 `use(name; force_rebuild=true)` rebuilds one registered package from nothing.
 
 ## Loud vs silent

@@ -65,7 +65,7 @@ until you have registered that name yourself. See [Registry](use.md).
 | `use("name")` | Load a **registered** project: its vendored build, or a fresh one after an edit. |
 | `list_registry()` / `unregister("name")` | Inspect / drop registry entries. |
 | `search("xml")` | Browse Hub config *names* (does not install or register). |
-| `clean(toml)` | Remove `build/`, `julia/`, caches. |
+| `clean(toml)` | Remove `build/`, `julia/`, caches. `deps=false` keeps the vendored git clones. |
 | `info(toml)` | Print whether the library and wrapper exist. |
 | `check_environment()` | Report which toolchains this machine has. |
 | `scaffold_package("Name")` | Skeleton of a distributable Julia package. |

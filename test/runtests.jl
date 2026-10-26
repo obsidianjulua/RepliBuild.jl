@@ -122,6 +122,10 @@ include(joinpath(@__DIR__, "test_ingest.jl"))
 
 include(joinpath(@__DIR__, "test_registry.jl"))
 
+# ── clean(toml; deps=false) keeps the vendored git clones (no toolchain) ─────
+
+include(joinpath(@__DIR__, "test_clean.jl"))
+
 # ── discover with no system LLVM (no toolchain) ──────────────────────────────
 # A C project needs only Julia, but discover's optional dependency walk and its
 # toolchain warm-up raised "LLVM Toolchain not found" with no LLVM installed.

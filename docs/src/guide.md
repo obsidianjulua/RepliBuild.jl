@@ -29,6 +29,9 @@ call keeps that file.
 
 `RepliBuild.clean(toml)` removes `build/`, `julia/`, and `.replibuild_cache/`
 (git dependencies are fetched again on the next build).
+`RepliBuild.clean(toml; deps=false)` keeps the clones under
+`.replibuild_cache/deps/` and removes the rest of the cache, so a rebuild from
+cold checks each dependency's pin instead of fetching it again.
 `RepliBuild.build(toml; clean=true)` does that first and then builds.
 `RepliBuild.info(toml)` prints whether the `.so` and wrapper exist.
 
