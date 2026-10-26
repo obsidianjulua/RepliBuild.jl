@@ -108,13 +108,11 @@ Functions routed to Tier 2 are further divided between JIT dispatch (`JITManager
 
 ### Idiomatic wrapper generation
 
-Beyond raw `ccall` bindings, the wrapper generator clusters related C++ functions by class name to produce idiomatic Julia types:
+Beyond raw `ccall` bindings, the C++ generator emits Julia types that own a C++ object and free it from a GC finalizer:
 
-1. **Factory detection:** Functions matching `create_X`, `new_X`, `make_X`, `alloc_X`, `init_X`, or returning `X*` are identified as constructors.
-2. **Destructor detection:** Functions matching `delete_X`, `destroy_X`, `free_X`, `dealloc_X`, or `X_destroy` are identified as destructors.
-3. **Method clustering:** Functions taking `X*` as their first parameter and associated with the same DWARF class are grouped as instance methods.
-
-The result is a `mutable struct ManagedX` with a raw `Ptr{Cvoid}` handle, a registered `finalizer` calling the C++ destructor, and multiple-dispatch method proxies that pass the pointer via `Base.unsafe_convert`.
+1. **Deleters.** A class's deleter is the library's deleter function for it (a free function or static member, one `X*` parameter, a name that says delete, destroy or free), else its deleting destructor (D0). A class with neither has no deleter: its other destructors end the object's lifetime without freeing its storage, and a method that takes `this` is never a deleter.
+2. **`ManagedX`**, for every class with a deleter: a `mutable struct` holding a `Ptr{X}` whose finalizer calls the deleter by its mangled symbol, plus `<f>_safe` for each `ccall`-path function returning `X*`.
+3. **Factory structs.** A free function named `create_`, `new_`, `make_`, `alloc_`, `init_` or `build_` returning a pointer to a known class (the pointee, or a class its name names that derives from the pointee) makes that class a `mutable struct` with a `Ptr{Cvoid}` handle, constructors that call the factories, and method proxies. Its finalizer is a deleter function for the class or the returned type, or the class's D0 when no class in the library derives from it. The struct replaces the class's layout struct and its `ManagedX`.
 
 ```@autodocs
 Modules = [RepliBuild.Wrapper]

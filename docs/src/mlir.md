@@ -363,7 +363,7 @@ static offset. `vbaseNames`/`vbaseVtableOffsets` carry virtual bases, keyed on
 the **negative** byte position of the vbase-offset entry relative to the vtable
 address point — a virtual base has no static offset, so it can only be named by
 where to *read* the offset. `destructorName` is the DWARF-resolved complete-object
-destructor, which is what `Managed` finalizers and the RAII scope call. The
+destructor, which the RAII scope calls. The
 verifier enforces the 1:1 pairing, because consumers index one array by the
 other's position.
 

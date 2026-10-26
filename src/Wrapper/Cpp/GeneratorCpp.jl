@@ -463,10 +463,32 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # AUTOMATIC FINALIZER GENERATION (Memory Safety)
     # =============================================================================
 
-    # 1. Scan for Deleters
-    # Map: StructName -> DeleterFunctionName
-    deleters = Dict{String, String}()
+    # 1. Scan for Deleters: what a finalizer that owns an `X*` calls to free it.
+    #
+    #   * The library's deleter function for X: no receiver (a free function or
+    #     a static member), one `X*` parameter, a name that says delete, destroy
+    #     or free. The library allocated the object, so its deleter knows how.
+    #   * Else X's deleting destructor (D0), which is C++ `delete` for an object
+    #     whose dynamic type is X.
+    #
+    # A class with neither has no entry, so no `Managed<X>` and no `<f>_safe`.
+    # Its other destructors (D1, D2) end the object's lifetime and leave its
+    # storage allocated: a finalizer built on one leaked every object, and the
+    # first destructor in metadata order was D2 for every class without a
+    # virtual destructor (85 Managed types across the Hub, 2026-10-26). A
+    # method with a receiver is never a deleter: imgui's `ManagedImDrawList`
+    # called `ImDrawList::_ClearFreeMemory()`, whose one parameter is `this`,
+    # and it frees the list's buffers, not the list. A static member is one:
+    # tinyxml2's `XMLNode::DeleteNode(XMLNode*)` returns a node to its pool.
+    # Several candidates for one class: the smallest mangled name.
+    deleters = Dict{String, String}()          # struct_name -> what it calls, demangled
     deleters_mangled = Dict{String, String}()  # struct_name -> mangled symbol
+    deleting_dtors = Set{String}()             # struct_names whose deleter is their D0
+
+    deleter_fns = Dict{String, Any}()          # struct_name -> deleter function
+    d0_funcs = Dict{String, Any}()             # struct_name -> deleting destructor
+    _take_smallest!(d, k, func) =
+        (haskey(d, k) && d[k]["mangled"] <= func["mangled"]) || (d[k] = func)
 
     for func in functions
         f_name = func["name"]
@@ -488,6 +510,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # rest of the emitter relies on it — so try each spelling and key on
         # whichever one actually matched.
         if contains(demangled, "~")
+            endswith(func["mangled"], "D0Ev") || continue
             cls = String(get(func, "class", ""))
             if !isempty(cls)
                 inner = _cpp_innermost_scope(cls)
@@ -496,100 +519,104 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         let s = _sanitize_cpp_type_name(inner)
                             s in struct_types ? s : ""
                         end
-                if !isempty(sname) && !haskey(deleters, sname)
-                    deleters[sname] = f_name
-                    deleters_mangled[sname] = func["mangled"]
-                end
+                isempty(sname) || _take_smallest!(d0_funcs, sname, func)
             end
             continue
         end
 
-        # Criteria: 1 arg, arg is Ptr{Struct}, name implies deletion
-        if length(params) == 1
-            arg_type = params[1]["julia_type"]
-            if startswith(arg_type, "Ptr{") && endswith(arg_type, "}")
-                struct_name = arg_type[5:end-1]
-                # Check if it's a known struct
-                if struct_name in struct_types
-                    # Check name patterns
-                    lower_name = lowercase(f_name)
-                    lower_demangled = lowercase(demangled)
-                    
-                    is_destructor = contains(demangled, "~")
-                    is_deleter = contains(lower_name, "delete") || contains(lower_name, "destroy") || contains(lower_name, "free")
-                    
-                    if is_destructor || is_deleter
-                        # Found a deleter for struct_name
-                        # Prefer destructors over generic deleters if duplicates?
-                        # For now, just take the first one
-                        if !haskey(deleters, struct_name)
-                            deleters[struct_name] = f_name
-                            deleters_mangled[struct_name] = func["mangled"]
-                        end
-                    end
-                end
-            end
-        end
+        # `_has_receiver` is the receiver gate the thunks use: a method whose
+        # declaration DIE left `this` out of `parameters` still has one.
+        length(params) == 1 || continue
+        JLCSIRGenerator.FunctionGen._has_receiver(func, dwarf_structs) && continue
+        arg_type = params[1]["julia_type"]
+        (startswith(arg_type, "Ptr{") && endswith(arg_type, "}")) || continue
+        struct_name = arg_type[5:end-1]
+        struct_name in struct_types || continue
+        lower_name = lowercase(f_name)
+        (contains(lower_name, "delete") || contains(lower_name, "destroy") ||
+         contains(lower_name, "free")) || continue
+        _take_smallest!(deleter_fns, struct_name, func)
+    end
+    for (s, func) in deleter_fns
+        deleters[s] = func["demangled"]
+        deleters_mangled[s] = func["mangled"]
+    end
+    for (s, func) in d0_funcs
+        haskey(deleters, s) && continue
+        deleters[s] = func["demangled"]
+        deleters_mangled[s] = func["mangled"]
+        push!(deleting_dtors, s)
     end
 
     # =============================================================================
     # IDIOMATIC CLASS WRAPPER PREPARATION
     # =============================================================================
 
+    # The struct_types key a type spelling names, or `nothing`. Several keys can
+    # sanitize to one name: the smallest wins, never the Dict order.
+    sanitized_struct_key = Dict{String,String}()
+    for k in sort!(collect(struct_types))
+        get!(sanitized_struct_key, _sanitize_cpp_type_name(k), k)
+    end
+    _struct_key(t::AbstractString) = t in struct_types ? String(t) :
+        get(sanitized_struct_key, _sanitize_cpp_type_name(String(t)), nothing)
+
+    function _base_keys(key)
+        found = String[]
+        for base in get(get(dwarf_structs, key, Dict{String,Any}()), "base_classes", Any[])
+            base isa AbstractDict || continue
+            b = _struct_key(replace(String(get(base, "type", "")), r"^(class|struct)\s+" => ""))
+            b === nothing || push!(found, b)
+        end
+        return found
+    end
+    _derives_from(d, b, seen = Set{String}()) =
+        !(d in seen) && (push!(seen, d); any(x -> x == b || _derives_from(x, b, seen), _base_keys(d)))
+
+    # Classes something in this library derives from. Their deleting
+    # destructor, called directly, runs only their own destructor on an object
+    # of a subclass.
+    has_subclass = Set{String}()
+    for key in keys(dwarf_structs)
+        union!(has_subclass, _base_keys(key))
+    end
+
+    # The struct a function's pointer return names, or `nothing`.
+    function _returned_key(func)
+        ret = func["return_type"]
+        ret_julia = String(get(ret, "julia_type", ""))
+        if startswith(ret_julia, "Ptr{") && endswith(ret_julia, "}") && ret_julia != "Ptr{Cvoid}"
+            k = _struct_key(ret_julia[5:end-1])
+            k === nothing || return k
+        end
+        ret_c = String(get(ret, "c_type", ""))
+        endswith(ret_c, "*") || return nothing
+        base_c = replace(strip(ret_c[1:end-1]), r"^(const\s+|struct\s+|class\s+)+" => "")
+        base_c = replace(base_c, r"\s+" => "")
+        return isempty(base_c) || base_c == "void" ? nothing : _struct_key(base_c)
+    end
+
     # Collect factory functions: free functions named create_/new_/make_/alloc_/init_/build_
-    # that return a pointer to a known C++ class.  The class name is inferred via
-    # (priority order): typed Ptr return type, c_type pointer base, name suffix.
-    factory_funcs = Dict{String, Vector{Any}}()  # inferred_class_name -> [func_info, ...]
+    # that return a pointer to a known class. The class is the one that pointer
+    # names, or the class the factory's name names when that class is the
+    # returned one or derives from it (`create_circle()` returning `Shape*`). A
+    # name never makes a class of its own: read first, `make_rect_nx` made a
+    # struct `RectNx`, and a name that named an unrelated class gave the object
+    # that class's finalizer.
+    factory_prefixes = ("create_", "new_", "make_", "alloc_", "init_", "build_")
+    factory_funcs = Dict{String, Vector{Any}}()  # struct_types key -> [func_info, ...]
     for func in functions
-        is_m = get(func, "is_method", false)
-        is_m && continue
+        get(func, "is_method", false) && continue
         f_name = func["name"]
-        f_lower = lowercase(f_name)
-        is_factory_name = (startswith(f_lower, "create_") || startswith(f_lower, "new_") ||
-                           startswith(f_lower, "make_")   || startswith(f_lower, "alloc_") ||
-                           startswith(f_lower, "init_")   || startswith(f_lower, "build_"))
-        is_factory_name || continue
-
-        ret       = func["return_type"]
-        ret_julia = get(ret, "julia_type", "")
-        ret_c     = get(ret, "c_type",     "")
-        class_nm  = nothing
-
-        # Strategy 1: infer from function name prefix (create_circle -> Circle)
-        # This is more accurate for polymorphism where create_circle() returns Shape*
-        if isnothing(class_nm)
-            for prefix in ["create_", "new_", "make_", "alloc_", "init_", "build_"]
-                if startswith(f_lower, prefix)
-                    raw_suffix = f_name[length(prefix)+1:end]
-                    if !isempty(raw_suffix)
-                        # Split by underscore to handle snake_case to CamelCase (e.g. create_dense_matrix -> DenseMatrix)
-                        parts = split(raw_suffix, "_")
-                        class_nm = join([uppercasefirst(p) for p in parts])
-                    end
-                    break
-                end
-            end
-        end
-
-        # Strategy 2: typed pointer return (Ptr{X} where X != Cvoid)
-        if isnothing(class_nm) && startswith(ret_julia, "Ptr{") && endswith(ret_julia, "}") && ret_julia != "Ptr{Cvoid}"
-            class_nm = ret_julia[5:end-1]
-        end
-
-        # Strategy 3: c_type ends in * (pointer to a named type)
-        if isnothing(class_nm) && endswith(ret_c, "*")
-            base_c = strip(ret_c[1:end-1])
-            base_c = replace(base_c, r"^(const\s+|struct\s+|class\s+)+" => "")
-            base_c = replace(base_c, r"\s+" => "")
-            if !isempty(base_c) && base_c != "void"
-                class_nm = base_c
-            end
-        end
-
-        if !isnothing(class_nm) && !isempty(string(class_nm))
-            safe_nm = _sanitize_cpp_type_name(string(class_nm))
-            push!(get!(factory_funcs, safe_nm, Any[]), func)
-        end
+        i = findfirst(p -> startswith(lowercase(f_name), p), factory_prefixes)
+        i === nothing && continue
+        returned = _returned_key(func)
+        returned === nothing && continue
+        # Snake case to CamelCase: create_dense_matrix -> DenseMatrix
+        suffix = f_name[length(factory_prefixes[i])+1:end]
+        named = isempty(suffix) ? nothing : _struct_key(join(uppercasefirst.(split(suffix, "_"))))
+        cls = named !== nothing && (named == returned || _derives_from(named, returned)) ? named : returned
+        push!(get!(factory_funcs, cls, Any[]), func)
     end
 
     # Collect C++ constructors: is_method=true AND func_name == class_name
@@ -600,16 +627,6 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         is_m && !isempty(cls_nm) && func["name"] == cls_nm || continue
         safe_cls = _sanitize_cpp_type_name(cls_nm)
         push!(get!(class_constructors, safe_cls, Any[]), func)
-    end
-
-    # Collect C++ destructors: is_method=true AND demangled contains "~"
-    class_destructors = Dict{String, Any}()  # class_name -> dtor_func_info (first only)
-    for func in functions
-        is_m   = get(func, "is_method", false)
-        cls_nm = get(func, "class", "")
-        is_m && !isempty(cls_nm) && contains(func["demangled"], "~") || continue
-        safe_cls = _sanitize_cpp_type_name(cls_nm)
-        haskey(class_destructors, safe_cls) || (class_destructors[safe_cls] = func)
     end
 
     # Collect non-constructor, non-destructor instance methods
@@ -629,53 +646,44 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # the main loop's derivation, not a shorter copy of its list.
     _sanitize_julia_fn(name::String)::String = _julia_function_name(name)
 
-    # Determine which classes get full idiomatic wrappers.
-    # Eligibility: has ≥1 factory function (pointer-returning) AND a resolvable deleter.
-    # Pure C++ constructor-only classes (no factory) are skipped — they require
-    # operator new + placement-new which needs sizeof(Class); left as raw bindings.
-    idiomatic_classes = Dict{String, Dict{String,Any}}()  # class_name -> config dict
+    # Determine which classes get full idiomatic wrappers: ≥1 factory function,
+    # and a finalizer that frees what the factories return —
+    #   1. the library's deleter function for the class, or for the type a
+    #      factory returns (`create_circle()` returning `Shape*`, and
+    #      `delete_shape(Shape*)`);
+    #   2. else the class's deleting destructor, when nothing in the library
+    #      derives from the class: it is called directly, so on an object of a
+    #      subclass it would run only the class's own destructor.
+    # The finalizer calls it by its mangled symbol. Called by Julia name it was
+    # `<X>_destroy_<X>`, which D0, D1 and D2 share; dedup kept D2, and every
+    # collected object leaked (2026-10-26). A class with neither keeps its raw
+    # bindings, as do pure C++ constructor-only classes (no factory): they need
+    # operator new and placement new.
+    idiomatic_classes = Dict{String, Dict{String,Any}}()  # Julia struct name -> config dict
 
-    for cls_nm in keys(factory_funcs)
-        factories = factory_funcs[cls_nm]
-        deleter_jl = ""
-
-        # 1. Direct match in deleters dict
-        if haskey(deleters, cls_nm)
-            raw_del = deleters[cls_nm]
-            is_del_method = any(f -> f["name"] == raw_del && get(f, "is_method", false), functions)
-            deleter_jl = is_del_method ? "$(cls_nm)_$(_sanitize_julia_fn(raw_del))" : _sanitize_julia_fn(raw_del)
-        end
-
-        # 2. DWARF-detected C++ destructor for the same class
-        if isempty(deleter_jl) && haskey(class_destructors, cls_nm)
-            dtor = class_destructors[cls_nm]
-            deleter_jl = "$(cls_nm)_$(_sanitize_julia_fn(dtor["name"]))"
-        end
-
-        # 3. Factory return c_type base class points to a known deleter
-        #    (e.g. create_circle returns Shape* -> deleters["Shape"] = "delete_shape")
-        if isempty(deleter_jl)
-            for fac_func in factories
-                ret_c = get(fac_func["return_type"], "c_type", "")
-                endswith(ret_c, "*") || continue
-                base_c = strip(ret_c[1:end-1])
-                base_c = replace(base_c, r"^(const\s+|struct\s+|class\s+)+" => "")
-                base_c = replace(base_c, r"\s+" => "")
-                if !isempty(base_c) && base_c != "void" && haskey(deleters, base_c)
-                    raw_del = deleters[base_c]
-                    is_del_method = any(f -> f["name"] == raw_del && get(f, "is_method", false), functions)
-                    deleter_jl = is_del_method ? "$(base_c)_$(_sanitize_julia_fn(raw_del))" : _sanitize_julia_fn(raw_del)
-                    break
-                end
+    for key in sort!(collect(keys(factory_funcs)))
+        factories = factory_funcs[key]
+        cls_nm = _sanitize_cpp_type_name(key)
+        haskey(idiomatic_classes, cls_nm) && continue
+        owner = nothing
+        for k in (key, (_returned_key(f) for f in factories)...)
+            if haskey(deleters, k) && !(k in deleting_dtors)
+                owner = k
+                break
             end
         end
-
-        isempty(deleter_jl) && continue  # no deleter found — skip, keep raw bindings only
+        if owner === nothing && key in deleting_dtors && !(key in has_subclass)
+            owner = key
+        end
+        owner === nothing && continue
 
         idiomatic_classes[cls_nm] = Dict{String,Any}(
-            "deleter"   => deleter_jl,
-            "factories" => factories,
-            "ctors"     => get(class_constructors, cls_nm, Any[]),
+            "deleter"      => deleters_mangled[owner],
+            "deleter_doc"  => owner in deleting_dtors ?
+                "calls `$(deleters[owner])`, the deleting destructor (C++ `delete`)" :
+                "calls `$(deleters[owner])`",
+            "factories"    => factories,
+            "ctors"        => get(class_constructors, cls_nm, Any[]),
         )
     end
 
@@ -2442,7 +2450,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         for s_name in sort!(collect(keys(deleters)))
             deleter = deleters[s_name]
             # Skip: a full idiomatic wrapper will be generated for this class
-            haskey(idiomatic_classes, s_name) && continue
+            (haskey(idiomatic_classes, s_name) ||
+             haskey(idiomatic_classes, _sanitize_cpp_type_name(s_name))) && continue
             # Sanitize names
             safe_s_name = _sanitize_cpp_type_name(s_name)
             
@@ -2485,7 +2494,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # =============================================================================
     # For every C++ class that has:
     #   - ≥1 factory function (pointer-returning) identified in the scan above
-    #   - A resolvable GC-finalizer deleter (C delete_*/destroy_* or C++ destructor)
+    #   - A finalizer that frees what they return (a library deleter function, or
+    #     the deleting destructor of a class nothing derives from)
     # we emit:
     #   1. A `mutable struct ClassName { handle::Ptr{Cvoid} }` with inner constructors
     #      that call the raw factory function and attach a GC finalizer.
@@ -2497,15 +2507,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # Idiomatic Class Wrappers
         # =============================================================================
         # High-level Julian structs wrapping C++ objects via opaque pointer handles.
-        # Memory is automatically managed: Julia's GC calls the C++ destructor when
-        # the last reference to the object is dropped.
+        # Memory is automatically managed: when the last reference is dropped,
+        # Julia's GC frees the C++ object (each struct's docstring says how).
 
         """)
 
         for cls_nm in sort(collect(keys(idiomatic_classes)))
-            cls_info   = idiomatic_classes[cls_nm]
-            deleter_jl = cls_info["deleter"]
-            factories  = cls_info["factories"]
+            cls_info    = idiomatic_classes[cls_nm]
+            deleter_sym = cls_info["deleter"]
+            deleter_doc = escape_string(cls_info["deleter_doc"], '$')
+            factories   = cls_info["factories"]
 
             # Build one inner constructor block per factory function.
             ctor_blocks = String[]
@@ -2541,7 +2552,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         Ptr{Cvoid}(handle) == C_NULL && Base.error("$cls_nm: constructor returned NULL (allocation failed)")
                         obj = new(Ptr{Cvoid}(handle))
                         finalizer(obj) do o
-                            $deleter_jl(o.handle)
+                            ccall((:$deleter_sym, LIBRARY_PATH), Cvoid, (Ptr{Cvoid},), o.handle)
                         end
                         return obj
                     end""")
@@ -2556,8 +2567,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 $cls_nm
 
             Idiomatic Julia wrapper for C++ class `$cls_nm`.
-            Memory is automatically managed: Julia's GC calls the C++ destructor
-            when this object is collected.
+            Memory is automatically managed: when Julia's GC collects this object,
+            its finalizer $deleter_doc.
             \"\"\"
             mutable struct $cls_nm
                 handle::Ptr{Cvoid}

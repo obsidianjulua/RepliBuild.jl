@@ -487,6 +487,14 @@ the test named when you touch the area.
   not interchangeable.
 - Generated wrappers precompile inside consumer packages: dedup methods by dispatch
   signature, and put all process side effects in `__init__`.
+- **A finalizer frees what it owns.** `Managed<X>` and the struct a factory
+  function makes call the class's deleter by mangled symbol: the library's
+  deleter function (no receiver by `FunctionGen._has_receiver`, one `X*`, named
+  delete/destroy/free), else D0. D1 and D2 end the lifetime without freeing,
+  and `<X>_destroy_<X>` names all three, so a class with neither gets no owning
+  type. A factory struct's D0 also needs a class nothing in the library derives
+  from, and a factory makes the class its pointer names, or a subclass its name
+  names. (`test_cpp_finalizers.jl`, devtests `test_cpp_finalizers_live.jl`.)
 - **The library populates the wrapper's namespace.** Generated diagnostics must call
   `Base.error(...)` (enforced by `_assert_base_calls_qualified`), and helpers must
   qualify `Base.get`/`Base.string`/…. `ccall` is syntax: `Base.ccall` is an

@@ -381,6 +381,14 @@ include(joinpath(TEST_DIR, "test_determinism_fixture.jl"))
 
 include(joinpath(TEST_DIR, "test_conflict_trap_fixture.jl"))
 
+# ── 8f. What a C++ finalizer frees, live ─────────────────────────────────────
+# finalizer_test counts destructor bodies and freed storage. The struct a
+# factory makes, a Managed type with a deleting destructor and one with a
+# library deleter function must free what they own when collected; a class
+# with neither gets no owning type. Needs clang++ and libJLCS.
+
+include(joinpath(TEST_DIR, "test_cpp_finalizers_live.jl"))
+
 # ── 9. Per-file IR cache invalidation on compile-config change ────────────────
 # A compile-flag change must invalidate the per-file IR cache without a manual
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.
