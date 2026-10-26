@@ -180,6 +180,15 @@ include(joinpath(@__DIR__, "test_record_natural_layout.jl"))
 
 include(joinpath(@__DIR__, "test_cpp_mutable_records.jl"))
 
+# ── What a C++ finalizer calls (no toolchain) ───────────────────────────────
+# A Managed<X> or factory struct frees its object with the library's deleter
+# function (a static member counts) or the deleting destructor (D0), never a
+# destructor that only ends the object's lifetime or a method that takes
+# `this`; with neither, no owning type. A factory makes the class it returns,
+# not one its name invents.
+
+include(joinpath(@__DIR__, "test_cpp_finalizers.jl"))
+
 # ── DWARF member sizes through typedefs, enums, qualifiers, arrays (no toolchain)
 # A member typed as an enum or a typedef'd record came out with size 0, and the
 # C++ layout proof turned the whole record into a byte blob. A real GNU dump.

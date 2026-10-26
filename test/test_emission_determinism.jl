@@ -616,8 +616,10 @@ _ed_text(parsed) = _ED_C._canonical_text(Any[parsed...])
         end
         fns = Any[callback_fn]
         if lang == "cpp"
+            # A deleting destructor each: a class whose destructors only end its
+            # lifetime gets no Managed type (test_cpp_finalizers.jl).
             for c in classes
-                push!(fns, _ed_row("_ZN$(length(c))$(c)D1Ev", "$c::~$c()",
+                push!(fns, _ed_row("_ZN$(length(c))$(c)D0Ev", "$c::~$c()",
                                    Any[_ed_p("this", "Ptr{$c}", "$c*")], _ed_void))
             end
         end

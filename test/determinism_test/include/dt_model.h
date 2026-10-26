@@ -57,9 +57,11 @@ public:
     double side;
 };
 
-// More destructors, so the Managed blocks have an order to keep.
-class dt_zeta  { public: dt_zeta();  ~dt_zeta();  int v; };
-class dt_alpha { public: dt_alpha(); ~dt_alpha(); int v; };
-class dt_mid   { public: dt_mid();   ~dt_mid();   int v; };
+// More deleting destructors, so the Managed blocks have an order to keep. A
+// destructor that is not virtual has no deleting variant, and its class gets
+// no Managed type (test_cpp_finalizers.jl).
+class dt_zeta  { public: dt_zeta();  virtual ~dt_zeta();  int v; };
+class dt_alpha { public: dt_alpha(); virtual ~dt_alpha(); int v; };
+class dt_mid   { public: dt_mid();   virtual ~dt_mid();   int v; };
 
 #endif

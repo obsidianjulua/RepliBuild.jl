@@ -136,18 +136,32 @@ end
 
 `Rect()` is not a constructor. It is the zeroed Julia value every struct gets:
 no C++ constructor has run, so a class with virtual methods has a null vtable
-pointer, and calling a method on it crashes.
+pointer, and calling a method on it crashes. A class a factory makes is the
+exception (below).
 
-**`Managed*` types** own a heap pointer the library allocated with `new`. Their
-finalizer runs the class's deleting destructor, which is C++ `delete`. Give
-`ManagedThing(ptr)` only such a pointer — never storage from `Libc.malloc` or a
-Julia array. When a function the wrapper calls through `ccall` (in C++, a
-`noexcept` one) returns `Thing*` and there is a `ManagedThing`, the wrapper also
-emits `<function>_safe(…) -> ManagedThing`. Keep a raw pointer when the library
-retains ownership (a `b2Body*` owned by its world).
+**`Managed*` types** own a heap pointer the library allocated. Their finalizer
+calls the library's deleter function for the class if it has one (a free or
+static function taking `Thing*` whose name says delete, destroy or free), and
+otherwise the class's deleting destructor, which is C++ `delete`. A class with
+neither, which is any class without a virtual destructor and without a deleter
+function, gets no `ManagedThing`. Give `ManagedThing(ptr)` only a pointer that
+deleter may free: never storage from `Libc.malloc` or a Julia array. The
+deleting destructor is called directly, so the object must be a `Thing`, not an
+object of a subclass. When a function the wrapper calls through `ccall` (in
+C++, a `noexcept` one) returns `Thing*` and there is a `ManagedThing`, the
+wrapper also emits `<function>_safe(…) -> ManagedThing`. Keep a raw pointer when
+the library retains ownership (a `b2Body*` owned by its world).
 
-**Factory/destructor pairs** (`create_X` / `destroy_X`) also become a `mutable
-struct` with a GC finalizer and method proxies.
+**Factories.** A free function named `create_`, `new_`, `make_`, `alloc_`,
+`init_` or `build_` that returns a pointer to a class makes that class a
+`mutable struct` holding the pointer, in place of its layout struct:
+`M.Rect(2.0, 3.0)` calls `make_rect`, and each method has a proxy
+(`M.area(r)`). The class is the one the returned pointer names, or one the
+function's name names that derives from it (`create_circle()` returning
+`Shape*`). Its GC finalizer is the library's deleter function for the class or
+for the returned type, or else the class's deleting destructor when nothing in
+the library derives from the class. A class with neither keeps its raw
+bindings.
 
 **Upcasts.** When a base subobject does not start where the object does, the
 wrapper emits `<Derived>_as_<Base>(p)`: a constant offset for a non-virtual base
