@@ -342,6 +342,14 @@ include(joinpath(TEST_DIR, "test_c_inprocess.jl"))
 
 include(joinpath(TEST_DIR, "test_tier1_alias_binding.jl"))
 
+# ── 7f. [wrap] shim_defines: a header's implementation from the TOML, live ────
+# A single-header library built with no source file and no macro entry, then
+# beside a library source that includes the same header: the define reaches
+# only the shim file, so the implementation is defined once. With the define in
+# [compile] flags the link stops. Needs the C bucket only.
+
+include(joinpath(TEST_DIR, "test_shim_defines_live.jl"))
+
 # ── 8. Nested-struct ABI resolution (pure ccall path) ────────────────────────
 # Library-free trace: structs with struct-typed members must come out with
 # verified named fields (SysV register classes preserved by value), and

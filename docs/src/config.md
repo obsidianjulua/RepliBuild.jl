@@ -35,6 +35,7 @@ destroying your intent. The preserved set is:
 | `[wrap]` | `varargs` |
 | `[wrap]` | `macros` |
 | `[wrap]` | `shim_headers` |
+| `[wrap]` | `shim_defines` |
 | `[wrap]` | `cstring_owned` |
 | `[wrap]` | `exclude_symbols` |
 | `[wrap]` | `surface_types_only` |
@@ -160,6 +161,27 @@ ret = "int"
     direct shim include and hard-errors if it resolved outside the
     project/dependency tree. The fix is either a more specific subpath
     (`shim_headers = ["c/blake3.h"]`) or an explicit `-I<dir>` in `[compile] flags`.
+
+**An implementation section, from the TOML alone.** A single-header library in
+the stb style compiles its implementation only where a macro is defined.
+`shim_defines` writes those `#define`s at the top of the shim file, before its
+`#include`s, and in no other file:
+
+```toml
+[wrap]
+shim_headers = ["stb_image.h"]
+shim_defines = ["STB_IMAGE_IMPLEMENTATION"]
+```
+
+The first `build` compiles the implementation into the library, and the first
+`wrap` binds it. No source file of your own is needed, and no `[wrap.macros]`
+entry: the shim file is written when either key has entries. Each entry is what
+you would write after `-D`: `NAME`, defined as `1`, or `NAME=VALUE`. A `-D` in
+`[compile] flags` would reach every file the build compiles, so a library
+source that includes the same header would get its own copy of every function
+and the link would fail; `shim_defines` reaches only the shim file, and
+`discover(force=true)` keeps it. An entry that is not one macro definition on
+one line is an error, and so is `shim_defines` without `shim_headers`.
 
 ### 2.3 Variadic functions
 
@@ -699,6 +721,7 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 | `use_clang_jl` | Bool | `true` | `false` skips AST extraction (DWARF-only path) |
 | `shim_headers` | Vector{String} | `[]` | Headers the macro-shim TU includes *(preserved)* |
 | `exclude_symbols` | Vector{String} | `[]` | Anchored globs for symbols to keep out of the wrapper; see §2.13 *(preserved)* |
+| `shim_defines` | Vector{String} | `[]` | `#define`s at the top of the shim file, before its includes, and in no other file: `NAME` (defined as `1`) or `NAME=VALUE`. Builds a single-header library's implementation section from the TOML (§2.2). Needs `shim_headers` *(preserved)* |
 | `surface_types_only` | Bool | `false` | Emit only types reachable from the wrap surface instead of every type in DWARF; see §2.14 *(preserved)* |
 | `surface_types_extra` | Vector{String} | `[]` | Anchored globs for types to keep even when unreachable — callback-only structs, constant-only enums. A pattern matching nothing is an error *(preserved)* |
 | `style` | String | `"clang"` | `"clang"`, `"basic"`, `"none"`; validated, but **not currently dispatched on** — the basic symbol-only generator is selected by *missing* `compilation_metadata.json`, not by this key |
@@ -905,6 +928,9 @@ afternoon.
 - `[compile] visibility` set to anything but `"default"` or `"hidden"`, or set to
   `"hidden"` while `[compile] flags` carries a `-fvisibility=` asking for something
   else — which of the two decides the library's API is not guessable (§2.12).
+- A `[wrap] shim_defines` entry that is not `NAME` or `NAME=VALUE` on one line,
+  or `shim_defines` with no `shim_headers` — a dropped define would build the
+  library without its implementation (§2.2).
 
 **Hard error later in the pipeline**
 

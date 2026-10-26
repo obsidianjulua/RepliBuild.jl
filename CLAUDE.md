@@ -400,6 +400,14 @@ the test named when you touch the area.
 - `[link] link_dirs` emits `-Wl,-rpath` (`$ORIGIN` first) alongside `-L`. `-L` alone
   loads the distro copy at runtime, giving two copies of process-global state. This is
   what makes Hub packages composable.
+- **The shim file is written when `[wrap.macros]` or `[wrap] shim_defines` has
+  entries** (`generate_macro_shims`). A check for the file asks both
+  (`verify_shim_headers`); a check for shim functions asks `macros` alone, since
+  only macros emit `RB_SHIM_EXPORT` (`create_library`'s PE export gate). The
+  defines go into that file and no other: in `[compile] flags` they reach every
+  file, and a second file that includes an stb-style header defines its whole
+  implementation again. (`test_shim_defines.jl`, devtests
+  `test_shim_defines_live.jl`.)
 - **A library binds its own exported symbols to itself.** On ELF a library's own
   PLT calls and GOT loads resolve through the global scope first, so a library
   loaded earlier with the same names takes them: the Hub's zlib called Julia's
