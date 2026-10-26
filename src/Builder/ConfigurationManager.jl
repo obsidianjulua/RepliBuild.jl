@@ -136,6 +136,13 @@ struct WrapConfig
     varargs_proven_at::String
     macros::Dict{String,Dict{String,Any}}
     shim_headers::Vector{String}
+    # `#define`s written at the top of the generated shim file, before its
+    # #includes, and in no other file: ["STB_IMAGE_IMPLEMENTATION"] builds a
+    # single-header library's implementation section into the library from
+    # the TOML alone. A -D in [compile] flags did the same and reached every
+    # file the build compiles, so a second file that included the header gave
+    # every function two definitions; discover(force=true) also rewrites flags.
+    shim_defines::Vector{String}
     # Glob patterns for symbols to keep OUT of the wrapper, matched against a
     # function's name/demangled/mangled spelling and against global names.
     # The wrapper's surface is otherwise "every exported symbol", which is the
@@ -572,6 +579,23 @@ function parse_binary_config(data::Dict)::BinaryConfig
     )
 end
 
+"""
+One `[wrap] shim_defines` entry: a macro name, optionally `=VALUE`, with no
+line break (`\\z`, because `\$` also matches before a final newline).
+"""
+const SHIM_DEFINE_RE = r"^[A-Za-z_][A-Za-z0-9_]*(=[^\r\n]*)?\z"
+
+"""
+    shim_define_line(entry) -> String
+
+The `#define` line for one `[wrap] shim_defines` entry. `NAME` alone is defined
+as `1`, as `-DNAME` would be, so `#if NAME` works as well as `#ifdef NAME`.
+"""
+function shim_define_line(entry::AbstractString)::String
+    name, value = occursin('=', entry) ? split(entry, '='; limit = 2) : (entry, "1")
+    return "#define $name $value"
+end
+
 """Parse [wrap] section"""
 function parse_wrap_config(data::Dict)::WrapConfig
     wrap = get(data, "wrap", Dict())
@@ -629,6 +653,25 @@ function parse_wrap_config(data::Dict)::WrapConfig
     end
 
     shim_headers = get(wrap, "shim_headers", String[])
+
+    # [wrap] shim_defines = ["STB_IMAGE_IMPLEMENTATION", "STBI_ONLY_PNG=1"]
+    # Each entry becomes a `#define` line in generated C, so it must be one
+    # object-like definition: a line break would inject code. A bad entry is an
+    # error, not a warning: a dropped define builds the library without the
+    # implementation, and its functions leave the wrapper with no other symptom.
+    shim_defines = String[]
+    for d in get(wrap, "shim_defines", String[])
+        (d isa AbstractString && occursin(SHIM_DEFINE_RE, d)) || error("""
+            RepliBuild: [wrap] shim_defines entries are what you would write after
+            -D, on one line: NAME or NAME=VALUE. Got: $(repr(d))""")
+        push!(shim_defines, String(d))
+    end
+    if !isempty(shim_defines) && isempty(shim_headers)
+        error("""
+            RepliBuild: [wrap] shim_defines is set but shim_headers is empty. The
+            defines apply to the headers the shim file includes: name the header
+            whose implementation they turn on in [wrap] shim_headers.""")
+    end
 
     # [wrap] exclude_symbols = ["matmul_*", "vk::*"]
     # Entries are globs (* and ?), not regexes — a symbol list is written by
@@ -716,6 +759,7 @@ function parse_wrap_config(data::Dict)::WrapConfig
         varargs_proven_at,
         macros,
         shim_headers,
+        shim_defines,
         exclude_symbols,
         surface_types_only,
         surface_types_extra,
@@ -992,7 +1036,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false, :default),
         LinkConfig("2", false, String[], String[], false, true),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], String[], false, String[], String[], Dict{String,String}(), Tier1Config(false, String[], 64, false)),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], String[], String[], false, String[], String[], Dict{String,String}(), Tier1Config(false, String[], 64, false)),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -1144,6 +1188,9 @@ function save_config(config::RepliBuildConfig)
     end
     if !isempty(config.wrap.shim_headers)
         wrap_dict["shim_headers"] = config.wrap.shim_headers
+    end
+    if !isempty(config.wrap.shim_defines)
+        wrap_dict["shim_defines"] = config.wrap.shim_defines
     end
     if !isempty(config.wrap.exclude_symbols)
         wrap_dict["exclude_symbols"] = config.wrap.exclude_symbols

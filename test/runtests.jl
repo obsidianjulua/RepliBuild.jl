@@ -190,6 +190,13 @@ include(joinpath(@__DIR__, "test_dwarf_member_sizes.jl"))
 
 include(joinpath(@__DIR__, "test_shim_header_guard.jl"))
 
+# ── [wrap] shim_defines: a header's implementation section from the TOML ─────
+# The defines go at the top of the shim file and nowhere else; the file is
+# written without macros; bad entries are refused at load; the header guard
+# runs for a defines-only shim (needs the JLL clang, like the guard above).
+
+include(joinpath(@__DIR__, "test_shim_defines.jl"))
+
 # ── STL force-TU default ctor + paren-aware Class::method split ──────────────
 # Library-free traces of the two Hub stl wrap defects; optional -O2 emission
 # probe needs clang++ and self-skips without it.

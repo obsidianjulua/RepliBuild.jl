@@ -32,6 +32,7 @@ const DISC = RepliBuild.Discovery
 
         [wrap]
         shim_headers = ["demo.h"]
+        shim_defines = ["DEMO_IMPLEMENTATION"]
         exclude_symbols = ["matmul_*", "vk::*"]
 
         [wrap.cstring_owned]
@@ -45,6 +46,9 @@ const DISC = RepliBuild.Discovery
         @test kept[("types", "templates")] == ["std::vector<int>"]
         @test kept[("types", "template_headers")] == ["<vector>"]
         @test kept[("wrap", "shim_headers")] == ["demo.h"]
+        # Lost, the next build compiles no implementation and its functions
+        # leave the wrapper without an error.
+        @test kept[("wrap", "shim_defines")] == ["DEMO_IMPLEMENTATION"]
         # Which symbols are NOT API is a judgement a source scan cannot re-derive.
         # Losing it on force=true is worse than losing most keys here: the wrapper
         # still generates, it just silently regrows the surface someone cut.
@@ -71,6 +75,7 @@ const DISC = RepliBuild.Discovery
         @test doc["types"]["templates"] == ["std::vector<int>"]
         @test doc["types"]["template_headers"] == ["<vector>"]
         @test doc["wrap"]["shim_headers"] == ["demo.h"]
+        @test doc["wrap"]["shim_defines"] == ["DEMO_IMPLEMENTATION"]
         @test doc["wrap"]["cstring_owned"]["demo_print"] == "demo_free"
         # Regenerated content is untouched
         @test doc["types"]["strictness"] == "warn"
