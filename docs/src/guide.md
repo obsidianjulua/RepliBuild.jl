@@ -414,6 +414,31 @@ header-only repository's tests and examples are often all it has, so exclude
 them. The clone's root, `include/` and `src/` are include directories, so the
 keep file includes the header the way a user would: `#include "hol/hol.hpp"`.
 
+### Boost and other large template libraries
+
+Two limits show up first on Boost, and apply to any library built like it.
+
+**Submodules are not fetched.** A git dependency is a plain `git clone`, so a
+superproject comes back without the libraries in it: `boostorg/boost` gives an
+empty tree. Depend on each library's own repository instead: `boostorg/math`
+for Boost.Math, which stands alone with `BOOST_MATH_STANDALONE` defined. A
+library that needs other Boost libraries needs each of them as a dependency of
+its own. Put `-DBOOST_MATH_STANDALONE` in `[compile] flags`: unlike an
+implementation macro, every file has to see it. Boost repositories also carry
+large test and example trees, which the resolver would compile, so exclude
+them.
+
+**A template instantiation's name spells out its arguments**, defaults
+included, and there is no key to rename it yet. Boost.Math's `pdf` comes out
+over 600 characters long, because its policy type spells out thirteen
+`default_policy` arguments. List the candidates with
+`filter(n -> occursin("pdf", string(n)), names(M; all = true))`, and bind the
+one you want to a short name in your own module: `const pdf = getfield(M, name)`.
+
+A large template library also puts its internal types in DWARF.
+`[wrap] surface_types_only` ([Edit the TOML](config.md), §2.14) emits only the
+types its functions reach, template spellings included.
+
 ### From the REPL
 
 The TOML recipes need no file of your own, so a header-only library can be
