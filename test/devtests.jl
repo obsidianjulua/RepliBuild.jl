@@ -517,3 +517,23 @@ include(joinpath(TEST_DIR, "test_sysconfiggen.jl"))
 # (runtests).
 
 include(joinpath(TEST_DIR, "test_link_cmdline_limit.jl"))
+
+# ── 20. A build graph compiled and linked library by library ─────────────────
+# `GraphBuild` compiles every translation unit of a TargetGraph under its own
+# compile group and links one library per shared target, against the libraries
+# of the shared targets it depends on. A two-library C++ project with an object
+# target folded in, described by hand (no cmake), is built, and a function of
+# one library that calls into the other is called from Julia; then the same in
+# the C bucket. The planning half is test_graph_build.jl (runtests).
+
+include(joinpath(TEST_DIR, "test_graph_build_live.jl"))
+
+# ── 21. Build-time generators of a graph ──────────────────────────────────────
+# A graph's generated sources (rootcling dictionaries, moc, protoc, a header a
+# script prints) come from steps of the project's own build, which run from a
+# narrowed ninja manifest: cmake orders every custom command of a target after
+# the artifacts of the targets it links, and those are libraries RepliBuild
+# compiles. Configures a tiny cmake project with Ninja; the planning is in
+# test_graph_generators.jl (runtests).
+
+include(joinpath(TEST_DIR, "test_graph_generators_live.jl"))

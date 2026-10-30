@@ -119,8 +119,9 @@ reference package and the byte-identical regression case.
   `<sundials/sundials_config.h>` resolves. Two files mapping to one destination is a
   hard error.
 - **Boundary:** configure-time generation works. Build-time custom commands (libpng's
-  `pnglibconf.h`) do not; an empty `generated_headers` is the signal. Check for a
-  shipped `.prebuilt` fallback first. Autotools is untested.
+  `pnglibconf.h`) are SysConfigGen's boundary; an empty `generated_headers` is the
+  signal. `GraphGenerators` runs them for a graph build. Check for a shipped
+  `.prebuilt` fallback first. Autotools is untested.
 - **A wrong harvested config does not fail the build.** It produces a library that
   is not the library. Package tests must assert behaviour that depends on the probes
   (pcre2 checks `\p{L}` on UTF-8 and reads the version from the `.so`). Each package
@@ -170,7 +171,10 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   from an older LLVM read by a newer one can lose its debug info with only a
   warning, and then every function in it wraps from an inferred signature.
   `_assert_debug_info_kept` turns that warning into a build error; keep it on every
-  path where one LLVM reads another's IR.
+  path where one LLVM reads another's IR. In a graph build the bucket belongs to
+  the library, decided over every translation unit linked into it, folded ones
+  included; a target folded into libraries of both buckets is compiled once per
+  bucket (`<out>/<name>/ir/<bucket>/`).
 - The final IR -> library step runs codegen at `[link] optimization_level` with
   `-disable-llvm-passes` (`_codegen_opt_flags`). Never drop the `-O`: the `-O0`
   backend is what clang uses without it.
@@ -274,17 +278,56 @@ If you are asked to work on it:
 - `Builder/Compiler.jl` — build engine: per-file IR, caches, link/opt, promotion,
   DWARF parse (`parse_dwarf_dump`, text-only seam), symbol extraction, the facts
   read off the linked IR's `define` lines (`_nounwind_definitions`,
-  `_byval_definitions`), metadata, `verify_wrap_surface`.
+  `_byval_definitions`), metadata, `verify_wrap_surface`. `link_optimize_ir` does
+  not create the build directory (`compile_to_ir` does); any other caller must, or
+  llvm-link has nowhere to write and the link falls back to per-TU clang with only
+  a warning.
 - `Builder/ConfigurationManager.jl` — TOML → immutable `RepliBuildConfig`.
   `test_config_surface.jl` requires every field to be consumed or listed in
   `RESERVED_UNUSED` with a reason.
 - `Builder/Discovery.jl` — scanning, include graph, TOML generation,
   `PRESERVED_TOML_KEYS`.
 - `Builder/DependencyResolver.jl` — git/local deps (drift markers, option-injection
-  guards). `[compile] source_files` **merges** with discovered sources.
+  guards). `[compile] source_files` **merges** with discovered sources. A git
+  dependency's `submodules` fetches exactly the listed paths (never all, never
+  recursive), each one more source root with the root's include heuristic, walk
+  and `exclude`. The superproject's `commit` pins them through its gitlinks, and a
+  listed submodule off its gitlink is a hard error. A directory with its own
+  `.git` is never walked as part of the root around it. (`test_dep_submodules.jl`.)
 - `Builder/DWARFParser.jl` — llvm-dwarfdump + nm → ClassInfo/VtableInfo.
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
+- `Builder/BuildGraph.jl` — the build-graph contract: a `TargetGraph` of targets
+  with their sources, compile groups, dependencies, link inputs and artifacts, as
+  the project's own build system resolved them. It runs no tool.
+  `topological_order` breaks ties by sorted id. CMakeGraph fills it;
+  GraphGenerators and GraphBuild consume it. (`test_build_graph.jl`.)
+- `Builder/CMakeGraph.jl` — `cmake_graph`/`read_cmake_graph`: a configure-only
+  CMake File API `codemodel-v2` reply → `TargetGraph`. **A File API command
+  fragment is not an argument** (`-O3 -DNDEBUG` is one fragment, MinGW's standard
+  libraries one more); `_split_fragment` splits each by the shell that runs the
+  build, so `flags` and `link_libraries` hold arguments. Every reply path goes
+  through `_abs`/`_normalize`: artifacts carry `./` segments their consumers'
+  sources do not. A target's `dependencies` are stored sorted: the reply's order
+  moves between two configures. Fixtures come from
+  `test/tools/gen_cmake_graph_fixtures.jl` (`--curl` adds libcurl).
+- `Builder/GraphGenerators.jl` — makes a graph's `generated` sources exist by
+  running the build's own custom-command steps from a narrowed ninja manifest.
+  **Never `ninja <output>` or `cmake --build --target`**: cmake orders every
+  custom command of a target after the artifacts of every target it depends on
+  (order-only), so both compile the project's libraries. An order-only input on
+  a library is dropped unless the command names it; one on an executable is the
+  tool the command runs and is a refusal (`GeneratorNeedsCompile`; rootcling).
+  Read ninja's graph through its `-t` tools, never by parsing build.ninja.
+  (`test_graph_generators.jl`, devtests `test_graph_generators_live.jl`.)
+- `Builder/GraphBuild.jl` — the build-graph executor. `build_graph` compiles each
+  translation unit under its own compile group and links one library per
+  `:shared`/`:module` target (and per static target nothing folds) into
+  `<out>/<name>/`, with `graph_target.toml` beside it. Object and static targets
+  fold their IR into the libraries that link them, never again into a library
+  that gets them through a shared dependency: the File API lists dependencies
+  transitively (`_reach`). (`test_graph_build.jl`, devtests
+  `test_graph_build_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
   where it lives.** An entry points at the project's own TOML; `register` builds
   and wraps in place, vendors the output to `builds/<hash_config>/` (immutable:
@@ -868,7 +911,10 @@ Start here for any ABI question: register state is observable.
   and runs build + wrap.
   `struct_abi/`, `jlcs_producers/`, `mlir_templates/` and `jit_unwind/` are
   single-file clang++ fixtures their test compiles directly; `fixtures/` holds
-  the vendored JSON corpora.
+  the vendored JSON corpora and `fixtures/cmake_graph/` the vendored File API
+  replies. `graph_build_test/` (a graph described by hand, no cmake) and
+  `graph_generators_test/` (configured with cmake and Ninja) are graph mode's
+  live fixtures.
 
 ## Windows (`x86_64-w64-windows-gnu`, MSYS2 CLANG64) — since v4.0.0
 
@@ -1022,12 +1068,21 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
-- Git dependencies are cloned without their submodules (`_clone_dep` runs a
-  plain `git clone`), so a superproject such as boostorg/boost comes back as an
-  empty tree and each Boost module that stands alone (Math, with
-  `BOOST_MATH_STANDALONE`) has to be its own dep (2026-10-25). Fetching them
-  needs a per-dependency key, since a superproject's submodule set can be
-  hundreds of clones.
+- Graph mode end to end (2026-10-30). CMakeGraph → GraphGenerators → GraphBuild
+  run as functions; no TOML key selects them, and nothing extracts metadata or
+  wraps per library yet. GraphBuild has no link cache: every library relinks.
+- Cross-library type identity in graph mode (2026-10-30). Each wrapper emits
+  every type its own DWARF holds, so B gets a second Julia type, often an empty
+  one, for each of A's types it touches. Design:
+  `docs/updates/CROSS_LIBRARY_TYPES.md`.
+- Graph mode for CERN ROOT (2026-10-30), measured in `docs/updates/ROOT_RECON.md`.
+  Linux only: ROOT on Windows is MSVC, and its CMake refuses MSYS2 CLANG64. Every
+  ROOT library's dictionary needs ROOT's own patched LLVM/Clang 20 and cling built
+  first. Hand `--target rootcling` to ROOT's build (31.9 min on 4 cores); a system
+  LLVM can replace only the bundled LLVM half, and only 20.1.x. Generate each
+  dictionary after its dependencies' `.pcm` files exist; the `.so` inputs Ninja
+  lists are ordering only. First wrap set: Core, Thread, RIO, then MathCore →
+  Matrix → Hist.
 - A template instantiation's Julia name carries its full template arguments
   (`_julia_function_name`, `_sanitize_c_type_name`), and there is no rename
   key: Boost.Math's thirteen `default_policy` arguments put `pdf` past 600

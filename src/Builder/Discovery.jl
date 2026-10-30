@@ -94,6 +94,11 @@ const PRESERVED_TOML_KEYS = [
     ("platform", "linux"),
     ("platform", "windows"),
     ("platform", "macos"),
+    # Every [dependencies.<name>] entry, whole ("*" = each key of the section).
+    # A scan cannot find where a dependency comes from, its pin, its excludes or
+    # which submodules it fetches, and a `submodules` key cannot survive without
+    # the entry it belongs to. generate_config emits no dependencies at all.
+    ("dependencies", "*"),
 ]
 
 """
@@ -114,10 +119,13 @@ function _collect_preserved_sections(config_path::String)
     for (sec, key) in PRESERVED_TOML_KEYS
         haskey(existing, sec) || continue
         section = existing[sec]
-        section isa AbstractDict && haskey(section, key) || continue
-        v = section[key]
-        isempty(v) && continue
-        kept[(sec, key)] = v
+        section isa AbstractDict || continue
+        for k in (key == "*" ? collect(keys(section)) : [key])
+            haskey(section, k) || continue
+            v = section[k]
+            isempty(v) && continue
+            kept[(sec, k)] = v
+        end
     end
     return isempty(kept) ? nothing : kept
 end
