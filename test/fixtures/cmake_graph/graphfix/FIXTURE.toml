@@ -1,0 +1,7 @@
+# Written by test/tools/gen_cmake_graph_fixtures.jl; regenerate, do not edit.
+# `windows_shell` is the encoding the reply's command fragments are in.
+cmake_version = "4.4.5"
+generator = "Ninja"
+host = "x86_64-w64-mingw32"
+options = []
+windows_shell = true

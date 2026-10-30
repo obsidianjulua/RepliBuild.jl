@@ -1,0 +1,16 @@
+{
+  "configurations": [
+    {
+      "name": "Release",
+      "targets": [
+        {"id": "core::@6890427a1f51a3e7e1df", "jsonFile": "target-core.json", "name": "core"},
+        {"id": "ext::@6890427a1f51a3e7e1df", "jsonFile": "target-ext.json", "name": "ext"},
+        {"id": "ext_version::@6890427a1f51a3e7e1df", "jsonFile": "target-ext_version.json", "name": "ext_version"},
+        {"id": "helpers::@6890427a1f51a3e7e1df", "jsonFile": "target-helpers.json", "name": "helpers"}
+      ]
+    }
+  ],
+  "kind": "codemodel",
+  "paths": {"build": "@BUILD@", "source": "@SOURCE@"},
+  "version": {"major": 2, "minor": 11}
+}

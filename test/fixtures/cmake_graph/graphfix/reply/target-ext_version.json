@@ -1,0 +1,11 @@
+{
+  "id": "ext_version::@6890427a1f51a3e7e1df",
+  "name": "ext_version",
+  "paths": {"build": ".", "source": "."},
+  "sources": [
+    {"isGenerated": true, "path": "@BUILD@/CMakeFiles/ext_version"},
+    {"isGenerated": true, "path": "@BUILD@/CMakeFiles/ext_version.rule"},
+    {"isGenerated": true, "path": "@BUILD@/gen/ext_version.h.rule"}
+  ],
+  "type": "UTILITY"
+}
