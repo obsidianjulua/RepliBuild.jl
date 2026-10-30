@@ -228,6 +228,10 @@ expected 40-hex object name for that ref: when set, DependencyResolver hard-erro
 the resolved HEAD differs, which is the only check that survives a cache wipe (the
 sidecar marker cannot, since `clean()` deletes it along with the clone).
 Leave `commit` empty to keep the old trust-the-tag behaviour.
+
+`submodules` (git only) names the superproject's submodule paths to fetch, sorted
+and deduplicated at load; empty means none, never all. The superproject's tree
+records each submodule's commit, so `commit` pins them too.
 """
 struct DependencyItem
     type::String # "git", "system", "local"
@@ -237,6 +241,7 @@ struct DependencyItem
     path::String
     pkg_config::String
     exclude::Vector{String}
+    submodules::Vector{String}
 end
 
 """Nested struct for [dependencies] section"""
@@ -824,19 +829,51 @@ function parse_dependencies_config(data::Dict)::DependenciesConfig
                 error("[dependencies.$name] commit must be a full 40-hex object name, got: $commit\n" *
                       "Abbreviated SHAs are rejected — they are ambiguous across future history.")
             end
+            dep_type = get(conf, "type", "local")
             items[String(name)] = DependencyItem(
-                get(conf, "type", "local"),
+                dep_type,
                 get(conf, "url", ""),
                 get(conf, "tag", ""),
                 lowercase(commit),
                 get(conf, "path", ""),
                 get(conf, "pkg_config", ""),
-                get(conf, "exclude", String[])
+                get(conf, "exclude", String[]),
+                _parse_dep_submodules(String(name), dep_type, get(conf, "submodules", String[]))
             )
         end
     end
-    
+
     return DependenciesConfig(items)
+end
+
+"""
+Validate `[dependencies.<name>] submodules`: each entry is a submodule path as git
+records it (relative, `/`-separated), and reaches git as an argument after `--`.
+Refused here rather than at fetch time, where a bad entry would read as a failed
+clone and the dependency would resolve to nothing.
+"""
+function _parse_dep_submodules(name::String, dep_type::AbstractString, raw)::Vector{String}
+    raw isa AbstractVector ||
+        error("[dependencies.$name] submodules must be a list of paths, e.g. [\"libs/math\"]; got: $(repr(raw))")
+    isempty(raw) && return String[]
+    dep_type == "git" ||
+        error("[dependencies.$name] submodules applies only to type = \"git\"; this dependency is type = \"$dep_type\"")
+    subs = String[]
+    for s in raw
+        s isa AbstractString ||
+            error("[dependencies.$name] submodules entries must be strings; got: $(repr(s))")
+        why = isempty(s)                          ? "is empty" :
+              startswith(s, "-")                  ? "starts with '-' (it would read as a git option)" :
+              startswith(s, "/")                  ? "is absolute; give the path inside the repository" :
+              !occursin(r"^[A-Za-z0-9._+/-]+$", s) ? "may contain only letters, digits, '.', '_', '+', '-' and '/'" :
+              any(isempty, split(s, '/'))         ? "has an empty path component (a doubled or trailing '/')" :
+              any(in((".", "..")), split(s, '/')) ? "has a '.' or '..' component" :
+              nothing
+        why === nothing ||
+            error("[dependencies.$name] submodules entry $(repr(s)) $why")
+        push!(subs, String(s))
+    end
+    return sort!(unique!(subs))
 end
 
 """Parse [types] section - Type validation settings for FFI generation"""
@@ -1249,6 +1286,7 @@ function save_config(config::RepliBuildConfig)
             if !isempty(item.path) item_dict["path"] = item.path end
             if !isempty(item.pkg_config) item_dict["pkg_config"] = item.pkg_config end
             if !isempty(item.exclude) item_dict["exclude"] = item.exclude end
+            if !isempty(item.submodules) item_dict["submodules"] = item.submodules end
             deps_dict[name] = item_dict
         end
         data["dependencies"] = deps_dict

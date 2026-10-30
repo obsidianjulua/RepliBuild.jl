@@ -32,6 +32,13 @@ export resolve_dependencies
 #
 # Neither layer is a substitute for reading the diff; they turn a silent content
 # swap into a loud one.
+#
+# SUBMODULES (2026-10-30). `submodules = ["libs/math", …]` fetches exactly those
+# paths of a superproject (boostorg/boost has ~170; it is never "all"). The pin
+# covers them without a second key: the superproject's tree records each
+# submodule's commit as a gitlink. The marker records the fetched list, so
+# changing it re-resolves like a tag change, and a listed submodule whose
+# checkout is not the commit its gitlink records is a hard error.
 # ---------------------------------------------------------------------------
 
 _dep_marker_path(deps_cache::AbstractString, name::AbstractString) =
@@ -39,14 +46,17 @@ _dep_marker_path(deps_cache::AbstractString, name::AbstractString) =
 
 _tagdisp(tag::AbstractString) = isempty(tag) ? "default branch" : tag
 _shortsha(sha::AbstractString) = length(sha) >= 12 ? sha[1:12] : (isempty(sha) ? "unknown" : sha)
+_subsdisp(subs) = isempty(subs) ? "none" : join(subs, ", ")
 
+# Submodule entries are validated at load to contain no ',' (ConfigurationManager).
 function _write_dep_marker(path::AbstractString, url::AbstractString, tag::AbstractString,
-                           commit::AbstractString="")
+                           commit::AbstractString="", submodules::AbstractVector=String[])
     try
         open(path, "w") do io
             println(io, "url=", url)
             println(io, "tag=", tag)
             println(io, "commit=", commit)
+            println(io, "submodules=", join(submodules, ","))
         end
     catch e
         @warn "Could not write dependency cache marker" path exception=e
@@ -54,8 +64,10 @@ function _write_dep_marker(path::AbstractString, url::AbstractString, tag::Abstr
     return nothing
 end
 
+# A marker written before submodules existed has no `submodules=` line, and its
+# clone fetched none: an empty list is the truth for it.
 function _read_dep_marker(path::AbstractString)
-    url = ""; tag = ""; commit = ""
+    url = ""; tag = ""; commit = ""; submodules = String[]
     for line in eachline(path)
         if startswith(line, "url=")
             url = String(line[5:end])
@@ -63,9 +75,11 @@ function _read_dep_marker(path::AbstractString)
             tag = String(line[5:end])
         elseif startswith(line, "commit=")
             commit = String(line[8:end])
+        elseif startswith(line, "submodules=")
+            submodules = String[s for s in split(line[12:end], ',') if !isempty(s)]
         end
     end
-    return (url, tag, commit)
+    return (url, tag, commit, submodules)
 end
 
 # Resolved object name of the current checkout. "" when it cannot be determined
@@ -88,8 +102,14 @@ Refusing to build is the whole point of the pin — a warning here would let the
 compile proceed on unverified source, which is the failure this exists to stop.
 
 No pin declared ⇒ nothing to verify (returns the resolved sha for the marker).
+
+With `submodules=true` every listed submodule is verified as well
+(`_verify_dep_submodules`), pinned or not. Clone and re-checkout pass `false` and
+verify them after fetching: the superproject is verified first, because its
+`.gitmodules` says where the submodules are fetched from.
 """
-function _verify_dep_pin(name::AbstractString, dep, dep_path::AbstractString)::String
+function _verify_dep_pin(name::AbstractString, dep, dep_path::AbstractString;
+                         submodules::Bool=true)::String
     head = _git_head_commit(dep_path)
     pin = hasproperty(dep, :commit) ? dep.commit : ""
 
@@ -110,7 +130,84 @@ function _verify_dep_pin(name::AbstractString, dep, dep_path::AbstractString)::S
                 between those two commits before updating `commit` in the recipe.""")
         end
     end
+    submodules && _verify_dep_submodules(name, dep, dep_path)
     return head
+end
+
+_dep_submodules(dep) = hasproperty(dep, :submodules) ? dep.submodules : String[]
+
+# Entries are `/`-separated at load (ConfigurationManager._parse_dep_submodules).
+_dep_subpath(dep_path::AbstractString, sub::AbstractString) = joinpath(dep_path, split(sub, '/')...)
+
+# The commit the superproject's checked-out tree records for each of `paths`.
+# Only gitlinks (mode 160000) count: a path that is a directory, a file, or
+# absent is missing from the result. `-z` keeps paths unquoted.
+function _recorded_submodule_commits(dep_path::AbstractString, paths::AbstractVector)
+    recorded = Dict{String,String}()
+    out = read(`git -C $dep_path ls-tree -z HEAD -- $paths`, String)
+    for entry in split(out, '\0'; keepempty=false)
+        meta, path = split(entry, '\t'; limit=2)
+        mode, type, sha = split(meta)
+        mode == "160000" && type == "commit" && (recorded[String(path)] = lowercase(sha))
+    end
+    return recorded
+end
+
+# A listed path the superproject records no submodule at is the recipe's error.
+# Refuse it before `git submodule update`, whose failure would read as a failed
+# fetch and resolve the dependency to nothing.
+function _require_recorded_submodules(name::AbstractString, dep, dep_path::AbstractString)
+    subs = _dep_submodules(dep)
+    recorded = _recorded_submodule_commits(dep_path, subs)
+    absent = [s for s in subs if !haskey(recorded, s)]
+    isempty(absent) || error("""
+        Dependency '$name' lists submodules its superproject does not record: $(join(absent, ", "))
+          url: $(dep.url)
+          tag: $(_tagdisp(dep.tag))
+          at:  $(_git_head_commit(dep_path))
+        Each entry is a submodule's path in the superproject, as `git submodule status` prints it.""")
+    return recorded
+end
+
+# Fetch exactly the listed submodules, each at the commit the superproject
+# records, never recursively. `--checkout` overrides a `.gitmodules`
+# `update = none|merge|rebase`, which upstream controls. `--force`: the clone is
+# a cache we own, the same reason `_recheckout_dep` forces its checkout.
+function _fetch_dep_submodules(name::AbstractString, dep, dep_path::AbstractString)
+    subs = _dep_submodules(dep)
+    isempty(subs) && return nothing
+    _require_recorded_submodules(name, dep, dep_path)
+    println("    $name: fetching submodules $(_subsdisp(subs))")
+    run(`git -C $dep_path submodule --quiet update --init --checkout --force --depth 1 -- $subs`)
+    return nothing
+end
+
+"""
+Verify every listed submodule's checkout against the commit the superproject's
+tree records for it. Hard error on a mismatch or a missing checkout, like a
+`commit` pin mismatch: the superproject's pin covers its submodules only while
+they are what its tree says.
+"""
+function _verify_dep_submodules(name::AbstractString, dep, dep_path::AbstractString)
+    subs = _dep_submodules(dep)
+    isempty(subs) && return nothing
+    recorded = _require_recorded_submodules(name, dep, dep_path)
+    for s in subs
+        sub_path = _dep_subpath(dep_path, s)
+        # An unfetched submodule is an empty directory, and `git -C` there answers
+        # with the superproject's HEAD: only a checkout with its own `.git` counts.
+        actual = ispath(joinpath(sub_path, ".git")) ? _git_head_commit(sub_path) : ""
+        actual == recorded[s] && continue
+        error("""
+            Dependency '$name' submodule '$s' is not at the commit its superproject records — refusing to build.
+              url:      $(dep.url)
+              tag:      $(_tagdisp(dep.tag))
+              recorded: $(recorded[s])
+              actual:   $(isempty(actual) ? "not fetched" : actual)
+              path:     $sub_path
+            Delete $dep_path (or `RepliBuild.clean` the project) to fetch it again.""")
+    end
+    return nothing
 end
 
 # Best-effort origin URL for a legacy clone that predates the marker.
@@ -122,18 +219,19 @@ function _git_origin_url(dep_path::AbstractString)
     end
 end
 
-# What is currently cached at dep_path? Returns (url, tag, commit, have_marker).
-#   marker present            → authoritative url+tag+commit
-#   marker absent, dir present → infer url from git, tag/commit unknown ("") ⇒ re-checkout
-#   nothing cached            → ("", "", "", false)
+# What is currently cached at dep_path? Returns (url, tag, commit, submodules, have_marker).
+#   marker present            → authoritative url+tag+commit+submodules
+#   marker absent, dir present → infer url from git, tag/commit unknown ("") ⇒ re-checkout;
+#                                no submodules (nothing before the marker fetched any)
+#   nothing cached            → ("", "", "", [], false)
 function _read_dep_state(marker_path::AbstractString, dep_path::AbstractString)
     if isfile(marker_path)
-        url, tag, commit = _read_dep_marker(marker_path)
-        return (url, tag, commit, true)
+        url, tag, commit, submodules = _read_dep_marker(marker_path)
+        return (url, tag, commit, submodules, true)
     elseif isdir(dep_path)
-        return (_git_origin_url(dep_path), "", "", false)
+        return (_git_origin_url(dep_path), "", "", String[], false)
     else
-        return ("", "", "", false)
+        return ("", "", "", String[], false)
     end
 end
 
@@ -153,9 +251,11 @@ function _clone_dep(name::AbstractString, dep, dep_path::AbstractString, marker_
         end
         # Verify BEFORE the marker is written: a failed pin must not leave a record
         # claiming this content was resolved successfully.
-        head = _verify_dep_pin(name, dep, dep_path)
+        head = _verify_dep_pin(name, dep, dep_path; submodules=false)
+        _fetch_dep_submodules(name, dep, dep_path)
+        _verify_dep_submodules(name, dep, dep_path)
         println("    $name: resolved $(_tagdisp(dep.tag)) → $(_shortsha(head))")
-        _write_dep_marker(marker_path, dep.url, dep.tag, head)
+        _write_dep_marker(marker_path, dep.url, dep.tag, head, _dep_submodules(dep))
         return true
     catch e
         # A failed PIN is a refusal to build, not a fetch failure — never swallow it
@@ -189,8 +289,12 @@ function _recheckout_dep(name::AbstractString, dep, dep_path::AbstractString, ma
                 run(`git checkout --quiet --force $(dep.tag)`)
             end
         end
-        head = _verify_dep_pin(name, dep, dep_path)
-        _write_dep_marker(marker_path, dep.url, dep.tag, head)
+        # A checkout moves the gitlinks, not the submodules' working trees: they
+        # are fetched again at what the new tree records.
+        head = _verify_dep_pin(name, dep, dep_path; submodules=false)
+        _fetch_dep_submodules(name, dep, dep_path)
+        _verify_dep_submodules(name, dep, dep_path)
+        _write_dep_marker(marker_path, dep.url, dep.tag, head, _dep_submodules(dep))
         return true
     catch e
         # Same rule as _clone_dep: a pin refusal propagates, a fetch/checkout failure
@@ -199,6 +303,50 @@ function _recheckout_dep(name::AbstractString, dep, dep_path::AbstractString, ma
         @warn "Failed to re-checkout dependency $name to '$(dep.tag)'" exception=e
         return false
     end
+end
+
+"""
+Add one source root of a git dependency: the include heuristic (the root,
+`include/`, `src/`), then every `.c`/`.cpp`/`.cc`/`.cxx` under it outside the
+skipped directories and `exclude`. `exclude` matches a file's path relative to
+`dep_path`, the dependency's root, so a submodule's files are named as the
+dependency's tree shows them (`libs/math/…`), whichever root found them.
+
+A directory holding a `.git` is another checkout, which in a clone can only be
+a fetched submodule, and never belongs to this root: a listed submodule is a
+root of its own, and one fetched before its entry was removed adds nothing.
+"""
+function _collect_git_dep_root!(includes::Vector{String}, sources::Vector{String},
+                                root::AbstractString, dep_path::AbstractString,
+                                exclude::AbstractVector)
+    push!(includes, root)
+    for subdir in ("include", "src")
+        d = joinpath(root, subdir)
+        isdir(d) && push!(includes, d)
+    end
+
+    # Find all .cpp/.c files under the root (ignoring tests/examples typically)
+    for (dir, dirs, files) in walkdir(root)
+        filter!(d -> !in(d, ["test", "tests", "testes", "example", "examples", "fuzzing", "build", ".git", "doc", "docs"]) &&
+                     !ispath(joinpath(dir, d, ".git")), dirs)
+        for file in files
+            rel_path = replace(relpath(joinpath(dir, file), dep_path), "\\" => "/")
+            should_exclude = false
+            for ex in exclude
+                if file == ex || startswith(rel_path, ex) || endswith(rel_path, ex) || occursin(ex, rel_path)
+                    should_exclude = true
+                    break
+                end
+            end
+            if should_exclude
+                continue
+            end
+            if endswith(file, ".cpp") || endswith(file, ".cc") || endswith(file, ".cxx") || endswith(file, ".c")
+                push!(sources, joinpath(dir, file))
+            end
+        end
+    end
+    return nothing
 end
 
 """
@@ -249,7 +397,7 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
 
             dep_path = joinpath(deps_cache, name)
             marker_path = _dep_marker_path(deps_cache, name)
-            cached_url, cached_tag, cached_commit, have_marker = _read_dep_state(marker_path, dep_path)
+            cached_url, cached_tag, cached_commit, cached_subs, have_marker = _read_dep_state(marker_path, dep_path)
 
             # A cache hit on url+tag proves nothing about CONTENT — the tag may have
             # been repointed, or the checkout moved locally. Compare the recorded
@@ -260,6 +408,8 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
             # The recipe's pin changing is a deliberate version move, not drift.
             pin_changed = !isempty(declared_pin) && !isempty(cached_commit) &&
                           lowercase(declared_pin) != cached_commit
+            # Both lists are sorted and deduplicated (at load, and as written).
+            subs_changed = cached_subs != _dep_submodules(dep)
 
             if !isdir(dep_path) || cached_url != dep.url
                 # Absent, or the upstream URL changed → (re)clone from scratch.
@@ -268,10 +418,11 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
                     rm(dep_path; recursive=true, force=true)
                 end
                 _clone_dep(name, dep, dep_path, marker_path) || continue
-            elseif cached_tag != dep.tag || content_drifted || pin_changed
+            elseif cached_tag != dep.tag || content_drifted || pin_changed || subs_changed
                 # Same repo, but something about the requested or actual content moved:
-                # a tag bump, a changed pin, a legacy cache with no recorded tag, or a
-                # checkout that drifted out from under the marker. All re-resolve.
+                # a tag bump, a changed pin, a changed submodule list, a legacy cache
+                # with no recorded tag, or a checkout that drifted out from under the
+                # marker. All re-resolve.
                 if content_drifted
                     @warn """
                         Dependency '$name' checkout drifted from its recorded commit — re-resolving.
@@ -280,6 +431,8 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
                         The cached clone is not the source that was resolved for the last build."""
                 elseif pin_changed
                     println("    $name: pin $(_shortsha(cached_commit)) → $(_shortsha(declared_pin)), re-resolving")
+                elseif have_marker && cached_tag == dep.tag
+                    println("    $name: submodules $(_subsdisp(cached_subs)) → $(_subsdisp(_dep_submodules(dep))), re-resolving")
                 elseif have_marker
                     println("    $name: $(_tagdisp(cached_tag)) → $(_tagdisp(dep.tag)), re-resolving")
                 else
@@ -293,41 +446,19 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
                 # Up to date but unmarked, or marked by a pre-commit-tracking build →
                 # verify any declared pin and record the resolved object name.
                 head = _verify_dep_pin(name, dep, dep_path)
-                _write_dep_marker(marker_path, dep.url, dep.tag, head)
+                _write_dep_marker(marker_path, dep.url, dep.tag, head, _dep_submodules(dep))
             else
                 # Full cache hit with verified content identity. Still check the pin:
                 # the recipe may have GAINED a `commit` since this clone was made.
+                # A listed submodule moved off its recorded commit fails here.
                 _verify_dep_pin(name, dep, dep_path)
             end
-            
-            # Heuristic: add common include directories from dep
-            push!(extra_includes, dep_path)
-            for subdir in ("include", "src")
-                d = joinpath(dep_path, subdir)
-                isdir(d) && push!(extra_includes, d)
+
+            # The dependency root and each fetched submodule are source roots alike.
+            for root in vcat([dep_path], [_dep_subpath(dep_path, s) for s in _dep_submodules(dep)])
+                _collect_git_dep_root!(extra_includes, extra_sources, root, dep_path, dep.exclude)
             end
-            
-            # Find all .cpp/.c files in the dep_path (ignoring tests/examples typically)
-            for (root, dirs, files) in walkdir(dep_path)
-                filter!(d -> !in(d, ["test", "tests", "testes", "example", "examples", "fuzzing", "build", ".git", "doc", "docs"]), dirs)
-                for file in files
-                    rel_path = replace(relpath(joinpath(root, file), dep_path), "\\" => "/")
-                    should_exclude = false
-                    for ex in dep.exclude
-                        if file == ex || startswith(rel_path, ex) || endswith(rel_path, ex) || occursin(ex, rel_path)
-                            should_exclude = true
-                            break
-                        end
-                    end
-                    if should_exclude
-                        continue
-                    end
-                    if endswith(file, ".cpp") || endswith(file, ".cc") || endswith(file, ".cxx") || endswith(file, ".c")
-                        push!(extra_sources, joinpath(root, file))
-                    end
-                end
-            end
-            
+
         elseif dep.type == "system"
             if isempty(dep.pkg_config)
                 @warn "System dependency $name missing pkg_config name"
