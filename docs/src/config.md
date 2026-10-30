@@ -45,12 +45,12 @@ destroying your intent. The preserved set is:
 | `[link]` | `promote_statics` |
 | `[compile]` | `visibility` |
 | `[platform]` | `linux`, `windows`, `macos` |
+| `[dependencies]` | every `<name>` entry, whole |
 
 A regenerated *non-empty* value wins; an empty or absent one gets the preserved
 value. A hand-edited key **not** in that table is wiped by `force=true`.
-`[compile] flags`, `include_dirs`, and `[dependencies]` are not preserved — keep
-a hand-written config in version control rather than relying on `force=true` to
-round-trip it.
+`[compile] flags` and `include_dirs` are not preserved — keep a hand-written
+config in version control rather than relying on `force=true` to round-trip it.
 
 `save_config` only writes keys with non-default or non-empty values, so a
 round-tripped file is smaller than the full schema. Absent keys take the
@@ -335,7 +335,8 @@ so those need no entry (several Hub configs list them anyway, harmlessly).
 
 ### 2.7 Include roots
 
-The resolver adds `<clone>`, `<clone>/include` and `<clone>/src` automatically.
+The resolver adds `<clone>`, `<clone>/include` and `<clone>/src` automatically,
+and the same three for each submodule a git dependency lists in `submodules`.
 Anything at a different depth must be named:
 
 ```toml
@@ -879,16 +880,53 @@ pugixml = { type = "git", url = "https://github.com/zeux/pugixml.git", tag = "v1
 |---|---|---|---|
 | `type` | String | `"local"` | `"git"`, `"local"`, `"system"` — **note the default is `local`, not `git`**; a `[dependencies.x]` with a `url` but no `type` will not clone |
 | `url` | String | `""` | Required for `type = "git"` |
-| `tag` | String | `""` (default branch) | Tag or branch; a tag makes the clone shallow |
+| `tag` | String | `""` (default branch) | Tag or branch, checked out after a full clone |
 | `commit` | String | `""` | Expected 40-hex object name. Validated at load; mismatch after checkout is a hard error — §2.11 |
 | `path` | String | `""` | Required for `type = "local"`; scanned in place, never copied |
 | `pkg_config` | String | `""` | For `type = "system"`; runs `pkg-config --cflags` |
 | `exclude` | Vector{String} | `[]` | Paths to skip during source injection — §2.6 |
+| `submodules` | Vector{String} | `[]` (none) | `type = "git"` only. Submodule paths of the superproject to fetch; see below |
 
 Git dependencies clone into `.replibuild_cache/deps/<name>/` and re-checkout on
 tag change. Resolved sources merge into the compilation graph before `[compile]`
 runs, so they are compiled with the same toolchain and flags as your own files —
 which is exactly why the resulting DWARF is consistent across the whole project.
+
+**Submodules.** A clone fetches no submodules, so a superproject such as
+boostorg/boost comes back as an almost empty tree. `submodules` names the ones to
+fetch, and only those: a superproject can have hundreds, and the list is never
+taken to mean all of them.
+
+```toml
+[dependencies.boost]
+type       = "git"
+url        = "https://github.com/boostorg/boost.git"
+tag        = "boost-1.86.0"
+commit     = "<40-hex>"
+submodules = ["libs/math", "libs/config"]
+exclude    = ["libs/math/src/tr1"]
+```
+
+- Each listed submodule is fetched shallow (`git submodule update --init --depth 1`)
+  at the commit the superproject's tree records for it, never recursively, so
+  submodules of a submodule are not fetched.
+- `commit` pins the submodules too, because the superproject's tree records each
+  submodule's commit. A listed submodule whose checkout is not that commit is a
+  **hard error**, like a pin mismatch; delete the clone (or `clean` the project)
+  to fetch it again.
+- A listed path where the superproject records no submodule is a hard error.
+- Changing the list re-resolves the dependency, as a tag change does.
+- Each fetched submodule is one more source root of the same dependency: the
+  resolver adds `<submodule>`, `<submodule>/include` and `<submodule>/src` to the
+  include path and walks it for sources like the dependency's root, with the same
+  skipped directories. `exclude` matches a path relative to the dependency's root,
+  so submodule files are named as `libs/math/…`. Everything still compiles into
+  one library with the project's flags.
+- A submodule that is not listed contributes nothing, even when an earlier list
+  fetched it.
+- Entries are validated at load: a relative `/`-separated path of letters,
+  digits, `.`, `_`, `+` and `-`, with no `.` or `..` component, no empty
+  component, and no leading `-`.
 
 ### `[ingest]`
 
@@ -963,6 +1001,9 @@ afternoon.
 **Hard error at config load**
 
 - `[dependencies.<n>] commit` that is not a full 40-hex object name.
+- `[dependencies.<n>] submodules` that is not a list of relative paths (absolute,
+  `..`, a leading `-`, or a character outside letters, digits, `.`, `_`, `+`, `-`
+  and `/`), or that is set on a dependency whose `type` is not `"git"`.
 - `[wrap.varargs.<f>]` that is not a list, or whose entries are not lists — with a
   message showing the correct shape.
 - `validate_config!`: empty `project.name`; non-existent `project.root`; a
@@ -980,6 +1021,8 @@ afternoon.
 **Hard error later in the pipeline**
 
 - A resolved dependency HEAD that disagrees with the declared `commit`.
+- A listed dependency submodule that is not at the commit its superproject
+  records, or a listed path where the superproject records no submodule.
 - A built library whose wrappable functions are not reachable in its dynamic
   symbol table, or whose wrappable surface is empty — the `visibility = "hidden"`
   hazard in §2.12. Checked before the build's cache marker is written, so a

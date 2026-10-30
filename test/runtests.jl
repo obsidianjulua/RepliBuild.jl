@@ -224,6 +224,13 @@ include(joinpath(@__DIR__, "test_header_enum_provenance.jl"))
 
 include(joinpath(@__DIR__, "test_dep_cache.jl"))
 
+# ── Git dependency submodules (local git repos over file://; needs git) ──────
+# `submodules = [...]` fetches exactly the listed paths at the commits the
+# superproject records; each is a source root of the dependency. A submodule off
+# its recorded commit is a hard error, and the key survives discover(force=true).
+
+include(joinpath(@__DIR__, "test_dep_submodules.jl"))
+
 # ── Wrapper type-binding guard (no toolchain required) ───────────────────────
 # A type used in a foreign-call signature but never declared by the module is
 # an UndefVarError at include time — the whole wrapper dies, not one function.
