@@ -1,0 +1,14 @@
+{
+  "configurations": [
+    {
+      "name": "Release",
+      "targets": [
+        {"id": "libcurl_object::@306ed2d68c6501e8728f", "jsonFile": "target-libcurl_object.json", "name": "libcurl_object"},
+        {"id": "libcurl_shared::@306ed2d68c6501e8728f", "jsonFile": "target-libcurl_shared.json", "name": "libcurl_shared"}
+      ]
+    }
+  ],
+  "kind": "codemodel",
+  "paths": {"build": "@BUILD@", "source": "@SOURCE@"},
+  "version": {"major": 2, "minor": 11}
+}

@@ -1,0 +1,36 @@
+{
+  "artifacts": [
+    {"path": "libcore.dll"},
+    {"path": "libcore.dll.a"},
+    {"path": "libcore.pdb"}
+  ],
+  "compileGroups": [
+    {
+      "compileCommandFragments": [
+        {"fragment": "-O3 -DNDEBUG"}
+      ],
+      "defines": [
+        {"define": "CORE_BUILDING=1"},
+        {"define": "core_EXPORTS"}
+      ],
+      "includes": [
+        {"path": "@SOURCE@/core/include"}
+      ],
+      "language": "CXX"
+    }
+  ],
+  "id": "core::@6890427a1f51a3e7e1df",
+  "link": {
+    "commandFragments": [
+      {"fragment": "-lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32", "role": "libraries"}
+    ]
+  },
+  "name": "core",
+  "paths": {"build": ".", "source": "."},
+  "sources": [
+    {"compileGroupIndex": 0, "path": "core/core.cpp"},
+    {"compileGroupIndex": 0, "isGenerated": true, "path": "@BUILD@/gen/table.cpp"},
+    {"isGenerated": true, "path": "@BUILD@/gen/table.cpp.rule"}
+  ],
+  "type": "SHARED_LIBRARY"
+}

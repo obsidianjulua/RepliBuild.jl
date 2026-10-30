@@ -1,0 +1,12 @@
+# Written by test/tools/gen_cmake_graph_fixtures.jl; regenerate, do not edit.
+# `windows_shell` is the encoding the reply's command fragments are in.
+cmake_version = "4.4.5"
+generator = "Ninja"
+host = "x86_64-w64-mingw32"
+options = ["-DBUILD_SHARED_LIBS=ON", "-DBUILD_STATIC_LIBS=ON", "-DSHARE_LIB_OBJECT=ON", "-DBUILD_CURL_EXE=OFF", "-DBUILD_TESTING=OFF", "-DBUILD_EXAMPLES=OFF", "-DBUILD_LIBCURL_DOCS=OFF", "-DBUILD_MISC_DOCS=OFF", "-DENABLE_CURL_MANUAL=OFF", "-DCURL_USE_LIBPSL=OFF", "-DUSE_LIBIDN2=OFF", "-DCURL_ZLIB=OFF", "-DCURL_BROTLI=OFF", "-DCURL_ZSTD=OFF", "-DUSE_NGHTTP2=OFF", "-DCURL_USE_LIBSSH2=OFF", "-DCURL_DISABLE_LDAP=ON", "-DCURL_ENABLE_SSL=OFF"]
+windows_shell = true
+
+[upstream]
+commit = "68720b4837284335b2d63cb358f8f6ce65f5bc55"
+tag = "curl-8_21_0"
+url = "https://github.com/curl/curl.git"

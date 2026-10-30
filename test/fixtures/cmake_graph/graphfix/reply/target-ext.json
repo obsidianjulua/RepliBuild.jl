@@ -1,0 +1,43 @@
+{
+  "artifacts": [
+    {"path": "libext.dll"},
+    {"path": "libext.dll.a"},
+    {"path": "libext.pdb"}
+  ],
+  "compileGroups": [
+    {
+      "compileCommandFragments": [
+        {"fragment": "-O3 -DNDEBUG"}
+      ],
+      "defines": [
+        {"define": "EXT_LEVEL=2"},
+        {"define": "ext_EXPORTS"}
+      ],
+      "includes": [
+        {"path": "@BUILD@/gen"},
+        {"path": "@SOURCE@/core/include"}
+      ],
+      "language": "CXX"
+    }
+  ],
+  "dependencies": [
+    {"id": "core::@6890427a1f51a3e7e1df"},
+    {"id": "ext_version::@6890427a1f51a3e7e1df"},
+    {"id": "helpers::@6890427a1f51a3e7e1df"}
+  ],
+  "id": "ext::@6890427a1f51a3e7e1df",
+  "link": {
+    "commandFragments": [
+      {"fragment": "libcore.dll.a", "role": "libraries"},
+      {"fragment": "-lgraphfix_syslib", "role": "libraries"},
+      {"fragment": "-lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32", "role": "libraries"}
+    ]
+  },
+  "name": "ext",
+  "paths": {"build": ".", "source": "."},
+  "sources": [
+    {"compileGroupIndex": 0, "path": "ext/ext.cpp"},
+    {"isGenerated": true, "path": "@BUILD@/CMakeFiles/helpers.dir/ext/helpers.c.obj"}
+  ],
+  "type": "SHARED_LIBRARY"
+}

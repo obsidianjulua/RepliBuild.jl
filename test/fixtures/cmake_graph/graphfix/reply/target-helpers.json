@@ -1,0 +1,20 @@
+{
+  "artifacts": [
+    {"path": "CMakeFiles/helpers.dir/./ext/helpers.c.obj"}
+  ],
+  "compileGroups": [
+    {
+      "compileCommandFragments": [
+        {"fragment": "-O3 -DNDEBUG"}
+      ],
+      "language": "C"
+    }
+  ],
+  "id": "helpers::@6890427a1f51a3e7e1df",
+  "name": "helpers",
+  "paths": {"build": ".", "source": "."},
+  "sources": [
+    {"compileGroupIndex": 0, "path": "ext/helpers.c"}
+  ],
+  "type": "OBJECT_LIBRARY"
+}
