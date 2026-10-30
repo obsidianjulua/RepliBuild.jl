@@ -77,22 +77,37 @@ function compute_compile_fingerprint(config::RepliBuildConfig;
     # file cache then links the old IR anyway.
     for d in get_include_dirs(config)
         _key_feed!(ctx, d)   # -I path affects header resolution, independent of mtime
-        isdir(d) || continue
-        for (root, dirs, files) in walkdir(d)
-            filter!(x -> !(x in (".git", "build", ".replibuild_cache")), dirs)
-            sort!(dirs)
-            for f in sort(files)
-                any(endswith(f, ext) for ext in (".h", ".hpp", ".hxx", ".hh")) || continue
-                path = joinpath(root, f)
-                isfile(path) || continue
-                _key_feed!(ctx, relpath(path, d))
-                _key_feed!(ctx, read(path))
-            end
-        end
+        _feed_include_headers!(ctx, d)
     end
     # The compiler and target triple; see `_toolchain_identity`.
     _key_feed!(ctx, toolchain)
     return bytes2hex(SHA.digest!(ctx))
+end
+
+"""
+    _feed_include_headers!(ctx, dir) -> ctx
+
+Feed every header under the include directory `dir` into a cache key: its path
+relative to `dir`, then its contents, in sorted order. `.git`, `build` and
+`.replibuild_cache` are not walked. A `dir` that does not exist feeds nothing.
+`compute_compile_fingerprint` and the graph build's per-group fingerprint
+(`GraphBuild`) both take a directory's headers from here, so the two agree on
+which files count.
+"""
+function _feed_include_headers!(ctx, d::AbstractString)
+    isdir(d) || return ctx
+    for (root, dirs, files) in walkdir(d)
+        filter!(x -> !(x in (".git", "build", ".replibuild_cache")), dirs)
+        sort!(dirs)
+        for f in sort(files)
+            any(endswith(f, ext) for ext in (".h", ".hpp", ".hxx", ".hh")) || continue
+            path = joinpath(root, f)
+            isfile(path) || continue
+            _key_feed!(ctx, relpath(path, d))
+            _key_feed!(ctx, read(path))
+        end
+    end
+    return ctx
 end
 
 """
@@ -146,9 +161,14 @@ rebuilds exactly what the switch affects.
   clang, which the package manager upgrades on its own (MSYS2 moved 22 to 23),
   and Julia's libLLVM plays no part, so a Julia switch leaves a C++ project
   built.
+
+`_toolchain_identity(language)` is the same answer for a bucket (`:c` or
+`:cpp`) rather than a config: the graph build chooses the bucket per library.
 """
-function _toolchain_identity(config::RepliBuildConfig)::String
-    compiler = config.wrap.language == :c ?
+_toolchain_identity(config::RepliBuildConfig)::String = _toolchain_identity(config.wrap.language)
+
+function _toolchain_identity(language::Symbol)::String
+    compiler = language == :c ?
         "libllvm " * string(Base.libllvm_version) :
         "system " * _system_clang_identity()
     return compiler * " | " * _detect_target_triple()
@@ -1875,9 +1895,15 @@ refuses the (usually merged) `ir_files` for running out of source locations —
 see the fallback inside. Callers that already hold that list should pass it;
 without it the fallback cannot run, because splitting a merged module is not
 possible after the fact.
+
+`extra_link_args` go on the link line after `[link] link_libraries`, on every
+attempt. The graph build passes a target's own link inputs there (absolute
+library paths and linker flags the build system resolved, which `-l` cannot
+spell), its relative rpaths and, on Windows, its import library.
 """
 function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{String}},
-                        lib_name::String=""; per_tu_ir::Vector{String}=String[])
+                        lib_name::String=""; per_tu_ir::Vector{String}=String[],
+                        extra_link_args::Vector{String}=String[])
     # Create shared library
 
     # Normalize to vector
@@ -1978,6 +2004,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     for lib in config.link.link_libraries
         push!(cmd_tail, "-l$lib")
     end
+    append!(cmd_tail, extra_link_args)
 
     compiler = config.wrap.language == :c ? "clang" : "clang++"
     # `files` is one merged module unless llvm-link declined to merge, and then it
