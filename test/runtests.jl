@@ -554,6 +554,12 @@ include(joinpath(@__DIR__, "test_function_pointer_types.jl"))
 
 include(joinpath(@__DIR__, "test_conflicted_names.jl"))
 
+# ── Build-graph contract (no toolchain) ──────────────────────────────────────
+# The data the CMake reader fills and the graph executor compiles from, and
+# the one ordering rule. Hand-built graphs.
+
+include(joinpath(@__DIR__, "test_build_graph.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.
