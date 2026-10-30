@@ -586,6 +586,14 @@ include(joinpath(@__DIR__, "test_cmake_graph.jl"))
 
 include(joinpath(@__DIR__, "test_graph_build.jl"))
 
+# ── Build-time generators of a graph (no toolchain) ─────────────────────────
+# Which steps `GraphGenerators` asks the project's ninja to run so a graph's
+# generated sources exist, in what order, and when it refuses (a tool the
+# project compiles), read off a fake of ninja's tools. The live run is
+# test_graph_generators_live.jl (devtests §21).
+
+include(joinpath(@__DIR__, "test_graph_generators.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.
