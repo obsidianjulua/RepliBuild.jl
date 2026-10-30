@@ -684,7 +684,11 @@ the test named when you touch the area.
   not the 1 of its bytes, or a `#pragma pack` body comes out unpacked (abi_fuzz X8).
   Only what no body can model (overlaps, unmeasurable members) degrades to an opaque
   `byte_size` region — never to the wrong size, which smashes the sret buffer.
-  (`test_struct_layout.jl`, `test_packed_layout.jl`, `test_thunk_byte_regions.jl`.)
+  A member's type is spelled by `StructGen._member_mlir_type`, never `map_cpp_type`
+  directly: that answers `!llvm.ptr` for a template spelling (`Vec<int, 3>`,
+  `pair<int*, int>`), and every record holding one shrank.
+  (`test_struct_layout.jl`, `test_packed_layout.jl`, `test_thunk_byte_regions.jl`,
+  `test_template_members.jl`.)
 - **The Julia struct IS the C layout.** GeneratorCpp proves each struct's fields
   against DWARF (`_prove_julia_layout`) and emits a C-layout byte blob when they
   cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk

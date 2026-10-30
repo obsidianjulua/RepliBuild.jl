@@ -121,6 +121,79 @@ function _lookup_struct(all_structs, s_name::AbstractString)
 end
 
 """
+    _outside_template_args(t) -> Union{String, Nothing}
+
+`t` with the contents of every top-level template argument list removed
+(`array<std::pair<int, int>, 2ULL>[3]` → `array<>[3]`), or `nothing` when `t`
+has no `<` or its brackets do not balance.
+"""
+function _outside_template_args(t::AbstractString)
+    occursin('<', t) || return nothing
+    io = IOBuffer()
+    depth = 0
+    for c in t
+        if c == '<'
+            depth == 0 && print(io, '<')
+            depth += 1
+        elseif c == '>'
+            depth -= 1
+            depth < 0 && return nothing
+            depth == 0 && print(io, '>')
+        elseif depth == 0
+            print(io, c)
+        end
+    end
+    depth == 0 || return nothing
+    return String(take!(io))
+end
+
+const _TEMPLATE_RECORD = r"^(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*<>$"
+const _TEMPLATE_RECORD_ARRAY = r"^(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*<>\s*((?:\[\d+\])+)$"
+
+"""
+    _member_mlir_type(c_type) -> String
+
+The MLIR spelling a record member's C type starts from, before
+`_resolve_struct_member_type` resolves it against the struct table. Every
+member site in this module goes through it.
+
+It is `map_cpp_type`'s answer, except for a template instantiation held by
+value. `map_cpp_type` names a record only when its spelling is a bare
+identifier and answers `!llvm.ptr` for anything else, so `Vec<int, 3>` and
+libc++'s `array<int, 3ULL>` came out as 8-byte pointers, and `pair<int*, int>`
+took its pointer branch on the `*` inside the arguments. A record holding one
+was emitted smaller than its DWARF size, every later member moved, and a Tier 2
+by-value return lost them without an error (`test_template_members.jl`). Here
+the member is the named ref, which resolves to the definition, its alias, or,
+with no table entry (a type the provenance gate dropped), a byte region of the
+member's DWARF size. An array of them is an array of that ref. Pointer,
+reference and function spellings are told apart outside the template arguments.
+
+Function signatures do not come through here. FunctionGen finds a template
+record through `_table_entry`, and a bare ref in a signature is a parse error
+for a record the table does not have.
+"""
+function _member_mlir_type(c_type::AbstractString)::String
+    t = String(strip(replace(replace(String(c_type), r"^(?:(?:const|volatile)\s+)+" => ""),
+                             r"(?:\s+(?:const|volatile))+$" => "")))
+    outer = _outside_template_args(t)
+    if outer !== nothing
+        occursin(_TEMPLATE_RECORD, outer) && return "!llvm.struct<\"$t\">"
+        am = match(_TEMPLATE_RECORD_ARRAY, outer)
+        if am !== nothing
+            dims = String(am.captures[1])
+            r = "!llvm.struct<\"$(strip(chop(t; tail = length(dims))))\">"
+            # Innermost dimension binds tightest, as in `map_cpp_type`.
+            for d in Iterators.reverse(collect(eachmatch(r"\[(\d+)\]", dims)))
+                r = "!llvm.array<$(d.captures[1]) x $r>"
+            end
+            return r
+        end
+    end
+    return map_cpp_type(String(c_type))
+end
+
+"""
     _resolve_struct_member_type(mlir_t, all_structs, seen; alias_form) -> String
 
 Resolve a struct-typed member reference for use inside another struct's body.
@@ -157,8 +230,12 @@ function _resolve_struct_member_type(mlir_t::String, all_structs, seen::Set{Stri
     if am !== nothing
         n = _parse_num(am.captures[1])
         if n !== nothing
+            # Each element gets its share of the member's DWARF size. Without
+            # it, an element the table does not have degraded to one byte
+            # (`max(0, 1)` below) and `Foo[2]` held 2 bytes for 2 records.
+            elem_fallback = (n > 0 && fallback_size % n == 0) ? fallback_size ÷ n : 0
             elem = _resolve_struct_member_type(String(am.captures[2]), all_structs, seen;
-                                               alias_form=false)
+                                               alias_form=false, fallback_size=elem_fallback)
             bare = match(r"^!llvm\.struct<\"([^\"]+)\">$", elem)
             if bare !== nothing
                 einfo = _lookup_struct(all_structs, String(bare.captures[1]))
@@ -251,7 +328,7 @@ function _packed_literal_string(name::String, info::Any, all_structs, seen::Set{
         catch
             0
         end
-        resolved = _resolve_struct_member_type(map_cpp_type(t), all_structs, seen;
+        resolved = _resolve_struct_member_type(_member_mlir_type(t), all_structs, seen;
                                                alias_form=false, fallback_size=m_size)
         # INVARIANT: a packed literal body contains no bare named struct refs.
         # `_resolve_struct_member_type(alias_form=false)` deliberately passes a
@@ -409,7 +486,7 @@ function _dwarf_struct_align(info, all_structs, depth::Int)
     kind == "union" && return 1   # unions are emitted as !llvm.array<N x i8>
     a = 1
     for m in get(info, "members", [])
-        l = _mlir_layout(map_cpp_type(String(get(m, "c_type", "void*"))), all_structs, depth + 1)
+        l = _mlir_layout(_member_mlir_type(String(get(m, "c_type", "void*"))), all_structs, depth + 1)
         l === nothing || (a = max(a, l[2]))
     end
     return a
@@ -535,7 +612,7 @@ function _sized_member_types(name::String, info::Any, all_structs; alias_form::B
     for m in get(info, "members", [])
         t = get(m, "c_type", "void*")
         m_size = something(_parse_num(get(m, "size", 0)), 0)
-        mapped = map_cpp_type(t)
+        mapped = _member_mlir_type(t)
         push!(emit, _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
                                                 alias_form=alias_form, fallback_size=m_size))
         # Measure what is emitted. The alias `!Struct_X` stands for X's own body,
@@ -811,11 +888,9 @@ function generate_struct_definitions(structs::Any)
         members = get(info, "members", [])
         for m in members
             t = get(m, "c_type", "void*")
-            if endswith(t, "*") || contains(t, "*")
-                continue
-            end
-            
-            mlir_t = map_cpp_type(t)
+            # A pointer member maps to `!llvm.ptr` and names no dependency. A
+            # `*` inside template arguments (`Box<int*>`) does not make one.
+            mlir_t = _member_mlir_type(t)
             # Use triple-quoted regex to avoid escape issues
             m_match = match(r"""!llvm.struct<\"([^\"]+)\">""", mlir_t)
             if m_match !== nothing

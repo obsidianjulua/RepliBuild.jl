@@ -238,6 +238,12 @@ include(joinpath(@__DIR__, "test_wrapper_type_bindings.jl"))
 
 include(joinpath(@__DIR__, "test_struct_layout.jl"))
 
+# ── Template-spelled members keep their size (no toolchain required) ─────────
+# A member typed `Vec<int, 3>` or libc++'s `array<int, 3ULL>` was emitted as an
+# 8-byte `!llvm.ptr`, so a by-value Tier-2 return lost every later member.
+
+include(joinpath(@__DIR__, "test_template_members.jl"))
+
 # ── Byte-blob struct setters + the Base-name namespace guard (no toolchain) ──
 # Blob structs had accessors in one direction only, so a param struct the
 # library builds was read-only — the only path into llama.cpp runs through one.
