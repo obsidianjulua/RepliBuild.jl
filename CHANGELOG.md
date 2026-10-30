@@ -4,6 +4,106 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### The build-graph contract (2026-10-30)
+
+- **Needed.** A multi-library project (CERN ROOT is the motivating case) is a graph of targets its own build system already resolved. The File API reader, the build-time generator step and the executor were written in parallel against one description of that graph.
+- **`RepliBuild.BuildGraph`** holds `TargetGraph(source_dir, build_dir, targets)`. Each `GraphTarget` has an id, a name, a kind (`:shared`, `:static`, `:object`, `:module`, `:executable`, `:utility`, `:interface`), its sources (`GraphSource`: path, compile-group index or 0 when not compiled, `generated`), its compile groups (`CompileGroup`: language, flags, defines, `IncludeDir`s), dependencies, link libraries and artifacts. Construction checks the kind and every source's group index. `topological_order` puts dependencies first and breaks ties by sorted id, so the order never follows a Dict's; an unknown dependency, a duplicate id or a cycle is an error that names the targets. The module runs no tool.
+- **Tests.** `test_build_graph.jl` (runtests) on hand-built graphs.
+
+### The build graph read from CMake's File API (2026-10-30)
+
+- **Needed.** Graph mode compiles every target of a multi-library project itself, but takes the graph from what the project's own CMake resolved: targets, per-target compile groups with inherited usage requirements, dependencies, generated sources and link inputs. compile_commands.json cannot carry most of it (curl's `libcurl_shared` compiles two files and links ~190 objects of `libcurl_object`, which is why `SysConfigGen._object_library_hint` exists).
+- **Change.** `RepliBuild.CMakeGraph`: `cmake_graph` writes a `codemodel-v2` query into the build directory and runs a configure-only cmake in the toolchain environment (as `SysConfigGen.cmake_probe` does; that module is unchanged). `read_cmake_graph` reads the reply into a `BuildGraph.TargetGraph`:
+  - the current index (an `error-*` index newer than it is an error);
+  - the one configuration (several, as a multi-config generator writes, is an error that names them unless `config` picks one);
+  - each target's kind, sources (group index + 1, 0 when not compiled; `isGenerated` kept), compile groups, dependencies, the `libraries` link arguments that are not another target's artifact, and artifacts.
+
+  Every path is absolute, `/`-separated and lexically normalised: an object library's artifact is spelled `…/helpers.dir/./x.c.obj` and its consumer's source `…/helpers.dir/x.c.obj`. `dependencies` is stored sorted, because CMake's order for it moved between two configures of one project.
+- **Command fragments are not arguments.** `-O3 -DNDEBUG` (`CMAKE_<LANG>_FLAGS_<CONFIG>`) is one compile fragment, and `CMAKE_<LANG>_STANDARD_LIBRARIES` is one link fragment of ten `-l` flags on MinGW. The contract's `flags` and `link_libraries` hold arguments, so each fragment is split by the rules of the shell that runs the build (Windows command-line rules on a Windows host except under MSYS/Unix Makefiles, POSIX shell rules elsewhere), in order, never joined with a neighbour. A Windows fragment can carry a backslashed path (curl's `libcurl.def`), which a POSIX split would eat.
+- **Not changed.** The contract. The reply's `libraryPath` and `flags` link roles, `languageStandard`, `sysroot`, `precompileHeaders`, source groups and the 2.9+ dependency splits are not read (the contract has no field for them). The codemodel carries no custom-command lines at all.
+- **Tests.** `test_cmake_graph.jl` (runtests, no toolchain) reads vendored replies of a fixture project (a PUBLIC include inherited through a link edge, a private define, an OBJECT library, a custom-command source and a custom-target header, a non-target link library) and of libcurl at the Hub's pinned commit. It also drives both splitters with both spellings, and checks path normalisation, configuration choice and failed-reply errors. `test/tools/gen_cmake_graph_fixtures.jl` regenerates the fixtures; it refuses to write one that does not read back exactly as the live reply, keeps a machine path, or no longer shows the shapes the test asserts on.
+
+### Build-time generators of a graph run from a narrowed ninja manifest (2026-10-30)
+
+- **Needed.** A graph's sources marked `generated` (rootcling dictionaries, moc, protoc, a header a script prints) must exist before the executor compiles, and they come from steps of the project's own build. cmake's Ninja generator gives every custom command of a target an order-only input on the full artifact of every target that target depends on, so `ninja <output>` and `cmake --build --target <utility>` compile and link those libraries first (`build gen.h: CUSTOM_COMMAND gen.h.in || libbase.dll`, cmake 4.4.5, ninja 1.13.2). A tool the project compiles is recorded the same way, as an order-only input on the executable.
+- **Change.** `GraphGenerators.run_generators(g)` reads the build tree's ninja graph through ninja's tools (`-t targets`, `-t query`, `-t commands -s`), walks it from the generated sources, and runs the steps that write them from a narrowed manifest (`CMakeFiles/replibuild_generators/generators.ninja`). Those are the build's own commands, run by the configured ninja from the build tree, with the inputs each step declares and without order-only inputs on library artifacts. `plan_generators` answers without running.
+  - Before anything runs it refuses with `GeneratorNeedsCompile`, naming the target, when a step declares a compile or link output (`:input`), depends on an executable (`:tool`, rootcling's shape), or names a library in its command (`:named`).
+  - `GeneratedSourceUnwritten` when no step writes a missing file; `GeneratorStepFailed` when a step fails.
+  - Every step runs on every call (the manifest carries no depfiles). `GeneratorRun.ran` comes from ninja's log.
+- **libpng.** 1.6.59's `pnglibconf.h` (awk, `cc -E`, awk; the limit SysConfigGen names) is written by three steps with nothing compiled. Its `#define`s match `pnglibconf.h.prebuilt` except `PNG_ZLIB_VERNUM`, which the generated header reads from the `zlib.h` the preprocessor saw. The `cc -E` is the compiler the configure chose, not RepliBuild's.
+- **Not changed.** The contract. Only `-G Ninja` build trees are supported (Makefiles and Ninja Multi-Config are refused). A compile inside a script step is not seen as one.
+- **Tests.** `test_graph_generators.jl` (runtests) drives a fake of ninja's tools: request and step order, dropped ordering, each refusal, the parsers on ninja 1.13 text, manifest escaping. `test_graph_generators_live.jl` (devtests §21) configures `test/graph_generators_test/` with Ninja and checks the files are written, nothing is compiled, the project's own ninja log is never created, and the tool step is refused.
+
+### The graph executor compiles and links a multi-library project (2026-10-30)
+
+- **Needed.** A project of several libraries has a build graph its own build system resolved: targets, the sources each compiles under which flags, defines and include path, and the order. RepliBuild built one library from one flag set, so it could not compile such a project without flattening it.
+- **`RepliBuild.GraphBuild`** compiles every translation unit of a `BuildGraph.TargetGraph` under its own source's compile group and links one library per `:shared` or `:module` target into `<out>/<name>/lib/lib<name>.<dlext>`, in `topological_order`. It goes through `Compiler`'s per-file IR cache, `link_optimize_ir` and `create_library`. `plan_graph(g, out)` decides everything without running a tool; `build_graph(g, out; only)` runs it and returns one `TargetResult` per target. Each library directory also holds `graph_target.toml` (sources, include path, defines, bucket, linked IR and dependencies), which is what metadata extraction needs to take the library on alone.
+- **Target kinds.**
+  - An `:object` target's IR folds into the libraries that link its objects; CMake lists the object files as the consumer's sources.
+  - A `:static` target is folded, not archived, so each library is one IR module whose `nounwind`/`byval` facts and DWARF cover everything it exports. The whole static target lands in each library that folds it. A static target behind a shared dependency is not folded again: the File API lists dependencies transitively, and without that rule every library would carry a copy of what its shared dependencies fold. A static target no library folds is a library itself.
+  - A library links against every `:shared` target it reaches, deps first: `-L`/`-l` and rpaths (`$ORIGIN`-relative too) on ELF, an import library and preloaded DLLs on PE.
+  - `:module`, `:executable` and `:utility` dependencies only order the build; executables and utilities are not built.
+- **One LLVM per module.** A library is in the C bucket only when every translation unit in it, folded ones included, is C. An object or static target folded into libraries of both buckets is compiled once for each. Every unit gets `-g` and, off Windows, `-fPIC` when the group's own flags do not end there, and `-x` from the group's language. Compiles run in parallel across every thread; libraries that do not depend on each other link in parallel.
+- **Refused before anything runs:** a target whose generated sources (compiled units, or headers it lists) do not exist yet, named per target; a source in a language other than C and C++ (RC version resources are left out and listed); a library with no translation unit; target names that are not one directory each on a case-folding file system.
+- **`Compiler`.** `create_library` takes `extra_link_args`, `_toolchain_identity` takes a bucket, and `compute_compile_fingerprint`'s header walk is now `_feed_include_headers!`. Existing builds are unchanged.
+- **Not done.** Wrapping and a TOML key for graph mode. A link cache: every library relinks, though compiles are cached. Assembly sources, precompiled headers, and prebuilt objects listed as sources. Tier 1: LTO bitcode and static promotion are off.
+- **Tests.** `test_graph_build.jl` (runtests) plans hand-built graphs: per-group arguments, the `-g`/`-fPIC` rules, the bucket, object folding once per bucket, static folding and standalone static libraries, File API-shaped transitive dependencies with object artifacts, link order and inputs on ELF and PE, `only`, independence from listing order, the refusals, the link config and the compile fingerprint. `test_graph_build_live.jl` (devtests §20) builds `graph_build_test/`: C++ `alpha`, and `beta` linked against it with an object target folded in, each source `#error`ing on another target's define. It calls `beta_combine` across the library boundary in a child process. An unchanged rebuild compiles nothing, and changing beta's define recompiles beta's unit alone. It then builds two C libraries in the C bucket, whose linked module carries the JLL clang's producer.
+
+### Git dependencies fetch the submodules they list (2026-10-30)
+
+- **A superproject came back empty.** `_clone_dep` ran a plain `git clone`, so `boostorg/boost` cloned as an almost empty tree: its libraries are submodules, about 170 of them. Each Boost library that stands alone had to be a dependency of its own (Boost.Math with `BOOST_MATH_STANDALONE`).
+- **New key.** `[dependencies.<n>] submodules = ["libs/math", "libs/config"]` (git only) fetches exactly those paths with `git submodule update --init --checkout --force --depth 1 -- <paths>`. The fetch runs after the superproject's checkout and its `commit` check, never recursively. If the key is absent or empty, the dependency is the plain clone it was. `--checkout` overrides a `.gitmodules` `update = none|merge|rebase`, which upstream controls.
+- **The superproject's pin covers its submodules.** Its tree records each submodule's commit as a gitlink, so `commit` pins them too.
+  - `_verify_dep_pin` checks each listed submodule's HEAD against its gitlink (`git ls-tree HEAD`) on every path, the cache hit included. A submodule off its recorded commit, or not fetched, is a hard error. Superproject drift still re-resolves with a warning.
+  - A listed path where the superproject records no submodule is a hard error before any fetch. Without that check, a failed `git submodule update` would read as a failed clone and resolve the dependency to nothing.
+  - The marker records the fetched list (`submodules=`). A changed list re-resolves as a tag change does. A marker from before has no such line and reads as none.
+  - A re-checkout fetches the submodules again, since `git checkout` moves the gitlinks but not the submodules' working trees.
+- **Each fetched submodule is one more source root of the same dependency.** It gets the same include heuristic (the root, `include/`, `src/`), the same walk with the same skipped directories, and the dependency's `exclude`, matched against the path relative to the dependency's root (`libs/math/…`). It is still one flat source list and one include path compiled into one library.
+  - A directory with its own `.git` is no longer walked as part of the root around it. So a submodule dropped from the list contributes nothing, although its checkout stays in the cache.
+  - A clone without fetched submodules has no nested `.git`, so existing git dependencies resolve the same sources.
+- **Entries are validated at load.** Each must be a relative, `/`-separated path of letters, digits, `.`, `_`, `+` and `-`, with no `.`, `..` or empty component and no leading `-`. `submodules` on a dependency that is not `type = "git"` is an error. Entries are sorted and deduplicated.
+- **`discover(force=true)` deleted every `[dependencies]` entry**, not only this key: `generate_config` emits none, and the table was not preserved. config.md said so, while `save_config`'s comment assumed the pin round-tripped through it. `PRESERVED_TOML_KEYS` gains `("dependencies", "*")`, which keeps each entry whole; `_collect_preserved_sections` reads `"*"` as every key of the section.
+- **Not changed.**
+  - The superproject is still cloned in full. config.md's `tag` row said a tag made the clone shallow; corrected.
+  - A submodule's own submodules are not fetched.
+  - There are no per-submodule flags or targets.
+- **Tests.** `test_dep_submodules.jl` (runtests; git only, no network) builds a superproject over `file://` with three submodules: one marked `update = none` in `.gitmodules`, and one whose recorded commit is behind its tip. It checks:
+  - only the listed ones are fetched, at the recorded commit;
+  - their sources and `include/` dirs reach the resolved config, and `exclude` hits by the dependency-relative path;
+  - an unlisted and a delisted submodule contribute nothing;
+  - adding to the list fetches;
+  - a tag bump moves a submodule to the new recorded commit;
+  - a submodule moved off its commit fails;
+  - a listed path that is absent or a plain directory fails and leaves no clone;
+  - a marker from before reads as none;
+  - 18 bad entries are refused at load;
+  - `save_config` and `discover(force=true)` keep the key.
+
+### Cross-library types: design (2026-10-30)
+
+- **Found:** in a multi-library graph, each wrapper emits every type its own DWARF holds.
+  - B's wrapper declares a second Julia type for every type of A it touches.
+  - That type is empty when clang homed A's class in A (vtable and constructor homing, measured on clang 23.1.4).
+  - So A's `Managed` objects, by-value records and enums cannot be passed to B's functions. Raw pointers can.
+  - B's derived classes lose A's base fields, and B's Tier-2 by-value crossings of A's classes trap.
+  - Inline functions from A's headers are wrapped by both, and the two thunks share one name in JITManager's cache.
+- **Design:** `docs/updates/CROSS_LIBRARY_TYPES.md`.
+  - Recommends that B import the types A owns.
+  - Ownership comes from `BuildGraph.topological_order` and each wrapper's emitted-type manifest.
+  - The identity check uses a new `scopes` metadata fact plus `_layout_signature`.
+  - Delivery is submodules of one generated graph module (`const X = ..A.X`).
+  - Rejects one module for all libraries, and a shared types module.
+- **Not changed:** no code; the implementation waits on John's approval of the design.
+- **Tests:** none. The doc's section 7 is the test plan for the implementation.
+
+### CERN ROOT measured as a graph-mode target (2026-10-30)
+
+- **`docs/updates/ROOT_RECON.md`** measures ROOT v6-40-04 (`-Dminimal=ON`, Ninja, clang 23.1.4, Ubuntu 24.04, 4 cores) through the CMake File API. The build has 3,365 compiles, and 2,364 of them are ROOT's bundled LLVM 20 and Clang. `--target rootcling` takes 31.9 min and 1.02 GB; the whole minimal build takes 34.1 min and 1.29 GB from scratch.
+- **Every ROOT library waits on ROOT's own interpreter.** Core's dictionary comes from `rootcling_stage1`, which links the bundled LLVM/Clang/cling, and every other dictionary comes from `rootcling`, which links libCling. A system LLVM must be exactly 20.1.x (19.1.1 is refused at configure), and Clang is always ROOT's patched copy. The generator closure is therefore handed to ROOT's build as `--target rootcling`, and RepliBuild compiles the libraries it wraps.
+- **Dictionaries follow the library graph.** A dictionary's real inputs are its headers and its dependencies' `.pcm` files. The dependency `.so` files Ninja lists only set the order: under `strace`, rootcling never opens them, and a replayed command reproduced `G__Hist.cxx`. The File API marks dictionaries `isGenerated` without their commands.
+- **Windows is out for ROOT.** ROOT builds with MSVC only: its CMake stops on MSYS2 CLANG64, and cling's Windows code assumes Visual Studio.
+- Docs only; nothing in `src/` or `test/` changed.
+
 ### A record holding a template keeps its size in Tier 2 (2026-10-30)
 
 - **A by-value Tier-2 return lost every member after a template-typed one, with no error.** Found on Windows with a probe library for `std::array` and `std::pair`: `Holder { std::array<int, 3> xs; std::pair<int, float> kv; int tag; }` returned by value gave `tag = 0` where the callee wrote 7, and `H2 { Vec<int, 3> a; int tag; }`, whose template is the project's own, gave 0 where it wrote 9. Every function taking these by reference, and `Vec<int, 3>` on its own, were right.
