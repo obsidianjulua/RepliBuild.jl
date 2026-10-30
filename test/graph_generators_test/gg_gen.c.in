@@ -1,0 +1,2 @@
+#include "gg_gen.h"
+int gg_gen(void) { return GG_GEN_VALUE; }

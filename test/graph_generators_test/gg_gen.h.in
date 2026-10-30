@@ -1,0 +1,2 @@
+#define GG_GEN_VALUE 21
+int gg_gen(void);
