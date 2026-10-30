@@ -579,6 +579,13 @@ include(joinpath(@__DIR__, "test_build_graph.jl"))
 
 include(joinpath(@__DIR__, "test_cmake_graph.jl"))
 
+# ── Graph executor planning (no toolchain) ───────────────────────────────────
+# What `GraphBuild` compiles with which flags, what folds into which library,
+# what each library links against, and what it refuses, on hand-built graphs.
+# Nothing is compiled; test_graph_build_live.jl (devtests) builds and calls one.
+
+include(joinpath(@__DIR__, "test_graph_build.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.
