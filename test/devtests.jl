@@ -537,3 +537,15 @@ include(joinpath(TEST_DIR, "test_graph_build_live.jl"))
 # test_graph_generators.jl (runtests).
 
 include(joinpath(TEST_DIR, "test_graph_generators_live.jl"))
+
+# ── 22. Graph mode end to end ─────────────────────────────────────────────────
+# A replibuild.toml with a [graph] section: `build` configures a CMake project
+# (File API), runs the step that writes its generated header, compiles and
+# links the selected library and the shared libraries it links, and extracts
+# each one's metadata; `wrap` writes one wrapper per library and the graph
+# module that includes them in load order (`Core` is wrapped as `RCore`); the
+# registry vendors the graph as one unit. Calls across the library boundaries
+# in a child, from the project and from the vendored copy once the project is
+# gone. The planning half is test_graph_mode.jl (runtests).
+
+include(joinpath(TEST_DIR, "test_graph_mode_live.jl"))

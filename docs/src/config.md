@@ -945,6 +945,71 @@ the C++ API surface of an ingested binary is unsupported.
 Generate it with `RepliBuild.ingest("/path/to/libfoo.so", headers=[...])` rather
 than by hand.
 
+### `[graph]` *(preserved)*
+
+The *presence* of this section selects **graph mode**: the project is a CMake
+project of several libraries, and RepliBuild takes its build graph from CMake's
+File API (configure only), never from the build files. `build` configures it,
+runs the build-time steps that write its generated sources, compiles and links
+every library with RepliBuild's own toolchain, and extracts each library's
+metadata; `wrap` writes one wrapper per library and a **graph module** that
+includes them. Needs `cmake` and `ninja` (the configure uses the Ninja
+generator).
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `source` | String | `"."` | The CMake project directory (the one holding `CMakeLists.txt`), relative to the project root |
+| `targets` | Vector{String} | `[]` | Library targets to build and wrap, by CMake target name or File API id. The shared libraries they link come too. Empty: every library target. An executable or utility target is an error |
+| `options` | Vector{String} | `[]` | Extra arguments for the configure step (`-DFOO=ON`), after RepliBuild's own `-G Ninja -DCMAKE_BUILD_TYPE=… -DCMAKE_POLICY_VERSION_MINIMUM=3.5` |
+| `build_type` | String | `"Release"` | `CMAKE_BUILD_TYPE` of the configure; `""` omits it |
+
+An unknown key or a value of the wrong type in `[graph]` is an error naming it.
+`[graph]` and `[ingest]` together are an error.
+
+Where things go (`[paths]` relative to the project root):
+
+| Path | Holds |
+|---|---|
+| `<paths.build>/cmake/` | The CMake build tree; generated sources land here |
+| `<paths.output>/<target>/lib/` | One library, its `compilation_metadata.json` and its wrapper `<Module>.jl` |
+| `<paths.output>/<target>/{ir,build}/` | Its IR and link intermediates; never vendored |
+| `<paths.output>/<Graph>.jl` | The graph module: `module <Graph>` including every library's wrapper in load order |
+| `<paths.output>/graph.toml` | The graph manifest: each library, its module and what it links |
+
+**Module names.** The graph module is named like a single library's wrapper:
+`[wrap] module_name`, else CamelCase of `[project] name`; a name Julia binds
+already (`Core`, `Base`, `Matrix`, …) is an error that says to set
+`[wrap] module_name`. Each library's module is CamelCase of its target name,
+renamed by one rule: a name bound in `Base` or `Core`, or `Libdl` or
+`RepliBuild`, gets an `R` in front (`Core` → `RCore`), and a name equal,
+ignoring case, to the graph module's or an earlier library's gets `_2`, `_3`, …
+(in load order). Call a library's functions as `Graph.RCore.f(…)`.
+
+**Load order.** Each library's `__init__` opens its library, and the graph
+module includes the wrappers dependencies first, so a library's dependencies
+are open before it is. On Windows a graph library's wrapper also opens the
+DLLs it links where they sit in the graph, relative to the wrapper, before
+their build-time paths; on ELF every graph library has its file name as its
+soname. Both keep a moved or vendored graph on its own copies.
+
+**Caching.** An unchanged translation unit is not recompiled; a library whose
+IR, compile keys, link arguments and dependencies are unchanged is not relinked
+(`<paths.output>/<target>/link.key`), and its metadata is not extracted again
+(`metadata.key`). Every `build` still configures, runs the generator steps and
+checks those keys. `clean` removes the CMake build tree and the output directory.
+
+**Registry.** `register` vendors the graph as one unit (graph module, manifest,
+each library's `lib/` directory) to `builds/<hash>/`, and `use(name)` returns the
+graph module. The hash covers every file of the CMake project's tree (`.git` and
+RepliBuild's own directories excepted), since CMake files decide every flag and
+a generator step can read files no target lists.
+
+**Not applied per library yet.** The other `[wrap]` keys, `[compile]` and
+`[types]`: each library is wrapped with defaults (a non-empty
+`[compile] source_files` warns). `[link] optimization_level` and `fallback`
+apply to every library. Types are emitted per library: a type two libraries
+share is two Julia types (cross-library type identity is not built yet).
+
 ### `[llvm]`
 
 | Key | Type | Default | Notes |
@@ -986,6 +1051,10 @@ order. Do not use it to skip a stage; call the individual verbs instead.
 - **`[ingest]` wins over source-build keys.** A config with both gets warnings
   naming `[compile] source_files` and any `git`/`local` dependency, and proceeds
   in ingest mode.
+- **`[graph]` takes its sources and flags from the CMake project.** `[compile]`
+  keys do not apply (a non-empty `source_files` warns), `[graph]` with
+  `[ingest]` is an error, and `[wrap] module_name` names the graph module, not
+  a library.
 - **`[binary] output_name` is overridden in ingest mode** when left empty, so
   `wrap()` finds the library where it expects it.
 - **`[cache] directory` is the cache path; `[paths] cache` is inert.** Likewise
@@ -1150,6 +1219,24 @@ template_headers = ["<fmt/format.h>"]
 
 [cache]
 enabled = true
+```
+
+### A CMake project of several libraries (graph mode)
+
+```toml
+[project]
+name = "mygraph"                 # the graph module: julia/Mygraph.jl
+
+[graph]
+source  = "upstream"             # holds CMakeLists.txt
+targets = ["hist"]               # hist and the shared libraries it links
+options = ["-DBUILD_TESTING=OFF"]
+```
+
+```julia
+RepliBuild.build("replibuild.toml")
+G = include(RepliBuild.wrap("replibuild.toml"))   # or RepliBuild.register + use
+G.Hist.some_function(1)
 ```
 
 ### A pre-built C binary (ingest)

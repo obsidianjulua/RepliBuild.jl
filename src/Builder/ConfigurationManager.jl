@@ -263,6 +263,37 @@ struct IngestConfig
     extra_link_libs::Vector{String}  # additional -l libs to thread into the wrapper at load time
 end
 
+"""
+Nested struct for [graph] section.
+
+Presence of this section selects graph mode: the project is a CMake project of
+several libraries, whose build graph CMake's File API reports at configure
+time. `build` configures it (`CMakeGraph.cmake_graph`), runs the build-time
+steps that write its generated sources (`GraphGenerators`), compiles and links
+every library itself (`GraphBuild`) and extracts each library's metadata;
+`wrap` writes one wrapper per library and a graph module that includes them
+(`GraphMode`).
+
+- `source`: the CMake project directory (the one holding `CMakeLists.txt`),
+  absolute and `/`-separated; relative in the TOML, against the project root.
+- `targets`: the library targets to build and wrap, by name or File API id;
+  the shared libraries they link come too. Empty: every library target.
+- `options`: extra configure arguments, after RepliBuild's own.
+- `build_type`: `CMAKE_BUILD_TYPE` of the configure; empty omits it.
+- `cmake_dir`, `out_dir`: where the configure runs (`<[paths] build>/cmake`)
+  and where the libraries, their wrappers and the graph module land
+  (`[paths] output`). Derived at load, absolute and `/`-separated, never
+  written back to a TOML.
+"""
+struct GraphConfig
+    source::String
+    targets::Vector{String}
+    options::Vector{String}
+    build_type::String
+    cmake_dir::String
+    out_dir::String
+end
+
 """Nested struct for [types] section - Type validation settings"""
 struct TypesConfig
     strictness::Symbol              # :strict, :warn, :permissive
@@ -295,6 +326,10 @@ struct RepliBuildConfig
 
     # Optional ingest mode (nothing = source-build mode)
     ingest::Union{Nothing,IngestConfig}
+
+    # Optional graph mode (nothing = one library). On the config of one library
+    # of a graph (`GraphBuild._library_config`), the graph it belongs to.
+    graph::Union{Nothing,GraphConfig}
 
     # Metadata
     config_file::String
@@ -332,6 +367,11 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     #   C++ projects: LTO off by default, aot_thunks off by default
 
     ingest_config = parse_ingest_config(data, toml_path)
+    paths_config = parse_paths_config(data)
+    graph_config = parse_graph_config(data, project_config.root, paths_config)
+    (ingest_config !== nothing && graph_config !== nothing) &&
+        error("$toml_path has both [ingest] and [graph]: ingest wraps one prebuilt library, " *
+              "graph mode builds a CMake project's libraries. Keep one.")
 
     # In ingest mode with no explicit binary.output_name, force the output name
     # to match the ingested .so so wrap() finds the library at output_dir/<name>.
@@ -346,7 +386,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
 
     config = RepliBuildConfig(
         project_config,
-        parse_paths_config(data),
+        paths_config,
         parse_discovery_config(data),
         compile_config,
         link_config,
@@ -358,6 +398,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
         parse_dependencies_config(data),
         parse_types_config(data),
         ingest_config,
+        graph_config,
         toml_path,
         now()
     )
@@ -1027,6 +1068,53 @@ function parse_ingest_config(data::Dict, toml_path::String)::Union{Nothing,Inges
     return IngestConfig(library, headers, extra_link_libs)
 end
 
+"The keys a `[graph]` section may have."
+const GRAPH_KEYS = ("source", "targets", "options", "build_type")
+
+# Absolute, normalised and `/`-separated, without a trailing separator: every
+# path the graph modules store has that spelling (BuildGraph's rule).
+function _graph_path(p::AbstractString)::String
+    s = replace(normpath(abspath(String(p))), '\\' => '/')
+    return (length(s) > 1 && endswith(s, '/') && !endswith(s, ":/")) ? s[1:end-1] : s
+end
+
+"""
+    parse_graph_config(data, root, paths) -> Union{Nothing,GraphConfig}
+
+Parse the `[graph]` section; `nothing` when there is none (one library).
+`source` resolves against the project `root`, as `[compile]` paths do; the
+cmake build tree is `<[paths] build>/cmake` and the output directory
+`[paths] output`, both under the root unless absolute.
+
+A `[graph]` section is new, so it is strict where older sections are not: an
+unknown key or a value of the wrong type is an error naming it, rather than a
+setting that silently does nothing.
+"""
+function parse_graph_config(data::Dict, root::AbstractString,
+                            paths::PathsConfig)::Union{Nothing,GraphConfig}
+    haskey(data, "graph") || return nothing
+    g = data["graph"]
+    g isa AbstractDict || error("[graph] must be a table, e.g.\n[graph]\nsource = \".\"")
+    for k in sort!(collect(String, keys(g)))
+        k in GRAPH_KEYS || error("[graph] $k: unknown key; a [graph] section takes $(join(GRAPH_KEYS, ", "))")
+    end
+    function str(k, default)
+        v = get(g, k, default)
+        v isa AbstractString || error("[graph] $k must be a string, got $(repr(v))")
+        return String(v)
+    end
+    function strs(k)
+        v = get(g, k, String[])
+        (v isa AbstractVector && all(x -> x isa AbstractString && !isempty(x), v)) ||
+            error("[graph] $k must be a list of non-empty strings, got $(repr(v))")
+        return String[String(x) for x in v]
+    end
+    under_root(p) = _graph_path(isabspath(p) ? p : joinpath(root, p))
+    return GraphConfig(under_root(str("source", ".")), unique(strs("targets")), strs("options"),
+                       str("build_type", "Release"),
+                       under_root(joinpath(paths.build, "cmake")), under_root(paths.output))
+end
+
 """Validate TOML data has minimum required fields"""
 function validate_toml_data(data::Dict, toml_path::String)
     # Project name is the only truly required field
@@ -1034,6 +1122,11 @@ function validate_toml_data(data::Dict, toml_path::String)
         @warn "Missing [project] section in $toml_path"
     elseif !haskey(data["project"], "name")
         @warn "Missing project.name in $toml_path"
+    end
+
+    # Graph mode takes every source and flag from the CMake project's own graph.
+    if haskey(data, "graph") && !isempty(get(get(data, "compile", Dict()), "source_files", []))
+        @warn "[graph] is set but [compile].source_files is non-empty in $toml_path — graph mode compiles what the CMake project's targets list, and ignores it"
     end
 
     # Ingest mode is mutually exclusive with source-build mode. A mixed config usually
@@ -1080,6 +1173,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         DependenciesConfig(Dict{String, DependencyItem}()),
         TypesConfig(:warn, true, false, true, Dict{String,String}(), String[], String[]),
         nothing,  # ingest: source-build mode by default
+        nothing,  # graph: one library by default
         toml_path,
         now()
     )
@@ -1322,6 +1416,16 @@ function save_config(config::RepliBuildConfig)
         data["ingest"] = ingest_dict
     end
 
+    # [graph] — only emitted in graph mode. `cmake_dir` and `out_dir` are
+    # derived from [paths], so they are not written.
+    if config.graph !== nothing
+        graph_dict = Dict{String,Any}("source" => _portable_path(config.graph.source, root),
+                                      "build_type" => config.graph.build_type)
+        isempty(config.graph.targets) || (graph_dict["targets"] = config.graph.targets)
+        isempty(config.graph.options) || (graph_dict["options"] = config.graph.options)
+        data["graph"] = graph_dict
+    end
+
     # Write to file
     open(config.config_file, "w") do io
         TOML.print(io, data)
@@ -1354,7 +1458,7 @@ function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.config_file, config.loaded_at
     )
 end
 
@@ -1378,7 +1482,7 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.config_file, config.loaded_at
     )
 end
 
@@ -1405,7 +1509,7 @@ function with_aot_thunks(config::RepliBuildConfig, enabled::Bool)::RepliBuildCon
         new_compile,
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.config_file, config.loaded_at
     )
 end
 
@@ -1426,7 +1530,7 @@ function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.config_file, config.loaded_at
     )
 end
 
@@ -1452,7 +1556,7 @@ function with_discovery_results(config::RepliBuildConfig;
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.config_file, config.loaded_at
     )
 end
 
@@ -1677,7 +1781,7 @@ export RepliBuildConfig,
        ProjectConfig, PathsConfig, DiscoveryConfig, CompileConfig,
        LinkConfig, BinaryConfig, WrapConfig, LLVMConfig,
        WorkflowConfig, CacheConfig, DependenciesConfig, DependencyItem, TypesConfig,
-       IngestConfig,
+       IngestConfig, GraphConfig,
        load_config, save_config, create_default_config,
        merge_compile_flags, with_source_files, with_include_dirs, with_discovery_results,
        get_output_path, get_build_path, get_cache_path,

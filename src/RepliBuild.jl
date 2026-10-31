@@ -599,7 +599,8 @@ Compile C++ project → library (.so/.dylib/.dll)
 - `clean`: Clean before building (default: false)
 
 # Returns
-Library path (String)
+Library path (String). For a `[graph]` project, the output directory that holds
+every library of the graph (see `GraphMode`).
 
 # Examples
 ```julia
@@ -640,6 +641,7 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
 
         if clean
             clean_internal(project_dir)
+            _clean_graph(toml_path)
         end
 
         # Load config
@@ -650,6 +652,12 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
         # pre-built .so. Tier 3 (ccall) only — no LTO bitcode, no AOT thunks.
         if config.ingest !== nothing
             return abspath(Compiler.ingest_library(config))
+        end
+
+        # Graph mode: a CMake project of several libraries, each built and
+        # extracted on its own. Returns the output directory that holds them.
+        if config.graph !== nothing
+            return GraphMode.build_graph_project(config)
         end
 
         # Compile the project (C++ → IR → library + metadata)
@@ -693,7 +701,8 @@ Generate Julia wrapper from compiled library
 - `headers`: C++ headers for advanced wrapping (optional)
 
 # Returns
-Path to generated Julia wrapper file
+Path to generated Julia wrapper file. For a `[graph]` project, the graph module
+`<output>/<Module>.jl`, which includes one wrapper per library in load order.
 
 # Examples
 ```julia
@@ -741,6 +750,14 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
         # Keyed on `headers`, which is the actual data dependency.
         if !isempty(headers)
             config = DependencyResolver.resolve_dependencies(config)
+        end
+
+        # Graph mode: one wrapper per library, then the graph module that
+        # includes them in load order. Returns the graph module's path.
+        if config.graph !== nothing
+            isempty(headers) || error("wrap: `headers` does not apply to a [graph] project; " *
+                                      "each library's headers come from its own include path.")
+            return GraphMode.wrap_graph_project(config)
         end
 
         # Find library
@@ -802,6 +819,30 @@ function clean(toml_path::String="replibuild.toml"; deps::Bool=true)
 
     project_dir = dirname(toml_path)
     clean_internal(project_dir; deps=deps)
+    _clean_graph(toml_path)
+end
+
+"""
+    _clean_graph(toml_path)
+
+For a `[graph]` project, delete its cmake build tree and its output directory
+(libraries, wrappers, graph module). They live under `[paths] build` and
+`output`, which need not be the default directories `clean_internal` knows.
+Never a directory that holds the TOML or the CMake project (`output = "."`).
+"""
+function _clean_graph(toml_path::String)
+    haskey(TOML.parsefile(toml_path), "graph") || return
+    gc = ConfigurationManager.load_config(toml_path).graph
+    holds(dir, p) = startswith(Compiler._canon_path(p) * "/", Compiler._canon_path(dir) * "/")
+    for dir in (gc.cmake_dir, gc.out_dir)
+        isdir(dir) || continue
+        if holds(dir, toml_path) || holds(dir, gc.source)
+            @warn "clean: not deleting $dir: it holds the project itself"
+            continue
+        end
+        _rm_tree(dir)
+        println("  clean: $dir")
+    end
 end
 
 """
@@ -935,6 +976,11 @@ function info(toml_path::String="replibuild.toml")
     project = get(data, "project", Dict())
 
     println("RepliBuild | $(get(project, "name", "unnamed"))")
+
+    if haskey(data, "graph")
+        GraphMode.describe(stdout, ConfigurationManager.load_config(toml_path))
+        return
+    end
 
     julia_dir = joinpath(project_dir, "julia")
     if isdir(julia_dir)
