@@ -99,6 +99,10 @@ const PRESERVED_TOML_KEYS = [
     # which submodules it fetches, and a `submodules` key cannot survive without
     # the entry it belongs to. generate_config emits no dependencies at all.
     ("dependencies", "*"),
+    # The whole [graph] section. A scan of a CMake project's tree sees its
+    # sources, not that the project is one: losing the section turns a graph
+    # build back into one library compiled from every file found.
+    ("graph", "*"),
 ]
 
 """
@@ -708,6 +712,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         dependencies_config,
         types_config,
         nothing,  # ingest: discovery is source-build mode by definition
+        nothing,  # graph: a discovered project is one library
         joinpath(root_dir, "replibuild.toml"),  # config_file
         now()                                    # loaded_at
     )

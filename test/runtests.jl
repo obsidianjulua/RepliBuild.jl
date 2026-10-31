@@ -594,6 +594,15 @@ include(joinpath(@__DIR__, "test_graph_build.jl"))
 
 include(joinpath(@__DIR__, "test_graph_generators.jl"))
 
+# ── Graph mode: a [graph] project end to end (no toolchain) ──────────────────
+# The [graph] section, the library module names (`Core` → `RCore`), the graph
+# module's text in load order, the link and metadata cache keys, what a build
+# asks the generators for, the registry's inputs and vendored files, and the
+# Windows preload of a graph library's dependencies, on hand-built graphs. The
+# live run is test_graph_mode_live.jl (devtests §22).
+
+include(joinpath(@__DIR__, "test_graph_mode.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.

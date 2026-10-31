@@ -179,12 +179,16 @@ plan_error(f) = try f(); "" catch e; sprint(showerror, e) end
         @test lb.link_files == [GB_OUT * "/alpha/lib/libalpha.so"]
         @test lb.library == GB_OUT * "/beta/lib/libbeta.so"
         @test lb.link_libraries == [zpath, "-pthread", "m"]          # its own, then util's
-        @test lb.link_args == ["-Wl,-rpath,\$ORIGIN/../../alpha/lib", zpath, "-pthread", "-lm"]
+        # Its own file name as its soname: a moved copy of the graph then binds
+        # its own alpha (GraphBuild._link_args).
+        @test lb.link_args == ["-Wl,-soname,libbeta.so", "-Wl,-rpath,\$ORIGIN/../../alpha/lib",
+                               zpath, "-pthread", "-lm"]
 
         lg = lib_named(plan, "gamma")
         @test lg.folded == String[]                                 # util belongs to beta
         @test lg.link_dependencies == ["alpha", "beta"]             # deps first
-        @test lg.link_args == ["-Wl,-rpath,\$ORIGIN/../../alpha/lib", "-Wl,-rpath,\$ORIGIN/../../beta/lib"]
+        @test lg.link_args == ["-Wl,-soname,libgamma.so", "-Wl,-rpath,\$ORIGIN/../../alpha/lib",
+                               "-Wl,-rpath,\$ORIGIN/../../beta/lib"]
 
         # A module and a utility only order the build.
         @test lib_named(plan, "delta").link_dependencies == String[]
