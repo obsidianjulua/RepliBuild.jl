@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # test/test_graph_mode_live.jl — graph mode end to end on a CMake project,
 # driven only through `RepliBuild.build`/`wrap`/`register`/`use`/`clean` on its
-# replibuild.toml.
+# replibuild.toml, which the test writes with a [graph] section.
 #
 # test/graph_mode_test/ (copied to a temp dir first; see its CMakeLists.txt):
 #   cbase   C library with a counter; Core (C) links it and compiles against a
@@ -68,7 +68,19 @@ else
     work = _gml_posix(mktempdir())
     proj = work * "/gm"
     cp(GML_FIXTURE, proj)
+    # Written here, as test/*/*.toml is untracked: only cxxlib is selected, and
+    # cbase and Core come with it because it links them.
     toml = proj * "/replibuild.toml"
+    write(toml, """
+        [project]
+        name = "gm_fixture"
+        root = "."
+
+        [graph]
+        source = "."
+        targets = ["cxxlib"]
+        build_type = "Release"
+        """)
     home = work * "/home"
     withenv("REPLIBUILD_HOME" => home, "REPLIBUILD_JULIA_ENV" => "none") do
 
