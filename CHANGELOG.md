@@ -2,7 +2,21 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## Unreleased
+## v4.3.1 (2026-10-31)
+
+**Multi-library projects build and wrap from CMake's own build graph; git
+dependencies fetch the submodules they list.** A `[graph]` section takes a
+CMake project's targets, flags, defines, include paths and build-time generated
+sources from its File API, compiles and links each library with RepliBuild's
+own toolchain, and wraps them as one graph module that includes one module per
+library, in load order. A git dependency's `submodules` fetches exactly the
+listed paths, pinned by the superproject's commit. Also in this release: `[wrap]
+shim_defines`; C++ finalizers free what they own; a Tier 2 record holding a
+template member keeps its size; Tier 2 on Linux classifies by-value records from
+their DWARF facts; Tier 3 places over-aligned by-value records in the slot C
+reads; libraries bind their own exports to themselves on Linux; a bare `ingest`
+no longer registers; and `clean(toml; deps=false)` keeps the vendored clones.
+Some fixes are in what `build` extracts: rebuild, then re-wrap.
 
 ### Graph mode end to end: a [graph] section builds, wraps and registers a CMake project's libraries (2026-10-30)
 

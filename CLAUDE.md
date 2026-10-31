@@ -1041,8 +1041,8 @@ check before claiming portability again; reading `.gitignore` does not settle it
 - **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
   "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles
   it: their Tier 1 code makes the reads 4.2.1 fixed. 4.2.0 is capped at `"9"`.
-  4.2.1 was never registered; its fixes ship in 4.3.0. Once 4.3.0 is registered
-  the resolver prefers it, so the old versions are reached only when another
+  4.2.1 was never registered; its fixes ship in 4.3.0. 4.3.0 is registered, so
+  the resolver prefers it, and the old versions are reached only when another
   package holds RepliBuild back. Capping them is a
   General PR (outward-facing, ask first).
 

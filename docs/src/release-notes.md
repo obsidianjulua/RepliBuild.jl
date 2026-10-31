@@ -23,11 +23,33 @@ registered release, which can be older than what is described here;
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
   folder ([Install](install.md#The-JLCS-dialect)).
 
-## Unreleased (on `main`)
+## v4.3.1 (2026-10-31)
 
-In this manual, and not yet in a registered release, so not in what `Pkg.add`
-installs:
+**Multi-library projects build and wrap from CMake's own build graph.**
 
+- **Graph mode.** A `[graph]` section ([TOML reference](config.md)) builds a
+  CMake project of several libraries. RepliBuild runs only CMake's configure
+  step and reads its File API: every target, its sources, flags, defines and
+  include path, including what it inherits from the libraries it links. It runs
+  the build steps that write generated sources, compiles and links each library
+  itself (C libraries with Julia's clang, C++ with the system clang), and
+  extracts each one's metadata. `wrap` writes one wrapper per library and a
+  graph module that includes them in load order, so `G.Shapes.f(…)` calls a
+  function of the `shapes` library. A library named like a Julia binding gets
+  an `R` (`Core` → `RCore`). `register` and `use` handle the graph as one unit.
+  Types are still per library: a struct two libraries share is a different
+  Julia type in each wrapper.
+- **Git submodules.** `[dependencies.<n>] submodules = ["libs/math"]` fetches
+  exactly those submodules of a git dependency, at the commits its pinned
+  `commit` records, so a library inside a superproject such as `boostorg/boost`
+  no longer needs a dependency of its own.
+- **`[wrap] shim_defines`** builds a single-header library's implementation
+  (`STB_IMAGE_IMPLEMENTATION`) from the TOML, in the shim file only.
+- **C++ finalizers free what they own.** A `Managed<X>` or factory struct calls
+  the library's deleter function for the class, else its deleting destructor;
+  a class with neither gets no owning type. Re-wrap to pick it up.
+- **A Tier 2 record holding a template member** (`std::array`, `std::pair`, a
+  project template) keeps its size when it crosses by value.
 - **`clean(toml; deps=false)`** keeps the vendored git clones, so a rebuild from
   cold checks their pins instead of fetching them again.
 - **`ingest` registers the way `discover` does:** only with `build=true,
