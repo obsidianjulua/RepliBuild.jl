@@ -371,7 +371,10 @@ If you are asked to work on it:
   Tier 2, and **noexcept means a declared-noexcept bare name (candidate) AND a
   `nounwind` mangled definition in the linked IR** (`_mark_noexcept!`). Never route on
   a name alone: a throw through a Tier-3 ccall aborts the process
-  (`test_noexcept_routing.jl`, `callback_test` "bare-name noexcept collision"). A
+  (`test_noexcept_routing.jl`, `callback_test` "bare-name noexcept collision").
+  **An attribute group (`#N`) belongs to its own IR file**: LLVM numbers them per
+  module, so a reader of `define` lines over several files (a per-TU link, a graph
+  library) resolves each file's groups in that file (`_nounwind_definitions`). A
   `nounwind`-only widening would expose Tier-3 emitter gaps (see CHANGELOG
   2026-09-26). `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
   DWARF against natural alignment, not the emitted struct with its `_pad_N`. A layout
