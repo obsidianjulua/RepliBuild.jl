@@ -12,6 +12,7 @@ using ..ConfigurationManager
 using ..DependencyResolver
 using ..EnvironmentDoctor
 import ..Compiler
+import ..GraphMode
 using TOML
 using SHA
 using Dates
@@ -162,6 +163,21 @@ function hash_config(config::RepliBuildConfig)::String
     # (libLLVM 20) carries Tier 1 slices that LLVM 18 cannot parse, so use()
     # under 1.12 must miss rather than serve it. See `_toolchain_identity`.
     SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(config)))
+
+    # A [graph] project is one entry for every library of the graph, so its
+    # hash covers all of their inputs: every file of the CMake project's tree
+    # (`GraphMode.input_files`: the CMake files decide every flag, and a
+    # generator step reads files no target lists), path and content, and the
+    # toolchain of both buckets, since each library has its own.
+    if config.graph !== nothing
+        SHA.update!(ctx, Vector{UInt8}("replibuild-graph"))
+        SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(:c)))
+        SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(:cpp)))
+        for (rel, path) in GraphMode.input_files(config)
+            SHA.update!(ctx, Vector{UInt8}(rel))
+            SHA.update!(ctx, read(path))
+        end
+    end
 
     return bytes2hex(SHA.digest!(ctx))
 end
@@ -603,7 +619,11 @@ function _build_and_vendor!(entry::RegistryEntry; clean::Bool=false, verbose::Bo
     # The same inputs `use` hashes: the loaded config with its dependencies resolved.
     config = DependencyResolver.resolve_dependencies(ConfigurationManager.load_config(entry.toml_path))
     config_hash = hash_config(config)
-    _store_build(config_hash, ConfigurationManager.get_output_path(config))
+    if config.graph !== nothing
+        _store_graph_build(config_hash, config)
+    else
+        _store_build(config_hash, ConfigurationManager.get_output_path(config))
+    end
     verbose && println("  vendored: $(_cached_build_dir(config_hash))")
     return _publish!(entry, config_hash, ConfigurationManager.get_module_name(config); verbose=verbose)
 end
@@ -851,6 +871,8 @@ function _has_cached_build(config_hash::String)::Bool
     if !isdir(build_dir)
         return false
     end
+    # A vendored graph: its manifest lists what must be there.
+    GraphMode.vendored_complete(build_dir) && return true
     # Check for required artifacts
     has_lib = any(f -> endswith(f, ".so") || endswith(f, ".dylib") || endswith(f, ".dll"),
                   readdir(build_dir))
@@ -874,6 +896,23 @@ function _store_build(config_hash::String, output_dir::String)
             # slices/ silently demotes every kernel to ccall.
             cp(f, dest; force=true)
         end
+    end
+end
+
+"""
+    _store_graph_build(config_hash, config)
+
+Vendor a built and wrapped `[graph]` project to `builds/<hash>/` as one unit:
+the graph module, the graph manifest and each library's directory (library,
+metadata, wrapper), at the paths they have under the output directory, so every
+relative path between them holds. Not the IR and link intermediates beside them.
+"""
+function _store_graph_build(config_hash::String, config::RepliBuildConfig)
+    build_dir = joinpath(_builds_dir(), config_hash)
+    for rel in GraphMode.vendored_paths(config)
+        dest = joinpath(build_dir, rel)
+        mkpath(dirname(dest))
+        cp(joinpath(config.graph.out_dir, rel), dest; force=true)
     end
 end
 

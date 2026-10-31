@@ -7,9 +7,10 @@
 # of that. It compiles every translation unit under its own source's compile
 # group, then links one library per library target, in `topological_order`,
 # through the machinery a single-library build uses (`Compiler`): the per-file
-# IR cache, `link_optimize_ir`, `create_library`. Wrapping and the TOML are a
-# later step; this one leaves a directory per library holding what metadata
-# extraction needs.
+# IR cache, `link_optimize_ir`, `create_library`. A library whose link inputs
+# did not change since its last link (`_link_key`) is not linked again. It
+# leaves a directory per library holding what metadata extraction needs;
+# `GraphMode` drives it from a replibuild.toml's [graph] section and wraps.
 #
 # What each target kind becomes:
 #
@@ -61,7 +62,7 @@ import ..ConfigurationManager: RepliBuildConfig
 import ..Compiler
 import ..BuildBridge
 
-export plan_graph, build_graph, GraphPlan, LibraryPlan, TUCompile, TargetResult
+export plan_graph, build_graph, scope_ids, link_key_path, GraphPlan, LibraryPlan, TUCompile, TargetResult
 
 "The compiler driver for each language this build compiles."
 const _COMPILERS = Dict("C" => "clang", "CXX" => "clang++")
@@ -312,6 +313,28 @@ function _library_ids(order::Vector{GraphTarget}, byid::AbstractDict, pos::Abstr
 end
 
 """
+    scope_ids(g; only = nothing) -> Vector{String}
+
+Every target a build of `g` with `only` (as `plan_graph` takes it) involves, in
+topological order: the targets that become libraries and every target they
+depend on, directly or not, utility targets that write their generated
+headers included. It reads no file, so it can say what must be generated
+before `plan_graph`, which refuses a generated source that does not exist yet.
+"""
+function scope_ids(g::TargetGraph; only = nothing)::Vector{String}
+    order = topological_order(g)
+    pos = Dict(t.id => i for (i, t) in enumerate(order))
+    byid = Dict(t.id => t for t in order)
+    closures = _closures(order)
+    keep = Set{String}()
+    for id in _library_ids(order, byid, pos, closures, only)
+        push!(keep, id)
+        union!(keep, closures[id])
+    end
+    return [t.id for t in order if t.id in keep]
+end
+
+"""
     _compile_reads(t, s) -> Bool
 
 Whether compiling `t` reads the source `s`: a translation unit in a language
@@ -410,10 +433,19 @@ end
 
 What a library's link takes beyond its dependencies' `-L`/`-l` (which
 `create_library` writes from `[link] link_dirs`/`link_libraries`, with an
-absolute rpath for each on ELF). On ELF, an rpath relative to `\$ORIGIN` for
-each dependency, so the output directory can move; on PE, which has no rpath,
-an import library beside the DLL, which any MinGW linker can link against.
-Then the target's own link inputs.
+absolute rpath for each on ELF). On ELF, the library's own file name as its
+soname, then an rpath relative to `\$ORIGIN` for each dependency, so the output
+directory can move; on PE, which has no rpath, an import library beside the
+DLL, which any MinGW linker can link against. Then the target's own link
+inputs.
+
+The soname is what keeps a moved graph on its own copies. Without one, the
+dynamic loader matches a dependent's `DT_NEEDED` against a loaded library only
+by the path it was opened with, so a copy of the graph (the registry vendors
+one) whose dependency the wrapper already opened searched the runpath again,
+and the absolute entry `create_library` writes found the original's copy: two
+copies of one library's state in one process. With a soname the loaded copy
+matches by name.
 """
 function _link_args(out::String, name::String, dep_names::Vector{String},
                     link_libraries::Vector{String}; windows::Bool)
@@ -421,6 +453,7 @@ function _link_args(out::String, name::String, dep_names::Vector{String},
     if windows
         push!(args, string("-Wl,--out-implib,", out, "/", name, "/lib/lib", name, ".dll.a"))
     else
+        push!(args, string("-Wl,-soname,lib", name, ".so"))
         for d in dep_names
             push!(args, string("-Wl,-rpath,\$ORIGIN/../../", d, "/lib"))
         end
@@ -704,7 +737,8 @@ end
 # ── Linking ──────────────────────────────────────────────────────────────────
 
 """
-    _library_config(lib; optimization_level = "2", fallback = false) -> RepliBuildConfig
+    _library_config(lib; optimization_level = "2", fallback = false,
+                    module_name = "", graph = nothing) -> RepliBuildConfig
 
 The config `Compiler.link_optimize_ir` and `Compiler.create_library` link one
 library with, built by the same `parse_*` functions a replibuild.toml goes
@@ -714,9 +748,17 @@ the bucket's language, its shared dependencies as `[link] link_dirs` and
 directory on ELF, and the DLLs it opens before the load check on Windows).
 LTO bitcode and static promotion are off: they serve Tier 1, which graph builds
 do not wire.
+
+Graph mode builds every step of one library from this one config, linking,
+metadata extraction and wrapping, so it also carries what wrapping needs:
+`module_name` (`[wrap] module_name`; empty derives it from the target name) and
+`graph`, the `[graph]` section the library belongs to.
 """
 function _library_config(lib::LibraryPlan; optimization_level::AbstractString = "2",
-                         fallback::Bool = false)::RepliBuildConfig
+                         fallback::Bool = false, module_name::AbstractString = "",
+                         graph::Union{Nothing,ConfigurationManager.GraphConfig} = nothing)::RepliBuildConfig
+    wrap_section = Dict{String,Any}("language" => lib.bucket == :c ? "c" : "cpp")
+    isempty(module_name) || (wrap_section["module_name"] = String(module_name))
     data = Dict{String,Any}(
         "project" => Dict{String,Any}("name" => lib.name, "root" => lib.dir,
                                       "uuid" => "00000000-0000-0000-0000-000000000000"),
@@ -730,7 +772,7 @@ function _library_config(lib::LibraryPlan; optimization_level::AbstractString = 
                                    "link_libraries" => copy(lib.link_names),
                                    "link_dirs" => copy(lib.link_dirs)),
         "binary" => Dict{String,Any}("type" => "shared", "output_name" => basename(lib.library)),
-        "wrap" => Dict{String,Any}("language" => lib.bucket == :c ? "c" : "cpp"),
+        "wrap" => wrap_section,
         "cache" => Dict{String,Any}("enabled" => true, "directory" => "cache"),
     )
     CM = ConfigurationManager
@@ -749,6 +791,7 @@ function _library_config(lib::LibraryPlan; optimization_level::AbstractString = 
         CM.parse_dependencies_config(data),
         CM.parse_types_config(data),
         nothing,
+        graph,
         "",
         DateTime(2000))
 end
@@ -769,14 +812,18 @@ function _link_levels(libraries::Vector{LibraryPlan})
 end
 
 """
-    _link_one(lib; optimization_level, fallback) -> (library, linked_ir)
+    _link_one(lib; optimization_level, fallback, module_name = "", graph = nothing)
+        -> (library, linked_ir)
 
 Link one library: `link_optimize_ir` over every translation unit's IR, then
 `create_library` with the per-TU list as its source-location fallback and the
-library's own link arguments.
+library's own link arguments. The config is `_library_config`'s, with the same
+keywords graph mode extracts metadata and wraps with.
 """
-function _link_one(lib::LibraryPlan; optimization_level::AbstractString, fallback::Bool)
-    config = _library_config(lib; optimization_level, fallback)
+function _link_one(lib::LibraryPlan; optimization_level::AbstractString, fallback::Bool,
+                   module_name::AbstractString = "",
+                   graph::Union{Nothing,ConfigurationManager.GraphConfig} = nothing)
+    config = _library_config(lib; optimization_level, fallback, module_name, graph)
     # link_optimize_ir writes here and does not create it (compile_to_ir does,
     # in a single-library build); llvm-link with nowhere to write falls back.
     mkpath(ConfigurationManager.get_build_path(config))
@@ -814,9 +861,77 @@ function _write_manifest(lib::LibraryPlan, library::String, linked_ir::Vector{St
     return nothing
 end
 
+"Where a library's link key is kept: the key of the inputs it was last linked from."
+link_key_path(lib::LibraryPlan) = lib.dir * "/link.key"
+
+# One list into a key: its length first, so two neighbouring lists cannot
+# trade elements and give the same bytes.
+function _feed_list!(ctx, xs)
+    Compiler._key_feed!(ctx, string(length(xs)))
+    for x in xs
+        Compiler._key_feed!(ctx, x)
+    end
+    return ctx
+end
+
+"""
+    _link_key(lib, dep_keys; optimization_level, fallback) -> String
+
+What linking `lib` depends on, as one SHA-256 through `Compiler._key_feed!`:
+every translation unit's IR, byte for byte, with the compile key beside it (its
+arguments, its include directories' headers, its toolchain); the link arguments
+and libraries; the optimization level and the C bucket's fallback; the bucket's
+toolchain; and the link keys of the libraries it links against (`dep_keys`).
+Equal keys mean `_link_one` would link the same inputs again, and links are
+reproducible, so it would write the same library.
+
+The IR is read by content, not by mtime. A generated source that the build's
+own step rewrites unchanged on every run (`GraphGenerators` runs every step
+every time) recompiles to the same IR, and then relinks nothing.
+"""
+function _link_key(lib::LibraryPlan, dep_keys::AbstractDict; optimization_level::AbstractString,
+                   fallback::Bool)::String
+    ctx = SHA.SHA256_CTX()
+    Compiler._key_feed!(ctx, "replibuild-graph-link-v1")
+    _feed_list!(ctx, String[lib.name, string(lib.kind), string(lib.bucket), basename(lib.library),
+                            Compiler._toolchain_identity(lib.bucket),
+                            String(optimization_level), string(fallback)])
+    _feed_list!(ctx, lib.link_args)
+    _feed_list!(ctx, lib.link_names)
+    _feed_list!(ctx, String[dep_keys[d] for d in lib.link_dependencies])
+    Compiler._key_feed!(ctx, string(length(lib.tus)))
+    for tu in lib.tus
+        Compiler._key_feed!(ctx, read(tu.ir_file))
+        k = Compiler._compile_key_path(tu.ir_file)
+        Compiler._key_feed!(ctx, isfile(k) ? read(k) : UInt8[])
+    end
+    return bytes2hex(SHA.digest!(ctx))
+end
+
+"""
+    _cached_link(lib, key) -> Union{Nothing,Tuple{String,Vector{String}}}
+
+`(library, linked_ir)` from the last link of `lib`, when that link's key is
+`key` and the library, its manifest and its linked modules are all still there;
+`nothing` otherwise.
+"""
+function _cached_link(lib::LibraryPlan, key::String)
+    kp = link_key_path(lib)
+    manifest = lib.dir * "/graph_target.toml"
+    (isfile(kp) && isfile(manifest) && isfile(lib.library)) || return nothing
+    strip(read(kp, String)) == key || return nothing
+    m = TOML.parsefile(manifest)
+    linked_ir = String[String(x) for x in get(m, "linked_ir", Any[])]
+    (get(m, "library", "") == lib.library && !isempty(linked_ir) && all(isfile, linked_ir)) ||
+        return nothing
+    return (lib.library, linked_ir)
+end
+
 """
     build_graph(g, out_dir; only = nothing, optimization_level = "2",
                 fallback = false, force = false) -> Vector{TargetResult}
+    build_graph(plan::GraphPlan; optimization_level = "2", fallback = false,
+                force = false, module_names = Dict(), graph = nothing)
 
 Compile every translation unit of `g` that a library needs, in parallel, each
 under its own compile group; then link one library per library target into
@@ -827,19 +942,41 @@ anything runs.
 
 `optimization_level` is the link-time `opt` and codegen level, `fallback` the
 C bucket's `[link] fallback`, and `force` recompiles every translation unit
-regardless of the IR cache.
+regardless of the IR cache and relinks every library.
+
+A library whose link key (`_link_key`) is the one its last link recorded in
+`<out_dir>/<name>/link.key` is not linked again: its library and manifest stay
+as they are. The key is written after the library and its manifest, and removed
+before a link starts, so a failed link never leaves a key claiming success.
+
+The second method builds a plan made beforehand. `module_names` (target id =>
+name) and `graph` go into each library's config (`_library_config`), so graph
+mode links, extracts metadata from and wraps one library under one config.
 """
 function build_graph(g::TargetGraph, out_dir::AbstractString; only = nothing,
                      optimization_level::AbstractString = "2", fallback::Bool = false,
                      force::Bool = false)::Vector{TargetResult}
+    return build_graph(plan_graph(g, out_dir; only); optimization_level, fallback, force)
+end
+
+function build_graph(plan::GraphPlan; optimization_level::AbstractString = "2",
+                     fallback::Bool = false, force::Bool = false,
+                     module_names::AbstractDict = Dict{String,String}(),
+                     graph::Union{Nothing,ConfigurationManager.GraphConfig} = nothing)::Vector{TargetResult}
     start = time()
-    plan = plan_graph(g, out_dir; only)
     println("RepliBuild graph | $(length(plan.libraries)) libraries, " *
             "$(length(plan.compiles)) translation units")
     _compile_all(plan.compiles; force)
 
     linked = Dict{String,Tuple{String,Vector{String}}}()
+    link_keys = Dict{String,String}()
+    relinked = 0
     for wave in _link_levels(plan.libraries)
+        # Before the wave links: each key takes the keys of the libraries it
+        # links against, which earlier waves settled.
+        for lib in wave
+            link_keys[lib.id] = _link_key(lib, link_keys; optimization_level, fallback)
+        end
         failures = Pair{String,String}[]
         lk = ReentrantLock()
         # On this thread, not spawned: the C bucket links and optimizes on
@@ -847,8 +984,20 @@ function build_graph(g::TargetGraph, out_dir::AbstractString; only = nothing,
         # each task waiting on its own tools.
         asyncmap(wave; ntasks = Sys.CPU_THREADS) do lib
             try
-                r = _link_one(lib; optimization_level, fallback)
-                lock(() -> linked[lib.id] = r, lk)
+                hit = force ? nothing : _cached_link(lib, link_keys[lib.id])
+                if hit !== nothing
+                    lock(() -> linked[lib.id] = hit, lk)
+                    return nothing
+                end
+                rm(link_key_path(lib); force = true)
+                r = _link_one(lib; optimization_level, fallback,
+                              module_name = get(module_names, lib.id, ""), graph)
+                _write_manifest(lib, r...)
+                write(link_key_path(lib), link_keys[lib.id])
+                lock(lk) do
+                    linked[lib.id] = r
+                    relinked += 1
+                end
             catch e
                 lock(() -> push!(failures, lib.name => sprint(showerror, e)), lk)
             end
@@ -860,9 +1009,9 @@ function build_graph(g::TargetGraph, out_dir::AbstractString; only = nothing,
                   "failed to link:\n" * join(["  $n: $m" for (n, m) in failures], "\n"))
         end
     end
-    for lib in plan.libraries
-        _write_manifest(lib, linked[lib.id]...)
-    end
+    n = length(plan.libraries)
+    println(relinked == 0 ? "  link: $n cached" :
+            "  link: $relinked/$n librar$(n == 1 ? "y" : "ies") ($(n - relinked) cached)")
     println("  done: $(round(time() - start, digits = 2))s")
     return _results(plan, linked)
 end

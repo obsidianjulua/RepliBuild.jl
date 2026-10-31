@@ -23,7 +23,7 @@ import ..INTERNAL_TYPE_BLOCKLIST
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
-import ..Compiler: _pe_exported_names, _nm_dynamic_names, _pe_crt_dll, _link_dir_dlls
+import ..Compiler: _pe_exported_names, _nm_dynamic_names, _pe_crt_dll, _link_dir_dlls, _canon_path
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -1617,10 +1617,37 @@ Windows' stand-in for the rpath `[link] link_dirs` emits on ELF. Each DLL is
 looked for next to the wrapper first (a build directory travels as a unit), then at
 its build-time path: the same order as rpath's `\$ORIGIN` then the absolute dir.
 Empty off Windows and when no link-dir DLL exists. Shared by both generators.
+
+A library of a graph (`config.graph`, graph mode) links the graph's own
+libraries, and the graph travels as one unit: the registry vendors its whole
+output tree. Each of those DLLs is looked for where it sits in that unit,
+relative to this wrapper, which is the copy the graph's wrapper for it has
+already opened, then at its build-time path. A sibling lookup would miss it
+(each library has its own directory), and the build-time path of a vendored
+graph is the project's copy: a second module of that name, or a load error once
+the project is gone. A DLL outside the graph's output keeps the sibling lookup.
+Wrappers of single libraries are unchanged.
 """
 function _link_dir_preload_snippet(config)
     dlls = _link_dir_dlls(config)
     isempty(dlls) && return ""
+    graph = config.graph
+    if graph !== nothing
+        here = get_output_path(config)
+        root = _canon_path(graph.out_dir) * "/"
+        rel(d) = startswith(_canon_path(d), root) ? replace(relpath(d, here), '\\' => '/') : basename(d)
+        entries = "[" * join(["(" * repr(rel(d)) * ", " * repr(d) * ")" for d in dlls], ", ") * "]"
+        return """
+        # [link] link_dirs DLLs, opened before the main library: PE has no RUNPATH,
+        # and Windows binds an import to a module already loaded under that name.
+        # They are libraries of this graph, opened where they sit in it, relative
+        # to this file, before their build-time paths.
+        for (_rel, _dll) in $entries
+            _here = normpath(joinpath(@__DIR__, _rel))
+            Libdl.dlopen(isfile(_here) ? _here : _dll, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+        end
+"""
+    end
     lit = "[" * join(repr.(dlls), ", ") * "]"
     return """
         # [link] link_dirs DLLs, opened before the main library: PE has no RUNPATH,

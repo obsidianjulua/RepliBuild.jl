@@ -246,6 +246,12 @@ end
 
 Every source `g` marks `generated`, once each: targets in `topological_order`,
 then each target's sources in its own order.
+
+A `.rule` source a target does not compile is CMake's record of a custom
+command (the File API's "CMake Rules" source group, marked generated), which no
+step of a Ninja build writes. It stands for the command's output, the same path
+without `.rule`, and that is requested instead: for a header a custom target
+DEPENDS on, the `.rule` path is the output's only spelling in the graph.
 """
 function requested_sources(g::TargetGraph)::Vector{String}
     seen = Set{String}()
@@ -253,6 +259,7 @@ function requested_sources(g::TargetGraph)::Vector{String}
     for t in topological_order(g), s in t.sources
         s.generated || continue
         p = _posix(normpath(_posix(s.path)))
+        (s.group == 0 && endswith(p, ".rule")) && (p = p[1:end-ncodeunits(".rule")])
         _key(p) in seen && continue
         push!(seen, _key(p))
         push!(out, p)

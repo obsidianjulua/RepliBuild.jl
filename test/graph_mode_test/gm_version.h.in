@@ -1,0 +1,5 @@
+/* Copied to <build>/gen/gm_version.h by a build-time step (CMakeLists.txt). */
+#ifndef GM_VERSION_H
+#define GM_VERSION_H
+#define GM_VERSION 7
+#endif
