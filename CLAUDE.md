@@ -496,6 +496,12 @@ the test named when you touch the area.
   first function that uses it. `resolve_type` gives each branch of a signature its
   own cycle guard (`copy(visited)`); a shared one made the second `int` of
   `int (*)(int, int)` a cycle. (`test_dwarf_attribution.jl`.)
+- **A SIMD vector is not an array.** DWARF spells one as the array of its lanes
+  (`float[4]`), and the metadata marks it `vector_size` on the member, parameter
+  or return (`_vector_size`). Anything that classifies a by-value crossing reads
+  that, never the spelling: SysV classifies a vector by its size (`<1 x float>`
+  is INTEGER, `<4 x float>` one XMM register), and the `NTuple` standing in for
+  it is classified lane by lane. (`test_simd_vectors.jl`.)
 - By-value aggregate returns through a typedef are repaired in a post-pass (type and
   size). Do **not** swap the return mapper for the parameter mapper: it maps `char*`
   differently and would dismantle the Cstring policy.

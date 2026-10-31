@@ -2,6 +2,36 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### SIMD vectors by value classify by their size (2026-10-31)
+
+- **What was wrong.** DWARF spells a vector (`__attribute__((vector_size))`, `__m128`) as the array of its lanes, marked `DW_AT_GNU_vector`, and `resolve_type` keeps that spelling (`float[4]`). The parser used the flag only for a member's alignment, so both tiers passed every vector lane by lane. clang's SysV lowering, against what the thunks and `ccall` did (`jlcs_probe_sysv_call_shapes` on the reference host, GeneratorC asked for `:sysv`):
+  - `{<4 x float>}` is one XMM register, and both tiers used XMM0 and XMM1;
+  - `{<1 x float>}` is INTEGER (RDI), and both used XMM0;
+  - `{<2 x int>}` and `{<8 x char>}` are SSE, and both used a GPR;
+  - `{<1 x double>}` is MEMORY, and both used XMM0;
+  - a bare vector argument crossed a thunk as `!llvm.array`, one register per lane.
+
+  Each is a plausible wrong value. On both hosts, a C function **returning** a vector made GeneratorC emit `ccall(…, float[4], …)`, which Julia evaluates when the module loads (`getindex(float, 4)`), so the whole wrapper failed to load (measured on Windows). Win64 otherwise passes these by size, as Julia does: every other case called correctly there. An array of vectors (`v4f lanes[2]`) also lost its 16-byte alignment, so its record's byval slot was stated at 8 where clang uses 16. Found while measuring LLVM's ABI library for the live path (`docs/updates/LLVM_ABI_LIVE.md`): the oracle could not see it, because both of its sides read the array spelling.
+- **Change.**
+  - The parser records `vector_size` (the bytes of one vector) on a member that is a vector or an array of them, on a parameter and on a return. A member's alignment is the vector's size. This is `Compiler._vector_size`, which replaces `_is_vector_type`.
+  - `FunctionGen.sysv_record_abi` classifies a vector member by its size, as clang's `X86_64ABIInfo` does on Linux. Up to 4 bytes is INTEGER. 8 bytes is SSE, except `<1 x double>`, which is MEMORY. So these records are now callable on Tier 2 with the right statement.
+  - A 16-byte vector is one SSE register (SSE, SSEUP), which no call statement states. That record is the new kind `:unstated`, which `sysv_trap_reason` refuses on SysV.
+  - Over 16 bytes, a record that is one vector of its own size goes in a YMM register when the callee was built for AVX. The metadata does not say whether it was, so that record is `:unknown`.
+  - `thunk_crossings` refuses a bare vector argument or return on every host.
+  - GeneratorC refuses (`vector_offenders`, one verdict for the plain and `[wrap.varargs]` paths):
+    - a vector return, on both conventions;
+    - on SysV, a bare vector argument, and a record whose class differs from ccall's lane-by-lane reading of its `NTuple` stand-in (`FunctionGen.sysv_vector_misread`, `sysv_record_abi(…; vectors = false)`).
+
+    `{<2 x float>}` and `{<2 x float>; int}` classify the same both ways and stay callable.
+  - The SysV oracle (`jlcs_abi_oracle_sysv`) takes a `vector` type.
+- **Rebuild, then re-wrap.** The fact is in `compilation_metadata.json`.
+- **Tests.**
+  - `test_simd_vectors.jl` (runtests, no toolchain) parses a vendored GNU objdump dump of a C unit with a vector of each size, an array of vectors, a nested one, a bare argument and a return. It checks the parser's facts, every record's class under both readings, `sysv_vector_misread`, the Tier 2 refusals in the emitted IR, and GeneratorC's output on both conventions; both wrappers parse.
+  - `SAO_CURATED` in `test_sysv_abi_oracle.jl` gains `<1 x float>`, `<2 x int>`, `<8 x char>`, `<1 x double>`, `<2 x float>` and `{<2 x float>; int}` records, which agree with LLVM's ABI library and with clang, and `<4 x float>`, which is refused both ways.
+  - Each of the four fixes was neutered in turn, and the test failed each time.
+
 ## v4.3.1 (2026-10-31)
 
 **Multi-library projects build and wrap from CMake's own build graph; git

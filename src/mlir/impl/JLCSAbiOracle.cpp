@@ -2,9 +2,10 @@
 //
 // LLVM 23's ABI lowering library (llvm/ABI) classifies a function's arguments
 // and return for x86-64 SysV from a frontend-neutral description of their
-// types. That makes it an independent second opinion on the dialect's own
-// classifySysVStruct + buildCallShape (JLCSPasses.cpp), and
-// test/test_sysv_abi_oracle.jl diffs the two over a corpus of C records.
+// types. That makes it an independent second opinion on RepliBuild's own
+// classification (FunctionGen.sysv_record_abi, stated on each call and acted
+// on by buildCallShape in JLCSPasses.cpp), and test/test_sysv_abi_oracle.jl
+// diffs the two over a corpus of C records.
 //
 // Test only. Nothing on the wrapping or JIT path calls this. It is compiled
 // only when CMake finds the library and its x86-64 classifier (LLVM 23+:
@@ -103,6 +104,17 @@ struct TypeReader {
             if (!elem)
                 return nullptr;
             return TB.getComplexType(elem, *al);
+        }
+        if (*K == "vector") {
+            std::optional<int64_t> n = O->getInteger("n");
+            std::optional<Align> al = alignOf(*O);
+            if (!n || *n <= 0 || !al)
+                return fail("a vector needs n and a power-of-two align");
+            const abi::Type* elem = read(O->get("elem"));
+            if (!elem)
+                return nullptr;
+            return TB.getVectorType(elem,
+                ElementCount::getFixed(static_cast<unsigned>(*n)), *al);
         }
         if (*K == "array") {
             std::optional<int64_t> n = O->getInteger("n");
@@ -355,6 +367,7 @@ extern "C" {
 //   {"k":"float", "sem":"half|bfloat|single|double|x87|quad", "align":8}
 //   {"k":"complex", "elem":T, "align":8}
 //   {"k":"array", "n":N, "size_bits":S, "elem":T}
+//   {"k":"vector", "n":N, "elem":T, "align":16}   (a SIMD vector of N lanes)
 //   {"k":"record", "size_bits":S, "align":A, "union":false,
 //    "fields":[{"offset_bits":O, "type":T, "bit_width":W (bitfields only)}]}
 // Records are C records: trivially copyable, so never passed by reference.

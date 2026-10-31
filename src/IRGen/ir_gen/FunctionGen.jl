@@ -319,6 +319,12 @@ function _byte_region_size(key, structs)
     return m === nothing ? nothing : parse(Int, m.captures[1])
 end
 
+# A SIMD vector by value (`vector_size` on a parameter or return): its `c_type`
+# is the array of its lanes, which the thunk would pass as `!llvm.array`, and
+# LLVM splits an array operand into one register per lane (abi_fuzz X2), where
+# C passes one vector register (SysV) or a pointer (Win64).
+const _BARE_VECTOR_PHRASE = "a SIMD vector, which a thunk would pass lane by lane as an array"
+
 """
     thunk_crossings(func, structs, record_abi) -> NamedTuple
 
@@ -327,8 +333,9 @@ The per-function answer both generators act on: `params` (one
 a human-readable reason when some crossing is `:opaque` or `:conflict`, when
 the return is `:indirect` (an sret the thunk does not model), or when a
 `:layout` record is one this host's convention refuses (`sysv_trap_reason`:
-a SysV class DWARF does not settle, or a `long double` record returned in
-st0), else `nothing`. `layout_trap`, `abi_trap` and `conflict_trap` split
+a SysV class DWARF does not settle or no statement states, or a `long double`
+record returned in st0), or when a bare SIMD vector crosses by value
+(`_BARE_VECTOR_PHRASE`, on every host), else `nothing`. `layout_trap`, `abi_trap` and `conflict_trap` split
 `trap` by cause, because the Julia stub explains them differently:
 `layout_trap` holds the reasons it has always explained as a layout missing
 from DWARF, which a build flag can recover; `abi_trap` the convention's own
@@ -350,12 +357,16 @@ function thunk_crossings(func, structs, record_abi)
             why = sysv_trap_reason(key, structs; ret = false)
             why === nothing || push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $why")
         end
+        haskey(p, "vector_size") &&
+            push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $(_BARE_VECTOR_PHRASE)")
     end
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
     if ret[1] === :layout
         why = sysv_trap_reason(ret[2], structs; ret = true)
         why === nothing || push!(abi_reasons, "returns `$ret_c` by value, $why")
     end
+    haskey(get(func, "return_type", Dict()), "vector_size") &&
+        push!(abi_reasons, "returns `$ret_c` by value, $(_BARE_VECTOR_PHRASE)")
     ret[1] === :indirect && push!(reasons,
         "returns `$ret_c` by value, which C++ returns through a hidden pointer the thunk does not pass")
     conflicts = conflict_crossings(func, structs)

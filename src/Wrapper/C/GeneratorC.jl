@@ -722,6 +722,17 @@ _c_blob_trap_body(julia_name::AbstractString, offenders::Vector{String}) =
         "member types). Use a pointer-taking variant of this C function, or make the struct's " *
         "members resolvable.") * ")\n"
 
+# The body of the SIMD vector refusal (`vector_offenders`), shared by the plain
+# path and the `[wrap.varargs]` path.
+_c_vector_trap_body(julia_name::AbstractString, offenders::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name' through ccall. It $(join(offenders, "; ")). " *
+        "C passes a SIMD vector in the registers its size picks, while the Julia type standing in " *
+        "for it is the tuple of its lanes, which ccall classifies lane by lane, and a vector " *
+        "returned by value has no Julia type at all. The call would read or write the wrong " *
+        "registers. Use a variant of this C function that takes or returns the vector through a " *
+        "pointer.") * ")\n"
+
 # Emitted once into a wrapper whose functions pass a record through
 # `_RB_ByVal16` (`_c_byval_param_shape` → `:carrier`), ahead of the functions:
 # a ccall type position resolves when the method is defined.
@@ -2753,8 +2764,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     #     (`_c_sret_buffer_align`, `align > 0`). `nothing` when any refusal
     #     above fires: a trap stub makes no call.
     #
+    #   * `vector_offenders`: a SIMD vector crossing by value, bare or in a
+    #     record, that ccall would place differently from C (see the block).
+    #
     # `param_types` are the ccall types in parameter order (`_ccall_param_type`).
     needs_byval16 = Ref(false)
+    # `FunctionGen.sysv_vector_misread` per DWARF record, computed once.
+    _vector_memo = Dict{String,Union{String,Nothing}}()
+    _vector_misread(key) = key isa AbstractString && haskey(dwarf_structs, key) ?
+        get!(() -> JLCSIRGenerator.FunctionGen.sysv_vector_misread(key, dwarf_structs), _vector_memo, key) :
+        nothing
     function _c_byvalue_verdict(func, param_types::Vector{String}, return_type)
         blob_abi_offenders = String[]
         let _rjt = String(get(return_type, "julia_type", "Any")),
@@ -2815,6 +2834,38 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16 &&
                    _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
                 push!(blob_abi_offenders, "takes `$_pt` by value")
+            end
+        end
+
+        # A SIMD vector by value (`vector_size`). The Julia type standing in
+        # for one is the `NTuple` of its lanes, which ccall classifies lane by
+        # lane, while C classifies a vector by its size: `{<4 x float>}` goes
+        # in XMM0 and XMM1 where C uses XMM0 alone. A vector returned by value
+        # has no stand-in at all: its return type would be its C spelling
+        # (`float[4]`), which Julia evaluates when the module loads, so the
+        # whole wrapper failed to load, on both hosts. A vector argument, bare
+        # or in a record, is misplaced on SysV only: Win64 passes it by size,
+        # as Julia does (`FunctionGen.sysv_vector_misread`).
+        vector_offenders = String[]
+        let rvs = get(return_type, "vector_size", nothing)
+            rvs === nothing || push!(vector_offenders,
+                "returns `$(get(return_type, "c_type", "?"))` (a $rvs-byte SIMD vector) by value")
+        end
+        if abi === :sysv
+            for p in get(func, "parameters", [])
+                pvs = get(p, "vector_size", nothing)
+                pvs === nothing || push!(vector_offenders,
+                    "takes `$(get(p, "c_type", "?"))` (a $pvs-byte SIMD vector) by value")
+            end
+            for _pt in param_types
+                startswith(_pt, "Ptr{") && continue
+                why = _vector_misread(get(_unaligned_bdk, _pt, _pt))
+                why === nothing || push!(vector_offenders, "takes `$_pt` by value, $why")
+            end
+            let rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
+                rkey = haskey(dwarf_structs, rct) ? rct : _fuzzy_dwarf_lookup(rct, dwarf_structs)
+                why = _vector_misread(rkey)
+                why === nothing || push!(vector_offenders, "returns `$rct` by value, $why")
             end
         end
 
@@ -2888,9 +2939,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         needs_sret = isempty(x87) && (sret_align > 0 || (ret_struct_info !== nothing &&
             _c_explicit_sret(rs_size, _rec_unaligned(ret_struct_info); abi)))
         emit_sret = needs_sret && (!c_safe || rs_size <= 16 || sret_align > 0) &&
-                    isempty(blob_abi_offenders) && isempty(slot_traps)
+                    isempty(blob_abi_offenders) && isempty(vector_offenders) && isempty(slot_traps)
         sret = emit_sret ? (; type = String(sret_ret_type), size = rs_size, align = sret_align) : nothing
-        return (; blob_abi_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret)
+        return (; blob_abi_offenders, vector_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret)
     end
 
     for func in functions
@@ -3011,6 +3062,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
             va_trap = !isempty(vd.x87) ? (n -> _x87_trap_body(n, vd.x87)) :
                       !isempty(vd.blob_abi_offenders) ? (n -> _c_blob_trap_body(n, vd.blob_abi_offenders)) :
+                      !isempty(vd.vector_offenders) ? (n -> _c_vector_trap_body(n, vd.vector_offenders)) :
                       !isempty(vd.slot_traps) ? (n -> _c_slot_trap_body(n, vd.slot_traps)) : nothing
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
@@ -3177,7 +3229,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # varargs path (`_c_byvalue_verdict` above): the SysV register-window
         # refusals, the over-aligned stack slots and their carriers, `long
         # double`, and BRANCH 0's return shape.
-        (; blob_abi_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret) =
+        (; blob_abi_offenders, vector_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret) =
             _c_byvalue_verdict(func, param_types, return_type)
         # The ccall's parameter types and argument expressions, each
         # over-aligned record inside its carrier (`_rb_byval16`).
@@ -3451,6 +3503,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             $doc_comment
             function $julia_name($param_sig)
             $(_c_blob_trap_body(julia_name, blob_abi_offenders))end
+
+            """
+        elseif !isempty(vector_offenders)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_c_vector_trap_body(julia_name, vector_offenders))end
 
             """
         elseif !isempty(slot_traps)
