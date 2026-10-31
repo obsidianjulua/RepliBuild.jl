@@ -318,7 +318,9 @@ If you are asked to work on it:
   (order-only), so both compile the project's libraries. An order-only input on
   a library is dropped unless the command names it; one on an executable is the
   tool the command runs and is a refusal (`GeneratorNeedsCompile`; rootcling).
-  Read ninja's graph through its `-t` tools, never by parsing build.ninja.
+  Read ninja's graph through its `-t` tools, never by parsing build.ninja. A
+  CMake `.rule` source is requested as the output it stands for: the Ninja
+  generator never writes it.
   (`test_graph_generators.jl`, devtests `test_graph_generators_live.jl`.)
 - `Builder/GraphBuild.jl` — the build-graph executor. `build_graph` compiles each
   translation unit under its own compile group and links one library per
@@ -326,8 +328,22 @@ If you are asked to work on it:
   `<out>/<name>/`, with `graph_target.toml` beside it. Object and static targets
   fold their IR into the libraries that link them, never again into a library
   that gets them through a shared dependency: the File API lists dependencies
-  transitively (`_reach`). (`test_graph_build.jl`, devtests
-  `test_graph_build_live.jl`.)
+  transitively (`_reach`). A library relinks only when its link key moves
+  (`link.key`: IR by content, compile keys, link arguments, dependencies'
+  keys). (`test_graph_build.jl`, devtests `test_graph_build_live.jl`.)
+- `Builder/GraphMode.jl` — a `[graph]` project end to end. `build`: configure
+  (`cmake_graph`), `run_generators` over the selection's scope
+  (`GraphBuild.scope_ids`), `build_graph`, then per library what
+  `compile_project` does after a link (nounwind/byval, metadata,
+  `verify_wrap_surface`). `wrap`: one wrapper per library in topological order,
+  then `<output>/<Graph>.jl` including them in that order (PE load order). **One
+  config per library** for link, metadata and wrap: `GraphBuild._library_config`
+  with `module_name` and `graph`. **Library module names come from
+  `library_module_names` only** (`Core` → `RCore`; a submodule named `Core`, or
+  like its parent, is unreachable). A vendored graph must bind its own copies:
+  ELF graph libraries carry a soname, and a graph library's PE preload opens
+  dependencies relative to the wrapper (`_link_dir_preload_snippet`, gated on
+  `config.graph`). (`test_graph_mode.jl`, devtests `test_graph_mode_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
   where it lives.** An entry points at the project's own TOML; `register` builds
   and wraps in place, vendors the output to `builds/<hash_config>/` (immutable:
@@ -815,7 +831,8 @@ the test named when you touch the area.
    rebuilds a C project and leaves a C++ one built.
 
 Every persisted key (these two, the registry's `hash_config`, the IR file name's
-directory digest `_ir_dir_key` and the templates TU's `.key` fingerprint) is
+directory digest `_ir_dir_key`, the templates TU's `.key` fingerprint, and graph
+mode's `link.key` and `metadata.key`) is
 SHA-256 fed through `_key_feed!`, never `Base.hash`, which differs between Julia
 releases.
 3. Registry build cache (`~/.replibuild/builds/<hash>/`, gates `use()`). It includes
@@ -912,9 +929,10 @@ Start here for any ABI question: register state is observable.
   `struct_abi/`, `jlcs_producers/`, `mlir_templates/` and `jit_unwind/` are
   single-file clang++ fixtures their test compiles directly; `fixtures/` holds
   the vendored JSON corpora and `fixtures/cmake_graph/` the vendored File API
-  replies. `graph_build_test/` (a graph described by hand, no cmake) and
-  `graph_generators_test/` (configured with cmake and Ninja) are graph mode's
-  live fixtures.
+  replies. `graph_build_test/` (a graph described by hand, no cmake),
+  `graph_generators_test/` (configured with cmake and Ninja) and
+  `graph_mode_test/` (a CMake project; its test writes a `[graph]` TOML into a
+  copy, since `test/*/*.toml` is untracked) are graph mode's live fixtures.
 
 ## Windows (`x86_64-w64-windows-gnu`, MSYS2 CLANG64) — since v4.0.0
 
@@ -1068,12 +1086,16 @@ DWARF-resolved destructors — **is** built.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
-- Graph mode end to end (2026-10-30). CMakeGraph → GraphGenerators → GraphBuild
-  run as functions; no TOML key selects them, and nothing extracts metadata or
-  wraps per library yet. GraphBuild has no link cache: every library relinks.
+- Graph mode (2026-10-30) runs end to end for a CMake project configured with
+  Ninja. Not built: other `[wrap]`/`[compile]`/`[types]` keys per library, a
+  project-level fast path (every build configures and runs every generator
+  step), parallel metadata extraction, and a `[graph] source` from a
+  `[dependencies]` git checkout.
 - Cross-library type identity in graph mode (2026-10-30). Each wrapper emits
   every type its own DWARF holds, so B gets a second Julia type, often an empty
-  one, for each of A's types it touches. Design:
+  one, for each of A's types it touches, and a call into B with A's value is a
+  `MethodError`. A header enum B's DWARF lacks is emitted from the header as
+  `Cint` where A's DWARF says `unsigned int` (2026-10-31). Design:
   `docs/updates/CROSS_LIBRARY_TYPES.md`.
 - Graph mode for CERN ROOT (2026-10-30), measured in `docs/updates/ROOT_RECON.md`.
   Linux only: ROOT on Windows is MSVC, and its CMake refuses MSYS2 CLANG64. Every
