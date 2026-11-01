@@ -115,6 +115,21 @@ end
         @test isempty(r2.unmatched)
     end
 
+    @testset "a keep-pattern naming a reachable type is a match, not a miss" begin
+        # `matches` is also the hit counter. The walk reaches `lib_config`
+        # through the global, and the keep test used to run only on keys the
+        # walk did NOT reach, so a pattern for a reachable type was never tested,
+        # counted zero hits and failed the wrap as "matched nothing"
+        # (Boost.Filesystem's `copy_options`, once the keep file compiled a
+        # function taking it, 2026-10-31).
+        md = fixture()
+        r = W._apply_surface_type_filter!(md, ["lib_config", "lib_status_t"];
+                                          runtime_defined=Set(["lib_open", "lib_default_cfg"]))
+        @test isempty(r.unmatched)
+        @test haskey(md["struct_definitions"], "lib_config")
+        @test haskey(md["struct_definitions"], "__enum__lib_status_t")
+    end
+
     @testset "a keep-pattern matching nothing is reported, not swallowed" begin
         # Worse than a stale exclude: this list exists to HOLD ON to types, so a
         # silent miss drops API. The caller turns this into a hard error.

@@ -178,11 +178,11 @@ function _member_mlir_type(c_type::AbstractString)::String
                              r"(?:\s+(?:const|volatile))+$" => "")))
     outer = _outside_template_args(t)
     if outer !== nothing
-        occursin(_TEMPLATE_RECORD, outer) && return "!llvm.struct<\"$t\">"
+        occursin(_TEMPLATE_RECORD, outer) && return mlir_struct_ref(t)
         am = match(_TEMPLATE_RECORD_ARRAY, outer)
         if am !== nothing
             dims = String(am.captures[1])
-            r = "!llvm.struct<\"$(strip(chop(t; tail = length(dims))))\">"
+            r = mlir_struct_ref(strip(chop(t; tail = length(dims))))
             # Innermost dimension binds tightest, as in `map_cpp_type`.
             for d in Iterators.reverse(collect(eachmatch(r"\[(\d+)\]", dims)))
                 r = "!llvm.array<$(d.captures[1]) x $r>"
@@ -236,9 +236,9 @@ function _resolve_struct_member_type(mlir_t::String, all_structs, seen::Set{Stri
             elem_fallback = (n > 0 && fallback_size % n == 0) ? fallback_size ÷ n : 0
             elem = _resolve_struct_member_type(String(am.captures[2]), all_structs, seen;
                                                alias_form=false, fallback_size=elem_fallback)
-            bare = match(r"^!llvm\.struct<\"([^\"]+)\">$", elem)
+            bare = match(r"^!llvm\.struct<\"(?:[^\"\\]|\\.)+\">$", elem)
             if bare !== nothing
-                einfo = _lookup_struct(all_structs, String(bare.captures[1]))
+                einfo = _lookup_struct(all_structs, mlir_struct_name(elem))
                 esz = einfo === nothing ? nothing : _parse_num(get(einfo, "byte_size", nothing))
                 esz === nothing && return "!llvm.array<$(max(fallback_size, 1)) x i8>"
                 elem = "!llvm.array<$(max(esz, 1)) x i8>"
@@ -247,9 +247,12 @@ function _resolve_struct_member_type(mlir_t::String, all_structs, seen::Set{Stri
         end
     end
 
-    m = match(r"^!llvm\.struct<\"(.+)\">$", mlir_t)
+    # A bare named ref. The name is read back through `mlir_struct_name`, which
+    # undoes the literal's escaping: the capture is the escaped form, and it
+    # misses the lookup for a name holding `\` or `"`.
+    m = match(r"^!llvm\.struct<\"(?:[^\"\\]|\\.)*\">$", mlir_t)
     m === nothing && return mlir_t
-    s_name = String(m.captures[1])
+    s_name = something(mlir_struct_name(mlir_t), "")
     info = _lookup_struct(all_structs, s_name)
 
     # Member names a struct we have no definition for. Emitting the bare
@@ -277,7 +280,7 @@ function _resolve_struct_member_type(mlir_t::String, all_structs, seen::Set{Stri
         return _packed_literal_string(s_name, info, all_structs, seen)
     end
     if alias_form
-        safe_name = replace(s_name, r"[^a-zA-Z0-9_]" => "_")
+        safe_name = alias_safe_name(s_name)
         return "!Struct_$(safe_name)"
     end
 
@@ -343,7 +346,7 @@ function _packed_literal_string(name::String, info::Any, all_structs, seen::Set{
         # A union has no LLVM spelling anyway (unions are emitted as byte arrays,
         # see get_struct_definition_string), so the byte region is also the
         # correct representation, not merely a safe one.
-        if match(r"^!llvm\.struct<\"[^\"]+\">$", resolved) !== nothing
+        if match(r"^!llvm\.struct<\"(?:[^\"\\]|\\.)+\">$", resolved) !== nothing
             resolved = "!llvm.array<$(max(m_size, 1)) x i8>"
         end
         push!(member_types, resolved)
@@ -440,16 +443,15 @@ function _mlir_layout(t::AbstractString, all_structs, depth::Int=0)
     # A bare named ref carries no body — its size is the DWARF one. This is what
     # `_resolve_struct_member_type(alias_form=false)` leaves for a known
     # non-packed struct member, which is why measurement runs on that form.
-    m = match(r"^!llvm\.struct<\"([^\"]+)\">$", t)
-    if m !== nothing
-        info = _lookup_struct(all_structs, String(m.captures[1]))
+    if match(r"^!llvm\.struct<\"(?:[^\"\\]|\\.)+\">$", t) !== nothing
+        info = _lookup_struct(all_structs, mlir_struct_name(t))
         info === nothing && return nothing
         sz = _parse_num(get(info, "byte_size", nothing))
         (sz === nothing || sz <= 0) && return nothing
         return (sz, _dwarf_struct_align(info, all_structs, depth + 1))
     end
 
-    m = match(r"^!llvm\.struct<(?:\"[^\"]*\",\s*)?(packed\s*)?\((.*)\)\s*>$", t)
+    m = match(r"^!llvm\.struct<(?:\"(?:[^\"\\]|\\.)*\",\s*)?(packed\s*)?\((.*)\)\s*>$", t)
     if m !== nothing
         packed = m.captures[1] !== nothing
         cur = 0
@@ -622,9 +624,9 @@ function _sized_member_types(name::String, info::Any, all_structs; alias_form::B
         # struct holding a pointer-aligned record pass the natural-layout check
         # with the record at an offset LLVM then moved: the body came out unpacked
         # and 4 bytes too large (abi_fuzz X8).
-        bare = match(r"^!llvm\.struct<\"(.+)\">$", mapped)
+        bare = match(r"^!llvm\.struct<\"(?:[^\"\\]|\\.)*\">$", mapped)
         if alias_form && startswith(emit[end], "!Struct_") && bare !== nothing &&
-           all_structs !== nothing && _lookup_struct(all_structs, String(bare.captures[1])) !== nothing
+           all_structs !== nothing && _lookup_struct(all_structs, mlir_struct_name(mapped)) !== nothing
             push!(measure, mapped)
         else
             push!(measure, alias_form ?
@@ -709,7 +711,7 @@ function get_struct_definition_string(name::String, info::Any, all_structs=nothi
         if isempty(mlir_t) || startswith(mlir_t, "!llvm.struct")
             mlir_t = "i32"
         end
-        return "!llvm.struct<\"$(name)\", ($(mlir_t))>"
+        return "!llvm.struct<$(mlir_string_literal(name)), ($(mlir_t))>"
     end
     
     is_packed = is_struct_packed(info)
@@ -738,13 +740,13 @@ function get_struct_definition_string(name::String, info::Any, all_structs=nothi
         offsets_typed = ["$(o) : i64" for o in offsets]
         offsets_str = "[$(join(offsets_typed, ", "))]"
         
-        return "!jlcs.c_struct<\"$(name)\", [$(types_str)], [$(offsets_str)], packed = true>"
+        return "!jlcs.c_struct<$(mlir_string_literal(name)), [$(types_str)], [$(offsets_str)], packed = true>"
     else
         # Standard LLVM struct
         if isempty(member_types)
-             return "!llvm.struct<\"$(name)\", opaque>"
+             return "!llvm.struct<$(mlir_string_literal(name)), opaque>"
         else
-             return "!llvm.struct<\"$(name)\", $(body_packed ? "packed " : "")($(join(member_types, ", ")))>"
+             return "!llvm.struct<$(mlir_string_literal(name)), $(body_packed ? "packed " : "")($(join(member_types, ", ")))>"
         end
     end
 end
@@ -760,7 +762,7 @@ function get_struct_type_string(name::String, info::Any)
         return def_str
     end
     # Sanitize name for alias
-    safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
+    safe_name = alias_safe_name(name)
     return "!Struct_$(safe_name)"
 end
 
@@ -793,7 +795,7 @@ function get_llvm_equivalent_type_string(name::String, info::Any, all_structs=no
     member_types = laid_out
 
     if isempty(member_types)
-         return "!llvm.struct<\"$(name)\", opaque>" # Fallback
+         return "!llvm.struct<$(mlir_string_literal(name)), opaque>" # Fallback
     else
          # Return a literal struct (no name)
          packed_attr = (is_packed || body_packed) ? "packed " : ""
@@ -829,7 +831,7 @@ function get_llvm_aligned_type_string(name::String, info::Any, all_structs=nothi
     member_types = laid_out
 
     if isempty(member_types)
-         return "!llvm.struct<\"$(name)\", opaque>"
+         return "!llvm.struct<$(mlir_string_literal(name)), opaque>"
     else
          # No natural layout exists for a packed-only body; the aligned spelling
          # of it IS the packed one.
@@ -891,10 +893,11 @@ function generate_struct_definitions(structs::Any)
             # A pointer member maps to `!llvm.ptr` and names no dependency. A
             # `*` inside template arguments (`Box<int*>`) does not make one.
             mlir_t = _member_mlir_type(t)
-            # Use triple-quoted regex to avoid escape issues
-            m_match = match(r"""!llvm.struct<\"([^\"]+)\">""", mlir_t)
+            # The member may be an array of the record; the name is read back
+            # through `mlir_struct_name`, which undoes the literal's escaping.
+            m_match = match(r"!llvm\.struct<\"(?:[^\"\\]|\\.)*\">", mlir_t)
             if m_match !== nothing
-                dep_name = m_match.captures[1]
+                dep_name = mlir_struct_name(m_match.match)
                 if haskey(node_map, dep_name) && dep_name != name
                     push!(d, dep_name)
                 end
@@ -936,7 +939,7 @@ function generate_struct_definitions(structs::Any)
         info = node_map[name]
         def_str = get_struct_definition_string(name, info, node_map)
         if !endswith(def_str, "opaque>")
-            safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
+            safe_name = alias_safe_name(name)
             push!(defined_aliases, "!Struct_$(safe_name)")
         end
     end
@@ -953,7 +956,7 @@ function generate_struct_definitions(structs::Any)
         def_str = replace(def_str, r"!Struct_[A-Za-z0-9_]+" => m -> m in defined_aliases ? m : "!llvm.ptr")
 
         # Emit alias
-        safe_name = replace(name, r"[^a-zA-Z0-9_]" => "_")
+        safe_name = alias_safe_name(name)
         alias_name = "!Struct_$(safe_name)"
         println(io_aliases, "$(alias_name) = $(def_str)")
 

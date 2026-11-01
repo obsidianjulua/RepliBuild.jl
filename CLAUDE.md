@@ -449,7 +449,10 @@ the test named when you touch the area.
   and no identifier token equals `normal_distribution<double, policy<…> >`; before
   that, boostmath's five distributions were emitted as empty structs (2026-10-25).
   A new way a signature spells a record goes into that function, never into a
-  second resolver. (`test_surface_types.jl`.)
+  second resolver. **The keep patterns are matched against every key, reachable
+  or not**: `matches` is the hit counter, and a short-circuit on reachability
+  read a pattern for a reachable type as "matched nothing" (2026-10-31).
+  (`test_surface_types.jl`.)
 - `_drop_unresolvable_globals!` removes globals absent from dynsym before either
   generator runs, unconditionally.
 - `extract_symbols_from_binary` filters `__rb_*` and Itanium adjustor thunks
@@ -540,6 +543,26 @@ the test named when you touch the area.
 
 ### Generators
 
+- **The STL screen is asked with the record's definition.** `_is_stl_internal_type`
+  matches bare names, which is all DWARF keys records by, and screened
+  `boost::core::basic_string_view<char>` like `std::string_view`. Every record
+  definition carries `scope` (the parser's `_scope_of`, from namespace DIEs that
+  set the depth context like records), and GeneratorCpp asks
+  `_is_stl_internal_record(name, dwarf_structs)` through its `_stl_internal`
+  closure: outside `std`/`__gnu_cxx`/`__cxx*` a record is never STL-internal; with
+  no scope, or inside `std`, the name decides as before. Never call the name-only
+  screen in the generator. The key needs a rebuild. (`test_record_scope.jl`.)
+- **Integer parameters are `::Integer` unless an overload set disagrees on their
+  width.** `_integer_width_overloads` predicts each wrapper's name and dispatch
+  signature the way the function loop builds them and marks the positions a set
+  of distinct symbols differs on; those keep the C type so dispatch separates
+  `f(int)` from `f(long long)`. A width is the type the alias names on this host
+  (`_concrete_ctype`): `int` and `long` are one width on LLP64, `long` and `long
+  long` on LP64, and a set that differs only in spelling stays `::Integer`.
+  `_method_sig_keys` keys by the same concrete types, so two spellings of one
+  width dedup instead of defining one signature twice, which precompilation
+  refuses. A change to how the loop types or names a function
+  must move the prediction with it. (`test_integer_width_overloads.jl`.)
 - **Two generators, one answer.** C and C++ duplicate type sets by design, for
   isolation. Shared decisions must still agree, so put the derivation in
   `Wrapper/Utils.jl` rather than copying it. Agreement is necessary, not sufficient.
@@ -1111,6 +1134,12 @@ DWARF-resolved destructors — **is** built.)
   characters, and a consumer finds it by regex (2026-10-25). A short alias
   needs a `[wrap]` table from mangled symbol or key to name, through both
   generators' name derivations.
+- **Boost is wrapped a library at a time** (2026-10-31): Hub `boostfilesystem`,
+  `boostcharconv`, `boostjson`, each `boostorg/boost` with `submodules` set to
+  the closure `tools/boostdep/depinst/depinst.py` computes (the guide's Boost
+  section has the recipe). Not built: a decoder for a `std::string` returned by
+  value (a 32-byte stand-in, libstdc++'s size; libc++'s object is 24), and
+  binding the STL members that live in the C++ runtime library (below).
 - STL members that live in the C++ runtime library are unbound: libc++'s
   `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
   them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches

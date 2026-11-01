@@ -416,17 +416,40 @@ keep file includes the header the way a user would: `#include "hol/hol.hpp"`.
 
 ### Boost and other large template libraries
 
-Two limits show up first on Boost, and apply to any library built like it.
+Two things shape a Boost build first, and apply to any library built like it.
 
-**Submodules are not fetched.** A git dependency is a plain `git clone`, so a
-superproject comes back without the libraries in it: `boostorg/boost` gives an
-empty tree. Depend on each library's own repository instead: `boostorg/math`
-for Boost.Math, which stands alone with `BOOST_MATH_STANDALONE` defined. A
-library that needs other Boost libraries needs each of them as a dependency of
-its own. Put `-DBOOST_MATH_STANDALONE` in `[compile] flags`: unlike an
-implementation macro, every file has to see it. Boost repositories also carry
-large test and example trees, which the resolver would compile, so exclude
-them.
+**A superproject is wrapped one library at a time.** `boostorg/boost` is a
+superproject of about 170 submodules, and a plain clone of it is an empty tree.
+`[dependencies.<n>] submodules` fetches exactly the submodules a library's
+headers reach ([Edit the TOML](config.md), the `[dependencies]` table), so one
+compiled Boost library is one package: its own `src/`, the header-only
+libraries it includes, and nothing else. Boost's own tool computes that list
+from a checkout of the superproject with `tools/boostdep` and the library
+fetched:
+
+```bash
+python tools/boostdep/depinst/depinst.py -X test -X example -X doc filesystem
+git submodule status | grep -v '^-'      # the closure; drop libs/headers and tools/
+```
+
+Two more things come from the library's own `CMakeLists.txt`. Its `PRIVATE`
+defines are what its sources need (`BOOST_FILESYSTEM_SOURCE`, and the opt-outs
+its probes would set on this toolchain, such as
+`BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF` on a `-std=c++17` build); put them in
+`[compile] flags`, since every file has to see them. And the submodules carry
+sources outside `test/`, `example/` and `doc/` that are not the library:
+configure checks (`config/`, `checks/`), code generators (`tools/`,
+`preprocess*/`) and benchmarks, which the resolver would compile, so `exclude`
+them by their `libs/<module>/…` path. A library that stands alone can still be
+its own dependency instead: `boostorg/math` with `-DBOOST_MATH_STANDALONE`.
+
+Most of a Boost library's public API is inline wrappers over its compiled
+`detail::` functions, so a keep file (above) gives it symbols. Under the
+library's `*_SOURCE` define the headers leave that inline API undefined, so
+the keep file `#undef`s it before its first include and compiles as a user of
+the library. A `BOOST_FORCEINLINE` member gets no symbol either way; call
+the `detail::` function it forwards to. Hub `boostfilesystem`, `boostcharconv`
+and `boostjson` are the worked examples.
 
 **A template instantiation's name spells out its arguments**, defaults
 included, and there is no key to rename it yet. Boost.Math's `pdf` comes out

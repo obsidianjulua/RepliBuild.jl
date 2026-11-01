@@ -2,6 +2,132 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### Boost in sections: the first three Hub packages from the superproject (2026-10-31)
+
+Boost.Filesystem, Boost.Charconv and Boost.JSON 1.92.0 are Hub packages
+(`boostfilesystem`, `boostcharconv`, `boostjson`), each a git dependency on
+`boostorg/boost` with `submodules` set to the closure Boost's own tool
+computes (`tools/boostdep/depinst/depinst.py -X test -X example -X doc
+<lib>`), the library's `PRIVATE` CMake defines in `[compile] flags`, and
+`exclude` entries for the configure checks, generators and benchmarks the
+submodules carry outside `test/`, `example/` and `doc/`. Each has a `test.jl`
+that drives the wrapper on this host (Windows, MSYS2 CLANG64): 23, 18 and 16
+assertions. Wrapping them found two generator bugs, fixed below, and the recipe
+is in the guide (Wrap a library, Boost).
+
+- **A keep file for a Boost library takes its `*_SOURCE` define back.**
+  `[compile] flags` define `BOOST_FILESYSTEM_SOURCE` for every TU, and under
+  it `path.hpp` and `directory.hpp` leave the inline API undefined (the
+  source build defines the versioned `detail::` functions it forwards to), so
+  the keep file linked against nothing. It `#undef`s the macro before its
+  first include and compiles as a user TU, at the default
+  `BOOST_FILESYSTEM_VERSION 3`. `BOOST_FORCEINLINE` members (`filename`,
+  `stem`, `extension`) still have no symbol: always-inline is honoured in an
+  `optnone` function too, so their `detail::path_algorithms::*_v3` entry
+  points are the API.
+- **Boost.Filesystem on a `-std=c++17` build needs
+  `BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF`**, which Boost's CMake defines when
+  its `std::atomic_ref` probe fails; the sources then use `boost::atomic_ref`
+  from `libs/atomic`. Its other probe defines (`HAS_STATX`, `HAS_STAT_ST_MTIM`)
+  are absent, so the library takes its portable paths.
+- Findings left as they are, noted in the recipes and under Not Yet Built: C++
+  overloads that differ only in integer width collapse to one Julia signature
+  (`Integer` parameters), so Boost.Charconv's integer `to_chars` keeps only the
+  `unsigned long long` one; `boost::core::string_view` has a 16-byte layout in
+  the metadata and crosses by value, but the wrapper emits no Julia type for
+  it (screened as STL-internal), so a caller spells `{ptr, len}` and passes
+  the struct by value; a `std::string` returned by value is a 32-byte stand-in
+  (libstdc++'s size, libc++'s object is 24) the caller decodes by hand. And
+  the build's "DWARF parameter extraction dropped parameters" warning on
+  `operator()` (charconv, json) is five lambdas' `operator()` declaration DIEs
+  sharing one bare-name key with no linkage name, so `check_param_arity!`
+  compares one lambda's parameters with another's count; none is a callable
+  symbol, so the warning is noise, not a dropped parameter.
+
+### A record outside `std` is never STL-internal, and overloads keep their integer width (2026-10-31)
+
+Two of the findings above, fixed. Both reach a Hub package on a **rebuild**:
+the first lives in the metadata.
+
+- **Each record carries the scope it is declared in.** DWARF keys every record
+  by its bare name, and the C++ generator's STL screen matches bare names
+  (`basic_string_view<`, `pair<`, `vector<`), so `boost::core::basic_string_view<char>`
+  was screened like `std::string_view`: not emitted, its by-value parameters
+  `::Any` with no Julia type to construct, a by-value return of it `Ptr{Cvoid}`.
+  The parser now writes `scope` on every record definition (`boost::core`,
+  `std::__1`, `""` at global scope) from the DIE tree: a namespace DIE is a
+  context like a record's, and a record's parent is the DIE last opened one
+  level up only while that is also the DIE last opened there (a record local
+  to a function, whose subprogram sets no context, gets no scope rather than
+  a stale one). `TypesCpp._is_stl_internal_record(name, structs)` is the screen
+  the generator asks, through one closure: a record whose scope is outside
+  `std`, `__gnu_cxx` and `__cxx*` is never STL-internal; without a scope, or
+  inside `std`, the name decides as before, so nothing the screen passed is
+  lost. Boost.Charconv's and Boost.JSON's `string_view` parameters are now
+  `sv::basic_string_view_char`, a struct of `p_` and `n_`.
+  (`test_record_scope.jl`.)
+- **Overloads that differ only in an integer parameter's width stay distinct
+  Julia methods.** Integer parameters are annotated `::Integer`, which made
+  `to_chars(char*, char*, int, int)` and `to_chars(char*, char*, long long, int)`
+  one signature; `_dedup_method_chunks` kept the last and the other C++ entry
+  point was unreachable (Boost.Charconv kept one of five). Before the function
+  loop, `_integer_width_overloads` predicts each wrapper's name and dispatch
+  signature the way the loop builds them, and for a set of distinct symbols
+  that would share one, marks the parameter positions whose C integer type
+  differs; those keep the C type (`value::Cint`, `value::Clonglong`), the
+  positions the set agrees on stay `::Integer` (`base`), so `to_chars(b, e,
+  255, 16)` still takes any integer base and `Int32(-7)` now formats through
+  the `int` overload. Positions index `func["parameters"]`, before any
+  injected `this`. A width is the type the alias names on the host, not its
+  spelling (`int` and `long` are one width on Windows, `long` and `long long`
+  on Linux): such a set stays `::Integer` and folds as before, and
+  `_method_sig_keys` compares concrete types too, so a set strict on one
+  position whose spellings coincide dedups rather than defining one dispatch
+  signature twice, which precompilation refuses ("Method overwriting is not
+  permitted"). (`test_integer_width_overloads.jl`.)
+
+- **A `surface_types_extra` pattern naming a reachable type is a match.**
+  `_apply_surface_type_filter!` tested the keep patterns only on keys the
+  reachability walk had not reached, and `matches` is also the hit counter, so
+  a pattern for a type the walk reached counted zero hits and failed the wrap
+  as "matched nothing" (Boost.Filesystem's `copy_options`, reached once the
+  keep file compiled a function taking it). Every key is matched now, as the
+  symbol filter already did. (`test_surface_types.jl`.)
+
+### A C++ name in an MLIR string literal is escaped (2026-10-31)
+
+- **One name failed the parse of the whole module.** Record names reach the
+  JIT module as `!llvm.struct<"…">` and `!jlcs.c_struct<"…">` literals, and
+  clang spells a `(unsigned char)3` template argument as `'\x03'`. MLIR's
+  lexer knows backslash-backslash, backslash-quote, `\n`, `\t` and
+  backslash plus two hex digits, and refuses any other backslash as "unknown
+  escape in string literal"; the module did not parse, so every thunk in the
+  library was lost, with the ccall wrappers left (Boost.Charconv's
+  `cache_block_count_t<true, (unsigned char)'\x03'>`, Boost.JSON's
+  `parse_number_helper<false, '\x00'>`). `TypeUtils.mlir_string_literal` is
+  the one spelling of the literal (backslash and quote escaped),
+  `mlir_struct_ref` the bare named reference, and `mlir_struct_name` reads
+  the name back; every emission site in StructGen, FunctionGen and
+  JLCSIRGenerator writes through the first two, and every parser that read a
+  name out of a spelling (the layout pass, the dependency walk, the
+  fixed-offset slices, the member resolver and a body's measure) reads it
+  through the third. The first cut left the member resolver and the measure
+  on the escaped capture, which misses the lookup, so a record holding such a
+  member degraded to bytes where a plain name embeds the body.
+  (`test_struct_layout.jl`.)
+- **Two records never share an alias id.** The `!Struct_<id>` alias replaced
+  every character outside `[A-Za-z0-9_]` by `_`, which is not injective:
+  Boost.JSON's `parse_number_helper<true, '+'>` and `<true, '-'>` both became
+  `!Struct_parse_number_helper_true______`, and MLIR refused the module for a
+  "redefinition of type alias id", again taking every thunk with it.
+  `TypeUtils.alias_safe_name` adds a 12-hex digest of the real name whenever
+  the replacement changed it; a plain identifier keeps the alias it had.
+  (`test_struct_layout.jl`, `test_template_members.jl`.)
+- The guide's Boost section said submodules are not fetched and each Boost
+  library had to be its own repository; it now gives the superproject recipe.
+
 ## v4.3.1 (2026-10-31)
 
 **Multi-library projects build and wrap from CMake's own build graph; git

@@ -96,7 +96,13 @@ Most parameters accept any value Julia can convert: an `int` takes any
 `Integer`, checked for range, and in a C wrapper a `double` takes any `Real`.
 Some take exactly one Julia type — fixed-width integers such as `int32_t`
 (`Int32`), and floating point in a C++ wrapper (`Cdouble`): write `2.0`, not
-`2`. Each function's signature says which.
+`2`. Each function's signature says which. C++ overloads that differ only in
+an integer parameter's width keep that width on the parameter they differ
+on, so they stay distinct methods: `to_chars(…, int, int)` takes an `Int32`
+value and `to_chars(…, long long, int)` an `Int64`, while the `base` they
+agree on takes any `Integer`. Two C types that are one width on the host
+(`int` and `long` on Windows, `long` and `long long` on Linux) are one
+method, taking any `Integer`.
 
 **Variadic functions** have one function per overload declared in
 `[wrap.varargs]`, named after its variadic types: `lua_pushfstring_Cstring(L,

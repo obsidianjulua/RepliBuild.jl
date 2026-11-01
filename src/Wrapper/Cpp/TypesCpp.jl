@@ -187,6 +187,49 @@ function _is_stl_internal_type(name::String)::Bool
 end
 
 """
+    _is_stl_internal_record(name, structs) -> Bool
+
+`_is_stl_internal_type`, except for a record the metadata places outside the
+standard library. The screen matches bare names (`basic_string_view<`, `pair<`,
+`vector<`), and DWARF keys every record by its bare name, so
+`boost::core::basic_string_view<char>` was screened like `std::string_view`:
+its by-value parameters came out `::Any` with no Julia type to construct, and
+a by-value return of it `Ptr{Cvoid}` (Boost.Charconv and Boost.JSON,
+2026-10-31). A definition's `scope` (the namespaces and records enclosing it,
+read off the DWARF tree) settles it: outside `std`, `__gnu_cxx` and the
+`__cxx*` ABI namespaces the record is the library's own and is emitted from
+its layout like any other. Without a `scope` (metadata from an older build, a
+parent the tree did not settle) the name decides as before, and inside `std`
+the name decides as before too, so nothing the screen passed is lost.
+"""
+function _is_stl_internal_record(name::AbstractString, structs)::Bool
+    key = _record_lookup_key(name)
+    info = (structs isa AbstractDict && key !== nothing) ? get(structs, key, nothing) : nothing
+    if info isa AbstractDict
+        scope = get(info, "scope", nothing)
+        if scope isa AbstractString
+            _is_std_scope(String(first(split(scope, "::")))) || return false
+        end
+    end
+    return _is_stl_internal_type(String(name))
+end
+
+_is_std_scope(top::AbstractString) = top in ("std", "__gnu_cxx") || startswith(top, "__cxx")
+
+# The struct_definitions key a spelling names: the record inside `Ptr{…}` or
+# `Ref{…}`, without top-level cv, `struct`/`class` and pointer or reference
+# marks. `nothing` for an empty spelling.
+function _record_lookup_key(name::AbstractString)
+    t = strip(String(name))
+    m = match(r"^(?:Ptr|Ref)\{(.*)\}$", t)
+    m === nothing || (t = strip(m.captures[1]))
+    t = replace(t, r"^(?:(?:const|volatile|struct|class|union)\s+)+" => "")
+    t = replace(t, r"(?:\s+(?:const|volatile))+$" => "")
+    t = strip(replace(t, r"[*&]+$" => ""))
+    return isempty(t) ? nothing : String(t)
+end
+
+"""
     _normalize_stl_for_dwarf(dwarf_name::String) -> String
 
 Normalize a DWARF struct name for STL container matching.

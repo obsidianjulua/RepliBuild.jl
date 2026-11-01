@@ -251,6 +251,14 @@ include(joinpath(@__DIR__, "test_struct_layout.jl"))
 
 include(joinpath(@__DIR__, "test_template_members.jl"))
 
+# ── A record's scope, and overloads that differ by integer width (no toolchain) ──
+# DWARF keys records by bare name, so `boost::core::basic_string_view<char>`
+# was screened as STL-internal and its by-value parameters came out `::Any`;
+# and `f(int)`/`f(long long)` collapsed to one `::Integer` signature.
+
+include(joinpath(@__DIR__, "test_record_scope.jl"))
+include(joinpath(@__DIR__, "test_integer_width_overloads.jl"))
+
 # ── Byte-blob struct setters + the Base-name namespace guard (no toolchain) ──
 # Blob structs had accessors in one direction only, so a param struct the
 # library builds was read-only — the only path into llama.cpp runs through one.

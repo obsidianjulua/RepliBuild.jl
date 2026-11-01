@@ -182,8 +182,8 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
         # Convert bare named struct references (!llvm.struct<"Name">) to aliases (!Struct_Name)
         # because bare named struct refs are only valid in recursive struct contexts in MLIR
         if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
-            s_name = mlir_t[15:end-2]
-            safe_name = replace(s_name, r"[^a-zA-Z0-9_]" => "_")
+            s_name = something(mlir_struct_name(mlir_t), mlir_t[15:end-2])
+            safe_name = alias_safe_name(s_name)
             mlir_t = "!Struct_$(safe_name)"
         end
         push!(field_types, mlir_t)
@@ -206,7 +206,7 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
 
     # Construct the CStruct type string
     # !jlcs.c_struct<"Name", [T1, T2], [[O1 : i64, O2 : i64]], packed = false>
-    struct_type_str = "!jlcs.c_struct<\"$(class_name)\", [$(field_types_str)], [$(field_offsets_attr)], packed = false>"
+    struct_type_str = "!jlcs.c_struct<$(mlir_string_literal(class_name)), [$(field_types_str)], [$(field_offsets_attr)], packed = false>"
 
     # Base tables: non-virtual bases carry static subobject offsets in
     # baseNames/baseOffsets; virtual bases have NO static offset (it is

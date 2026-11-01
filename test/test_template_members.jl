@@ -108,14 +108,15 @@ bodies(name, structs) = (SG.get_llvm_equivalent_type_string(name, structs[name],
             "H3" => rec("0xc", [mem("p", "Pad<char, int>", 0, 8), mem("tag", "int", 8, 4)]))
         @test aligned_size("H3", structs) == 12
         (aliases, _) = SG.generate_struct_definitions(structs)
-        pad_def = findfirst("!Struct_Pad_char__int_ =", aliases)
+        pad_alias = "!Struct_" * RepliBuild.JLCSIRGenerator.TypeUtils.alias_safe_name("Pad<char, int>")
+        pad_def = findfirst(pad_alias * " =", aliases)
         h3_def = findfirst("!Struct_H3 =", aliases)
         @test pad_def !== nothing
         @test h3_def !== nothing
         if pad_def !== nothing && h3_def !== nothing
             @test first(pad_def) < first(h3_def)
             h3_line = split(aliases[first(h3_def):end], '\n')[1]
-            @test occursin("!Struct_Pad_char__int_", h3_line)
+            @test occursin(pad_alias, h3_line)
             @test !occursin("!llvm.ptr", h3_line)
         end
     end

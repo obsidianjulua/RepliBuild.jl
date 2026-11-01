@@ -709,7 +709,14 @@ function _apply_surface_type_filter!(metadata::Dict{String,Any}, extra_patterns:
         # bare name, so `MD_*_DETAIL` catches an enum recorded as
         # `__enum__MD_..._DETAIL` without the author needing to know the prefix.
         bare = startswith(ks, "__enum__") ? ks[9:end] : ks
-        if !(ks in reach) && !matches(ks) && !matches(bare)
+        # Every key is matched, reachable or not: `matches` is also the hit
+        # counter, and a pattern naming a type the walk already reaches used to
+        # be skipped by the `&&` below, read as "matched nothing", and fail the
+        # wrap (Boost.Filesystem's `copy_options`, reached once the keep file
+        # compiled `copy(path, path, copy_options)`, 2026-10-31).
+        m_key = matches(ks)
+        m_bare = matches(bare)
+        if !(ks in reach) && !m_key && !m_bare
             delete!(structs, k)
             dropped += 1
         end
@@ -2366,12 +2373,35 @@ function _split_toplevel_commas(s::AbstractString)
     return parts
 end
 
+# The Julia type each C alias names on this host, by name: `Cint` → `Int32`.
+# The aliases are not injective per host: `Cint === Clong` on LLP64 (Windows),
+# `Clong === Clonglong` and `Culong === Csize_t` on LP64 (Linux). Two spellings
+# of one width are one dispatch signature, and a module that defines it twice
+# is "Method overwriting is not permitted during Module precompilation" in
+# every consumer (2026-10-31). Anything that predicts or compares a signature
+# compares these, never the spellings: `_integer_width_overloads` decides
+# strictness by them, and `_method_sig_keys` keys by them.
+const _C_ALIAS_CONCRETE = Dict{String,String}(
+    n => string(getfield(Base, Symbol(n))) for n in
+    ("Cchar", "Cuchar", "Cshort", "Cushort", "Cint", "Cuint", "Clong", "Culong",
+     "Clonglong", "Culonglong", "Csize_t", "Cssize_t", "Cintmax_t", "Cuintmax_t",
+     "Cptrdiff_t", "Cwchar_t", "Cfloat", "Cdouble"))
+
+"The concrete type name a C alias stands for on this host; any other name as is."
+_concrete_ctype(t::AbstractString) = get(_C_ALIAS_CONCRETE, String(t), String(t))
+
+"A signature type with every C alias in it spelled concretely (`Ptr{Csize_t}` → `Ptr{UInt64}`)."
+_concrete_sig_type(t::AbstractString) =
+    replace(String(t), r"\b[A-Z][A-Za-z0-9_]*\b" => s -> get(_C_ALIAS_CONCRETE, s, s))
+
 """
     _method_sig_keys(chunk) -> Vector{String}
 
 Dispatch-significant signature keys (`name(argtype,argtype,…)`) for every
 top-level `function` definition in an emitted code chunk. Keyword arguments
-and default values are ignored — they don't participate in dispatch.
+and default values are ignored — they don't participate in dispatch. A C
+alias is keyed by the type it names on this host (`_concrete_sig_type`), so
+`x::Clong` and `x::Clonglong` are one key where they are one type.
 """
 function _method_sig_keys(chunk::AbstractString)
     keys = String[]
@@ -2384,7 +2414,7 @@ function _method_sig_keys(chunk::AbstractString)
                 a = strip(first(split(a, '='; limit=2)))   # drop default value
                 isempty(a) && continue
                 push!(argtypes, occursin("::", a) ?
-                      strip(last(split(a, "::"; limit=2))) : "Any")
+                      _concrete_sig_type(strip(last(split(a, "::"; limit=2)))) : "Any")
             end
         end
         push!(keys, string(name, "(", join(argtypes, ","), ")"))

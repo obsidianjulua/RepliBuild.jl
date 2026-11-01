@@ -638,7 +638,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
 
             # Resolve full struct type if available
             if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
-                s_name = mlir_t[15:end-2]
+                s_name = something(mlir_struct_name(mlir_t), mlir_t[15:end-2])
                 lookup_key = haskey(structs, s_name) ? s_name : (haskey(structs, "__enum__$(s_name)") ? "__enum__$(s_name)" : nothing)
             end
             if lookup_key === nothing && kind === :layout
@@ -732,12 +732,12 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             ju = String(get(structs[ret_key], "julia_type", "Cint"))
             ret_type = map_cpp_type(ju == "Any" ? "int" : ju)
             ret_type == "" && (ret_type = "i32")
-        elseif ret_kind === :layout && !(_ret_named && haskey(structs, ret_type[15:end-2]))
+        elseif ret_kind === :layout && !(_ret_named && haskey(structs, something(mlir_struct_name(ret_type), ret_type[15:end-2])))
             # A template or qualified spelling takes the named-struct path below
             # under its table key. It used to take the fuzzy branch, which
             # always answered with an integer byte blob: `Box<double>` came back
             # from RAX while the callee returned it in XMM0.
-            ret_type = "!llvm.struct<\"$(ret_key)\">"
+            ret_type = mlir_struct_ref(ret_key)
         end
 
         # Enum return → bare underlying integer, NOT a single-member struct.
@@ -748,7 +748,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # Found live: tinyxml2 XMLDocument::Parse → XMLError. Bare int returns
         # by value, matching the scalar ccall; @enum is ABI-identical to its base.
         if startswith(ret_type, "!llvm.struct<\"") && endswith(ret_type, "\">")
-            _ename = ret_type[15:end-2]
+            _ename = something(mlir_struct_name(ret_type), ret_type[15:end-2])
             if haskey(structs, "__enum__$(_ename)")
                 ju = String(get(structs["__enum__$(_ename)"], "julia_type", "Cint"))
                 ret_type = map_cpp_type(ju == "Any" ? "int" : ju)
@@ -758,7 +758,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
 
         # Resolve full struct type for return
         if startswith(ret_type, "!llvm.struct<\"") && endswith(ret_type, "\">")
-            s_name = ret_type[15:end-2]
+            s_name = something(mlir_struct_name(ret_type), ret_type[15:end-2])
             lookup_key = haskey(structs, s_name) ? s_name : (haskey(structs, "__enum__$(s_name)") ? "__enum__$(s_name)" : nothing)
             if lookup_key !== nothing
                 # For packed structs, use LLVM packed type for external decl/ffe_call

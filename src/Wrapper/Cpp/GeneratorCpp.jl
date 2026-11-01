@@ -115,6 +115,68 @@ undeclared spelling if it ever reached a ccall tuple).
 
 Must agree with `FunctionGen._has_receiver` on every input.
 """
+const _INTEGER_CTYPES = ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
+                         "Clonglong", "Culonglong", "Csize_t", "Cssize_t")
+const _NO_POSITIONS = Set{Int}()
+
+"""
+    _integer_width_overloads(functions, struct_types, ccall_param_type; concrete) -> Dict{String,Set{Int}}
+
+For each mangled symbol whose wrapper would share its Julia name and dispatch
+signature with another C++ entry point, the positions in `func["parameters"]`
+whose integer **width** differs within that set. The signature is predicted the
+way the function loop builds it: integer parameters `Integer`, pointers `Any`,
+a receiver `Any` in front when the loop would inject one, and the name from
+`_julia_function_name`. A function the loop skips (varargs) is not grouped.
+
+A width is the Julia type the C alias names on this host (`concrete`, by
+default `_concrete_ctype`): `int` and `long` are one width on LLP64, `long`
+and `long long` on LP64. A set that differs only in the spelling of one width
+is not a disagreement; it stays `::Integer` and `_dedup_method_chunks` folds
+it as it always did, instead of two `function`s with one dispatch signature,
+which precompilation refuses. Tests pass another map to drive both hosts.
+"""
+function _integer_width_overloads(functions, struct_types, ccall_param_type;
+                                  concrete = _concrete_ctype)
+    groups = Dict{String,Vector{Tuple{String,Vector{String}}}}()
+    for func in functions
+        get(func, "is_vararg", false) == true && continue
+        raw = get(func, "parameters", Any[])
+        func_name = String(get(func, "name", ""))
+        mangled = String(get(func, "mangled", func_name))
+        class_name = String(get(func, "class", ""))
+        is_method = get(func, "is_method", false) == true
+        hop = get(func, "has_object_pointer", nothing)
+        jname = is_method && !isempty(class_name) ? "$(class_name)_$(func_name)" : func_name
+        jname = _julia_function_name(jname, mangled)
+        has_this = !isempty(raw) && get(raw[1], "name", "") == "this"
+        injects = is_method && !isempty(class_name) && hop !== false && !has_this &&
+                  (_cpp_this_param(class_name, func_name, struct_types) !== nothing || hop === true)
+        ctypes = String[ccall_param_type(String(get(p, "julia_type", "Any")), String(get(p, "c_type", "")))
+                        for p in raw]
+        kinds = [t in _INTEGER_CTYPES ? "Integer" : (startswith(t, "Ptr{") ? "Any" : t) for t in ctypes]
+        injects && pushfirst!(kinds, "Any")
+        push!(get!(() -> Tuple{String,Vector{String}}[], groups, jname * "(" * join(kinds, ",") * ")"),
+              (mangled, ctypes))
+    end
+    strict = Dict{String,Set{Int}}()
+    for (_, members) in groups
+        length(unique(first.(members))) >= 2 || continue
+        n = length(members[1][2])
+        all(m -> length(m[2]) == n, members) || continue
+        for i in 1:n
+            spellings = Set(m[2][i] for m in members)
+            all(w -> w in _INTEGER_CTYPES, spellings) || continue
+            # Two spellings of one width (`int`/`long` on LLP64) are one type.
+            length(Set(concrete(w) for w in spellings)) >= 2 || continue
+            for (mangled, _) in members
+                push!(get!(() -> Set{Int}(), strict, mangled), i)
+            end
+        end
+    end
+    return strict
+end
+
 function _cpp_this_param(class_name::AbstractString, func_name::AbstractString,
                          struct_types)
     isempty(class_name) && return nothing
@@ -458,6 +520,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(struct_types, name)
         end
     end
+
+    # The STL screen, asked with the record's definition: a record whose
+    # `scope` is outside the standard library is never STL-internal, whatever
+    # its bare name (TypesCpp._is_stl_internal_record).
+    _stl_internal(n) = _is_stl_internal_record(String(n), dwarf_structs)
 
     # =============================================================================
     # AUTOMATIC FINALIZER GENERATION (Memory Safety)
@@ -1059,7 +1126,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Build set of sanitized names that will get real DWARF definitions
     dwarf_defined_names = Set{String}()
     for (name, info) in dwarf_structs
-        _is_stl_internal_type(name) && continue
+        _stl_internal(name) && continue
         s = _sanitize_cpp_type_name(name)
         s = replace(s, "*" => "Ptr")
         s = replace(s, "&" => "Ref")
@@ -1084,7 +1151,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         seen_forward_decls = Set{String}()
         for name in sort(collect(all_forward_decls))
             # Skip STL internal types
-            _is_stl_internal_type(name) && continue
+            _stl_internal(name) && continue
             # Skip blocklisted internal/system types
             name in _INTERNAL_TYPE_BLOCKLIST && continue
 
@@ -1325,7 +1392,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         best_dwarf_key = Dict{String, String}()  # sanitized_name -> best struct_name
         for struct_name in sorted_structs
             struct_name in enum_names && continue
-            _is_stl_internal_type(struct_name) && continue
+            _stl_internal(struct_name) && continue
             
             jname = _sanitize_cpp_type_name(struct_name)
             jname = replace(jname, "*" => "Ptr")
@@ -1395,7 +1462,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             # Skip STL internal implementation types (they leak from DWARF when
             # template instantiation is forced, but are not useful to Julia users)
-            if _is_stl_internal_type(struct_name)
+            if _stl_internal(struct_name)
                 continue
             end
 
@@ -1607,14 +1674,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     type_match = match(r"Ptr\{([^}]+)\}", julia_type)
                                     if !isnothing(type_match)
                                         inner_type = String(type_match.captures[1])
-                                        if _is_stl_internal_type(inner_type)
+                                        if _stl_internal(inner_type)
                                             sanitized_type = "Ptr{Cvoid}"
                                         else
                                             sanitized_type = "Ptr{$(_sanitize_cpp_type_name(inner_type))}"
                                         end
                                     end
                                 else
-                                    if _is_stl_internal_type(julia_type)
+                                    if _stl_internal(julia_type)
                                         m_size = get(member, "size", 0)
                                         sanitized_type = m_size > 0 ? "NTuple{$m_size, UInt8}" : "Ptr{Cvoid}"
                                     else
@@ -1800,7 +1867,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                 inner_type = String(type_match.captures[1])
                                 # Only sanitize if inner type is a custom struct (contains template chars)
                                 if occursin(r"[<>]", inner_type)
-                                    if _is_stl_internal_type(inner_type)
+                                    if _stl_internal(inner_type)
                                         # STL-internal inner type: use Ptr{Cvoid} — never defined
                                         sanitized_type = "Ptr{Cvoid}"
                                     else
@@ -1811,14 +1878,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             end
                         elseif occursin(r"[<>]", julia_type)
                             # Direct custom struct reference with template syntax
-                            _is_stl_internal_type(julia_type) && return nothing
+                            _stl_internal(julia_type) && return nothing
                             sanitized_type = _sanitize_cpp_type_name(julia_type)
                         end
 
                         # If the (now-sanitized) type refers to an STL-internal type that
                         # will be filtered out during struct generation, the member
                         # becomes bytes so the embedding struct remains valid Julia syntax.
-                        sanitized_type == julia_type && _is_stl_internal_type(julia_type) && return nothing
+                        sanitized_type == julia_type && _stl_internal(julia_type) && return nothing
                     end
 
                     # If the field is Ptr{X} and X hasn't been defined yet,
@@ -2012,7 +2079,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                 push!(_setter_branches, _blob_store_expr(m_name, m_offset, :primitive; julia_type=jt))
                             # Nested struct types — extract sub-blob
                             else
-                                if _is_stl_internal_type(String(m_c_type))
+                                if _stl_internal(String(m_c_type))
                                     continue
                                 end
                                 m_sanitized = _sanitize_cpp_type_name(m_c_type)
@@ -2691,7 +2758,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 wrapper_kw, inner = m.captures
                 # If inner type is an STL-internal (allocator<>, char_traits<>, etc.),
                 # fall back to Ptr{Cvoid} — the type is opaque and not user-accessible.
-                if _is_stl_internal_type(String(inner))
+                if _stl_internal(String(inner))
                     julia_type = "Ptr{Cvoid}"
                 else
                     inner_safe = _sanitize_cpp_type_name(inner)
@@ -2725,6 +2792,18 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         end
     end
     _callback_type = _callback_param_type(_ccall_param_type, dwarf_structs)
+
+    # Overloads that differ only in an integer parameter's width. An integer
+    # parameter is annotated `::Integer` so a caller can pass any Julia
+    # integer, which makes `f(int)` and `f(long long)` one Julia signature; the
+    # dedup then keeps the last definition and the other C++ entry point is
+    # unreachable (Boost.Charconv's integer `to_chars` kept only the `unsigned
+    # long long` one, 2026-10-31). Where two or more functions would share a
+    # name and a signature, the parameters whose C integer type differs
+    # between them keep that type (`value::Cint`, `value::Clonglong`), so
+    # dispatch tells them apart; the parameters the group agrees on stay
+    # `::Integer`. Positions index `func["parameters"]`, before any `this`.
+    strict_int_positions = _integer_width_overloads(functions, struct_types, _ccall_param_type)
 
     for func in functions
         func_name = func["name"]
@@ -2770,6 +2849,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # the receiver. Declaration DIEs omit the attribute, so a missing key
         # must not take this branch.
         hop = get(func, "has_object_pointer", nothing)
+        this_injected = false
         if is_method && !isempty(class_name) && hop !== false
             # Check if 'this' is already present (it should be first)
             has_this = !isempty(params) && (params[1]["name"] == "this")
@@ -2788,7 +2868,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         "is_synthesized" => true,
                     )
                 end
-                this_param === nothing || pushfirst!(params, this_param)
+                this_param === nothing || (pushfirst!(params, this_param); this_injected = true)
             end
         end
 
@@ -2825,7 +2905,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             stl_sz = get_stl_container_size(ret_type_str)
             if stl_sz > 0
                 return_type["julia_type"] = "NTuple{$stl_sz, UInt8}"
-            elseif _is_stl_internal_type(ret_type_str)
+            elseif _stl_internal(ret_type_str)
                 return_type["julia_type"] = "Ptr{Cvoid}"
             else
                 safe_ret = _sanitize_cpp_type_name(ret_type_str)
@@ -2885,8 +2965,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(param_types, actual_c_type)
 
             # Map C integer types to natural Julia types with range checking
-            if actual_c_type in ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort", "Clonglong", "Culonglong", "Csize_t", "Cssize_t")
-                push!(julia_param_types, "Integer")
+            if actual_c_type in _INTEGER_CTYPES
+                # An overload set that differs here keeps the C width (see
+                # `strict_int_positions`); everything else takes any Integer.
+                raw_i = i - (this_injected ? 1 : 0)
+                strict = raw_i in get(strict_int_positions, mangled, _NO_POSITIONS)
+                push!(julia_param_types, strict ? actual_c_type : "Integer")
                 push!(needs_conversion, true)
             elseif startswith(actual_c_type, "Ptr{")
                 # Relax pointer types to Any to allow Managed wrappers via Base.unsafe_convert
@@ -3068,12 +3152,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 # The generated @enum type is a Julia primitive type, so
                 # _invoke_call takes the scalar ccall path with it.
                 _enum_ret = String(strip(replace(jit_c_ret, r"\bconst\b" => "")))
-                stl_size = _is_stl_internal_type(jit_c_ret) ? get_stl_container_size(jit_c_ret) : 0
+                stl_size = _stl_internal(jit_c_ret) ? get_stl_container_size(jit_c_ret) : 0
                 if haskey(dwarf_structs, "__enum__$(_enum_ret)")
                     jit_ret_type = _sanitize_cpp_type_name(_enum_ret)
                 elseif stl_size > 0
                     jit_ret_type = "NTuple{$stl_size, UInt8}"
-                elseif _is_stl_internal_type(jit_c_ret)
+                elseif _stl_internal(jit_c_ret)
                     info = get(dwarf_structs, jit_c_ret, nothing)
                     bs = isnothing(info) ? 0 : (let s = string(get(info, "byte_size", "0x0")); startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s) end)
                     jit_ret_type = bs > 0 ? "NTuple{$bs, UInt8}" : "Ptr{Cvoid}"
@@ -3083,10 +3167,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     # Fuzzy match: DWARF keys may have trailing " >" nesting artifacts
                     matched_key = _fuzzy_dwarf_lookup(jit_c_ret, dwarf_structs)
                     if matched_key !== nothing
-                        stl_size = _is_stl_internal_type(matched_key) ? get_stl_container_size(matched_key) : 0
+                        stl_size = _stl_internal(matched_key) ? get_stl_container_size(matched_key) : 0
                         if stl_size > 0
                             jit_ret_type = "NTuple{$stl_size, UInt8}"
-                        elseif _is_stl_internal_type(matched_key)
+                        elseif _stl_internal(matched_key)
                             info = dwarf_structs[matched_key]
                             bs = let s = string(get(info, "byte_size", "0x0")); startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s) end
                             jit_ret_type = bs > 0 ? "NTuple{$bs, UInt8}" : "Ptr{Cvoid}"
@@ -3866,7 +3950,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Add struct types (filter internal/compiler types)
     for struct_name in sort!(collect(struct_types))
         if !(struct_name in enum_names)
-            if _is_stl_internal_type(struct_name)
+            if _stl_internal(struct_name)
                 continue
             end
             # Sanitize struct name for export

@@ -5,8 +5,68 @@ module TypeUtils
 # docstring in RepliBuild.jl.
 import ...C_LONG_MLIR
 import ...C_WCHAR_MLIR
+import SHA
 
 export map_cpp_type, get_llvm_signature, get_stl_container_size
+export mlir_string_literal, mlir_struct_ref, mlir_struct_name, alias_safe_name
+
+"""
+    alias_safe_name(name) -> String
+
+The identifier a record's MLIR type alias is built from (`!Struct_<id>`): the
+C++ name with every character outside `[A-Za-z0-9_]` replaced by `_`, and,
+when that replacement changed anything, a 12-hex digest of the real name after
+it. The replacement alone is not injective: Boost.JSON's
+`parse_number_helper<true, '+'>` and `parse_number_helper<true, '-'>` both came
+out as `parse_number_helper_true______`, and MLIR refused the module for a
+"redefinition of type alias id", taking every thunk in the library with it
+(2026-10-31). A name that needs no replacement keeps its alias as it was.
+"""
+function alias_safe_name(name::AbstractString)
+    safe = replace(String(name), r"[^a-zA-Z0-9_]" => "_")
+    safe == name && return safe
+    return safe * "_" * bytes2hex(SHA.sha256(String(name)))[1:12]
+end
+
+"""
+    mlir_string_literal(s) -> String
+
+`s` as an MLIR string literal, quotes included. MLIR's lexer knows the escapes
+`\\\\`, `\\"`, `\\n`, `\\t` and `\\NN` (two hex digits) and refuses every other
+backslash as "unknown escape in string literal", which fails the parse of the
+whole module and with it every thunk in the library. C++ type names reach these
+literals as `!llvm.struct<"…">` and `!jlcs.c_struct<"…">`, and clang spells a
+`(unsigned char)3` template argument as `'\\x03'` (Boost.Charconv's
+`cache_block_count_t<true, (unsigned char)'\\x03'>`, Boost.JSON's
+`parse_number_helper<false, '\\x00'>`, 2026-10-31). Every name written into an
+MLIR string goes through here, and `mlir_struct_name` reads it back.
+"""
+mlir_string_literal(s::AbstractString) =
+    "\"" * replace(String(s), "\\" => "\\\\", "\"" => "\\\"") * "\""
+
+"""
+    mlir_struct_ref(name) -> String
+
+The bare named reference `!llvm.struct<"name">`, with the name escaped.
+"""
+mlir_struct_ref(name::AbstractString) = "!llvm.struct<" * mlir_string_literal(name) * ">"
+
+# The name inside `!llvm.struct<"…"` (bare ref, opaque, or with a body) or
+# `!jlcs.c_struct<"…"`, as written by `mlir_string_literal`: an escaped quote
+# or backslash is part of the name.
+const _MLIR_STRUCT_NAME = r"^!(?:llvm\.struct|jlcs\.c_struct)<\"((?:[^\"\\]|\\.)*)\""
+
+"""
+    mlir_struct_name(t) -> Union{String, Nothing}
+
+The C++ name a struct spelling carries, unescaped, or `nothing` when `t` is not
+a named struct spelling. The inverse of `mlir_string_literal` for the name.
+"""
+function mlir_struct_name(t::AbstractString)
+    m = match(_MLIR_STRUCT_NAME, strip(t))
+    m === nothing && return nothing
+    return replace(String(m.captures[1]), "\\\"" => "\"", "\\\\" => "\\")
+end
 
 """
     map_cpp_type(type_str::String) -> String
@@ -120,7 +180,7 @@ function map_cpp_type(type_str::String)
         # Check if it looks like a struct name (Alphanumeric)
         if occursin(r"^[A-Za-z0-9_]+$", type_str) && type_str != "Any"
              # Return as struct type alias (we will define these)
-             return "!llvm.struct<\"$(type_str)\">"
+             return mlir_struct_ref(type_str)
         end
     end
 

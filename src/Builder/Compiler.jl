@@ -4932,6 +4932,22 @@ function parse_dwarf_dump(output::AbstractString;
         m === nothing ? nothing : parse(Int, m.captures[1])
     end
 
+    # The DIE a record, enum or namespace is declared in, for the `scope` the
+    # metadata gives each record (`_scope_of`): the namespace or record last
+    # opened one level up, provided it is also the DIE last opened there. A
+    # subprogram sets no context, so a record local to a function would read a
+    # stale namespace or record at its parent depth; the header tracker below
+    # catches that and the record gets no scope (`missing`, unknown) rather
+    # than a wrong one. `nothing` is the global scope, at depth 1.
+    last_die_by_depth = Dict{Int,String}()
+    function scope_parent(depth::Union{Int,Nothing})
+        depth === nothing && return missing
+        depth <= 1 && return nothing
+        c = get(context_by_depth, depth - 1, nothing)
+        c === nothing && return missing
+        return get(last_die_by_depth, depth - 1, nothing) == c ? c : missing
+    end
+
     # Flush a completed member into its parent struct's members array.
     # Called on each new DW_TAG_* to ensure all attributes (name, type, offset)
     # are collected before the member dict is copied to the parent.
@@ -4991,6 +5007,9 @@ function parse_dwarf_dump(output::AbstractString;
             if !isnothing(offset_match)
                 tag_offset = "0x" * offset_match.captures[1]
                 type_refs["last_tag_offset"] = tag_offset  # Always update for ANY tag
+                let d = die_depth(line)
+                    d === nothing || (last_die_by_depth[d] = tag_offset)
+                end
             end
         end
 
@@ -5142,7 +5161,8 @@ function parse_dwarf_dump(output::AbstractString;
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "struct",
                     "name" => "unknown_struct",
-                    "members" => []
+                    "members" => [],
+                    "scope_parent" => scope_parent(die_depth(line))
                 )
                 offset_to_kind[current_type_offset] = :struct
             end
@@ -5159,7 +5179,8 @@ function parse_dwarf_dump(output::AbstractString;
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "union",
                     "name" => "unknown_union",
-                    "members" => []
+                    "members" => [],
+                    "scope_parent" => scope_parent(die_depth(line))
                 )
                 offset_to_kind[current_type_offset] = :struct  # Treat as struct for generic handling
             end
@@ -5177,7 +5198,8 @@ function parse_dwarf_dump(output::AbstractString;
                 type_refs[current_type_offset] = Dict{String,Any}(
                     "kind" => "class",
                     "name" => "unknown_class",
-                    "members" => []
+                    "members" => [],
+                    "scope_parent" => scope_parent(die_depth(line))
                 )
                 offset_to_kind[current_type_offset] = :class
             end
@@ -5200,7 +5222,8 @@ function parse_dwarf_dump(output::AbstractString;
                     "name" => "unknown_enum",
                     "underlying_type" => nothing,
                     "byte_size" => nothing,
-                    "enumerators" => []
+                    "enumerators" => [],
+                    "scope_parent" => scope_parent(die_depth(line))
                 )
                 offset_to_kind[current_type_offset] = :enum
             end
@@ -5363,9 +5386,12 @@ function parse_dwarf_dump(output::AbstractString;
                 ns_offset = "0x" * offset_match.captures[1]
                 type_refs[ns_offset] = Dict{String,Any}(
                     "kind" => "namespace",
-                    "name" => nothing
+                    "name" => nothing,
+                    "scope_parent" => scope_parent(die_depth(line))
                 )
                 offset_to_kind[ns_offset] = :namespace
+                # A namespace is a scope the records under it are declared in.
+                set_ctx_at_depth!(something(die_depth(line), 1), ns_offset)
             end
         end
 
@@ -6921,6 +6947,19 @@ function parse_dwarf_dump(output::AbstractString;
                         struct_def["base_classes"] = base_classes
                     end
 
+                    # The namespaces and records this one is declared in
+                    # (`boost::core`, `std::__1`, "" at global scope), when the
+                    # tree settled it. The C++ generator's STL screen matches
+                    # bare names, which is all DWARF keys records by; this is
+                    # what tells `boost::core::basic_string_view<char>` from
+                    # `std::string_view`.
+                    let sp = get(type_info, "scope_parent", missing)
+                        if sp !== missing
+                            sc = _scope_of(sp, type_refs)
+                            sc === nothing || (struct_def["scope"] = sc)
+                        end
+                    end
+
                     # Add template parameters if available
                     template_params = []
                     for tmpl_info in get(children_by_parent, offset, ())
@@ -7295,6 +7334,35 @@ function _layout_signature(def::AbstractDict)::String
                                     for e in def["enumerators"]]])
     end
     return ""
+end
+
+"""
+    _scope_of(parent, type_refs) -> Union{String,Nothing}
+
+The `::`-joined names of the namespaces and records enclosing a DIE whose
+`scope_parent` is `parent`: `""` at global scope (`parent === nothing`),
+`"boost::core"`, `"std::__1"`, `"Outer"` for a nested record. `nothing` when
+any link of the chain is unknown (`missing`) or is not a namespace or record,
+so a partial chain is never reported as the whole one: `"chrono"` for
+`std::__1::chrono` would read as a library's own namespace.
+"""
+function _scope_of(parent, type_refs::AbstractDict)
+    parts = String[]
+    p = parent
+    seen = Set{Any}()
+    while p !== nothing
+        (p === missing || p in seen) && return nothing
+        push!(seen, p)
+        die = get(type_refs, p, nothing)
+        die isa AbstractDict || return nothing
+        kind = get(die, "kind", nothing)
+        kind in ("namespace", "struct", "class", "union") || return nothing
+        name = get(die, "name", nothing)
+        pushfirst!(parts, kind == "namespace" && (name === nothing || isempty(string(name))) ?
+                          "(anonymous namespace)" : string(name))
+        p = get(die, "scope_parent", missing)
+    end
+    return join(parts, "::")
 end
 
 """

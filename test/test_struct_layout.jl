@@ -102,6 +102,106 @@ mem(name, ctype, off, size) = Dict{String,Any}(
         @test !occursin("!llvm.array<", body)
     end
 
+    @testset "a record's name is an MLIR string literal" begin
+        # A record carries its C++ name inside `!jlcs.c_struct<"...">` and
+        # `!llvm.struct<"...">`. clang spells a `(unsigned char)3` template
+        # argument as `'\x03'`, and MLIR's lexer knows `\\`, `\"`, `\n`, `\t`
+        # and `\NN` only: `\x` is "unknown escape in string literal", and the
+        # parse failure took every thunk in the library with it (Boost.Charconv's
+        # `cache_block_count_t<true, (unsigned char)'\x03'>`, 2026-10-31). The
+        # name is escaped on the way in and read back on the way out, so
+        # `mlir_string_literal`/`mlir_struct_name` are the one spelling of that.
+        TU = RepliBuild.JLCSIRGenerator.TypeUtils
+        raw = "cache_block_count_t<true, (unsigned char)'\\x03'>"
+        lit = TU.mlir_string_literal(raw)
+        @test lit == "\"cache_block_count_t<true, (unsigned char)'\\\\x03'>\""
+        @test TU.mlir_string_literal("a\"b\\c") == "\"a\\\"b\\\\c\""
+        @test TU.mlir_string_literal("plain") == "\"plain\""
+        # the inverse, on a bare ref, an opaque body and a c_struct
+        @test TU.mlir_struct_name(TU.mlir_struct_ref(raw)) == raw
+        @test TU.mlir_struct_name("!llvm.struct<" * lit * ", opaque>") == raw
+        @test TU.mlir_struct_name("!jlcs.c_struct<" * lit * ", [i8], [[0 : i64]], packed = true>") == raw
+        @test TU.mlir_struct_name(TU.mlir_struct_ref("a\"b\\c")) == "a\"b\\c"
+        @test TU.mlir_struct_name("i32") === nothing
+        # and the emitted bodies carry the escaped name, never a bare `\x`
+        structs = Dict{String,Any}(raw => Dict{String,Any}(
+            "kind" => "struct", "byte_size" => "0x8",
+            "members" => [mem("p", "void*", 0, 8)]))
+        body = SG.get_struct_definition_string(raw, structs[raw], structs)
+        @test startswith(body, "!jlcs.c_struct<")
+        @test occursin("'\\\\x03'", body)
+        @test !occursin(r"[^\\]\\x03", body)
+        # a member whose type is such a record: the ref is escaped and the
+        # layout pass still finds the record by its real name
+        holder = Dict{String,Any}("kind" => "struct", "byte_size" => "0x8",
+            "members" => [mem("c", raw, 0, 8)])
+        structs["Holder"] = holder
+        ref = SG._member_mlir_type(raw)
+        @test ref == TU.mlir_struct_ref(raw)
+        @test SG._mlir_layout(ref, structs) == (8, 8)
+
+        # Every reader takes the name back through `mlir_struct_name`. The
+        # member resolver and the measure side still read the escaped capture,
+        # which misses the lookup, so a record holding such a member degraded
+        # to bytes where a plain name embeds the body (2026-10-31 audit). A
+        # name with a quote drives the readers that excluded `"` outright.
+        quoted = "parse_number_helper<true, '\"'>"
+        for nm in (raw, quoted)
+            s2 = Dict{String,Any}(
+                nm => Dict{String,Any}("kind" => "struct", "byte_size" => "0x8",
+                                       "members" => [mem("p", "void*", 0, 8)]),
+                "Plain<int>" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x8",
+                                                 "members" => [mem("p", "void*", 0, 8)]),
+                "H" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x10",
+                                        "members" => [mem("c", nm, 0, 8), mem("tag", "int", 8, 4)]),
+                "HP" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x10",
+                                         "members" => [mem("c", "Plain<int>", 0, 8), mem("tag", "int", 8, 4)]))
+            body_h = SG.get_struct_definition_string("H", s2["H"], s2)
+            body_p = SG.get_struct_definition_string("HP", s2["HP"], s2)
+            @test replace(body_h, "\"H\"" => "\"HP\"") == body_p
+            @test !occursin("!llvm.array<8 x i8>", body_h)
+            # the body-with-name spelling is measured too
+            @test SG._mlir_layout("!llvm.struct<" * TU.mlir_string_literal(nm) * ", (i32)>", s2) == (4, 4)
+            # a packed body never leaks a bare named ref (MLIR rejects one
+            # outside a recursive definition): a known non-packed member record
+            # is its bytes there
+            s3 = Dict{String,Any}(
+                nm => Dict{String,Any}("kind" => "struct", "byte_size" => "0x8",
+                                       "members" => [mem("x", "int", 0, 4)]),
+                "PK" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x9",
+                                         "members" => [mem("b", "char", 0, 1), mem("q", nm, 1, 8)]))
+            pk = SG._packed_literal_string("PK", s3["PK"], s3, Set{String}())
+            @test !occursin(r"!llvm\.struct<\"(?:[^\"\\]|\\.)*\">", pk)
+            @test pk == "!llvm.struct<packed (i8, !llvm.array<8 x i8>)>"
+        end
+    end
+
+    @testset "two records never share an alias id" begin
+        # The alias id replaces every character outside [A-Za-z0-9_] by `_`,
+        # which is not injective: Boost.JSON's `parse_number_helper<true, '+'>`
+        # and `parse_number_helper<true, '-'>` both became
+        # `!Struct_parse_number_helper_true______`, and MLIR refused the module
+        # ("redefinition of type alias id"), taking every thunk in the library
+        # with it (2026-10-31). A changed name carries a digest of the real
+        # one; a plain identifier keeps the alias it always had.
+        TU = RepliBuild.JLCSIRGenerator.TypeUtils
+        plus  = TU.alias_safe_name("parse_number_helper<true, '+'>")
+        minus = TU.alias_safe_name("parse_number_helper<true, '-'>")
+        @test plus != minus
+        @test startswith(plus, "parse_number_helper_true_______") && occursin(r"_[0-9a-f]{12}$", plus)
+        @test TU.alias_safe_name("Shape") == "Shape"
+        @test TU.alias_safe_name("Pad<char, int>") == TU.alias_safe_name("Pad<char, int>")   # deterministic
+        structs = Dict{String,Any}(
+            "parse_number_helper<true, '+'>" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x10",
+                "members" => [mem("a", "void*", 0, 8), mem("b", "void*", 8, 8)]),
+            "parse_number_helper<true, '-'>" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x10",
+                "members" => [mem("a", "void*", 0, 8), mem("b", "void*", 8, 8)]))
+        (aliases, _) = SG.generate_struct_definitions(structs)
+        ids = [m.match for m in eachmatch(r"^!Struct_[A-Za-z0-9_]+(?= =)"m, aliases)]
+        @test length(ids) == 2
+        @test allunique(ids)
+    end
+
     @testset "_mlir_layout mirrors the x86-64 rules it stands in for" begin
         s = Dict{String,Any}()
         @test SG._mlir_layout("i32", s)                       == (4, 4)
