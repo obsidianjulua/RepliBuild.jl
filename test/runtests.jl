@@ -550,6 +550,14 @@ include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
 
 include(joinpath(@__DIR__, "test_sysv_record_abi.jl"))
 
+# ── SIMD vectors by value (no toolchain) ────────────────────────────────────
+# DWARF spells a vector as the array of its lanes, and both tiers passed it
+# lane by lane: `{<4 x float>}` in two XMM registers, a bare vector as
+# `!llvm.array`, and a vector return as `ccall(…, float[4], …)`, which failed
+# the whole wrapper's load. A vendored GNU objdump dump, both conventions.
+
+include(joinpath(@__DIR__, "test_simd_vectors.jl"))
+
 # ── Emission does not follow Dict order, the Julia release or DIE offsets ───
 # DWARF extraction kept the last definition in a Dict's hash order, GeneratorCpp
 # emitted Managed blocks in one, callback examples followed one, and IR file

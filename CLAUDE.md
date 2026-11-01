@@ -371,7 +371,10 @@ If you are asked to work on it:
   Tier 2, and **noexcept means a declared-noexcept bare name (candidate) AND a
   `nounwind` mangled definition in the linked IR** (`_mark_noexcept!`). Never route on
   a name alone: a throw through a Tier-3 ccall aborts the process
-  (`test_noexcept_routing.jl`, `callback_test` "bare-name noexcept collision"). A
+  (`test_noexcept_routing.jl`, `callback_test` "bare-name noexcept collision").
+  **An attribute group (`#N`) belongs to its own IR file**: LLVM numbers them per
+  module, so a reader of `define` lines over several files (a per-TU link, a graph
+  library) resolves each file's groups in that file (`_nounwind_definitions`). A
   `nounwind`-only widening would expose Tier-3 emitter gaps (see CHANGELOG
   2026-09-26). `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
   DWARF against natural alignment, not the emitted struct with its `_pad_N`. A layout
@@ -499,6 +502,17 @@ the test named when you touch the area.
   first function that uses it. `resolve_type` gives each branch of a signature its
   own cycle guard (`copy(visited)`); a shared one made the second `int` of
   `int (*)(int, int)` a cycle. (`test_dwarf_attribution.jl`.)
+- **A SIMD vector is not an array.** DWARF spells one as the array of its lanes
+  (`float[4]`), and the metadata marks it `vector_size` on the member, parameter
+  or return (`_vector_size`). Anything that classifies a by-value crossing reads
+  that, never the spelling: SysV classifies a vector by its size (`<1 x float>`
+  is INTEGER, `<4 x float>` one XMM register), and the `NTuple` standing in for
+  it is classified lane by lane. Metadata without the key must fail safe. A
+  parameter or return spelled as an array is a vector (`crosses_as_vector`).
+  A member aligned to its own size is refused on SysV until a rebuild, because
+  an `aligned` array type has the same shape; the parser marks that array
+  `vector_size: null`. (`test_simd_vectors.jl`, devtests
+  `test_simd_vectors_live.jl`.)
 - By-value aggregate returns through a typedef are repaired in a post-pass (type and
   size). Do **not** swap the return mapper for the parameter mapper: it maps `char*`
   differently and would dismantle the Cstring policy.

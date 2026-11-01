@@ -3636,16 +3636,23 @@ Every function sharing a bare name with a noexcept one (`B::get` vs
 constructor, anything named `size`/`what`/`swap`) was then routed to Tier 3. The regex also matched `noexcept(false)`. A throw through such
 a `ccall` has no landing pad, so the process aborted (exit 134). Found by the
 2026-09-26 audit.
+
+An attribute group (`#N`) is resolved in the file that defines it: LLVM numbers
+groups per module, and a library linked from several IR files (llvm-link
+declined to merge, a graph library's per-TU list) has a `#0` in each. One table
+across files let the last file's `#0` decide for all of them.
 """
 function _nounwind_definitions(ir_files)::Set{String}
     unquote(n) = startswith(n, "\"") ?
         replace(n[2:end-1], r"\\([0-9A-Fa-f]{2})" => h -> string(Char(parse(UInt8, h[2:3], base=16)))) : n
     has_nounwind(attrs) = occursin(r"(?:^|\s)nounwind(?:\s|$)", attrs)
 
-    group_nounwind = Dict{String,Bool}()
-    defs = Tuple{String,String}[]     # (symbol, text after the parameter list)
+    out = Set{String}()
     for f in ir_files
         isfile(f) || continue
+        # Per file: `#N` names a group of this module only (docstring).
+        group_nounwind = Dict{String,Bool}()
+        defs = Tuple{String,String}[]     # (symbol, text after the parameter list)
         for line in eachline(f)
             if startswith(line, "define ")
                 m = match(r"@(\"(?:[^\"\\]|\\.)*\"|[-a-zA-Z$._][-a-zA-Z$._0-9]*)\(", line)
@@ -3667,12 +3674,10 @@ function _nounwind_definitions(ir_files)::Set{String}
                 g === nothing || (group_nounwind[g.captures[1]] = has_nounwind(g.captures[2]))
             end
         end
-    end
-
-    out = Set{String}()
-    for (name, tail) in defs
-        if has_nounwind(tail) || any(r -> get(group_nounwind, r.match, false), eachmatch(r"#\d+", tail))
-            push!(out, name)
+        for (name, tail) in defs
+            if has_nounwind(tail) || any(r -> get(group_nounwind, r.match, false), eachmatch(r"#\d+", tail))
+                push!(out, name)
+            end
         end
     end
     return out
@@ -6656,6 +6661,9 @@ function parse_dwarf_dump(output::AbstractString;
                         "is_noexcept" => is_noexcept, # NEW: Store noexcept status
                         "parameters" => params_for_this_function  # NEW: Use params_for_this_function
                     )
+                    # A SIMD vector returned by value (`_vector_size`).
+                    r_vec = _vector_size(type_ref, type_refs; base_sizes = base_byte_size)
+                    r_vec === nothing || (return_types[function_key]["vector_size"] = r_vec)
                 end
                 function_processed = true  # Mark as processed
             end
@@ -6736,6 +6744,10 @@ function parse_dwarf_dump(output::AbstractString;
                         "julia_type" => julia_type,
                         "position" => param_info["position"]
                     )
+                    # A SIMD vector by value (`_vector_size`): its `c_type` is
+                    # the array of its lanes.
+                    p_vec = _vector_size(type_ref, type_refs; base_sizes = base_byte_size)
+                    p_vec === nothing || (param_dict["vector_size"] = p_vec)
 
                     # If this is a function pointer, preserve the full signature
                     if startswith(c_type, "function_ptr(")
@@ -6889,10 +6901,19 @@ function parse_dwarf_dump(output::AbstractString;
                         end
                         # The alignment the member asked for (DW_AT_alignment),
                         # or a vector's, which is its size and carries no
-                        # attribute. Natural alignment is left to the reader.
+                        # attribute (an array of vectors too). Natural
+                        # alignment is left to the reader.
                         m_align = get(member, "alignment", nothing)
-                        if _is_vector_type(member_type_ref, type_refs) && ispow2(m_size)
-                            m_align = max(something(m_align, 1), m_size)
+                        m_vec = _vector_size(member_type_ref, type_refs; base_sizes = base_byte_size, arrays = true)
+                        if m_vec !== nothing
+                            member_resolved["vector_size"] = m_vec
+                            ispow2(m_vec) && (m_align = max(something(m_align, 1), m_vec))
+                        elseif m_align !== nothing && m_align == m_size && ispow2(m_size) && endswith(c_type, "]")
+                            # An array aligned to its own size (cglm's `vec4`,
+                            # `float[4]` aligned 16) is what a vector looked like
+                            # in metadata from before `vector_size`. `null` says
+                            # this one was looked at and is not a vector.
+                            member_resolved["vector_size"] = nothing
                         end
                         m_align === nothing || (member_resolved["alignment"] = m_align)
                         push!(resolved_members, member_resolved)
@@ -7233,24 +7254,41 @@ function _function_pointer_typedef(type_ref, type_refs)
 end
 
 """
-    _is_vector_type(type_ref, type_refs) -> Bool
+    _vector_size(type_ref, type_refs; base_sizes, arrays = false) -> Union{Int,Nothing}
 
-Whether a DWARF type reference names a vector (`__attribute__((vector_size))`,
-`__m128`): an array DIE with `DW_AT_GNU_vector`, reached through typedefs and
-cv-qualifiers. A vector is aligned to its size, which no attribute states.
+The bytes of the SIMD vector (`__attribute__((vector_size))`, `__m128`) a DWARF
+type reference names: an array DIE with `DW_AT_GNU_vector`, reached through
+typedefs and cv-qualifiers, and with `arrays` also through ordinary arrays (a
+member `v4f lanes[2]` holds two 16-byte vectors). `nothing` for anything else.
+
+DWARF spells a vector as the array of its lanes, and `resolve_type` keeps that
+spelling (`float[4]`), but a vector is aligned to its size, which no attribute
+states, and x86-64 SysV classifies it by its size, never lane by lane: `<1 x
+float>` is INTEGER, `<2 x int>` SSE, `<4 x float>` one SSE register. The
+metadata records it as `vector_size` on the member, parameter or return.
 """
-function _is_vector_type(type_ref, type_refs)
+function _vector_size(type_ref, type_refs; base_sizes::AbstractDict = Dict{String,Int}(),
+                      arrays::Bool = false)::Union{Int,Nothing}
     ref = type_ref
     for _ in 1:16                                  # typedef chains are short; no cycles
         t = get(type_refs, ref, nothing)
-        t isa Dict || return false
+        t isa Dict || return nothing
         kind = get(t, "kind", nothing)
-        kind == "array" && return get(t, "vector", false) == true
-        kind in ("typedef", "const", "volatile") || return false
-        ref = get(t, "target", nothing)
-        ref === nothing && return false
+        if kind == "array"
+            if get(t, "vector", false) == true
+                n = _die_byte_size(ref, type_refs; base_sizes)
+                return n > 0 ? n : nothing
+            end
+            arrays || return nothing
+            ref = get(t, "element_type", nothing)
+        elseif kind in ("typedef", "const", "volatile")
+            ref = get(t, "target", nothing)
+        else
+            return nothing
+        end
+        ref === nothing && return nothing
     end
-    return false
+    return nothing
 end
 
 """
@@ -7476,6 +7514,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                 "julia_type" => get(dwarf_info, "julia_type", "Cvoid"),
                 "size" => get(dwarf_info, "size", 0)
             )
+            haskey(dwarf_info, "vector_size") && (func["return_type"]["vector_size"] = dwarf_info["vector_size"])
             func["return_type_source"] = "dwarf"
             
             # Merge is_vararg

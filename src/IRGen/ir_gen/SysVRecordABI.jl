@@ -28,6 +28,13 @@
 #   * integers, pointers and enums are INTEGER; `float`, `double`, `_Float16`
 #     and both halves of a `_Complex` are SSE; `long double` is X87 with X87UP
 #     above it; `__int128` is INTEGER in both eightbytes;
+#   * a SIMD vector (`vector_size` in the metadata, whose `c_type` spells it as
+#     the array of its lanes) classifies by its size, never lane by lane: up
+#     to 4 bytes it is INTEGER, 8 bytes are SSE except `<1 x double>`, which
+#     is MEMORY, and 16 bytes are one SSE register (SSE, SSEUP), which no
+#     call statement states, so the record is `:unstated`. Over 16 bytes a
+#     record holding one vector of its own size goes in a YMM or ZMM register
+#     when the callee was compiled for AVX, which the metadata does not say;
 #   * merge: equal stays, NO_CLASS yields, MEMORY wins, then INTEGER, then any
 #     x87 class against another class is MEMORY, else SSE; afterwards an
 #     X87UP not under X87 is MEMORY;
@@ -52,7 +59,9 @@ How a record crosses by value under x86-64 SysV (`sysv_record_abi`).
   * `kind`: `:regs` (in registers, one class per eightbyte in `classes`),
     `:memory` (byval / sret, `align`), `:x87` (`long double` alone: an
     argument in memory, a return in st0), `:ignore` (only padding: no
-    operand, a void return), `:unknown` (`reason` says what could not be read).
+    operand, a void return), `:unknown` (`reason` says what could not be
+    read), `:unstated` (the class is known and no call statement states it:
+    a 16-byte SIMD vector in one SSE register; `reason` says which).
   * `classes`: for `:regs`, `:int` or `:sse` per eightbyte C passes, and
     `:none` for a low eightbyte of padding C passes nowhere (the high one
     then travels alone, read from offset 8).
@@ -71,7 +80,7 @@ end
 struct _SysVLeaf
     bit::Int          # absolute bit offset in the record
     bits::Int         # width: a bitfield's declared width, else 8 × size
-    kind::Symbol      # :int | :sse | :x87 | :place | :memory | :unknown
+    kind::Symbol      # :int | :sse | :x87 | :place | :memory | :unknown | :unstated
     align::Int        # the type's alignment in bytes, for the misalignment check
     bitfield::Bool
     what::String
@@ -165,14 +174,15 @@ function _sysv_julia_elem(jt::AbstractString)
 end
 
 """
-    _sysv_type_leaves!(out, c_type, julia_type, size, bit, structs, seen, what)
+    _sysv_type_leaves!(out, c_type, julia_type, size, bit, structs, seen, what; vectors = true)
 
 The leaves of one member type at absolute bit offset `bit`. Returns the type's
 alignment in bytes, or `nothing` when it could not be read (an `:unknown` leaf
-was pushed then).
+was pushed then). `vectors` is `sysv_record_abi`'s.
 """
 function _sysv_type_leaves!(out::Vector{_SysVLeaf}, c_type::AbstractString, julia_type::AbstractString,
-                            size::Int, bit::Int, structs, seen::Set{String}, what::String)
+                            size::Int, bit::Int, structs, seen::Set{String}, what::String;
+                            vectors::Bool = true)
     t = _sysv_norm(c_type)
     t = String(replace(t, r"^(?:struct|union|enum|class) " => ""))
     unknown(why) = (push!(out, _SysVLeaf(bit, 8 * max(size, 0), :unknown, 1, false, "$what: $why")); nothing)
@@ -195,7 +205,7 @@ function _sysv_type_leaves!(out::Vector{_SysVLeaf}, c_type::AbstractString, juli
         ejt = _sysv_julia_elem(julia_type)
         # One element gives the alignment and settles the element size.
         probe = _SysVLeaf[]
-        al = _sysv_type_leaves!(probe, elem, ejt, esize, bit, structs, seen, "$what[]")
+        al = _sysv_type_leaves!(probe, elem, ejt, esize, bit, structs, seen, "$what[]"; vectors)
         al === nothing && (append!(out, probe); return nothing)
         if esize == 0
             esize = _sysv_leaf_extent(probe, bit)
@@ -203,7 +213,7 @@ function _sysv_type_leaves!(out::Vector{_SysVLeaf}, c_type::AbstractString, juli
         end
         append!(out, probe)
         for i in 1:n-1
-            _sysv_type_leaves!(out, elem, ejt, esize, bit + 8 * esize * i, structs, seen, "$what[$i]")
+            _sysv_type_leaves!(out, elem, ejt, esize, bit + 8 * esize * i, structs, seen, "$what[$i]"; vectors)
         end
         return al
     end
@@ -232,7 +242,7 @@ function _sysv_type_leaves!(out::Vector{_SysVLeaf}, c_type::AbstractString, juli
         al = _sysv_record_align(key, structs, seen)
         push!(out, _SysVLeaf(bit, 8 * _sysv_record_size(structs[key]), :place, al, false, what))
         push!(seen, key)
-        _sysv_record_leaves!(out, key, structs, bit, seen)
+        _sysv_record_leaves!(out, key, structs, bit, seen; vectors)
         delete!(seen, key)
         return al
     elseif entry === :direct
@@ -258,13 +268,16 @@ end
 _sysv_record_size(info) = something(_parse_num(get(info, "byte_size", nothing)), 0)
 
 """
-    _sysv_record_leaves!(out, key, structs, base_bit, seen)
+    _sysv_record_leaves!(out, key, structs, base_bit, seen; vectors = true)
 
 The leaves of record `key` placed at `base_bit`: its bases' and members' at
 their offsets. A union's members all sit at its start. A member with no
 position (a static) is not part of the object; an unnamed bitfield is padding.
+A SIMD vector member classifies by its size (`_sysv_vector_leaves!`), or, with
+`vectors` off, as the array of lanes its `c_type` spells.
 """
-function _sysv_record_leaves!(out::Vector{_SysVLeaf}, key::String, structs, base_bit::Int, seen::Set{String})
+function _sysv_record_leaves!(out::Vector{_SysVLeaf}, key::String, structs, base_bit::Int, seen::Set{String};
+                              vectors::Bool = true)
     info = structs[key]
     is_union = get(info, "kind", "struct") == "union"
     for b in get(info, "base_classes", [])
@@ -274,7 +287,7 @@ function _sysv_record_leaves!(out::Vector{_SysVLeaf}, key::String, structs, base
             push!(out, _SysVLeaf(base_bit, 0, :unknown, 1, false, "$key: a virtual base `$bt`"))
             continue
         end
-        _sysv_type_leaves!(out, bt, "Any", 0, base_bit + 8 * off, structs, seen, "$key's base `$bt`")
+        _sysv_type_leaves!(out, bt, "Any", 0, base_bit + 8 * off, structs, seen, "$key's base `$bt`"; vectors)
     end
     for m in get(info, "members", [])
         name = String(get(m, "name", ""))
@@ -293,8 +306,91 @@ function _sysv_record_leaves!(out::Vector{_SysVLeaf}, key::String, structs, base
             is_union || continue
             off = 0
         end
+        vs = vectors ? _parse_num(get(m, "vector_size", nothing)) : nothing
+        if vs !== nothing
+            _sysv_vector_leaves!(out, String(get(m, "c_type", "")), size, vs, base_bit + 8 * off, "$key.$name")
+            continue
+        end
+        if vectors && _sysv_vector_unrecorded(m)
+            push!(out, _SysVLeaf(base_bit + 8 * off, 8 * size, :unknown, 1, false,
+                                 "$key.$name: $(_SYSV_VECTOR_REBUILD)"))
+            continue
+        end
         _sysv_type_leaves!(out, String(get(m, "c_type", "")), String(get(m, "julia_type", "Any")), size,
-                           base_bit + 8 * off, structs, seen, "$key.$name")
+                           base_bit + 8 * off, structs, seen, "$key.$name"; vectors)
+    end
+    return out
+end
+
+# What a member that may be a vector says when its metadata cannot tell.
+const _SYSV_VECTOR_REBUILD =
+    "an array aligned to its own size, which is how a SIMD vector looked in metadata from before " *
+    "`vector_size`, and this metadata cannot say which it is; rebuild the package (delete " *
+    ".replibuild_cache/project_hash) and wrap again"
+
+"""
+    _sysv_vector_unrecorded(m) -> Bool
+
+Whether the member `m` may be a SIMD vector that its metadata does not mark:
+an array spelling whose `alignment` is its own size, with no `vector_size` key.
+Metadata from before `vector_size` gave a vector exactly that alignment, and so
+does `__attribute__((aligned))` on an array type (cglm's `vec4`), so the two are
+one shape there. The parser now writes `vector_size` for a vector and `null`
+for such an array, so this answers `true` for old metadata alone.
+"""
+function _sysv_vector_unrecorded(m)::Bool
+    haskey(m, "vector_size") && return false
+    size = something(_parse_num(get(m, "size", 0)), 0)
+    al = _parse_num(get(m, "alignment", nothing))
+    return al !== nothing && al == size && size > 0 && ispow2(size) &&
+           _sysv_array(_sysv_norm(String(get(m, "c_type", "")))) !== nothing
+end
+
+"""
+    crosses_as_vector(entry) -> Bool
+
+Whether a parameter or return `entry` of the metadata crosses as a SIMD vector
+by value: `vector_size` says so, and so does an array spelling (`float[4]`)
+without the key. C and C++ never pass or return an array by value (DWARF gives a
+parameter declared as one its pointer type), so the spelling settles it in
+metadata from before `vector_size`, which must not reach a call: a re-wrap
+without a rebuild emitted `ccall(…, float[4], …)` and the wrapper failed to
+load. `thunk_crossings` and GeneratorC both ask this.
+"""
+crosses_as_vector(entry)::Bool = get(entry, "vector_size", nothing) !== nothing ||
+    _sysv_array(_sysv_norm(String(get(entry, "c_type", "")))) !== nothing
+
+"""
+    _sysv_vector_leaves!(out, c_type, size, vs, bit, what)
+
+The leaves of a member that is a SIMD vector of `vs` bytes, or an array of them
+(`size` bytes in all), at absolute bit `bit`. clang's `X86_64ABIInfo::classify`
+on Linux, which LLVM's ABI library repeats: a vector of 4 bytes or less is
+INTEGER (`<1 x float>` too, as gcc passes it), one of 8 bytes is SSE
+(`<2 x int>` too) except `<1 x double>`, which is MEMORY, and one of 16 bytes
+is a single SSE register (SSE, SSEUP), `:unstated` here. Each is aligned to its
+size. `c_type` spells the vector as the array of its lanes, so the lane type
+is what is left when the dimensions are cut.
+"""
+function _sysv_vector_leaves!(out::Vector{_SysVLeaf}, c_type::AbstractString, size::Int, vs::Int, bit::Int,
+                              what::String)
+    if vs <= 0 || size <= 0 || size % vs != 0
+        push!(out, _SysVLeaf(bit, 8 * max(size, 0), :unknown, 1, false,
+                             "$what: a SIMD vector whose size the metadata does not settle"))
+        return out
+    end
+    lane = _sysv_norm(replace(String(c_type), r"(?:\s*\[\d*\])+$" => ""))
+    for i in 0:(size ÷ vs - 1)
+        at = bit + 8 * vs * i
+        if vs <= 4
+            push!(out, _SysVLeaf(at, 8 * vs, :int, vs, false, what))
+        elseif vs == 8
+            push!(out, _SysVLeaf(at, 64, lane == "double" ? :memory : :sse, 8, false, what))
+        else
+            push!(out, _SysVLeaf(at, 8 * vs, :unstated, vs, false,
+                                 "$what: a $vs-byte SIMD vector, which SysV passes in one SSE register " *
+                                 "(SSE, SSEUP) that no call statement states"))
+        end
     end
     return out
 end
@@ -361,25 +457,42 @@ function _sysv_merge(acc::Symbol, field::Symbol)
 end
 
 """
-    sysv_record_abi(key, structs) -> SysVRecordABI
+    sysv_record_abi(key, structs; vectors = true) -> SysVRecordABI
 
 How the record `structs[key]` crosses by value under x86-64 SysV; see the head
-of this file for the rules.
+of this file for the rules. With `vectors` off, a SIMD vector member is read as
+the array of lanes its `c_type` spells, which is how Julia's `ccall` classifies
+the `NTuple` that stands in for it (`sysv_vector_misread`).
 """
-function sysv_record_abi(key::AbstractString, structs)
+function sysv_record_abi(key::AbstractString, structs; vectors::Bool = true)
     key = String(key)
     info = structs[key]
     size = _sysv_record_size(info)
     align = _sysv_record_align(key, structs)
     size == 0 && return SysVRecordABI(:ignore, Symbol[], 0, align, "")
-    size > 16 && return SysVRecordABI(:memory, Symbol[], size, align, "")
+    if size > 16
+        # A record that is one vector of its own size travels in a YMM or ZMM
+        # register when the callee was built for AVX (`-mavx`, `-march=`), and
+        # in memory otherwise.
+        whole = vectors ? findfirst(m -> _parse_num(get(m, "vector_size", nothing)) == size,
+                                    get(info, "members", [])) : nothing
+        whole === nothing || return SysVRecordABI(:unknown, Symbol[], size, align,
+            "$key.$(get(info["members"][whole], "name", "")): a $size-byte SIMD vector, which SysV " *
+            "passes in a YMM or ZMM register when the callee was compiled for AVX, and the metadata " *
+            "does not say whether it was")
+        unsure = vectors ? findfirst(m -> _sysv_vector_unrecorded(m) &&
+                                          _parse_num(get(m, "size", 0)) == size, get(info, "members", [])) : nothing
+        unsure === nothing || return SysVRecordABI(:unknown, Symbol[], size, align,
+            "$key.$(get(info["members"][unsure], "name", "")): $(_SYSV_VECTOR_REBUILD)")
+        return SysVRecordABI(:memory, Symbol[], size, align, "")
+    end
 
     leaves = _SysVLeaf[]
-    _sysv_record_leaves!(leaves, key, structs, 0, Set{String}([key]))
+    _sysv_record_leaves!(leaves, key, structs, 0, Set{String}([key]); vectors)
     lo = hi = :none
     for lf in leaves
         lf.kind === :memory && return SysVRecordABI(:memory, Symbol[], size, align, "")
-        lf.kind === :unknown && return SysVRecordABI(:unknown, Symbol[], size, align, lf.what)
+        lf.kind in (:unknown, :unstated) && return SysVRecordABI(lf.kind, Symbol[], size, align, lf.what)
         if !lf.bitfield && lf.bit % (8 * lf.align) != 0
             return SysVRecordABI(:memory, Symbol[], size, align, "")
         end
@@ -417,7 +530,8 @@ The statement FunctionGen puts on a call for a record crossing, which
 `buildCallShape` reads: `mem:<align>` (the byval or sret alignment, at least 8),
 `regs:<class>[,<class>]` (`int`, `sse`, or `none` for a low eightbyte of
 padding), or `ignore`. An `:x87` record is `mem:16` as an argument; as a return
-it is a trap (`sysv_trap_reason`), never a statement. `:unknown` is a trap too.
+it is a trap (`sysv_trap_reason`), never a statement. `:unknown` and
+`:unstated` are traps too.
 """
 function sysv_call_fact(abi::SysVRecordABI)::String
     abi.kind === :ignore && return "ignore"
@@ -431,14 +545,14 @@ end
 
 What the thunk generator states on a call for the record `key` crossing by
 value: `sysv_call_fact` of its class, or nothing (`""`) for a record whose
-class cannot be read. Such a record reaches emission only on a host whose
-convention does not read the statement: SysV refuses it first
+class cannot be read or stated. Such a record reaches emission only on a host
+whose convention does not read the statement: SysV refuses it first
 (`sysv_trap_reason`), and Win64 crosses it by size. Throwing here took every
 thunk of a Win64 library with it (CI, 2026-10-25).
 """
 function sysv_statement(key, structs)::String
     abi = sysv_record_abi(key, structs)
-    return abi.kind === :unknown ? "" : sysv_call_fact(abi)
+    return abi.kind in (:unknown, :unstated) ? "" : sysv_call_fact(abi)
 end
 
 """
@@ -446,9 +560,10 @@ end
 
 Why the thunk generator refuses to pass (`ret = false`) or return (`ret = true`)
 the record `key` by value under `abi`, or `nothing`. SysV refuses a record of
-16 bytes or less whose class it cannot read from DWARF, and a `long double`
-record as a return, which C leaves in st0 where no thunk reads. Win64 crosses a
-record by size alone, so it refuses nothing here.
+16 bytes or less whose class it cannot read from DWARF, one whose class no call
+statement states (a 16-byte SIMD vector), and a `long double` record as a
+return, which C leaves in st0 where no thunk reads. Win64 crosses a record by
+size alone, so it refuses nothing here.
 """
 function sysv_trap_reason(key, structs; ret::Bool, abi::Symbol = Sys.iswindows() ? :win64 : :sysv)
     abi === :win64 && return nothing
@@ -457,7 +572,66 @@ function sysv_trap_reason(key, structs; ret::Bool, abi::Symbol = Sys.iswindows()
     v = sysv_record_abi(key, structs)
     v.kind === :unknown &&
         return "whose SysV class cannot be read from DWARF ($(v.reason))"
+    v.kind === :unstated &&
+        return "which a thunk cannot pass the way SysV does ($(v.reason))"
     ret && v.kind === :x87 &&
         return "which SysV returns on the x87 stack (st0), where a thunk does not look"
     return nothing
+end
+
+"""
+    sysv_vector_misread(key, structs) -> Union{String,Nothing}
+
+Why a Tier-3 `ccall` would pass or return the record `key` in the wrong place
+under SysV because it holds a SIMD vector, or `nothing`. The Julia type that
+stands in for a vector is the `NTuple` of its lanes, and Julia's `ccall`
+classifies that lane by lane, which is `sysv_record_abi` with `vectors` off. C
+classifies the vector by its size. Where the two answers differ in kind or in
+register classes, the call reads or writes the wrong registers: `{<4 x float>}`
+in XMM0 and XMM1 where C uses XMM0 alone, `{<1 x float>}` in XMM0 where C uses
+RDI. A record holding no vector, or one whose vectors classify as their lanes
+do (`<2 x float>`), gives `nothing`. Alignment is not compared: a MEMORY-class
+record's slot is decided from the compiler's own `byval` alignment
+(GeneratorC's `_c_byval_param_shape`).
+"""
+function sysv_vector_misread(key, structs)::Union{String,Nothing}
+    (key === nothing || !haskey(structs, key)) && return nothing
+    _sysv_holds_vector(String(key), structs, Set{String}()) || return nothing
+    c = sysv_record_abi(key, structs)
+    j = sysv_record_abi(key, structs; vectors = false)
+    (c.kind === j.kind && c.classes == j.classes) && return nothing
+    c.kind === :unknown && return "whose SysV class this metadata does not settle ($(c.reason))"
+    return "which holds a SIMD vector: C passes it $(_sysv_where(c)), and a ccall of the " *
+           "Julia type standing in for it $(_sysv_where(j))"
+end
+
+# Whether the record `key` holds a SIMD vector by value at any depth: a member
+# with `vector_size`, one that may be a vector its metadata does not mark
+# (`_sysv_vector_unrecorded`), or a base or member record (an array of records
+# holds its element) that holds one.
+function _sysv_holds_vector(key::String, structs, seen::Set{String})::Bool
+    key in seen && return false
+    push!(seen, key)
+    info = structs[key]
+    info isa AbstractDict || return false
+    held(t) = begin
+        t = String(replace(_sysv_norm(t), r"^(?:struct|union|enum|class) " => ""))
+        entry, k = _table_entry(String(replace(t, r"(?:\s*\[\d*\])+$" => "")), structs)
+        entry === :layout && _sysv_holds_vector(k, structs, seen)
+    end
+    for m in get(info, "members", [])
+        (get(m, "vector_size", nothing) !== nothing || _sysv_vector_unrecorded(m)) && return true
+        held(String(get(m, "c_type", ""))) && return true
+    end
+    return any(b -> held(String(get(b, "type", ""))), get(info, "base_classes", []))
+end
+
+# Where a SysV verdict puts a record, in words.
+function _sysv_where(v::SysVRecordABI)::String
+    v.kind === :regs && return "in registers (" *
+        join((c === :int ? "INTEGER" : c === :sse ? "SSE" : "padding" for c in v.classes), ", ") * ")"
+    v.kind === :memory && return "in memory"
+    v.kind === :ignore && return "nowhere"
+    v.kind === :x87 && return "on the x87 stack"
+    return "in a way RepliBuild cannot reproduce ($(v.reason))"
 end

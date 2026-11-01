@@ -145,6 +145,19 @@ const SAO_CURATED = [
     ("c_f_cf",     "typedef struct { float a; _Complex float z; } c_f_cf;", :agree, :agree),
     # an empty record takes no register (GNU C)
     ("c_empty",    "typedef struct { } c_empty;", :agree, :agree),
+    # SIMD vectors classify by their size, never lane by lane (DWARF spells
+    # them as arrays): up to 4 bytes INTEGER, 8 bytes SSE except
+    # `<1 x double>`, which is MEMORY. 16 bytes are one SSE register (SSE,
+    # SSEUP), which no call statement states: FunctionGen refuses both ways.
+    ("c_v1f",      "typedef float sao_v1f __attribute__((vector_size(4)));\ntypedef struct { sao_v1f v; } c_v1f;", :agree, :agree),
+    ("c_v2i",      "typedef int sao_v2i __attribute__((vector_size(8)));\ntypedef struct { sao_v2i v; } c_v2i;", :agree, :agree),
+    ("c_v8c",      "typedef char sao_v8c __attribute__((vector_size(8)));\ntypedef struct { sao_v8c v; } c_v8c;", :agree, :agree),
+    ("c_v1d",      "typedef double sao_v1d __attribute__((vector_size(8)));\ntypedef struct { sao_v1d v; } c_v1d;", :agree, :agree),
+    ("c_v2f",      "typedef float sao_v2f __attribute__((vector_size(8)));\ntypedef struct { sao_v2f v; } c_v2f;", :agree, :agree),
+    ("c_v2f_i",    "typedef struct { sao_v2f v; int i; } c_v2f_i;", :agree, :agree),
+    ("c_v4f",      "typedef float sao_v4f __attribute__((vector_size(16)));\ntypedef struct { sao_v4f v; } c_v4f;", :trap, :trap),
+    # an array aligned to its own size is not a vector (cglm's `vec4`): its lanes
+    ("c_al16_arr", "typedef float sao_al4[4] __attribute__((aligned(16)));\ntypedef struct { sao_al4 a; } c_al16_arr;", :agree, :agree),
 ]
 
 "`u` with every ordinary identifier prefixed by `p`, so many units share one C file."
@@ -318,6 +331,25 @@ end
 "The alignment of an oracle type."
 sao_align(ty) = ty["k"] == "ptr" ? 8 : ty["k"] == "array" ? sao_align(ty["elem"]) : Int(ty["align"])
 
+"The bytes of a scalar oracle type."
+sao_scalar_bytes(ty) = ty["k"] == "ptr" ? 8 : ty["k"] == "int" ? Int(ty["bits"]) ÷ 8 :
+    Dict("half" => 2, "bfloat" => 2, "single" => 4, "double" => 8, "quad" => 16)[ty["sem"]]
+
+"""
+    sao_vector(c_type, size, vs, meta) -> Dict
+
+A member that is a SIMD vector of `vs` bytes (`vector_size` in the metadata),
+or an array of them (`size` bytes in all), as the oracle reads it. `c_type`
+spells the vector as the array of its lanes, so the lane type is what is left
+when the dimensions are cut.
+"""
+function sao_vector(c_type::AbstractString, size::Integer, vs::Integer, meta)
+    lane = sao_type(replace(String(c_type), r"(?:\s*\[\d*\])+$" => ""), 0, meta)
+    v = Dict{String,Any}("k" => "vector", "n" => vs ÷ sao_scalar_bytes(lane), "elem" => lane, "align" => vs)
+    size == vs && return v
+    return Dict{String,Any}("k" => "array", "n" => size ÷ vs, "size_bits" => 8 * size, "elem" => v)
+end
+
 "A metadata record as an oracle record."
 function sao_record(key::String, meta, seen::Set{String} = Set{String}())
     sd = meta["struct_definitions"]
@@ -327,7 +359,9 @@ function sao_record(key::String, meta, seen::Set{String} = Set{String}())
     is_union = get(info, "kind", "struct") == "union"
     fields = Any[]
     for m in get(info, "members", [])
-        ty = sao_type(String(get(m, "c_type", "")), sao_bytes(get(m, "size", 0)), meta, seen)
+        ty = get(m, "vector_size", nothing) !== nothing ?
+             sao_vector(String(get(m, "c_type", "")), sao_bytes(get(m, "size", 0)), Int(m["vector_size"]), meta) :
+             sao_type(String(get(m, "c_type", "")), sao_bytes(get(m, "size", 0)), meta, seen)
         if haskey(m, "bit_size")
             haskey(m, "data_bit_offset") || is_union ||
                 error("bitfield `$(get(m, "name", "?"))` of `$key` has no data_bit_offset")
@@ -924,7 +958,7 @@ end
         @test checked == 2 * length(SAO_CURATED)
         # The refusals are the ones SAO_CURATED says, and no other.
         @test sort!([n for (n, _, a, r) in SAO_CURATED for (fn, w) in (("take_$n", a), ("make_$n", r)) if w === :trap]) ==
-              ["c_ld"]
+              ["c_ld", "c_v4f", "c_v4f"]
     end
 
     @testset "abi_fuzz records and functions" begin
