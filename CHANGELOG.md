@@ -41,6 +41,13 @@ All notable changes to RepliBuild.jl are documented in this file.
   - On Windows: 108 pass and 2 `@test_broken`. Those are a bare 8-byte vector argument through Tier 3, which clang passes by reference and ccall by value, and the callee faults. It runs in a child of its own until that refusal is decided.
   - `SAO_CURATED` in `test_sysv_abi_oracle.jl` gains `<1 x float>`, `<2 x int>`, `<8 x char>`, `<1 x double>`, `<2 x float>`, `{<2 x float>; int}` and an aligned `float[4]` record, which agree with LLVM's ABI library and with clang. It also gains `<4 x float>`, which is refused both ways.
   - Each of the seven fixes was neutered in turn, and the test failed each time.
+### `nounwind` is read from each IR file's own attribute groups (2026-10-31)
+
+- **Found by the Rust front-end review (PR #59).** `_nounwind_definitions` kept one `#N` → nounwind table for every IR file it read and resolved every definition after reading them all. LLVM numbers attribute groups per module, so with several files the last file's `#0`, `#1`, … decided for all of them. On a Rust crate built with four codegen units, a function that panics was reported `nounwind` over the four files and not over its own.
+- **Where it reached the router.** A C++ library whose linked IR is more than one module: `link_optimize_ir`'s per-TU list when llvm-link declines to merge, and a graph library's `linked_ir`. A function declared `noexcept` by bare name whose own group lacks `nounwind` could be confirmed by another file's group, routed to a plain `ccall` (Tier 3), and abort the process on a throw. A function wrongly left out went to Tier 2, which is safe. A library linked from one module, the usual case, is unaffected.
+- **Fix.** Groups are resolved in the file that defines them. `_byval_definitions` reads `byval` from the `define` line itself and was not affected.
+- **Rebuild, then re-wrap** a C++ package that links from several modules: the routing is in its metadata (delete `.replibuild_cache/project_hash`).
+- **Tests.** `test_noexcept_routing.jl` (runtests): a throwing function and a `nounwind` one, each in its own file under the same `#0`, read in both orders. Both orders failed before the fix.
 
 ## v4.3.1 (2026-10-31)
 

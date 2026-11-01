@@ -3636,16 +3636,23 @@ Every function sharing a bare name with a noexcept one (`B::get` vs
 constructor, anything named `size`/`what`/`swap`) was then routed to Tier 3. The regex also matched `noexcept(false)`. A throw through such
 a `ccall` has no landing pad, so the process aborted (exit 134). Found by the
 2026-09-26 audit.
+
+An attribute group (`#N`) is resolved in the file that defines it: LLVM numbers
+groups per module, and a library linked from several IR files (llvm-link
+declined to merge, a graph library's per-TU list) has a `#0` in each. One table
+across files let the last file's `#0` decide for all of them.
 """
 function _nounwind_definitions(ir_files)::Set{String}
     unquote(n) = startswith(n, "\"") ?
         replace(n[2:end-1], r"\\([0-9A-Fa-f]{2})" => h -> string(Char(parse(UInt8, h[2:3], base=16)))) : n
     has_nounwind(attrs) = occursin(r"(?:^|\s)nounwind(?:\s|$)", attrs)
 
-    group_nounwind = Dict{String,Bool}()
-    defs = Tuple{String,String}[]     # (symbol, text after the parameter list)
+    out = Set{String}()
     for f in ir_files
         isfile(f) || continue
+        # Per file: `#N` names a group of this module only (docstring).
+        group_nounwind = Dict{String,Bool}()
+        defs = Tuple{String,String}[]     # (symbol, text after the parameter list)
         for line in eachline(f)
             if startswith(line, "define ")
                 m = match(r"@(\"(?:[^\"\\]|\\.)*\"|[-a-zA-Z$._][-a-zA-Z$._0-9]*)\(", line)
@@ -3667,12 +3674,10 @@ function _nounwind_definitions(ir_files)::Set{String}
                 g === nothing || (group_nounwind[g.captures[1]] = has_nounwind(g.captures[2]))
             end
         end
-    end
-
-    out = Set{String}()
-    for (name, tail) in defs
-        if has_nounwind(tail) || any(r -> get(group_nounwind, r.match, false), eachmatch(r"#\d+", tail))
-            push!(out, name)
+        for (name, tail) in defs
+            if has_nounwind(tail) || any(r -> get(group_nounwind, r.match, false), eachmatch(r"#\d+", tail))
+                push!(out, name)
+            end
         end
     end
     return out

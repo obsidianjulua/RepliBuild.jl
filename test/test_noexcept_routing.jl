@@ -73,6 +73,34 @@ attributes #1 = { mustprogress uwtable "frame-pointer"="none" "target-cpu"="x86-
         @test isempty(NXC._nounwind_definitions(["/nonexistent/x.ll"]))
     end
 
+    @testset "attribute groups belong to their own file" begin
+        # `#N` is numbered per module, so a library linked from several IR
+        # files (llvm-link declined to merge, a graph library's per-TU list)
+        # has one `#0` per file. One table across files let the last file's
+        # `#0` decide for every file: a throwing function was proven nounwind
+        # by another file's group and routed to a plain ccall, which aborts.
+        throws = raw"""
+        define dso_local void @_Z6throwsv() #0 personality ptr @__gxx_personality_v0 {
+          ret void
+        }
+        attributes #0 = { mustprogress uwtable }
+        """
+        safe = raw"""
+        define dso_local void @_Z4safev() #0 {
+          ret void
+        }
+        attributes #0 = { mustprogress nounwind uwtable }
+        """
+        for order in ((throws, safe), (safe, throws))
+            got = mktempdir() do dir
+                files = [joinpath(dir, "tu$i.ll") for i in 1:2]
+                foreach(write, files, order)
+                NXC._nounwind_definitions(files)
+            end
+            @test got == Set(["_Z4safev"])
+        end
+    end
+
     fn(name, mangled) = Dict{String,Any}("name" => name, "mangled" => mangled)
 
     @testset "a bare-name candidate is not enough" begin
