@@ -844,10 +844,17 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     end
                 end
             end
-        elseif ret_type == "!llvm.ptr" && !contains(ret_c_type, "*") && ret_c_type != "void" && ret_c_type != "unknown"
+        elseif ret_type == "!llvm.ptr" && !occursin(r"[*&]", _outside_template_args(ret_c_type)) &&
+               ret_c_type != "void" && ret_c_type != "unknown"
             # Template types (e.g. "Matrix<double, -1, -1>") fall through map_cpp_type
             # to !llvm.ptr because they contain non-alphanumeric chars.
             # Fuzzy-match against DWARF struct definitions to recover the correct size.
+            # A pointer or reference return IS the address: `path::native()` returns
+            # `const std::wstring&`, and the STL fallback below measured the string
+            # behind the `&` (`get_stl_container_size` strips it), so the thunk
+            # declared a 32-byte return, passed a hidden pointer the callee took
+            # for `this`, and handed back a slot on its own stack (Boost.Filesystem,
+            # 2026-11-01). Only the type's own declarators count, not an argument's.
             matched_key = _fuzzy_struct_lookup(ret_c_type, structs)
             if matched_key !== nothing
                 info = structs[matched_key]

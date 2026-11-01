@@ -214,7 +214,7 @@ function _param_docs!(arg_docs::Vector{String}, callback_docs::Vector{String}, p
                       registry::TypeRegistry, callback_param_type)
     name = param["name"]
     c_type_name = get(param, "c_type", "")
-    julia_type = param["julia_type"]
+    julia_type = _pointee_safe_type(param["julia_type"])     # what the signature takes, not the metadata's `Ref{Any}`
 
     # Check if this is a callback parameter (Ptr{Cvoid} from function pointer)
     if julia_type == "Ptr{Cvoid}" && (startswith(c_type_name, "function_ptr") || contains(c_type_name, "(*"))
