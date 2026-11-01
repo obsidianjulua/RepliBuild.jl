@@ -4,6 +4,51 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### By-value template returns: a pointer inside the arguments, a `const` the lookup kept (2026-11-01)
+
+Wrapping Boost.JSON 1.92's inline DOM API (the Hub's `boostjson` keep file)
+exposed two Tier 2 return defects, one of them a confirmed crash:
+
+- **A `*` or `&` inside template arguments made a record a pointer.**
+  `FunctionGen._table_entry` tested the whole spelling for a declarator, so
+  `pair<boost::json::key_value_pair *, bool>` (returned by `object::emplace`,
+  `insert_or_assign`) and Boost.System's `result<boost::json::value &,
+  boost::system::error_code>` (every `try_as_*`/`try_at`; 39 crossings in that
+  one package) were `(:direct, nothing)`. The thunk returned the 16-byte pair in
+  a register and the Julia stub spelled it `Ptr{Cvoid}`. On Win64 a record over
+  8 bytes comes back through a hidden pointer the thunk did not pass, so the
+  callee read `this` from the string_view copy's register: calling
+  `boost_json_object_emplace_int` was an `EXCEPTION_ACCESS_VIOLATION` inside
+  `object::empty`. SysV returned the pair in RAX:RDX and happened to work. The
+  declarator test now reads `_outside_template_args(t)`, the spelling with every
+  balanced `<…>` removed, in `_table_entry`, `_sysv_record_of` and
+  `is_ccall_safe`'s two walks; `pair<int*, bool>*` keeps its own `*`. A
+  declared-only record with such arguments is `:missing` → `:opaque`, and
+  `thunk_crossings` refuses the function ("returns `pair<…>` by value"); one
+  with a layout crosses by it: `value::try_as_int64`'s `result<long long,
+  error_code>`, a 32-byte variant, now comes back through the sret on Win64
+  with its alternative and payload intact, where it was read from RAX before.
+  In boostjson 23 functions became trap stubs (the `pair` returns and parser
+  internals) and the `try_as_*` family became callable. `Compiler._by_value_record_name` still skips
+  these spellings, so `record_abi` records no facts for them (a refusal needs
+  none; `:indirect` precision would). (`test_by_value_crossing.jl`,
+  `test_cpp_return_resolution.jl`.)
+- **A `const` on a by-value return defeated the Julia-side lookup.** DWARF
+  spells `key_value_pair::key()`'s return `const basic_string_view<char>`; the
+  record is keyed without the `const`, emitted as `basic_string_view_char`, and
+  crossed as a parameter, but GeneratorCpp's Tier 2 return resolution looked
+  the spelling up as written, missed, and left the `Any` sentinel, which
+  `JITManager.invoke` refused at the call ("unresolved `Any` sentinel"). Every
+  lookup in that block now reads `FunctionGen._strip_top_cv(c_ret)`.
+- **A return left `Any` is refused where the function is defined.** The runtime
+  check was the only guard; a wrapper could ship an `invoke(…, Any, …)` that
+  raised on first use. GeneratorCpp now emits an ABI Safety Trap stub naming
+  the unresolved return (`_unresolved_return_trap_msg`) and requests no thunk
+  for it, like the other refusals. (`test_cpp_return_resolution.jl`.)
+
+The Hub's `boostjson/test.jl` names both findings in its header; the `key()`
+assertion and the trap on `emplace` land with a re-wrap.
+
 ### SIMD vectors: Win64 bare vectors, the C++ gate, nested AVX records, a 3-lane vector's size (2026-11-01)
 
 The audit of #60 (`SIMD vectors by value classify by their size`) ran its

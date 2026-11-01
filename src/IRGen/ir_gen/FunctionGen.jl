@@ -133,6 +133,34 @@ end
 _strip_top_cv(c_type) = String(replace(replace(strip(String(c_type)), r"^(?:(?:const|volatile)\s+)+" => ""),
                                        r"(?:\s+(?:const|volatile))+$" => ""))
 
+"""
+    _outside_template_args(t) -> String
+
+`t` with every balanced `<…>` removed: the type's own declarators, without its
+template arguments'. A test for a pointer, reference, function or array
+spelling reads this, never `t`, or a `*` or `&` inside the arguments makes a
+record look like a pointer: `pair<key_value_pair *, bool>` and Boost.System's
+`result<value &, error_code>` were `:direct`, so the thunk returned the 16-byte
+pair in a register and the Julia stub spelled it `Ptr{Cvoid}`. On Win64 that
+return needs a hidden pointer, and the callee read `this` from the next
+register: `boost::json::object::emplace<int>` was an access violation
+(2026-11-01). `pair<int*, bool>*` keeps its own `*` and stays a pointer.
+"""
+function _outside_template_args(t::AbstractString)::String
+    depth = 0
+    io = IOBuffer()
+    for c in t
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0
+            write(io, c)
+        end
+    end
+    return String(take!(io))
+end
+
 # The table entry a by-value `t` (top-level cv removed) is laid out from:
 # `(:direct, nothing)` for what needs none (a scalar, pointer, reference,
 # function pointer or STL container), `(:enum, key)`, `(:layout, key)`, or
@@ -141,7 +169,7 @@ _strip_top_cv(c_type) = String(replace(replace(strip(String(c_type)), r"^(?:(?:c
 # parameter of its type would.
 function _table_entry(t::AbstractString, structs)
     (isempty(t) || t in ("void", "unknown")) && return (:direct, nothing)
-    (occursin(r"[*&(\[]", t) || startswith(t, "function_ptr")) && return (:direct, nothing)
+    (occursin(r"[*&(\[]", _outside_template_args(t)) || startswith(t, "function_ptr")) && return (:direct, nothing)
 
     mapped = map_cpp_type(t)
     named = startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")

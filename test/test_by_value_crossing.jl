@@ -488,8 +488,48 @@ Contents of the .debug_info section:
         "parameters" => [Dict{String,Any}("name" => "a$i", "c_type" => c) for (i, c) in enumerate(params)],
         "return_type" => Dict{String,Any}("c_type" => ret))
 
+    @testset "a pointer inside template arguments is not a pointer crossing" begin
+        # `_table_entry` read the `*` of `pair<key_value_pair *, bool>` as the
+        # type's own declarator and called it `:direct`: the thunk returned the
+        # 16-byte pair in a register, and on Win64 the callee read `this` from
+        # the next register (Boost.JSON `object::emplace<int>`, 2026-11-01).
+        @test BVF._outside_template_args("pair<int*, bool>") == "pair"
+        @test BVF._outside_template_args("pair<int*, bool>*") == "pair*"
+        @test BVF._outside_template_args("result<ee::Pair &, int>") == "result"
+        @test BVF._outside_template_args("map<string, vector<int*> >") == "map"
+        @test BVF._outside_template_args("int (*)(int*)") == "int (*)(int*)"
+        @test BVF._outside_template_args("Pair") == "Pair"
+        # The type's own declarators still make it a pointer, reference, function or array.
+        for t in ("pair<int*, bool>*", "pair<int*, bool>&", "result<ee::Pair &, int>&&",
+                  "void (*)(int*)", "int (&)[3]", "Box<double>*")
+            @test BVF._table_entry(t, structs) == (:direct, nothing)
+        end
+        # Inside the arguments they do not: with no layout the record is missing,
+        # and the crossing is refused, not spelled as a pointer.
+        @test BVF._table_entry("pair<int*, bool>", structs) == (:missing, nothing)
+        @test BVF._table_entry("result<ee::Pair &, int>", structs) == (:missing, nothing)
+        @test BVF.by_value_crossing("pair<int*, bool>", structs, ra) == (:opaque, nothing)
+        @test BVF.by_value_crossing("const result<ee::Pair &, int>", structs, ra) == (:opaque, nothing)
+        # With a layout under that spelling it crosses by its layout, like any record.
+        with_pair = merge(structs, Dict{String,Any}("pair<int*, bool>" => Dict{String,Any}(
+            "kind" => "struct", "byte_size" => "0x10",
+            "members" => [Dict{String,Any}("name" => "first", "c_type" => "int*",
+                                           "julia_type" => "Ptr{Cint}", "size" => 8, "offset" => "0x0"),
+                          Dict{String,Any}("name" => "second", "c_type" => "bool",
+                                           "julia_type" => "Bool", "size" => 1, "offset" => "0x8")])))
+        @test BVF.by_value_crossing("pair<int*, bool>", with_pair, ra) == (:layout, "pair<int*, bool>")
+        @test BVF.by_value_crossing("pair<int*, bool>*", with_pair, ra) == (:direct, nothing)
+        # The SysV member walk reads the same declarators.
+        @test BVF._sysv_record_of("pair<int*, bool>", with_pair) == "pair<int*, bool>"
+        @test BVF._sysv_record_of("pair<int*, bool>*", with_pair) === nothing
+    end
+
     @testset "thunk_crossings names the reason" begin
         @test BVF.thunk_crossings(fn("f", ["Tag", "int"], "int"), structs, ra).trap === nothing
+        @test occursin("returns `pair<int*, bool>` by value",
+                       BVF.thunk_crossings(fn("f", ["int"], "pair<int*, bool>"), structs, ra).layout_trap)
+        @test occursin("takes `result<ee::Pair &, int>` by value",
+                       BVF.thunk_crossings(fn("f", ["result<ee::Pair &, int>"], "int"), structs, ra).layout_trap)
         @test occursin("takes `P3` by value", BVF.thunk_crossings(fn("f", ["P3"], "int"), structs, ra).trap)
         # A pass-by-reference record comes back through a hidden pointer the
         # thunk does not pass.

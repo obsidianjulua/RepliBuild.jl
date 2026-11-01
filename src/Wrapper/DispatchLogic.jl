@@ -144,7 +144,7 @@ function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
         for t in Iterators.flatten(((get(func_info["return_type"], "c_type", ""),),
                                     (get(p, "c_type", "") for p in func_info["parameters"])))
             s = String(t)
-            (isempty(s) || occursin(r"[*&(\[]", s)) && continue
+            (isempty(s) || occursin(r"[*&(\[]", FG._outside_template_args(s))) && continue
             FG.record_passes_by_reference(s, nothing, record_abi) && return false
             # A name several types share (`FG.conflicted_within`): the Julia
             # struct is one of them, maybe not this function's. The thunk path
@@ -169,7 +169,7 @@ function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
                                     (get(p, "c_type", "") for p in func_info["parameters"])))
             s = String(strip(replace(String(t), r"\bconst\b" => "")))
             s = String(replace(s, r"^(?:struct|union|class|enum)\s+" => ""))
-            (isempty(s) || occursin(r"[*&(\[]", s)) && continue
+            (isempty(s) || occursin(r"[*&(\[]", FG._outside_template_args(s))) && continue
             FG.holds_vector(s, dwarf_structs) && return false
         end
     end
