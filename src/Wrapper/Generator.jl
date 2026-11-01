@@ -164,6 +164,7 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     _assert_wrapper_parses(wrapper_content, module_name)
     _assert_base_calls_qualified(wrapper_content, module_name)
     _assert_exports_defined(wrapper_content, module_name)
+    _assert_no_duplicate_toplevel_names(wrapper_content, module_name)
     _assert_cstring_policy(wrapper_content, module_name)
     _assert_no_shadowed_ccall_types(wrapper_content, module_name)
     _assert_no_any_ccall_return(wrapper_content, module_name)
@@ -644,6 +645,70 @@ function _assert_exports_defined(wrapper_content::AbstractString, module_name::A
     the candidate set (see `_export_statement`), not by defining the missing \
     names: they are usually screened out on purpose, or bound under a different \
     spelling because the definition path sanitizes and the export path does not.
+    """)
+end
+
+"""
+    _assert_no_duplicate_toplevel_names(wrapper_content, module_name)
+
+Refuse to write a wrapper that binds one top-level name twice.
+
+Julia 1.12+ lets a module redefine a binding silently: `struct object` after
+`@enum kind … object = 7 …` replaces the enumerator, and `const x = 1` twice
+keeps the second. The module parses, loads and passes any test that never
+reaches the first binding. Boost.JSON's `enum class kind { …, string, array,
+object }` is followed by the records `string`, `array` and `object`, so
+`BoostJson.object` was the struct and `kind::object` was reachable only as
+`kind(7)`; `kind::null` and `literals::null` rebound each other the same way
+(2026-11-01). `_render_enum_chunks` now prefixes a colliding enumerator with
+its enum's name; this is the check that the rule, and every other emitter,
+left no name bound twice.
+
+What counts: two definitions of a name are fine when they are all methods
+(`function f` twice is an overload set) or one type plus methods (`struct T`
+and `function T()` is a constructor). Anything else bound twice — two types,
+two constants, a constant or an enumerator beside anything — is one binding
+replacing another, and is refused with the line of each.
+
+Checked on the emitted TEXT (`_defined_bindings`), like its siblings: the
+bug is the generator's bookkeeping disagreeing with what it wrote, so a guard
+built on that bookkeeping would agree with the bug. An unparseable body is
+left to `_assert_wrapper_parses`, which runs first.
+"""
+function _assert_no_duplicate_toplevel_names(wrapper_content::AbstractString,
+                                             module_name::AbstractString)
+    by_name = Dict{String,Vector{Tuple{Symbol,Int}}}()
+    for (n, kind, line) in _defined_bindings(wrapper_content)
+        push!(get!(by_name, n, Tuple{Symbol,Int}[]), (kind, line))
+    end
+    isempty(by_name) && return nothing
+
+    offenders = String[]
+    for n in sort!(collect(keys(by_name)))
+        defs = by_name[n]
+        length(defs) > 1 || continue
+        n_methods = count(d -> d[1] === :function, defs)
+        n_types   = count(d -> d[1] in (:struct, :type, :enum), defs)
+        # Methods overload; one type takes constructors. Nothing else coexists.
+        (n_types <= 1 && n_methods + n_types == length(defs)) && continue
+        push!(offenders, "  `$n`: " * join(("$(d[1]) at line $(d[2])" for d in defs), ", "))
+    end
+    isempty(offenders) && return nothing
+
+    shown = join(first(offenders, 15), "\n")
+    more = length(offenders) > 15 ? "\n  … and $(length(offenders) - 15) more" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(offenders)) top-level \
+    name(s) are bound more than once.
+
+    $shown$more
+
+    Julia 1.12+ accepts the redefinition silently, so the module would load with \
+    the LAST binding and the earlier one unreachable: a struct named after an \
+    enumerator replaces it, and a second constant replaces the first. An \
+    enumerator that collides is renamed `<enum>_<name>` by `_render_enum_chunks`; \
+    a collision from any other emitter is a generator bug — give the later \
+    binding a name of its own, never a second definition.
     """)
 end
 
