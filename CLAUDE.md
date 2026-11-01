@@ -714,6 +714,19 @@ the test named when you touch the area.
 - Enums with identical member sets emit as `const Alias = Canonical`, not a second
   `@enum`. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
   `""` stays an empty-name sentinel; do not harden it.
+- **An enumerator never rebinds another top-level name.** Julia 1.12+ lets
+  `struct object` silently replace `kind::object` bound by an earlier `@enum`
+  (Boost.JSON, 2026-11-01). Both generators hold the enum section back as
+  `_PendingEnum`s and `_render_enum_chunks` renders it last, against
+  `_toplevel_names` of the rest of the wrapper's text: an enumerator whose name
+  is also a record, function, global, constant, enum type or another enum's
+  enumerator is bound as `<enum>_<name>` (both enums move when two share a
+  member), the rest keep their names byte for byte. `_enumerator_julia_name` is
+  the one derivation, and the export list carries the names the `@enum` binds.
+  Never push `@enum` text into `enum_chunks` directly, and never bind a
+  top-level name twice from any emitter: `_assert_no_duplicate_toplevel_names`
+  refuses the wrapper (methods overload, one type takes constructors, nothing
+  else coexists). (`test_enumerator_collisions.jl`.)
 - Emitted introspection (`DISPATCH_TIER`/`dispatch_tier`, `STRUCT_SIZES`/
   `STRUCT_OFFSETS`/`struct_size`/`member_offset`) is derived from the final chunks, is
   unexported, and uses each generator's own sanitizer. `_vptr$X` member names must be

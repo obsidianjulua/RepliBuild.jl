@@ -1179,7 +1179,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # ENUM GENERATION (from DWARF)
     # =============================================================================
 
-    enum_chunks = String[]
+    # The enum section is held back as `_PendingEnum` records and rendered last
+    # (`_render_enum_chunks`), once every other top-level name of the wrapper is
+    # known: an enumerator that would rebind a record, a function, a global or
+    # another enum's member is prefixed with its enum's name there. The text
+    # still lands first in the file. Strings in this list are emitted verbatim.
+    enum_chunks = _EnumChunk[]
 
     # Extract enums (stored with __enum__ prefix)
     enum_types = filter(k -> startswith(k, "__enum__"), keys(dwarf_structs))
@@ -1240,11 +1245,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 # Sanitize FIRST, then choose the shape. Both branches consume the
                 # same pairs, so the emitted member spelling cannot depend on which
                 # one runs — the bitflag path is a different container for identical
-                # names and values, not a different naming decision.
+                # names and values, not a different naming decision. These are
+                # the BASE names: `_render_enum_chunks` applies the collision
+                # prefix and the keyword escape (`_enumerator_julia_name`).
                 members = Pair{String,Any}[]
                 seen_names = Set{String}()
                 for enumerator in enumerators
-                    name = _escape_keyword(_sanitize_c_type_name(get(enumerator, "name", "Unknown")))
+                    name = _sanitize_c_type_name(get(enumerator, "name", "Unknown"))
                     name in seen_names && continue
                     push!(seen_names, name)
                     push!(members, name => get(enumerator, "value", 0))
@@ -1256,46 +1263,22 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 if haskey(emitted_enum_sigs, enum_sig)
                     canonical = emitted_enum_sigs[enum_sig]
                     if canonical != enum_name
-                        push!(enum_chunks, """
+                        push!(enum_chunks, _PendingEnumAlias(enum_name, canonical, """
                         # $enum_name is $canonical under a different DWARF spelling.
                         # Aliased rather than re-emitted: a second `@enum` would
                         # rebind every member name to this type and break ccalls
                         # expecting $canonical.
                         const $enum_name = $canonical
 
-                        """)
+                        """))
                     end
                     continue
                 end
                 emitted_enum_sigs[enum_sig] = enum_name
 
-                if _is_bitflag_enum(last.(members))
-                    push!(enum_chunks, _bitflag_enum_chunk(enum_name, julia_underlying, members))
-                else
-                push!(enum_chunks, """
-                # C enum: $enum_name (underlying type: $underlying_type)
-                @enum $enum_name::$julia_underlying begin
-                """)
-
-                seen_values = Set{Any}()
-                duplicate_defs = String[]
-                for (name, value) in members
-                    if value in seen_values
-                        push!(duplicate_defs, "const $name = $enum_name($value)")
-                    else
-                        push!(seen_values, value)
-                        push!(enum_chunks, "    $name = $value\n")
-                    end
-                end
-
-                push!(enum_chunks, """
-                end
-
-                """)
-                if !isempty(duplicate_defs)
-                    push!(enum_chunks, join(duplicate_defs, "\n") * "\n\n")
-                end
-                end
+                push!(enum_chunks, _PendingEnum(enum_name,
+                    "C enum: $enum_name (underlying type: $underlying_type)",
+                    julia_underlying, members))
             end
         end
 
@@ -1341,42 +1324,19 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
                 # Sanitize first, then choose the shape — see the DWARF enum site
                 # above. `emitted`, not `members`: the loop variable is taken.
+                # Base names; the renderer prefixes and escapes.
                 emitted = Pair{String,Any}[]
                 seen_names = Set{String}()
                 for (member_name, value) in members
-                    n = _escape_keyword(_sanitize_c_type_name(string(member_name)))
+                    n = _sanitize_c_type_name(string(member_name))
                     n in seen_names && continue
                     push!(seen_names, n)
                     push!(emitted, n => value)
                 end
 
-                if _is_bitflag_enum(last.(emitted))
-                    push!(enum_chunks, _bitflag_enum_chunk(enum_name, underlying, emitted))
-                else
-                push!(enum_chunks, """
-                # C enum: $enum_name (from header - not in DWARF)
-                @enum $enum_name::$underlying begin
-                """)
-
-                seen_values = Set{Any}()
-                duplicate_defs = String[]
-                for (member_name, value) in emitted
-                    if value in seen_values
-                        push!(duplicate_defs, "const $member_name = $enum_name($value)")
-                    else
-                        push!(seen_values, value)
-                        push!(enum_chunks, "    $member_name = $value\n")
-                    end
-                end
-
-                push!(enum_chunks, """
-                end
-
-                """)
-                if !isempty(duplicate_defs)
-                    push!(enum_chunks, join(duplicate_defs, "\n") * "\n\n")
-                end
-                end
+                push!(enum_chunks, _PendingEnum(string(enum_name),
+                    "C enum: $enum_name (from header - not in DWARF)",
+                    underlying, emitted))
                 added_header_enums += 1
             end
         end
@@ -3904,26 +3864,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Include enum types, enum values, struct types, and functions
     all_exports = copy(exports)
 
-    # Add enum types. `enum_types` and `struct_types` are Sets filled from
-    # `dwarf_structs`, read back from compilation_metadata.json, so their order is
-    # the file's key order — which differs between JSON majors. Sort for a stable
-    # export line (GeneratorCpp does the same).
-    for enum_key in sort!(collect(enum_types))
-        enum_name = replace(enum_key, "__enum__" => "")
-        push!(all_exports, enum_name)
-
-        # Add enum constants
-        if haskey(dwarf_structs, enum_key)
-            enum_info = dwarf_structs[enum_key]
-            enumerators = get(enum_info, "enumerators", [])
-            for enumerator in enumerators
-                enum_const_name = get(enumerator, "name", "")
-                if !isempty(enum_const_name)
-                    push!(all_exports, enum_const_name)
-                end
-            end
-        end
-    end
+    # Enum types and enumerators go here, in `sort!(collect(enum_types))`
+    # order (the Sets follow the metadata file's key order, which differs
+    # between JSON majors), but are spliced in below once `_render_enum_chunks`
+    # has settled each enumerator's final name: the export list must carry the
+    # spelling the `@enum` binds (`_enumerator_julia_name`), and that is
+    # decided against the rest of the module (GeneratorCpp does the same).
+    enum_exports_at = length(all_exports) + 1
 
     # Add struct types (filter internal/compiler types)
     for struct_name in sort!(collect(struct_types))
@@ -4078,17 +4025,38 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # built from different inputs — which is exactly how 102 undefined exports
     # reached the Hub (see `_export_statement`). Must stay below the dedup, the
     # slice emission, and `tier1_registry` (which defines TIER1_FUNCTIONS et al).
-    _enums    = join(enum_chunks)
     _structs  = join(struct_chunks)
     _unions   = join(union_accessor_chunks)
     _funcs    = join(func_chunks)
 
     # Derived from the FINAL chunks, like the slices and TIER1_FUNCTIONS above:
     # what dispatches how, and the layout facts consumers were re-parsing out of
-    # compilation_metadata.json.
+    # compilation_metadata.json. The enum section is not text yet; its type
+    # names are known.
     (_tiers, _kernels) = _dispatch_facts(func_chunks)
     introspection = _dispatch_tier_chunk(_tiers, _kernels) *
-                    _layout_chunk(dwarf_structs, _defined_type_names(_enums * _structs), _sanitize_c_type_name)
+                    _layout_chunk(dwarf_structs,
+                                  union(_defined_type_names(_structs), _pending_enum_type_names(enum_chunks)),
+                                  _sanitize_c_type_name)
+
+    # The enum section last, against every other top-level name the module
+    # binds, read off the text it will be written with (minus the enums and
+    # the export line). An enumerator that would rebind one of them is
+    # prefixed with its enum's name (`_render_enum_chunks`).
+    taken = _toplevel_names(header * init_block * metadata_section * _structs * _unions *
+                            tier1_registry * introspection * _funcs * footer)
+    (rendered_enums, enum_member_names) = _render_enum_chunks(enum_chunks, taken)
+    _enums = join(rendered_enums)
+
+    # The enum segment of the export list, at the position recorded above, in
+    # the names the `@enum`s bind. An alias carries its canonical's members.
+    enum_exports = String[]
+    for enum_key in sort!(collect(enum_types))
+        enum_name = replace(enum_key, "__enum__" => "")
+        push!(enum_exports, enum_name)
+        append!(enum_exports, get(enum_member_names, enum_name, String[]))
+    end
+    splice!(all_exports, enum_exports_at:enum_exports_at-1, enum_exports)
 
     export_statement = _export_statement(all_exports,
                                          _enums * _structs * _unions * tier1_registry *

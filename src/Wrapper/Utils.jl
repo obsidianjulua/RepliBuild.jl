@@ -262,12 +262,39 @@ An unparseable body returns an empty set rather than throwing —
 """
 function _defined_names(module_body::AbstractString)::Set{String}
     out = Set{String}()
+    for (n, _, _) in _defined_bindings(module_body)
+        push!(out, n)
+    end
+    return out
+end
+
+"""
+    _defined_bindings(module_body) -> Vector{Tuple{String,Symbol,Int}}
+
+Every top-level binding the emitted module body makes, as `(name, kind, line)`,
+in source order. The same walk as `_defined_names`, keeping what that one
+throws away: WHAT each name is bound as, which is the question a redefinition
+check has to ask. Two `function f` are overloads, `struct T` plus `function T`
+is a type with a constructor, and anything else bound twice is one binding
+silently replacing another.
+
+`kind` is one of `:function` (`function`, `macro`, `f(x) = …`), `:struct`
+(`struct`, `mutable struct`), `:type` (`abstract type`, `primitive type`),
+`:enum` (the `@enum` type), `:enumerator` (an `@enum` member), `:const`
+(`const x = …`) or `:global` (a bare `x = …`). `line` is the last
+`LineNumberNode` seen before the definition, 0 when the parse gives none, so a
+refusal can name where to look.
+
+Unparseable input gives an empty vector, like `_defined_names`.
+"""
+function _defined_bindings(module_body::AbstractString)::Vector{Tuple{String,Symbol,Int}}
+    out = Tuple{String,Symbol,Int}[]
     ex = try
         Meta.parseall(module_body)
     catch
         return out
     end
-    _collect_defined!(out, ex)
+    _collect_defined!(out, ex, 0, false)
     return out
 end
 
@@ -281,32 +308,44 @@ function _bound_name(x)
     return nothing
 end
 
-function _collect_defined!(out::Set{String}, ex)
+# Whether an assignment target is a method definition (`f(x) = …`, with any
+# `where` clauses) rather than a name (`x = …`, `x::T = …`).
+function _is_method_target(x)
+    x isa Expr || return false
+    x.head === :call && return true
+    x.head === :where && !isempty(x.args) && return _is_method_target(x.args[1])
+    return false
+end
+
+function _collect_defined!(out::Vector{Tuple{String,Symbol,Int}}, ex, line::Int, in_const::Bool)
     ex isa Expr || return out
     h = ex.head
+    found(n, kind) = (n === nothing || push!(out, (n, kind, line)); nothing)
 
     if h === :function || h === :macro
-        n = _bound_name(get(ex.args, 1, nothing)); n === nothing || push!(out, n)
+        found(_bound_name(get(ex.args, 1, nothing)), :function)
     elseif h === :(=)
         # Covers both `f(x) = …` (short-form method) and `x = …` (global).
-        n = _bound_name(ex.args[1]); n === nothing || push!(out, n)
+        found(_bound_name(ex.args[1]),
+              _is_method_target(ex.args[1]) ? :function : (in_const ? :const : :global))
     elseif h === :const || h === :global || h === :local
-        for a in ex.args; _collect_defined!(out, a); end
+        for a in ex.args; _collect_defined!(out, a, line, h === :const); end
     elseif h === :struct
-        n = _bound_name(get(ex.args, 2, nothing)); n === nothing || push!(out, n)
+        found(_bound_name(get(ex.args, 2, nothing)), :struct)
     elseif h === :abstract || h === :primitive
-        n = _bound_name(get(ex.args, 1, nothing)); n === nothing || push!(out, n)
+        found(_bound_name(get(ex.args, 1, nothing)), :type)
     elseif h === :macrocall && !isempty(ex.args) && ex.args[1] === Symbol("@enum")
         # `@enum Name::T begin A = 1 … end` and `@enum Name A B C` both bind the
         # type AND every member. Members carry the emitter's FINAL spelling,
         # which is the whole reason this is read back rather than re-derived.
         rest = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
         if !isempty(rest)
-            n = _bound_name(rest[1]); n === nothing || push!(out, n)
+            found(_bound_name(rest[1]), :enum)
+            mline = line
             for m in rest[2:end], s in (m isa Expr && m.head === :block ? m.args : (m,))
-                s isa LineNumberNode && continue
+                s isa LineNumberNode && (mline = s.line; continue)
                 nm = s isa Expr && s.head === :(=) ? _bound_name(s.args[1]) : _bound_name(s)
-                nm === nothing || push!(out, nm)
+                nm === nothing || push!(out, (nm, :enumerator, mline))
             end
         end
     elseif h === :macrocall
@@ -320,11 +359,17 @@ function _collect_defined!(out::Set{String}, ex)
         # filter deleted `setproperty`, `g_count` and the bitfield accessors
         # from a wrapper's export line. Also covers `@generated function
         # _TIER1_x(…)` and `@inline f() = …`, both real emission shapes.
-        for a in ex.args; _collect_defined!(out, a); end
+        for a in ex.args
+            a isa LineNumberNode && (line = a.line; continue)
+            _collect_defined!(out, a, line, in_const)
+        end
     end
 
     if h === :toplevel || h === :module || h === :block
-        for a in ex.args; _collect_defined!(out, a); end
+        for a in ex.args
+            a isa LineNumberNode && (line = a.line; continue)
+            _collect_defined!(out, a, line, in_const)
+        end
     end
     return out
 end
@@ -991,6 +1036,225 @@ function _bitflag_enum_chunk(enum_name::AbstractString, underlying::AbstractStri
     end
     println(io)
     return String(take!(io))
+end
+
+# =============================================================================
+# Enumerators: one name derivation, one collision rule, one renderer
+# =============================================================================
+
+"""
+    _enumerator_julia_name(raw, enum_name, sanitize; collides=false) -> String
+
+The Julia name an enumerator spelled `raw` (its DWARF or header name) is bound
+under, in the `@enum`, in a bitflag enum's `const`, and on the `export` line.
+This is the ONE derivation; `sanitize` is the generator's type-name sanitizer
+(`_sanitize_c_type_name` or `_sanitize_cpp_type_name`), because the two
+generators spell identifiers differently and the enumerator must match the
+field and parameter spellings of its own wrapper.
+
+Before this existed the `@enum` emitters sanitized and the export list did
+not. Boost.JSON spells `kind::bool_` and `kind::double_` with a trailing
+underscore (C++ keywords), the sanitizer strips it, and the wrap reported
+"4 name(s) dropped from `export` — the module never binds them: bool_, double_,
+false_, true_" (2026-11-01).
+
+`collides` is the collision rule's verdict (`_render_enum_chunks`): the
+enumerator's sanitized name is also a top-level name the same wrapper emits
+(a record, a function, a global, an enum type, or an enumerator of ANOTHER
+enum), so it is bound as `<enum>_<name>`, the way C++ spells `kind::object`.
+Nothing moves when nothing collides: consumers call these names. The keyword
+escape (`var"…"`) comes last, so a prefixed name is never escaped.
+"""
+function _enumerator_julia_name(raw::AbstractString, enum_name::AbstractString, sanitize;
+                                collides::Bool = false)::String
+    base = String(sanitize(String(raw)))
+    return _escape_keyword(collides ? "$(enum_name)_$(base)" : base)
+end
+
+"""
+    _PendingEnum
+
+One enum a generator has decided to emit, held back until every other
+top-level name of the wrapper is known, so the collision rule can run over the
+whole module (`_render_enum_chunks`). `members` are `base => value` pairs where
+`base` is the sanitized enumerator name BEFORE keyword escaping and before any
+collision prefix, deduplicated, in declaration order. `comment` is the line
+above the `@enum` (`C++ enum: kind (underlying type: unsigned char)`).
+"""
+struct _PendingEnum
+    name::String                        # the Julia type name as emitted
+    comment::String
+    julia_underlying::String
+    members::Vector{Pair{String,Any}}
+end
+
+"""
+    _PendingEnumAlias
+
+An enum whose member set another enum already emitted, bound as `const name =
+canonical` (see the across-enum dedup in either generator). `text` is the
+chunk, verbatim; it binds only the type name, so it needs no collision pass,
+and its members are the canonical's.
+"""
+struct _PendingEnumAlias
+    name::String
+    canonical::String
+    text::String
+end
+
+# Shared by the enum-section chunk list: a `String` is emitted as written (the
+# section banners, an alias), the two records above go through the renderer.
+const _EnumChunk = Union{String,_PendingEnum,_PendingEnumAlias}
+
+_pending_enum_type_names(chunks)::Set{String} =
+    Set{String}(c.name for c in chunks if !(c isa String))
+
+"""
+    _toplevel_names(module_text) -> Dict{String,Symbol}
+
+Every name `module_text` binds at top level, with the kind it is bound as,
+read off the parsed text (`_defined_bindings`). A name bound as a type and as
+its constructor is reported as the type: that is what an enumerator of the
+same name collides with. The input is the wrapper WITHOUT its enum section,
+header to footer, so the set is what the enumerators must not rebind.
+"""
+function _toplevel_names(module_text::AbstractString)::Dict{String,Symbol}
+    taken = Dict{String,Symbol}()
+    for (n, kind, _) in _defined_bindings(module_text)
+        prev = get(taken, n, nothing)
+        if prev === nothing || (prev === :function && kind !== :function)
+            taken[n] = kind
+        end
+    end
+    return taken
+end
+
+_describe_binding(kind::Symbol) =
+    kind === :struct ? "a struct" :
+    kind === :function ? "a function" :
+    kind === :const ? "a constant" :
+    kind === :global ? "a global" :
+    kind === :enum ? "an enum type" :
+    kind === :enumerator ? "an enumerator" :
+    "a type"
+
+"""
+    _render_enum_chunks(chunks, taken) -> (Vector{String}, Dict{String,Vector{String}})
+
+Render the enum section from its pending list, applying the collision rule.
+
+A C++ scoped enum's enumerators are emitted at module scope by `@enum`, where
+Julia 1.12+ lets a later `struct` of the same bare name replace them silently.
+Boost.JSON's `enum class kind { null, bool_, …, string, array, object }` is
+followed by the records `string`, `array` and `object`, so `BoostJson.object`
+was the struct and `kind::object` was reachable only as `kind(7)`; a consumer
+comparing `value_kind(v) == BoostJson.object` compared an enum against a type
+(2026-11-01). Two enums sharing an enumerator (`kind::null`, `literals::null`)
+are the same defect from the other side: the later `@enum` rebinds the name.
+
+The rule, deterministic and total: an enumerator whose sanitized name is also
+in `taken` (every other top-level name of the wrapper), is an enum type's
+name, or is an enumerator of another emitted enum is bound as
+`<enum>_<name>` (`kind_object`), as C++ spells it; both enums move when two
+share a member, since the bare name belongs to neither. Should the prefixed
+name itself be taken, underscores are appended until it is free. A comment
+above the `@enum` names each collision. An enumerator that collides with
+nothing keeps its name, byte for byte: consumers call those.
+
+`taken` is `_toplevel_names` of the wrapper without its enum section. Returns
+the rendered chunks and, per emitted enum (aliases included, as their
+canonical's), the final member names as BOUND, unescaped, which is what the
+export list carries. `_assert_no_duplicate_toplevel_names` checks the result
+on the written text, so a collision this rule misses is refused, never
+redefined.
+"""
+function _render_enum_chunks(chunks::AbstractVector, taken::Dict{String,Symbol})
+    enum_types = _pending_enum_type_names(chunks)
+    owners = Dict{String,Vector{String}}()
+    for c in chunks
+        c isa _PendingEnum || continue
+        for (base, _) in c.members
+            push!(get!(owners, base, String[]), c.name)
+        end
+    end
+    collides(base) = haskey(taken, base) || base in enum_types || length(owners[base]) > 1
+
+    # Names the module ends up holding besides the renamed enumerators, so a
+    # prefixed name can be checked against them before it is assigned.
+    used = Set{String}(keys(taken))
+    union!(used, enum_types)
+    for c in chunks
+        c isa _PendingEnum || continue
+        for (base, _) in c.members
+            collides(base) || push!(used, base)
+        end
+    end
+
+    function note(base, enum_name)
+        parts = String[]
+        haskey(taken, base) && push!(parts, _describe_binding(taken[base]) * " this module defines")
+        base in enum_types && push!(parts, "the enum type `$base`")
+        others = filter(!=(enum_name), owners[base])
+        isempty(others) || push!(parts, "an enumerator of " * join(("`$o`" for o in others), ", "))
+        return "# `$base` also names " * join(parts, " and ") * "; "
+    end
+
+    out = String[]
+    finals = Dict{String,Vector{String}}()
+    for c in chunks
+        if c isa String
+            push!(out, c)
+            continue
+        elseif c isa _PendingEnumAlias
+            push!(out, c.text)
+            finals[c.name] = get(finals, c.canonical, String[])
+            continue
+        end
+
+        bound = String[]
+        members = Pair{String,Any}[]
+        notes = String[]
+        for (base, value) in c.members
+            if collides(base)
+                final = "$(c.name)_$(base)"
+                while final in used
+                    final *= "_"
+                end
+                push!(used, final)
+                push!(notes, note(base, c.name) * "the enumerator is `$final`.")
+            else
+                final = base
+            end
+            push!(bound, final)
+            push!(members, _escape_keyword(final) => value)
+        end
+        finals[c.name] = bound
+
+        io = IOBuffer()
+        if _is_bitflag_enum(last.(members))
+            foreach(n -> println(io, n), notes)
+            print(io, _bitflag_enum_chunk(c.name, c.julia_underlying, members))
+        else
+            println(io, "# ", c.comment)
+            foreach(n -> println(io, n), notes)
+            println(io, "@enum $(c.name)::$(c.julia_underlying) begin")
+            seen_values = Set{Any}()
+            duplicate_defs = String[]
+            for (name, value) in members
+                if value in seen_values
+                    push!(duplicate_defs, "const $name = $(c.name)($value)")
+                else
+                    push!(seen_values, value)
+                    println(io, "    $name = $value")
+                end
+            end
+            println(io, "end")
+            println(io)
+            isempty(duplicate_defs) || print(io, join(duplicate_defs, "\n"), "\n\n")
+        end
+        push!(out, String(take!(io)))
+    end
+    return (out, finals)
 end
 
 """

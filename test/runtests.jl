@@ -315,6 +315,18 @@ include(joinpath(@__DIR__, "test_enum_underscore_name.jl"))
 
 include(joinpath(@__DIR__, "test_enum_alias_collision.jl"))
 
+# ── Enumerators colliding with top-level names (no toolchain) ────────────────
+# A C++ scoped enum's enumerators are bound at module scope by `@enum`, where
+# Julia 1.12+ lets a later `struct` of the same bare name replace them silently.
+# Boost.JSON's `kind::object` was reachable only as `kind(7)` because
+# `BoostJson.object` was the struct; `kind::null` and `literals::null` rebound
+# each other; and the export list spelled `bool_` where the `@enum` bound
+# `bool`, so the wrap dropped four names (2026-11-01). One derivation now
+# (`_enumerator_julia_name`), a colliding enumerator is `<enum>_<name>`, and
+# `_assert_no_duplicate_toplevel_names` refuses any name bound twice.
+
+include(joinpath(@__DIR__, "test_enumerator_collisions.jl"))
+
 # ── Function names: one derivation, total (no toolchain) ─────────────────────
 # fmt instantiates a template on a lambda's closure type, which GNU demangles as
 # `…::{lambda(fmt::v12::basic_appender<char>)#1}&>`. The function-name
