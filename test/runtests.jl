@@ -259,6 +259,13 @@ include(joinpath(@__DIR__, "test_template_members.jl"))
 include(joinpath(@__DIR__, "test_record_scope.jl"))
 include(joinpath(@__DIR__, "test_integer_width_overloads.jl"))
 
+# ── Tier 2 returns the Julia side must type (no toolchain) ──────────────────
+# Boost.JSON's inline DOM API (2026-11-01): a `const` record return looked up
+# with its cv stayed `Any` and the JIT refused the call; a `*` inside template
+# arguments made `pair<key_value_pair *, bool>` a pointer crossing, which on
+# Win64 returned a 16-byte record without its hidden pointer (access violation).
+include(joinpath(@__DIR__, "test_cpp_return_resolution.jl"))
+
 # ── Byte-blob struct setters + the Base-name namespace guard (no toolchain) ──
 # Blob structs had accessors in one direction only, so a param struct the
 # library builds was read-only — the only path into llama.cpp runs through one.

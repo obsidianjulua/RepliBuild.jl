@@ -2853,6 +2853,28 @@ _conflict_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
         "ABI Safety Trap: cannot call '$julia_name'. It $(join(crossings, "; ")). " *
         _CONFLICT_TRAP_NOTE) * ")\n"
 
+"""
+    _unresolved_return_trap_msg(julia_name, demangled, c_ret) -> String
+
+The refusal GeneratorCpp's Tier 2 path raises for a function whose return the
+Julia side could not type: `thunk_crossings` accepted the crossing, but the
+metadata's `julia_type` is the `Any` sentinel and no struct, enum or STL
+lookup resolved the C spelling. `JITManager.invoke` refuses `Any` at the call
+("unresolved `Any` sentinel"), so such a function was uncallable; the stub says
+so where it is defined, like every other ABI trap, and no thunk is compiled
+for it. Boost.JSON's `key_value_pair::key()` reached `invoke` this way until
+the lookup read the cv-stripped spelling (2026-11-01).
+"""
+function _unresolved_return_trap_msg(julia_name::AbstractString, demangled::AbstractString,
+                                     c_ret::AbstractString)::String
+    return "ABI Safety Trap: cannot call '$julia_name' ($demangled). It returns `$c_ret`, and no " *
+           "Julia type was resolved for that return: the metadata maps it to nothing this wrapper " *
+           "emits, so the thunk's result could not be read. A type only declared here (header-only, " *
+           "constructor homing) is recovered by building with `-Xclang -fno-use-ctor-homing` or " *
+           "`-fstandalone-debug` in [compile] flags; otherwise keep the function out with " *
+           "[wrap] exclude_symbols."
+end
+
 # A chunk whose function body only raises one of the generators' refusal
 # errors: GeneratorC's "ABI Safety Trap" / "FFI Safety Trap" stubs and
 # GeneratorCpp's untypable by-value record trap.

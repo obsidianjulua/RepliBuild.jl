@@ -3093,9 +3093,6 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # discards it), and the value is the type's only instance.
             empty_ret = crossings.ret[1] === :ignore || crossings.ret[1] === :regpad
 
-            requires_jit = true
-            push!(needed_function_thunks, mangled)
-
             # Build argument list for invoke
             invoke_args = join(param_names, ", ")
             jit_ret_type = return_type["julia_type"]
@@ -3105,27 +3102,33 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # This is critical: invoke(name, Any, ...) creates Ref{Any}() which corrupts
             # memory when the JIT writes raw struct bytes into it.
             if jit_ret_type == "Any" && jit_c_ret != "void"
+                # Every lookup reads the spelling with its top-level cv removed,
+                # as `by_value_crossing` does. DWARF gives
+                # `key_value_pair::key()` the return `const basic_string_view<char>`
+                # and keys the record without the `const`; looked up as spelled,
+                # the return stayed `Any` and the JIT refused the call, while the
+                # same record crossed as a parameter (Boost.JSON, 2026-11-01).
+                _bare_ret = JLCSIRGenerator.FunctionGen._strip_top_cv(jit_c_ret)
                 # Enum returns first: ABI integers keyed __enum__<name> in DWARF,
                 # so every struct branch below misses them and the Any sentinel
                 # survived into invoke() — whose Ref{Any}() sret path throws
                 # UndefRefError (found live: tinyxml2 XMLDocument::Parse → XMLError).
                 # The generated @enum type is a Julia primitive type, so
                 # _invoke_call takes the scalar ccall path with it.
-                _enum_ret = String(strip(replace(jit_c_ret, r"\bconst\b" => "")))
-                stl_size = _stl_internal(jit_c_ret) ? get_stl_container_size(jit_c_ret) : 0
-                if haskey(dwarf_structs, "__enum__$(_enum_ret)")
-                    jit_ret_type = _sanitize_cpp_type_name(_enum_ret)
+                stl_size = _stl_internal(_bare_ret) ? get_stl_container_size(_bare_ret) : 0
+                if haskey(dwarf_structs, "__enum__$(_bare_ret)")
+                    jit_ret_type = _sanitize_cpp_type_name(_bare_ret)
                 elseif stl_size > 0
                     jit_ret_type = "NTuple{$stl_size, UInt8}"
-                elseif _stl_internal(jit_c_ret)
-                    info = get(dwarf_structs, jit_c_ret, nothing)
+                elseif _stl_internal(_bare_ret)
+                    info = get(dwarf_structs, _bare_ret, nothing)
                     bs = isnothing(info) ? 0 : (let s = string(get(info, "byte_size", "0x0")); startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s) end)
                     jit_ret_type = bs > 0 ? "NTuple{$bs, UInt8}" : "Ptr{Cvoid}"
-                elseif haskey(dwarf_structs, jit_c_ret)
-                    jit_ret_type = _sanitize_cpp_type_name(jit_c_ret)
+                elseif haskey(dwarf_structs, _bare_ret)
+                    jit_ret_type = _sanitize_cpp_type_name(_bare_ret)
                 else
                     # Fuzzy match: DWARF keys may have trailing " >" nesting artifacts
-                    matched_key = _fuzzy_dwarf_lookup(jit_c_ret, dwarf_structs)
+                    matched_key = _fuzzy_dwarf_lookup(_bare_ret, dwarf_structs)
                     if matched_key !== nothing
                         stl_size = _stl_internal(matched_key) ? get_stl_container_size(matched_key) : 0
                         if stl_size > 0
@@ -3140,6 +3143,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end
                 end
             end
+
+            # A return still `Any` is one no Julia type was resolved for.
+            # `invoke` refuses it at the call ("unresolved `Any` sentinel"), so
+            # the function was uncallable anyway; refuse it where it is
+            # defined, as the other ABI traps do, and compile no thunk for it.
+            if jit_ret_type == "Any" && jit_c_ret != "void" && !empty_ret
+                push!(func_chunks, """
+                $doc_comment
+                function $julia_name($param_sig)
+                    Base.error($(repr(_unresolved_return_trap_msg(julia_name, demangled, jit_c_ret))))
+                end
+                """)
+                push!(exports, julia_name)
+                continue
+            end
+
+            requires_jit = true
+            push!(needed_function_thunks, mangled)
 
             # Determine if we need the return type overload of invoke
             # Void returns: invoke(name, args...)

@@ -583,7 +583,7 @@ end
 # else `nothing` (a pointer, an array, a scalar, a declared-only type).
 function _sysv_record_of(t::AbstractString, structs)
     t = String(replace(_sysv_norm(t), r"^(?:struct|union|enum|class) " => ""))
-    (isempty(t) || occursin(r"[*&(\[]", t)) && return nothing
+    (isempty(t) || occursin(r"[*&(\[]", _outside_template_args(t))) && return nothing
     entry, k = _table_entry(t, structs)
     return entry === :layout ? String(k) : nothing
 end
