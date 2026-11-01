@@ -4483,6 +4483,15 @@ function _die_byte_size(ref, type_refs; base_sizes::AbstractDict = Dict{String,I
     follow(r) = _die_byte_size(r, type_refs; base_sizes, visited)
     kind in ("typedef", "const", "volatile", "restrict", "atomic") && return follow(get(info, "target", nothing))
     if kind == "array"
+        # A vector DIE's own byte_size wins over lanes × element: clang writes
+        # it when the lanes do not fill the vector (`ext_vector_type(3)` of
+        # float is 16 bytes, not 12), and nothing else carries that fact.
+        bs = get(info, "byte_size", nothing)
+        if bs !== nothing
+            s = string(bs)
+            n = startswith(s, "0x") ? tryparse(Int, s[3:end]; base = 16) : tryparse(Int, s)
+            n !== nothing && n > 0 && return n
+        end
         dims = get(info, "dimensions", [])
         isempty(dims) && return 0
         return follow(get(info, "element_type", nothing)) * prod(Int.(dims))
@@ -5554,8 +5563,10 @@ function parse_dwarf_dump(output::AbstractString;
                         type_refs[tag_offset] = _complex_base_name(nbytes)
                     end
                 end
-            elseif haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union]
-                # Match value after colon
+            elseif haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] in [:enum, :struct, :class, :union, :array]
+                # Match value after colon. An array DIE carries a byte_size only
+                # when its lanes do not fill it: a SIMD vector padded to a power
+                # of two (`ext_vector_type(3)` of float is 16 bytes).
                 size_match = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
                 if !isnothing(size_match)
                     val_str = size_match.captures[1]

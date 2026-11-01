@@ -361,6 +361,28 @@ crosses_as_vector(entry)::Bool = get(entry, "vector_size", nothing) !== nothing 
     _sysv_array(_sysv_norm(String(get(entry, "c_type", "")))) !== nothing
 
 """
+    vector_bytes(entry) -> Union{Int,Nothing}
+
+The size of the SIMD vector a parameter or return `entry` crosses as, from its
+`vector_size`; `nothing` when the metadata predates the key (`crosses_as_vector`
+still says it is one, from its array spelling).
+"""
+vector_bytes(entry) = _parse_num(get(entry, "vector_size", nothing))
+
+"""
+    holds_vector(key, structs) -> Bool
+
+Whether the record `key` holds a SIMD vector by value at any depth
+(`_sysv_holds_vector`); `false` for a name the table does not hold. The C++
+gate (`is_ccall_safe`) asks it: C passes such a record by the vector's size and
+`ccall` by its lanes, so the record takes the thunk, which states its class
+from DWARF.
+"""
+holds_vector(key, structs) =
+    (key isa AbstractString && structs isa AbstractDict && haskey(structs, key)) ?
+    _sysv_holds_vector(String(key), structs, Set{String}()) : false
+
+"""
     _sysv_vector_leaves!(out, c_type, size, vs, bit, what)
 
 The leaves of a member that is a SIMD vector of `vs` bytes, or an array of them
@@ -473,17 +495,18 @@ function sysv_record_abi(key::AbstractString, structs; vectors::Bool = true)
     if size > 16
         # A record that is one vector of its own size travels in a YMM or ZMM
         # register when the callee was built for AVX (`-mavx`, `-march=`), and
-        # in memory otherwise.
-        whole = vectors ? findfirst(m -> _parse_num(get(m, "vector_size", nothing)) == size,
-                                    get(info, "members", [])) : nothing
-        whole === nothing || return SysVRecordABI(:unknown, Symbol[], size, align,
-            "$key.$(get(info["members"][whole], "name", "")): a $size-byte SIMD vector, which SysV " *
-            "passes in a YMM or ZMM register when the callee was compiled for AVX, and the metadata " *
-            "does not say whether it was")
-        unsure = vectors ? findfirst(m -> _sysv_vector_unrecorded(m) &&
-                                          _parse_num(get(m, "size", 0)) == size, get(info, "members", [])) : nothing
-        unsure === nothing || return SysVRecordABI(:unknown, Symbol[], size, align,
-            "$key.$(get(info["members"][unsure], "name", "")): $(_SYSV_VECTOR_REBUILD)")
+        # in memory otherwise, and the metadata does not say how the callee was
+        # built. That holds at any depth of single-member records: clang passes
+        # `struct { struct { v8f v; } in; }` as one `<8 x float>` under `-mavx`
+        # too (`_sysv_sole_vector`; a one-level check missed it, 2026-11-01).
+        sole = vectors ? _sysv_sole_vector(key, structs, size, Set{String}()) : nothing
+        if sole !== nothing
+            path, how = sole
+            how === :vector && return SysVRecordABI(:unknown, Symbol[], size, align,
+                "$path: a $size-byte SIMD vector, which SysV passes in a YMM or ZMM register when the " *
+                "callee was compiled for AVX, and the metadata does not say whether it was")
+            return SysVRecordABI(:unknown, Symbol[], size, align, "$path: $(_SYSV_VECTOR_REBUILD)")
+        end
         return SysVRecordABI(:memory, Symbol[], size, align, "")
     end
 
@@ -521,6 +544,48 @@ function sysv_record_abi(key::AbstractString, structs; vectors::Bool = true)
     classes = Symbol[lo]
     hi in (:int, :sse) && push!(classes, hi)
     return SysVRecordABI(:regs, classes, size, align, "")
+end
+
+"""
+    _sysv_sole_vector(key, structs, size, seen) -> (path, :vector | :unrecorded) | nothing
+
+The record `key`, of `size` bytes, as nothing but one SIMD vector of that size:
+its only placed member (statics have no offset) is such a vector, or is a
+record that is one, through any depth of single-member records and single
+bases. `:unrecorded` when that member is an array its metadata cannot tell
+from a vector (`_sysv_vector_unrecorded`).
+"""
+function _sysv_sole_vector(key::String, structs, size::Int, seen::Set{String})
+    key in seen && return nothing
+    push!(seen, key)
+    info = get(structs, key, nothing)
+    info isa AbstractDict || return nothing
+    placed = [m for m in get(info, "members", []) if _parse_num(get(m, "offset", nothing)) !== nothing]
+    bases = get(info, "base_classes", [])
+    if length(placed) == 1 && isempty(bases)
+        m = only(placed)
+        _parse_num(get(m, "offset", nothing)) == 0 || return nothing
+        path = "$key.$(get(m, "name", ""))"
+        _parse_num(get(m, "vector_size", nothing)) == size && return (path, :vector)
+        (_sysv_vector_unrecorded(m) && _parse_num(get(m, "size", 0)) == size) && return (path, :unrecorded)
+        inner = _sysv_record_of(String(get(m, "c_type", "")), structs)
+        return inner === nothing ? nothing : _sysv_sole_vector(inner, structs, size, seen)
+    elseif isempty(placed) && length(bases) == 1
+        b = only(bases)
+        something(_parse_num(get(b, "offset", 0)), 0) == 0 || return nothing
+        inner = _sysv_record_of(String(get(b, "type", "")), structs)
+        return inner === nothing ? nothing : _sysv_sole_vector(inner, structs, size, seen)
+    end
+    return nothing
+end
+
+# The table key a member or base type names when it is a record with a layout,
+# else `nothing` (a pointer, an array, a scalar, a declared-only type).
+function _sysv_record_of(t::AbstractString, structs)
+    t = String(replace(_sysv_norm(t), r"^(?:struct|union|enum|class) " => ""))
+    (isempty(t) || occursin(r"[*&(\[]", t)) && return nothing
+    entry, k = _table_entry(t, structs)
+    return entry === :layout ? String(k) : nothing
 end
 
 """

@@ -1121,6 +1121,14 @@ function _undefined_ccall_types(source::AbstractString)::Vector{Tuple{String,Str
             while (inner = match(r"^(?:Ptr|Ref)\{(.+)\}$", t)) !== nothing
                 t = strip(String(inner.captures[1]))
             end
+            # A C array spelling (`float[4]`, a SIMD vector's DWARF name) is no
+            # Julia type, and fails the module's load like an undefined one; it
+            # used to pass this screen for not being an identifier (2026-11-01).
+            if occursin(r"[\[\]]", t)
+                key = (t, enclosing(pos))
+                key in seen || (push!(seen, key); push!(bad, key))
+                continue
+            end
             occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", t) || continue
             t in known && continue
             key = (t, enclosing(pos))

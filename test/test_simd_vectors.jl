@@ -761,18 +761,18 @@ _vfns(rt) = Any[n == "take_rarr" ? _vfunc(n; byval = [("RArr", 16)], rt) : _vfun
     @testset "GeneratorC traps what ccall would misplace" begin
         sysv, win64 = _vgen(_vfns(_VRT), _VSD, :sysv), _vgen(_vfns(_VRT), _VSD, :win64)
         #         function        SysV      Win64
-        table = [("take_v4f",    :vector,  :ccall),   # one XMM vs two; Win64 passes it by reference either way
+        table = [("take_v4f",    :vector,  :carrier), # one XMM vs two; Win64 by reference to a 16-aligned copy
                  ("make_v4f",    :vector,  :vector),  # no Julia type: `float[4]` failed the module's load
-                 ("take_rv1f",   :vector,  :ccall),   # RDI vs XMM0; Win64 by size
+                 ("take_rv1f",   :vector,  :ccall),   # RDI vs XMM0; Win64 by size, in a register
                  ("take_rv2i",   :vector,  :ccall),
                  ("take_rv1d",   :vector,  :ccall),   # memory vs XMM0
                  ("make_rv4f",   :vector,  :aligned), # Win64: a 16-aligned buffer for the hidden pointer
-                 ("take_rv8f",   :vector,  :ccall),
+                 ("take_rv8f",   :vector,  :carrier), # Win64: by reference, read from a 16-aligned copy (32 is for an AVX callee)
                  ("make_rnest",  :vector,  :ccall),
                  ("take_rv2fi",  :ccall,   :ccall),   # SSE, INTEGER on both readings
-                 ("take_rarr",   :carrier, :ccall),   # MEMORY on both readings
+                 ("take_rarr",   :carrier, :carrier), # MEMORY on both readings; Win64 reads the copy 16-aligned
                  ("take_rplain", :ccall,   :ccall),
-                 ("take_ral",    :ccall,   :ccall)]   # an aligned array is not a vector
+                 ("take_ral",    :ccall,   :carrier)] # an aligned array is not a vector, but is 16-aligned
         checked = 0
         for (fn, s, w) in table
             @test (fn, _vform(sysv, fn), _vform(win64, fn)) == (fn, s, w)
@@ -784,6 +784,163 @@ _vfns(rt) = Any[n == "take_rarr" ? _vfunc(n; byval = [("RArr", 16)], rt) : _vfun
             @test _vparses(code)
             @test !occursin(r"ccall\([^\n]*\bfloat\[", code)
         end
+    end
+
+    @testset "Win64 passes a bare vector by reference" begin
+        # clang's Win64 lowering passes a vector of any size by reference to a
+        # copy aligned to its size (`take_v2f(<2 x float>)` reads through RCX),
+        # and ccall passes a tuple of 8 bytes or less in that register, so the
+        # callee dereferenced two floats (take_v2f, take_v2i faulted; take_v1f
+        # read NaN, 2026-11-01 audit of #60). A 16-byte vector's tuple does go
+        # by reference, to a copy Julia aligns to 4 where the callee's `movaps`
+        # wants 16: it crosses inside `_RB_ByVal16{N}`, 32 bytes as two chunks.
+        # Smaller, a tuple that is not the vector's size, or no recorded size:
+        # refused.
+        bare(name, lanes, el, jl, vs) = Dict{String,Any}(
+            "name" => name, "mangled" => name, "demangled" => name, "is_vararg" => false,
+            "parameters" => Any[Dict{String,Any}("name" => "x", "c_type" => "$el[$lanes]",
+                                                 "julia_type" => "NTuple{$lanes, $jl}", "size" => vs,
+                                                 "vector_size" => vs)],
+            "return_type" => Dict{String,Any}("c_type" => "double", "julia_type" => "Cdouble", "size" => 8))
+        fns = Any[bare("take_v1f", 1, "float", "Float32", 4), bare("take_v2f", 2, "float", "Float32", 8),
+                  bare("take_v2i", 2, "int", "Int32", 8), bare("take_v1d", 1, "double", "Float64", 8),
+                  bare("take_v4f", 4, "float", "Float32", 16), bare("take_v2d", 2, "double", "Float64", 16),
+                  bare("take_v3f", 3, "float", "Float32", 16), bare("take_v8f", 8, "float", "Float32", 32)]
+        win64 = _vgen(fns, _VSD, :win64)
+        @test _vparses(win64)
+        for (fn, want) in [("take_v1f", :vector), ("take_v2f", :vector), ("take_v2i", :vector),
+                           ("take_v1d", :vector), ("take_v4f", :carrier), ("take_v2d", :carrier),
+                           ("take_v3f", :vector), ("take_v8f", :carrier)]
+            @test (fn, _vform(win64, fn)) == (fn, want)
+        end
+        @test occursin("in a register", _vbody(win64, "take_v2f"))
+        @test occursin("not the vector's size", _vbody(win64, "take_v3f"))
+        @test occursin("_rb_byval16(x, _RB_ByVal16{1})", _vbody(win64, "take_v4f"))
+        @test occursin("_rb_byval16(x, _RB_ByVal16{2})", _vbody(win64, "take_v8f"))
+        @test occursin("struct _RB_ByVal16{N}", win64)
+        # SysV is unchanged by any of this: every bare vector argument is refused.
+        sysv = _vgen(fns, _VSD, :sysv)
+        @test all(fn -> _vform(sysv, fn) === :vector, first.(fns .|> f -> (f["name"],)))
+
+        # The shape rule itself (`_c_byval_param_shape`), Win64 column.
+        shape(sz, byref, al) = RepliBuild.Wrapper._c_byval_param_shape(sz, byref, al, false; abi = :win64)
+        @test shape(8, false, 8) === :own          # a register
+        @test shape(16, true, 8) === :own          # by reference, 8-aligned: Julia's copy is enough
+        @test shape(16, true, 16) === :carrier     # {<4 x float>}
+        @test shape(32, true, 16) === :carrier     # two 16-byte vectors
+        @test shape(24, true, 16) === :trap        # no carrier has that size and alignment
+        @test shape(32, true, 32) === :carrier     # 16-aligned is all Julia gives; an AVX callee is not covered
+    end
+
+    @testset "the C++ gate sends a vector crossing to the thunk" begin
+        # `is_ccall_safe` is what a C-linkage or noexcept function in a C++
+        # library goes through. It ignored vectors, so such a function was a
+        # plain ccall: wrong registers on SysV, a fault on Win64 (audit of #60).
+        W = RepliBuild.Wrapper
+        @test !W.is_ccall_safe(_vfunc("take_v4f"), _VSD)      # a bare vector argument
+        @test !W.is_ccall_safe(_vfunc("make_v4f"), _VSD)      # a bare vector return
+        @test !W.is_ccall_safe(_vfunc("take_rv1f"), _VSD)     # a record holding one
+        @test !W.is_ccall_safe(_vfunc("take_rv8f"), _VSD)
+        @test !W.is_ccall_safe(_vfunc("make_rnest"), _VSD)    # at depth
+        @test W.is_ccall_safe(_vfunc("take_rplain"), _VSD)    # no vector anywhere
+        @test W.is_ccall_safe(_vfunc("take_ral"), _VSD)       # an aligned array, marked as looked at
+        # Old metadata cannot tell RAl's array from a vector: the thunk decides.
+        old_sd, old_rt = _vstrip!(deepcopy(_VSD)), _vstrip!(deepcopy(_VRT))
+        @test !W.is_ccall_safe(_vfunc("take_ral"; rt = old_rt), old_sd)
+        @test !W.is_ccall_safe(_vfunc("take_v4f"; rt = old_rt), old_sd)
+        @test W.is_ccall_safe(_vfunc("take_rplain"; rt = old_rt), old_sd)
+        @test _VFG.holds_vector("RV4F", _VSD) && _VFG.holds_vector("RNest", _VSD)
+        @test !_VFG.holds_vector("RPlain", _VSD) && !_VFG.holds_vector("NoSuch", _VSD)
+    end
+
+    @testset "a record that is one vector, at any depth" begin
+        # With -mavx clang passes `struct { struct { v8f v; } in; }` as one
+        # `<8 x float>`, exactly as it passes `struct { v8f v; }`; the metadata
+        # does not say how the callee was built, so both are `:unknown`. The
+        # check used to look one level down only.
+        vm(name, ct, jt, off, size; vs = nothing) = begin
+            d = Dict{String,Any}("name" => name, "c_type" => ct, "julia_type" => jt, "offset" => off, "size" => size)
+            vs === nothing || (d["vector_size"] = vs)
+            d
+        end
+        rec(size, members; bases = Any[]) = Dict{String,Any}("kind" => "struct", "byte_size" => "0x" * string(size, base = 16),
+                                                           "members" => Any[members...], "base_classes" => bases)
+        s = Dict{String,Any}(
+            "In"      => rec(32, [vm("v", "float[8]", "NTuple{8, Float32}", "0x0", 32; vs = 32)]),
+            "Out"     => rec(32, [vm("in", "In", "In", "0x0", 32)]),
+            "Outer"   => rec(32, [vm("out", "Out", "Out", "0x0", 32)]),
+            "Derived" => rec(32, []; bases = Any[Dict{String,Any}("type" => "In", "offset" => 0)]),
+            "Tagged"  => rec(48, [vm("in", "In", "In", "0x0", 32), vm("tag", "int", "Cint", "0x20", 4)]),
+            "Statics" => rec(32, [vm("in", "In", "In", "0x0", 32),
+                                  Dict{String,Any}("name" => "n", "c_type" => "int", "julia_type" => "Cint", "offset" => nothing, "size" => 4)]))
+        for k in ("In", "Out", "Outer", "Derived", "Statics")
+            v = _VFG.sysv_record_abi(k, s)
+            @test (k, v.kind, occursin("AVX", v.reason), occursin("In.v", v.reason)) == (k, :unknown, true, true)
+        end
+        @test _VFG.sysv_record_abi("Tagged", s).kind === :memory     # a vector and a tag: memory, as C
+        @test _VFG.sysv_trap_reason("Outer", s; ret = false, abi = :sysv) !== nothing
+        @test _VFG.sysv_trap_reason("Outer", s; ret = false, abi = :win64) === nothing   # Win64 by size
+    end
+
+    @testset "an array spelling in a ccall type is refused at write time" begin
+        # `float[4]` is a vector's DWARF spelling, not a Julia type: a wrapper
+        # that names it in a ccall fails to load, and the screen used to pass
+        # it for not being an identifier.
+        W = RepliBuild.Wrapper
+        src = "module M\nfunction f(x)\n    ccall((:f, LIB), float[4], (Cint,), x)\nend\n" *
+              "function g(v)\n    ccall((:g, LIB), Cdouble, (float[2],), v)\nend\nend\n"
+        bad = W._undefined_ccall_types(src)
+        @test ("float[4]", "f") in bad
+        @test ("float[2]", "g") in bad
+        @test isempty(W._undefined_ccall_types("module M\nfunction h(v)\n    ccall((:h, LIB), Cdouble, (NTuple{4, Float32},), v)\nend\nend\n"))
+    end
+
+    @testset "a 3-lane vector is 16 bytes" begin
+        # clang pads `ext_vector_type(3)` of float to 16 bytes and writes the
+        # array DIE's DW_AT_byte_size, which nothing else carries; the parser
+        # sized it as lanes × element (12) and mis-stated the vector's class.
+        dump(bs) = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : (indirect string, offset: 0x0): clang version 23.1.4
+            <d>   DW_AT_language    : 29	(C11)
+         <1><20>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <21>   DW_AT_low_pc      : 0x0
+            <29>   DW_AT_high_pc     : 0x8
+            <2d>   DW_AT_name        : (indirect string, offset: 0x10): take_v3f
+            <31>   DW_AT_decl_file   : 1
+            <32>   DW_AT_decl_line   : 3
+            <33>   DW_AT_prototyped  : 1
+            <33>   DW_AT_type        : <0x60>
+            <37>   DW_AT_external    : 1
+         <2><38>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <39>   DW_AT_name        : (indirect string, offset: 0x19): x
+            <3d>   DW_AT_decl_file   : 1
+            <3e>   DW_AT_decl_line   : 3
+            <3f>   DW_AT_type        : <0x50>
+         <2><43>: Abbrev Number: 0
+         <1><50>: Abbrev Number: 4 (DW_TAG_array_type)
+            <51>   DW_AT_GNU_vector  : 1
+        $(bs === nothing ? "" : "    <51>   DW_AT_byte_size   : $bs\n")    <52>   DW_AT_type        : <0x60>
+         <2><56>: Abbrev Number: 5 (DW_TAG_subrange_type)
+            <57>   DW_AT_type        : <0x67>
+            <5b>   DW_AT_count       : 3
+         <2><5c>: Abbrev Number: 0
+         <1><60>: Abbrev Number: 6 (DW_TAG_base_type)
+            <61>   DW_AT_name        : (indirect string, offset: 0x1b): float
+            <65>   DW_AT_encoding    : 4	(float)
+            <66>   DW_AT_byte_size   : 4
+         <1><67>: Abbrev Number: 6 (DW_TAG_base_type)
+            <68>   DW_AT_name        : (indirect string, offset: 0x21): __ARRAY_SIZE_TYPE__
+            <6c>   DW_AT_byte_size   : 8
+            <6d>   DW_AT_encoding    : 7	(unsigned)
+         <1><6e>: Abbrev Number: 0
+        """
+        rt16, _, _, _, _ = RepliBuild.Compiler.parse_dwarf_dump(dump(16))
+        p = only(rt16["take_v3f"]["parameters"])
+        @test (p["c_type"], p["vector_size"]) == ("float[3]", 16)
+        # Without the attribute the lanes decide, as for every other vector.
+        rt12, _, _, _, _ = RepliBuild.Compiler.parse_dwarf_dump(dump(nothing))
+        @test only(rt12["take_v3f"]["parameters"])["vector_size"] == 12
     end
 
     @testset "metadata from before vector_size fails safe" begin
@@ -816,14 +973,18 @@ _vfns(rt) = Any[n == "take_rarr" ? _vfunc(n; byval = [("RArr", 16)], rt) : _vfun
         @test checked == 8
         @test _VFG.sysv_statement("RPlain", old_sd) == "regs:sse"
 
-        # GeneratorC: every crossing that may hold a vector is refused on SysV;
-        # on Win64 only the vector return, as with new metadata.
+        # GeneratorC: every crossing that may hold a vector is refused on SysV.
+        # On Win64 the vector return, and a bare vector whose size the old
+        # metadata does not record (the carrier needs it); records cross by
+        # size as with new metadata, the 16-aligned ones in the carrier.
         sysv, win64 = _vgen(_vfns(old_rt), old_sd, :sysv), _vgen(_vfns(old_rt), old_sd, :win64)
         for fn in _VNAMES
             s = fn in ("take_rarr",) ? :carrier : fn == "take_rplain" ? :ccall : :vector
-            w = fn == "make_v4f" ? :vector : fn == "make_rv4f" ? :aligned : :ccall
+            w = fn in ("make_v4f", "take_v4f") ? :vector : fn == "make_rv4f" ? :aligned :
+                fn in ("take_rv8f", "take_rarr", "take_ral") ? :carrier : :ccall
             @test (fn, _vform(sysv, fn), _vform(win64, fn)) == (fn, s, w)
         end
+        @test occursin("rebuild", _vbody(win64, "take_v4f"))
         @test occursin("rebuild", _vbody(sysv, "take_ral"))
         for code in (sysv, win64)
             @test _vparses(code)
