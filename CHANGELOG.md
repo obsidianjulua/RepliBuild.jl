@@ -4,6 +4,30 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A reference return is an address; a reference to a type Julia cannot hold is a raw pointer (2026-11-01)
+
+Two findings from the full-surface tests of the Hub's Boost.Filesystem and
+Boost.Charconv wrappers:
+
+- **A pointer or reference return to an STL container was declared as the
+  container by value.** `path::native()` returns `const std::wstring&`.
+  `generate_function_thunks`' fallback for a return `map_cpp_type` left as
+  `!llvm.ptr` excluded `*` but not `&`, and `get_stl_container_size` strips
+  both, so the thunk declared a 32-byte blob return: on Win64 that passes a
+  hidden pointer, the callee took it for `this`, and the Julia side got a slot
+  on the thunk's stack as the "address" of the string. The fallback now reads
+  the type's own declarators (`_outside_template_args`) and leaves any pointer
+  or reference return as `!llvm.ptr`; a by-value container is the blob as
+  before. (`test_by_value_crossing.jl`.)
+- **`Ref{Any}` and `Ptr{Any}` parameters are `Ptr{Cvoid}`.** A reference to a
+  type Julia has no scalar for (`long double&`, `unsigned __int128&`) arrived
+  with the metadata's `Ref{Any}`, and GeneratorCpp spelled the parameter so
+  (33 signatures in boostcharconv, 15 in boostjson, 3 in boostfilesystem). The
+  only value a caller can pass to `Ref{Any}` is `Ref{Any}(x)`: a pointer to a
+  box slot, which the callee overwrites with 10 or 16 bytes. `_ccall_param_type`
+  now spells both as `Ptr{Cvoid}`, the address of a buffer the caller owns.
+  (`test_cpp_return_resolution.jl`.)
+
 ### An enumerator never rebinds another top-level name (2026-11-01)
 
 Found by John in the Hub's Boost.JSON wrapper, built on Windows under MSYS2 CLANG64 with Julia 1.13.
