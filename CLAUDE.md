@@ -621,6 +621,12 @@ the test named when you touch the area.
   `_assert_no_any_ccall_argument` refuse both. The one exemption is a variadic
   `@ccall` argument, which is the user's explicit `[wrap.varargs]` declaration.
   `::Any` in a Julia signature is normal. (`test_wrapper_type_bindings.jl`.)
+  On the Tier 2 path GeneratorCpp resolves an `Any` return through the
+  cv-stripped C spelling (`FunctionGen._strip_top_cv`; DWARF spells
+  `key_value_pair::key()`'s return `const basic_string_view<char>`), and a
+  return still `Any` after that is emitted as an ABI trap stub
+  (`_unresolved_return_trap_msg`), never as `invoke(…, Any, …)`, which the JIT
+  refuses only at the call. (`test_cpp_return_resolution.jl`.)
 - **A Tier-3 by-value record is classified per target, from its fields' type
   alignment, never a member's size** (C1: `{ char; short[3]; }` got an sret
   the callee never reads).
@@ -847,8 +853,14 @@ the test named when you touch the area.
   `FunctionGen.by_value_crossing` is the one verdict; the thunk generator and
   GeneratorCpp both act on it. `record_abi` in metadata carries the DWARF facts. A
   record must never fall to `!llvm.ptr`: that is how empty classes, declared-only
-  types, `string_view` and every template spelling were mis-passed.
-  (`test_by_value_crossing.jl`.)
+  types, `string_view` and every template spelling were mis-passed. **A `*` or
+  `&` inside template arguments is not the type's declarator**: every test for a
+  pointer, reference, function or array spelling reads
+  `FunctionGen._outside_template_args(t)` (`_table_entry`, `_sysv_record_of`,
+  `is_ccall_safe`), because `pair<key_value_pair *, bool>` and `result<T &, E>`
+  classed as pointers returned a 16-byte record in a register, which on Win64
+  lacks its hidden pointer (Boost.JSON `object::emplace`, access violation,
+  2026-11-01). (`test_by_value_crossing.jl`, `test_cpp_return_resolution.jl`.)
 - **A byte region never crosses a thunk as an array.** A record with no
   field-by-field body (a union, a bitfield record, overlapping members) is
   `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one
