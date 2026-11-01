@@ -456,6 +456,14 @@ include(joinpath(TEST_DIR, "test_sysv_abi_oracle.jl"))
 
 include(joinpath(TEST_DIR, "test_sysv_live.jl"))
 
+# ── 12d. SIMD vectors by value, live ─────────────────────────────────────────
+# Records holding a vector of each size class and bare 8- and 16-byte vectors,
+# built as C (Tier 3) and as C++ (Tier 2) at -O0 and -O2, every call made with
+# the SSE registers poisoned and checked against C. SysV classifies a vector by
+# its size, never lane by lane; this is the only place a SysV vector call runs.
+
+include(joinpath(TEST_DIR, "test_simd_vectors_live.jl"))
+
 # ── 13. Multi-library JIT: one engine per wrapped binary ─────────────────────
 # Two generated wrappers in one session. The old single-engine singleton let
 # the first library win and silently killed the second's Tier 2 (found live
