@@ -2837,7 +2837,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
         end
 
-        # A SIMD vector by value (`vector_size`). The Julia type standing in
+        # A SIMD vector by value (`FunctionGen.crosses_as_vector`, which also
+        # reads metadata from before `vector_size`). The Julia type standing in
         # for one is the `NTuple` of its lanes, which ccall classifies lane by
         # lane, while C classifies a vector by its size: `{<4 x float>}` goes
         # in XMM0 and XMM1 where C uses XMM0 alone. A vector returned by value
@@ -2847,15 +2848,15 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # or in a record, is misplaced on SysV only: Win64 passes it by size,
         # as Julia does (`FunctionGen.sysv_vector_misread`).
         vector_offenders = String[]
-        let rvs = get(return_type, "vector_size", nothing)
-            rvs === nothing || push!(vector_offenders,
-                "returns `$(get(return_type, "c_type", "?"))` (a $rvs-byte SIMD vector) by value")
+        _vector_phrase(e) = let vs = get(e, "vector_size", nothing)
+            "`$(get(e, "c_type", "?"))` ($(vs === nothing ? "" : "a $vs-byte ")SIMD vector)"
         end
+        JLCSIRGenerator.FunctionGen.crosses_as_vector(return_type) &&
+            push!(vector_offenders, "returns $(_vector_phrase(return_type)) by value")
         if abi === :sysv
             for p in get(func, "parameters", [])
-                pvs = get(p, "vector_size", nothing)
-                pvs === nothing || push!(vector_offenders,
-                    "takes `$(get(p, "c_type", "?"))` (a $pvs-byte SIMD vector) by value")
+                JLCSIRGenerator.FunctionGen.crosses_as_vector(p) &&
+                    push!(vector_offenders, "takes $(_vector_phrase(p)) by value")
             end
             for _pt in param_types
                 startswith(_pt, "Ptr{") && continue

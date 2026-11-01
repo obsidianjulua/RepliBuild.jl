@@ -311,11 +311,54 @@ function _sysv_record_leaves!(out::Vector{_SysVLeaf}, key::String, structs, base
             _sysv_vector_leaves!(out, String(get(m, "c_type", "")), size, vs, base_bit + 8 * off, "$key.$name")
             continue
         end
+        if vectors && _sysv_vector_unrecorded(m)
+            push!(out, _SysVLeaf(base_bit + 8 * off, 8 * size, :unknown, 1, false,
+                                 "$key.$name: $(_SYSV_VECTOR_REBUILD)"))
+            continue
+        end
         _sysv_type_leaves!(out, String(get(m, "c_type", "")), String(get(m, "julia_type", "Any")), size,
                            base_bit + 8 * off, structs, seen, "$key.$name"; vectors)
     end
     return out
 end
+
+# What a member that may be a vector says when its metadata cannot tell.
+const _SYSV_VECTOR_REBUILD =
+    "an array aligned to its own size, which is how a SIMD vector looked in metadata from before " *
+    "`vector_size`, and this metadata cannot say which it is; rebuild the package (delete " *
+    ".replibuild_cache/project_hash) and wrap again"
+
+"""
+    _sysv_vector_unrecorded(m) -> Bool
+
+Whether the member `m` may be a SIMD vector that its metadata does not mark:
+an array spelling whose `alignment` is its own size, with no `vector_size` key.
+Metadata from before `vector_size` gave a vector exactly that alignment, and so
+does `__attribute__((aligned))` on an array type (cglm's `vec4`), so the two are
+one shape there. The parser now writes `vector_size` for a vector and `null`
+for such an array, so this answers `true` for old metadata alone.
+"""
+function _sysv_vector_unrecorded(m)::Bool
+    haskey(m, "vector_size") && return false
+    size = something(_parse_num(get(m, "size", 0)), 0)
+    al = _parse_num(get(m, "alignment", nothing))
+    return al !== nothing && al == size && size > 0 && ispow2(size) &&
+           _sysv_array(_sysv_norm(String(get(m, "c_type", "")))) !== nothing
+end
+
+"""
+    crosses_as_vector(entry) -> Bool
+
+Whether a parameter or return `entry` of the metadata crosses as a SIMD vector
+by value: `vector_size` says so, and so does an array spelling (`float[4]`)
+without the key. C and C++ never pass or return an array by value (DWARF gives a
+parameter declared as one its pointer type), so the spelling settles it in
+metadata from before `vector_size`, which must not reach a call: a re-wrap
+without a rebuild emitted `ccall(…, float[4], …)` and the wrapper failed to
+load. `thunk_crossings` and GeneratorC both ask this.
+"""
+crosses_as_vector(entry)::Bool = get(entry, "vector_size", nothing) !== nothing ||
+    _sysv_array(_sysv_norm(String(get(entry, "c_type", "")))) !== nothing
 
 """
     _sysv_vector_leaves!(out, c_type, size, vs, bit, what)
@@ -437,6 +480,10 @@ function sysv_record_abi(key::AbstractString, structs; vectors::Bool = true)
             "$key.$(get(info["members"][whole], "name", "")): a $size-byte SIMD vector, which SysV " *
             "passes in a YMM or ZMM register when the callee was compiled for AVX, and the metadata " *
             "does not say whether it was")
+        unsure = vectors ? findfirst(m -> _sysv_vector_unrecorded(m) &&
+                                          _parse_num(get(m, "size", 0)) == size, get(info, "members", [])) : nothing
+        unsure === nothing || return SysVRecordABI(:unknown, Symbol[], size, align,
+            "$key.$(get(info["members"][unsure], "name", "")): $(_SYSV_VECTOR_REBUILD)")
         return SysVRecordABI(:memory, Symbol[], size, align, "")
     end
 
@@ -553,13 +600,15 @@ function sysv_vector_misread(key, structs)::Union{String,Nothing}
     c = sysv_record_abi(key, structs)
     j = sysv_record_abi(key, structs; vectors = false)
     (c.kind === j.kind && c.classes == j.classes) && return nothing
+    c.kind === :unknown && return "whose SysV class this metadata does not settle ($(c.reason))"
     return "which holds a SIMD vector: C passes it $(_sysv_where(c)), and a ccall of the " *
            "Julia type standing in for it $(_sysv_where(j))"
 end
 
 # Whether the record `key` holds a SIMD vector by value at any depth: a member
-# with `vector_size`, or a base or member record (an array of records holds its
-# element) that holds one.
+# with `vector_size`, one that may be a vector its metadata does not mark
+# (`_sysv_vector_unrecorded`), or a base or member record (an array of records
+# holds its element) that holds one.
 function _sysv_holds_vector(key::String, structs, seen::Set{String})::Bool
     key in seen && return false
     push!(seen, key)
@@ -571,7 +620,7 @@ function _sysv_holds_vector(key::String, structs, seen::Set{String})::Bool
         entry === :layout && _sysv_holds_vector(k, structs, seen)
     end
     for m in get(info, "members", [])
-        haskey(m, "vector_size") && return true
+        (get(m, "vector_size", nothing) !== nothing || _sysv_vector_unrecorded(m)) && return true
         held(String(get(m, "c_type", ""))) && return true
     end
     return any(b -> held(String(get(b, "type", ""))), get(info, "base_classes", []))

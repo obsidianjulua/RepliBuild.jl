@@ -319,7 +319,7 @@ function _byte_region_size(key, structs)
     return m === nothing ? nothing : parse(Int, m.captures[1])
 end
 
-# A SIMD vector by value (`vector_size` on a parameter or return): its `c_type`
+# A SIMD vector by value (`crosses_as_vector`: a parameter or return): its `c_type`
 # is the array of its lanes, which the thunk would pass as `!llvm.array`, and
 # LLVM splits an array operand into one register per lane (abi_fuzz X2), where
 # C passes one vector register (SysV) or a pointer (Win64).
@@ -357,7 +357,7 @@ function thunk_crossings(func, structs, record_abi)
             why = sysv_trap_reason(key, structs; ret = false)
             why === nothing || push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $why")
         end
-        haskey(p, "vector_size") &&
+        crosses_as_vector(p) &&
             push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $(_BARE_VECTOR_PHRASE)")
     end
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
@@ -365,7 +365,7 @@ function thunk_crossings(func, structs, record_abi)
         why = sysv_trap_reason(ret[2], structs; ret = true)
         why === nothing || push!(abi_reasons, "returns `$ret_c` by value, $why")
     end
-    haskey(get(func, "return_type", Dict()), "vector_size") &&
+    crosses_as_vector(get(func, "return_type", Dict())) &&
         push!(abi_reasons, "returns `$ret_c` by value, $(_BARE_VECTOR_PHRASE)")
     ret[1] === :indirect && push!(reasons,
         "returns `$ret_c` by value, which C++ returns through a hidden pointer the thunk does not pass")

@@ -6877,6 +6877,12 @@ function parse_dwarf_dump(output::AbstractString;
                         if m_vec !== nothing
                             member_resolved["vector_size"] = m_vec
                             ispow2(m_vec) && (m_align = max(something(m_align, 1), m_vec))
+                        elseif m_align !== nothing && m_align == m_size && ispow2(m_size) && endswith(c_type, "]")
+                            # An array aligned to its own size (cglm's `vec4`,
+                            # `float[4]` aligned 16) is what a vector looked like
+                            # in metadata from before `vector_size`. `null` says
+                            # this one was looked at and is not a vector.
+                            member_resolved["vector_size"] = nothing
                         end
                         m_align === nothing || (member_resolved["alignment"] = m_align)
                         push!(resolved_members, member_resolved)

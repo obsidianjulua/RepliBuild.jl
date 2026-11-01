@@ -26,11 +26,21 @@ All notable changes to RepliBuild.jl are documented in this file.
 
     `{<2 x float>}` and `{<2 x float>; int}` classify the same both ways and stay callable.
   - The SysV oracle (`jlcs_abi_oracle_sysv`) takes a `vector` type.
+- **Metadata from before `vector_size` fails safe.** A re-wrap without a rebuild reads no key, and missing used to mean "not a vector". So the `float[4]` return was still emitted and the wrapper still failed to load.
+  - A parameter or return spelled as an array can only be a vector: C and C++ never pass or return an array by value, and DWARF gives a parameter declared as one its pointer type. `FunctionGen.crosses_as_vector` reads that spelling without the key, and `thunk_crossings` and GeneratorC both ask it. Refusing those is exact.
+  - A member is not exact. Old metadata gave a vector member an `alignment` equal to its size, and an array type with `aligned` gets the same (cglm's `vec4`, `float[4]` aligned 16), so the two are one shape there. Such a member with no key (`_sysv_vector_unrecorded`) makes its record `:unknown` on SysV, and the trap says to rebuild. The parser now writes `vector_size: null` on that array, so a rebuilt `vec4` record classifies as its lanes again. Win64 crosses records by size and asks nothing.
 - **Rebuild, then re-wrap.** The fact is in `compilation_metadata.json`.
 - **Tests.**
-  - `test_simd_vectors.jl` (runtests, no toolchain) parses a vendored GNU objdump dump of a C unit with a vector of each size, an array of vectors, a nested one, a bare argument and a return. It checks the parser's facts, every record's class under both readings, `sysv_vector_misread`, the Tier 2 refusals in the emitted IR, and GeneratorC's output on both conventions; both wrappers parse.
-  - `SAO_CURATED` in `test_sysv_abi_oracle.jl` gains `<1 x float>`, `<2 x int>`, `<8 x char>`, `<1 x double>`, `<2 x float>` and `{<2 x float>; int}` records, which agree with LLVM's ABI library and with clang, and `<4 x float>`, which is refused both ways.
-  - Each of the four fixes was neutered in turn, and the test failed each time.
+  - `test_simd_vectors.jl` (runtests, no toolchain) parses a vendored GNU objdump dump of a C unit with a vector of each size, an array of vectors, a nested one, an aligned array, a bare argument and a return. It checks:
+    - the parser's facts, including the `null` marker;
+    - every record's class under both readings, and `sysv_vector_misread`;
+    - the Tier 2 refusals in the emitted IR;
+    - GeneratorC's output on both conventions, including Win64's aligned return buffer; both wrappers parse;
+    - the same dump with every `vector_size` stripped, standing for old metadata.
+  - `test_simd_vectors_live.jl` (devtests §12d) builds `test/simd_live_test/` as C and as C++ at -O0 and -O2. A child calls six vector records and bare 8- and 16-byte vectors both ways, with the SSE registers poisoned, and checks values against C. Each host asserts its own convention, so CI's tier2-linux runs the SysV calls.
+  - On Windows: 108 pass and 2 `@test_broken`. Those are a bare 8-byte vector argument through Tier 3, which clang passes by reference and ccall by value, and the callee faults. It runs in a child of its own until that refusal is decided.
+  - `SAO_CURATED` in `test_sysv_abi_oracle.jl` gains `<1 x float>`, `<2 x int>`, `<8 x char>`, `<1 x double>`, `<2 x float>`, `{<2 x float>; int}` and an aligned `float[4]` record, which agree with LLVM's ABI library and with clang. It also gains `<4 x float>`, which is refused both ways.
+  - Each of the seven fixes was neutered in turn, and the test failed each time.
 
 ## v4.3.1 (2026-10-31)
 
