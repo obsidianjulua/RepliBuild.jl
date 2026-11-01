@@ -612,11 +612,25 @@ alignment C gives its stack slot, and `exact` whether that number is the
 compiler's own ([`_c_byval_facts`](@ref)) rather than the DWARF model's
 ([`_c_record_align`](@ref)).
 
-  * `:own`: Julia's own `byval` lands where C looks. Win64 (a record goes in a
-    register or by reference to a copy, never in a slot its alignment places);
-    a record that is not MEMORY class (it travels in registers); a slot aligned
-    to 8 or less, which is what Julia's lowering gives every stand-in, since it
-    writes no `align` on its `byval` and the backend takes `max(type, 8)`.
+  * `:own`: Julia's own `byval` lands where C looks. On SysV, a record that is
+    not MEMORY class (it travels in registers), or a slot aligned to 8 or less,
+    which is what Julia's lowering gives every stand-in, since it writes no
+    `align` on its `byval` and the backend takes `max(type, 8)`. On Win64, a
+    record of 1, 2, 4 or 8 bytes (a register), or one by reference whose
+    alignment is 8 or less.
+
+  Win64 passes any other record by reference to a copy the caller aligns as the
+  record is, and Julia's copy has the stand-in's alignment (4 for a tuple of
+  floats, 8 for a struct of doubles), from which a callee's `movaps` faults. So
+  a record aligned above 8 (a vector member, `_Alignas(16)`) crosses inside the
+  carrier, whose copy is 16-aligned, at any size that is a multiple of 16; a
+  size that is not one has no carrier and is refused. Here `in_memory` is "by
+  reference", and DWARF's alignment is enough (`exact` is not asked): a copy
+  aligned more than the callee reads is harmless, where a SysV slot placed by an
+  over-estimate is not. 16 is also all Julia can give: a callee built for AVX
+  that reads a 32-aligned record with `vmovaps ymm` is not covered, and the
+  metadata does not say how the callee was built (the `:unknown` SysV says of
+  the same record).
   * `:carrier`: the slot is 16-aligned, the number is exact, and the record is
     over 16 bytes and a multiple of 16: the wrapper copies the value into
     `_RB_ByVal16{N}` (`N` = size ÷ 16), a struct of `<2 x double>` chunks whose
@@ -637,7 +651,12 @@ bytes earlier, and the call returned 494.5 for 4883.5 with no error (W2,
 """
 function _c_byval_param_shape(byte_size::Integer, in_memory::Union{Bool,Nothing},
                               slot_align::Integer, exact::Bool; abi::Symbol = _c_record_abi())
-    abi === :win64 && return :own
+    if abi === :win64
+        in_memory === true || return :own
+        slot_align <= 8 && return :own
+        byte_size % 16 == 0 && return :carrier
+        return :trap
+    end
     abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
     in_memory === true || return :own
     slot_align <= 8 && return :own
@@ -702,11 +721,21 @@ function _c_slot_trap_phrase(jname::AbstractString, byte_size::Integer, slot_ali
     return "takes `$jname` by value in a $slot_align-byte-aligned stack slot ($why)"
 end
 
+# The phrase a Win64 refusal names a by-reference record with: the callee reads
+# its copy with loads aligned as the record is, and Julia's copy is not.
+function _c_win64_copy_trap_phrase(jname::AbstractString, byte_size::Integer, align::Integer;
+                                   placeholder::Bool = false)::String
+    why = placeholder ? "its Julia type is a placeholder with no value layout to copy from" :
+          "its $byte_size bytes are not a multiple of 16, so no carrier type has both its size and its alignment"
+    return "takes `$jname` by value, which Win64 passes by reference to a $align-byte-aligned copy ($why)"
+end
+
 _c_slot_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
     "    Base.error(" * repr(
         "ABI Safety Trap: cannot call '$julia_name' through ccall. It $(join(crossings, "; ")). " *
-        "Julia's ccall passes a by-value record at 8-byte alignment, so the callee would read " *
-        "it from the wrong slot and return a plausible wrong value. Use a pointer-taking " *
+        "Julia's ccall passes a by-value record at the alignment of the Julia type standing in " *
+        "for it, 8 at most, so the callee would read it from the wrong stack slot (SysV) or fault " *
+        "on an aligned load from the copy (Win64). Use a pointer-taking " *
         "variant of this C function.") * ")\n"
 
 # The body of the SysV register-window refusal (`blob_abi_offenders`), shared
@@ -722,26 +751,36 @@ _c_blob_trap_body(julia_name::AbstractString, offenders::Vector{String}) =
         "member types). Use a pointer-taking variant of this C function, or make the struct's " *
         "members resolvable.") * ")\n"
 
+# The byte size of the Julia scalars a vector lane is spelled as.
+const _C_JULIA_SCALAR_BYTES = Dict{String,Int}(
+    "Int8" => 1, "UInt8" => 1, "Cchar" => 1, "Cuchar" => 1, "Bool" => 1,
+    "Int16" => 2, "UInt16" => 2, "Cshort" => 2, "Cushort" => 2, "Float16" => 2,
+    "Int32" => 4, "UInt32" => 4, "Cint" => 4, "Cuint" => 4, "Float32" => 4, "Cfloat" => 4,
+    "Int64" => 8, "UInt64" => 8, "Clonglong" => 8, "Culonglong" => 8, "Float64" => 8, "Cdouble" => 8,
+    "Csize_t" => 8, "Cssize_t" => 8, "Clong" => Sys.iswindows() ? 4 : 8, "Culong" => Sys.iswindows() ? 4 : 8)
+
 # The body of the SIMD vector refusal (`vector_offenders`), shared by the plain
 # path and the `[wrap.varargs]` path.
 _c_vector_trap_body(julia_name::AbstractString, offenders::Vector{String}) =
     "    Base.error(" * repr(
         "ABI Safety Trap: cannot call '$julia_name' through ccall. It $(join(offenders, "; ")). " *
-        "C passes a SIMD vector in the registers its size picks, while the Julia type standing in " *
-        "for it is the tuple of its lanes, which ccall classifies lane by lane, and a vector " *
-        "returned by value has no Julia type at all. The call would read or write the wrong " *
-        "registers. Use a variant of this C function that takes or returns the vector through a " *
-        "pointer.") * ")\n"
+        "C passes a SIMD vector by its size: in the register that size picks on SysV, by " *
+        "reference to a copy aligned to it on Win64. The Julia type standing in for it is the " *
+        "tuple of its lanes, which ccall passes lane by lane or in a general register, and a " *
+        "vector returned by value has no Julia type at all. The call would read or write the " *
+        "wrong registers or memory. Use a variant of this C function that takes or returns the " *
+        "vector through a pointer.") * ")\n"
 
 # Emitted once into a wrapper whose functions pass a record through
 # `_RB_ByVal16` (`_c_byval_param_shape` → `:carrier`), ahead of the functions:
 # a ccall type position resolves when the method is defined.
 const _C_BYVAL16_HELPER = """
-# A record C passes by value in a 16-byte-aligned stack slot (`aligned(16)`,
+# A record C passes by value at 16-byte alignment (`aligned(16)`,
 # `_Alignas(16)`, a vector or `__int128` member) crosses `ccall` inside this
-# type. Julia writes no alignment on its `byval`, so the backend takes the
-# argument type's, and a `<2 x double>` chunk is 16-aligned where a struct of
-# fields is 8. Only the bytes travel; the callee reads its own record.
+# type: in a 16-aligned stack slot on SysV, by reference to a 16-aligned copy on
+# Win64. Julia writes no alignment on its `byval` or its copy, so the backend
+# takes the argument type's, and a `<2 x double>` chunk is 16-aligned where a
+# struct of fields is 8. Only the bytes travel; the callee reads its own record.
 struct _RB_ByVal16{N}
     chunks::NTuple{N, NTuple{2, VecElement{Float64}}}
 end
@@ -2653,6 +2692,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         !(jname isa AbstractString) ? nothing :
         jname in blob_struct_names ? 1 :
         haskey(resolved_layouts, jname) ? resolved_layouts[jname][2] : nothing
+    # The bytes of the tuple standing in for a bare vector (`NTuple{4, Float32}`),
+    # or `nothing` for any other spelling.
+    _c_stand_in_bytes(jname) = let m = match(r"^NTuple\{(\d+),\s*([A-Za-z0-9_]+)\}$", String(jname))
+        m === nothing ? nothing : let el = get(_C_JULIA_SCALAR_BYTES, String(m.captures[2]), nothing)
+            el === nothing ? nothing : parse(Int, m.captures[1]) * el
+        end
+    end
 
     # Every record and enum is declared under `_sanitize_c_type_name` of its C
     # name, so a signature must spell it the same way. The metadata spells it
@@ -2848,6 +2894,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # or in a record, is misplaced on SysV only: Win64 passes it by size,
         # as Julia does (`FunctionGen.sysv_vector_misread`).
         vector_offenders = String[]
+        slot_traps = String[]
+        carriers = Dict{Int,String}()
         _vector_phrase(e) = let vs = get(e, "vector_size", nothing)
             "`$(get(e, "c_type", "?"))` ($(vs === nothing ? "" : "a $vs-byte ")SIMD vector)"
         end
@@ -2863,10 +2911,41 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 why = _vector_misread(get(_unaligned_bdk, _pt, _pt))
                 why === nothing || push!(vector_offenders, "takes `$_pt` by value, $why")
             end
+            # The return's record, when the spelling is one: a primitive,
+            # pointer or void return used to scan every struct name through
+            # `_fuzzy_dwarf_lookup`, once per function.
             let rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
-                rkey = haskey(dwarf_structs, rct) ? rct : _fuzzy_dwarf_lookup(rct, dwarf_structs)
-                why = _vector_misread(rkey)
-                why === nothing || push!(vector_offenders, "returns `$rct` by value, $why")
+                if !(rct == "void" || isempty(rct) || occursin(r"[*&(\[]", rct) || _is_primitive_type(rct))
+                    rkey = haskey(dwarf_structs, rct) ? rct : _fuzzy_dwarf_lookup(rct, dwarf_structs)
+                    why = _vector_misread(rkey)
+                    why === nothing || push!(vector_offenders, "returns `$rct` by value, $why")
+                end
+            end
+        else
+            # Win64 passes a bare vector by reference to a copy aligned to its
+            # size, like a record over 8 bytes, never in a register: clang's
+            # `take_v2f(<2 x float>)` reads through a pointer where ccall put
+            # the lanes in RCX, and faulted. A vector of 16 bytes or more whose
+            # tuple has its size crosses inside `_RB_ByVal16{N}` (the tuple's
+            # own copy is 4-aligned, the carrier's 16, which is all Julia can
+            # give: see `_c_byval_param_shape`). Refused: 8 bytes or less
+            # (ccall passes a tuple that small in a register), a tuple that is
+            # not the vector's size (`<3 x float>`: 16 bytes, a 12-byte tuple),
+            # and a size this metadata does not record.
+            for (i, p) in enumerate(get(func, "parameters", []))
+                JLCSIRGenerator.FunctionGen.crosses_as_vector(p) || continue
+                vs = JLCSIRGenerator.FunctionGen.vector_bytes(p)
+                tup = i <= length(param_types) ? _c_stand_in_bytes(param_types[i]) : nothing
+                if vs !== nothing && vs >= 16 && vs % 16 == 0 && tup == vs
+                    carriers[i] = "_RB_ByVal16{$(vs ÷ 16)}"
+                    needs_byval16[] = true
+                    continue
+                end
+                why = vs === nothing ?
+                    "whose size this metadata does not record; rebuild the package (delete .replibuild_cache/project_hash) and wrap again" :
+                    vs <= 8 ? "which Win64 passes by reference to a copy where ccall passes a tuple of $vs bytes in a register" :
+                    "whose Julia tuple ($(something(tup, "?")) bytes) is not the vector's size ($vs bytes)"
+                push!(vector_offenders, "takes $(_vector_phrase(p)) by value, $why")
             end
         end
 
@@ -2877,8 +2956,6 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # record with naturally placed members, an alignment only a typedef
         # carries). Without that record, the DWARF alignment decides between a
         # plain call and a refusal, never a carrier.
-        slot_traps = String[]
-        carriers = Dict{Int,String}()
         if abi === :sysv
             memory_params = Tuple{Int,String}[]
             mem_info = Dict{Int,Any}()
@@ -2906,6 +2983,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     needs_byval16[] = true
                 else
                     push!(slot_traps, _c_slot_trap_phrase(param_types[i], sz, slot, exact; placeholder))
+                end
+            end
+        else
+            # Win64: a record by reference whose alignment the callee's loads
+            # assume (`_c_byval_param_shape`): `{<4 x float>}` is read with
+            # `movaps` from a copy Julia aligned to 4. The record's DWARF
+            # alignment decides; a bare vector already has its carrier above.
+            for (i, _pt) in enumerate(param_types)
+                (startswith(_pt, "Ptr{") || haskey(carriers, i)) && continue
+                raw = get(_unaligned_bdk, _pt, _pt)
+                info = get(dwarf_structs, raw, nothing)
+                (info isa AbstractDict && haskey(info, "members")) || continue
+                sz = _parse_dwarf_size(info)
+                sz > 0 || continue
+                al = _rec_align(info)
+                shape = _c_byval_param_shape(sz, !(sz in (1, 2, 4, 8)), al, false; abi)
+                shape === :own && continue
+                placeholder = _stand_in_align(_pt) === nothing
+                if shape === :carrier && !placeholder
+                    carriers[i] = "_RB_ByVal16{$(sz ÷ 16)}"
+                    needs_byval16[] = true
+                else
+                    push!(slot_traps, _c_win64_copy_trap_phrase(_pt, sz, al; placeholder))
                 end
             end
         end

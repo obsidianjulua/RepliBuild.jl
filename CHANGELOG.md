@@ -4,6 +4,68 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### SIMD vectors: Win64 bare vectors, the C++ gate, nested AVX records, a 3-lane vector's size (2026-11-01)
+
+The audit of #60 (`SIMD vectors by value classify by their size`) ran its
+fixture on Windows and read the C++ generator; what it found, and what moved:
+
+- **A bare vector argument faulted on Win64.** clang's Win64 lowering passes a
+  vector of any size by reference to a copy aligned to its size, and `ccall`
+  passes the tuple standing in for one of 8 bytes or less in a register:
+  `take_v2f(<2 x float>)` read two floats through RCX (`take_v2f`, `take_v2i`
+  faulted; `take_v1f` read NaN). The 16-byte one went by reference too, to a
+  copy Julia aligned to 4 where the callee's `movaps` wants 16, and worked by
+  luck. GeneratorC now refuses a bare vector of 8 bytes or less on Win64, with
+  the reason, and carries one of 16 bytes or more inside `_RB_ByVal16{N}` (a
+  16-aligned copy); a tuple that is not the vector's size (`<3 x float>`: 16
+  bytes in a 12-byte tuple) and a size old metadata does not record are
+  refused. The live test's `@test_broken` for the 8-byte case is gone: it is
+  a refusal now, asserted as one.
+- **Every over-aligned record by reference on Win64 crosses in the carrier.**
+  The same copy problem held for a record with a vector or `_Alignas(16)`
+  member: `_c_byval_param_shape` under `:win64` answered `:own` for every
+  record. It now answers `:carrier` for a record over 8 bytes aligned above 8
+  whose size is a multiple of 16, `:trap` for one whose size is not, and
+  `:own` otherwise; DWARF's alignment is enough there, since a copy aligned
+  more than the callee reads is harmless. 16 is all Julia can give: a callee
+  built for AVX reading a 32-aligned record with `vmovaps ymm` is not covered,
+  and the metadata does not say how the callee was built. `test_c_sret_abi`'s
+  Win64 arm now expects the carrier for `D4A`, `MA32`, `HVec`, `HV4`, `NestA`,
+  `A32` and `V4A`.
+- **The C++ generator's ccall gate learned the vector verdict.** A C-linkage
+  or `noexcept` function in a C++ library goes through `is_ccall_safe`, which
+  ignored vectors, so the fixture's own functions were judged safe for a plain
+  ccall and emitted as one: the calls the C generator refuses on SysV, and the
+  Win64 fault above. A bare vector (`crosses_as_vector`) or a record holding
+  one at any depth (`holds_vector`) now takes the thunk, which states a
+  record's class from DWARF and refuses a bare vector on every host. The live
+  fixture gained C-linkage twins (`take_c_r_v4f`, `make_c_r_v2f`, `take_c_v4f`,
+  …) so the C++ build exercises the gate.
+- **A record that is one vector at any depth is `:unknown` over 16 bytes.**
+  With `-mavx` clang passes `struct { struct { v8f v; } in; }` as one
+  `<8 x float>`, exactly as the one-level record; the check looked one level
+  down and classified the nested one MEMORY. `_sysv_sole_vector` recurses
+  through single-member records and single bases.
+- **A 3-lane vector is 16 bytes.** clang pads `ext_vector_type(3)` of float to
+  16 and writes the array DIE's `DW_AT_byte_size`, which the parser did not
+  keep for arrays; `_die_byte_size` sized it as lanes × element (12). The
+  attribute is kept on array DIEs and wins when present.
+- **An array spelling in a ccall type is refused at write time.**
+  `_undefined_ccall_types` screened identifiers only, so `float[4]` in a ccall
+  type position passed and the module failed to load; it is reported like an
+  undefined type.
+- **The SysV return scan is bounded.** `_fuzzy_dwarf_lookup` ran on every
+  function's return type under SysV, primitives and pointers included, scanning
+  every struct name; it runs for record spellings only.
+
+Noted, not changed: Tier 2's sret buffer is `Ref{T}()`, aligned as the Julia
+record is, and a thunk returning a record aligned 16 stores through it; the
+live fixture's `make_r_v4f` through Tier 2 passes on Win64, and whether the
+heap box is 16-aligned by construction or by luck is not settled.
+`sysv_vector_misread`'s `_sysv_holds_vector` pre-check is not redundant with
+the comparison beside it: without it a record `:unknown` for another reason
+(a bitfield) would be reported as a vector misread.
+
 ### Boost in sections: the first three Hub packages from the superproject (2026-10-31)
 
 Boost.Filesystem, Boost.Charconv and Boost.JSON 1.92.0 are Hub packages

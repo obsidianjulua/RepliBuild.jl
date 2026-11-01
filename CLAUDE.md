@@ -376,7 +376,11 @@ If you are asked to work on it:
   module, so a reader of `define` lines over several files (a per-TU link, a graph
   library) resolves each file's groups in that file (`_nounwind_definitions`). A
   `nounwind`-only widening would expose Tier-3 emitter gaps (see CHANGELOG
-  2026-09-26). `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
+  2026-09-26). A by-value SIMD vector, bare or inside a record at any depth,
+  also goes to Tier 2 (`FunctionGen.crosses_as_vector`, `holds_vector`): a
+  C-linkage or `noexcept` function crossing one was a plain ccall, which faulted
+  on Win64 and read the wrong registers on SysV; the gate gives the vector
+  answer GeneratorC gives (2026-11-01). `is_ccall_safe` is the only gate; DAGDiff was removed because it diffed
   DWARF against natural alignment, not the emitted struct with its `_pad_N`. A layout
   check must model what the generator emits.
 - `IRGen/JLCSIRGenerator.jl` + `ir_gen/` (`FunctionGen`, `StructGen`, `ArrayViewGen`) —
@@ -516,6 +520,14 @@ the test named when you touch the area.
 - By-value aggregate returns through a typedef are repaired in a post-pass (type and
   size). Do **not** swap the return mapper for the parameter mapper: it maps `char*`
   differently and would dismantle the Cstring policy.
+- **An array DIE keeps its own `DW_AT_byte_size`**, and `_die_byte_size` prefers
+  it to lanes × element: clang writes it only when the lanes do not fill a
+  vector (`ext_vector_type(3)` of float is 16 bytes, not 12), and SysV
+  classifies the vector by that size. (`test_simd_vectors.jl`.)
+- **A record over 16 bytes that is one SIMD vector at any depth is `:unknown`**
+  on SysV (`_sysv_sole_vector`): with `-mavx` clang passes
+  `struct { struct { v8f v; } in; }` in a YMM register like the one-level
+  record, and the metadata does not say how the callee was built.
 - **A DIE with no `DW_AT_type` is `void`**, pointed at or qualified: a
   target-less pointer is `void*`, a target-less `const` is `const void` (clang's
   `const void *`), and the transparent qualifiers (`volatile`, `restrict`,
@@ -617,6 +629,17 @@ the test named when you touch the area.
     is the walk. `_c_record_abi()` is the only place GeneratorC reads the target.
   - Register-class traps (a float-bearing blob, a mixed float/integer region) are
     SysV's only: Win64 crosses a record by size alone on both sides.
+  - **Win64 passes a record over 8 bytes by reference to a copy aligned as the
+    record is, and Julia's copy is aligned as the stand-in.** So
+    `_c_byval_param_shape` under `:win64` carries a record aligned above 8
+    whose size is a multiple of 16 in `_RB_ByVal16{N}`, refuses one whose size
+    is not, and asks no `exact` (a copy aligned more than the callee reads is
+    harmless). 16 is all Julia can give: an AVX callee's `vmovaps ymm` is not
+    covered. A bare SIMD vector is passed the same way there: 8 bytes or less
+    is refused (ccall would put the tuple in a register; it faulted), 16 and up
+    is carried when the tuple has the vector's size. (`test_simd_vectors.jl`,
+    `test_c_sret_classification.jl`, devtests `test_simd_vectors_live.jl`,
+    `test_c_sret_abi.jl`.)
   - Whether a record is packed at all is `_record_natural_layout`, the one answer
     for `is_c_lto_safe` and `_is_struct_unsafe`.
   - GeneratorCpp sends to Tier 2 a function that crosses by value a ≤16-byte
@@ -664,7 +687,9 @@ the test named when you touch the area.
   changes. A raw keyword (`baremodule`) in a ccall type position fails the parse
   (abi_fuzz I1). (`test_c_sret_classification.jl`.)
 - Only **ccall type positions** resolve eagerly, so an undeclared type there kills
-  the module; `_assert_wrapper_loadable` checks exactly those. Unknown leaves degrade
+  the module; `_assert_wrapper_loadable` checks exactly those, and refuses a C
+  array spelling (`float[4]`, a vector's DWARF name) there like an undefined
+  type. Unknown leaves degrade
   to `Ptr{Cvoid}` via `_resolve_forward_ptr`, gated on types **actually emitted**.
 - A type constructor (`Ptr`) is not a type name. Names bound in Base/Core must never
   be rejected by a screen (`_assert_no_bound_name_rejected`).

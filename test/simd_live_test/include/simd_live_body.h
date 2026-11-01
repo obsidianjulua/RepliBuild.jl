@@ -42,3 +42,10 @@ double take_v2f(sl_v2f v) { return v[0] + 10.0 * v[1]; }                        
 sl_v2f make_v2f(float a) { sl_v2f r = {a, 2 * a}; return r; }
 double take_v4f(sl_v4f v) { return v[0] + 10.0 * v[1] + 100.0 * v[2] + 1000.0 * v[3]; } /* (0.5, 1, 1.5, 2): 2160.5 */
 sl_v4f make_v4f(float a) { sl_v4f r = {a, 2 * a, 3 * a, 4 * a}; return r; }
+
+/* C linkage (the C++ generator's ccall gate): the same values as above. */
+SL_C double take_c_v4f(sl_v4f v) { return v[0] + 10.0 * v[1] + 100.0 * v[2] + 1000.0 * v[3]; }
+SL_C double take_c_r_v4f(r_v4f x) { return take_r_v4f(x); }
+SL_C r_v4f make_c_r_v4f(void) { return make_r_v4f(); }
+SL_C double take_c_r_v2f(r_v2f x) { return take_r_v2f(x); }
+SL_C r_v2f make_c_r_v2f(void) { return make_r_v2f(); }

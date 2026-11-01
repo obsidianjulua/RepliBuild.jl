@@ -19,11 +19,15 @@
 #     16-byte `{<4 x float>}` comes back through GeneratorC's 16-aligned
 #     buffer (BRANCH 0), since the callee stores it with `movaps`.
 #   * A bare vector never crosses a thunk (one register per lane), and no Julia
-#     type returns one, so both are refused on both hosts. A bare 16-byte
-#     argument through Tier 3 is right on Win64 (both sides pass it by
-#     reference). A bare 8-byte one is not: clang passes it by reference and
-#     ccall by value, and the callee faults. That call runs in a child of its
-#     own and is `@test_broken` until the Win64 refusal is decided.
+#     type returns one, so both are refused on both hosts. Through Tier 3 on
+#     Win64, clang passes every bare vector by reference to a copy aligned to
+#     its size: the 16-byte one crosses inside GeneratorC's `_RB_ByVal16{1}`
+#     (a 16-aligned copy) and is called; the 8-byte one, which ccall would put
+#     in a register, is refused (it faulted, 2026-11-01 audit of #60).
+#   * The `take_c_*`/`make_c_*` functions have C linkage in the C++ build too,
+#     so GeneratorCpp's ccall gate (`is_ccall_safe`) judges them: a vector
+#     crossing takes the thunk, which gives the same answers as the C++ ones
+#     above. They used to be plain ccalls of the shapes the C build refuses.
 #
 # Needs clang, clang++ and libJLCS. The library-free side is
 # test_simd_vectors.jl in runtests.
@@ -39,26 +43,31 @@ using .TestSupport
 const SIMD_LIVE_DIR = joinpath(@__DIR__, "simd_live_test")
 const SIMD_LIVE_RECORDS = ["r_v1f", "r_v2i", "r_v2f", "r_v1d", "r_v2f_i", "r_v4f"]
 const SIMD_LIVE_BARE = ["v2f", "v4f"]
+# C linkage in both builds: the records and the bare vector `take_c_`/`make_c_` cross.
+const SIMD_LIVE_CLINK_RECORDS = ["c_r_v4f", "c_r_v2f"]
+const SIMD_LIVE_CLINK_BARE = ["c_v4f"]                   # take only
 
 """
     simd_live_expected(lang, name, dir) -> String
 
 What the probe must print for `<name>/<dir>` from the `lang` (`:c` or `:cpp`)
-build on this host: `PASS`, `TRAP`, or `BROKEN` for the Win64 bare 8-byte
-argument through Tier 3, which faults and runs on its own.
+build on this host: `PASS` or `TRAP`. A `c_` name is the C-linkage twin of the
+record or vector after the prefix, which crosses the same way in the C build
+and, in the C++ build, the way the thunk crosses it.
 """
 function simd_live_expected(lang::Symbol, name::String, dir::String)
     win = Sys.iswindows()
-    if name in SIMD_LIVE_BARE
+    base = replace(name, r"^c_" => "")
+    if base in SIMD_LIVE_BARE
         dir == "make" && return "TRAP"          # no Julia type returns a vector
         lang === :cpp && return "TRAP"          # a thunk would pass the lanes
         win || return "TRAP"                    # ccall reads the lanes, C the vector
-        return name == "v4f" ? "PASS" : "BROKEN"
+        return base == "v4f" ? "PASS" : "TRAP"  # Win64: 16 bytes in the carrier; 8 bytes would go in a register
     end
     win && return "PASS"                        # Win64: by size, on both tiers
-    name == "r_v4f" && return "TRAP"            # one SSE register (SSE, SSEUP)
+    base == "r_v4f" && return "TRAP"            # one SSE register (SSE, SSEUP)
     lang === :cpp && return "PASS"              # Tier 2 states the vector's class
-    return name in ("r_v2f", "r_v2f_i") ? "PASS" : "TRAP"
+    return base in ("r_v2f", "r_v2f_i") ? "PASS" : "TRAP"
 end
 
 function simd_live_project(lang::Symbol, opt::String)
@@ -110,47 +119,48 @@ if requires("SIMD vectors by value, live", :libJLCS, :clang, :clangxx)
             @test isfile(wrapper)
             code = read(wrapper, String)
 
-            # Every C++ take_/make_ that is called goes through its thunk.
+            # Every C++ take_/make_ that is called goes through its thunk, the
+            # C-linkage twins included: the gate sends a vector crossing there.
             if lang === :cpp
                 tiers = Dict(m.captures[1] => m.captures[2] for m in eachmatch(r"\n\s+:(\w+) => :(tier\d)", code))
-                for r in SIMD_LIVE_RECORDS, dir in ("take", "make")
+                for r in vcat(SIMD_LIVE_RECORDS, SIMD_LIVE_CLINK_RECORDS), dir in ("take", "make")
                     f = "$(dir)_$r"
                     want = simd_live_expected(lang, r, dir) == "PASS" ? "tier2" : "missing"
                     @test (f, get(tiers, f, "missing")) == (f, want)
                 end
+                @test get(tiers, "take_c_v4f", "missing") == "missing"
+                @test !occursin(r"function take_c_v4f\([^\n]*\n\s*(?:#[^\n]*\n\s*)*ccall\(", code)
             end
-            # Win64 returns the 16-aligned record through a buffer GeneratorC
-            # aligned itself, which a plain ccall result cannot tell apart.
+            # Win64, C: the 16-aligned record comes back through a buffer
+            # GeneratorC aligned itself, and the 16-byte bare vector goes in
+            # through the carrier; neither is a plain ccall by its result. The
+            # 8-byte one is a refusal, named as such.
             if lang === :c && Sys.iswindows()
-                i = findfirst("function make_r_v4f(", code)
-                @test i !== nothing && occursin("ret_ptr", code[first(i):first(findnext("\nend", code, first(i)))])
+                body(f) = let i = findfirst("function $f(", code)
+                    i === nothing ? "" : code[first(i):first(findnext("\nend", code, first(i)))]
+                end
+                @test occursin("ret_ptr", body("make_r_v4f"))
+                @test occursin("_rb_byval16(", body("take_v4f"))
+                @test occursin("_rb_byval16(", body("take_c_v4f"))
+                @test occursin("_rb_byval16(", body("take_r_v4f"))
+                @test occursin("ABI Safety Trap", body("take_v2f")) && occursin("in a register", body("take_v2f"))
             end
 
-            broken = [n for n in SIMD_LIVE_BARE, d in ("take", "make") if simd_live_expected(lang, n, d) == "BROKEN"]
-            skips = ["$n/take" for n in broken]
-            r = run_isolated(`$probe $wrapper $skips`)
+            r = run_isolated(`$probe $wrapper`)
             v = probe_verdicts(r.output)
             @test r.ok
             @test haskey(v, "PROBE_DONE")
             probed = 0
-            for name in vcat(SIMD_LIVE_RECORDS, SIMD_LIVE_BARE), dir in ("take", "make")
+            cases = vcat(vec([(n, d) for n in vcat(SIMD_LIVE_RECORDS, SIMD_LIVE_BARE, SIMD_LIVE_CLINK_RECORDS), d in ("take", "make")]),
+                         [(n, "take") for n in SIMD_LIVE_CLINK_BARE])
+            for (name, dir) in cases
                 want = simd_live_expected(lang, name, dir)
-                want == "BROKEN" && continue
                 got = get(v, "$name/$dir", "no PROBE line")
                 @test ("$name/$dir", first(split(got, ' '))) == ("$name/$dir", want)
                 probed += 1
             end
-            @test probed == 2 * (length(SIMD_LIVE_RECORDS) + length(SIMD_LIVE_BARE)) - length(broken)
+            @test probed == length(cases)
             @test !any(k -> endswith(k, "/size"), keys(v))
-
-            # The Win64 bare 8-byte argument through Tier 3, in a child of its
-            # own: clang passes it by reference and ccall by value.
-            for n in broken
-                others = ["$m/$d" for m in vcat(SIMD_LIVE_RECORDS, SIMD_LIVE_BARE), d in ("take", "make")
-                          if "$m/$d" != "$n/take"]
-                rb = run_isolated(`$probe $wrapper $others`; echo = false)
-                @test_broken startswith(get(probe_verdicts(rb.output), "$n/take", "no PROBE line"), "PASS")
-            end
         end
     end
 end

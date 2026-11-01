@@ -52,4 +52,14 @@ sl_v2f make_v2f(float a);
 double take_v4f(sl_v4f v);
 sl_v4f make_v4f(float a);
 
+/* C linkage, for the C++ build: a function the C++ generator's ccall gate
+   (`is_ccall_safe`) judges. It used to pass these to a plain ccall; a vector
+   crossing now takes the thunk, which states a record's class and refuses a
+   bare vector. In the C build they are ordinary C functions, like the above. */
+SL_C double take_c_v4f(sl_v4f v);
+SL_C double take_c_r_v4f(r_v4f x);
+SL_C r_v4f make_c_r_v4f(void);
+SL_C double take_c_r_v2f(r_v2f x);
+SL_C r_v2f make_c_r_v2f(void);
+
 #endif

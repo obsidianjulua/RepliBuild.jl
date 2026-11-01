@@ -328,10 +328,10 @@ end
              ("va_make_packed_Cint", :sret, :ccall),
              ("va_dbits",        :trap,    :ccall),   # a float blob in the register window
              ("va_dbits_Cint",   :trap,    :ccall),
-             ("va_d4a",          :carrier, :ccall),   # the 16-aligned slot after Big24 (W2)
-             ("va_d4a_Cint",     :carrier, :ccall),
-             ("va_a32",          :trap,    :ccall),   # 32-aligned: Julia cannot place it
-             ("va_a32_Cint",     :trap,    :ccall),
+             ("va_d4a",          :carrier, :carrier), # the 16-aligned slot after Big24 (W2); Win64 the 16-aligned copy
+             ("va_d4a_Cint",     :carrier, :carrier),
+             ("va_a32",          :trap,    :carrier), # 32-aligned: Julia cannot place a SysV slot; Win64 gives the copy 16
+             ("va_a32_Cint",     :trap,    :carrier),
              ("va_ld",           :trap,    :trap),    # long double, on both
              ("va_ld_Cint",      :trap,    :trap),
              ("va_make_d4a",     :aligned, :aligned), # returns a 16-aligned record: the wrapper's own buffer
@@ -368,8 +368,8 @@ end
     @test occursin("v_c = _rb_byval16(v, _RB_ByVal16{2})", body(sysv, "va_d4a_Cint"))
     @test occursin("@ccall LIBRARY_PATH.var\"va_d4a\"(p::Big24, v_c::_RB_ByVal16{2}, fmt::Cstring; va_1::Cint)::Cdouble", body(sysv, "va_d4a_Cint"))
     @test occursin("@ccall LIBRARY_PATH.var\"va_d4a\"(p::Big24, v_c::_RB_ByVal16{2}, fmt::Cstring;)::Cdouble", body(sysv, "va_d4a"))
-    @test occursin("@ccall LIBRARY_PATH.var\"va_d4a\"(p::Big24, v::D4A, fmt::Cstring; va_1::Cint)::Cdouble", body(win64, "va_d4a_Cint"))
-    @test count("struct _RB_ByVal16{N}", sysv) == 1 && !occursin("_RB_ByVal16", win64)
+    @test occursin("@ccall LIBRARY_PATH.var\"va_d4a\"(p::Big24, v_c::_RB_ByVal16{2}, fmt::Cstring; va_1::Cint)::Cdouble", body(win64, "va_d4a_Cint"))
+    @test count("struct _RB_ByVal16{N}", sysv) == 1 && count("struct _RB_ByVal16{N}", win64) == 1
     @test occursin("@ccall LIBRARY_PATH.var\"va_plain\"(p::Big24, fmt::Cstring; va_1::Cint)::Cint", body(sysv, "va_plain_Cint"))
     # Every variadic call site is still variadic, sret and carrier included,
     # and both modules parse.

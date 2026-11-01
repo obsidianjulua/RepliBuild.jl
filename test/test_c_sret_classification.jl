@@ -569,19 +569,23 @@ Contents of the .debug_info section:
     end
 
     @testset "byval slot: Julia's own, a carrier, or refused" begin
-        # (size, MEMORY class, slot alignment, exact) → SysV, Win64
-        table = [(24, true,  8,  true,  :own,     :own),   # Big24: Julia's byval is at 8 too
-                 (32, true,  16, true,  :carrier, :own),   # D4A, MA32, HVec, HV4, NestA (W2)
-                 (48, true,  16, true,  :carrier, :own),
-                 (32, true,  16, false, :trap,    :own),   # metadata without byval_params: refused, not guessed
-                 (32, true,  32, true,  :trap,    :own),   # A32: Julia's allocas are 16-aligned at most
-                 (32, true,  32, false, :trap,    :own),
-                 (24, true,  16, true,  :trap,    :own),   # an alignment a typedef added: not a multiple of 16
-                 (16, true,  16, true,  :trap,    :own),   # a 16-byte carrier would travel in XMM
-                 (32, false, 16, true,  :own,     :own),   # not MEMORY: registers, no slot
-                 (16, false, 16, true,  :own,     :own),   # V4A: SSE,SSE
-                 (16, nothing, 16, true, :own,    :own),   # unproven at 16 bytes: the blob trap's case, not this one
-                 (32, true,  8,  false, :own,     :own)]   # a packed 32-byte record, DWARF alignment 8
+        # (size, MEMORY class / Win64 by reference, slot or record alignment, exact) → SysV, Win64.
+        # Win64 passes a record over 8 bytes by reference to a copy aligned as
+        # the record is, and Julia's copy as the stand-in is, so a record
+        # aligned above 8 goes through the 16-aligned carrier at any size that
+        # is a multiple of 16, exactness not asked (2026-11-01).
+        table = [(24, true,  8,  true,  :own,     :own),     # Big24: Julia's byval is at 8 too
+                 (32, true,  16, true,  :carrier, :carrier), # D4A, MA32, HVec, HV4, NestA (W2)
+                 (48, true,  16, true,  :carrier, :carrier),
+                 (32, true,  16, false, :trap,    :carrier), # metadata without byval_params: refused on SysV, not guessed
+                 (32, true,  32, true,  :trap,    :carrier), # A32: Julia's allocas are 16-aligned at most
+                 (32, true,  32, false, :trap,    :carrier),
+                 (24, true,  16, true,  :trap,    :trap),    # an alignment a typedef added: not a multiple of 16
+                 (16, true,  16, true,  :trap,    :carrier), # a 16-byte carrier travels in XMM on SysV; by reference on Win64
+                 (32, false, 16, true,  :own,     :own),     # not MEMORY: registers, no slot
+                 (16, false, 16, true,  :own,     :own),     # V4A: SSE,SSE
+                 (16, nothing, 16, true, :own,    :own),     # unproven at 16 bytes: the blob trap's case, not this one
+                 (32, true,  8,  false, :own,     :own)]     # a packed 32-byte record, DWARF alignment 8
         checked = 0
         for (n, mem, al, exact, sysv, win64) in table
             @test (n, mem, al, exact, :sysv, _SW._c_byval_param_shape(n, mem, al, exact; abi = :sysv)) ==
@@ -816,21 +820,24 @@ Contents of the .debug_info section:
              # A MEMORY-class argument in a stack slot C aligns above 8 (W2).
              # SysV: inside `_RB_ByVal16` where the compiler recorded a
              # 16-aligned slot, refused where it recorded more, or nothing.
-             # Win64: by reference to a copy on both sides, the plain ccall.
-             ("take_d4a",   :carrier, :ccall),
-             ("take_ma32",  :carrier, :ccall),
-             ("take_hvec",  :carrier, :ccall),
-             ("take_nesta", :carrier, :ccall),
-             ("take_a32",   :trap,   :ccall),   # 32: Julia's allocations are 16-aligned at most
-             ("take_v4a",   :ccall,  :ccall),   # SSE,SSE: no slot
-             ("take_ab16",  :trap,   :ccall),   # the register window, as before
-             ("take_mys48", :carrier, :ccall),  # unmeasurable member; the IR says 16, 48 bytes
-             ("take_pa32",  :ccall,  :ccall),   # DWARF says 16, the IR says 8: the compiler's answer
-             ("take_d4a_old", :trap, :ccall),   # no `byval_params`: refused, not guessed
+             # Win64: by reference to a copy aligned as the record is, so a
+             # record aligned above 8 goes inside the carrier too (its copy is
+             # 16-aligned; the stand-in's is not), at any size that is a
+             # multiple of 16 (2026-11-01).
+             ("take_d4a",   :carrier, :carrier),
+             ("take_ma32",  :carrier, :carrier),
+             ("take_hvec",  :carrier, :carrier),
+             ("take_nesta", :carrier, :carrier),
+             ("take_a32",   :trap,   :carrier), # 32: Julia's allocations are 16-aligned at most; Win64 gives 16
+             ("take_v4a",   :ccall,  :carrier), # SSE,SSE: no slot; Win64 by reference, 16-aligned
+             ("take_ab16",  :trap,   :carrier), # the register window, as before; Win64 by reference, 16-aligned
+             ("take_mys48", :carrier, :carrier),# unmeasurable member; the IR says 16, 48 bytes
+             ("take_pa32",  :ccall,  :carrier), # DWARF says 16, the IR says 8: SysV takes the compiler's; Win64 has no IR fact and over-aligns the copy, harmlessly
+             ("take_d4a_old", :trap, :carrier), # no `byval_params`: SysV refuses, not guesses; Win64 asks no fact
              ("take_big24_old", :ccall, :ccall),# 8-aligned without facts: Julia's byval is right
-             ("take_mys48_old", :trap, :ccall), # DWARF bounds it to 16 from the size: refused
-             ("take_d4a_short", :trap, :ccall), # one fact for two MEMORY parameters: no fact
-             ("take_d4a_named", :trap, :ccall), # the fact names another record: no fact
+             ("take_mys48_old", :trap, :carrier), # DWARF bounds it to 16 from the size: SysV refuses
+             ("take_d4a_short", :trap, :carrier), # one fact for two MEMORY parameters: no fact on SysV
+             ("take_d4a_named", :trap, :carrier), # the fact names another record: no fact on SysV
              ("make_take_d4a", :aligned, :aligned)]   # BRANCH 0's buffer, and the carrier (below)
     checked = 0
     for (name, want_sysv, want_win64) in table
@@ -888,20 +895,23 @@ Contents of the .debug_info section:
     @test occursin("ccall((:make_bfm12, LIBRARY_PATH), BFM12, (), )", body(win64, "make_bfm12"))
     # The carrier: the record's bytes inside `_RB_ByVal16{N}` in the ccall's
     # argument and type positions, the record itself in the signature, and the
-    # type defined once, ahead of the functions. Win64 has no trace of it.
+    # type defined once, ahead of the functions, on both conventions since
+    # Win64 carries its over-aligned by-reference records too (2026-11-01).
     @test occursin("function take_d4a(p::Big24, v::D4A)", body(sysv, "take_d4a"))
     @test occursin("ccall((:take_d4a, LIBRARY_PATH), Cdouble, (Big24, _RB_ByVal16{2},), p, _rb_byval16(v, _RB_ByVal16{2}))", body(sysv, "take_d4a"))
-    @test occursin("(Mys48,)", body(win64, "take_mys48")) && occursin("(_RB_ByVal16{3},), _rb_byval16(v, _RB_ByVal16{3})", body(sysv, "take_mys48"))
+    @test occursin("(_RB_ByVal16{3},), _rb_byval16(v, _RB_ByVal16{3})", body(sysv, "take_mys48"))
+    @test occursin("(_RB_ByVal16{3},), _rb_byval16(v, _RB_ByVal16{3})", body(win64, "take_mys48"))
     @test count("struct _RB_ByVal16{N}", sysv) == 1 && count("function _rb_byval16(", sysv) == 1
+    @test count("struct _RB_ByVal16{N}", win64) == 1 && count("function _rb_byval16(", win64) == 1
     @test (i = findfirst("struct _RB_ByVal16{N}", sysv); j = findfirst("function take_d4a(", sysv);
            i !== nothing && j !== nothing && first(i) < first(j))
-    @test !occursin("_RB_ByVal16", win64) && !occursin("_rb_byval16", win64)
-    @test occursin("ccall((:take_d4a, LIBRARY_PATH), Cdouble, (Big24, D4A,), p, v)", body(win64, "take_d4a"))
-    @test occursin("ccall((:take_a32, LIBRARY_PATH), Cdouble, (Big24, A32,), p, v)", body(win64, "take_a32"))
+    # Win64: the same carrier, for the copy's alignment rather than a slot's.
+    @test occursin("ccall((:take_d4a, LIBRARY_PATH), Cdouble, (Big24, _RB_ByVal16{2},), p, _rb_byval16(v, _RB_ByVal16{2}))", body(win64, "take_d4a"))
+    @test occursin("ccall((:take_a32, LIBRARY_PATH), Cdouble, (Big24, _RB_ByVal16{2},), p, _rb_byval16(v, _RB_ByVal16{2}))", body(win64, "take_a32"))
     @test occursin("ccall((:take_pa32, LIBRARY_PATH), Cint, (Big24, PA32,), p, v)", body(sysv, "take_pa32"))
     # BRANCH 0's aligned buffer and the carrier on one function.
     @test occursin("ccall((:make_take_d4a, LIBRARY_PATH), Cvoid, (Ptr{D4A}, Big24, _RB_ByVal16{2},), ret_ptr, p, _rb_byval16(v, _RB_ByVal16{2}))", body(sysv, "make_take_d4a"))
-    @test occursin("ccall((:make_take_d4a, LIBRARY_PATH), Cvoid, (Ptr{D4A}, Big24, D4A,), ret_ptr, p, v)", body(win64, "make_take_d4a"))
+    @test occursin("ccall((:make_take_d4a, LIBRARY_PATH), Cvoid, (Ptr{D4A}, Big24, _RB_ByVal16{2},), ret_ptr, p, _rb_byval16(v, _RB_ByVal16{2}))", body(win64, "make_take_d4a"))
     # The refusals say why, and what a rebuild would change.
     @test occursin("takes `A32` by value in a 32-byte-aligned stack slot", body(sysv, "take_a32"))
     @test occursin("16-byte-aligned at most", body(sysv, "take_a32"))
@@ -910,7 +920,9 @@ Contents of the .debug_info section:
           occursin("project_hash", body(sysv, "take_d4a_old"))
     @test occursin("does not record the slot alignment", body(sysv, "take_d4a_short"))
     @test occursin("takes `Mys48` by value in a 16-byte-aligned stack slot", body(sysv, "take_mys48_old"))
-    @test !occursin("stack slot", win64)
+    # Win64 refuses no slot: every record here is carried or passed as is.
+    @test !occursin(r"by value in a \d+-byte-aligned stack slot", win64)
+    @test !occursin(r"takes `\w+` by value, which Win64 passes by reference", win64)   # nor a copy refusal: every size here is a multiple of 16
     # Every emitted module still parses (the carrier helper is part of it).
     for (code, abi) in ((sysv, :sysv), (win64, :win64))
         ex = Meta.parseall(code)

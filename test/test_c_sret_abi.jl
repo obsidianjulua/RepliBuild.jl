@@ -129,9 +129,21 @@ const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
             @test occursin("ccall((:take_v4a, LIBRARY_PATH), Cfloat, (Big24, V4A,), p, v)", body("take_v4a"))
             @test count("struct _RB_ByVal16{N}", wsrc) == 1
         else
-            @test !occursin("_RB_ByVal16", wsrc)
-            @test occursin("ccall((:take_d4a, LIBRARY_PATH), Cdouble, (Big24, D4A,), p, v)", body("take_d4a"))
-            @test occursin("ccall((:take_a32, LIBRARY_PATH), Cdouble, (Big24, A32,), p, v)", body("take_a32"))
+            # Win64 passes each of these by reference to a copy aligned as the
+            # record is, and Julia's copy is aligned as the stand-in: every
+            # record aligned above 8 crosses inside the carrier (2026-11-01),
+            # the 32-aligned A32 included, since 16 is all Julia can give.
+            checked = 0
+            for f in ("take_d4a", "take_ma32", "take_hvec", "take_hv4", "take_nesta", "take_a32")
+                @test (f, occursin("_rb_byval16(v, _RB_ByVal16{2})", body(f))) == (f, true)
+                @test (f, occursin("(Big24, _RB_ByVal16{2},), p, _rb_byval16(v, _RB_ByVal16{2}))", body(f))) == (f, true)
+                checked += 1
+            end
+            @test checked == 6
+            @test occursin("_rb_byval16(v, _RB_ByVal16{1})", body("take_v4a"))     # 16 bytes: by reference too
+            @test count("struct _RB_ByVal16{N}", wsrc) == 1
+            # Big24 is 8-aligned: Julia's own copy, as before.
+            @test occursin("(Big24,", body("take_d4a")) && !occursin("_rb_byval16(p", body("take_d4a"))
         end
     end
 

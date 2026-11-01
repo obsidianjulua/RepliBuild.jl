@@ -153,6 +153,27 @@ function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
         end
     end
 
+    # ── -0.25. SIMD vectors by value ──────────────────────────────────────
+    # C passes a vector by its size (one SSE register on SysV, by reference on
+    # Win64) and `ccall` passes the tuple of its lanes, and the two agree only
+    # by luck. A bare vector (`crosses_as_vector`) and a record holding one at
+    # any depth (`holds_vector`) take the thunk, which states a record's class
+    # from DWARF and refuses a bare vector on every host. A plain ccall of the
+    # same shape read the wrong registers on SysV and faulted on Win64; the C
+    # generator had refused these since 2026-10-31 and this gate had not
+    # (2026-11-01).
+    let FG = JLCSIRGenerator.FunctionGen
+        FG.crosses_as_vector(func_info["return_type"]) && return false
+        any(p -> FG.crosses_as_vector(p), func_info["parameters"]) && return false
+        for t in Iterators.flatten(((get(func_info["return_type"], "c_type", ""),),
+                                    (get(p, "c_type", "") for p in func_info["parameters"])))
+            s = String(strip(replace(String(t), r"\bconst\b" => "")))
+            s = String(replace(s, r"^(?:struct|union|class|enum)\s+" => ""))
+            (isempty(s) || occursin(r"[*&(\[]", s)) && continue
+            FG.holds_vector(s, dwarf_structs) && return false
+        end
+    end
+
     # ── 0. STL containers (never ccall-safe by value) ───────────────────
     ret_type_str = String(get(func_info["return_type"], "c_type", ""))
     if is_stl_container_type(ret_type_str)
