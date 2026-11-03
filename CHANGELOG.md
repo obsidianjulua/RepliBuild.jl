@@ -4,6 +4,39 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A Tier 2 argument crosses at its C width (2026-11-03)
+
+Found by the full-surface test of the Hub's pugixml wrapper. A thunk slot
+holds a pointer to the argument's storage, and the thunk loads the C
+parameter's width from it; the generated body handed `JITManager.invoke` the
+Julia value as the caller spelled it. A parameter declared `::Integer` (every
+C integer type, CLAUDE.md's rule) therefore took an `Int8` and boxed one byte,
+and the thunk read four: `pugi_xml_attribute_as_int(attr, Int8(-1))` answered
+`-1371856897`, then `619396351`, a different number on every call. `Int32`
+and `Int64` happened to work because the box was wide enough and the host is
+little-endian. The ccall path never had this: `ccall` converts to the declared
+C type itself (and GeneratorCpp's BRANCH 2 spells `x_c = Cint(x)` on top);
+only a thunk cannot.
+
+- **The emitted Tier 2 body converts first.** `_tier2_invoke_args`
+  (GeneratorCpp) spells the invoke's argument list: `Cint(def)`,
+  `Cuint(options)`, `Csize_t(size)` for a parameter in `_INTEGER_CTYPES`, and
+  the `@enum`'s base type for a parameter whose C type is an emitted enum
+  (`Cuint(encoding)` for pugixml's `xml_encoding`), which the enum value and
+  any Integer both convert to. `emitted_enum_base` records that base type
+  per emitted enum name, an alias taking its canonical's. Pointers,
+  references, strings, `Bool`, floats (declared at their exact type) and
+  records cross as before. The AOT dispatch branch shares the same list.
+- **Tests.** `test_tier2_scalar_widths.jl` (runtests): synthetic metadata,
+  the emitted bodies carry the conversions and the signatures stay
+  `::Integer`; neutered (names returned unchanged), 3 of its 8 assertions
+  fail. `test/cpp_routing_test` gained `scalar_widths(int, unsigned, size_t,
+  Kind)`, C++ linkage so it is a thunk; its probe (devtests
+  `test_cpp_record_routing.jl`) calls it with `Int8`, `UInt8` and `Int16`
+  arguments and an `Int8` for the enum, and checks the callee's weighted sum:
+  44 pass live on Windows. pugixml re-wrapped and its 441-assertion test
+  passes; the wrapper changed only in those argument lists.
+
 ### A reference return is an address; a reference to a type Julia cannot hold is a raw pointer (2026-11-01)
 
 Two findings from the full-surface tests of the Hub's Boost.Filesystem and

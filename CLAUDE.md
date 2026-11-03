@@ -591,6 +591,14 @@ the test named when you touch the area.
   must move the prediction with it. (`test_integer_width_overloads.jl`.)
 - **Two generators, one answer.** C and C++ duplicate type sets by design, for
   isolation. Shared decisions must still agree, so put the derivation in
+- **A Tier 2 argument is converted to its C width in the emitted body.** A
+  thunk loads the C parameter's width from the argument's storage, so a
+  Julia integer narrower than the C type was read past its box
+  (`as_int(attr, Int8(-1))`: garbage, pugixml 2026-11-03). `_tier2_invoke_args`
+  spells every `::Integer` parameter as `Ctype(name)` and an emitted enum as
+  its `@enum` base type; a new scalar kind in a Tier 2 signature must go
+  through it. (`test_tier2_scalar_widths.jl`, devtests
+  `test_cpp_record_routing.jl`'s `scalar_widths`.)
   `Wrapper/Utils.jl` rather than copying it. Agreement is necessary, not sufficient.
 - **Receiver (`this`) gates**: `FunctionGen._has_receiver` and GeneratorCpp's
   `_cpp_this_param` must agree (corpus test in `test_symbol_hygiene.jl` over the
@@ -1213,6 +1221,24 @@ DWARF-resolved destructors — **is** built.)
   binding the STL members that live in the C++ runtime library (below).
 - STL members that live in the C++ runtime library are unbound: libc++'s
   `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
+- **`long double` by value is a trap on every tier** (scoped 2026-11-03, not
+  built). The scalar is x87 extended precision: SysV passes it in memory and
+  returns it in `ST0`, which `ccall` cannot reach, so Tier 3 can never carry
+  it and a C package stays shimmed. A thunk could: LLVM has `x86_fp80`,
+  `map_cpp_type` already spells a `long double` member `f80`, and
+  `_table_entry` refuses only the bare scalar (`:opaque`). The design, if it
+  is ever wanted: cross it through Tier 2 as a 16-byte carrier
+  (`NTuple{16, UInt8}`: the thunk loads and stores `x86_fp80` from the slot,
+  no ABI change beyond declaring the type) with explicit Julia conversions
+  to and from `Float64`/`BigFloat`, never an automatic `fpext`/`fptrunc`
+  behind a flag, which would round 64-bit mantissas to 53 silently. Route
+  C-linkage functions that cross one to Tier 2 like vectors; keep records
+  holding one refused on SysV returns (`sysv_trap_reason`). Live tests:
+  SysV with poisoned registers, Win64, and `abi_fuzz`, whose 62 `XFAIL`s per
+  60 seeds are exactly this type. Payoff measured on the Hub: 5 stubs in
+  boostcharconv (`to_chars(long double)` and kin) and 3 in fmt, no consumer
+  behind them, and MSVC's `long double` is a `double`, so Windows-native
+  libraries rarely expose it. About three days with both hosts verified.
   them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches
   only the wrapped library. Binding them needs the engine to also search the
   library's runtime dependencies (2026-10-16).

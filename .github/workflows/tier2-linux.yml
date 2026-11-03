@@ -106,9 +106,14 @@ jobs:
           echo "codename=$VERSION_CODENAME" >> "$GITHUB_OUTPUT"
 
           # Trust apt.llvm.org's archive key and nothing else, pinned by fingerprint.
+          # The download retries on every error, name resolution included: four
+          # of four Julia 1.12 cells died here on `curl: (6) Could not resolve
+          # host: apt.llvm.org` within one minute on 2026-11-03, while the
+          # apt-get below already had its retry loop.
           key=/etc/apt/keyrings/apt.llvm.org.asc
           sudo install -d -m 0755 /etc/apt/keyrings
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee "$key" > /dev/null
+          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
+            https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee "$key" > /dev/null
           fpr=$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10; exit }')
           if [ "$fpr" != 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421 ]; then
             echo "::error::apt.llvm.org key fingerprint is '$fpr', expected 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"

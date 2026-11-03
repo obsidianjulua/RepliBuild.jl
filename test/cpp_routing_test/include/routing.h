@@ -45,6 +45,12 @@ struct PK28 { char c; PR r; };
 struct PB12 { unsigned int m1; unsigned long long m2 : 7; };
 #pragma pack(pop)
 
+/* C++ linkage, not noexcept: Tier 2 for its exceptions, with plain scalar
+   arguments. The thunk loads each at its C width, so the wrapper must widen a
+   narrower Julia integer before it boxes it (2026-11-03). Every argument has
+   its own weight in the result. */
+long long scalar_widths(int a, unsigned int b, unsigned long long c, Kind k);
+
 extern "C" {
 
 CS3     make_cs3(int base);

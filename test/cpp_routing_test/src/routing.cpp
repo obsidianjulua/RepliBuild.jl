@@ -129,3 +129,8 @@ PB12 make_pb12(int m1)
 }
 
 }
+
+long long scalar_widths(int a, unsigned int b, unsigned long long c, Kind k)
+{
+    return (long long)a + 1000LL * (long long)b + 1000000LL * (long long)c + 1000000000LL * (long long)k;
+}
