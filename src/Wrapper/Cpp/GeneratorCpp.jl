@@ -120,6 +120,27 @@ const _INTEGER_CTYPES = ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort"
 const _NO_POSITIONS = Set{Int}()
 
 """
+    _tier2_invoke_args(names, ctypes, needs_conversion, enum_base) -> Vector{String}
+
+The argument list of a Tier 2 `invoke`. A thunk slot points at the argument's
+storage and the thunk loads the C parameter's width from it, so an integer
+narrower than its C type must be widened BEFORE it is boxed: `Ref(Int8(-1))`
+holds one byte, and an `int` parameter reads three more past it (pugixml's
+`as_int(attr, Int8(-1))` answered a different number on every call,
+2026-11-03). `ccall` converts to the declared C type itself; a thunk cannot,
+so the emitted body does — `Cint(def)` for a parameter in `_INTEGER_CTYPES`
+(the ones declared `::Integer`), and the `@enum`'s base type for an emitted
+enum, which the enum value and any Integer both convert to. Pointers,
+references, strings, `Bool`, floats (declared at their exact type) and records
+cross as they are.
+"""
+function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base)
+    [needs_conversion[i] ? "$(ctypes[i])($(names[i]))" :
+     haskey(enum_base, ctypes[i]) ? "$(enum_base[ctypes[i]])($(names[i]))" : names[i]
+     for i in eachindex(names)]
+end
+
+"""
     _integer_width_overloads(functions, struct_types, ccall_param_type; concrete) -> Dict{String,Set{Int}}
 
 For each mangled symbol whose wrapper would share its Julia name and dispatch
@@ -768,6 +789,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Julia (sizeof, alignment) of each DWARF enum as emitted, by emitted name:
     # what a struct field of that enum type is. An alias has its canonical's.
     emitted_enum_layout = Dict{String,Tuple{Int,Int}}()
+    # The `@enum X::T` base type `T` of each emitted enum, by emitted name: what
+    # a Tier 2 body converts an enum argument to (`_tier2_invoke_args`).
+    emitted_enum_base = Dict{String,String}()
 
     # Extract enums (stored with __enum__ prefix)
     enum_types = filter(k -> startswith(k, "__enum__"), keys(dwarf_structs))
@@ -855,6 +879,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     canonical = emitted_enum_sigs[enum_sig]
                     haskey(emitted_enum_layout, canonical) &&
                         (emitted_enum_layout[enum_name] = emitted_enum_layout[canonical])
+                    haskey(emitted_enum_base, canonical) &&
+                        (emitted_enum_base[enum_name] = emitted_enum_base[canonical])
                     if canonical != enum_name
                         push!(enum_chunks, _PendingEnumAlias(enum_name, canonical, """
                         # $enum_name is $canonical under a different DWARF spelling
@@ -869,6 +895,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     continue
                 end
                 emitted_enum_sigs[enum_sig] = enum_name
+                emitted_enum_base[enum_name] = julia_underlying
                 # `@enum X::T` and the bitflag alias `const X = T` both have T's layout.
                 haskey(_C_PRIM_FIELD_LAYOUT, julia_underlying) &&
                     (emitted_enum_layout[enum_name] = _C_PRIM_FIELD_LAYOUT[julia_underlying])
@@ -3098,8 +3125,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # discards it), and the value is the type's only instance.
             empty_ret = crossings.ret[1] === :ignore || crossings.ret[1] === :regpad
 
-            # Build argument list for invoke
-            invoke_args = join(param_names, ", ")
+            # Build argument list for invoke: every scalar at its C width.
+            invoke_args = join(_tier2_invoke_args(param_names, param_types, needs_conversion,
+                                                  emitted_enum_base), ", ")
             jit_ret_type = return_type["julia_type"]
             jit_c_ret = get(return_type, "c_type", "void")
 

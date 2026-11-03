@@ -94,7 +94,9 @@ if requires("C++ record routing", :libJLCS, :clangxx)
                     :u4_sum => :tier2, :u12_sum => :tier2, :bf8_sum => :tier2,
                     :make_u4 => :tier2, :make_u12 => :tier2, :make_bf8 => :tier2,
                     :make_pk28 => :tier2, :pk28_sum => :tier2,
-                    :make_pb12 => :tier2, :pb12_sum => :tier2)
+                    :make_pb12 => :tier2, :pb12_sum => :tier2,
+                    # C++ linkage, not noexcept: a thunk, with scalar arguments.
+                    :scalar_widths => :tier2)
         checked = 0
         for (f, t) in sort(collect(want); by = first)
             @test (f, get(tiers, f, :missing)) == (f, t)
@@ -109,7 +111,7 @@ if requires("C++ record routing", :libJLCS, :clangxx)
         @test r.ok
         @test haskey(v, "PROBE_DONE")
         names = ["cs3", "mass", "enumrec", "pk5", "top6", "u4", "u12", "bf8",
-                 "u4ret", "u12ret", "bf8ret", "pb12", "pk28"]
+                 "u4ret", "u12ret", "bf8ret", "pb12", "pk28", "scalar_widths"]
         for n in names
             @test (n, get(v, n, "no PROBE line")) == (n, "PASS")
         end

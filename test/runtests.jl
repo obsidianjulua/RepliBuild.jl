@@ -266,6 +266,12 @@ include(joinpath(@__DIR__, "test_integer_width_overloads.jl"))
 # Win64 returned a 16-byte record without its hidden pointer (access violation).
 include(joinpath(@__DIR__, "test_cpp_return_resolution.jl"))
 
+# ── Tier 2 arguments cross at their C width (no toolchain) ───────────────────
+# A thunk loads the C parameter's width from the argument's storage, so a Julia
+# integer narrower than the C type was read past its box (pugixml's
+# `as_int(attr, Int8(-1))`, 2026-11-03). The emitted body converts first.
+include(joinpath(@__DIR__, "test_tier2_scalar_widths.jl"))
+
 # ── Byte-blob struct setters + the Base-name namespace guard (no toolchain) ──
 # Blob structs had accessors in one direction only, so a param struct the
 # library builds was read-only — the only path into llama.cpp runs through one.

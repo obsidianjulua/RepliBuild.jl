@@ -136,4 +136,13 @@ probe("pk28") do p
     (s = pk28_sum(r)) == 0x41 + 22 + 21 + 0x1234 || push!(p, "pk28_sum = $s")
 end
 
+# Scalars at their C width (2026-11-03): a Julia integer narrower than the C
+# parameter used to be boxed as is, and the thunk read past it.
+probe("scalar_widths") do p
+    want = -1 + 200_000 + 3_000_000 + 2_000_000_000
+    (s = scalar_widths(Int8(-1), UInt8(200), Int16(3), Int8(2))) == want || push!(p, "narrow arguments = $s")
+    (s = scalar_widths(Int32(-1), UInt32(200), Csize_t(3), KIND_B)) == want || push!(p, "exact arguments = $s")
+    (s = scalar_widths(Int64(-1), Int64(200), Int64(3), Int64(1))) == want - 1_000_000_000 || push!(p, "wide arguments = $s")
+end
+
 println("PROBE_DONE")

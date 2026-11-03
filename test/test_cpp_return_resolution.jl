@@ -94,7 +94,7 @@ _crr_fn(name, mangled, demangled, ret_c, ret_jl) = Dict{String,Any}(
         @test CRR_F.by_value_crossing("const basic_string_view<char>", structs, record_abi) ==
               (:layout, "basic_string_view<char>")
         k = body("key")
-        @test occursin("JITManager.invoke(\"_mlir_ciface__ZN2ns3keyEi_thunk\", basic_string_view_char, x)", k)
+        @test occursin("JITManager.invoke(\"_mlir_ciface__ZN2ns3keyEi_thunk\", basic_string_view_char, Cint(x))", k)
         @test !occursin("ABI Safety Trap", k)
         @test occursin(r"^struct basic_string_view_char\n"m, out)
     end
