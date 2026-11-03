@@ -2854,6 +2854,21 @@ _conflict_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
         _CONFLICT_TRAP_NOTE) * ")\n"
 
 """
+    _pointee_safe_type(julia_type) -> String
+
+The Julia spelling of a parameter whose metadata type is `Ref{Any}` or
+`Ptr{Any}`: a reference or pointer to a type Julia has no scalar for (`long
+double&`, `unsigned __int128&`). The only value a caller can pass to `Ref{Any}`
+is `Ref{Any}(x)`, a pointer to a box slot the callee then overwrites with 10 or
+16 bytes (Boost.Charconv's `long double` from_chars, 2026-11-01). `Ptr{Cvoid}`,
+the address of a buffer the caller owns, is the honest type, and it needs no
+Julia name for the pointee. Both generators' parameter spellings and
+`_param_docs!` read this, so the signature and its docstring agree.
+"""
+_pointee_safe_type(julia_type::AbstractString)::String =
+    julia_type in ("Ref{Any}", "Ptr{Any}") ? "Ptr{Cvoid}" : String(julia_type)
+
+"""
     _unresolved_return_trap_msg(julia_name, demangled, c_ret) -> String
 
 The refusal GeneratorCpp's Tier 2 path raises for a function whose return the

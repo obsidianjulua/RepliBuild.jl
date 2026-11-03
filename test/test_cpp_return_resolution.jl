@@ -72,7 +72,12 @@ _crr_fn(name, mangled, demangled, ret_c, ret_jl) = Dict{String,Any}(
                     "pair<int *, bool>", "pair<int *, bool>"),
             # a pointer return the metadata never mapped: the crossing is fine,
             # the Julia side has no type
-            _crr_fn("ns::lookup", "_ZN2ns6lookupEi", "ns::lookup(int)", "mystery*", "Any")],
+            _crr_fn("ns::lookup", "_ZN2ns6lookupEi", "ns::lookup(int)", "mystery*", "Any"),
+            # a reference to a type Julia cannot hold: `long double&` arrives as Ref{Any}
+            let f = _crr_fn("ns::parse_ld", "_ZN2ns8parse_ldEiRe", "ns::parse_ld(int, long double&)", "int", "Cint")
+                push!(f["parameters"], Dict{String,Any}("name" => "value", "c_type" => "long double&", "julia_type" => "Ref{Any}"))
+                f
+            end],
         "globals" => Dict{String,Any}(),
         "struct_definitions" => structs,
         "record_abi" => record_abi)
@@ -83,7 +88,7 @@ _crr_fn(name, mangled, demangled, ret_c, ret_jl) = Dict{String,Any}(
         m = match(Regex("^function \\w*$(name)\\(.*?^end\$", "ms"), out)
         m === nothing ? "" : m.match
     end
-    @test count(r"^function \w*(key|make_pair|lookup)\("m, out) == 3     # every function is defined
+    @test count(r"^function \w*(key|make_pair|lookup|parse_ld)\("m, out) == 4     # every function is defined
 
     @testset "a const record return resolves to the emitted record" begin
         @test CRR_F.by_value_crossing("const basic_string_view<char>", structs, record_abi) ==
@@ -109,5 +114,20 @@ _crr_fn(name, mangled, demangled, ret_c, ret_jl) = Dict{String,Any}(
         @test !occursin(r"invoke\(\"[^\"]*\",\s*Any\b", out)
         # The stub loses a method dedup to a callable, like every other trap.
         @test CRR_W._is_trap_chunk(l)
+    end
+
+    @testset "a reference to a type Julia cannot hold is a raw pointer, never Ref{Any}" begin
+        # Boost.Charconv's `long double` from_chars carried `value::Ref{Any}`: the
+        # only value a caller can pass is `Ref{Any}(x)`, a pointer to a box slot the
+        # callee overwrites with an 80-bit value (2026-11-01).
+        # A Tier 2 signature types every pointer parameter `::Any` (a Ptr or a Ref
+        # both marshal); the docstring says what it is, and the metadata's
+        # `Ref{Any}` reaches neither.
+        p = body("parse_ld")
+        @test occursin(r"^function \w*parse_ld\(x::Integer, value::Any\)"m, p)
+        @test occursin("- `value::Ptr{Cvoid}`", out)
+        @test !occursin("Ref{Any}", out) && !occursin("Ptr{Any}", out)
+        @test CRR_W._pointee_safe_type("Ref{Any}") == "Ptr{Cvoid}" == CRR_W._pointee_safe_type("Ptr{Any}")
+        @test CRR_W._pointee_safe_type("Ref{Cint}") == "Ref{Cint}"
     end
 end

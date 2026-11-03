@@ -2704,6 +2704,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # loop below spells each parameter so, and a callback's `@cfunction`
     # example spells the types of its signature so (`_callback_param_type`).
     function _ccall_param_type(julia_type::AbstractString, c_type_name::AbstractString)::String
+        # A reference or pointer to a type Julia cannot hold (`long double&`,
+        # `unsigned __int128&`) arrives as `Ref{Any}`/`Ptr{Any}` and is the
+        # address of a caller's buffer (`_pointee_safe_type`; Boost.Charconv's
+        # `long double` from_chars, 33 signatures in that wrapper, 2026-11-01).
+        julia_type = _pointee_safe_type(julia_type)
         # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
         let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
             if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST

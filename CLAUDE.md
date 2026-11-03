@@ -626,7 +626,10 @@ the test named when you touch the area.
   `key_value_pair::key()`'s return `const basic_string_view<char>`), and a
   return still `Any` after that is emitted as an ABI trap stub
   (`_unresolved_return_trap_msg`), never as `invoke(…, Any, …)`, which the JIT
-  refuses only at the call. (`test_cpp_return_resolution.jl`.)
+  refuses only at the call. A parameter the metadata spells `Ref{Any}` or
+  `Ptr{Any}` (a reference to `long double` or `__int128`) is `Ptr{Cvoid}`: the
+  address of a caller's buffer, since `Ref{Any}(x)` points at a box slot.
+  (`test_cpp_return_resolution.jl`.)
 - **A Tier-3 by-value record is classified per target, from its fields' type
   alignment, never a member's size** (C1: `{ char; short[3]; }` got an sret
   the callee never reads).
@@ -873,7 +876,11 @@ the test named when you touch the area.
   `is_ccall_safe`), because `pair<key_value_pair *, bool>` and `result<T &, E>`
   classed as pointers returned a 16-byte record in a register, which on Win64
   lacks its hidden pointer (Boost.JSON `object::emplace`, access violation,
-  2026-11-01). (`test_by_value_crossing.jl`, `test_cpp_return_resolution.jl`.)
+  2026-11-01). The converse holds for the thunk's return type: a `*` or `&`
+  on the type itself makes the return `!llvm.ptr`, whatever it points at, and
+  the STL-size fallback in `generate_function_thunks` never measures the
+  container behind a reference (`path::native()` returned a stack slot).
+  (`test_by_value_crossing.jl`, `test_cpp_return_resolution.jl`.)
 - **A byte region never crosses a thunk as an array.** A record with no
   field-by-field body (a union, a bitfield record, overlapping members) is
   `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one

@@ -580,6 +580,20 @@ Contents of the .debug_info section:
         @test !occursin("func.func", ir)
         @test occursin("// no thunk for _ZN2ee6p3_sumENS_2P3E: takes `P3` by value", ir)
 
+        # A reference or pointer return is an address, whatever it points at.
+        # `path::native()` returns `const std::wstring&`; the STL fallback measured
+        # the string behind the `&` and declared a 32-byte blob return, so the
+        # callee took the hidden pointer for `this` and the caller got a slot on
+        # the thunk's stack (Boost.Filesystem, 2026-11-01). By value, the blob
+        # is right.
+        ws = "basic_string<wchar_t, std::__1::char_traits<wchar_t>, std::__1::allocator<wchar_t> >"
+        ir = gen(fn("_ZN2ee6nativeEi", ["int"], "const $ws&"))
+        @test decl(ir, "_ZN2ee6nativeEi") == "func.func private @_ZN2ee6nativeEi(i32) -> !llvm.ptr"
+        ir = gen(fn("_ZN2ee7nativepEi", ["int"], "$ws*"))
+        @test decl(ir, "_ZN2ee7nativepEi") == "func.func private @_ZN2ee7nativepEi(i32) -> !llvm.ptr"
+        ir = gen(fn("_ZN2ee6stringEi", ["int"], ws))
+        @test decl(ir, "_ZN2ee6stringEi") == "func.func private @_ZN2ee6stringEi(i32) -> !llvm.struct<packed (i64, i64, i64, i64)>"
+
         # Template record, both directions: its layout, not a pointer in and an
         # integer blob out.
         # (`is_struct_packed` calls every padding-free struct packed, so the
