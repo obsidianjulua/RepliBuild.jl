@@ -403,6 +403,15 @@ include(joinpath(TEST_DIR, "test_cpp_finalizers_live.jl"))
 
 include(joinpath(TEST_DIR, "test_cache_invalidation.jl"))
 
+# ── 9a. The project-hash marker names what was built ────────────────────────
+# A build that failed after the link kept the last good build's marker, so a
+# revert took the fast path to the failed build's library; the marker was
+# hashed after the build, so a file saved mid-build was recorded as built; and
+# a compiler that never started linked the previous IR. Real C builds, `f()`
+# called in a child.
+
+include(joinpath(TEST_DIR, "test_build_markers_live.jl"))
+
 # ── 9b. A relink of unchanged IR gives the same library ─────────────────────
 # lld writes the link time into a PE image, so every relink of an unchanged
 # project gave a different DLL and a different LIBRARY_SHA, the one line a

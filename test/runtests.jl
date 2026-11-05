@@ -525,9 +525,19 @@ include(joinpath(@__DIR__, "test_toolchain_advice.jl"))
 # The include-dir walk was `readdir`, top level only, so a header one directory
 # down could be edited freely while the build reported "project unchanged"
 # against modified sources — and `include/<lib>/<lib>.h` is the ordinary C
-# layout. Also pins what must stay OUT: .git, build/, cache dirs, non-headers.
+# layout. Also pins what must stay OUT: .git, build/, cache dirs, non-headers,
+# and that a build which misses the fast path removes the marker before it
+# builds, so a failed build cannot be revived by reverting it.
 
 include(joinpath(@__DIR__, "test_project_hash.jl"))
+
+# ── A compile that never ran is a failure (no toolchain) ─────────────────────
+# Success was "the .ll exists". A compiler that never started deletes nothing,
+# so the last build's IR was stamped with the new fingerprint and linked, and
+# stayed a cache hit. A 200,000-character define makes the spawn fail on both
+# hosts without any compiler.
+
+include(joinpath(@__DIR__, "test_compile_never_ran.jl"))
 
 # ── Switching toolchains rebuilds what the switch affects (no toolchain) ─────
 # A Julia switch changes a C project's compiler (the JLL clang is pinned to

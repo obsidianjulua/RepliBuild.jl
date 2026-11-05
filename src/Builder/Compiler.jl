@@ -394,17 +394,25 @@ function _detect_target_triple()::String
     return Sys.MACHINE
 end
 
+_project_hash_path(config::RepliBuildConfig) = joinpath(get_cache_path(config), "project_hash")
+
 """
+    is_project_cache_valid(config; hash = compute_project_hash(config)) -> Bool
+
 Check if the project-level cache is valid. Returns `true` if all artifacts exist
 and the content hash matches, meaning the build can be skipped entirely.
+
+`hash` is the current project hash. `compile_project` passes the one it took
+before the build read anything, and saves that same value when the build
+succeeds (see there).
 """
-function is_project_cache_valid(config::RepliBuildConfig)::Bool
+function is_project_cache_valid(config::RepliBuildConfig;
+                                hash::Union{Nothing,AbstractString}=nothing)::Bool
     if !is_cache_enabled(config)
         return false
     end
 
-    cache_dir = get_cache_path(config)
-    hash_file = joinpath(cache_dir, "project_hash")
+    hash_file = _project_hash_path(config)
 
     # Check hash file exists
     if !isfile(hash_file)
@@ -423,19 +431,22 @@ function is_project_cache_valid(config::RepliBuildConfig)::Bool
 
     # Compare stored hash with current
     stored_hash = strip(read(hash_file, String))
-    current_hash = compute_project_hash(config)
+    current_hash = hash === nothing ? compute_project_hash(config) : hash
 
     return stored_hash == current_hash
 end
 
 """
-Save the project hash after a successful build.
+    save_project_hash(config; hash = compute_project_hash(config))
+
+Save the project hash after a successful build. `compile_project` passes the
+hash it took before the build began, never one taken now: the build compiled
+the files as they were then.
 """
-function save_project_hash(config::RepliBuildConfig)
-    cache_dir = get_cache_path(config)
-    mkpath(cache_dir)
-    hash_file = joinpath(cache_dir, "project_hash")
-    write(hash_file, compute_project_hash(config))
+function save_project_hash(config::RepliBuildConfig;
+                           hash::AbstractString=compute_project_hash(config))
+    mkpath(get_cache_path(config))
+    write(_project_hash_path(config), hash)
 end
 
 # =============================================================================
@@ -699,6 +710,17 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
         return (ir_file, true, 0)  # Cache hit
     end
 
+    # The IR here is about to be replaced: it and its key go first, and only a
+    # compile that exits 0 counts. Success used to be `isfile(ir_file)`. A
+    # compiler that never ran (SPAWN_FAILED: a command line past Windows'
+    # 32,767 characters, a JLL clang the OS refuses) deletes nothing, so the
+    # last build's IR passed for this one's, was stamped with the new
+    # fingerprint, and was linked; the build reported success, and every later
+    # build with those flags took it from the cache. `GraphBuild._compile_one`
+    # does the same.
+    rm(ir_file; force=true)
+    rm(_compile_key_path(ir_file); force=true)
+
     # Build compiler command
     # Ensure -g is always present for DWARF metadata extraction
     base_flags = get_compile_flags(config)
@@ -742,7 +764,7 @@ function compile_single_to_ir(config::RepliBuildConfig, cpp_file::String,
         println("  $(basename(cpp_file)): $output")
     end
 
-    success = isfile(ir_file)
+    success = exitcode == 0 && isfile(ir_file)
     if success
         # Stamp the fingerprint that produced this IR so a later flag/define/
         # include/compiler change invalidates it (not just a source-mtime change).
@@ -3375,8 +3397,15 @@ function compile_project(config::RepliBuildConfig)
 
     start_time = time()
 
+    # The inputs this build is OF, hashed before anything reads them, and the
+    # value saved at the end. Hashing again at the end recorded whatever was on
+    # disk THEN: a file saved while the build ran (llama.cpp spends 18 minutes
+    # in DWARF extraction) was recorded as built, and every later build said
+    # "project unchanged" over a library compiled from the version before.
+    project_hash = compute_project_hash(config)
+
     # Fast path: check project-level content hash cache
-    if is_project_cache_valid(config)
+    if is_project_cache_valid(config; hash=project_hash)
         output_dir = get_output_path(config)
         lib_name = get_library_name(config)
         library_path = joinpath(output_dir, lib_name)
@@ -3384,6 +3413,14 @@ function compile_project(config::RepliBuildConfig)
         println("  cache: project unchanged ($(elapsed)s)")
         return library_path
     end
+
+    # A miss: the marker goes before any artifact is touched. Kept, it is the
+    # LAST successful build's hash, and a build that fails after the link (the
+    # wrap-surface guard, the load check, DWARF extraction) leaves a new
+    # library beside it. Reverting the change that broke the build restored
+    # those inputs, the old hash matched, and the fast path returned the failed
+    # build's library.
+    rm(_project_hash_path(config); force=true)
 
     # Get source files (from config or discovery)
     cpp_files = get_source_files(config)
@@ -3445,8 +3482,9 @@ function compile_project(config::RepliBuildConfig)
     # marker claiming it succeeded.
     verify_wrap_surface(config, binary_path, metadata_path)
 
-    # Step 5: Save project hash for future cache hits
-    save_project_hash(config)
+    # Step 5: Save project hash for future cache hits: the one taken before the
+    # build, which is what it compiled.
+    save_project_hash(config; hash=project_hash)
 
     # Timed HERE, not before step 4. DWARF extraction is part of the build and on
     # a large library it dominates it: llama.cpp linked at 73s and then spent 18

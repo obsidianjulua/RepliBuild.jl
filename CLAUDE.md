@@ -932,6 +932,15 @@ the test named when you touch the area.
    libLLVM for C, the system clang for C++, plus the triple). A Julia switch
    rebuilds a C project and leaves a C++ one built.
 
+**A marker names what was built.** `compile_project` hashes the project once,
+before anything reads it, and saves that value. On a fast-path miss it removes
+the marker before building, so a build that fails after its link leaves no
+marker. A compile counts only on exit 0 with its output present, and the old
+IR and `.key` go first (`compile_single_to_ir`, `GraphBuild._compile_one`): a
+compiler that never started deletes nothing. A new build path keeps all three
+(`test_project_hash.jl`, `test_compile_never_ran.jl`,
+`test_build_markers_live.jl`).
+
 Every persisted key (these two, the registry's `hash_config`, the IR file name's
 directory digest `_ir_dir_key`, the templates TU's `.key` fingerprint, and graph
 mode's `link.key` and `metadata.key`) is
