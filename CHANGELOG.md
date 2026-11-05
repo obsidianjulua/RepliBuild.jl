@@ -4,6 +4,59 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### The project-hash marker names what was built (2026-11-05)
+
+Found by an audit of the build stage's cache reads, which reproduced each case
+on a one-function C library whose `f()` the build got wrong while reporting
+success. The marker is `.replibuild_cache/project_hash`. When it matches,
+`compile_project` prints "cache: project unchanged" and returns the existing
+library without looking at anything.
+
+- **A failed build no longer leaves the last good build's marker.**
+  `compile_project` kept the old marker until it saved a new one. A build that
+  failed after writing its library (the wrap-surface guard, the load check,
+  DWARF extraction) therefore left a new library beside the previous build's
+  hash. Reverting the change that broke the build restored those inputs, and
+  the fast path returned the failed build's library. Measured: set
+  `visibility = "hidden"`, R1 refuses, revert, and the next build is "project
+  unchanged" over a library that does not export `f`, with 0 functions in the
+  metadata. The marker is now removed on a fast-path miss, before anything is
+  built.
+- **The marker is the hash of what the build compiled.** `save_project_hash`
+  hashed the inputs again at the end, so a file saved while the build ran
+  (llama.cpp spends 18 minutes in DWARF extraction) was recorded as built.
+  Every later build was then "project unchanged" over the version before it.
+  `compile_project` now takes the hash once, before reading anything, uses it
+  for the fast-path check, and saves that value. `is_project_cache_valid` and
+  `save_project_hash` take it as `hash`.
+- **A compile that never ran is a failure.** `compile_single_to_ir` judged
+  success by `isfile(ir_file)`. A compiler that fails deletes its `-o` output,
+  but one that never started deletes nothing: `SPAWN_FAILED` from a command
+  line past Windows' 32,767 characters, or a JLL clang the OS refuses. The
+  previous build's IR then passed for this one's, was stamped with the new
+  fingerprint and linked, and stayed a cache hit for those flags on every
+  later build. Reproduced through a 40,618-character include path:
+  `ENAMETOOLONG`, the error printed inline, and a library with the old value.
+  The IR and its key are now removed before a compile, and only exit 0 with
+  the file present counts, as `GraphBuild._compile_one` already did.
+- **Tests.**
+  - `test_project_hash.jl` (runtests): a build that misses drops the marker
+    before it builds. No toolchain: the failing change is a 200,000-character
+    define, which no process can be handed on either host (Linux allows
+    128 KiB per argument).
+  - `test_compile_never_ran.jl` (runtests): the same trigger through
+    `compile_single_to_ir` and both batch paths of `compile_to_ir`.
+  - `test_build_markers_live.jl` (devtests §9a): the three cases end to end
+    on real C builds, `f()` called in a child.
+  - Each was negative-checked against the old code.
+
+Still open from the same audit:
+- `needs_recompile` gates source content by mtime only;
+- the header walks skip `.inc`, `.inl` and `.ipp`;
+- `use()` after an upgrade re-wraps the old metadata;
+- graph `wrap` accepts metadata older than its library;
+- smaller ones.
+
 ### A Tier 2 argument crosses at its C width (2026-11-03)
 
 Found by the full-surface test of the Hub's pugixml wrapper. A thunk slot

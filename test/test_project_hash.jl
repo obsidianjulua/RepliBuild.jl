@@ -162,3 +162,36 @@ hashof(cfg) = C.compute_project_hash(cfg)
         end
     end
 end
+
+# The marker is the LAST successful build's hash. A build that misses the fast
+# path used to leave it in place until it saved a new one, so a build that
+# failed after writing a new library (the wrap-surface guard, the load check,
+# DWARF extraction) left the old marker beside it: reverting the change that
+# broke the build restored those inputs, and the fast path returned the failed
+# build's library (audit 2026-11-05, B1). No toolchain here: the failing
+# change is a define no process can be handed (200,000 characters, past
+# Windows' 32,767 for a whole command line and Linux's 128 KiB for one
+# argument), so the compile never starts, which is enough to show the marker
+# went before the build did anything. Negative-checked by restoring the old
+# `compile_project` head: the last assertion fails.
+@testset "a build that misses the fast path drops the marker first" begin
+    mktempdir() do d
+        cfg = scratch_project(d)
+        toml = joinpath(d, "replibuild.toml")
+        good = read(toml, String)
+        # The last good build, as the fast path sees it: library, metadata, marker.
+        out = CM.get_output_path(cfg)
+        mkpath(out)
+        write(joinpath(out, CM.get_library_name(cfg)), "library")
+        write(joinpath(out, "compilation_metadata.json"), "{}")
+        C.save_project_hash(cfg)
+        @test C.is_project_cache_valid(cfg)
+
+        write(toml, good * "\n[compile.defines]\nPAD = \"$("x"^200_000)\"\n")
+        @test_throws ErrorException C.compile_project(CM.load_config(toml))
+        @test !isfile(C._project_hash_path(cfg))
+
+        write(toml, good)            # the revert
+        @test !C.is_project_cache_valid(CM.load_config(toml))
+    end
+end
