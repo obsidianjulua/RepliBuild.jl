@@ -13,6 +13,8 @@ RepliBuild.jl is an ABI-aware C/C++ compiler bridge for Julia. It compiles C/C++
 through LLVM/MLIR, introspects DWARF metadata, and emits type-safe Julia bindings.
 Each function is routed to one of three tiers based on ABI complexity:
 
+Ingest and llmcall are John's features with julia dont use them clancker.
+
 | Tier | Mechanism | When |
 |------|-----------|------|
 | 1 | `Base.llvmcall` on bitcode | POD args, scalar/pointer return — **experimental, off by default** |
@@ -589,8 +591,6 @@ the test named when you touch the area.
   width dedup instead of defining one signature twice, which precompilation
   refuses. A change to how the loop types or names a function
   must move the prediction with it. (`test_integer_width_overloads.jl`.)
-- **Two generators, one answer.** C and C++ duplicate type sets by design, for
-  isolation. Shared decisions must still agree, so put the derivation in
 - **A Tier 2 argument is converted to its C width in the emitted body.** A
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box
@@ -599,6 +599,8 @@ the test named when you touch the area.
   its `@enum` base type; a new scalar kind in a Tier 2 signature must go
   through it. (`test_tier2_scalar_widths.jl`, devtests
   `test_cpp_record_routing.jl`'s `scalar_widths`.)
+- **Two generators, one answer.** C and C++ duplicate type sets by design, for
+  isolation. Shared decisions must still agree, so put the derivation in
   `Wrapper/Utils.jl` rather than copying it. Agreement is necessary, not sufficient.
 - **Receiver (`this`) gates**: `FunctionGen._has_receiver` and GeneratorCpp's
   `_cpp_this_param` must agree (corpus test in `test_symbol_hygiene.jl` over the
@@ -1232,8 +1234,6 @@ DWARF-resolved destructors — **is** built.)
   section has the recipe). Not built: a decoder for a `std::string` returned by
   value (a 32-byte stand-in, libstdc++'s size; libc++'s object is 24), and
   binding the STL members that live in the C++ runtime library (below).
-- STL members that live in the C++ runtime library are unbound: libc++'s
-  `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
 - **`long double` by value is a trap on every tier** (scoped 2026-11-03, not
   built). The scalar is x87 extended precision: SysV passes it in memory and
   returns it in `ST0`, which `ccall` cannot reach, so Tier 3 can never carry
@@ -1252,6 +1252,8 @@ DWARF-resolved destructors — **is** built.)
   boostcharconv (`to_chars(long double)` and kin) and 3 in fmt, no consumer
   behind them, and MSVC's `long double` is a `double`, so Windows-native
   libraries rarely expose it. About three days with both hosts verified.
+- STL members that live in the C++ runtime library are unbound: libc++'s
+  `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
   them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches
   only the wrapped library. Binding them needs the engine to also search the
   library's runtime dependencies (2026-10-16).
