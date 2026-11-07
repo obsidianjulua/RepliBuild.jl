@@ -4,6 +4,33 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Fedora's binutils are GNU binutils (2026-11-07, issue #68)
+
+A first-time user on Fedora 44 had `binutils-2.46.1-1.fc44` installed and
+`check_environment` reported no GNU readelf, objdump or nm. Fedora builds
+print their version as `GNU nm version 2.46.1-1.fc44`: the distro's package
+version, and no `Binutils` word. `_is_gnu_binutils` accepted the substring
+`GNU Binutils` (Debian, Ubuntu, Arch, MSYS2) or a line opening `GNU objdump`
+or `GNU readelf`, so Fedora's `nm` was refused on every machine, and the
+symbol reader with it.
+
+- **Every binutils program's own line is the identity.** The check now
+  accepts a line opening `GNU nm`, `GNU ar`, `GNU objcopy`, `GNU strip`,
+  `GNU ranlib`, `GNU size` or `GNU strings` beside objdump and readelf. LLVM's
+  tools open with `LLVM (http://llvm.org/)` or say `compatible with GNU
+  objdump` mid-line, and stay rejected.
+- **The doctor says what it saw.** When no DWARF dumper is accepted,
+  `_dumper_candidate_report` runs each candidate's `--version` once more and
+  the advice lists each one's exit code and first line (`readelf: not GNU
+  binutils — \`…\``, or `did not start`); the `nm` refusal quotes its first
+  line too. The candidate list is `_dumper_candidates`, shared with
+  `_dwarf_dumper`. The readelf refusal in #68 is still unexplained by the
+  code, and this is what will explain it.
+- **Tests.** `test_windows_port.jl`: the Fedora, Arch and Ubuntu spellings
+  of readelf, nm and objdump are accepted, LLVM's `nm`/`readelf` banner and an
+  indented `GNU nm` are not, and the candidate report has one classified line
+  per candidate.
+
 ### The project-hash marker names what was built (2026-11-05)
 
 Found by an audit of the build stage's cache reads, which reproduced each case

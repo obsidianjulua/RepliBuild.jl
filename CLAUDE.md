@@ -1059,7 +1059,11 @@ changes:
   (`DWARFParser.parse_vtables`), so the doctor probes that name.
 - DWARF dumper: GNU `objdump` on Windows. `_is_gnu_binutils` must reject llvm-objdump
   (on PATH in CLANG64), which otherwise parses **zero functions** silently. Use
-  `Compiler._gnu_objdump()` wherever GNU objdump specifically is needed.
+  `Compiler._gnu_objdump()` wherever GNU objdump specifically is needed. The
+  identity is `GNU Binutils` or a line opening `GNU <program>` for any binutils
+  program: Fedora prints `GNU nm version 2.46.1-1.fc44`, with no `Binutils`
+  (issue #68). The candidate list is `_dumper_candidates`, and the doctor
+  reports each candidate's first line when none is accepted.
 - The API is the **PE export directory** (`objdump -p`), not `nm`. mingw links the CRT
   statically into every DLL. Shims need `__declspec(dllexport)` (`RB_SHIM_EXPORT`,
   keyed on `_WIN32`). One dllexport disables auto-export for the whole image, so
