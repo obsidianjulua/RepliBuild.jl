@@ -231,6 +231,12 @@ include(joinpath(@__DIR__, "test_dep_cache.jl"))
 
 include(joinpath(@__DIR__, "test_dep_submodules.jl"))
 
+# ── Archive dependencies: a tarball pinned by SHA-256 (no toolchain, no network)
+# `type = "archive"` fetches through Pkg's download-verify-unpack into the deps
+# cache, records the pin in a marker, and walks the unpacked tree like a clone
+# (NASA's CDF, 2026-11-07).
+include(joinpath(@__DIR__, "test_dep_archive.jl"))
+
 # ── Wrapper type-binding guard (no toolchain required) ───────────────────────
 # A type used in a foreign-call signature but never declared by the module is
 # an UndefVarError at include time — the whole wrapper dies, not one function.

@@ -2658,6 +2658,24 @@ function _shim_headers_out_of_tree(shim_file::String, probe::Cmd,
 end
 
 """
+    _shim_allowed_roots(config) -> Vector{String}
+
+Where a shim header may resolve to: the project root, the build cache (git
+clones and unpacked archives live under it), and the path of every local
+dependency, which is the project's own by declaration wherever it sits. A
+local dependency outside the root used to be refused like a system header
+(2026-11-07).
+"""
+function _shim_allowed_roots(config::RepliBuildConfig)::Vector{String}
+    roots = [config.project.root, get_cache_path(config)]
+    for dep in values(config.dependencies.items)
+        dep.type == "local" && !isempty(dep.path) &&
+            push!(roots, abspath(joinpath(config.project.root, dep.path)))
+    end
+    return roots
+end
+
+"""
     verify_shim_headers(config, shim_file)
 
 Hard-error if the generated macro shim resolved any [wrap] shim_header to a path
@@ -2679,11 +2697,7 @@ function verify_shim_headers(config::RepliBuildConfig, shim_file::String)
     defflags = ["-D$(k)=$(v)" for (k, v) in config.compile.defines]
     extra    = vcat(userID, incflags, defflags)
 
-    # In-bounds = the project root and the build cache (git clones live under the
-    # cache, so both are covered by these two roots). Anything else is foreign.
-    allowed = [config.project.root, get_cache_path(config)]
-
-    offenders = _shim_headers_out_of_tree(shim_file, probe, extra, allowed)
+    offenders = _shim_headers_out_of_tree(shim_file, probe, extra, _shim_allowed_roots(config))
     isempty(offenders) && return
 
     error("""

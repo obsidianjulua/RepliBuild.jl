@@ -320,7 +320,9 @@ tag  = "v2.4.1"
 exclude = ["testbed", "unit-test", "extern", "docs"]
 ```
 
-`exclude` entries are matched against the path **relative to the dependency
+`exclude` applies to every dependency type (git, archive and local alike; a
+local dependency ignored it until 2026-11-07). Entries are matched against the
+path **relative to the dependency
 root**, and the match is deliberately generous — an entry hits if it equals the
 filename, or is a prefix, suffix, **or any substring** of the relative path.
 That is why `"ggml-cuda/"` and `"tools/"` work as directory filters and
@@ -878,19 +880,41 @@ pugixml = { type = "git", url = "https://github.com/zeux/pugixml.git", tag = "v1
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `type` | String | `"local"` | `"git"`, `"local"`, `"system"` — **note the default is `local`, not `git`**; a `[dependencies.x]` with a `url` but no `type` will not clone |
-| `url` | String | `""` | Required for `type = "git"` |
+| `type` | String | `"local"` | `"git"`, `"archive"`, `"local"`, `"system"` — **note the default is `local`, not `git`**; a `[dependencies.x]` with a `url` but no `type` will not clone |
+| `url` | String | `""` | Required for `type = "git"` and `type = "archive"`. For an archive, a plain path is a local tarball |
+| `sha256` | String | `""` | **Required for `type = "archive"`**: the tarball's SHA-256, 64 hex digits. Checked before unpacking; a mismatch is a hard error |
+| `subdir` | String | `""` | `type = "archive"` only. The directory inside the unpacked archive that is the dependency root. Absent, a tarball whose top level is one directory has that directory as its root |
 | `tag` | String | `""` (default branch) | Tag or branch, checked out after a full clone |
 | `commit` | String | `""` | Expected 40-hex object name. Validated at load; mismatch after checkout is a hard error — §2.11 |
 | `path` | String | `""` | Required for `type = "local"`; scanned in place, never copied |
 | `pkg_config` | String | `""` | For `type = "system"`; runs `pkg-config --cflags` |
-| `exclude` | Vector{String} | `[]` | Paths to skip during source injection — §2.6 |
+| `exclude` | Vector{String} | `[]` | Paths to skip during source injection, for every dependency type — §2.6 |
 | `submodules` | Vector{String} | `[]` (none) | `type = "git"` only. Submodule paths of the superproject to fetch; see below |
 
 Git dependencies clone into `.replibuild_cache/deps/<name>/` and re-checkout on
 tag change. Resolved sources merge into the compilation graph before `[compile]`
 runs, so they are compiled with the same toolchain and flags as your own files —
 which is exactly why the resulting DWARF is consistent across the whole project.
+
+**Archives.** A library that ships as a tarball rather than a git repository
+(NASA's CDF, most of what GNU and the national labs distribute) is an
+`archive` dependency: the tarball's `url` and its `sha256`. It is fetched
+through Pkg's own download-verify-unpack engine into
+`.replibuild_cache/deps/<name>/`, the hash is checked before anything is
+unpacked, and the unpacked tree is then walked like a clone, `exclude`
+included. The marker records url and hash, so a changed pin re-fetches and an
+unchanged one is reused across builds; `clean()` deletes the unpacked tree and
+the next build fetches again, checking the same hash. There is no "latest":
+without `sha256` the recipe does not load.
+
+```toml
+[dependencies.cdf]
+type   = "archive"
+url    = "https://spdf.gsfc.nasa.gov/pub/software/cdf/dist/cdf39_1/linux/cdf39_1-dist-cdf.tar.gz"
+sha256 = "f9574315a028e8f71257fd55c375639c95fea607a5df70fb6629dc1e22adc68b"
+subdir = "cdf39_1-dist/src"          # the library's tree inside the archive
+exclude = ["tools", "lib/libmain.c"]
+```
 
 **Submodules.** A clone fetches no submodules, so a superproject such as
 boostorg/boost comes back as an almost empty tree. `submodules` names the ones to

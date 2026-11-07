@@ -5,6 +5,7 @@ module DependencyResolver
 
 using ..ConfigurationManager
 using ..BuildBridge
+import Pkg   # PlatformEngines: download, verify and unpack archive dependencies
 
 export resolve_dependencies
 
@@ -330,23 +331,126 @@ function _collect_git_dep_root!(includes::Vector{String}, sources::Vector{String
         filter!(d -> !in(d, ["test", "tests", "testes", "example", "examples", "fuzzing", "build", ".git", "doc", "docs"]) &&
                      !ispath(joinpath(dir, d, ".git")), dirs)
         for file in files
-            rel_path = replace(relpath(joinpath(dir, file), dep_path), "\\" => "/")
-            should_exclude = false
-            for ex in exclude
-                if file == ex || startswith(rel_path, ex) || endswith(rel_path, ex) || occursin(ex, rel_path)
-                    should_exclude = true
-                    break
-                end
-            end
-            if should_exclude
-                continue
-            end
+            _dep_excluded(dep_path, joinpath(dir, file), exclude) && continue
             if endswith(file, ".cpp") || endswith(file, ".cc") || endswith(file, ".cxx") || endswith(file, ".c")
                 push!(sources, joinpath(dir, file))
             end
         end
     end
     return nothing
+end
+
+"""
+    _dep_excluded(dep_path, file_path, exclude) -> Bool
+
+Whether a dependency's `exclude` list names `file_path`. The path is taken
+relative to the dependency root with `/` separators on every host, and an entry
+hits when it equals the file name or is a prefix, suffix or substring of that
+relative path (the generous match `docs/src/config.md` §2.6 documents). One
+rule for every dependency type: a local dependency used to walk its tree
+without consulting `exclude` at all, so the key was silently inert there
+(2026-11-07, the Hub's cdf recipe).
+"""
+function _dep_excluded(dep_path::AbstractString, file_path::AbstractString, exclude::AbstractVector)
+    isempty(exclude) && return false
+    rel_path = replace(relpath(file_path, dep_path), "\\" => "/")
+    file = basename(file_path)
+    for ex in exclude
+        if file == ex || startswith(rel_path, ex) || endswith(rel_path, ex) || occursin(ex, rel_path)
+            return true
+        end
+    end
+    return false
+end
+
+# ---------------------------------------------------------------------------
+# Archive dependencies (2026-11-07)
+#
+# A library that ships as a tarball (NASA's CDF, most of what GNU and the
+# national labs distribute) has no git URL to pin. `type = "archive"` takes the
+# tarball's `url` and its `sha256`, fetches it through Pkg's own
+# download-verify-unpack engine (the same one that fetches artifacts, which
+# handles both hosts and every archive format Pkg does), and unpacks it under
+# the deps cache like a clone. The hash is checked before unpacking and is a
+# hard error on mismatch; it is also what the marker records, so a changed
+# `sha256` in the recipe re-fetches, and the extracted tree is otherwise reused.
+# `subdir` is the dependency root inside the unpacked tree; with none, a
+# tarball whose top level is a single directory (the usual shape) has that
+# directory as its root.
+# ---------------------------------------------------------------------------
+function _write_archive_marker(path::AbstractString, url::AbstractString, sha256::AbstractString)
+    try
+        open(path, "w") do io
+            println(io, "url=", url)
+            println(io, "sha256=", sha256)
+        end
+    catch e
+        @warn "Could not write archive marker $path" exception=e
+    end
+end
+
+function _read_archive_marker(path::AbstractString)
+    isfile(path) || return ("", "")
+    url = ""; sha = ""
+    for line in eachline(path)
+        startswith(line, "url=") && (url = line[5:end])
+        startswith(line, "sha256=") && (sha = line[8:end])
+    end
+    return (url, sha)
+end
+
+"""
+A plain file path as an archive `url` (a vendored tarball, a test fixture) is
+spelled as the `file://` URL Downloads accepts on both hosts: three slashes and
+forward separators (`file:///C:/…` on Windows).
+"""
+function _archive_url(url::AbstractString, project_root::AbstractString)
+    occursin(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url) && return String(url)
+    p = abspath(joinpath(project_root, url))
+    return "file://" * (Sys.iswindows() ? "/" * replace(p, '\\' => '/') : p)
+end
+
+"""
+The dependency root inside an unpacked archive: `subdir` when the recipe names
+one, else the single top-level directory most tarballs unpack to, else the
+unpack directory itself.
+"""
+function _archive_root(dep_path::AbstractString, subdir::AbstractString)
+    # `subdir` is written with `/` in the recipe; normpath spells it for the host
+    isempty(subdir) || return normpath(joinpath(dep_path, subdir))
+    entries = filter(e -> e != ".resolved", readdir(dep_path))
+    if length(entries) == 1 && isdir(joinpath(dep_path, entries[1]))
+        return joinpath(dep_path, entries[1])
+    end
+    return String(dep_path)
+end
+
+"""
+Fetch, verify and unpack an archive dependency into `dep_path`. Returns `false`
+(after a warning) when the fetch failed; a hash mismatch is a hard error, as a
+git pin mismatch is.
+"""
+function _fetch_archive(name::AbstractString, dep, dep_path::AbstractString, marker_path::AbstractString,
+                        project_root::AbstractString)::Bool
+    rm(dep_path; recursive=true, force=true)
+    mkpath(dep_path)
+    url = _archive_url(dep.url, project_root)
+    println("    $name: fetching $(dep.url)")
+    try
+        Pkg.PlatformEngines.download_verify_unpack(url, dep.sha256, dep_path;
+                                                   ignore_existence=true, verbose=false)
+    catch e
+        rm(dep_path; recursive=true, force=true)
+        msg = sprint(showerror, e)
+        if occursin(r"hash|sha256|verif"i, msg)
+            error("Dependency '$name': the archive at $(dep.url) does not have the declared sha256 $(dep.sha256).\n" *
+                  "Refusing to build from it. If upstream republished the file, inspect it, then update the pin.\n$msg")
+        end
+        @warn "Failed to fetch archive dependency $name from $(dep.url)" exception=e
+        return false
+    end
+    _write_archive_marker(marker_path, dep.url, dep.sha256)
+    return true
 end
 
 """
@@ -508,6 +612,8 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
             for (root, dirs, files) in walkdir(dep_path)
                 filter!(d -> !in(d, ["build", ".git", ".cache"]), dirs)
                 for file in files
+                    # `exclude` applies here as it does to a clone (`_dep_excluded`).
+                    _dep_excluded(dep_path, joinpath(root, file), dep.exclude) && continue
                     # `.c` too. A local C dependency used to contribute headers
                     # and nothing else: the sources were never compiled, and
                     # the symbols were simply absent from the library.
@@ -524,6 +630,23 @@ function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig
                     end
                 end
             end
+        elseif dep.type == "archive"
+            dep_path = joinpath(deps_cache, name)
+            marker_path = _dep_marker_path(deps_cache, name)
+            cached_url, cached_sha = _read_archive_marker(marker_path)
+            if !isdir(dep_path) || cached_url != dep.url || cached_sha != dep.sha256
+                if isdir(dep_path)
+                    println("    $name: $(cached_sha == dep.sha256 ? "url" : "sha256") changed → re-fetching")
+                end
+                _fetch_archive(name, dep, dep_path, marker_path, config.project.root) || continue
+            end
+            root = _archive_root(dep_path, dep.subdir)
+            if !isdir(root)
+                @warn "Archive dependency $name: subdir '$(dep.subdir)' is not a directory of the unpacked archive at $dep_path"
+                continue
+            end
+            _collect_git_dep_root!(extra_includes, extra_sources, root, root, dep.exclude)
+
         else
             @warn "Unknown dependency type: $(dep.type) for $name"
         end
