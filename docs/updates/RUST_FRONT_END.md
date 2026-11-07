@@ -858,3 +858,509 @@ __declspec(dllexport) void thunk_like(struct env *e) { e->out = e->f(e->x); }
 The C++ guard for the `catch (...)` probe is `extern "C" int cpp_guard(int
 (*f)(int), int x) { try { return f(x); } catch (...) { return -999; } }`,
 compiled with `clang++ -shared`.
+
+---
+---
+
+# Part II. Walking the build
+
+Measured 2026-11-01 on the same host. Two additions to it: rustup's
+`stable-x86_64-pc-windows-gnu` toolchain (rustc 1.99.1, the same commit as
+MSYS2's), and Julia 1.12.7 beside 1.13.3, which are the two Julias in CI.
+
+Part I asked what a crate gives RepliBuild. Part II walks RepliBuild's
+pipeline one stage at a time and asks what each stage does with a crate. This
+first pass covers the build (who compiles, who links, which LLVM reads what)
+and the call a thunk makes. Later steps become sections as the walk reaches
+them (§15).
+
+The probe crate is `rbwalk` (Appendix C.1): ten Rust-ABI functions built as a
+`dylib`. From here on, the Hub package `hello_rust` is the walk's subject
+(§14).
+
+## 10. Answers first
+
+1. **Rust is C for data and C++ for calls, so it gets a third generator.**
+   - Its records, enums and pointers sit where DWARF says, like C's. There are
+     no classes, no bases and no hidden `this`; `self` is an ordinary first
+     parameter.
+   - Its calls are not C's. Names are v0, aggregates cross by rustc's own ABI,
+     panics unwind, values have destructors, generics exist only where they
+     were instantiated, and `dyn` dispatches through a vtable. That is the C++
+     side of RepliBuild (Tier 2, EH, `Managed`, declared templates) with a
+     different mechanism at every point.
+   - Neither generator's heuristics hold. GeneratorC's type tables are C's
+     (`i32` came out `Any`, §14.2), and GeneratorCpp reads Itanium.
+   - The toolchain is the C++ bucket's, the system LLVM. Never Julia's.
+2. **rustc compiles and links; RepliBuild directs it.** clang gives RepliBuild
+   one IR file per translation unit and leaves the link to RepliBuild. rustc's
+   unit is the crate, and its link reads files rustc writes during the link:
+   the export list, the allocator shim, the metadata object, and 20 std rlibs
+   (§12.2). RepliBuild sets the crate type, debug info, opt-level, IR emission
+   and link arguments. It reads back what it reads from clang's builds: the
+   DWARF, the export table, and the define lines as text.
+3. **Julia's LLVM never reads Rust IR, so Tier 1 and the C bucket are out.**
+   Julia 1.12.7's LLVM 18.1.7 rejects rustc 1.99's IR at its first
+   `#dbg_declare` record, debug build included (§12.5). Julia 1.13.3's LLVM
+   20.1.8 parsed this probe's IR, but rejects `dead_on_return` (Part I §5),
+   which rustc writes on owned by-value parameters. An `llvmcall` slice of a
+   Rust function would need that parse.
+4. **Whether rustc has its own LLVM depends on where it came from, and the
+   call does not care.** MSYS2's `rustc_driver` imports the system
+   `libLLVM-23.dll`, the DLL libJLCS imports. rustup's imports none: LLVM
+   23.1.1 is inside it. A thunk lowered on the system LLVM 23.1.3 called both
+   builds' functions correctly, 12 of 12 each (§13). Only a define line's text
+   and a symbol name pass from rustc's LLVM to the thunk's. Different majors
+   were not tested.
+5. **No Rust is lowered into MLIR. A call into Rust is, and MLIR expresses
+   it.** A thunk is MLIR that calls the function; the function stays rustc's
+   machine code. A thunk that calls with `llvm.call` and exactly the define
+   line's types and attributes, lowered and JIT'd by libJLCS, was right for
+   all 12 probes: first-class struct returns, `i128`, `i24`, `zeroext i1`,
+   `sret`. The same thunks through `jlcs.ffe_call` got exactly the four
+   struct returns wrong, because its lowering classifies every `!llvm.struct`
+   as a C record. The dialect change is that one call form (§13.3).
+
+---
+
+## 11. Where Rust sits in the architecture
+
+### 11.1 Stage by stage
+
+| Stage | C | C++ | Rust |
+|---|---|---|---|
+| Sources | `DependencyResolver` (git, local) | the same | the same for the crate's repository; cargo resolves crates.io from `Cargo.lock` |
+| Discovery | walks files and the include graph | the same | `cargo metadata`: packages, targets, crate types, features. No file walk (step 2) |
+| Compile | JLL clang, one IR file per TU | system clang, one per TU | `cargo rustc --lib -- <flags>`: one crate, one IR file per codegen unit |
+| Caches | per-file IR `.key`, project hash | the same | cargo's fingerprints for the crate; the project hash adds the rustc identity (§12.1) |
+| Link, opt | in-process on Julia's libLLVM, codegen by clang | llvm-link, opt, clang | rustc, with link arguments RepliBuild sets (§12.2) |
+| Static promotion, `__rb_` aliases | Tier 1 only | — | none: no Tier 1 (answer 3) |
+| DWARF | GNU binutils → `parse_dwarf_dump` | the same | the same dumper → a Rust pass selected by `DW_AT_language 28` (Part I §3.5) |
+| Surface | `nm -g`, the PE export directory | the same | the same, filtered on the v0 path root (§14.1) |
+| IR facts | `_nounwind_definitions`, `_byval_definitions` | the same | `_rust_abi_definitions`: each define line's types and attributes (§13) |
+| `verify_wrap_surface` | R1, R2 | the same | the same |
+| Generator | GeneratorC | GeneratorCpp | GeneratorRust, sharing `Wrapper/Utils.jl` |
+| Calls | Tier 3 | Tier 2 or 3 | a thunk with the define line's call; Tier 3 where `ccall` lowers every IR type as LLVM does (§13.2) |
+| Unwinding | — | `try_call`, `jlcs_guard_*` | `__rb_catch` (Part I §6.3) |
+| Ownership | — | `Managed<X>`, by D0 or the library's deleter | `Managed<X>`, by a generated drop function (Part I §6.2) |
+
+### 11.2 C for data, C++ for calls
+
+| | C | C++ | Rust | What RepliBuild does |
+|---|---|---|---|---|
+| Record layout | DWARF offsets | the same, with bases and a vptr | DWARF offsets of the reordered fields | the layout proof applies unchanged |
+| Sum types | `union` | `union` | data enums: a `variant_part`, a discriminant, niches | a new layout fact (Part I §3.5) |
+| Pointers | `T*` | `T*`, `T&` | `&T`, `&mut T`, `Box<T>`, raw, fat | pointer kinds kept; a fat pointer is a two-field record |
+| Methods | — | hidden `this`, receiver gates | `self` an ordinary first parameter, declared inside the type's DIE | no receiver gates; the owner from DWARF nesting |
+| Names | C identifiers | Itanium | v0 | the Itanium code never sees them |
+| Aggregates by value | C ABI | C ABI | rustc's ABI, read from the define line | the call keeps the define line |
+| Unwinding | — | C++ exceptions | panics, which only Rust may end | a Rust catching frame |
+| Destruction | — | D0, D1, D2 | drop glue | a generated drop function |
+| Generics | — | templates, declared | generics, declared | a generated sibling crate |
+| Dynamic dispatch | — | vptr in the object | vtable in a fat pointer | generated forwarders |
+
+Data is C's column. Every row about calls is C++'s, with a different
+mechanism. A branch inside either generator would bring the other's
+heuristics with it: GeneratorC's C type names, GeneratorCpp's Itanium `class`
+and receiver gates. So Rust gets `Wrapper/Rust/`, a third generator beside the
+two, and its shared derivations go through `Wrapper/Utils.jl` as CLAUDE.md
+already requires of the pair. Two of those derivations mean something
+different for Rust:
+
+- A `&str` is a pointer and a length, not a C string, so the Cstring policy
+  does not apply to it.
+- A function's Julia name is the last segment of its v0 path, and the module
+  path scopes it.
+
+---
+
+## 12. Step 1: the build
+
+### 12.1 Two toolchains
+
+| | MSYS2 `mingw-w64-clang-x86_64-rust` | rustup `stable-x86_64-pc-windows-gnu` |
+|---|---|---|
+| rustc | 1.99.1 (58cf8f9c3 2026-10-13) | the same commit |
+| Host | `x86_64-pc-windows-gnullvm` | `x86_64-pc-windows-gnu` |
+| LLVM | the system `libLLVM-23.dll`, imported by `rustc_driver` (`-vV`: 23.1.3) | inside `rustc_driver`, which imports no LLVM DLL (`-vV`: 23.1.1) |
+| Linker | `x86_64-w64-mingw32-clang`, CLANG64's clang | its own `x86_64-w64-mingw32-gcc` |
+| The dylib's C runtime | UCRT (`api-ms-win-crt-*`) | `msvcrt.dll` |
+| The dylib's unwinder | `libunwind.dll` | `libgcc_s_seh-1.dll` |
+| System `llvm-as` 23.1.3 reads its IR | yes | yes |
+| Thunks with the define line's call (§13) | 12 of 12 | 12 of 12 |
+
+- **MSYS2's rustc is the reference.** It shares one LLVM with libJLCS, its
+  DLLs use the UCRT like RepliBuild's, and the same clang links them.
+- **rustup's works for calls.** Its DLL uses `msvcrt.dll`, which is Julia's
+  runtime rather than RepliBuild's, so "two C runtimes in one process" applies
+  to it from the other side. It also needs `libgcc_s_seh-1.dll` at load. Julia
+  ships one; which copy this process loaded was not checked.
+- **rustup's `windows-msvc` host writes PDB, not DWARF** (read, not measured).
+  RepliBuild reads only DWARF.
+- **The toolchain identity** in the project hash is `rustc -vV` whole (Part I
+  §5). Its `host` and `LLVM version` lines already tell these two apart.
+
+### 12.2 Who links
+
+rustc's link line for `rbwalk`, from `--print link-args` (MSYS2, temporary
+paths shortened; each object's contents from `-C save-temps` and `nm`):
+
+```
+x86_64-w64-mingw32-clang  <tmp>/list.def  -nolibc --unwindlib=none -m64
+  <tmp>/symbols.o                         defines nothing
+  rbwalk.rbwalk.<h>-cgu.0.rcgu.o          the crate
+  <tmp>/rmeta.o                           rust_metadata_rbwalk_<h>
+  rbwalk.<h>.rcgu.o                       __rustc::__rust_alloc, __rust_dealloc, __rust_realloc,
+                                          __rust_alloc_zeroed, __rust_no_alloc_shim_is_unstable_v2
+  -Wl,-Bstatic   20 std rlibs (libstd, libcore, liballoc, libpanic_unwind, …)
+  -Wl,-Bdynamic  -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -lunwind
+                 -lmingw32 -lmingwex -lmsvcrt -luser32
+  -Wl,--nxcompat -o rbwalk.dll -shared librbwalk.dll.a
+```
+
+rustc writes the export list, the metadata object and the allocator shim for
+this link and deletes them after it. A C++ library is just its objects and its
+link flags, but a Rust library is not: RepliBuild could link it only by
+re-implementing rustc's linker driver. So RepliBuild sets the link's arguments
+instead:
+
+- `-C link-arg=` reaches the linker. The one in §12.3 changed the output.
+- `-C linker=` names the linker. On MSYS2 that is already the system clang.
+- On ELF, `_self_binding_link_flags` goes in the same way
+  (`-C link-arg=-Wl,-Bsymbolic`). A static-std dylib exports std (§12.4), so
+  two wrapped crates would export the same std names. That is the bug class
+  the rule was written for (inferred; Linux not measured).
+
+### 12.3 Reproducible links
+
+| Build | Two clean builds | PE time stamp |
+|---|---|---|
+| MSYS2, default | differ: `04dadd0d…`, `efbd0825…` | the clock |
+| rustup, default | differ: `a41b21f2…`, `27f0a894…` | the clock |
+| MSYS2, `-C link-arg=-Wl,--no-insert-timestamp` | identical: `93aea7ab…` | 0 |
+
+Both linkers write the clock into the PE header. `_reproducible_link_flags`
+therefore needs a Rust spelling: without it, `LIBRARY_SHA` moves on every
+build. rustup's GNU ld was not measured with the flag.
+
+### 12.4 std: static or shared
+
+| | Default | `-C prefer-dynamic` |
+|---|---|---|
+| std | linked into the dylib | imports `std-33b59cf903eba3b0.dll` (MSYS2 ships it in `clang64/bin`) |
+| Exports | 1,792, of which 10 are rooted in `rbwalk` | 11 |
+| Size | 1,640,960 bytes | 27,648 bytes |
+
+- **A shared std** gives one allocator, one panic runtime and one set of std
+  statics for any number of crates in the process, and an export table that
+  is the crate's own. But the DLL's name carries the toolchain's hash, so a
+  vendored build runs only beside that exact std. That DLL must also be found
+  at load: PE has no RUNPATH, and `_link_dir_preload_snippet` is the existing
+  answer.
+- **A static std** is self-contained, but every wrapped crate carries its own
+  std, which means two allocators in one process (Part I §9).
+
+This is decision 2 in §16.
+
+### 12.5 Which LLVM reads rustc's IR
+
+| Reader | MSYS2, opt-level 0 | MSYS2, opt-level 3 | rustup, opt-level 0 |
+|---|---|---|---|
+| System `llvm-as` 23.1.3 | parses | parses | parses |
+| Julia 1.13.3, LLVM 20.1.8 | parses | parses | parses |
+| Julia 1.12.7, LLVM 18.1.7 | rejects `#dbg_declare` | not run | rejects `#dbg_declare` |
+
+- **LLVM 18** stops at the first debug record (`#dbg_declare`, a format LLVM 19
+  introduced), so no debug build reads.
+- **LLVM 20** reads this probe. It rejects Part I's, at the `dead_on_return`
+  rustc writes on owned by-value parameters.
+- **libJLCS** imports the same `libLLVM-23.dll` as MSYS2's rustc, so on this
+  host it could parse rustc's IR in-process. Nothing here needs that.
+
+Part I §8's rule stands: rustc's IR is read as text. rustc 1.99's define lines
+carry `!guid !N` after `!dbg`, and the reader must accept it.
+
+### 12.6 The flags RepliBuild sets
+
+| Flag | Why |
+|---|---|
+| `--crate-type dylib` | every non-generic `pub fn` exported; a `cdylib` exports only `extern "C"` (Part I §4.3) |
+| `-C debuginfo=2` | every type and parameter in DWARF |
+| `-C opt-level=0` on the wrapped crate | at 3, small `pub fn`s lose their symbol (Part I §4.3) |
+| `--emit=llvm-ir,link` | the define lines, one `.ll` per codegen unit |
+| `-C link-arg=-Wl,--no-insert-timestamp` (PE) | §12.3 |
+| `-C link-arg=-Wl,-Bsymbolic` (ELF) | §12.2 |
+| `-C panic=unwind` | the default; `abort` turns every panic into a process exit (Part I §6.3) |
+| `-C prefer-dynamic` | §12.4, undecided |
+
+`cargo rustc --lib -- <flags>` puts the flags on the root crate only, and its
+dependencies build under their profile. That command and `--print link-args`
+were measured. `cargo metadata` and `--message-format=json`, which say where
+the artifacts are, belong to step 2.
+
+---
+
+## 13. Step 1, continued: the call
+
+### 13.1 The probe
+
+A 40-line transcriber (Appendix C.2) reads each crate function's define line
+from the build and writes one MLIR thunk per function, `func.func
+@t_<fn>(%args_ptr, %ret_ptr)`:
+
+- one argument slot per IR parameter, holding a pointer to its value (the
+  product's slot convention);
+- the result stored through `%ret_ptr`.
+
+It writes two modules:
+
+- **The define line's call.** `llvm.call`, with the callee declared by
+  `llvm.func` carrying the define line's `zeroext`, `signext`, `sret` and
+  `align`.
+- **Today's call.** `jlcs.ffe_call`, with the callee declared by `func.func`.
+
+`MLIRNative.lower_to_llvm` lowered each module, `create_jit(...;
+shared_libs=[dll])` JIT'd it on libJLCS's LLJIT, and Julia called each thunk
+by address.
+
+| Call | Define line | Define line's call, MSYS2 | The same, rustup | `jlcs.ffe_call` |
+|---|---|---|---|---|
+| `hello_message()` | `{ ptr, i64 } ()` | `"Hello, World!"` | right | **wrong**: a garbage length (`OutOfMemoryError`) |
+| `str_len("héllo")` | `i64 (ptr, i64)` | 6 | right | right |
+| `f2_make(1.5, 2.5)` | `{ double, double } (double, double)` | (1.5, 2.5) | right | **wrong**: (1.04e-311, 1.04e-311) |
+| `f2_dot((1, 2), (3, 4))` | `double (double, double, double, double)` | 11.0 | right | right |
+| `two16_swap(1, 2)` | `{ i16, i16 } (i16, i16)` | (2, 1) | right | **wrong**: (2, -32628) |
+| `b3_rot((1, 2, 3))` | `i24 (i24)` | (2, 3, 1) | right | right |
+| `wide(2^100 + 7)` | `i128 (i128)` | × 3, right | right | right |
+| `flag(true)`, `flag(false)` | `zeroext i1 (i1 zeroext)` | false, true | right | right, without `zeroext` |
+| `checked_div(7, 2)` | `{ i32, i32 } (i32, i32)` | (1, 3) | right | **wrong**: (1, 0) |
+| `checked_div(1, 0)` | the same | tag 0 | right | right (the tag only) |
+| `particle_by_value(p)` | `void (ptr sret([32 x i8]) align 8, ptr align 8)` | id 141, mass 2.0 | right | right |
+
+The lowered calls (names shortened):
+
+```
+define line's call                                 jlcs.ffe_call
+call { double, double } @f2_make(double, double)   call void @f2_make(ptr, double, double)
+call { i16, i16 } @two16_swap(i16, i16)            call i32 @two16_swap(i16, i16)
+call { i32, i32 } @checked_div(i32, i32)           call i64 @checked_div(i32, i32)
+call { ptr, i64 } @hello_message()                 call void @hello_message(ptr)
+declare zeroext i1 @flag(i1 zeroext)               declare i1 @flag(i1)
+```
+
+### 13.2 What it settles
+
+- **MLIR's LLVM dialect needs nothing for Rust.** Struct literals, integers of
+  any width, `llvm.zeroext`, `llvm.sret = !llvm.array<N x i8>` and
+  `llvm.align` on the declaration lowered to the define line's own call. What
+  assumes C is JLCS's call lowering: `buildCallShape` hands every
+  `!llvm.struct` operand and result to `classifyStruct` for the target. On
+  Win64 that makes a 16-byte return an `sret`, and a 4- or 8-byte one an
+  integer.
+- **`flag` through `jlcs.ffe_call` is not evidence.** The declaration lost
+  `zeroext`, and the callee assumes the bits above the `i1` are zero. They
+  happened to be.
+- **Two LLVMs agreed.** rustc's own 23.1.1 (rustup) and the system's 23.1.3
+  (libJLCS) lowered the same signatures the same way. Different majors are
+  still untested, so Part I §5's risk stands.
+- **Results go through a slot.** The probe's thunks return nothing and store
+  their result; the product's thunks are not shaped that way.
+  - A product thunk's scalar return on Windows goes through a `jlcs_guard_*`
+    of one fixed width (`JITManager._invoke_call`). There is none for `i128`,
+    `i24` or `i1`.
+  - A product thunk's struct return goes through the ciface's `sret` path,
+    which is a C crossing of its own.
+
+  A `void t(void** args, void* ret)` thunk has neither problem. It is also
+  the shape `__rb_catch` calls (Part I §6.3: `thunk(env)`), so one thunk can
+  be called directly or inside the catching frame.
+- **Tier 3 is the subset where `ccall` and LLVM agree.** That is a define line
+  whose types are all `i8`, `i16`, `i32`, `i64`, `float`, `double` or `ptr`,
+  with no first-class struct and no `zeroext` or `signext`. `str_len` and
+  `f2_dot` qualify, and so does `particle_by_value`: Part I §4.2 called it
+  through `ccall` with an `sret` buffer. `i128` does not (Part I §4.2).
+
+### 13.3 The dialect change
+
+The dialect needs one call form whose lowering is the identity: operands and
+result as given, the declaration's parameter and result attributes as the
+define line has them, and no `CallShape`. Two ways to have it:
+
+- **An attribute on `ffe_call` and `try_call`** (`abi = "rust"`), for which
+  `buildCallShape` returns the identity shape. The two ops keep one
+  derivation, as now.
+- **A separate op**, which leaves the C path's lowering untouched.
+
+The generator would state the attributes from the define line, the way it
+states the SysV class today (`sysv_args`, `sysv_ret`). `try_call` is no use
+against a panic: C++ EH catches one and Rust then aborts (Part I §6.3). So a
+Rust thunk makes the plain call, and `__rb_catch` sits outside it.
+
+---
+
+## 14. hello_rust
+
+### 14.1 The package
+
+The Hub package is plain Rust: three `pub fn`s in a `dylib`, no `extern "C"`.
+Its `replibuild.toml` holds the `[rust]` table Part I §6.5 proposes, and says
+that nothing consumes it yet.
+
+| Rust | `define` |
+|---|---|
+| `hello_message() -> &'static str` | `{ ptr, i64 } ()` |
+| `hello_print() -> usize` | `i64 ()` |
+| `hello_to(name: &str, times: u32) -> u32` | `i32 (ptr %0, i64 %1, i32 %times)` |
+
+- `hello_message` needs a thunk, for its first-class struct return. The other
+  two are Tier 3's.
+- `hello_to`'s `name` is `%0, %1`. Part I §4.2 already showed that a split
+  parameter's value names cannot be trusted; only the DWARF join can.
+- **The surface filter.** The dylib exports 31 symbols whose names contain
+  `10hello_rust`, and 3 of them are rooted in the crate. The rest are std
+  instantiations hello_rust made (`drop_glue::<StdoutLock>`,
+  `default_write_fmt::<StdoutLock>`, …), which carry the instantiating crate
+  as a suffix (Part I §4.3).
+
+### 14.2 The ingest detour
+
+Before Part II, this package was a `cdylib` pushed through `[ingest]`. Ingest
+is not the path, since it skips the build RepliBuild must own. What it showed
+is about the generators:
+
+- **GeneratorC refused the wrapper.** The C path read 3 functions and 85
+  types. `Vec<u8, alloc::alloc::Global>` reached a type position unsanitized,
+  `i32` became `Any`, and a `*const c_char` parameter became `Ptr{Cvoid}`.
+- **85 types came from 3 scalar functions.** std code inlined into the
+  crate's compile unit (`writeln!`, the stdout lock) puts std's types into the
+  crate's DWARF.
+
+So for Rust the surface walk (`surface_types_only`) is the default, not an
+option. An empty result is also legitimate there: a crate of scalar
+functions reaches no type, where the C guard calls that a failure.
+
+---
+
+## 15. The walk from here
+
+Each step becomes a section when the walk reaches it, measured the same way.
+
+1. **The build** (§12): a `[rust]` table, the cargo driver, the flags, and
+   the toolchain identity in the project hash. The code comes next.
+2. **Artifacts and surface**: where the dylib and `.ll` files are (`cargo
+   metadata`, `--message-format=json`), the export table filtered on the v0
+   path root, and `verify_wrap_surface`.
+3. **Define lines and the join**: `_rust_abi_definitions`, joined to DWARF's
+   formal parameters by Part I §4.2's 0/1/2 rule. Anything the join does not
+   account for is refused.
+4. **The Rust DWARF pass**: variant parts, scoped keys, pointer kinds, Rust
+   base names, and methods by nesting (Part I §3.5), with the surface walk on
+   by default.
+5. **The dialect**: the call form of §13.3 and the `void(void**, void*)`
+   thunk, in ThunkBuilder and JITManager.
+6. **GeneratorRust**: Julia types, names, and routing between Tier 3 and the
+   thunk. Borrowed and plain-data values only (Part I's Stage 2).
+7. **The sibling crate** (Part I's Stage 3): `__rb_catch`, drop functions,
+   instantiations, `dyn` forwarders.
+
+hello_rust is the subject throughout: step 1 builds it, step 6 calls its
+three functions, and step 7 lets it panic.
+
+## 16. Decisions for John
+
+1. **The toolchain.** MSYS2's rustc as the reference. rustup's `windows-gnu`
+   accepted with its identity recorded (`msvcrt.dll`,
+   `libgcc_s_seh-1.dll`), and `windows-msvc` refused (PDB).
+2. **std.** Static (self-contained) or `-C prefer-dynamic` (one std per
+   process, tied to the toolchain).
+3. **The dialect.** An `abi` attribute on `ffe_call`/`try_call`, or a new op.
+4. **Part I's Stage 1** (`extern "C"` through the C path). Is it still wanted,
+   or does the walk go straight to Rust-ABI calls? hello_rust no longer has
+   an `extern "C"` function.
+
+## Appendix C
+
+### C.1 `rbwalk`
+
+`Cargo.toml`: package `rbwalk`, edition 2024, `crate-type = ["dylib"]`,
+`[profile.dev] debug = 2, codegen-units = 1, incremental = false`. Built with
+`cargo rustc --lib -- --emit=llvm-ir,link`, by each toolchain.
+
+```rust
+pub struct F2 { pub x: f64, pub y: f64 }
+pub struct Two16 { pub a: u16, pub b: u16 }
+pub struct B3 { pub a: u8, pub b: u8, pub c: u8 }
+pub struct Particle { pub tag: u8, pub mass: f64, pub id: u32, pub flag: u8, pub pos: [f32; 3] }
+
+pub fn hello_message() -> &'static str { "Hello, World!" }
+pub fn str_len(s: &str) -> usize { s.len() }
+pub fn f2_make(x: f64, y: f64) -> F2 { F2 { x, y } }
+pub fn f2_dot(a: F2, b: F2) -> f64 { a.x * b.x + a.y * b.y }
+pub fn two16_swap(t: Two16) -> Two16 { Two16 { a: t.b, b: t.a } }
+pub fn b3_rot(x: B3) -> B3 { B3 { a: x.b, b: x.c, c: x.a } }
+pub fn wide(x: u128) -> u128 { x.wrapping_mul(3) }
+pub fn flag(b: bool) -> bool { !b }
+pub fn checked_div(a: i32, b: i32) -> Option<i32> { if b == 0 { None } else { Some(a / b) } }
+pub fn particle_by_value(p: Particle) -> Particle { Particle { id: p.id + 100, ..p } }
+```
+
+### C.2 The transcriber
+
+A define line becomes a declaration and a thunk. These are the type and
+attribute maps; everything else is string assembly.
+
+```julia
+function mlir_type(t)
+    t == "double" && return "f64";  t == "float" && return "f32"
+    t == "ptr" && return "!llvm.ptr";  t == "void" && return ""
+    occursin(r"^i\d+$", t) && return t
+    startswith(t, "{") && return "!llvm.struct<(" *
+        join(mlir_type.(split_top(strip(t[2:end-1]), ',')), ", ") * ")>"
+    error("unmapped IR type: $t")
+end
+
+# The attributes that change how a call is made. noundef, nonnull, noalias,
+# dereferenceable, captures, range: hints about values, not about the shape.
+function mlir_attrs(toks)
+    out = String[]; i = 1
+    while i <= length(toks)
+        t = toks[i]
+        if t in ("zeroext", "signext", "inreg")
+            push!(out, "llvm.$t")
+        elseif (m = match(r"^sret\(\[(\d+) x i8\]\)$", t)) !== nothing
+            push!(out, "llvm.sret = !llvm.array<$(m[1]) x i8>")
+        elseif t == "align"
+            push!(out, "llvm.align = $(toks[i+1]) : i64"); i += 1
+        end
+        i += 1
+    end
+    return isempty(out) ? "" : " {" * join(out, ", ") * "}"
+end
+```
+
+What it wrote for `f2_make`, `flag` and `particle_by_value` (symbols
+shortened):
+
+```mlir
+llvm.func @f2_make(f64, f64) -> !llvm.struct<(f64, f64)>
+llvm.func @flag(i1 {llvm.zeroext}) -> (i1 {llvm.zeroext})
+llvm.func @particle_by_value(!llvm.ptr {llvm.sret = !llvm.array<32 x i8>, llvm.align = 8 : i64},
+                             !llvm.ptr {llvm.align = 8 : i64})
+
+func.func @t_f2_make(%args_ptr: !llvm.ptr, %ret_ptr: !llvm.ptr) {
+  %s0 = llvm.getelementptr %args_ptr[0] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr
+  %p0 = llvm.load %s0 : !llvm.ptr -> !llvm.ptr
+  %v0 = llvm.load %p0 : !llvm.ptr -> f64
+  %s1 = llvm.getelementptr %args_ptr[1] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr
+  %p1 = llvm.load %s1 : !llvm.ptr -> !llvm.ptr
+  %v1 = llvm.load %p1 : !llvm.ptr -> f64
+  %r = llvm.call @f2_make(%v0, %v1) : (f64, f64) -> !llvm.struct<(f64, f64)>
+  llvm.store %r, %ret_ptr : !llvm.struct<(f64, f64)>, !llvm.ptr
+  return
+}
+```
+
+The `jlcs.ffe_call` module differs only in the declaration (`func.func
+private @f2_make(f64, f64) -> !llvm.struct<(f64, f64)>`) and the call
+(`%r = jlcs.ffe_call %v0, %v1 { callee = @f2_make } : (f64, f64) ->
+!llvm.struct<(f64, f64)>`).
