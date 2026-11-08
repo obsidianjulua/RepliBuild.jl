@@ -2797,6 +2797,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # `::Integer`. Positions index `func["parameters"]`, before any `this`.
     strict_int_positions = _integer_width_overloads(functions, struct_types, _ccall_param_type)
 
+    # What a pointer or reference return may be typed with (`_typed_pointer_return`).
+    typed_return_names = _typed_return_names(join(struct_chunks))
+
     for func in functions
         func_name = func["name"]
         mangled = func["mangled"]
@@ -2887,6 +2890,23 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                  safe_base = _sanitize_cpp_type_name(base_c)
                  return_type["julia_type"] = "Ptr{$safe_base}"
              end
+        end
+
+        # A pointer or reference return the step above left untyped takes the
+        # type its declaration names (`_typed_pointer_return`): `ImGui::GetIO`
+        # (`ImGuiIO&`) is `Ptr{ImGuiIO}`. Only the type: such a return never
+        # becomes a `Managed` owner (`newly_typed_return` below). A reference
+        # never transfers ownership, and nothing here says a pointer does.
+        newly_typed_return = false
+        let jt = String(get(return_type, "julia_type", "Cvoid"))
+            if occursin(r"^(Ptr\{)*(Cvoid|Any)\}*$", jt)
+                typed = _typed_pointer_return(String(get(return_type, "c_type", "")),
+                                              typed_return_names, _sanitize_cpp_type_name)
+                if typed !== nothing
+                    return_type["julia_type"] = typed
+                    newly_typed_return = true
+                end
+            end
         end
 
         # BUG FIX: Sanitize return types that are template instantiations (e.g. Box<double> -> Box_double)
@@ -3618,8 +3638,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         push!(func_chunks, func_def)
         push!(exports, julia_name)
 
-        # Generate safe wrapper if return type is a managed struct
-        if startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")
+        # Generate safe wrapper if return type is a managed struct. Not for a
+        # return typed from its declaration alone: `GetIO()` hands back memory
+        # the context owns, and a finalizer on it frees what imgui still uses.
+        if !newly_typed_return && startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")
             target_struct = julia_return_type[5:end-1]
             # Sanitize target struct name to match ManagedX keys
             safe_target = _sanitize_cpp_type_name(target_struct)

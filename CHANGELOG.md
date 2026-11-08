@@ -4,6 +4,49 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A pointer or reference return is typed from its declaration (2026-11-08)
+
+Building a chat GUI on the Hub's imgui, glfw and libvterm wrappers (LlamaChat),
+the session cast returns back to their types at every call site:
+`Ptr{W.GLFWwindow}(W.glfwCreateWindow(…))`, `Ptr{G.ImGuiStyle}(G.ImGui_GetStyle())`,
+`Ptr{G.ImVec4}(G.ImGui_GetStyleColorVec4(…))`. The metadata had each type
+(`GLFWwindow*`, `ImGuiStyle&`, `ImVec4 const*`); both generators typed a return
+only when it was `T*` with `T` in `struct_types`, so an opaque handle (declared,
+never defined: glfw's window, monitor and cursor), a reference, `T const*` and
+`T**` all came out `Ptr{Cvoid}`, though the parameters taking the same handle were
+already `Ptr{GLFWwindow}`.
+
+- **`_typed_pointer_return`** (`Wrapper/Utils.jl`, both generators) reads the
+  declarators off the return's C type, `const`/`volatile` in any position, and
+  gives `Ptr{T}` or `Ptr{Ptr{T}}` when `T` is a type the module emits
+  (`_typed_return_names`, read off the emitted text like `_defined_type_names`).
+  It runs only where the existing steps left `Ptr{Cvoid}` or `Any`, so nothing
+  typed before changes.
+- **Not a mutable record.** A named union or a record carried as its bytes is a
+  `mutable struct`, and `unsafe_load(Ptr{T})` on one reads C's bytes as an object
+  reference (abi_fuzz X5); those stay `Ptr{Cvoid}`, as do `void*`, function
+  pointers and names the module does not emit. `char*` keeps the Cstring policy.
+- **Not ownership.** GeneratorCpp emits `f_safe(…)::ManagedX`, which attaches a
+  finalizer, for a `Ptr{X}` return whose class has a deleter. A return typed only
+  by its declaration never gets one (`newly_typed_return`): `ImGui::GetIO()`
+  returns memory the context owns.
+- Measured by re-wrapping the Hub packages without a rebuild: glfw types 9 returns
+  (`glfwCreateWindow` → `Ptr{GLFWwindow}`, `glfwGetMonitors` →
+  `Ptr{Ptr{GLFWmonitor}}`, …), imgui 6 (`GetIO`, `GetPlatformIO`, `GetStyle`,
+  `GetStyleColorVec4`), libvterm none (its handles were already typed); no `_safe`
+  wrapper added or removed. test_deep: imgui 202/202, libvterm 46/46, glfw 37/38
+  (the one asserts the Hub path, which a copy does not have); the chat-box probe,
+  which keeps the GUI's casts, 22/22. A cast like `Ptr{X}(…)` around a typed
+  return is now a no-op, so callers keep working; re-wrap to pick it up.
+- Not covered: a handle that appears only in return types has no `struct T end`
+  (forward declarations come from parameters), and stays `Ptr{Cvoid}`.
+- **Tests.** `test_typed_pointer_returns.jl` (runtests): every declarator
+  spelling; mutable records and value constants left out of the names; through
+  GeneratorC an opaque handle, a double pointer, `T* const`, a mutable record's
+  `U**`, `void*` and `const char*`; through GeneratorCpp a reference, `T const*`,
+  a mutable record's reference, and the ownership gate (a `T*` return keeps its
+  `_safe` wrapper, a `T&` return of the same class gets none).
+
 ### A symbol `exclude_symbols` drops seeds no toolchain record (2026-11-08)
 
 Rebuilding the Hub's glfw on v4.4.0 printed "5 toolchain record(s) held or passed

@@ -277,6 +277,7 @@ include(joinpath(@__DIR__, "test_integer_width_overloads.jl"))
 # arguments made `pair<key_value_pair *, bool>` a pointer crossing, which on
 # Win64 returned a 16-byte record without its hidden pointer (access violation).
 include(joinpath(@__DIR__, "test_cpp_return_resolution.jl"))
+include(joinpath(@__DIR__, "test_typed_pointer_returns.jl"))
 
 # ── Tier 2 arguments cross at their C width (no toolchain) ───────────────────
 # A thunk loads the C parameter's width from the argument's storage, so a Julia
