@@ -861,6 +861,10 @@ the test named when you touch the area.
   (`is_struct_packed`) is measured too: emitted members that do not add up to
   `byte_size` fall to the offset-driven layout (`_apply_dwarf_layout`), since a
   member spelled to the wrong type tiles by its DWARF size and was returned short.
+  A synthetic fixture that sizes `long` at 8 is LP64-only: `long` is i32 on Win64,
+  so the measurement re-lays it out there (Windows CI, PR #72); size 8 is `long long`.
+  To check a StructGen change for that without Windows, rebind
+  `RepliBuild.C_LONG_MLIR` to `"i32"` with `Core.eval` and run the file.
   (`test_struct_layout.jl`, `test_packed_layout.jl`, `test_thunk_byte_regions.jl`,
   `test_template_members.jl`, `test_toolchain_records.jl`.)
 - **The Julia struct IS the C layout.** GeneratorCpp proves each struct's fields
