@@ -83,6 +83,29 @@ const LE = RepliBuild.LLVMEnvironment
         @test !C._is_gnu_binutils("LLVM version 22.1.8\n  compatible with GNU objdump")
         @test !C._is_gnu_binutils("llvm-objdump, compatible with GNU objdump")
         @test !C._is_gnu_binutils("")
+        # Fedora's binutils carry the distro's version and no `Binutils` word
+        # (issue #68): the program's own line is the identity there.
+        @test C._is_gnu_binutils("GNU readelf version 2.46.1-1.fc44\nCopyright (C) 2025 Free Software Foundation, Inc.")
+        @test C._is_gnu_binutils("GNU nm version 2.46.1-1.fc44")
+        @test C._is_gnu_binutils("GNU objdump version 2.46.1-1.fc44")
+        @test C._is_gnu_binutils("GNU nm (GNU Binutils) 2.43.1")                  # Arch
+        @test C._is_gnu_binutils("GNU nm (GNU Binutils for Ubuntu) 2.42")
+        # LLVM's nm/readelf/objdump never open with `GNU`.
+        @test !C._is_gnu_binutils("LLVM (http://llvm.org/):\n  LLVM version 22.1.8\n  Optimized build.")
+        @test !C._is_gnu_binutils("GNU-compatible nm 1.0")
+        @test !C._is_gnu_binutils("  GNU nm version 2.46")                        # not at line start
+    end
+
+    @testset "the doctor can say what each dumper candidate printed" begin
+        cands = C._dumper_candidates()
+        @test !isempty(cands)
+        @test Sys.iswindows() ? ("objdump" in cands) : (cands[end-1:end] == ["readelf", "objdump"])
+        report = C._dumper_candidate_report()
+        @test length(report) == length(cands)
+        for (tool, line) in zip(cands, report)
+            @test startswith(line, tool * ": ")
+            @test occursin(r"accepted|not GNU binutils|exit -?\d+|did not start", line)
+        end
     end
 
     @testset "the objdump Debug disassembles with is GNU, not llvm-objdump" begin

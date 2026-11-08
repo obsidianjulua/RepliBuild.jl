@@ -4583,10 +4583,69 @@ end
 function _is_gnu_binutils(version_out::AbstractString)::Bool
     # LLVM's llvm-objdump has printed `compatible with GNU objdump`. A
     # substring `GNU` accepts that dialect, which `parse_dwarf_dump` cannot
-    # read. GNU binutils identifies itself as `GNU Binutils` (and as a line
-    # starting `GNU objdump` / `GNU readelf`).
+    # read. GNU binutils identifies itself as `GNU Binutils` on Debian, Arch
+    # and MSYS2 (`GNU nm (GNU Binutils for Debian) 2.42`), and by the program's
+    # own line everywhere: Fedora builds print `GNU nm version 2.46.1-1.fc44`
+    # with no `Binutils` in it (issue #68), so every binutils program name is
+    # accepted at the start of a line. LLVM's tools never start one with `GNU`.
     occursin("GNU Binutils", version_out) ||
-        occursin(r"(?m)^GNU (objdump|readelf)\b", version_out)
+        occursin(r"(?m)^GNU (objdump|readelf|nm|ar|objcopy|strip|ranlib|size|strings)\b", version_out)
+end
+
+"""
+    _dumper_candidates() -> Vector{String}
+
+The programs `_dwarf_dumper` tries, in order: `REPLIBUILD_OBJDUMP` when set,
+then `readelf` and `objdump` on PATH, and on Windows the GNU objdump of each
+GCC-flavoured MSYS2 tree by absolute path (CLANG64's bare `objdump` is
+llvm-objdump).
+"""
+function _dumper_candidates()::Vector{String}
+    candidates = String[]
+    env_override = get(ENV, "REPLIBUILD_OBJDUMP", "")
+    isempty(env_override) || push!(candidates, env_override)
+    if Sys.iswindows()
+        # MSYS2 ships GNU binutils in the GCC-flavoured trees; CLANG64's own
+        # `objdump` is llvm-objdump and will fail the GNU check, so the bare
+        # name is tried first only for the case where a GNU one is on PATH.
+        push!(candidates, "objdump")
+        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
+        for envdir in ("mingw64", "ucrt64", "mingw32")
+            push!(candidates, joinpath(msys_root, envdir, "bin", "objdump.exe"))
+        end
+    else
+        push!(candidates, "readelf", "objdump")
+    end
+    return candidates
+end
+
+"""
+    _dumper_candidate_report() -> Vector{String}
+
+One line per `_dumper_candidates()` entry saying what `--version` did: the
+exit code and the first line it printed, or that it did not start. The
+doctor shows these when no candidate was accepted, so a report of "no GNU
+binutils" carries what RepliBuild saw instead of leaving the user to guess
+(issue #68: binutils installed, every candidate refused, no way to tell why).
+"""
+function _dumper_candidate_report()::Vector{String}
+    lines = String[]
+    for tool in _dumper_candidates()
+        (out, ec) = try
+            BuildBridge.execute(tool, ["--version"])
+        catch e
+            (sprint(showerror, e), 1)
+        end
+        first_line = strip(first(split(out, '\n'; limit=2)))
+        isempty(first_line) && (first_line = "(no output)")
+        if ec == BuildBridge.SPAWN_FAILED
+            push!(lines, "$tool: did not start — $first_line")
+        else
+            verdict = ec == 0 ? (_is_gnu_binutils(out) ? "accepted" : "not GNU binutils") : "exit $ec"
+            push!(lines, "$tool: $verdict — `$first_line`")
+        end
+    end
+    return lines
 end
 
 """
@@ -4664,24 +4723,7 @@ identifies itself as GNU.
 Set `REPLIBUILD_OBJDUMP` to an explicit path to override the search.
 """
 function _dwarf_dumper()
-    candidates = String[]
-    env_override = get(ENV, "REPLIBUILD_OBJDUMP", "")
-    isempty(env_override) || push!(candidates, env_override)
-
-    if Sys.iswindows()
-        # MSYS2 ships GNU binutils in the GCC-flavoured trees; CLANG64's own
-        # `objdump` is llvm-objdump and will fail the GNU check below, so the
-        # bare name is tried first only for the case where a GNU one is on PATH.
-        push!(candidates, "objdump")
-        msys_root = get(ENV, "MSYS2_ROOT", "C:/msys64")
-        for envdir in ("mingw64", "ucrt64", "mingw32")
-            push!(candidates, joinpath(msys_root, envdir, "bin", "objdump.exe"))
-        end
-    else
-        push!(candidates, "readelf", "objdump")
-    end
-
-    for tool in candidates
+    for tool in _dumper_candidates()
         (out, ec) = try
             BuildBridge.execute(tool, ["--version"])
         catch
