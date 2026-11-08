@@ -457,7 +457,9 @@ the test named when you touch the area.
   wrong visibility.
 - `[wrap] exclude_symbols` uses anchored globs (`*`, `?` only, everything else is
   literal), applied at wrap time on both wrap paths. A pattern matching nothing is a
-  hard error, and hit counting must not short-circuit.
+  hard error, and hit counting must not short-circuit. The build reads it once too,
+  so a dropped symbol seeds no toolchain record; the glob dialect lives at package
+  level (`_glob_matcher`) so both sides compile a pattern the same way.
 - `[wrap] surface_types_only` is **opt-in and must stay default-off**. The reachability
   walk cannot see types used only through function-pointer members (md4c) or
   constant-only enums (argon2). `surface_types_extra` is the hatch, and an unmatched
@@ -932,7 +934,10 @@ the test named when you touch the area.
   C++ promoted 123 Vulkan-Hpp records, `vk::Event` and `vk::Semaphore` among them
   (Base names), and with dynsym alone 55 `_Rb_tree_iterator`-class records; gated,
   llama.cpp promotes 0 and boostmath exactly `pair<double, double>`. A library record nothing exported crosses by value promotes
-  nothing. It never promotes an STL
+  nothing, and neither does a symbol `[wrap] exclude_symbols` drops: the exported
+  set loses it first (`_without_excluded_symbols`, matched as wrap matches, and a
+  global on its exported name because `symbols` is code only), or glfw's exported
+  `_glfw` state global kept glibc's `pthread_mutex_t` and friends. It never promotes an STL
   container (`stl_container_size`; those keep their own path) or an
   `INTERNAL_TYPE_BLOCKLIST` name, and a library record of the same name keeps its
   entry. Still traps, with no entry to promote: libstdc++'s `tuple` and `optional`

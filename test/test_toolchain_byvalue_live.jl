@@ -49,6 +49,7 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
 
     [wrap]
     language = "cpp"
+    exclude_symbols = ["tbv_ledger"]
 
     [types]
     strictness = "warn"
@@ -88,6 +89,11 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
         @test all(b -> get(b, "empty", false) == true, sd["pair<double, double>"]["base_classes"])
         @test all(b -> get(b, "empty", false) == true, sd["LP"]["base_classes"])
         @test get(sd["Span"], "toolchain", false) == false
+        # An exported global holding `pair<long, long>` by value, dropped by
+        # `exclude_symbols`: wrap will not bind it, so it seeds nothing. The
+        # record itself is the library's and keeps its entry.
+        @test haskey(sd, "Ledger")
+        @test !haskey(sd, "pair<long, long>")
     end
 
     @testset "the wrapper emits them as structs and calls through them" begin
@@ -101,6 +107,7 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
         for f in ("tup", "maybe", "cplx")
             @test occursin("ABI Safety Trap: cannot call '$f'", code)
         end
+        @test !occursin("tbv_ledger", code)
     end
 
     @testset "every call returns what the C++ computed" begin

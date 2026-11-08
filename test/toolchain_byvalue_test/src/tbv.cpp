@@ -39,3 +39,5 @@ int map_lookup(int k) {
     auto it = m.find(k);
     return it == m.end() ? -1 : it->second + hidden_pair((short)k).second;
 }
+
+Ledger tbv_ledger = {{1, 2}, 3};

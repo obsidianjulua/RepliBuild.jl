@@ -20,6 +20,7 @@ const _JULIA_KEYWORDS = Set([
 # IR generator — which loads before this module — screens the same types. Kept
 # under the old name because it is referenced from six files in Wrapper.
 import ..INTERNAL_TYPE_BLOCKLIST
+import .._glob_to_regex, .._glob_matcher   # package level: the Builder asks them too
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
@@ -373,67 +374,6 @@ function _collect_defined!(out::Vector{Tuple{String,Symbol,Int}}, ex, line::Int,
         end
     end
     return out
-end
-
-"""
-    _glob_to_regex(pattern) -> Regex
-
-Compile one `[wrap] exclude_symbols` glob into an anchored `Regex`.
-
-`*` and `?` are the wildcards; EVERY other regex metacharacter is escaped.
-That escaping is the point. These patterns are written by reading `nm` output,
-where a literal `*` never appears in a symbol but `(`, `)`, `+`, `.` and `[`
-appear constantly — `operator+`, `foo(int const&)`, `std::vector<int>`. Treating
-the input as a regex would silently reinterpret those: `operator+` would compile
-to "one or more `operator`" and match nothing, and the user would see an empty
-filter with no error to read. Anchored at both ends so a pattern names a whole
-symbol, not a substring of one — `vk` must not take out `vkontakte_init`.
-"""
-function _glob_to_regex(pattern::AbstractString)::Regex
-    io = IOBuffer()
-    print(io, '^')
-    for c in pattern
-        if c == '*'
-            print(io, ".*")
-        elseif c == '?'
-            print(io, '.')
-        elseif c in ('.', '^', '$', '|', '(', ')', '[', ']', '{', '}', '+', '\\', '/', '-', '&', '!', '<', '>', '#', '=', ':', ',', '~', '@', '%', '"', '\'', '`', ' ')
-            print(io, '\\', c)
-        else
-            print(io, c)
-        end
-    end
-    print(io, '$')
-    return Regex(String(take!(io)))
-end
-
-"""
-    _glob_matcher(patterns) -> (matches, hit)
-
-Compile `patterns` once and return a `matches(name)::Bool` predicate plus the
-per-pattern hit counter it updates. Shared by the two wrap paths so both spell
-"does this symbol match" identically and both can report stale patterns.
-
-`matches` tests EVERY pattern rather than short-circuiting on the first hit:
-the counter has to be complete for the unmatched-pattern check downstream to
-mean anything, and stopping early would let a pattern look stale purely because
-a broader one happened to be listed before it.
-"""
-function _glob_matcher(patterns::Vector{String})
-    regexes = [(p, _glob_to_regex(p)) for p in patterns]
-    hit = Dict{String,Int}(p => 0 for p in patterns)
-    matches = function (name)
-        name isa AbstractString || return false
-        matched = false
-        for (p, re) in regexes
-            if occursin(re, name)
-                hit[p] += 1
-                matched = true
-            end
-        end
-        return matched
-    end
-    return (matches, hit)
 end
 
 """
