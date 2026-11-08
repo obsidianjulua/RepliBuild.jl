@@ -6,6 +6,7 @@ module TypeUtils
 import ...C_LONG_MLIR
 import ...C_WCHAR_MLIR
 import SHA
+import ...stl_container_size
 
 export map_cpp_type, get_llvm_signature, get_stl_container_size
 export mlir_string_literal, mlir_struct_ref, mlir_struct_name, alias_safe_name
@@ -214,51 +215,34 @@ end
     get_stl_container_size(c_type::String) -> Int
 
 Returns the exact ABI byte size of common STL containers on x86_64 SysV.
-Returns 0 if unknown.
+Returns 0 if unknown. The table is `RepliBuild.stl_container_size`, which the
+Builder reads too.
 """
-# Match an STL type name with word-boundary awareness: `clean` equals `prefix`,
-# or is `prefix` followed by `<` or a space. Without this, `startswith` makes
-# `std::string_view` match `std::string` and answer 32 — while the wrapper side
-# (TypesCpp `is_stl_container_type`) correctly says "not a container, size 0".
-# FunctionGen would then emit a 32-byte blob thunk for a buffer the wrapper does
-# not treat as one: thunk and wrapper disagreeing about a buffer, which is the
-# ImGui receiver-miss shape.
-#
-# THIS IS THE ONE TABLE. `Wrapper/Cpp/TypesCpp.jl` delegates here rather than
-# keeping a second copy — Wrapper imports IRGen, so this is the layer both can
-# reach. The two copies had already drifted twice (the `string_view` match above,
-# and a different unordered-before-map ordering that happened to be harmless).
-function _stl_name_match(clean::AbstractString, prefix::AbstractString)::Bool
-    startswith(clean, prefix) || return false
-    ncodeunits(clean) == ncodeunits(prefix) && return true
-    c = clean[ncodeunits(prefix) + 1]
-    return c == '<' || c == ' '
-end
+get_stl_container_size(c_type::String)::Int = stl_container_size(c_type)
 
-function get_stl_container_size(c_type::String)::Int
-    clean = strip(replace(c_type, r"^(const|struct|class|union)\b" => ""))
-    clean = strip(replace(clean, r"[*&]+$" => ""))
 
-    # Bare (std::-stripped) spellings require `<` — DWARF drops the namespace but
-    # keeps the template arguments, so a bare `string` is not a container name.
-    if _stl_name_match(clean, "std::vector") || startswith(clean, "vector<")
-        return 24
-    elseif _stl_name_match(clean, "std::basic_string") || _stl_name_match(clean, "std::string") || startswith(clean, "basic_string<")
-        return 32  # libstdc++ SSO string is 32 bytes on 64-bit
-    elseif _stl_name_match(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
-        return 16
-    elseif _stl_name_match(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
-        return 8
-    elseif _stl_name_match(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || _stl_name_match(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
-        return 56  # hashtable
-    elseif _stl_name_match(clean, "std::map") || startswith(clean, "map<") || _stl_name_match(clean, "std::set") || startswith(clean, "set<")
-        return 48  # rb_tree
-    elseif _stl_name_match(clean, "std::list") || startswith(clean, "list<")
-        return 24
-    elseif _stl_name_match(clean, "std::deque") || startswith(clean, "deque<")
-        return 80
+"""
+    _fuzzy_struct_lookup(c_type, structs) -> Union{String, Nothing}
+
+Fuzzy-match a C type name against struct definition keys.
+DWARF keys often have trailing " >" nesting artifacts from template types.
+Of several fuzzy matches, the smallest key: the first one met was the first in
+the Dict's order, so a thunk's by-value layout could change with the Julia
+release. GeneratorCpp's `_fuzzy_dwarf_lookup` answers the same way. Here, below
+StructGen and FunctionGen, so a struct body's member and a signature's
+parameter find a record the same way.
+"""
+function _fuzzy_struct_lookup(c_type::String, structs::Any)
+    haskey(structs, c_type) && return c_type
+    key = c_type * " >"
+    haskey(structs, key) && return key
+    c_norm = rstrip(c_type, [' ', '>'])
+    hit = nothing
+    for k in keys(structs)
+        s = String(k)
+        rstrip(s, [' ', '>']) == c_norm && (hit === nothing || s < hit) && (hit = s)
     end
-    return 0
+    return hit
 end
 
 end

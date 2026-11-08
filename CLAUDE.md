@@ -156,7 +156,13 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   pipeline. `libJLCS.so` (`libJLCS.dll` on Windows: it
   imports `libLLVM-<major>.dll` and links MLIR statically) is a gitignored build
   artifact pinned to the installed MLIR minor SONAME: rebuild after a minor upgrade. A patch
-  bump inside a minor needs nothing. `deps/build.jl` builds it at install time when
+  bump inside a minor needs nothing to *load* it, but MLIR's `MLIRConfig.cmake` asks
+  for LLVM's exact version, so where MLIR is packaged apart from LLVM (Arch's AUR
+  `mlir`) an `llvm` patch bump blocks *building* libJLCS until MLIR is rebuilt at
+  the same version (llvm 23.1.4 against mlir 23.1.3, 2026-11-08). A libJLCS older
+  than `JLCSAbiOracle.cpp` fails `test_sysv_abi_oracle.jl` well beyond the new
+  code (76 of 1915 at 048ca6f, unions and packed records included); rebuild it
+  before reading that test. `deps/build.jl` builds it at install time when
   possible and never throws. On Windows it runs build.sh through MSYS2's
   `bash.exe -l` with `MSYSTEM=CLANG64`, which is a CLANG64 shell from any
   process; `src/mlir/windows_build.jl` is that command's one copy (the doctor's
@@ -453,7 +459,11 @@ the test named when you touch the area.
 - `[wrap] surface_types_only` is **opt-in and must stay default-off**. The reachability
   walk cannot see types used only through function-pointer members (md4c) or
   constant-only enums (argon2). `surface_types_extra` is the hatch, and an unmatched
-  pattern is a hard error. Seed the walk from method `class` and from globals that are
+  pattern is a hard error. A pattern hits only on a key **outside** the reach (the
+  `&&` in `_apply_surface_type_filter!` skips `matches` for reached keys), so a
+  keep-pattern a walk fix made redundant fails as "matched nothing" while the type is
+  in `struct_definitions`: boostmath's five, on HEAD after 48befe9 (2026-10-29). The
+  error is right (a stale pin), its diagnosis is wrong. Seed the walk from method `class` and from globals that are
   **in dynsym**. `_runtime_defined_names` returns `nothing` when it could not look, and
   callers must fail safe on it. **Check public enums by hand** when a package enables it.
   **A spelling reaches a key in every dress** (`_surface_core_spellings`: `const
@@ -582,8 +592,10 @@ the test named when you touch the area.
   set the depth context like records), and GeneratorCpp asks
   `_is_stl_internal_record(name, dwarf_structs)` through its `_stl_internal`
   closure: outside `std`/`__gnu_cxx`/`__cxx*` a record is never STL-internal; with
-  no scope, or inside `std`, the name decides as before. Never call the name-only
-  screen in the generator. The key needs a rebuild. (`test_record_scope.jl`.)
+  no scope, or inside `std`, the name decides as before. A record marked
+  `"toolchain"` (promoted, above) is never STL-internal either. Never call the
+  name-only screen in the generator. The key needs a rebuild.
+  (`test_record_scope.jl`, `test_toolchain_records.jl`.)
 - **Integer parameters are `::Integer` unless an overload set disagrees on their
   width.** `_integer_width_overloads` predicts each wrapper's name and dispatch
   signature the way the function loop builds them and marks the positions a set
@@ -843,9 +855,12 @@ the test named when you touch the area.
   `byte_size` region — never to the wrong size, which smashes the sret buffer.
   A member's type is spelled by `StructGen._member_mlir_type`, never `map_cpp_type`
   directly: that answers `!llvm.ptr` for a template spelling (`Vec<int, 3>`,
-  `pair<int*, int>`), and every record holding one shrank.
+  `pair<int*, int>`), and every record holding one shrank. A tiled body
+  (`is_struct_packed`) is measured too: emitted members that do not add up to
+  `byte_size` fall to the offset-driven layout (`_apply_dwarf_layout`), since a
+  member spelled to the wrong type tiles by its DWARF size and was returned short.
   (`test_struct_layout.jl`, `test_packed_layout.jl`, `test_thunk_byte_regions.jl`,
-  `test_template_members.jl`.)
+  `test_template_members.jl`, `test_toolchain_records.jl`.)
 - **The Julia struct IS the C layout.** GeneratorCpp proves each struct's fields
   against DWARF (`_prove_julia_layout`) and emits a C-layout byte blob when they
   cannot reproduce it; GeneratorC does the same (`_resolve_exact_layout`). So the thunk
@@ -895,6 +910,34 @@ the test named when you touch the area.
   the STL-size fallback in `generate_function_thunks` never measures the
   container behind a reference (`path::native()` returned a stack slot).
   (`test_by_value_crossing.jl`, `test_cpp_return_resolution.jl`.)
+- **A toolchain record the library reaches by value keeps its layout**
+  (2026-10-29, merged 2026-11-08). The provenance gate keeps a record declared in a
+  toolchain header out of `struct_definitions`, so `std::pair<double, double>`
+  returned, `std::string_view` taken, or a library `Span { std::pair<int, int>; … }`
+  had no layout and every crossing trapped. The gate now sets those definitions
+  aside, and `Compiler._promote_toolchain_records!` puts back what an **exported**
+  function or global crosses by value (the dynamic-symbol gate, read with
+  `_runtime_defined_names`, which lives in the Builder for this; constructors
+  through `_structor_dwarf_key`; less `_is_stdlib_internal`, since libstdc++'s
+  `namespace std` has default visibility and its instantiations are in dynsym
+  even under -fvisibility=hidden), and what each record so reached holds by value,
+  library records included, transitively; marked `"toolchain" => true`, **only
+  when the whole by-value closure has a layout**. Ungated, ggml-vulkan's hidden
+  C++ promoted 123 Vulkan-Hpp records, `vk::Event` and `vk::Semaphore` among them
+  (Base names), and with dynsym alone 55 `_Rb_tree_iterator`-class records; gated,
+  llama.cpp promotes 0 and boostmath exactly `pair<double, double>`. A library record nothing exported crosses by value promotes
+  nothing. It never promotes an STL
+  container (`stl_container_size`; those keep their own path) or an
+  `INTERNAL_TYPE_BLOCKLIST` name, and a library record of the same name keeps its
+  entry. Still traps, with no entry to promote: libstdc++'s `tuple` and `optional`
+  (no member of their own), `complex` (clang names both `_Complex` widths
+  `complex`). A 1-byte empty base (`__pair_base`, a library `Tag`) is marked
+  `"empty"` on the base entry and the SysV classifier skips it; unmarked, every
+  record deriving from one trapped, the library's own included. Whether a member
+  is held by value reads `_outside_template_args` (`pair<int*, bool>` is a
+  record). `stl_container_size`, `_scope_suffixes` and `_outside_template_args`
+  live at package level because the Builder asks them too.
+  (`test_toolchain_records.jl`, devtests 8g `test_toolchain_byvalue_live.jl`.)
 - **A byte region never crosses a thunk as an array.** A record with no
   field-by-field body (a union, a bitfield record, overlapping members) is
   `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one
@@ -1186,9 +1229,21 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
-- By-value toolchain types (`std::string_view`, `back_insert_iterator`, …) have ABI
-  facts in `record_abi` but no layout, so their functions are ABI traps. Keeping the
-  layout of records reachable by value would make them callable (2026-09-27).
+- Toolchain records by value with no layout to keep stay ABI traps (2026-11-08):
+  libstdc++'s `std::tuple` and `std::optional` are bases all the way down, with no
+  member of their own and so no definition; `std::complex`'s member is
+  `__complex__ double`, and clang names `_Complex float` and `_Complex double`
+  both `complex`. Laying out a record from its bases, and reading the complex
+  width from `byte_size`, would cover them. Everything else the library reaches
+  by value now keeps its layout (above).
+- `parse_dwarf_dump` holds the whole `readelf` dump and every DIE as a `Dict`.
+  oneDNN's (`libonednn.so`) parse passed a 24 GB cap and was OOM-killed at
+  2519a16 (2026-10-29), so a oneDNN build needs most of a 64 GB box. A streaming
+  parse, or dropping DIEs the tables never read, would bound it.
+- StructGen has its own `_outside_template_args`, a different function from the
+  package-level one (it keeps the `<>`, collapses only the outer arguments and
+  answers `nothing` without a `<`). Same name, two meanings; renaming one would
+  stop a caller picking the wrong one.
 - Default `-Xclang -fno-use-ctor-homing` for C++ builds. It restores the definition of
   header-only value types at a fraction of `-fstandalone-debug`'s size, but changes
   every C++ package's metadata, so it needs a Hub-wide measurement first.

@@ -20,6 +20,7 @@ import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_d
 import ..BuildBridge
 import ..LLVMEnvironment
 import .._read_json
+import ..stl_container_size, .._scope_suffixes, .._outside_template_args, ..INTERNAL_TYPE_BLOCKLIST
 
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
        ingest_library,
@@ -3941,6 +3942,34 @@ function _pe_crt_dll(binary_path::String)
 end
 
 """
+    _runtime_defined_names(library_path) -> Union{Set{String},Nothing}
+
+Every symbol the loader can actually resolve in `library_path`, or `nothing`
+when that cannot be determined. PE's export directory answers this on Windows;
+`nm -D` reads ELF's dynamic symbol table elsewhere, and is a hard ERROR rather
+than an empty answer on PE — hence the split.
+
+`nothing` and an empty set mean different things and callers must not conflate
+them: `nothing` is "could not look", which has to fail safe, while an empty set
+is a real answer about a library that exports nothing.
+
+Here in the Builder because `parse_dwarf_dump` asks it too: a toolchain record
+keeps its layout only for what an exported function or global crosses by value.
+"""
+function _runtime_defined_names(library_path::AbstractString)
+    isfile(library_path) || return nothing
+    pe = _pe_exported_names(library_path)
+    pe === nothing || return pe
+    (out, code) = try
+        BuildBridge.execute("nm", ["-D", "--defined-only", library_path])
+    catch
+        return nothing
+    end
+    code == 0 || return nothing
+    return _nm_dynamic_names(out)
+end
+
+"""
     _pe_exported_names(binary_path) -> Union{Nothing,Set{String}}
 
 The names in a PE binary's export directory, or `nothing` when the question
@@ -4827,7 +4856,8 @@ Returns: (return_types, struct_defs, global_vars, typedef_table, record_abi)
   - struct_defs: Dict{struct_name => {members: [{name, type, offset}]}}
   - record_abi: Dict{record_name => {byte_size, pass, empty}} for by-value records
 """
-function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
+function extract_dwarf_return_types(binary_path::String;
+                                    exported::Union{Nothing,AbstractSet{String}} = nothing)::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
     # GNU binutils format only — `_dwarf_dumper()` picks readelf (ELF) or
     # objdump (PE). Both print from binutils' dwarf.c; llvm-dwarfdump is a
     # different dialect and is rejected there. A fallback that returns empty
@@ -4849,7 +4879,8 @@ function extract_dwarf_return_types(binary_path::String)::Tuple{Dict{String,Dict
         Vector{Dict{Int,String}}()
     end
 
-    (return_types, struct_defs, global_vars, typedefs, record_abi) = parse_dwarf_dump(output; file_tables=file_tables)
+    (return_types, struct_defs, global_vars, typedefs, record_abi) = parse_dwarf_dump(output; file_tables=file_tables,
+                                                                                      exported=exported)
 
     # A non-empty dump that yields nothing is a dialect or format mismatch, not
     # a library without debug info — and it is indistinguishable downstream from
@@ -4943,7 +4974,8 @@ header is dropped instead of emitted. Omitted — as every synthetic-dump test
 does — the filter simply does not run, and parsing behaves exactly as before.
 """
 function parse_dwarf_dump(output::AbstractString;
-                          file_tables::Vector{Dict{Int,String}}=Vector{Dict{Int,String}}()
+                          file_tables::Vector{Dict{Int,String}}=Vector{Dict{Int,String}}(),
+                          exported::Union{Nothing,AbstractSet{String}}=nothing
                          )::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
     # Which CU we are inside, 1-based; readelf emits line programs and DIEs in the
     # same section order, so the Nth "Compilation Unit @ offset" uses the Nth table.
@@ -6894,6 +6926,7 @@ function parse_dwarf_dump(output::AbstractString;
     # `type_refs`' hash order, so the choice changed with the Julia release.
     struct_defs = Dict{String,Dict{String,Any}}()
     struct_candidates = Dict{String,Vector{Dict{String,Any}}}()
+    toolchain_candidates = Dict{String,Vector{Dict{String,Any}}}()   # dropped by provenance
     record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
     for offset in die_order
         type_info = type_refs[offset]
@@ -7076,8 +7109,13 @@ function parse_dwarf_dump(output::AbstractString;
                     # not part of this library's API. Skipping it here — at the
                     # emission point, on the ACTUAL record being written — rather
                     # than post-filtering keeps the intent/output split that has
-                    # bitten the generators repeatedly.
-                    drops_type(type_info) && continue
+                    # bitten the generators repeatedly. Its layout is kept aside:
+                    # the library may hold or pass it by value (`std::pair`), and
+                    # `_promote_toolchain_records!` brings back exactly those.
+                    if drops_type(type_info)
+                        push!(get!(() -> Dict{String,Any}[], toolchain_candidates, struct_name), struct_def)
+                        continue
+                    end
 
                     push!(get!(() -> Dict{String,Any}[], struct_candidates, struct_name), struct_def)
                 end
@@ -7086,6 +7124,23 @@ function parse_dwarf_dump(output::AbstractString;
     end
     for (struct_name, defs) in struct_candidates
         struct_defs[struct_name] = _canonical_definition(defs)
+    end
+    toolchain_defs = Dict{String,Dict{String,Any}}(name => _canonical_definition(defs)
+                                                   for (name, defs) in toolchain_candidates)
+    # An empty base holds no bytes, and a record with no members has no entry of
+    # its own (`Tag` in `struct P : Tag { double a, b; }`, libstdc++'s
+    # `__pair_base` under every `std::pair`). Say so on the base entry, or the
+    # SysV classifier meets a name it cannot read and traps every by-value
+    # crossing of the derived record. Only a 1-byte one: an `alignas` empty
+    # base raises the derived record's alignment, which DWARF does not repeat.
+    for defs in (struct_defs, toolchain_defs), (_, def) in defs
+        for b in get(def, "base_classes", ())
+            fk = _key_in(String(get(b, "type", "")), record_facts)
+            fk === nothing && continue
+            facts = record_facts[fk]
+            get(facts, "empty", false) == true && _definition_byte_size(facts) == 1 &&
+                (b["empty"] = true)
+        end
     end
 
 
@@ -7132,6 +7187,51 @@ function parse_dwarf_dump(output::AbstractString;
     for (enum_name, enum_info) in enum_defs
         struct_defs["__enum__" * enum_name] = enum_info
     end
+
+    # Toolchain records the library holds or passes BY VALUE get their layout
+    # back (`_promote_toolchain_records!`). Here, not in a later pass: the
+    # return repair below sizes a by-value return from `struct_defs`, and a
+    # `std::pair` return left at size 0 is as unclassifiable as one typed `Any`.
+    # Seeds are what the wrapper can reach, the dynamic-symbol gate every other
+    # wrapped thing passes: an exported function (a constructor or destructor
+    # through its unified C4/D4 DWARF key, `_structor_dwarf_key`) and an exported
+    # global, less the standard library's own (`_is_stdlib_internal`, which
+    # the function list screens with too). A library record seeds nothing by
+    # itself; one reached by value is walked (`_promote_toolchain_records!`).
+    # Without the gate, ggml-vulkan's hidden C++ promoted 123 Vulkan-Hpp records
+    # (vk::Event, vk::Semaphore, …) that no exported function names (2026-11-08).
+    # `exported === nothing` (no binary to ask, as in a parser test) falls back
+    # to every function that is not the standard library's own.
+    seed_fn = if exported === nothing
+        Set(String(k) for k in keys(return_types) if !_is_stdlib_internal(String(k), ""))
+    else
+        # Exported AND not the standard library's own, the two screens the
+        # function list passes: libstdc++ gives `namespace std` default
+        # visibility, so `std::map<…>::find` is in the dynamic table of a
+        # -fvisibility=hidden build and seeded 55 `_Rb_tree_iterator`s and
+        # friends for a llama.cpp no wrapper function returns one from.
+        Set{String}(something(haskey(return_types, e) ? e : nothing, _structor_dwarf_key(e, return_types), "")
+                    for e in exported if !_is_stdlib_internal(e, ""))
+    end
+    toolchain_seeds = String[]
+    for (fkey, info) in return_types
+        (isa(info, Dict) && String(fkey) in seed_fn) || continue
+        push!(toolchain_seeds, String(get(info, "c_type", "")))
+        for p in get(info, "parameters", [])
+            push!(toolchain_seeds, String(get(p, "c_type", "")))
+        end
+    end
+    for offset in die_order
+        info = type_refs[offset]
+        if isa(info, Dict) && get(info, "kind", nothing) == "variable" &&
+           get(info, "external", false) == true && !get(info, "declaration", false) &&
+           !_is_system_decl_file(get(info, "decl_file_path", "")) &&
+           (exported === nothing || String(get(info, "name", "")) in exported)
+            type_ref = get(info, "type", nothing)
+            isnothing(type_ref) || push!(toolchain_seeds, resolve_type(type_ref, type_refs))
+        end
+    end
+    _promote_toolchain_records!(struct_defs, toolchain_defs, toolchain_seeds)
 
     # ---- Repair by-value AGGREGATE return types that resolved to `Any` ----
     #
@@ -7522,6 +7622,138 @@ function _by_value_record_name(c_type::AbstractString)
     return String(t)
 end
 
+# The key `t` is filed under in `table`: `t`, or `t` with leading scopes cut at
+# depth 0 of its template arguments (`_scope_suffixes`), since tables are keyed
+# by the bare DWARF name; `nothing` when there is none.
+function _key_in(t::AbstractString, table::AbstractDict)
+    for c in _scope_suffixes(t)
+        haskey(table, c) && return c
+    end
+    return nothing
+end
+
+"""
+    _promote_toolchain_records!(struct_defs, toolchain_defs, seed_types) -> Vector{String}
+
+Put back into `struct_defs` the toolchain records the library holds or passes by
+value, and return their keys, sorted. Each one is marked `"toolchain" => true`.
+
+`parse_dwarf_dump`'s provenance gate keeps a record declared in a toolchain header
+out of `struct_defs`: it is not the library's API. But a function that returns
+`std::pair<double, double>` needs that pair's layout to be called, and without it
+both generators emit an ABI trap (`FunctionGen.by_value_crossing` says
+`:opaque`). So does a library record holding one by value, whose member was a
+byte blob and whose by-value crossings were traps. `record_abi` carried the
+pair's size and pass convention all along; only its members were missing.
+
+A record is reached from `seed_types` (the by-value returns, parameters and
+globals of what the library exports; `parse_dwarf_dump` gates them on the
+dynamic symbol table) and from what a reached record holds by value, through
+members (arrays included) and bases, whether that record is the library's own
+(`Span { std::pair<int, int> range; … }` returned by value) or one promoted
+here. A library record nothing exported crosses by value promotes nothing. It is promoted only
+when its whole by-value closure has a layout: every member a scalar, pointer,
+reference, enum, STL container (held as bytes, as in a library record), library
+record or promotable toolchain record, and every base one of those last two or
+marked `"empty"` (`std::pair`'s `__pair_base`). Anything else stays out,
+and its crossings stay traps: a derived record with no members of its own
+(`std::tuple`, `std::optional` in libstdc++, which have no entry to promote), a
+`__complex__` member (`std::complex`; clang names `_Complex float` and `_Complex
+double` both `complex`, so the name cannot be mapped), a virtual base, a
+conflicted entry.
+
+Never promoted: an STL container, which keeps its own path (pointer in, byte blob
+out; `stl_container_size`), and a name on `INTERNAL_TYPE_BLOCKLIST`, which no
+generator emits. A library record of the same name keeps its entry.
+"""
+function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::AbstractDict,
+                                     seed_types)::Vector{String}
+    isempty(toolchain_defs) && return String[]
+    promotable(k) = !(k in INTERNAL_TYPE_BLOCKLIST) && stl_container_size(k) == 0
+
+    # The type `t` holds in place: `nothing` for a pointer, reference or function
+    # pointer (it holds an address), else the spelling with top-level cv and
+    # array extents removed.
+    function held(t::AbstractString)
+        s = strip(replace(String(t), r"^(?:(?:const|volatile)\s+)+" => ""))
+        s = strip(replace(s, r"(?:\s+(?:const|volatile))+$" => ""))
+        m = match(r"^(.*?)\s*((?:\[\d*\])+)$", s)
+        m === nothing || (s = strip(String(m.captures[1])))
+        # The declarators outside the template arguments: `pair<int*, bool>`
+        # holds a record, `pair<int, bool>*` an address.
+        (occursin(r"[*&(]", _outside_template_args(s)) || startswith(s, "function_ptr")) && return nothing
+        return String(s)
+    end
+
+    verdict = Dict{String,Bool}()
+    function complete(key::String, stack::Vector{String})
+        haskey(verdict, key) && return verdict[key]
+        key in stack && return false   # nothing holds itself by value; a cycle is a misparse
+        push!(stack, key)
+        def = toolchain_defs[key]
+        ok = get(def, "conflict", false) != true &&
+             all(m -> holds_ok(String(get(m, "c_type", "")), stack), get(def, "members", ())) &&
+             all(b -> get(b, "virtual", false) != true &&
+                      (get(b, "empty", false) == true || base_ok(String(get(b, "type", "")), stack)),
+                 get(def, "base_classes", ()))
+        pop!(stack)
+        verdict[key] = ok
+        return ok
+    end
+    function holds_ok(t::String, stack)
+        e = held(t)
+        e === nothing && return true
+        (isempty(e) || e in ("unknown", "Any", "void")) && return false
+        get_type_size(e) > 0 && return true
+        cuts = _scope_suffixes(e)
+        any(c -> haskey(struct_defs, "__enum__" * c), cuts) && return true
+        stl_container_size(e) > 0 && return true
+        _key_in(e, struct_defs) !== nothing && return true
+        tk = _key_in(e, toolchain_defs)
+        return tk !== nothing && promotable(tk) && complete(tk, stack)
+    end
+    function base_ok(t::String, stack)
+        isempty(t) && return false
+        _key_in(t, struct_defs) !== nothing && return true
+        tk = _key_in(t, toolchain_defs)
+        return tk !== nothing && promotable(tk) && complete(tk, stack)
+    end
+
+    promoted = String[]
+    walked = Set{String}()
+    # A record in `struct_defs` reached by value: what it holds is reached too.
+    function walk(key::String)
+        key in walked && return
+        push!(walked, key)
+        def = struct_defs[key]
+        for m in get(def, "members", ())
+            reach(String(get(m, "c_type", "")))
+        end
+        for b in get(def, "base_classes", ())
+            reach(String(get(b, "type", "")))
+        end
+    end
+    function reach(t::AbstractString)
+        e = held(t)
+        (e === nothing || isempty(e)) && return
+        stl_container_size(e) > 0 && return
+        lk = _key_in(e, struct_defs)
+        lk === nothing || return walk(lk)                # the library's own, or done
+        tk = _key_in(e, toolchain_defs)
+        (tk === nothing || !promotable(tk) || !complete(tk, String[])) && return
+        def = toolchain_defs[tk]
+        def["toolchain"] = true
+        struct_defs[tk] = def
+        push!(promoted, tk)
+        walk(tk)
+    end
+
+    for t in seed_types
+        reach(String(t))
+    end
+    return sort!(promoted)
+end
+
 """
 Extract compilation metadata from source files and binary.
 This is the core of automatic wrapper generation!
@@ -7534,7 +7766,11 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     symbols = extract_symbols_from_binary(binary_path)
 
     # Extract return types and struct definitions from DWARF debug info (if available)
-    (dwarf_return_types, struct_defs, global_vars, typedef_table, record_abi) = extract_dwarf_return_types(binary_path)
+    # What the loader can resolve: a toolchain record keeps its layout only for an
+    # exported function's or global's by-value crossing (`_promote_toolchain_records!`).
+    exported = _runtime_defined_names(binary_path)
+    (dwarf_return_types, struct_defs, global_vars, typedef_table, record_abi) =
+        extract_dwarf_return_types(binary_path; exported = exported)
 
     # Types are keyed by bare name, so distinct types sharing one (a nested
     # `impl` per class) keep one definition between them; say which names.
@@ -7544,6 +7780,10 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                                    "$(length(conflicted)) type names have", " distinct definitions, ",
                                    "one kept for each: ", join(first(conflicted, 8), ", "),
                                    length(conflicted) > 8 ? ", …" : "")
+    toolchain = sort!([k for (k, v) in struct_defs if get(v, "toolchain", false) == true])
+    isempty(toolchain) || println("  metadata: ", length(toolchain), " toolchain record(s) held or passed ",
+                                  "by value, layout kept: ", join(first(toolchain, 6), ", "),
+                                  length(toolchain) > 6 ? ", …" : "")
 
     # Collect struct/enum names for type resolution in function signatures
     sig_struct_names = Set{String}()

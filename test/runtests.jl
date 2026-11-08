@@ -257,6 +257,12 @@ include(joinpath(@__DIR__, "test_struct_layout.jl"))
 
 include(joinpath(@__DIR__, "test_template_members.jl"))
 
+# ── Toolchain records by value keep their layout (no toolchain required) ─────
+# `std::pair<double, double>` returned by value, or held by a library record,
+# had no layout (the provenance gate dropped it) and every crossing was a trap.
+
+include(joinpath(@__DIR__, "test_toolchain_records.jl"))
+
 # ── A record's scope, and overloads that differ by integer width (no toolchain) ──
 # DWARF keys records by bare name, so `boost::core::basic_string_view<char>`
 # was screened as STL-internal and its by-value parameters came out `::Any`;
