@@ -30,6 +30,45 @@ symbol reader with it.
   of readelf, nm and objdump are accepted, LLVM's `nm`/`readelf` banner and an
   indented `GNU nm` are not, and the candidate report has one classified line
   per candidate.
+### Archive dependencies, and `exclude` on a local dependency (2026-11-07)
+
+Wrapping NASA's CDF library (issue #68's library) for the Hub ran into the
+fact that it ships as a tarball. The two ways around that were both wrong:
+vendor the tree into the Hub, or point a `type = "local"` dependency at a
+directory a hand-written script fills. The local route then hit two more
+things.
+
+- **`type = "archive"`.** A dependency with the tarball's `url` and its
+  `sha256` (64 hex, required: a URL pins nothing, and the hash is what a
+  rebuild from cold checks, as `commit` is for a clone). The resolver fetches
+  it through `Pkg.PlatformEngines.download_verify_unpack`, the engine that
+  fetches artifacts, so both hosts and every archive format Pkg reads are
+  covered; the hash is checked before anything is unpacked and a mismatch is
+  a hard error that leaves no tree behind. The unpacked tree goes under
+  `.replibuild_cache/deps/<name>/` with a marker recording url and hash: a
+  changed pin re-fetches, an unchanged one is reused. `subdir` names the
+  dependency root inside the archive; without it, a tarball whose top level
+  is a single directory has that directory as its root. The tree is then
+  walked like a clone (`_collect_git_dep_root!`), `exclude` included. A plain
+  path as `url` is a local tarball, spelled into a `file:///` URL the way
+  Downloads wants it on either host.
+- **A local dependency's `exclude` was read and ignored.** The local branch
+  of the resolver walked its tree without consulting it; only clones
+  filtered. One rule, `_dep_excluded`, now serves every type.
+- **A local dependency is in-tree for the shim-header guard.**
+  `verify_shim_headers` accepted the project root and the build cache as the
+  only places a shim header may resolve to, so a local dependency anywhere
+  else was refused like a system header. `_shim_allowed_roots` adds each
+  local dependency's path.
+- **Tests.** `test_dep_archive.jl` (runtests, no toolchain, no network: the
+  tarball is made with `Pkg.PlatformEngines.package` and reached by
+  `file://`): load refuses a missing or short hash and archive keys on
+  another type; a fetch excludes, records the marker, is reused on a cache
+  hit and re-fetched on a url change; a wrong hash is a hard error with no
+  tree left; `subdir` picks the root and a missing one warns and contributes
+  nothing; a plain path and its `file://` spelling fetch the same file.
+  `test_dep_cache.jl`: a local dependency with `exclude` drops the named
+  paths, and its path is among the shim roots.
 
 ### The project-hash marker names what was built (2026-11-05)
 

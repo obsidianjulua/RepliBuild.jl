@@ -245,5 +245,28 @@ end
         @test all(s -> startswith(s, dep), cfg.compile.source_files)
         @test abspath(dep) in cfg.compile.include_dirs
         @test abspath(joinpath(dep, "include")) in cfg.compile.include_dirs
+
+        # `exclude` applies to a local dependency as it does to a clone: it
+        # used to be read and ignored here (the Hub's cdf recipe, 2026-11-07).
+        write(toml_path, """
+        [project]
+        name = "localdep"
+        root = "."
+
+        [compile]
+        source_files = []
+
+        [dependencies.tinydep]
+        type = "local"
+        path = "vendor/tinydep"
+        exclude = ["sub/", "three.cc"]
+        """)
+        cfg2 = DR.resolve_dependencies(CM.load_config(toml_path))
+        srcs2 = Set(relpath(s, dep) for s in cfg2.compile.source_files)
+        @test srcs2 == Set(["one.c"])
+        # and its headers are the project's own to the shim-header guard
+        roots = RepliBuild.Compiler._shim_allowed_roots(cfg2)
+        @test abspath(dep) in roots
+        @test cfg2.project.root in roots
     end
 end
