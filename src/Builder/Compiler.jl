@@ -21,6 +21,7 @@ import ..BuildBridge
 import ..LLVMEnvironment
 import .._read_json
 import ..stl_container_size, .._scope_suffixes, .._outside_template_args, ..INTERNAL_TYPE_BLOCKLIST
+import .._glob_matcher
 
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
        ingest_library,
@@ -3970,6 +3971,43 @@ function _runtime_defined_names(library_path::AbstractString)
 end
 
 """
+    _without_excluded_symbols(exported, symbols, patterns) -> AbstractSet{String}
+
+`exported` less every symbol that `[wrap] exclude_symbols` drops, matched the
+way wrap matches it (`Wrapper._apply_symbol_filter!`). A function, from
+`symbols`, on its mangled spelling, its demangled spelling, or its function
+name (`extract_function_name`, which `parse_function_signatures` records as
+`name`). A global on the exported name itself: `symbols` holds code symbols
+only (`extract_symbols_from_binary`), and an unmangled global's symbol is its
+name, which is what wrap matches a global on.
+
+What wrap will not bind seeds no toolchain record. glfw is built without
+`-fvisibility=hidden`, so its internal state global `_glfw` is exported, and
+its TOML drops `_glfw*`; the by-value walk from that global still kept glibc's
+`pthread_mutex_t`, `__pthread_mutex_s` and `re_pattern_buffer` and the
+kernel's `input_absinfo`, and Glfw.jl grew them and the `_GLFW*` records that
+hold them (2026-11-08). `patterns` empty returns `exported` itself.
+"""
+function _without_excluded_symbols(exported::AbstractSet{String}, symbols, patterns::Vector{String})
+    isempty(patterns) && return exported
+    (matches, _) = _glob_matcher(patterns)
+    dropped = Set{String}()
+    for s in symbols
+        mangled = get(s, "mangled", nothing)
+        demangled = get(s, "demangled", nothing)
+        mangled isa AbstractString || continue
+        if matches(mangled) ||
+           (demangled isa AbstractString && (matches(demangled) || matches(extract_function_name(String(demangled)))))
+            push!(dropped, String(mangled))
+        end
+    end
+    for name in exported                      # globals: data symbols are not in `symbols`
+        matches(name) && push!(dropped, name)
+    end
+    return isempty(dropped) ? exported : setdiff(exported, dropped)
+end
+
+"""
     _pe_exported_names(binary_path) -> Union{Nothing,Set{String}}
 
 The names in a PE binary's export directory, or `nothing` when the question
@@ -7810,7 +7848,12 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # Extract return types and struct definitions from DWARF debug info (if available)
     # What the loader can resolve: a toolchain record keeps its layout only for an
     # exported function's or global's by-value crossing (`_promote_toolchain_records!`).
+    # Less what `[wrap] exclude_symbols` drops: wrap will not bind it, so it seeds
+    # nothing (`_without_excluded_symbols`). `nothing` ("could not look") stays
+    # `nothing`, and the parser's fallback seeds every non-std function.
     exported = _runtime_defined_names(binary_path)
+    exported === nothing ||
+        (exported = _without_excluded_symbols(exported, symbols, config.wrap.exclude_symbols))
     (dwarf_return_types, struct_defs, global_vars, typedef_table, record_abi) =
         extract_dwarf_return_types(binary_path; exported = exported)
 

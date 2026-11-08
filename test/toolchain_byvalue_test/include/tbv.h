@@ -54,3 +54,9 @@ double lp_sum(LP p);
 template <class T> struct Box { T a, b; };
 struct Outer3 { double x; Box<double> in; };           // a template record inside a MEMORY return
 Outer3 make_outer3(double x, double a, double b);
+
+// An exported global holding a toolchain record by value. The test's TOML drops
+// it with `[wrap] exclude_symbols`, so wrap will not bind it and it seeds no
+// toolchain record: `pair<long, long>` stays out (glfw's `_glfw`, 2026-11-08).
+struct Ledger { std::pair<long, long> span; int n; };
+extern Ledger tbv_ledger;

@@ -155,4 +155,36 @@ end
     @test _TR_SG.get_llvm_aligned_type_string("T", ok["T"], ok) == "!llvm.struct<(f64, i32, i32) >"
 end
 
+@testset "a symbol exclude_symbols drops seeds nothing" begin
+    # glfw exports its internal state global `_glfw` (no -fvisibility=hidden) and
+    # drops `_glfw*` at wrap; the walk from that global kept glibc's
+    # pthread_mutex_t and friends (2026-11-08). The walk's exported set must lose
+    # exactly what wrap drops, matched on the same three spellings.
+    syms = [Dict{String,Any}("mangled" => m, "demangled" => d, "type" => t, "address" => "0")
+            for (m, d, t) in [("_glfw", "_glfw", "B"),                          # a global
+                              ("glfwInit", "glfwInit", "T"),
+                              ("_glfwPlatformInit", "_glfwPlatformInit", "T"),  # mangled spelling
+                              ("_ZN2vk6Device7destroyEv", "vk::Device::destroy()", "T"),  # demangled
+                              ("_ZN2ns4stepEi", "ns::step(int)", "T")]]         # function name
+    pats = ["_glfw*", "vk::*", "step"]
+    exported = Set(s["mangled"] for s in syms)
+    kept = _TR_C._without_excluded_symbols(exported, syms, pats)
+    @test kept == Set(["glfwInit"])
+
+    md = Dict{String,Any}("functions" => _TR_C.parse_function_signatures(syms),
+                          "globals" => Dict{String,Any}("_glfw" => Dict{String,Any}()))
+    _TR_W._apply_symbol_filter!(md, pats)
+    @test Set(f["mangled"] for f in md["functions"]) == kept
+    @test isempty(md["globals"])
+
+    # A global is a data symbol, which `extract_symbols_from_binary` leaves out
+    # of `symbols` (code only): it is matched on its exported name.
+    code_only = filter(s -> s["type"] == "T", syms)
+    @test _TR_C._without_excluded_symbols(exported, code_only, pats) == Set(["glfwInit"])
+
+    # Nothing to drop: the same set, not a copy; a pattern matching nothing drops nothing.
+    @test _TR_C._without_excluded_symbols(exported, syms, String[]) === exported
+    @test _TR_C._without_excluded_symbols(exported, syms, ["nomatch_*"]) == exported
+end
+
 end

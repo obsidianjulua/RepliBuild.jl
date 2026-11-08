@@ -2,6 +2,36 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
+## Unreleased
+
+### A symbol `exclude_symbols` drops seeds no toolchain record (2026-11-08)
+
+Rebuilding the Hub's glfw on v4.4.0 printed "5 toolchain record(s) held or passed
+by value": glibc's `pthread_mutex_t`, `__pthread_mutex_s` and
+`re_pattern_buffer`, and the kernel's `input_absinfo`. glfw is built without
+`-fvisibility=hidden`, so its internal state global `_glfw` is in the dynamic
+table, and the by-value walk seeded from it. Its TOML drops `_glfw*` at wrap, so
+nothing in the wrapper reaches those records, yet Glfw.jl grew them and the
+`_GLFW*` records that hold them (707 changed lines, the public `GLFW*` structs
+untouched).
+
+- **The exported set loses what wrap drops, before it seeds anything.**
+  `Compiler._without_excluded_symbols` removes every symbol a `[wrap]
+  exclude_symbols` pattern matches, the way `_apply_symbol_filter!` matches at
+  wrap: a function on its mangled, demangled or function-name spelling, a
+  global on its exported name (`extract_symbols_from_binary` keeps code symbols
+  only, and an unmangled global's symbol is its name). `exported === nothing`
+  still means "could not look" and seeds as before.
+- `_glob_to_regex` and `_glob_matcher` moved to package level, since the Builder
+  compiles the patterns too; the Wrapper imports them.
+- **Tests.** `test_toolchain_records.jl`: the walk drops exactly what wrap
+  drops over the same symbols (a global, a mangled, a demangled and a
+  function-name match), with data symbols absent from `symbols`. The live
+  fixture gains `Ledger tbv_ledger`, an exported global holding
+  `pair<long, long>` that its TOML excludes: the record stays out and `Ledger`
+  keeps its entry. Removing the helper, its globals loop, or the call site
+  each fails the live test; the first two fail the unit test too.
+
 ## v4.4.0 (2026-11-08)
 
 **A toolchain record a library passes or holds by value keeps its layout, so a
