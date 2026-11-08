@@ -287,6 +287,9 @@ function _sysv_record_leaves!(out::Vector{_SysVLeaf}, key::String, structs, base
             push!(out, _SysVLeaf(base_bit, 0, :unknown, 1, false, "$key: a virtual base `$bt`"))
             continue
         end
+        # An empty base (`parse_dwarf_dump` marks a 1-byte one) has no class and
+        # no entry of its own: it adds nothing to the eightbytes.
+        get(b, "empty", false) == true && continue
         _sysv_type_leaves!(out, bt, "Any", 0, base_bit + 8 * off, structs, seen, "$key's base `$bt`"; vectors)
     end
     for m in get(info, "members", [])
@@ -444,6 +447,7 @@ function _sysv_record_align(key::String, structs, seen::Set{String} = Set{String
     placed = Tuple{Int,Int}[]                       # (byte offset, type alignment)
     al = 1
     for b in get(info, "base_classes", [])
+        get(b, "empty", false) == true && continue     # 1-byte empty: alignment 1
         a = _sysv_type_align(String(get(b, "type", "")), "Any", 0, structs, seen)
         a === nothing && continue
         al = max(al, a)

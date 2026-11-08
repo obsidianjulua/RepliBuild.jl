@@ -652,7 +652,22 @@ they travel the `!jlcs.c_struct` marshalling path, not this one.
 function _apply_dwarf_layout(name::String, info::Any, emit::Vector{String},
                              measure::Vector{String}, all_structs,
                              dwarf_size::Int, is_packed::Bool)
-    (is_packed || dwarf_size <= 0) && return emit
+    dwarf_size <= 0 && return emit
+    if is_packed
+        # `is_struct_packed` tiles the DWARF member sizes; the body is exact only
+        # if what is emitted has those sizes too. A member spelled to the wrong
+        # type (a template record as `!llvm.ptr`, before `_member_mlir_type`) gave
+        # `Outer3 { double; Box<double>; }` a 16-byte body for 24 bytes, and a
+        # memory return read past it with no error. Measured short or long, the
+        # offset-driven body below lays it out instead; unmeasurable, as before.
+        total = 0
+        for t in measure
+            l = _mlir_layout(t, all_structs)
+            l === nothing && return emit
+            total += l[1]
+        end
+        total == dwarf_size && return emit
+    end
     # Quiet first attempt: a struct the packed body below models exactly is not
     # an "opaque region" and must not be reported as one.
     plan = _dwarf_padded_members(name, info, measure, all_structs, dwarf_size; report=false)

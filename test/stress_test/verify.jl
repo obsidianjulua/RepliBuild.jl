@@ -290,12 +290,16 @@ if MLIR_AVAILABLE
         @test StressTest.geom_unit_make(7) === StressTest.Unit()     # void callee, singleton back
         @test StressTest.geom_cell_doubled(StressTest.Cell_double(2.5)).v == 5.0
 
-        # No layout in the metadata: refused where it is called, with the
-        # reason, and the rest of the module still loads.
-        err = try StressTest.geom_name_length("hello"); nothing catch e; e end
-        @test err isa ErrorException
-        @test occursin("ABI Safety Trap", sprint(showerror, err))
-        @test occursin("string_view", sprint(showerror, err))
+        # `std::string_view` was a trap here, a toolchain record with no layout
+        # in the metadata. The library passes it by value, so its layout is kept
+        # (2026-11-08) and it crosses as {len, ptr} in two INTEGER registers.
+        svk = "basic_string_view<char, std::char_traits<char> >"
+        @test get(meta["struct_definitions"][svk], "toolchain", false) == true
+        name = "hello"
+        GC.@preserve name begin
+            sv = StressTest.basic_string_view_char_std_char_traits_char(sizeof(name), pointer(name))
+            @test StressTest.geom_name_length(sv) == 5
+        end
 
         # DW_CC_pass_by_reference: returned through an sret slot the thunk owns.
         @test meta["record_abi"]["Ticket"]["pass"] == "reference"

@@ -201,11 +201,17 @@ read off the DWARF tree) settles it: outside `std`, `__gnu_cxx` and the
 its layout like any other. Without a `scope` (metadata from an older build, a
 parent the tree did not settle) the name decides as before, and inside `std`
 the name decides as before too, so nothing the screen passed is lost.
+
+A standard-library record marked `"toolchain"` is not screened either: the
+library holds or passes it by value (`std::pair<double, double>` returned,
+`string_view` taken), so `parse_dwarf_dump` kept its layout for exactly that
+(`Compiler._promote_toolchain_records!`).
 """
 function _is_stl_internal_record(name::AbstractString, structs)::Bool
     key = _record_lookup_key(name)
     info = (structs isa AbstractDict && key !== nothing) ? get(structs, key, nothing) : nothing
     if info isa AbstractDict
+        get(info, "toolchain", false) == true && return false
         scope = get(info, "scope", nothing)
         if scope isa AbstractString
             _is_std_scope(String(first(split(scope, "::")))) || return false

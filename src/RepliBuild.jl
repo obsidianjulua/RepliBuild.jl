@@ -100,6 +100,125 @@ const INTERNAL_TYPE_BLOCKLIST = Set([
     "threadmbcinfostruct", "tagLC_ID", "lconv",
 ])
 
+"""
+    stl_container_size(c_type) -> Int
+
+The x86-64 SysV byte size of an STL container spelled `c_type`, or 0 when it
+is not one of the containers RepliBuild handles as a container (pointer in,
+byte blob out). `TypeUtils.get_stl_container_size` and TypesCpp's are this
+function.
+
+THIS IS THE ONE TABLE. It lived in IRGen's TypeUtils, the layer both Wrapper
+and IRGen reach, until the Builder needed it too: `parse_dwarf_dump` keeps the
+layout of a toolchain record reached by value, and a container must stay on
+its own path there as well. The Builder loads first, so the table is here.
+TypesCpp and TypeUtils had drifted twice before they shared one copy (a
+`string_view` match, and an unordered-before-map ordering).
+"""
+function stl_container_size(c_type::AbstractString)::Int
+    clean = strip(replace(c_type, r"^(const|struct|class|union)\b" => ""))
+    clean = strip(replace(clean, r"[*&]+$" => ""))
+
+    # Bare (std::-stripped) spellings require `<` — DWARF drops the namespace but
+    # keeps the template arguments, so a bare `string` is not a container name.
+    if _stl_name_match(clean, "std::vector") || startswith(clean, "vector<")
+        return 24
+    elseif _stl_name_match(clean, "std::basic_string") || _stl_name_match(clean, "std::string") || startswith(clean, "basic_string<")
+        return 32  # libstdc++ SSO string is 32 bytes on 64-bit
+    elseif _stl_name_match(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")
+        return 16
+    elseif _stl_name_match(clean, "std::unique_ptr") || startswith(clean, "unique_ptr<")
+        return 8
+    elseif _stl_name_match(clean, "std::unordered_map") || startswith(clean, "unordered_map<") || _stl_name_match(clean, "std::unordered_set") || startswith(clean, "unordered_set<")
+        return 56  # hashtable
+    elseif _stl_name_match(clean, "std::map") || startswith(clean, "map<") || _stl_name_match(clean, "std::set") || startswith(clean, "set<")
+        return 48  # rb_tree
+    elseif _stl_name_match(clean, "std::list") || startswith(clean, "list<")
+        return 24
+    elseif _stl_name_match(clean, "std::deque") || startswith(clean, "deque<")
+        return 80
+    end
+    return 0
+end
+
+"""
+    _scope_suffixes(name) -> Vector{String}
+
+`name` plus each suffix obtained by dropping leading `::`-separated scopes,
+longest first. Separators inside `<>` are ignored, so
+`A::B<C::D>` yields `["A::B<C::D>", "B<C::D>"]` — not a cut at `C::D`.
+
+Defined at package level because the Builder (`parse_dwarf_dump` keeps a
+toolchain record by its bare DWARF name), IRGen and both generators look
+records up by it.
+"""
+function _scope_suffixes(name::AbstractString)::Vector{String}
+    out = String[String(name)]
+    depth = 0
+    i = 1
+    n = lastindex(name)
+    while i < n
+        c = name[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ':' && name[i+1] == ':'
+            push!(out, String(name[i+2:end]))
+            i += 1
+        end
+        i += 1
+    end
+    return out
+end
+
+"""
+    _outside_template_args(t) -> String
+
+`t` with every balanced `<…>` removed: the type's own declarators, without its
+template arguments'. A test for a pointer, reference, function or array
+spelling reads this, never `t`, or a `*` or `&` inside the arguments makes a
+record look like a pointer: `pair<key_value_pair *, bool>` and Boost.System's
+`result<value &, error_code>` were `:direct`, so the thunk returned the 16-byte
+pair in a register and the Julia stub spelled it `Ptr{Cvoid}`. On Win64 that
+return needs a hidden pointer, and the callee read `this` from the next
+register: `boost::json::object::emplace<int>` was an access violation
+(2026-11-01). `pair<int*, bool>*` keeps its own `*` and stays a pointer.
+
+Defined at package level because the Builder asks it too: whether a toolchain
+record holds a member by value (`Compiler._promote_toolchain_records!`).
+StructGen has its own `_outside_template_args`, a different function (it keeps
+the `<>` and answers `nothing` without one).
+"""
+function _outside_template_args(t::AbstractString)::String
+    depth = 0
+    io = IOBuffer()
+    for c in t
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0
+            write(io, c)
+        end
+    end
+    return String(take!(io))
+end
+
+# Match an STL type name with word-boundary awareness: `clean` equals `prefix`,
+# or is `prefix` followed by `<` or a space. Without this, `startswith` makes
+# `std::string_view` match `std::string` and answer 32 — while the wrapper side
+# (TypesCpp `is_stl_container_type`) correctly says "not a container, size 0".
+# FunctionGen would then emit a 32-byte blob thunk for a buffer the wrapper does
+# not treat as one: thunk and wrapper disagreeing about a buffer, which is the
+# ImGui receiver-miss shape.
+function _stl_name_match(clean::AbstractString, prefix::AbstractString)::Bool
+    startswith(clean, prefix) || return false
+    ncodeunits(clean) == ncodeunits(prefix) && return true
+    c = clean[ncodeunits(prefix) + 1]
+    return c == '<' || c == ' '
+end
+
 # RepliBuild targets Linux (ELF/.so) and Windows (PE/.dll, x86_64-w64-windows-gnu).
 #
 # The gate admits a kernel only once the pipeline's format assumptions hold for

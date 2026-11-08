@@ -23,7 +23,8 @@ import ..INTERNAL_TYPE_BLOCKLIST
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
-import ..Compiler: _pe_exported_names, _nm_dynamic_names, _pe_crt_dll, _link_dir_dlls, _canon_path
+import ..Compiler: _pe_exported_names, _nm_dynamic_names, _runtime_defined_names,
+                   _pe_crt_dll, _link_dir_dlls, _canon_path
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -520,30 +521,6 @@ function _surface_type_keys(metadata::Dict{String,Any};
     return _surface_type_keys_impl(metadata, runtime_defined)
 end
 
-"""
-    _runtime_defined_names(library_path) -> Union{Set{String},Nothing}
-
-Every symbol the loader can actually resolve in `library_path`, or `nothing`
-when that cannot be determined. PE's export directory answers this on Windows;
-`nm -D` reads ELF's dynamic symbol table elsewhere, and is a hard ERROR rather
-than an empty answer on PE — hence the split.
-
-`nothing` and an empty set mean different things and callers must not conflate
-them: `nothing` is "could not look", which has to fail safe, while an empty set
-is a real answer about a library that exports nothing.
-"""
-function _runtime_defined_names(library_path::AbstractString)
-    isfile(library_path) || return nothing
-    pe = _pe_exported_names(library_path)
-    pe === nothing || return pe
-    (out, code) = try
-        BuildBridge.execute("nm", ["-D", "--defined-only", library_path])
-    catch
-        return nothing
-    end
-    code == 0 || return nothing
-    return _nm_dynamic_names(out)
-end
 
 """
     _surface_core_spellings(spelling) -> Vector{String}

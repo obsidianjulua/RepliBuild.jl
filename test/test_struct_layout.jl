@@ -93,9 +93,13 @@ mem(name, ctype, off, size) = Dict{String,Any}(
         # is_struct_packed means sum(member sizes) == byte_size, so the body is
         # exact by construction and travels the !jlcs.c_struct marshalling path.
         # The layout pass must not rewrite it.
+        # `long long`, not `long`: the members are DWARF-sized 8, and `long` is
+        # i32 on Win64. With `long` there, the body measured 8 bytes against a
+        # 16-byte record (so this asserted a short body on Windows), and the
+        # tiled-body guard now lays such a body out by offset instead.
         structs = Dict{String,Any}("Tight" => Dict{String,Any}(
             "kind" => "struct", "byte_size" => "0x10",
-            "members" => [mem("a", "long", 0, 8), mem("b", "long", 8, 8)]))
+            "members" => [mem("a", "long long", 0, 8), mem("b", "long long", 8, 8)]))
         @test SG.is_struct_packed(structs["Tight"])
         body = SG.get_struct_definition_string("Tight", structs["Tight"], structs)
         @test startswith(body, "!jlcs.c_struct<")

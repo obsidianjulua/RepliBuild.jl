@@ -4,6 +4,56 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A toolchain record passed or held by value keeps its layout (2026-11-08)
+
+Boost.Math's root finders and minimisers (`brent_find_minima`, `bisect`,
+`toms748_solve`) return `std::pair<T, T>` by value, and the Hub's boostmath
+left them out because the wrapper could only trap them. Every function that
+returned or took a toolchain record by value was in the same place, and so was
+a library record holding one: the provenance gate in `parse_dwarf_dump` kept
+any record declared in a toolchain header out of `struct_definitions`, so the
+record had ABI facts (`record_abi`: size, pass convention) and no layout.
+
+- **`Compiler._promote_toolchain_records!`.** The gate sets toolchain
+  definitions aside instead of discarding them, and puts back the ones an
+  exported function or global crosses by value (the dynamic symbol table, as
+  for everything else the wrapper binds), and what each record so reached holds,
+  a library record's members included, marked `"toolchain" => true`. Without
+  that gate the llama.cpp package promoted 123 Vulkan-Hpp records its hidden C++
+  passes around, two of them named like Base's `Event` and `Semaphore`; with the
+  dynamic table alone it still promoted 55 libstdc++ iterator records, because
+  `namespace std` keeps default visibility, so the standard library's own
+  functions are screened out as the function list screens them. Gated,
+  llama.cpp promotes none and the Hub's boostmath exactly `pair<double, double>`. A record is promoted only when its whole
+  by-value closure has a layout. STL containers (which keep their own path) and
+  `INTERNAL_TYPE_BLOCKLIST` names never are, and a library record of the same
+  name keeps its entry. The build prints the records it kept.
+- **An empty base adds nothing to the SysV class.** libstdc++'s `std::pair`
+  derives from an empty `__pair_base`, which has no members and so no entry,
+  and the classifier stopped at it. So did it at a library `struct P : Tag {
+  double a, b; }`: every by-value crossing of such a record was a trap. A
+  1-byte empty base is now marked on the base entry and skipped. An `alignas`
+  empty base is not marked, since it raises the derived record's alignment.
+- **GeneratorCpp's STL screen lets a promoted record through.** Its name list
+  includes `pair<` and `basic_string_view<`, so a promoted pair still had no
+  Julia struct. `_is_stl_internal_record` answers no for a `"toolchain"` record.
+- **A tiled body that does not add up is laid out by offset.** `_apply_dwarf_layout`
+  returned an `is_struct_packed` body as emitted, on the reasoning that its
+  members tile the DWARF sizes; a member spelled to the wrong type (a template
+  record as `!llvm.ptr`, 2026-10-30) still tiled and came back short. The
+  emitted members are now measured.
+- `stl_container_size`, `_scope_suffixes` and `_outside_template_args` moved to
+  package level, since the Builder reads them too; IRGen keeps its names for
+  them.
+
+Checked live on `test/toolchain_byvalue_test` (devtests 8g): `std::pair` in each
+SysV shape (two SSE, INTEGER+SSE, packed ints, two floats, a pair in a pair, a
+24-byte memory return, `pair<int*, bool>`), pairs as parameters, `std::array`,
+`std::string_view`, and a library record holding a pair, each against what the
+C++ computed. `std::tuple`, `std::optional` and `std::complex` remain traps (no
+layout to keep). Each change was negative-checked by removing it:
+`test_toolchain_records.jl` (runtests) and the live test fail without each.
+
 ### Fedora's binutils are GNU binutils (2026-11-07, issue #68)
 
 A first-time user on Fedora 44 had `binutils-2.46.1-1.fc44` installed and
@@ -30,6 +80,7 @@ symbol reader with it.
   of readelf, nm and objdump are accepted, LLVM's `nm`/`readelf` banner and an
   indented `GNU nm` are not, and the candidate report has one classified line
   per candidate.
+
 ### Archive dependencies, and `exclude` on a local dependency (2026-11-07)
 
 Wrapping NASA's CDF library (issue #68's library) for the Hub ran into the

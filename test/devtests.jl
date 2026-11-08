@@ -397,6 +397,14 @@ include(joinpath(TEST_DIR, "test_conflict_trap_fixture.jl"))
 
 include(joinpath(TEST_DIR, "test_cpp_finalizers_live.jl"))
 
+# ── 8g. Toolchain records by value, live ─────────────────────────────────────
+# toolchain_byvalue_test returns and takes std::pair in every SysV shape,
+# std::array and std::string_view, and a library record holds a pair. Each call
+# must return what the C++ computed; tuple, optional and complex stay traps.
+# Needs clang++ and libJLCS.
+
+include(joinpath(TEST_DIR, "test_toolchain_byvalue_live.jl"))
+
 # ── 9. Per-file IR cache invalidation on compile-config change ────────────────
 # A compile-flag change must invalidate the per-file IR cache without a manual
 # `rm -rf` — otherwise stale IR (built with the old flags) is silently reused.

@@ -2,6 +2,10 @@ module FunctionGen
 
 using ..TypeUtils
 using ..StructGen # for get_struct_type_string
+# One spelling-to-key lookup for signatures and struct bodies (TypeUtils, and the
+# package root, which the Builder reads too).
+import ..._scope_suffixes, ..._outside_template_args
+import ..TypeUtils: _fuzzy_struct_lookup
 
 export generate_function_thunks
 
@@ -13,27 +17,6 @@ _parse_num(x) = StructGen._parse_num(x)
 # on a call, and `sysv_trap_reason`.
 include("SysVRecordABI.jl")
 
-"""
-    _fuzzy_struct_lookup(c_type, structs) -> Union{String, Nothing}
-
-Fuzzy-match a C type name against struct definition keys.
-DWARF keys often have trailing " >" nesting artifacts from template types.
-Of several fuzzy matches, the smallest key: the first one met was the first in
-the Dict's order, so a thunk's by-value layout could change with the Julia
-release. GeneratorCpp's `_fuzzy_dwarf_lookup` answers the same way.
-"""
-function _fuzzy_struct_lookup(c_type::String, structs::Any)
-    haskey(structs, c_type) && return c_type
-    key = c_type * " >"
-    haskey(structs, key) && return key
-    c_norm = rstrip(c_type, [' ', '>'])
-    hit = nothing
-    for k in keys(structs)
-        s = String(k)
-        rstrip(s, [' ', '>']) == c_norm && (hit === nothing || s < hit) && (hit = s)
-    end
-    return hit
-end
 
 """
     by_value_crossing(c_type, structs, record_abi) -> (kind, key)
@@ -133,33 +116,6 @@ end
 _strip_top_cv(c_type) = String(replace(replace(strip(String(c_type)), r"^(?:(?:const|volatile)\s+)+" => ""),
                                        r"(?:\s+(?:const|volatile))+$" => ""))
 
-"""
-    _outside_template_args(t) -> String
-
-`t` with every balanced `<…>` removed: the type's own declarators, without its
-template arguments'. A test for a pointer, reference, function or array
-spelling reads this, never `t`, or a `*` or `&` inside the arguments makes a
-record look like a pointer: `pair<key_value_pair *, bool>` and Boost.System's
-`result<value &, error_code>` were `:direct`, so the thunk returned the 16-byte
-pair in a register and the Julia stub spelled it `Ptr{Cvoid}`. On Win64 that
-return needs a hidden pointer, and the callee read `this` from the next
-register: `boost::json::object::emplace<int>` was an access violation
-(2026-11-01). `pair<int*, bool>*` keeps its own `*` and stays a pointer.
-"""
-function _outside_template_args(t::AbstractString)::String
-    depth = 0
-    io = IOBuffer()
-    for c in t
-        if c == '<'
-            depth += 1
-        elseif c == '>'
-            depth = max(0, depth - 1)
-        elseif depth == 0
-            write(io, c)
-        end
-    end
-    return String(take!(io))
-end
 
 # The table entry a by-value `t` (top-level cv removed) is laid out from:
 # `(:direct, nothing)` for what needs none (a scalar, pointer, reference,
@@ -503,32 +459,6 @@ function _bare_type_name(cls::AbstractString)::String
     return String(strip(i === nothing ? inner : inner[1:prevind(inner, i)]))
 end
 
-"""
-    _scope_suffixes(name) -> Vector{String}
-
-`name` plus each suffix obtained by dropping leading `::`-separated scopes,
-longest first. Separators inside `<>` are ignored, so
-`A::B<C::D>` yields `["A::B<C::D>", "B<C::D>"]` — not a cut at `C::D`.
-"""
-function _scope_suffixes(name::AbstractString)::Vector{String}
-    out = String[String(name)]
-    depth = 0
-    i = 1
-    n = lastindex(name)
-    while i < n
-        c = name[i]
-        if c == '<'
-            depth += 1
-        elseif c == '>'
-            depth = max(0, depth - 1)
-        elseif depth == 0 && c == ':' && name[i+1] == ':'
-            push!(out, String(name[i+2:end]))
-            i += 1
-        end
-        i += 1
-    end
-    return out
-end
 
 """
     _dwarf_member_offsets(info) -> Vector{Int}
