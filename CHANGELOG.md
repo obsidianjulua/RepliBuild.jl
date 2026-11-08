@@ -2,7 +2,22 @@
 
 All notable changes to RepliBuild.jl are documented in this file.
 
-## Unreleased
+## v4.4.0 (2026-11-08)
+
+**A toolchain record a library passes or holds by value keeps its layout, so a
+function returning `std::pair`, `std::array` or `std::string_view` is callable;
+a dependency can be a tarball pinned by its hash.** Generated wrappers change
+names and types (an enumerator that collided is bound as `<enum>_<name>`, a
+`Ref{Any}` parameter is `Ptr{Cvoid}`, overloads that differ only in an integer
+width are separate methods), so this is a minor release. Also in this release: a
+Tier 2 argument crosses at its C width; a wrapper that binds a name twice is
+refused; a pointer or reference return is an address; a record with a `*` or `&`
+inside its template arguments crosses as a record, not a pointer; SIMD vectors
+classify by their size, and on Win64 and through the C++ ccall gate; a record
+outside `std` is never STL-internal; a C++ name in an MLIR literal is escaped;
+`nounwind` is read per IR file; the project-hash marker names what was built;
+Fedora's binutils are GNU binutils; a local dependency's `exclude` is applied.
+Some fixes are in what `build` extracts: rebuild, then re-wrap.
 
 ### A toolchain record passed or held by value keeps its layout (2026-11-08)
 
