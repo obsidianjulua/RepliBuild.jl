@@ -23,6 +23,69 @@ registered release, which can be older than what is described here;
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
   folder ([Install](install.md#The-JLCS-dialect)).
 
+## v4.4.0 (2026-11-08)
+
+**A function that returns or takes `std::pair`, `std::array` or
+`std::string_view` by value is callable, and a dependency can be a tarball.**
+Generated wrappers change some names and parameter types (below), so this is a
+minor release.
+
+- **Standard-library records by value.** A record the library passes, returns
+  or holds by value keeps its layout when it is declared in a toolchain header,
+  and the wrapper emits it as a struct (`pair_double_double`, with `first` and
+  `second`). This covers `std::pair` in every shape, `std::array`,
+  `std::string_view`, and a library struct with one of them as a member. Only
+  what an exported function crosses by value is kept; the standard library's
+  own internals are not. `std::tuple`, `std::optional` and `std::complex` are
+  still ABI traps. A struct that derives from an empty base (`std::pair` does,
+  and so does a library `struct P : Tag { … }`) crosses by value; it was an ABI
+  trap.
+- **Archive dependencies.** `[dependencies.<n>] type = "archive"` with `url` and
+  a required `sha256` fetches a tarball (any format Pkg reads), checks the hash
+  before unpacking, and walks it like a git checkout, from `subdir` or the
+  archive's single top directory. A changed pin fetches again
+  ([TOML reference](config.md)). A local dependency's `exclude` is now applied,
+  and its headers count as the project's own for the shim-header check.
+- **Wrapper names and types that change — re-wrap, and update callers:**
+  - An enumerator whose name is also a struct, function, global, constant or
+    another enum's member is bound as `<enum>_<name>` (Boost.JSON's
+    `kind::object` is `kind_object`, because `object` is a struct). Before, the
+    later definition silently replaced it. An enumerator that collides with
+    nothing keeps its name, and a wrapper that would bind any name twice is
+    refused when it is written.
+  - A parameter that is a reference to a type Julia cannot hold (`long
+    double&`, `__int128&`) is `Ptr{Cvoid}`, the address of a buffer you own,
+    instead of `Ref{Any}`.
+  - C++ overloads that differ only in an integer parameter's width are separate
+    methods: those positions keep their C type (`value::Cint`,
+    `value::Clonglong`), and the rest stay `::Integer`.
+- **Calls that crossed wrong:**
+  - A Tier 2 integer argument narrower than its C parameter (`Int8` for an
+    `int`) was read past its storage and gave a different value on every call.
+  - A function returning a pointer or reference to a standard container
+    (`path::native()`) was declared as returning the container itself, and
+    the caller got an address on the thunk's stack.
+  - A record with a `*` or `&` inside its template arguments
+    (`pair<T*, bool>`, `result<T&, E>`) was treated as a pointer; on Windows
+    that was an access violation.
+  - SIMD vectors (`__m128`, `vector_size`) passed by value, bare or inside a
+    record, crossed lane by lane on both tiers; they now classify by their size
+    or are refused, on Linux and Windows.
+  - A C++ name containing `\x` (a `char` template argument) failed the whole
+    library's Tier 2 module, and so did two records whose names differ only in
+    punctuation.
+  - A record outside namespace `std` named like a standard one
+    (`boost::core::string_view`) was skipped as standard-library internal.
+- **Builds:**
+  - A failed build no longer leaves the previous build's project hash, so the
+    next build cannot report "project unchanged" over a broken library. A
+    compiler that never started counts as a failure.
+  - Fedora's binutils are recognised as GNU binutils.
+- **Fixes in what `build` extracts — rebuild, then re-wrap:** the toolchain
+  records and empty bases above; the scope recorded on each struct (the `std`
+  check); SIMD vector facts, including a 3-lane vector's size; `nounwind` for a
+  C++ library linked from several IR modules.
+
 ## v4.3.1 (2026-10-31)
 
 **Multi-library projects build and wrap from CMake's own build graph.**
