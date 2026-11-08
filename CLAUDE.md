@@ -294,6 +294,12 @@ If you are asked to work on it:
   and `exclude`. The superproject's `commit` pins them through its gitlinks, and a
   listed submodule off its gitlink is a hard error. A directory with its own
   `.git` is never walked as part of the root around it. (`test_dep_submodules.jl`.)
+  A `type = "archive"` dependency is a tarball pinned by a required `sha256`,
+  fetched through `Pkg.PlatformEngines.download_verify_unpack` into the deps
+  cache and walked like a clone from `subdir` (or its single top directory);
+  `exclude` applies to every dependency type through `_dep_excluded`, and a
+  local dependency's path is a shim-header root (`_shim_allowed_roots`).
+  (`test_dep_archive.jl`, `test_dep_cache.jl`.)
 - `Builder/DWARFParser.jl` — llvm-dwarfdump + nm → ClassInfo/VtableInfo.
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.

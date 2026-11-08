@@ -234,7 +234,7 @@ and deduplicated at load; empty means none, never all. The superproject's tree
 records each submodule's commit, so `commit` pins them too.
 """
 struct DependencyItem
-    type::String # "git", "system", "local"
+    type::String # "git", "archive", "system", "local"
     url::String
     tag::String
     commit::String
@@ -242,6 +242,10 @@ struct DependencyItem
     pkg_config::String
     exclude::Vector{String}
     submodules::Vector{String}
+    # type = "archive": the tarball's SHA-256 (required) and the directory
+    # inside the unpacked tree that is the dependency's root (optional).
+    sha256::String
+    subdir::String
 end
 
 """Nested struct for [dependencies] section"""
@@ -871,6 +875,7 @@ function parse_dependencies_config(data::Dict)::DependenciesConfig
                       "Abbreviated SHAs are rejected — they are ambiguous across future history.")
             end
             dep_type = get(conf, "type", "local")
+            sha256, subdir = _parse_dep_archive(String(name), dep_type, conf)
             items[String(name)] = DependencyItem(
                 dep_type,
                 get(conf, "url", ""),
@@ -879,12 +884,41 @@ function parse_dependencies_config(data::Dict)::DependenciesConfig
                 get(conf, "path", ""),
                 get(conf, "pkg_config", ""),
                 get(conf, "exclude", String[]),
-                _parse_dep_submodules(String(name), dep_type, get(conf, "submodules", String[]))
+                _parse_dep_submodules(String(name), dep_type, get(conf, "submodules", String[])),
+                sha256,
+                subdir,
             )
         end
     end
 
     return DependenciesConfig(items)
+end
+
+"""
+Validate the archive keys of `[dependencies.<name>]`. An archive dependency is a
+tarball at `url`, and its `sha256` is required: a URL alone pins nothing (the
+file behind it can change), and the hash is the only identity that survives
+`clean()`, as `commit` is for a git dependency. `subdir` names the directory
+inside the unpacked archive that is the dependency root; it is relative and
+never climbs out. Both keys belong to `type = "archive"` only.
+"""
+function _parse_dep_archive(name::String, dep_type::AbstractString, conf::Dict)
+    sha = lowercase(String(get(conf, "sha256", "")))
+    subdir = String(get(conf, "subdir", ""))
+    if dep_type == "archive"
+        isempty(String(get(conf, "url", ""))) &&
+            error("[dependencies.$name] type = \"archive\" needs a url (the tarball to fetch)")
+        occursin(r"^[0-9a-f]{64}$", sha) ||
+            error("[dependencies.$name] type = \"archive\" needs sha256 = \"<64 hex>\" of the tarball; got: $(repr(sha)).\n" *
+                  "Compute it with `sha256sum <file>` (or `bytes2hex(open(SHA.sha256, file))`) and pin it: " *
+                  "a URL alone pins nothing, and the hash is what a rebuild from cold checks.")
+        (isabspath(subdir) || occursin(r"(^|[/\\])\.\.([/\\]|$)", subdir)) &&
+            error("[dependencies.$name] subdir must be a relative path inside the archive, got: $(repr(subdir))")
+    else
+        isempty(sha) || error("[dependencies.$name] sha256 applies only to type = \"archive\"; this dependency is type = \"$dep_type\"")
+        isempty(subdir) || error("[dependencies.$name] subdir applies only to type = \"archive\"; this dependency is type = \"$dep_type\"")
+    end
+    return sha, subdir
 end
 
 """
