@@ -265,9 +265,14 @@ end
 function _check_dwarf_dumper()::ToolStatus
     d = try Compiler._dwarf_dumper() catch; nothing end
     if d === nothing
+        # Say what each candidate printed: "no GNU binutils" with binutils
+        # installed is otherwise undiagnosable from the report (issue #68).
+        seen = try Compiler._dumper_candidate_report() catch; String[] end
+        advice = isempty(seen) ? _dumper_advice() :
+            vcat(["What each candidate's --version said:"], ["  " * l for l in seen], _dumper_advice())
         return ToolStatus("DWARF dumper", true, false, "", "", false,
             "no GNU binutils readelf/objdump — DWARF extraction cannot run";
-            section=SEC_DWARF, advice=_dumper_advice())
+            section=SEC_DWARF, advice=advice)
     end
     # Version via BuildBridge.execute, the same call `_dwarf_dumper` used to
     # accept this tool. Reading it with a bare `read(`$tool --version`)` can
@@ -310,8 +315,10 @@ function _check_symbol_reader()::ToolStatus
     end
     out = try read(`$path --version`, String) catch; "" end
     if !Compiler._is_gnu_binutils(out)
+        first_line = strip(first(split(out, '\n'; limit=2)))
+        said = isempty(first_line) ? "it printed nothing" : "it says `$first_line`"
         return ToolStatus("symbol reader", true, true, path, "", false,
-            "`nm` on PATH is not GNU binutils";
+            "`nm` on PATH is not GNU binutils: $said";
             section=SEC_DWARF, advice=_dumper_advice())
     end
     ToolStatus("symbol reader", true, true, path, _get_version(path), true,
