@@ -2597,6 +2597,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # (miniaudio's ma_fopen/ma_wfopen, 2026-08-02). Degrading the pointer to
     # `Ptr{Cvoid}` is ABI-identical and keeps the function callable.
     emitted_type_names = _defined_type_names(join(enum_chunks) * join(struct_chunks))
+    # What a pointer or reference return may be typed with (`_typed_pointer_return`).
+    typed_return_names = _typed_return_names(join(enum_chunks) * join(struct_chunks))
 
     # Union accessors were built during struct emission and screened against the
     # INTENDED struct set (`known_struct_names`). A type that was planned but
@@ -3048,6 +3050,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         let rm = match(r"^(Ref|Ptr)\{(.*)\}$", get(return_type, "julia_type", "Cvoid"))
             if rm !== nothing && String(rm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
                 return_type["julia_type"] = "Ptr{Cvoid}"
+            end
+        end
+
+        # A pointer return the steps above left untyped takes the type its
+        # declaration names (`_typed_pointer_return`): `glfwCreateWindow` is
+        # `Ptr{GLFWwindow}`, the type its parameters already had.
+        let jt = String(get(return_type, "julia_type", "Cvoid"))
+            if occursin(r"^(Ptr\{)*(Cvoid|Any)\}*$", jt)
+                typed = _typed_pointer_return(String(get(return_type, "c_type", "")),
+                                              typed_return_names, _sanitize_c_type_name)
+                typed === nothing || (return_type["julia_type"] = typed)
             end
         end
 

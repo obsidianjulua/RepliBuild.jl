@@ -1253,6 +1253,74 @@ function _defined_type_names(source::AbstractString)::Set{String}
     return names
 end
 
+"""
+    _typed_return_names(source) -> Set{String}
+
+The type names a pointer or reference return may be spelled with
+(`_typed_pointer_return`): every `struct`, `@enum` and `primitive type` the
+emitted text binds, less every `mutable struct`. A mutable record (a named
+union, a bitfield or member-less record carried as its bytes) is left
+`Ptr{Cvoid}`: `unsafe_load(Ptr{T})` on a mutable `T` reads C's bytes as an
+object reference (abi_fuzz X5), and a typed return invites exactly that load.
+Value constants (`const X = …`) are not type names here.
+"""
+function _typed_return_names(source::AbstractString)::Set{String}
+    names = Set{String}()
+    for re in (r"^\s*(?:mutable\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)"m,
+               r"^\s*@enum\s+([A-Za-z_][A-Za-z0-9_]*)"m,
+               r"^\s*primitive\s+type\s+([A-Za-z_][A-Za-z0-9_]*)"m)
+        for m in eachmatch(re, source)
+            push!(names, m.captures[1])
+        end
+    end
+    for m in eachmatch(r"^\s*mutable\s+struct\s+([A-Za-z_][A-Za-z0-9_]*)"m, source)
+        delete!(names, m.captures[1])
+    end
+    return names
+end
+
+"""
+    _typed_pointer_return(c_type, names, sanitize) -> Union{String,Nothing}
+
+The type a pointer or reference return is declared with, as `Ptr{…}`: `T*`,
+`const T*`, `T&`, `const T&` and `T* const` give `Ptr{T}`, `T**` and `T*&` give
+`Ptr{Ptr{T}}`, when `sanitize(T)` is in `names` (`_typed_return_names`).
+`nothing` otherwise: a function pointer, `void*`, a type the module does not
+emit or emits mutable, an internal type, a by-value return.
+
+Both generators returned `Ptr{Cvoid}` for every record pointer the metadata did
+not already type, and every reference: `glfwCreateWindow` (`GLFWwindow*`, an
+opaque handle the parameters already typed `Ptr{GLFWwindow}`), `ImGui::GetIO`
+(`ImGuiIO&`), libvterm's 12 handle returns. The declaration says what the
+pointer points at, so a caller cast it back by hand at every call site
+(LlamaChat's GUI, 2026-11-08). Only the Julia type changes; how the value
+crosses (a pointer, `!llvm.ptr` for a thunk) does not.
+"""
+function _typed_pointer_return(c_type::AbstractString, names, sanitize)::Union{String,Nothing}
+    t = strip(String(c_type))
+    occursin('(', t) && return nothing                       # a function pointer
+    levels = 0
+    while true
+        if endswith(t, "&&")
+            levels += 1; t = rstrip(t[1:end-2])
+        elseif endswith(t, "*") || endswith(t, "&")
+            levels += 1; t = rstrip(t[1:end-1])
+        elseif (m = match(r"^(.*?)\s*\b(?:const|volatile)$", t)) !== nothing &&
+               (levels > 0 || endswith(rstrip(m.captures[1]), r"[*&]"))
+            t = rstrip(String(m.captures[1]))                # `T* const`, `T const*`: qualifiers
+        else
+            break
+        end
+    end
+    levels == 0 && return nothing
+    base = replace(t, r"^((const|volatile|struct|class|union|enum)\s+)+" => "")
+    base = strip(replace(base, r"\s+\b(const|volatile)$" => ""))   # `T const *`
+    (isempty(base) || base == "void" || base in _INTERNAL_TYPE_BLOCKLIST) && return nothing
+    name = sanitize(String(base))
+    name in names || return nothing
+    return "Ptr{"^levels * name * "}"^levels
+end
+
 # Docstrings quote the same types they document, so an undefined name shows up
 # there too — harmlessly, since it is inside a string. Strip them before
 # scanning for real uses.
