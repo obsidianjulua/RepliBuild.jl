@@ -660,7 +660,7 @@ _ed_text(parsed) = _ED_C._canonical_text(Any[parsed...])
             gpos = [something(findfirst("function $g()", code), 0:0)[1] for g in sort(collect(keys(md["globals"])))]
             @test all(>(0), gpos)
             @test issorted(gpos)
-            hpos = [something(findfirst("@enum $h::", code), 0:0)[1] for h in sort(collect(keys(md["header_enums"])))]
+            hpos = [something(findfirst("primitive type $h <: ", code), 0:0)[1] for h in sort(collect(keys(md["header_enums"])))]
             @test all(>(0), hpos)
             @test issorted(hpos)
         end

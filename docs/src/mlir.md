@@ -657,7 +657,7 @@ because both sides share it.
 
 **Enum returns must be bare integers.** A struct result — even
 `!llvm.struct<(i32)>` — makes `emit_c_interface` use the sret convention, while
-the Julia side calls an `@enum` back as a scalar: the args pointer lands in the
+the Julia side calls an enum back as a scalar: the args pointer lands in the
 sret slot and the call dereferences garbage. Found on tinyxml2's
 `XMLDocument::Parse → XMLError`.
 

@@ -341,7 +341,7 @@ end
 
         # …and an ordinary enumeration is untouched. {0,1,2} is powers of two by
         # coincidence; losing its type would be a silent downgrade.
-        @test occursin("@enum SynthMode::Int32", code)
+        @test occursin("primitive type SynthMode <: RepliBuild.OpenEnums.OpenEnum{Int32} 32 end", code)
         @test !occursin("const SynthMode = ", code)
 
         # The rule itself, at its boundaries. Bit DENSITY is what separates a
@@ -405,7 +405,7 @@ end
         @test occursin("const CppFlags = Cuint", cppcode)
         @test occursin("const CF_CD = CppFlags(12)", cppcode)
         @test !occursin("@enum CppFlags", cppcode)
-        @test occursin("@enum CppMode::Int32", cppcode)
+        @test occursin("primitive type CppMode <: RepliBuild.OpenEnums.OpenEnum{Int32} 32 end", cppcode)
         # The alias and its members must still reach `export` — they are `const`
         # bindings now, not `@enum` members, and a different collector sees them.
         @test occursin(r"export[^\n]*\bCppFlags\b", cppcode)

@@ -755,8 +755,19 @@ the test named when you touch the area.
   falls back to the mangled symbol, and a reserved word gets a `_` suffix.
   Never inline a replace-list again. The curated part is frozen, because
   consumers call those names. (`test_function_name_derivation.jl`.)
+- **A C enum is open: any value of its underlying type is a value of the enum**
+  (2026-11-08). Never emit `@enum`, which refuses undeclared values: libvterm's
+  `VTERM_KEY_FUNCTION(n)` is `VTERM_KEY_FUNCTION_0 + n`, and `VTermKey(257)` was an
+  ArgumentError. `_open_enum_chunk` emits `primitive type E <:
+  RepliBuild.OpenEnums.OpenEnum{T} <width> end`, the `enumerators` table, and one
+  `const` per enumerator; `OpenEnum <: Base.Enum`, so integer conversion, `ccall`
+  passing and `Cuint(e)` in a Tier 2 body are Base's. A declared value prints as
+  an `@enum` member did (`namemap`, defined only while Base has it), an
+  undeclared one as `E(v)`. A bitmask enum stays an integer alias
+  (`_is_bitflag_enum`). Wrappers name `RepliBuild.OpenEnums`, so the header's
+  `import RepliBuild` must precede the enum section. (`test_open_enums.jl`.)
 - Enums with identical member sets emit as `const Alias = Canonical`, not a second
-  `@enum`. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
+  enum type. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
   `""` stays an empty-name sentinel; do not harden it.
 - **An enumerator never rebinds another top-level name.** Julia 1.12+ lets
   `struct object` silently replace `kind::object` bound by an earlier `@enum`
@@ -766,8 +777,8 @@ the test named when you touch the area.
   is also a record, function, global, constant, enum type or another enum's
   enumerator is bound as `<enum>_<name>` (both enums move when two share a
   member), the rest keep their names byte for byte. `_enumerator_julia_name` is
-  the one derivation, and the export list carries the names the `@enum` binds.
-  Never push `@enum` text into `enum_chunks` directly, and never bind a
+  the one derivation, and the export list carries the names the enum's `const`s
+  bind. Never push enum text into `enum_chunks` directly, and never bind a
   top-level name twice from any emitter: `_assert_no_duplicate_toplevel_names`
   refuses the wrapper (methods overload, one type takes constructors, nothing
   else coexists). (`test_enumerator_collisions.jl`.)

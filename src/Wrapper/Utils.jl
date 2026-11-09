@@ -955,6 +955,43 @@ function _bitflag_enum_chunk(enum_name::AbstractString, underlying::AbstractStri
     return String(take!(io))
 end
 
+"""
+    _open_enum_chunk(enum_name, underlying, bound, members) -> String
+
+Emit a C enum that is not a bitmask as a `RepliBuild.OpenEnums.OpenEnum`: a
+`primitive type` the width of `underlying`, its `enumerators` table, and one
+`const` per enumerator.
+
+It replaced `@enum`, which accepts declared values only. A C enum is an integer
+type with named constants, and APIs pass values between or beyond the declared
+ones: libvterm's `VTERM_KEY_FUNCTION(n)` is `VTERM_KEY_FUNCTION_0 + n`, so
+`VTermKey(257)` (F1) was an `ArgumentError` and a terminal on the wrapper could
+not send function keys (2026-11-08). The type subtypes `Base.Enum`, so integer
+conversion, `ccall` passing and printing a declared value are what `@enum`
+gave; the constructor takes any value of `underlying`.
+
+`bound` are the members' names as bound (unescaped), for the table;
+`members` are `escaped name => value`, for the `const`s. Duplicate values are
+two constants of one value, and the table's first name is the one printed.
+"""
+function _open_enum_chunk(enum_name::AbstractString, underlying::AbstractString,
+                          bound::AbstractVector, members)::String
+    T = try getfield(Base, Symbol(underlying)) catch; nothing end
+    bits = T isa DataType && isprimitivetype(T) ? string(8 * sizeof(T)) : "8 * sizeof($underlying)"
+    io = IOBuffer()
+    println(io, "primitive type $enum_name <: RepliBuild.OpenEnums.OpenEnum{$underlying} $bits end")
+    println(io, "RepliBuild.OpenEnums.enumerators(::Type{$enum_name}) = (")
+    for (b, (_, value)) in zip(bound, members)
+        println(io, "    ", repr(Symbol(b)), " => ", value, ",")
+    end
+    println(io, ")")
+    for (name, value) in members
+        println(io, "const $name = $enum_name($value)")
+    end
+    println(io)
+    return String(take!(io))
+end
+
 # =============================================================================
 # Enumerators: one name derivation, one collision rule, one renderer
 # =============================================================================
@@ -1154,20 +1191,7 @@ function _render_enum_chunks(chunks::AbstractVector, taken::Dict{String,Symbol})
         else
             println(io, "# ", c.comment)
             foreach(n -> println(io, n), notes)
-            println(io, "@enum $(c.name)::$(c.julia_underlying) begin")
-            seen_values = Set{Any}()
-            duplicate_defs = String[]
-            for (name, value) in members
-                if value in seen_values
-                    push!(duplicate_defs, "const $name = $(c.name)($value)")
-                else
-                    push!(seen_values, value)
-                    println(io, "    $name = $value")
-                end
-            end
-            println(io, "end")
-            println(io)
-            isempty(duplicate_defs) || print(io, join(duplicate_defs, "\n"), "\n\n")
+            print(io, _open_enum_chunk(c.name, c.julia_underlying, bound, members))
         end
         push!(out, String(take!(io)))
     end
