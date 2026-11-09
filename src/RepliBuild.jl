@@ -337,6 +337,9 @@ _read_json(path::AbstractString) = JSON.parse(read(path, String); dicttype=Dict{
 # LOAD MODULES
 # ============================================================================
 
+# The type every generated wrapper's C enums are (`OpenEnum`); wrappers name it.
+include("OpenEnums.jl")
+
 # Builder: config, environment, compilation, metadata extraction
 include("Builder.jl")
 

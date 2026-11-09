@@ -4,6 +4,64 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A C enum takes any value of its underlying type (2026-11-08)
+
+LlamaChat's GUI drives a terminal pane through the Hub's libvterm wrapper and
+could not send F1–F12. C names them `VTERM_KEY_FUNCTION(n)`, which is
+`VTERM_KEY_FUNCTION_0 + n`, and declares only `VTERM_KEY_FUNCTION_0` (256) and
+`VTERM_KEY_FUNCTION_MAX` (511). Both generators emitted every C enum that is
+not a bitmask as a Julia `@enum`, which accepts declared values only, so
+`VTermKey(257)` was an `ArgumentError` and the call never reached libvterm.
+imgui's key chords (`ImGuiMod_Ctrl | ImGuiKey_S`) hit the same wall. A C enum is
+an integer type with named constants; any value of the underlying type is a
+value of the enum, and APIs pass such values.
+
+- **`RepliBuild.OpenEnums.OpenEnum{T} <: Base.Enum{T}`.** Each such enum is
+  now `primitive type E <: RepliBuild.OpenEnums.OpenEnum{T} <width> end`, an
+  `enumerators(::Type{E})` table, and one `const` per enumerator
+  (`_open_enum_chunk`, the one renderer both generators go through). `E(x)`
+  takes any value of `T` (an `InexactError` past `T`'s range), and `convert`
+  takes an `Int` where a field or argument wants `E`. Because it subtypes
+  `Base.Enum`, `Int(x)`, `Cuint(x)` (what a Tier 2 body passes), `ccall`
+  passing, `isless`, `hash`, `read`/`write` and `x isa Enum` are Base's own. A
+  declared value prints exactly as an `@enum` member did (the type supplies
+  Base's `namemap`, defined only while Base has it); an undeclared one prints
+  as `VTermKey(257)`, never `<invalid #257>`. `instances`, `typemin`/`typemax`
+  and `|`, `&`, `xor`, `~` within one enum are defined.
+- Bitmask enums stay integer aliases (`_is_bitflag_enum`); aliased enums stay
+  `const Alias = Canonical`; the collision rule and its renames are unchanged.
+  Duplicate values are two constants, and the first declared name prints.
+- Every wrapper already imports RepliBuild in its header, ahead of the enum
+  section, so a consumer needs nothing new.
+
+- **Measured** by re-wrapping Hub packages, no rebuild:
+  - **libvterm:** F1, F5 and F12 (`VTermKey(257)`, `(261)`, `(268)`) reach the
+    library and come back as `\eOP`, `\e[15~` and `\e[24~`. The wrapper they
+    replace refused all three with `ArgumentError` before any call.
+  - **test_deep:** imgui 202/202, libvterm 46/46, llamacpp 33/33, pugixml
+    13/13, glfw 37/38 (the one asserts the Hub path, which a copy does not
+    have).
+  - **Precompilation:** a package that includes the libvterm wrapper
+    precompiles and loads from cache.
+  - **LlamaChat's chat-box probe:** 22/22, with LlamaChat's vendored llama.cpp
+    wrapper still the `@enum` kind (264 enums).
+- **Compatibility.** A wrapper written by this version names
+  `RepliBuild.OpenEnums`, so it needs this RepliBuild or later to load. A
+  wrapper written before keeps working, since its `@enum`s are plain Julia.
+  Code that relied on `E(n)` throwing for an undeclared `n` no longer gets the
+  error; nothing in the Hub did. Re-wrap to pick it up.
+- **Tests.** `test_open_enums.jl` (runtests) covers:
+  - construction at 8, 16, 32 and 64 bits and at `Clong`, and the
+    `InexactError` past the underlying range;
+  - printing of declared and undeclared values, duplicates, `instances`,
+    `typemin`/`typemax`, the combining operators, and `read`/`write`;
+  - a GeneratorC wrapper that passes an undeclared value to libc's `abs` and
+    gets one back, and GeneratorCpp's emission.
+
+  Six test files that matched `@enum` text now match the new shape. A closed
+  constructor, the `@enum` renderer, Base's undeclared printing, and a missing
+  `namemap` each fail it. runtests 118 and devtests 69 pass.
+
 ### A pointer or reference return is typed from its declaration (2026-11-08)
 
 Building a chat GUI on the Hub's imgui, glfw and libvterm wrappers (LlamaChat),

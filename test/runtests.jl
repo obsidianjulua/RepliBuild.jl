@@ -333,6 +333,7 @@ include(joinpath(@__DIR__, "test_enum_underscore_name.jl"))
 # (2026-09-20). Identical member sets are now aliased, not re-emitted.
 
 include(joinpath(@__DIR__, "test_enum_alias_collision.jl"))
+include(joinpath(@__DIR__, "test_open_enums.jl"))
 
 # ── Enumerators colliding with top-level names (no toolchain) ────────────────
 # A C++ scoped enum's enumerators are bound at module scope by `@enum`, where

@@ -130,13 +130,13 @@ end
     @testset "both generators emit the alias, not a second @enum" begin
         for lang in (:cpp, :c)
             src = enum_source(lang)
-            # Exactly one real @enum for the shared member set...
-            n_enum = count(m -> true, eachmatch(r"^@enum\s+(data_type_t|key_type)\b"m, src))
+            # Exactly one real enum type for the shared member set...
+            n_enum = count(m -> true, eachmatch(r"^primitive type (data_type_t|key_type) <: RepliBuild\.OpenEnums\.OpenEnum\b"m, src))
             @test n_enum == 1
             # ...and the other name arrives as an alias.
             @test occursin(r"^const\s+(key_type|data_type_t)\s*=\s*(data_type_t|key_type)\s*$"m, src)
             # The member must be bound exactly once, or the clobber is back.
-            @test count(m -> true, eachmatch(r"^\s*dt_f32\s*=\s*3\s*$"m, src)) == 1
+            @test count(m -> true, eachmatch(r"^const dt_f32 = (data_type_t|key_type)\(3\)$"m, src)) == 1
         end
     end
 
@@ -148,15 +148,17 @@ end
             lines = String[]
             keep = false
             for ln in eachsplit(src, '\n')
-                if occursin(r"^@enum\s+(data_type_t|key_type)\b", ln); keep = true end
+                if occursin(r"^primitive type (data_type_t|key_type) <:", ln); keep = true end
+                if keep && isempty(strip(ln)); keep = false end
                 keep && push!(lines, String(ln))
-                if keep && strip(ln) == "end"; keep = false end
                 occursin(r"^const\s+(key_type|data_type_t)\s*=", ln) && push!(lines, String(ln))
             end
             chunk = join(unique(lines), "\n")
-            @test occursin("@enum", chunk)
+            @test occursin("primitive type", chunk)
 
+            # A wrapper imports RepliBuild in its header; the slice needs it too.
             m = Module(Symbol("EnumEmitProbe_", lang))
+            Core.eval(m, :(import RepliBuild))
             Base.include_string(m, chunk)
             canon = _has(m, :data_type_t) ? _get(m, :data_type_t) : nothing
             @test canon !== nothing
@@ -176,8 +178,8 @@ end
                 Dict{String,Any}("name" => "other_b", "value" => 1)]
         for lang in (:cpp, :c)
             s = enum_source(lang; md=md)
-            @test occursin(r"^@enum\s+data_type_t\b"m, s)
-            @test occursin(r"^@enum\s+key_type\b"m, s)
+            @test occursin(r"^primitive type data_type_t <:"m, s)
+            @test occursin(r"^primitive type key_type <:"m, s)
             @test !occursin(r"^const\s+key_type\s*=\s*data_type_t"m, s)
         end
     end

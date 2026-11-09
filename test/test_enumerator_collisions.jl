@@ -141,9 +141,10 @@ function parses_clean(src::AbstractString)
     return true
 end
 
-# The lines of one `@enum` block, by type name.
+# The lines of one emitted enum, by type name: its `enumerators` table and
+# one `const` per enumerator, up to the blank line that ends the chunk.
 function enum_block(src::AbstractString, name::AbstractString)
-    m = match(Regex("^@enum $(name)::\\w+ begin\\n(.*?)^end\\n", "ms"), src)
+    m = match(Regex("^primitive type $(name) <: RepliBuild\\.OpenEnums\\.OpenEnum\\{\\w+\\} \\d+ end\\n(.*?)\\n\\n", "ms"), src)
     return m === nothing ? "" : String(m.captures[1])
 end
 
@@ -266,24 +267,24 @@ end
             @test occursin(r"^struct object\b"m, src)
             @test occursin(r"^struct array\b"m, src)
             @test occursin(r"^struct string\b"m, src)
-            @test occursin(r"^    kind_object = 7$"m, kind)
-            @test occursin(r"^    kind_array = 6$"m, kind)
-            @test occursin(r"^    kind_string = 5$"m, kind)
-            @test !occursin(r"^    object = 7$"m, kind)
+            @test occursin(r"^const kind_object = kind\(7\)$"m, kind)
+            @test occursin(r"^const kind_array = kind\(6\)$"m, kind)
+            @test occursin(r"^const kind_string = kind\(5\)$"m, kind)
+            @test !occursin(r"^const object = "m, kind)
             # `null` belongs to neither enum.
-            @test occursin(r"^    kind_null = 0$"m, kind)
-            @test occursin(r"^    literals_null = 0$"m, lits)
-            @test !occursin(r"^    null = 0$"m, src)
+            @test occursin(r"^const kind_null = kind\(0\)$"m, kind)
+            @test occursin(r"^const literals_null = literals\(0\)$"m, lits)
+            @test !occursin(r"^const null = "m, src)
             # Nothing collides with these, so they keep the names they had:
             # `bool_` and `double_` lose Boost's trailing underscore as before,
             # `true_`/`false_` keep the keyword escape.
-            @test occursin(r"^    bool = 1$"m, kind)
-            @test occursin(r"^    int64 = 2$"m, kind)
-            @test occursin(r"^    uint64 = 3$"m, kind)
-            @test occursin(r"^    double = 4$"m, kind)
-            @test occursin(r"^    c_true = 1$"m, lits)
-            @test occursin(r"^    c_false = 2$"m, lits)
-            @test occursin(r"^    infinity = 3$"m, lits)
+            @test occursin(r"^const bool = kind\(1\)$"m, kind)
+            @test occursin(r"^const int64 = kind\(2\)$"m, kind)
+            @test occursin(r"^const uint64 = kind\(3\)$"m, kind)
+            @test occursin(r"^const double = kind\(4\)$"m, kind)
+            @test occursin(r"^const c_true = literals\(1\)$"m, lits)
+            @test occursin(r"^const c_false = literals\(2\)$"m, lits)
+            @test occursin(r"^const infinity = literals\(3\)$"m, lits)
             # Each collision is named above the `@enum`.
             @test occursin("# `object` also names a struct this module defines; the enumerator is `kind_object`.", src)
             @test occursin("# `null` also names an enumerator of `literals`; the enumerator is `kind_null`.", src)
@@ -304,7 +305,7 @@ end
 
             # Neutered rename: put the bare name back and the refusal fires on
             # exactly that name. This is what every wrap now runs.
-            neutered = replace(src, "    kind_object = 7" => "    object = 7")
+            neutered = replace(src, "const kind_object = kind(7)" => "const object = kind(7)")
             @test neutered != src
             err = try
                 W._assert_no_duplicate_toplevel_names(neutered, "EnumCollide"); nothing
@@ -312,7 +313,7 @@ end
                 e
             end
             @test err isa ErrorException
-            @test occursin("`object`: enumerator at line", sprint(showerror, err))
+            @test occursin("`object`: const at line", sprint(showerror, err))
             @test W._assert_no_duplicate_toplevel_names(src, "EnumCollide") === nothing
 
             # The module loads, and the bindings are what the text says.
@@ -342,14 +343,14 @@ end
             src = generate(lang, fixture(; with_function = true))
             @test parses_clean(src)
             @test occursin(r"^function array\("m, src)
-            @test occursin(r"^    kind_array = 6$"m, enum_block(src, "kind"))
+            @test occursin(r"^const kind_array = kind\(6\)$"m, enum_block(src, "kind"))
             @test occursin("# `array` also names a struct this module defines; the enumerator is `kind_array`.", src)
             # With the record gone the function alone still collides.
             src2 = generate(lang, fixture(; with_function = true, records = ("object",)))
-            @test occursin(r"^    kind_array = 6$"m, enum_block(src2, "kind"))
+            @test occursin(r"^const kind_array = kind\(6\)$"m, enum_block(src2, "kind"))
             @test occursin("# `array` also names a function this module defines; the enumerator is `kind_array`.", src2)
             # And `string`, now only a global's accessor, collides with that.
-            @test occursin(r"^    kind_string = 5$"m, enum_block(src2, "kind"))
+            @test occursin(r"^const kind_string = kind\(5\)$"m, enum_block(src2, "kind"))
             @test occursin("# `string` also names a function this module defines; the enumerator is `kind_string`.", src2)
             @test W._assert_no_duplicate_toplevel_names(src, "EnumCollide") === nothing
             @test W._assert_no_duplicate_toplevel_names(src2, "EnumCollide") === nothing
@@ -379,16 +380,25 @@ end
             label = lang === :cpp ? "C++" : "C"
             @test occursin("""
                 # $label enum: kind (underlying type: unsigned char)
-                @enum kind::UInt8 begin
-                    null = 0
-                    bool = 1
-                    int64 = 2
-                    uint64 = 3
-                    double = 4
-                    string = 5
-                    array = 6
-                    object = 7
-                end
+                primitive type kind <: RepliBuild.OpenEnums.OpenEnum{UInt8} 8 end
+                RepliBuild.OpenEnums.enumerators(::Type{kind}) = (
+                    :null => 0,
+                    :bool => 1,
+                    :int64 => 2,
+                    :uint64 => 3,
+                    :double => 4,
+                    :string => 5,
+                    :array => 6,
+                    :object => 7,
+                )
+                const null = kind(0)
+                const bool = kind(1)
+                const int64 = kind(2)
+                const uint64 = kind(3)
+                const double = kind(4)
+                const string = kind(5)
+                const array = kind(6)
+                const object = kind(7)
 
                 """, src)
             @test !occursin("also names", src)

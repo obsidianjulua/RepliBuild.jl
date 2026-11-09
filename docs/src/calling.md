@@ -38,15 +38,22 @@ and `T()` returns one with every byte zero. To change a field, make a new value:
 the wrapper defines them, which return a copy. A C++ wrapper defines them for
 every struct, a C wrapper for its byte-blob structs.
 
-**Enums.** `@enum` with the underlying type from the headers. A C enum whose
-members are bit flags is an integer alias plus named constants instead, so
-`A | B` works. Enumerators are bound at module scope, under their own names.
+**Enums.** A type of the enum's underlying width (`Cint`, `UInt8`, …) whose
+values are any value of that type, declared or not, as in C:
+`VTermKey(Int(VTERM_KEY_FUNCTION_0) + 1)` is libvterm's F1 though only
+`VTERM_KEY_FUNCTION_0` and `VTERM_KEY_FUNCTION_MAX` are declared. It behaves as a
+Julia `@enum`: `Int(x)`, `x == NAME`, `x isa Enum`, `instances(E)`, and a
+declared value prints by name; an undeclared one prints as `E(257)`. Values of
+one enum combine with `|`, `&` and `xor` (imgui's `ImGuiMod_Ctrl | ImGuiKey_S`),
+and an `Int` converts where a field or argument wants the enum. A C enum whose
+members are bit flags is an integer alias plus named constants instead.
+Enumerators are bound at module scope, under their own names.
 One whose name is also a struct, a function, a global, an enum type or an
 enumerator of another enum in the same wrapper is bound as `<enum>_<name>`,
 the way C++ spells `kind::object`: Boost.JSON's `kind::object` is
 `BoostJson.kind_object`, since `BoostJson.object` is the record, and
 `kind::null` and `literals::null` are `kind_null` and `literals_null`. A
-comment above the `@enum` names each such collision.
+comment above the enum names each such collision.
 
 **Unions.** A `mutable struct` holding the union's bytes
 (`data::NTuple{N,UInt8}`), with `U()` for a zeroed one and, for each member, a

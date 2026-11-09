@@ -206,8 +206,8 @@ const _NATURAL_STRUCTS = Dict{String,Any}(
             # A type of another size than the member's is not the member's type.
             @test occursin(r"struct RefEnumRec\n\s+r::NTuple\{8, UInt8\}\nend", code)
             # No forward declaration replaces an enum: `struct c_Type end` after
-            # `@enum c_Type` made every later `::c_Type` an empty struct.
-            @test occursin(r"\n@enum c_Type::Cuint", code)
+            # the enum `c_Type` made every later `::c_Type` an empty struct.
+            @test occursin(r"\nprimitive type c_Type <: RepliBuild\.OpenEnums\.OpenEnum\{Cuint\}", code)
             @test !occursin(r"\nstruct c_Type end", code)
             @test occursin(r"struct HasType\n\s+t::c_Type\n\s+k::Cint\nend", code)
             # A record holding a named union is a blob, whatever the sizes say.

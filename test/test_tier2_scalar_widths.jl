@@ -83,7 +83,7 @@ _tsw_fn(name, mangled, demangled, params, ret_c, ret_jl) = Dict{String,Any}(
         t = body("take")
         @test occursin(r"^function \w*take\(a::Integer, b::Integer, c::Integer, k::\w+, f::Bool, d::Cdouble\)"m, t)
         @test occursin("invoke(\"_mlir_ciface__ZN2ns4takeEijy4Kindbd_thunk\", Clonglong, Cint(a), Cuint(b), Csize_t(c), Int16(k), f, d)", t)
-        @test occursin("@enum Kind::Int16", out)
+        @test occursin("primitive type Kind <: RepliBuild.OpenEnums.OpenEnum{Int16} 16 end", out)
         n = body("name_of")
         @test occursin(r"^function \w*name_of\(s::\w+, n::Integer\)"m, n)
         @test occursin("invoke(\"_mlir_ciface__ZN2ns7name_ofEPKcl_thunk\", Cint, s, Clong(n))", n)
