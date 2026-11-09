@@ -127,10 +127,14 @@ end
     enabled = false
     """)
     cfg = RepliBuild.ConfigurationManager.load_config(joinpath(dir, "replibuild.toml"))
-    libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
+    # `abs` is libc's: `int abs(int)`, declared here as taking and returning the
+    # enum. A Linux dlopen handle resolves a name through the library's
+    # dependencies, so libjulia's path reaches it; Windows looks a name up in
+    # the named DLL's own exports only, so the C runtime is named there.
+    libref = Sys.iswindows() ? Libdl.dlpath("msvcrt") :
+             abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
+    @test Libdl.dlsym(Libdl.dlopen(libref), :abs; throw_error = false) !== nothing
     ent(n, v) = Dict{String,Any}("name" => n, "value" => v)
-    # `abs` is libc's, reached through libjulia's dependencies: `int abs(int)`,
-    # declared here as taking and returning the enum.
     meta = Dict{String,Any}(
         "functions" => Any[Dict{String,Any}(
             "name" => "abs", "mangled" => "abs", "demangled" => "abs", "class" => "",

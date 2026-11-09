@@ -1174,6 +1174,10 @@ changes:
   allocate from the UCRT. Never `Libc.free` library memory, in generated code or
   in a Hub test: wrappers define `libc_free` (bound via `Compiler._pe_crt_dll`).
   Generated code that `Libc.malloc`s storage must also be the code that frees it.
+- **A library handle resolves only that DLL's own exports.** On Linux a name looked
+  up through libjulia's path reaches libc through its dependencies; on Windows
+  `could not load symbol`. A test whose wrapper really calls a libc function names
+  the C runtime there (`Libdl.dlpath("msvcrt")`, `test_open_enums.jl`).
 - Per-host config lives in `[platform.<host>]`, merged by `apply_platform_overlay`
   inside `load_config`. Anything else that reads a replibuild.toml for build inputs
   must go through it too (registry staging does). Keep Hub bases correct for Linux
