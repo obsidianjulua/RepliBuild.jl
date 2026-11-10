@@ -112,6 +112,14 @@ same answers), and Win64 reads no statement.
     wrapper's shape from this host's metadata on every host. The spec test's
     corpus uses `__builtin_memset`: a multiarch glibc keeps `<string.h>`'s
     target headers where a bare `--target` cannot find them.
+  - **The nested-struct probe read "not Windows" as SysV** (sixth arm64 run,
+    2026-11-10). Its 9-byte packed `PackedFV` must be refused by value on
+    SysV (MEMORY class, INTEGER blob); AAPCS64 puts a 9-byte record that is no
+    HFA in two general registers each way, so the plain call the generator
+    emits there is right, and the probe reported it as a silent crossing. The
+    probe asks `host_record_abi()` and, on Win64 and AAPCS64, checks the sum
+    the blob brings back; `test_abi_nested` pins the fixture's shape for all
+    three conventions from this host's metadata.
 
 ### A C enum takes any value of its underlying type (2026-11-08)
 

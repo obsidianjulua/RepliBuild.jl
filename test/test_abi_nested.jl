@@ -12,11 +12,12 @@
 # still prove the crossing works.
 # The probe runs in a subprocess so an ABI break can never take down the
 # test session (see also: a packed float struct must refuse loudly on SysV and
-# cross by reference on Win64).
+# cross by value on Win64 and AAPCS64, where size alone places a non-HFA).
 # =============================================================================
 
 using Test
 using RepliBuild
+import Libdl
 
 isdefined(@__MODULE__, :TestSupport) ||
     include(joinpath(@__DIR__, "support", "TestSupport.jl"))
@@ -78,5 +79,44 @@ const ABI_TEST_DIR = joinpath(@__DIR__, "abi_nested_test")
                        "nestint_roundtrip", "packed_float_byvalue",
                        "float_param_loosening", "with_helper"]
         @test startswith(get(v, probe_name, "no PROBE line"), "PASS")
+    end
+
+    @testset "PackedFV's crossing per convention, from this host's metadata" begin
+        # The live probe sees one host. The same metadata generated for each
+        # convention pins what the others emit for the 9-byte packed float
+        # blob: SysV refuses the argument (MEMORY class, INTEGER blob) and
+        # returns through an explicit sret; Win64 passes it by reference to a
+        # copy and returns through the hidden pointer Julia's ccall supplies;
+        # AAPCS64 puts a 9-byte non-HFA in two general registers each way.
+        # Both are plain calls for the blob.
+        W = RepliBuild.Wrapper
+        cfg = RepliBuild.ConfigurationManager.load_config(toml_path)
+        meta = RepliBuild._read_json(joinpath(ABI_TEST_DIR, "julia", "compilation_metadata.json"))
+        libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
+        body(code, name) = let i = findfirst("function $name(", code)
+            i === nothing ? "" : (r = SubString(code, first(i)); j = findfirst(r"\nend\b", r);
+                                  j === nothing ? String(r) : String(r[1:last(j)]))
+        end
+        checked = 0
+        for abi in (:sysv, :win64, :aapcs64)
+            code = W.generate_introspective_module_c(cfg, libref, meta, "AbiNestedX", W.create_type_registry(cfg), false;
+                                                     abi = abi)
+            take = body(code, "packedfv_sum")
+            make = body(code, "make_packedfv")
+            if abi === :sysv
+                @test (abi, occursin("ABI Safety Trap", take)) == (abi, true)
+            else
+                @test (abi, occursin("ccall((:packedfv_sum, LIBRARY_PATH), Cfloat, (PackedFV,), s)", take)) == (abi, true)
+            end
+            if abi === :sysv
+                @test (abi, occursin("(Ptr{PackedFV}, ), ret_buf", make)) == (abi, true)
+            else
+                @test (abi, occursin("ccall((:make_packedfv, LIBRARY_PATH), PackedFV, (), )", make)) == (abi, true)
+            end
+            # The field-resolved records cross plainly on every convention.
+            @test (abi, occursin("ccall((:xform_p, LIBRARY_PATH), Vec2, (XForm,), t)", body(code, "xform_p"))) == (abi, true)
+            checked += 1
+        end
+        @test checked == 3
     end
 end

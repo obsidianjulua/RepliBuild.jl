@@ -6,6 +6,7 @@
 wrapper = ARGS[1]
 include(wrapper)
 using .AbiNested
+import RepliBuild   # the wrapper loads it; `host_record_abi` names this host's convention
 
 approx(a, b) = isapprox(a, b; atol=1e-4)
 
@@ -63,19 +64,23 @@ end
 # is per target. SysV: 9 bytes with a float at offset 1 is MEMORY class while
 # the blob classifies INTEGER, and the float puts it in the SSE trap besides, so
 # the argument must be refused loudly. Win64 passes any 9-byte record by
-# reference to a copy and returns it through a hidden pointer, the blob
-# included, so both directions must work. The target is the host's, decided
-# here independently of the generator's own `_c_record_abi`.
+# reference to a copy and returns it through a hidden pointer, and AAPCS64 puts
+# a 9-byte record that is no HFA in two general registers each way, the blob
+# included, so on both of those the two directions must work and the sum must
+# come back right: the value check is what no generator verdict can pass by
+# accident. The target is the host's.
+const ABI = RepliBuild.host_record_abi()
 let opaque = :_data in fieldnames(PackedFV)
     s = try
-        make_packedfv()   # SysV: explicit sret (MEMORY class); Win64: hidden pointer by size
+        make_packedfv()   # SysV: explicit sret (MEMORY class); Win64 and AAPCS64: by size
     catch e
         nothing
     end
-    if Sys.iswindows()
+    if ABI in (:win64, :aapcs64)
         v = s === nothing ? nothing : try packedfv_sum(s) catch e; sprint(showerror, e) end
         ok = opaque && v isa AbstractFloat && approx(v, 11.0)
-        println("PROBE packed_float_byvalue: ", ok ? "PASS (Win64: crosses by reference)" : "FAIL",
+        how = ABI === :win64 ? "crosses by reference" : "crosses in general registers"
+        println("PROBE packed_float_byvalue: ", ok ? "PASS ($ABI: $how)" : "FAIL ($ABI)",
                 " opaque=", opaque, " s=", s, " sum=", v)
     elseif s === nothing
         println("PROBE packed_float_byvalue: ", opaque ? "PASS (return refused loudly)" : "FAIL (not opaque)")
