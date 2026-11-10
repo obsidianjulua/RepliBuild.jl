@@ -392,7 +392,8 @@ Contents of the .debug_info section:
 @testset "Tier 3 by-value record classification (C1)" begin
 
     @testset "the target comes from the host, in one place" begin
-        @test _SW._c_record_abi() === (Sys.iswindows() ? :win64 : :sysv)
+        @test _SW._c_record_abi() === RepliBuild.host_record_abi()
+        @test _SW._c_record_abi() === (Sys.iswindows() ? :win64 : Sys.ARCH === :aarch64 ? :aapcs64 : :sysv)
         @test_throws ArgumentError _SW._c_return_in_memory(8, false; abi = :aapcs32)
     end
 

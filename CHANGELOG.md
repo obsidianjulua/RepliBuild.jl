@@ -73,8 +73,27 @@ same answers), and Win64 reads no statement.
   `clang --target=aarch64-linux-gnu -S -emit-llvm` of the same unit: a
   specification test, like `test_win64_abi.jl`. The live run is the new
   `ubuntu-24.04-arm` cell of `tier2-linux.yml` (LLVM 23, Julia 1.13), and
-  `test.yml` runs runtests on that runner too. Neither arm64 job has been
-  observed green yet: this change was made on an x86-64 box.
+  `test.yml` runs runtests on that runner too. This change was made on an
+  x86-64 box; the first arm64 run found two things:
+  - **The JIT could not resolve `DW.ref.__gxx_personality_v0`** and every thunk
+    of a library went with it. AArch64 ELF spells the personality in
+    `.eh_frame` as `DW_EH_PE_indirect|pcrel` through a per-object slot, a weak
+    hidden symbol the MC layer emits after the IR layer has listed the
+    module's symbols; nothing claims it, and RuntimeDyld takes the relocation
+    for an external one. `JlcsJIT.cpp` now sets
+    `setAutoClaimResponsibilityForObjectSymbols` on AArch64 ELF, as `lli` does
+    for PowerPC, whose encoding is the same; the slot stays the object's own,
+    next to its code, where the 32-bit pc-relative reference reaches it.
+  - **Tests that stated the x86-64 answer through the host.** The oracle test
+    now generates SysV statements by name; `test_sysv_record_abi`,
+    `test_thunk_byte_regions`, `test_by_value_crossing` and
+    `test_c_sret_classification` ask each convention by name; the live SysV,
+    SIMD and C sret tests take the AArch64 answer where it differs (a
+    `long double` HFA return works, every vector crossing is refused, no
+    carrier and no aligned buffer), and `test_c_sret_abi` pins the AAPCS64
+    wrapper's shape from this host's metadata on every host. The spec test's
+    corpus uses `__builtin_memset`: a multiarch glibc keeps `<string.h>`'s
+    target headers where a bare `--target` cannot find them.
 
 ### A C enum takes any value of its underlying type (2026-11-08)
 

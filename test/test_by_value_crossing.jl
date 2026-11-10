@@ -460,13 +460,17 @@ Contents of the .debug_info section:
         @test k("Box<double>") == (:layout, "Box<double>")    # template spelling
         @test k("Color") == (:enum, "__enum__Color")
         @test k("ns::Color") == (:enum, "__enum__Color")
-        # SysV drops a 1-byte empty class. Win64 passes it as i8 — see
-        # by_value_crossing. Both answers have to stay, or one host's suite
-        # goes green by stating the other's ABI.
-        empty_tag = Sys.iswindows() ? (:regpad, "i8") : (:ignore, nothing)
-        @test k("Tag") == empty_tag
-        @test k("const Tag") == empty_tag
-        @test k("ee::Tag") == empty_tag
+        # SysV drops a 1-byte empty class. Win64 passes it as i8, AAPCS64 as
+        # i64 (and returns it as nothing) — see by_value_crossing. Every
+        # answer is asked by name, so no host's suite goes green by stating
+        # another's ABI; the default is the host's.
+        empty_tags = Dict(:sysv => (:ignore, nothing), :win64 => (:regpad, "i8"), :aapcs64 => (:regpad, "i64"))
+        for (abi, want) in sort!(collect(empty_tags); by = first), t in ("Tag", "const Tag", "ee::Tag")
+            @test (abi, t, BVF.by_value_crossing(t, structs, ra; abi)) == (abi, t, want)
+            @test (abi, t, BVF.by_value_crossing(t, structs, ra; abi, ret = true)) ==
+                  (abi, t, abi === :win64 ? (:regpad, "i8") : (:ignore, nothing))
+        end
+        @test k("Tag") == empty_tags[RepliBuild.host_record_abi()]
         @test k("Guard") == (:indirect, nothing)
         @test k("P3") == (:opaque, nothing)                   # base but no members
         @test k("Range") == (:opaque, nothing)                # declaration only
@@ -538,37 +542,35 @@ Contents of the .debug_info section:
     end
 
     @testset "generate_function_thunks acts on the verdict" begin
-        gen(f) = BVF.generate_function_thunks([f], structs; may_throw = true, record_abi = ra)
+        gen(f; abi = RepliBuild.host_record_abi()) =
+            BVF.generate_function_thunks([f], structs; may_throw = true, record_abi = ra, abi)
         decl(ir, m) = strip(first(l for l in split(ir, '\n') if startswith(l, "func.func private @$m(")))
 
         # Empty record first. SysV: clang drops it, and `x` is still read from
         # the SECOND Julia slot. Win64: clang takes an i8, which carries no
         # state, so the thunk passes a zero and still reads `x` from slot 1.
-        ir = gen(fn("_ZN2ee8with_tagENS_3TagEi", ["Tag", "int"], "int"))
-        if Sys.iswindows()
-            @test decl(ir, "_ZN2ee8with_tagENS_3TagEi") ==
-                  "func.func private @_ZN2ee8with_tagENS_3TagEi(i8, i32) -> i32"
-            @test occursin("llvm.mlir.constant(0 : i8) : i8", ir)
-        else
-            @test decl(ir, "_ZN2ee8with_tagENS_3TagEi") ==
-                  "func.func private @_ZN2ee8with_tagENS_3TagEi(i32) -> i32"
+        # AAPCS64: an i64, the same way. Every convention by name.
+        with_tag = fn("_ZN2ee8with_tagENS_3TagEi", ["Tag", "int"], "int")
+        for (abi, params, pad) in ((:sysv, "i32", nothing), (:win64, "i8, i32", "i8"), (:aapcs64, "i64, i32", "i64"))
+            ir = gen(with_tag; abi)
+            @test (abi, decl(ir, "_ZN2ee8with_tagENS_3TagEi")) ==
+                  (abi, "func.func private @_ZN2ee8with_tagENS_3TagEi($params) -> i32")
+            @test (abi, pad === nothing || occursin("llvm.mlir.constant(0 : $pad) : $pad", ir)) == (abi, true)
+            @test (abi, occursin("fieldOffset = 8 : i64", ir)) == (abi, true)
+            @test (abi, occursin("fieldOffset = 0 : i64", ir)) == (abi, false)
         end
-        @test occursin("fieldOffset = 8 : i64", ir)
-        @test !occursin("fieldOffset = 0 : i64", ir)
 
-        # Empty record returned. The thunk is void on both ABIs (the wrapper
+        # Empty record returned. The thunk is void on every ABI (the wrapper
         # builds the singleton). Win64's callee still returns i8; declaring
-        # it void would not be the function clang emitted.
-        ir = gen(fn("_ZN2ee8make_tagEi", ["int"], "Tag"))
-        if Sys.iswindows()
-            @test decl(ir, "_ZN2ee8make_tagEi") ==
-                  "func.func private @_ZN2ee8make_tagEi(i32) -> i8"
-            @test occursin("-> i8", ir)
-        else
-            @test decl(ir, "_ZN2ee8make_tagEi") ==
-                  "func.func private @_ZN2ee8make_tagEi(i32)"
+        # it void would not be the function clang emitted. SysV's and
+        # AAPCS64's callees are void.
+        make_tag = fn("_ZN2ee8make_tagEi", ["int"], "Tag")
+        for (abi, sig) in ((:sysv, "(i32)"), (:win64, "(i32) -> i8"), (:aapcs64, "(i32)"))
+            ir = gen(make_tag; abi)
+            @test (abi, decl(ir, "_ZN2ee8make_tagEi")) == (abi, "func.func private @_ZN2ee8make_tagEi$sig")
+            @test (abi, occursin(r"func\.func @_ZN2ee8make_tagEi_thunk\(%args_ptr: !llvm\.ptr\)\s+attributes", ir)) == (abi, true)
         end
-        @test occursin(r"func\.func @_ZN2ee8make_tagEi_thunk\(%args_ptr: !llvm\.ptr\)\s+attributes", ir)
+        ir = gen(make_tag)
 
         # Non-trivial for calls: the callee takes the object's address.
         ir = gen(fn("_ZN2ee10with_guardENS_5GuardEi", ["Guard", "int"], "int"))

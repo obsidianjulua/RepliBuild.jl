@@ -33,6 +33,7 @@
 
 using Test
 using RepliBuild
+import Libdl
 
 isdefined(@__MODULE__, :TestSupport) ||
     include(joinpath(@__DIR__, "support", "TestSupport.jl"))
@@ -52,6 +53,58 @@ const C_SRET_FUNCTIONS = ["f4", "f2", "make_ic12", "ic12_sum", "make_p4", "make_
 const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
                                "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12",
                                C_SRET_ALIGNED...]
+
+# One function's body in a generated wrapper (its `function name(` up to `end`).
+function c_sret_body(wsrc::AbstractString, name::AbstractString)
+    i = findfirst("function $name(", wsrc)
+    i === nothing && return ""
+    r = SubString(wsrc, first(i))
+    j = findfirst(r"\nend\b", r)
+    return j === nothing ? String(r) : String(r[1:last(j)])
+end
+
+"""
+    c_sret_aapcs64_shapes(wsrc)
+
+What GeneratorC emits for this fixture under AAPCS64 (`abi = :aapcs64`), pinned
+when the convention was built (2026-11-09): registers at 16 bytes or less and
+HFAs at any size through Julia's own lowering, so every record return is a
+plain `ccall` (no explicit sret, no aligned buffer: an HFA over 16 bytes, D4A,
+comes back in registers, and no AArch64 load checks a buffer's alignment); a
+pointer to a copy above 16 bytes with no carrier (`_RB_ByVal16` is never
+emitted); the float blobs refused inside the 64-byte window (an HFA may hide in
+them); and every record holding a SIMD vector refused. Asserted on the host's
+wrapper on an AArch64 host and on a wrapper generated for AAPCS64 everywhere.
+"""
+function c_sret_aapcs64_shapes(wsrc::AbstractString)
+    body(name) = c_sret_body(wsrc, name)
+    plain = Dict("take_d4a" => "(Big24, D4A,), p, v)", "take_ma32" => "(Big24, MA32,), p, v)",
+                 "take_nesta" => "(Big24, NestA,), p, v)", "take_a32" => "(Big24, A32,), p, v)",
+                 "take_v4a" => "(Big24, V4A,), p, v)", "take_hv4" => "(Big24, HV4,), p, v)", "take_p8" => "(P8,), v)")
+    checked = 0
+    for (f, sig) in sort!(collect(plain); by = first)
+        @test (f, occursin("ccall((:$f, LIBRARY_PATH), ", body(f)) && occursin(sig, body(f))) == (f, true)
+        checked += 1
+    end
+    for f in ("make_v4a", "make_d4a", "make_ma32", "make_a32", "make_hv4", "make_nesta",
+              "make_p4", "make_p8", "make_out6", "make_pk17", "make_big24", "make_is20", "make_ic12", "f2", "f4")
+        b = body(f)
+        @test (f, occursin("ccall((:$f, LIBRARY_PATH), ", b) && !occursin("ret_ptr", b) && !occursin("ret_buf", b)) ==
+              (f, true)
+        checked += 1
+    end
+    for f in ("take_ab16", "make_ab16", "make_bf12")
+        @test (f, occursin("AAPCS64 register window", body(f))) == (f, true)
+        checked += 1
+    end
+    for f in ("take_hvec", "make_hvec")
+        @test (f, occursin("holds a SIMD vector", body(f))) == (f, true)
+        checked += 1
+    end
+    @test checked == 27
+    @test !occursin("_rb_byval16(", wsrc)
+    @test !occursin("ABI Safety Trap", body("take_a32"))      # no slot to align: a plain call
+ end
 
 @testset "Tier 3 record returns, live (C1)" begin
     toml_path = joinpath(C_SRET_DIR, "replibuild.toml")
@@ -115,7 +168,10 @@ const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
             i === nothing ? "" : (r = SubString(wsrc, first(i)); j = findfirst(r"\nend\b", r);
                                   j === nothing ? String(r) : String(r[1:last(j)]))
         end
-        if RepliBuild.Wrapper._c_record_abi() === :sysv
+        host_abi = RepliBuild.Wrapper._c_record_abi()
+        if host_abi === :aapcs64
+            c_sret_aapcs64_shapes(wsrc)
+        elseif host_abi === :sysv
             checked = 0
             for f in ("take_d4a", "take_ma32", "take_hvec", "take_hv4", "take_nesta")
                 @test (f, occursin("_rb_byval16(v, _RB_ByVal16{2})", body(f))) == (f, true)
@@ -145,6 +201,18 @@ const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
             # Big24 is 8-aligned: Julia's own copy, as before.
             @test occursin("(Big24,", body("take_d4a")) && !occursin("_rb_byval16(p", body("take_d4a"))
         end
+    end
+
+    @testset "the wrapper's shape for AAPCS64, from this host's metadata" begin
+        # The same metadata generated for AArch64: what an AAPCS64 host's
+        # wrapper looks like, pinned on every host (`c_sret_aapcs64_shapes`).
+        W = RepliBuild.Wrapper
+        cfg = RepliBuild.ConfigurationManager.load_config(toml_path)
+        meta = RepliBuild._read_json(joinpath(C_SRET_DIR, "julia", "compilation_metadata.json"))
+        libref = abspath(first(filter(p -> occursin("libjulia", basename(p)), Libdl.dllist())))
+        code = W.generate_introspective_module_c(cfg, libref, meta, "CSretA64", W.create_type_registry(cfg), false;
+                                                 abi = :aapcs64)
+        c_sret_aapcs64_shapes(code)
     end
 
     if requires("C record return class vs clang", :clang)

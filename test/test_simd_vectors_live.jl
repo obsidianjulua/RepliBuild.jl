@@ -56,6 +56,10 @@ record or vector after the prefix, which crosses the same way in the C build
 and, in the C++ build, the way the thunk crosses it.
 """
 function simd_live_expected(lang::Symbol, name::String, dir::String)
+    # AAPCS64 passes a vector, bare or as a homogeneous vector aggregate, in
+    # vector registers; neither tier models that yet (`aapcs64_record_abi`,
+    # GeneratorC's vector offenders), so every crossing is a refusal there.
+    RepliBuild.host_record_abi() === :aapcs64 && return "TRAP"
     win = Sys.iswindows()
     base = replace(name, r"^c_" => "")
     if base in SIMD_LIVE_BARE

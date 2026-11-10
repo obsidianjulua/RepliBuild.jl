@@ -870,8 +870,13 @@ the test named when you touch the area.
   / 0) replaces the literal 16 of the register-window refusals;
   `_c_return_in_memory` is never `true` on AAPCS64 (an HFA over 16 bytes
   returns in registers; Julia's lowering decides from the stand-in's fields);
-  `_c_register_pair_misplaced` is its one trap. (`test_aapcs64_record_abi.jl`,
-  devtests `test_aapcs64_abi_spec.jl` against clang's aarch64 IR; live only on
+  `_c_register_pair_misplaced` is its one trap. **RuntimeDyld on AArch64 ELF
+  needs `setAutoClaimResponsibilityForObjectSymbols`** (`JlcsJIT.cpp`): the
+  `.eh_frame` personality goes through a per-object `DW.ref.__gxx_personality_v0`
+  slot the MC layer emits after the IR layer listed the symbols, and unclaimed
+  it is "Symbols not found" for every thunk of the library (first arm64 run,
+  2026-11-09). (`test_aapcs64_record_abi.jl`, devtests
+  `test_aapcs64_abi_spec.jl` against clang's aarch64 IR; live only on
   tier2-linux's arm64 cell.)
 - **A record's SysV class comes from its DWARF facts, never from the body it
   crosses as.** `FunctionGen.sysv_record_abi` (`ir_gen/SysVRecordABI.jl`)
