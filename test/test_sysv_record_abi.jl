@@ -212,15 +212,19 @@ const _SR = Dict{String,Any}(
     end
 
     @testset "StructGen emits long double, _Complex and __int128 at their size" begin
+        # `long double` is the host's: x87 `f80` on x86-64, IEEE `f128` on
+        # AArch64 (`C_LONG_DOUBLE_MLIR`); 16 bytes either way.
+        ld = RepliBuild.C_LONG_DOUBLE_MLIR
+        @test ld == (Sys.ARCH === :aarch64 ? "f128" : "f80")
         @test _SRSG.get_struct_definition_string("c_ld", _SR["c_ld"], _SR) ==
-              "!jlcs.c_struct<\"c_ld\", [f80], [[0 : i64]], packed = true>"
-        @test _SRSG.get_llvm_equivalent_type_string("c_ld", _SR["c_ld"], _SR) == "!llvm.struct<packed (f80) >"
+              "!jlcs.c_struct<\"c_ld\", [$ld], [[0 : i64]], packed = true>"
+        @test _SRSG.get_llvm_equivalent_type_string("c_ld", _SR["c_ld"], _SR) == "!llvm.struct<packed ($ld) >"
         @test _SRSG.get_struct_definition_string("c_cd", _SR["c_cd"], _SR) ==
               "!jlcs.c_struct<\"c_cd\", [!llvm.struct<(f64, f64)>], [[0 : i64]], packed = true>"
         @test _SRSG.get_struct_definition_string("c_i128_l", _SR["c_i128_l"], _SR) ==
               "!llvm.struct<\"c_i128_l\", (i128, i64, !llvm.array<8 x i8>)>"
         # Measured as emitted: 16 bytes each, 16-aligned.
-        @test _SRSG._mlir_layout("!llvm.struct<packed (f80) >", _SR) == (16, 1)
+        @test _SRSG._mlir_layout("!llvm.struct<packed ($ld) >", _SR) == (16, 1)
         @test _SRSG._mlir_layout("!llvm.struct<(i128, i64, !llvm.array<8 x i8>)>", _SR) == (32, 16)
         @test _SRSG._mlir_layout("!llvm.struct<(f32, f32)>", _SR) == (8, 4)
     end

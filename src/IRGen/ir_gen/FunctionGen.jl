@@ -986,7 +986,14 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         end
 
         # The hidden return pointer is the first argument (declared above).
-        ret_sret && (pushfirst!(call_args, "%sret_slot"); pushfirst!(arg_facts, ""))
+        # The hidden return pointer of a pass-by-reference record. On x86-64 a
+        # plain first pointer lands where the convention wants it (RDI, RCX);
+        # AAPCS64 wants it in x8, the indirect result register, which only an
+        # `sret` attribute on the call reaches, so the statement names the slot
+        # (`aapcs64_sret_statement`; Ticket came back as garbage on the first
+        # arm64 run, 2026-11-09).
+        ret_sret && (pushfirst!(call_args, "%sret_slot");
+                     pushfirst!(arg_facts, abi === :aapcs64 ? aapcs64_sret_statement(ret_key, structs) : ""))
 
         # The call's attributes: the callee, and the class of every record it
         # passes or returns by value under the convention generated for

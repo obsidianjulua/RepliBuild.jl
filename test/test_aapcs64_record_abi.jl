@@ -232,6 +232,27 @@ const _AR = Dict{String,Any}(
         @test c.trap === nothing
     end
 
+    @testset "a pass-by-reference return names its hidden pointer for x8" begin
+        # DW_CC_pass_by_reference: the thunk owns an sret slot and passes it
+        # first. AAPCS64 wants that pointer in x8, which only `llvm.sret`
+        # reaches, so the statement names the slot and its bytes; x86-64 puts
+        # it in the first argument register and states nothing.
+        structs = Dict{String,Any}("Ticket" => _arrec(12, _arm("n", "int", "0x0", 4), _arm("a", "int", "0x4", 4),
+                                                      _arm("b", "int", "0x8", 4)))
+        ra = Dict{String,Any}("Ticket" => Dict{String,Any}("pass" => "reference", "byte_size" => "0xc"))
+        f = _arfn("make_ticket", "Ticket", "int")
+        @test _ARFG.aapcs64_sret_statement("Ticket", structs) == "sret:12"
+        ir = _ARFG.generate_function_thunks(Any[f], structs; record_abi = ra, abi = :aapcs64)
+        @test occursin("%sret_slot", ir)
+        @test occursin("callee = @make_ticket, aapcs64_args = [\"sret:12\", \"\"]", ir)
+        for other in (:sysv, :win64)
+            irx = _ARFG.generate_function_thunks(Any[f], structs; record_abi = ra, abi = other)
+            @test (other, occursin("%sret_slot", irx)) == (other, true)
+            @test (other, occursin("sret:", irx)) == (other, false)
+            @test (other, occursin("{ callee = @make_ticket }", irx)) == (other, true)
+        end
+    end
+
     @testset "GeneratorC's Tier-3 predicates under AAPCS64" begin
         @test _ARW._c_class_window(:sysv) == 16
         @test _ARW._c_class_window(:aapcs64) == 64

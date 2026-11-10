@@ -684,6 +684,12 @@ static bool parseSysVFacts(StringRef s, MLIRContext* ctx, SysVFacts& out, std::s
 //   "int:<bits>"              a return of its exact size in one register
 //   "hfa:<f16|f32|f64|f128>:<n>"  a homogeneous floating-point aggregate,
 //                             `[n x fT]`, one floating register per leaf
+//   "sret:<bytes>"            on a POINTER operand: the hidden return pointer
+//                             of a pass-by-reference record the thunk passes
+//                             first. AAPCS64 wants it in x8, the indirect
+//                             result register, which only `llvm.sret` reaches;
+//                             a plain pointer goes in x0 (Ticket came back as
+//                             garbage on the first arm64 run, 2026-11-09).
 //
 // Why facts and not the body, again: an HFA of 12 bytes is `[3 x f32]` only if
 // every member is a float, and a tiled body spells a nested record as bytes;
@@ -696,6 +702,7 @@ struct A64Facts {
     bool memory = false;
     unsigned align = 8;
     Type coerced;                         // the one register block, when not memory/ignore
+    uint64_t sretBytes = 0;               // "sret:<bytes>": this pointer is the hidden return slot
 };
 
 static bool parseA64Facts(StringRef s, MLIRContext* ctx, A64Facts& out, std::string& err) {
@@ -719,6 +726,15 @@ static bool parseA64Facts(StringRef s, MLIRContext* ctx, A64Facts& out, std::str
     }
     if (s == "i128") {
         out.coerced = IntegerType::get(ctx, 128);
+        return true;
+    }
+    if (s.consume_front("sret:")) {
+        uint64_t n = 0;
+        if (s.getAsInteger(10, n) || n == 0) {
+            err = ("a hidden return slot has a size in bytes: `sret:" + s + "`").str();
+            return false;
+        }
+        out.sretBytes = n;
         return true;
     }
     if (s.consume_front("gpr:")) {
@@ -1200,6 +1216,17 @@ struct CallShape {
     // loaded from; 0 leaves it to the slot type's (`kA64CoercionSlotAlign`
     // under AAPCS64).
     unsigned retSlotAlign = 0;
+    // Every pointer argument that takes the `llvm.sret` attribute, with its
+    // pointee type: the shape's own hidden return slot and the generator's
+    // (a pass-by-reference record, stated `sret:<bytes>`). AAPCS64 only: the
+    // indirect result register (x8) is reached by the attribute alone. x86-64
+    // puts the pointer in the first argument register either way, and its
+    // IR stays byte for byte what it was.
+    struct Sret {
+        unsigned index;
+        Type pointee;
+    };
+    SmallVector<Sret, 1> sret;
 };
 
 static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location loc,
@@ -1241,8 +1268,11 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
     }
 
     // If sret, the return pointer is the first argument. On both SysV and
-    // Win64 that pointer occupies an integer argument register.
+    // Win64 that pointer occupies an integer argument register; AAPCS64 puts
+    // it in x8, which the `llvm.sret` attribute selects.
     if (s.needsSret) {
+        if (target == AbiTarget::AAPCS64)
+            s.sret.push_back({static_cast<unsigned>(s.args.size()), s.sretStructType});
         s.args.push_back(s.sretSlot);
         s.argTypes.push_back(ptrType);
     }
@@ -1355,6 +1385,14 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
             continue;
         }
 
+        // A pointer the generator stated as the hidden return slot of a
+        // pass-by-reference record: under AAPCS64 it takes `llvm.sret` of the
+        // record's bytes and travels in x8.
+        if (target == AbiTarget::AAPCS64 && k < facts.a64args.size() && facts.a64args[k].sretBytes &&
+            isa<LLVM::LLVMPointerType>(argType)) {
+            s.sret.push_back({static_cast<unsigned>(s.args.size()),
+                              LLVM::LLVMArrayType::get(rewriter.getI8Type(), facts.a64args[k].sretBytes)});
+        }
         s.args.push_back(arg);
         s.argTypes.push_back(arg.getType());
         noteScalar(arg.getType());
@@ -1401,11 +1439,11 @@ static Value materializeCallResult(ConversionPatternRewriter& rewriter, Location
     return LLVM::LoadOp::create(rewriter, loc, s.origRetStructType, slot);
 }
 
-// `llvm.byval` has to travel on the call site AND on the declaration: the
-// call site is what the backend lowers, and the declaration is what the
-// verifier checks the call site against.
+// `llvm.byval` and `llvm.sret` have to travel on the call site AND on the
+// declaration: the call site is what the backend lowers, and the declaration
+// is what the verifier checks the call site against.
 static ArrayAttr byValArgAttrs(ConversionPatternRewriter& rewriter, const CallShape& s) {
-    if (s.byval.empty())
+    if (s.byval.empty() && s.sret.empty())
         return nullptr;
     SmallVector<Attribute> attrs(s.args.size(), rewriter.getDictionaryAttr({}));
     for (const CallShape::ByVal& b : s.byval) {
@@ -1414,6 +1452,11 @@ static ArrayAttr byValArgAttrs(ConversionPatternRewriter& rewriter, const CallSh
                                   TypeAttr::get(b.pointee)),
             rewriter.getNamedAttr(LLVM::LLVMDialect::getAlignAttrName(),
                                   rewriter.getI64IntegerAttr(b.align))});
+    }
+    for (const CallShape::Sret& r : s.sret) {
+        attrs[r.index] = rewriter.getDictionaryAttr({
+            rewriter.getNamedAttr(LLVM::LLVMDialect::getStructRetAttrName(),
+                                  TypeAttr::get(r.pointee))});
     }
     return rewriter.getArrayAttr(attrs);
 }
@@ -1432,6 +1475,9 @@ static void retargetCallee(ConversionPatternRewriter& rewriter, ModuleOp moduleO
             calleeFn.setArgAttr(b.index, LLVM::LLVMDialect::getAlignAttrName(),
                                 rewriter.getI64IntegerAttr(b.align));
         }
+        for (const CallShape::Sret& r : s.sret)
+            calleeFn.setArgAttr(r.index, LLVM::LLVMDialect::getStructRetAttrName(),
+                                TypeAttr::get(r.pointee));
     } else if (auto llvmCalleeFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(callee)) {
         llvmCalleeFn.setFunctionType(LLVM::LLVMFunctionType::get(
             callResultTypes.empty() ? (Type)LLVM::LLVMVoidType::get(rewriter.getContext())
@@ -1443,6 +1489,9 @@ static void retargetCallee(ConversionPatternRewriter& rewriter, ModuleOp moduleO
             llvmCalleeFn.setArgAttr(b.index, LLVM::LLVMDialect::getAlignAttrName(),
                                     rewriter.getI64IntegerAttr(b.align));
         }
+        for (const CallShape::Sret& r : s.sret)
+            llvmCalleeFn.setArgAttr(r.index, LLVM::LLVMDialect::getStructRetAttrName(),
+                                    TypeAttr::get(r.pointee));
     }
 }
 
@@ -2314,7 +2363,13 @@ struct CallShapeProbe : public ConversionPattern {
                 os << '\t';
                 auto st = dyn_cast<LLVM::LLVMStructType>(arg.getType());
                 if (!st) {
-                    os << "scalar:" << arg.getType();
+                    // A pointer the generator stated as a hidden return slot
+                    // (`sret:<bytes>`, AAPCS64) is named; any other scalar
+                    // prints its type.
+                    if (llvm::any_of(s.sret, [&](const CallShape::Sret& r) { return r.index == j; }))
+                        os << "sretptr";
+                    else
+                        os << "scalar:" << arg.getType();
                     ++j;
                     continue;
                 }

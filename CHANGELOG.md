@@ -84,6 +84,17 @@ same answers), and Win64 reads no statement.
     `setAutoClaimResponsibilityForObjectSymbols` on AArch64 ELF, as `lli` does
     for PowerPC, whose encoding is the same; the slot stays the object's own,
     next to its code, where the 32-bit pc-relative reference reaches it.
+  - **A pass-by-reference record came back as garbage** (`Ticket`, the
+    stress test). The thunk passes the hidden return pointer as a plain first
+    argument, which x86-64 puts where the sret pointer goes (RDI, RCX) and
+    AArch64 does not: the indirect result register is x8, reached only by an
+    `sret` attribute. The generator now states the slot (`aapcs64_args =
+    ["sret:<bytes>", …]`) and `buildCallShape` stamps `llvm.sret` on it and
+    on its own memory-class return slots, call site and declaration, under
+    AAPCS64 alone; x86-64 IR is unchanged. Checked from this box with a
+    `JLCS_FORCE_ABI_AAPCS64` build: the lowered module's LLVM IR carries
+    `ptr sret([12 x i8])`, and `llc -mtriple=aarch64-unknown-linux-gnu` puts
+    the pointer in `x8` before the call and the HFA in `d0`–`d2`.
   - **Tests that stated the x86-64 answer through the host.** The oracle test
     now generates SysV statements by name; `test_sysv_record_abi`,
     `test_thunk_byte_regions`, `test_by_value_crossing` and

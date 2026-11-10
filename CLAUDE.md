@@ -875,7 +875,11 @@ the test named when you touch the area.
   `.eh_frame` personality goes through a per-object `DW.ref.__gxx_personality_v0`
   slot the MC layer emits after the IR layer listed the symbols, and unclaimed
   it is "Symbols not found" for every thunk of the library (first arm64 run,
-  2026-11-09). (`test_aapcs64_record_abi.jl`, devtests
+  2026-11-09). **A hidden return pointer needs `llvm.sret` there**: AArch64's
+  indirect result register is x8, not the first argument register, so the
+  generator states a pass-by-reference record's slot (`sret:<bytes>`) and
+  `buildCallShape` stamps the attribute on it and on its own sret slots,
+  under AAPCS64 alone (x86-64 IR unchanged; `Ticket` came back as garbage). (`test_aapcs64_record_abi.jl`, devtests
   `test_aapcs64_abi_spec.jl` against clang's aarch64 IR; live only on
   tier2-linux's arm64 cell.)
 - **A record's SysV class comes from its DWARF facts, never from the body it

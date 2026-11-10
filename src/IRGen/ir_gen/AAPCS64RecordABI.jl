@@ -169,6 +169,18 @@ function aapcs64_trap_reason(key, structs; ret::Bool)
 end
 
 """
+    aapcs64_sret_statement(key, structs) -> String
+
+The statement for the hidden return pointer the thunk passes first for a
+pass-by-reference record (`DW_CC_pass_by_reference`): `sret:<bytes>`, the
+record's size. `buildCallShape` under AAPCS64 stamps `llvm.sret` of that many
+bytes on the pointer, which puts it in x8, the indirect result register; a
+plain pointer would go in x0. SysV and Win64 want it in the first argument
+register, which a plain pointer already is, so they state nothing.
+"""
+aapcs64_sret_statement(key, structs) = "sret:$(_sysv_record_size(structs[String(key)]))"
+
+"""
     record_statement(key, structs; ret, abi) -> String
 
 The statement the thunk generator puts on a call for the record `key` crossing
