@@ -274,6 +274,12 @@ const _AR = Dict{String,Any}(
             checked += 1
         end
         @test checked == length(table)
+        # The facts settle it where they can: a float-bearing blob the facts
+        # call no HFA travels by size, as the blob does.
+        @test !_ARW._c_register_class_misstated(24, true; abi = :aapcs64, hfa = false)
+        @test _ARW._c_register_class_misstated(24, true; abi = :aapcs64, hfa = true)
+        @test _ARW._c_register_class_misstated(24, true; abi = :aapcs64, hfa = nothing)
+        @test _ARW._c_register_class_misstated(8, true; abi = :sysv, hfa = false)      # SysV has no HFA to rule out
         # No slot and no copy to align.
         for (n, mem, al, exact) in ((32, true, 16, true), (24, true, 32, false), (8, false, 16, true))
             @test (n, _ARW._c_byval_param_shape(n, mem, al, exact; abi = :aapcs64)) == (n, :own)

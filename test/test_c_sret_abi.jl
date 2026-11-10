@@ -72,9 +72,12 @@ HFAs at any size through Julia's own lowering, so every record return is a
 plain `ccall` (no explicit sret, no aligned buffer: an HFA over 16 bytes, D4A,
 comes back in registers, and no AArch64 load checks a buffer's alignment); a
 pointer to a copy above 16 bytes with no carrier (`_RB_ByVal16` is never
-emitted); the float blobs refused inside the 64-byte window (an HFA may hide in
-them); and every record holding a SIMD vector refused. Asserted on the host's
-wrapper on an AArch64 host and on a wrapper generated for AAPCS64 everywhere.
+emitted); the float blobs AB16 and BF12 called, since their facts (a bitfield
+in each) rule an HFA out and they travel by size like their blobs, except
+`take_ab16`, whose 16-aligned 16 bytes AAPCS64 puts in an even register pair
+the blob cannot reach (`_c_register_pair_misplaced`); and every record holding
+a SIMD vector refused. Asserted on the host's wrapper on an AArch64 host and on
+a wrapper generated for AAPCS64 everywhere.
 """
 function c_sret_aapcs64_shapes(wsrc::AbstractString)
     body(name) = c_sret_body(wsrc, name)
@@ -86,17 +89,16 @@ function c_sret_aapcs64_shapes(wsrc::AbstractString)
         @test (f, occursin("ccall((:$f, LIBRARY_PATH), ", body(f)) && occursin(sig, body(f))) == (f, true)
         checked += 1
     end
-    for f in ("make_v4a", "make_d4a", "make_ma32", "make_a32", "make_hv4", "make_nesta",
+    for f in ("make_v4a", "make_d4a", "make_ma32", "make_a32", "make_hv4", "make_nesta", "make_ab16", "make_bf12",
               "make_p4", "make_p8", "make_out6", "make_pk17", "make_big24", "make_is20", "make_ic12", "f2", "f4")
         b = body(f)
         @test (f, occursin("ccall((:$f, LIBRARY_PATH), ", b) && !occursin("ret_ptr", b) && !occursin("ret_buf", b)) ==
               (f, true)
         checked += 1
     end
-    for f in ("take_ab16", "make_ab16", "make_bf12")
-        @test (f, occursin("AAPCS64 register window", body(f))) == (f, true)
-        checked += 1
-    end
+    @test occursin("even-numbered register pair", body("take_ab16"))
+    @test !occursin("AAPCS64 register window", wsrc)      # the facts settle every float blob here
+    checked += 1
     for f in ("take_hvec", "make_hvec")
         @test (f, occursin("holds a SIMD vector", body(f))) == (f, true)
         checked += 1

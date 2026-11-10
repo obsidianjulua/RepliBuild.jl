@@ -95,6 +95,13 @@ same answers), and Win64 reads no statement.
     `JLCS_FORCE_ABI_AAPCS64` build: the lowered module's LLVM IR carries
     `ptr sret([12 x i8])`, and `llc -mtriple=aarch64-unknown-linux-gnu` puts
     the pointer in `x8` before the call and the HFA in `d0`–`d2`.
+  - **A float-bearing blob the facts call no HFA is callable** (fifth arm64
+    run, 2026-11-10). `_c_register_class_misstated` refused every float-bearing
+    blob inside the 64-byte window as a possible HFA; the anonymous-union
+    fixture's `TaggedValue` (an integer tag, flags and a union of an integer, a
+    double and pointers, 24 bytes) is none, and Julia's blob goes through the
+    same hidden pointer. The predicate takes `hfa` from `aapcs64_record_abi`
+    on the record's DWARF facts and refuses only `true` or unreadable.
   - **Tests that stated the x86-64 answer through the host.** The oracle test
     now generates SysV statements by name; `test_sysv_record_abi`,
     `test_thunk_byte_regions`, `test_by_value_crossing` and

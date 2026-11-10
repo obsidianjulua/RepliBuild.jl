@@ -604,7 +604,7 @@ function _c_blob_param_misclassified(byte_size::Integer, unaligned::Union{Bool,N
 end
 
 """
-    _c_register_class_misstated(byte_size, class_risk; abi = _c_record_abi()) -> Bool
+    _c_register_class_misstated(byte_size, class_risk; abi = _c_record_abi(), hfa = nothing) -> Bool
 
 Whether a by-value record travels in other registers than the Julia type
 standing in for it, when that type cannot reproduce the record's member types
@@ -627,15 +627,23 @@ named-field struct holding an opaque region of mixed float and integer members
     any size up to four `long double`s, and Julia's lowering (`abi_aarch64.cpp`)
     finds the HFA in the stand-in's fields; a byte blob with float members, or
     an opaque region of mixed members, claims general registers (or a pointer
-    to a copy) for a record that may be one. Refused when `class_risk`.
+    to a copy) for a record that may be one. Refused when `class_risk`, unless
+    `hfa` is `false`: the record's DWARF facts (`aapcs64_record_abi`) say it is
+    no HFA, and a record that is not one travels by size, as its blob does.
+    `TaggedValue` (an integer tag, flags and a union of an integer, a double
+    and pointers, 24 bytes) returns through a hidden pointer on both views and
+    was refused for the double it holds (first arm64 run of
+    test_anonymous_unions, 2026-11-10). `hfa = true` or `nothing` (facts the
+    classifier cannot read) keeps the refusal. Other conventions ignore it.
 
 A SysV return that C makes through a hidden pointer has no class to misstate;
 the caller exempts it with [`_c_return_in_memory`](@ref).
 """
 function _c_register_class_misstated(byte_size::Integer, class_risk::Bool;
-                                     abi::Symbol = _c_record_abi())
+                                     abi::Symbol = _c_record_abi(), hfa::Union{Bool,Nothing} = nothing)
     abi === :win64 && return false
     abi in (:sysv, :aapcs64) || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
+    abi === :aapcs64 && hfa === false && return false
     return class_risk && byte_size <= _c_class_window(abi)
 end
 
@@ -2753,6 +2761,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     _rec_unadjusted_align(info) = get!(_unadjusted_memo, info) do
         _c_record_align(info, dwarf_structs; best_dwarf_key = _unaligned_bdk, own = false)
     end
+    # Whether the record under a DWARF key is a homogeneous floating-point
+    # aggregate by its facts (`aapcs64_record_abi`): `true`, `false`, or
+    # `nothing` when the facts cannot say or there is no such record. Asked
+    # under AAPCS64 alone (`_c_register_class_misstated`'s `hfa`).
+    _hfa_memo = Dict{Any,Union{Bool,Nothing}}()
+    _rec_hfa(key) = get!(_hfa_memo, key) do
+        (abi === :aapcs64 && key isa AbstractString && haskey(dwarf_structs, key)) || return nothing
+        v = try
+            JLCSIRGenerator.FunctionGen.aapcs64_record_abi(key, dwarf_structs; ret = false)
+        catch
+            return nothing
+        end
+        v.kind === :hfa ? true : v.kind === :unknown ? nothing : false
+    end
     _stand_in_align(jname) =
         !(jname isa AbstractString) ? nothing :
         jname in blob_struct_names ? 1 :
@@ -2898,7 +2920,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= _c_class_window(abi)
                 _rsz = blob_struct_sizes[_rname]
                 _rinfo = get(dwarf_structs, _rct, nothing)
-                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi)
+                _rkey = _rinfo !== nothing ? _rct : _fuzzy_dwarf_lookup(_rct, dwarf_structs)
+                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi, hfa = _rec_hfa(_rkey))
                     # A record C returns through a hidden pointer has no register
                     # class to get wrong: the caller's buffer is exact even for a
                     # blob (BRANCH 0 passes it explicitly wherever Julia's own
@@ -2926,7 +2949,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # the blob test above never sees it, but its register class is just
             # as unknowable from the Julia side.
             if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= _c_class_window(abi) &&
-               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi)
+               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi,
+                                           hfa = _rec_hfa(get(_unaligned_bdk, _rname, _rname)))
                 push!(blob_abi_offenders, "returns `$_rname` by value")
             end
         end
@@ -2947,11 +2971,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         end
         for _pt in param_types
             if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= _c_class_window(abi) &&
-               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi) ||
+               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi,
+                                            hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt))) ||
                 _blob_param_misaligned(_pt))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= _c_class_window(abi) &&
-                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
+                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi,
+                                               hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt)))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
         end

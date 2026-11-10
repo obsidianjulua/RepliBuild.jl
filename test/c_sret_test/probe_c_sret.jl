@@ -12,11 +12,14 @@ import RepliBuild
 
 # Which answer this host should give where the conventions differ: SysV refuses
 # what the register window cannot classify and a 32-aligned slot; AAPCS64
-# refuses the float blobs inside its 64-byte window and every record holding a
-# SIMD vector; Win64 passes everything by size or by reference and refuses
+# refuses the 16-aligned AB16 as an argument (an even register pair the blob
+# cannot reach) and every record holding a SIMD vector, while the float blobs
+# whose facts rule an HFA out (AB16 and BF12 hold a bitfield) travel by size
+# like their blobs; Win64 passes everything by size or by reference and refuses
 # nothing here.
 const ABI = RepliBuild.Wrapper._c_record_abi()
-const BLOB_REFUSED = ABI in (:sysv, :aapcs64)      # make_bf12, make_ab16, take_ab16
+const BLOB_RET_REFUSED = ABI === :sysv              # make_bf12, make_ab16
+const AB16_ARG_REFUSED = ABI in (:sysv, :aapcs64)   # take_ab16
 const VECTOR_REFUSED = ABI === :aapcs64             # make_hvec, take_hvec
 
 const REC = cglobal((:c1_rec, CSret.LIBRARY_PATH), UInt64)
@@ -166,9 +169,9 @@ probe("make_out6") do p                     # unaligned field inside a packed me
         push!(p, "ret bytes = $d")
 end
 
-probe("make_bf12") do p                     # float blob, 12 B: Win64 sret; SysV, AAPCS64 refused
+probe("make_bf12") do p                     # float blob, 12 B: Win64 sret, AAPCS64 x0:x1; SysV refused
     reset_rec()
-    if BLOB_REFUSED
+    if BLOB_RET_REFUSED
         refused(p, () -> make_bf12(1.5f0, -3, 99))
     else
         r = make_bf12(1.5f0, -3, 99)
@@ -190,9 +193,9 @@ call(f, args...) = Base.invokelatest(f, args...)
 f32(x) = UInt64(reinterpret(UInt32, Float32(x)))
 f64(x) = reinterpret(UInt64, Float64(x))
 
-probe("make_ab16") do p                     # 16 B blob, member _Alignas(16): Win64 sret; SysV, AAPCS64 refused
+probe("make_ab16") do p                     # 16 B blob, member _Alignas(16): Win64 sret, AAPCS64 x0:x1; SysV refused
     reset_rec()
-    if BLOB_REFUSED
+    if BLOB_RET_REFUSED
         refused(p, () -> call(make_ab16, 1.5f0, -2))
     else
         r = call(make_ab16, 1.5f0, -2)
@@ -270,11 +273,11 @@ end
 const BIG = CSret.with(Big24(); a = Clonglong(1), b = Clonglong(2), c = Int32(3))
 bytes32(x) = reinterpret(NTuple{4,UInt8}, x)
 
-probe("take_ab16") do p                     # SysV, AAPCS64: refused (float blob); Win64: by reference
+probe("take_ab16") do p                     # SysV: refused (float blob); AAPCS64: refused (register pair); Win64: by reference
     reset_rec()
     # a = 1.5, b = 3.0, c = -2 (0b110 in a signed 3-bit field at byte 8)
     v = AB16((bytes32(1.5f0)..., bytes32(3.0f0)..., 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
-    if BLOB_REFUSED
+    if AB16_ARG_REFUSED
         refused(p, () -> call(take_ab16, BIG, v))
     else
         r = call(take_ab16, BIG, v)
