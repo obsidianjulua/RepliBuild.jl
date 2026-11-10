@@ -2,16 +2,28 @@
    simd_live.cpp so the C and C++ builds are one library. */
 #include "simd_live.h"
 
-/* Fill every SSE argument register with a NaN pattern, so a value the call
+/* Fill every floating argument register with a NaN pattern, so a value the call
    left in the wrong register cannot be read back from a register that still
    held it by chance. The integer registers are overwritten by any call. */
 SL_C void poison_regs(void) {
     unsigned long long junk = 0x7ff8dead7ff8deadULL;
+#if defined(__x86_64__)
     __asm__ volatile(
         "movq %0, %%xmm0\n\tmovq %0, %%xmm1\n\tmovq %0, %%xmm2\n\tmovq %0, %%xmm3\n\t"
         "movq %0, %%xmm4\n\tmovq %0, %%xmm5\n\tmovq %0, %%xmm6\n\tmovq %0, %%xmm7\n\t"
         : : "r"(junk)
         : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7");
+#elif defined(__aarch64__)
+    /* AAPCS64: the eight floating argument registers are v0-v7 (d0-d7 for a
+       double, s0-s7 for a float, q0-q7 for a 16-byte HFA leaf). */
+    __asm__ volatile(
+        "dup v0.2d, %0\n\tdup v1.2d, %0\n\tdup v2.2d, %0\n\tdup v3.2d, %0\n\t"
+        "dup v4.2d, %0\n\tdup v5.2d, %0\n\tdup v6.2d, %0\n\tdup v7.2d, %0\n\t"
+        : : "r"(junk)
+        : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7");
+#else
+#error "poison_regs: the floating argument registers of this architecture are not named here"
+#endif
 }
 
 /* Each record has one canonical value, and take_R weights every lane
