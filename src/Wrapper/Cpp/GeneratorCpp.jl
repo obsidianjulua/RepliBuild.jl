@@ -2554,7 +2554,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     #   1. A `mutable struct ClassName { handle::Ptr{Cvoid} }` with inner constructors
     #      that call the raw factory function and attach a GC finalizer.
     #   2. An `unsafe_convert` for transparent use in raw FFI calls.
-    #   3. Proxy methods `method(obj::ClassName, ...) = ClassName_method(obj.handle, ...)`.
+    #   3. Proxy methods `method(obj::ClassName, ...) = GC.@preserve obj ClassName_method(obj.handle, ...)`.
     if !isempty(idiomatic_classes)
         push!(struct_chunks, """
         # =============================================================================
@@ -2643,7 +2643,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # METHOD PROXIES  (Julian dispatch on idiomatic structs)
     # =============================================================================
     # For each instance method of an idiomatic class, emit a Julian wrapper:
-    #   method_name(obj::ClassName, other_args...) = ClassName_method_name(obj.handle, ...)
+    #   method_name(obj::ClassName, other_args...) = GC.@preserve obj ClassName_method_name(obj.handle, ...)
     # This gives multi-dispatch semantics: the same method name works for multiple
     # classes (e.g. area(c::Circle) and area(r::Rectangle) dispatch independently).
     if !isempty(idiomatic_classes)
@@ -2695,8 +2695,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                 full_sig = isempty(other_sig) ? "obj::$cls_nm" : "obj::$cls_nm, $other_sig"
 
+                # `obj` is dead once its handle is read, and the raw wrapper
+                # allocates before the call reaches C++ (a Tier 2 invoke packs
+                # its slots), so a collection there ran `obj`'s finalizer, the
+                # deleting destructor, on the object the call was about to use
+                # (`area(Rect(2, 3))`: a segfault in the thunk, 2026-11-10).
+                # The proxy keeps the owner alive across the call.
                 push!(struct_chunks, """
-                $proxy_nm($full_sig) = $raw_jl($call_sig_str)
+                $proxy_nm($full_sig) = GC.@preserve obj $raw_jl($call_sig_str)
                 """)
 
                 push!(exports, proxy_nm)

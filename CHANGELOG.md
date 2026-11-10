@@ -4,6 +4,20 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A method proxy keeps its owner alive across the call (2026-11-10)
+
+GeneratorCpp's method proxies read `area(obj::Rect) = Rect_area(obj.handle)`.
+`obj` is dead once its handle is read, and the raw wrapper allocates before C++
+runs (a Tier 2 `invoke` packs its argument slots), so a collection there ran
+`obj`'s finalizer, the deleting destructor, on the object the call was about to
+use. The finalizer live probe's `area(Rect(2, 3))` segfaulted inside the thunk
+on one x86-64 CI cell (LLVM 22, Julia 1.13.2) after passing on every earlier
+round and on the LLVM 23 cell of the same commit: a race, not a flake. The proxy
+is now `GC.@preserve obj Rect_area(obj.handle)`; the Managed types and the
+`unsafe_convert` methods were never exposed, since `ccall` roots what it
+converts. `test_cpp_finalizers.jl` gains a `Rect::area() const` row and pins
+the form; the live test pins it on the real wrapper.
+
 ### AArch64 AAPCS64 struct ABI classifier, Linux arm64 supported (2026-11-09)
 
 RepliBuild refused every host but Linux x86-64 and Windows x86-64 because the

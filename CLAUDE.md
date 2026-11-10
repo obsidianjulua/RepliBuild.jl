@@ -641,7 +641,12 @@ the test named when you touch the area.
   and `<X>_destroy_<X>` names all three, so a class with neither gets no owning
   type. A factory struct's D0 also needs a class nothing in the library derives
   from, and a factory makes the class its pointer names, or a subclass its name
-  names. (`test_cpp_finalizers.jl`, devtests `test_cpp_finalizers_live.jl`.)
+  names. **A method proxy keeps `obj` alive across the call** (`GC.@preserve
+  obj X_method(obj.handle, …)`): the owner is dead once its handle is read,
+  and a Tier 2 invoke allocates before C++ runs, so its finalizer could delete
+  the object under the call (2026-11-10). Anything that passes a handle out of
+  an owning type into Julia code, rather than straight into a `ccall`, needs
+  the same. (`test_cpp_finalizers.jl`, devtests `test_cpp_finalizers_live.jl`.)
 - **A pointer or reference return is typed from its declaration**
   (`_typed_pointer_return`, both generators): `T*`, `const T*`, `T&`, `T**` give
   `Ptr{T}`/`Ptr{Ptr{T}}` when `T` is a type the module emits
