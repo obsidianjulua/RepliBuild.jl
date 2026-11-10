@@ -120,6 +120,12 @@ same answers), and Win64 reads no statement.
     probe asks `host_record_abi()` and, on Win64 and AAPCS64, checks the sum
     the blob brings back; `test_abi_nested` pins the fixture's shape for all
     three conventions from this host's metadata.
+  - **The debug inspection test read the thunk's machine code in x86-64**
+    (seventh arm64 run, 2026-11-10): `mov` and `0x10(%rax)` for vtable slot 2.
+    The arm64 object is right (`ldr x8, [x8, #16]`); the test spells the load
+    mnemonic and the 16-byte slot operand per `Sys.ARCH`, the one host fact a
+    disassembly test cannot avoid, and errors on an architecture it has no
+    spelling for.
 
 ### A C enum takes any value of its underlying type (2026-11-08)
 

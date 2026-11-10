@@ -201,18 +201,22 @@ const VI_SO = joinpath(VI, "julia", "libvi_test." * Libdl.dlext)
             # This is the assertion that would fail if the sourceName parse or
             # the DIScope pass regressed — both are invisible to every other
             # test, because the thunks keep working without them.
+            # The machine code is the host's. A load mnemonic says objdump
+            # printed instructions, and slot 2 of the vtable is 2 × 8 = 16,
+            # spelled in the host's addressing mode: that multiplication is
+            # the thing the dialect is responsible for getting right.
+            load, slot16 = Sys.ARCH === :aarch64 ? (r"\bldr\b", r"\[x\d+, #16\]") :
+                           Sys.ARCH === :x86_64  ? (r"\bmov\b", "0x10(%rax)") :
+                           error("no machine-code spelling for $(Sys.ARCH)")
             asm = D.disassemble(VI; symbol="_ZNK5VBase3tagEv_thunk")
             @test occursin("_ZNK5VBase3tagEv_thunk", asm)
             @test occursin("jlcs.vcall", asm)            # MLIR interleaved
-            @test occursin(r"\bmov\b", asm)              # ...with machine code
-
-            # Slot 2 of the vtable is 2 × 8 = 0x10, and that multiplication is
-            # the thing the dialect is responsible for getting right.
-            @test occursin("0x10(%rax)", asm)
+            @test occursin(load, asm)                    # ...with machine code
+            @test occursin(slot16, asm)
 
             # source=false is the same code without the interleaving.
             plain = D.disassemble(VI; symbol="_ZNK5VBase3tagEv_thunk", source=false)
-            @test occursin(r"\bmov\b", plain)
+            @test occursin(load, plain)
             @test !occursin("jlcs.vcall", plain)
 
             # DWARF is real, and it pins WHICH file the debugger will open.
@@ -246,7 +250,7 @@ const VI_SO = joinpath(VI, "julia", "libvi_test." * Libdl.dlext)
 
             w = D.walk(VI, "_ZNK5VBase3tagEv_thunk")
             @test occursin("func.func @_ZNK5VBase3tagEv_thunk", w)
-            @test occursin("0x10(%rax)", w)
+            @test occursin(slot16, w)
         end
     end
 end
