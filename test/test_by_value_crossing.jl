@@ -611,11 +611,17 @@ Contents of the .debug_info section:
         # A 4-byte class with a destructor comes back through a hidden pointer,
         # FIRST, and the callee returns void. Read from EAX, the callee stored
         # the object through the int argument's register (a SIGSEGV at 42).
-        ir = gen(fn("_ZN2ee10make_ownerEi", ["int"], "Owner"))
-        @test decl(ir, "_ZN2ee10make_ownerEi") == "func.func private @_ZN2ee10make_ownerEi(!llvm.ptr, i32)"
-        @test occursin(r"%sret_slot = llvm\.alloca %sret_one x \S", ir)
-        @test occursin(r"jlcs\.try_call %sret_slot, %val_1 \{ callee = @_ZN2ee10make_ownerEi \}", ir)
-        @test occursin(r"llvm\.load %sret_slot", ir)
+        # On x86-64 the slot is a plain first pointer (RDI, RCX take it); on
+        # AAPCS64 the call states it (`sret:4`), which puts it in x8.
+        for abi in (:sysv, :win64, :aapcs64)
+            ir = gen(fn("_ZN2ee10make_ownerEi", ["int"], "Owner"); abi)
+            @test (abi, decl(ir, "_ZN2ee10make_ownerEi")) == (abi, "func.func private @_ZN2ee10make_ownerEi(!llvm.ptr, i32)")
+            @test (abi, occursin(r"%sret_slot = llvm\.alloca %sret_one x \S", ir)) == (abi, true)
+            attrs = abi === :aapcs64 ? "callee = @_ZN2ee10make_ownerEi, aapcs64_args = \\[\"sret:4\", \"\"\\]" :
+                                       "callee = @_ZN2ee10make_ownerEi"
+            @test (abi, occursin(Regex("jlcs\\.try_call %sret_slot, %val_1 \\{ $attrs \\}"), ir)) == (abi, true)
+            @test (abi, occursin(r"llvm\.load %sret_slot", ir)) == (abi, true)
+        end
 
         # Laid out, non-trivial, no destructor to run: the callee takes the
         # address of a temporary, and the slot already holds a private copy.

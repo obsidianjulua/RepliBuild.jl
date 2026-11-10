@@ -3,6 +3,10 @@
 
 using Test
 
+# The callback for "Original extern C callbacks still work", at top level:
+# `@cfunction($f, …)` is a runtime closure, which Julia supports on x86-64 only.
+cbt_my_add_fn(a::Cint, b::Cint)::Cint = a + b
+
 # Rebuild wrapper if needed
 wrapper_path = joinpath(@__DIR__, "julia", "CallbackTest.jl")
 if !isfile(wrapper_path)
@@ -162,8 +166,10 @@ using RepliBuild.MLIRNative
     end
 
     @testset "Original extern C callbacks still work" begin
-        my_add_fn(a::Cint, b::Cint)::Cint = a + b
-        c_add = @cfunction($my_add_fn, Cint, (Cint, Cint))
+        # A top-level function, not a closure: `@cfunction($f, …)` is a runtime
+        # closure, which Julia supports on x86-64 only ("cfunction: closures
+        # are not supported on this platform" on AArch64).
+        c_add = @cfunction(cbt_my_add_fn, Cint, (Cint, Cint))
         @test CallbackTest.execute_binary_op(Base.unsafe_convert(Ptr{Cvoid}, c_add), 10, 20) == 30
     end
 end
