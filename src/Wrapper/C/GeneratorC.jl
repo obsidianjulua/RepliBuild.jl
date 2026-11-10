@@ -244,15 +244,28 @@ end
 # =============================================================================
 
 """
-    _c_record_abi() -> :sysv | :win64
+    _c_record_abi() -> :sysv | :win64 | :aapcs64
 
-The x86-64 convention a C record crosses a Tier-3 `ccall` in. RepliBuild builds
-for its host and refuses macOS at load, so the host decides it:
-`x86_64-w64-windows-gnu` is Win64 and Linux is SysV. This is the one place the C
-generator asks. Everything that classifies a by-value record takes the answer as
-an `abi` argument, so a test can ask for either convention on any host.
+The convention a C record crosses a Tier-3 `ccall` in: `host_record_abi()`,
+since RepliBuild builds for its host (x86-64 SysV on Linux x86-64, Microsoft x64
+on Windows, AAPCS64 on Linux AArch64) and refuses every other host at load. This
+is the one place the C generator asks. Everything that classifies a by-value
+record takes the answer as an `abi` argument, so a test can ask for any
+convention on any host.
 """
-_c_record_abi() = Sys.iswindows() ? :win64 : :sysv
+_c_record_abi() = host_record_abi()
+
+"""
+    _c_class_window(abi) -> Int
+
+The largest record whose register class the Julia type standing in for it can
+misstate under `abi`, in bytes: 16 on SysV (above it every record is MEMORY
+class), 64 on AAPCS64 (a homogeneous floating-point aggregate of four `long
+double`s travels in registers at that size; above it everything is a pointer
+to a copy), 0 on Win64 (a record has no register class there). The guards
+that compare a blob's size against the window read it, never a literal 16.
+"""
+_c_class_window(abi::Symbol) = abi === :sysv ? 16 : abi === :aapcs64 ? 64 : 0
 
 """
     _c_scalar_layout(jt, ct, size, dwarf_structs) -> (size, alignment) | nothing
@@ -422,8 +435,12 @@ make a buffer more aligned than it needs to be, which is still a correct buffer.
 """
 function _c_record_align(info, dwarf_structs;
                          best_dwarf_key::Dict{String,String} = Dict{String,String}(),
-                         seen::Set{String} = Set{String}())
-    al = _c_explicit_align(get(info, "alignment", nothing))
+                         seen::Set{String} = Set{String}(), own::Bool = true)
+    # `own = false`: the members' alone, without the record's own
+    # DW_AT_alignment (a nested record's still counts, through its type). That
+    # is clang's "unadjusted" alignment, which AAPCS64 reads for an argument
+    # (`_c_register_pair_misplaced`).
+    al = own ? _c_explicit_align(get(info, "alignment", nothing)) : 1
     for m in get(info, "members", [])
         al = max(al, _c_explicit_align(get(m, "alignment", nothing)))
         sz, jt, ct = get(m, "size", 0), get(m, "julia_type", "Any"), get(m, "c_type", "")
@@ -509,6 +526,14 @@ record; only SysV reads it.
   * `:sysv`: MEMORY class above 16 bytes or with an unaligned field, INTEGER or
     SSE registers otherwise. `nothing` when the record is at most 16 bytes and
     `unaligned` is `nothing`.
+  * `:aapcs64`: registers at 16 bytes or less, whatever the members (field
+    alignment never matters there). Above 16 a hidden pointer, EXCEPT for a
+    homogeneous floating-point aggregate (four doubles, 32 bytes, come back in
+    d0–d3), which this signature cannot see: `nothing`, which leaves the
+    answer to Julia's own `ccall` lowering. That agrees with C wherever the
+    stand-in's fields are the record's, and a stand-in that cannot reproduce
+    the fields (a float-bearing blob) is refused by `_c_register_class_misstated`
+    at any size inside `_c_class_window`.
 
 Whether the wrapper must pass that pointer itself is
 [`_c_explicit_sret`](@ref).
@@ -516,7 +541,8 @@ Whether the wrapper must pass that pointer itself is
 function _c_return_in_memory(byte_size::Integer, unaligned::Union{Bool,Nothing};
                              abi::Symbol = _c_record_abi())
     abi === :win64 && return !(byte_size in (1, 2, 4, 8))
-    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    abi === :aapcs64 && return byte_size > 16 ? nothing : false
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
     byte_size > 16 && return true
     return unaligned
 end
@@ -534,7 +560,10 @@ above 16 bytes. The one return it gets wrong is SysV with an unaligned field at
 16 bytes or less, because a Julia type has no unaligned fields and its lowering
 never applies that rule; only an explicit sret reaches the callee there. Above
 16 bytes the answer is yes too, so the records BRANCH 0 is given keep the
-explicit form they always had; there it is equivalent.
+explicit form they always had; there it is equivalent. On AAPCS64 never:
+`_c_return_in_memory` is never `true` there, since a record over 16 bytes may be
+an HFA that comes back in registers, and Julia's lowering tells the two apart
+from the stand-in's fields where an explicit sret could not.
 
 An explicit sret for a return that comes back in registers shifts every
 argument by one and returns garbage, with no error (C1).
@@ -560,19 +589,22 @@ the `NTuple{N,UInt8}` blob standing in for it. `unaligned` is
   * `:win64`: never. A record is passed by size alone (1, 2, 4 or 8 bytes in a
     register, anything else by reference to a copy), and the blob has the
     record's size.
+  * `:aapcs64`: never. Field alignment plays no part in the convention: a
+    packed record travels by its size like any other. A record's own alignment
+    does, in one place ([`_c_register_pair_misplaced`](@ref)).
 
-Float members are a separate hazard (an SSE eightbyte the blob cannot claim):
-[`_c_register_class_misstated`](@ref).
+Float members are a separate hazard (an SSE eightbyte, or an AAPCS64 floating
+register, the blob cannot claim): [`_c_register_class_misstated`](@ref).
 """
 function _c_blob_param_misclassified(byte_size::Integer, unaligned::Union{Bool,Nothing};
                                      abi::Symbol = _c_record_abi())
-    abi === :win64 && return false
-    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    abi in (:win64, :aapcs64) && return false
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
     return byte_size <= 16 && unaligned !== false
 end
 
 """
-    _c_register_class_misstated(byte_size, class_risk; abi = _c_record_abi()) -> Bool
+    _c_register_class_misstated(byte_size, class_risk; abi = _c_record_abi(), hfa = nothing) -> Bool
 
 Whether a by-value record travels in other registers than the Julia type
 standing in for it, when that type cannot reproduce the record's member types
@@ -590,15 +622,29 @@ named-field struct holding an opaque region of mixed float and integer members
     general-purpose register, any other size by reference to a copy or through
     a hidden return pointer), and Julia lowers a non-primitive type of the same
     size the same way (`abi_win64.cpp`). The stand-in has the record's size.
+  * `:aapcs64`: at 64 bytes or less (`_c_class_window`). A homogeneous
+    floating-point aggregate travels in one floating register per member, at
+    any size up to four `long double`s, and Julia's lowering (`abi_aarch64.cpp`)
+    finds the HFA in the stand-in's fields; a byte blob with float members, or
+    an opaque region of mixed members, claims general registers (or a pointer
+    to a copy) for a record that may be one. Refused when `class_risk`, unless
+    `hfa` is `false`: the record's DWARF facts (`aapcs64_record_abi`) say it is
+    no HFA, and a record that is not one travels by size, as its blob does.
+    `TaggedValue` (an integer tag, flags and a union of an integer, a double
+    and pointers, 24 bytes) returns through a hidden pointer on both views and
+    was refused for the double it holds (first arm64 run of
+    test_anonymous_unions, 2026-11-10). `hfa = true` or `nothing` (facts the
+    classifier cannot read) keeps the refusal. Other conventions ignore it.
 
 A SysV return that C makes through a hidden pointer has no class to misstate;
 the caller exempts it with [`_c_return_in_memory`](@ref).
 """
 function _c_register_class_misstated(byte_size::Integer, class_risk::Bool;
-                                     abi::Symbol = _c_record_abi())
+                                     abi::Symbol = _c_record_abi(), hfa::Union{Bool,Nothing} = nothing)
     abi === :win64 && return false
-    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
-    return class_risk && byte_size <= 16
+    abi in (:sysv, :aapcs64) || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
+    abi === :aapcs64 && hfa === false && return false
+    return class_risk && byte_size <= _c_class_window(abi)
 end
 
 """
@@ -648,20 +694,51 @@ compiler's own ([`_c_byval_facts`](@ref)) rather than the DWARF model's
 `D4A` at the 16-aligned slot after the 24-byte `Big24`, Julia's byval put it 8
 bytes earlier, and the call returned 494.5 for 4883.5 with no error (W2,
 2026-10-24). `take1(D4A)` passed, its slot being 16-aligned by luck.
+
+  * `:aapcs64`: `:own`, always. A record of 16 bytes or less travels in
+    registers, and one over 16 by a pointer to a copy whose alignment no
+    AArch64 load checks (there is no `movaps`; unaligned loads are ordinary).
+    The one placement Julia's copy can miss there is a register pair, not a
+    slot: [`_c_register_pair_misplaced`](@ref).
 """
 function _c_byval_param_shape(byte_size::Integer, in_memory::Union{Bool,Nothing},
                               slot_align::Integer, exact::Bool; abi::Symbol = _c_record_abi())
+    abi === :aapcs64 && return :own
     if abi === :win64
         in_memory === true || return :own
         slot_align <= 8 && return :own
         byte_size % 16 == 0 && return :carrier
         return :trap
     end
-    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    abi === :sysv || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
     in_memory === true || return :own
     slot_align <= 8 && return :own
     (exact && slot_align == 16 && byte_size > 16 && byte_size % 16 == 0) && return :carrier
     return :trap
+end
+
+"""
+    _c_register_pair_misplaced(byte_size, unadjusted_align, stand_in_align; abi) -> Bool
+
+Whether AAPCS64 passes a by-value record in an even-numbered general register
+pair where Julia's `ccall` would not. A record of 16 bytes or less whose
+UNADJUSTED alignment is 16 (a member's own `alignas(16)`, a `__int128` or `long
+double` member, a nested record with an `aligned(16)` of its own; never an
+`aligned` on the record itself, which clang does not read for an argument) is
+coerced to `i128`, which takes the next even pair (`x0:x1`, `x2:x3`, …), and
+Julia's lowering (`abi_aarch64.cpp`) places the stand-in by the stand-in's
+alignment: a byte blob or a struct of 8-aligned fields goes in the next pair
+whatever its number. The callee then reads the wrong registers, with no error.
+`stand_in_align` is `nothing` for a placeholder with no value layout, which
+counts as misplaced. Other conventions have no such pair: `false`.
+(Measured with clang 23: `struct { _Alignas(16) long long a; }` is `i128`,
+`struct __attribute__((aligned(16))) { long long a; }` is `[2 x i64]`.)
+"""
+function _c_register_pair_misplaced(byte_size::Integer, unadjusted_align::Integer,
+                                    stand_in_align::Union{Integer,Nothing}; abi::Symbol = _c_record_abi())
+    abi === :aapcs64 || return false
+    byte_size <= 16 && unadjusted_align >= 16 || return false
+    return stand_in_align === nothing || stand_in_align < 16
 end
 
 """
@@ -730,23 +807,51 @@ function _c_win64_copy_trap_phrase(jname::AbstractString, byte_size::Integer, al
     return "takes `$jname` by value, which Win64 passes by reference to a $align-byte-aligned copy ($why)"
 end
 
-_c_slot_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
+# Why a SIMD vector crossing is refused on AAPCS64 (the C generator's phrase).
+const _C_A64_VECTOR_WHY = "which AAPCS64 passes in a vector register where ccall passes the lanes one " *
+                          "register each"
+
+# One AAPCS64 register-pair refusal (`_c_register_pair_misplaced`), as the trap
+# stub says it.
+function _c_register_pair_trap_phrase(jname::AbstractString, byte_size::Integer;
+                                      placeholder::Bool = false)::String
+    why = placeholder ? "its Julia type is a placeholder with no value layout" :
+          "the Julia type standing in for it is aligned below 16, so ccall passes it in the next pair whatever its number"
+    return "takes `$jname` by value, a $byte_size-byte record aligned to 16 that AAPCS64 passes in an " *
+           "even-numbered register pair ($why)"
+end
+
+# The x86-64 wording is the one every shipped wrapper carries, byte for byte;
+# AAPCS64 gets its own.
+_c_slot_trap_body(julia_name::AbstractString, crossings::Vector{String}; abi::Symbol = _c_record_abi()) =
     "    Base.error(" * repr(
         "ABI Safety Trap: cannot call '$julia_name' through ccall. It $(join(crossings, "; ")). " *
-        "Julia's ccall passes a by-value record at the alignment of the Julia type standing in " *
-        "for it, 8 at most, so the callee would read it from the wrong stack slot (SysV) or fault " *
-        "on an aligned load from the copy (Win64). Use a pointer-taking " *
-        "variant of this C function.") * ")\n"
+        (abi === :aapcs64 ?
+         "Julia's ccall places a by-value record by the alignment of the Julia type standing in " *
+         "for it, so the callee would look for it in the wrong register pair. " :
+         "Julia's ccall passes a by-value record at the alignment of the Julia type standing in " *
+         "for it, 8 at most, so the callee would read it from the wrong stack slot (SysV) or fault " *
+         "on an aligned load from the copy (Win64). ") *
+        "Use a pointer-taking variant of this C function.") * ")\n"
 
-# The body of the SysV register-window refusal (`blob_abi_offenders`), shared
-# by the plain path and the `[wrap.varargs]` path.
-_c_blob_trap_body(julia_name::AbstractString, offenders::Vector{String}) =
+# The body of the register-window refusal (`blob_abi_offenders`), shared by the
+# plain path and the `[wrap.varargs]` path. The window is the convention's
+# (`_c_class_window`): 16 bytes on SysV, 64 on AAPCS64.
+# The x86-64 wording is the one every shipped wrapper carries, byte for byte;
+# AAPCS64 gets its own.
+_c_blob_trap_body(julia_name::AbstractString, offenders::Vector{String}; abi::Symbol = _c_record_abi()) =
     "    Base.error(" * repr(
         "ABI Safety Trap: cannot call '$julia_name' through ccall. This function crosses an " *
-        "opaque byte-blob struct by value inside the SysV register window (≤16 bytes, " *
-        "float-bearing or packed): $(join(offenders, "; ")). A byte blob cannot reproduce the " *
-        "struct's real argument classes (SSE eightbytes, or MEMORY-class stack passing for " *
-        "packed layouts), so the call would silently corrupt data. The struct is opaque because " *
+        (abi === :aapcs64 ?
+         "opaque byte-blob struct by value inside the AAPCS64 register window (≤64 bytes, " *
+         "float-bearing): $(join(offenders, "; ")). A byte blob cannot reproduce the struct's real " *
+         "argument classes (a homogeneous floating-point aggregate's floating registers), so the " *
+         "call would silently corrupt data. " :
+         "opaque byte-blob struct by value inside the SysV register window (≤16 bytes, " *
+         "float-bearing or packed): $(join(offenders, "; ")). A byte blob cannot reproduce the " *
+         "struct's real argument classes (SSE eightbytes, or MEMORY-class stack passing for " *
+         "packed layouts), so the call would silently corrupt data. ") *
+        "The struct is opaque because " *
         "its layout could not be reproduced exactly (packed layout, bitfields, or unresolvable " *
         "member types). Use a pointer-taking variant of this C function, or make the struct's " *
         "members resolvable.") * ")\n"
@@ -889,8 +994,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                       registry::TypeRegistry, generate_docs::Bool,
                                       thunks_lib_path::String="";
                                       abi::Symbol = _c_record_abi())
-    abi in (:sysv, :win64) ||
-        throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv or :win64"))
+    abi in (:sysv, :win64, :aapcs64) ||
+        throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
 
     # Track exported symbols
     exports = String[]
@@ -2650,6 +2755,26 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     _rec_align(info) = get!(_align_memo, info) do
         _c_record_align(info, dwarf_structs; best_dwarf_key = _unaligned_bdk)
     end
+    # The same without the record's own attribute: what AAPCS64 reads for an
+    # argument (`_c_register_pair_misplaced`).
+    _unadjusted_memo = IdDict{Any,Int}()
+    _rec_unadjusted_align(info) = get!(_unadjusted_memo, info) do
+        _c_record_align(info, dwarf_structs; best_dwarf_key = _unaligned_bdk, own = false)
+    end
+    # Whether the record under a DWARF key is a homogeneous floating-point
+    # aggregate by its facts (`aapcs64_record_abi`): `true`, `false`, or
+    # `nothing` when the facts cannot say or there is no such record. Asked
+    # under AAPCS64 alone (`_c_register_class_misstated`'s `hfa`).
+    _hfa_memo = Dict{Any,Union{Bool,Nothing}}()
+    _rec_hfa(key) = get!(_hfa_memo, key) do
+        (abi === :aapcs64 && key isa AbstractString && haskey(dwarf_structs, key)) || return nothing
+        v = try
+            JLCSIRGenerator.FunctionGen.aapcs64_record_abi(key, dwarf_structs; ret = false)
+        catch
+            return nothing
+        end
+        v.kind === :hfa ? true : v.kind === :unknown ? nothing : false
+    end
     _stand_in_align(jname) =
         !(jname isa AbstractString) ? nothing :
         jname in blob_struct_names ? 1 :
@@ -2749,16 +2874,18 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # before the plain path's guards, and until W5 applied only the conflict
     # trap) ask this about a function's by-value records:
     #
-    #   * `blob_abi_offenders`: the SysV register-window refusals. An opaque
-    #     byte-blob struct of 16 bytes or less with float members has
-    #     unknowable register classes from its byte image (the record travels
-    #     in SSE eightbytes, `NTuple{N,UInt8}` claims INTEGER), and one with an
-    #     unaligned member is MEMORY class where the blob classifies INTEGER.
-    #     Either would silently read or write the wrong registers. Pointer
-    #     crossings and >16-byte blobs (MEMORY on both views) stay callable.
-    #     Win64 gives a record no register class: C and Julia both pass and
-    #     return it by size alone, so the guard is SysV's only
-    #     (`_c_register_class_misstated`, `_c_blob_param_misclassified`).
+    #   * `blob_abi_offenders`: the register-window refusals. An opaque
+    #     byte-blob struct inside the convention's window (`_c_class_window`:
+    #     16 bytes on SysV, 64 on AAPCS64) with float members has unknowable
+    #     register classes from its byte image (the record travels in SSE
+    #     eightbytes or AAPCS64 floating registers, `NTuple{N,UInt8}` claims
+    #     integer ones), and on SysV one with an unaligned member is MEMORY
+    #     class where the blob classifies INTEGER. Either would silently read
+    #     or write the wrong registers. Pointer crossings and blobs past the
+    #     window (memory on both views) stay callable. Win64 gives a record no
+    #     register class: C and Julia both pass and return it by size alone,
+    #     so its window is empty (`_c_register_class_misstated`,
+    #     `_c_blob_param_misclassified`).
     #   * `slot_traps` and `carriers`: a MEMORY-class record C passes in a
     #     stack slot aligned above 8 (`_c_byval_param_shape`). Julia's byval
     #     puts it at 8, one slot early whenever a stack-resident argument
@@ -2790,10 +2917,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         let _rjt = String(get(return_type, "julia_type", "Any")),
             _rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
             _rname = _rjt == "Any" ? _sanitize_c_type_name(_rct) : _rjt
-            if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= 16
+            if _rname in blob_struct_names && 1 <= get(blob_struct_sizes, _rname, 0) <= _c_class_window(abi)
                 _rsz = blob_struct_sizes[_rname]
                 _rinfo = get(dwarf_structs, _rct, nothing)
-                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi)
+                _rkey = _rinfo !== nothing ? _rct : _fuzzy_dwarf_lookup(_rct, dwarf_structs)
+                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi, hfa = _rec_hfa(_rkey))
                     # A record C returns through a hidden pointer has no register
                     # class to get wrong: the caller's buffer is exact even for a
                     # blob (BRANCH 0 passes it explicitly wherever Julia's own
@@ -2803,13 +2931,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     if _ret_in_memory(_rsz, _rinfo) !== true
                         push!(blob_abi_offenders, "returns `$_rname` by value")
                     end
-                elseif _rinfo !== nothing && _ret_in_memory(_rsz, _rinfo) === nothing
+                elseif abi === :sysv && _rinfo !== nothing && _ret_in_memory(_rsz, _rinfo) === nothing
                     # No float member, but no proof of the fields' alignment
                     # either: on SysV an unaligned field would make the record
                     # MEMORY class while its byte image comes back in registers.
                     # The parameter path refuses the same case
                     # (`_c_blob_param_misclassified`). Win64 decides by size
-                    # alone, so `_c_return_in_memory` never answers `nothing` there.
+                    # alone, so `_c_return_in_memory` never answers `nothing`
+                    # there; AAPCS64 answers it for every record over 16 bytes
+                    # (an HFA or a hidden pointer, which the stand-in's fields
+                    # settle), and an all-integer blob is no HFA.
                     push!(blob_abi_offenders, "returns `$_rname` by value")
                 end
             end
@@ -2817,8 +2948,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # of mixed SysV class (see `abi_class_risk`): it has real fields, so
             # the blob test above never sees it, but its register class is just
             # as unknowable from the Julia side.
-            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= 16 &&
-               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi)
+            if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= _c_class_window(abi) &&
+               _c_register_class_misstated(resolved_layouts[_rname][1], true; abi,
+                                           hfa = _rec_hfa(get(_unaligned_bdk, _rname, _rname)))
                 push!(blob_abi_offenders, "returns `$_rname` by value")
             end
         end
@@ -2838,12 +2970,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             return _c_blob_param_misclassified(get(blob_struct_sizes, jname, 0), _rec_unaligned(info); abi)
         end
         for _pt in param_types
-            if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= 16 &&
-               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi) ||
+            if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= _c_class_window(abi) &&
+               (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi,
+                                            hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt))) ||
                 _blob_param_misaligned(_pt))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
-            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= 16 &&
-                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi)
+            elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= _c_class_window(abi) &&
+                   _c_register_class_misstated(resolved_layouts[_pt][1], true; abi,
+                                               hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt)))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
         end
@@ -2884,6 +3018,29 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                     rkey = haskey(dwarf_structs, rct) ? rct : _fuzzy_dwarf_lookup(rct, dwarf_structs)
                     why = _vector_misread(rkey)
                     why === nothing || push!(vector_offenders, "returns `$rct` by value, $why")
+                end
+            end
+        elseif abi === :aapcs64
+            # AAPCS64 passes a bare vector in one vector register, and a record
+            # that is a homogeneous vector aggregate in one per member; ccall
+            # passes the `NTuple` standing in for a vector lane by lane (an HFA
+            # of its lanes, one floating register each, or general registers),
+            # and the thunk does not model the vector case either
+            # (`aapcs64_record_abi`). Every vector crossing is refused.
+            for p in get(func, "parameters", [])
+                JLCSIRGenerator.FunctionGen.crosses_as_vector(p) &&
+                    push!(vector_offenders, "takes $(_vector_phrase(p)) by value, $(_C_A64_VECTOR_WHY)")
+            end
+            for _pt in param_types
+                startswith(_pt, "Ptr{") && continue
+                JLCSIRGenerator.FunctionGen.holds_vector(get(_unaligned_bdk, _pt, _pt), dwarf_structs) &&
+                    push!(vector_offenders, "takes `$_pt` by value, which holds a SIMD vector, $(_C_A64_VECTOR_WHY)")
+            end
+            let rct = String(strip(replace(String(get(return_type, "c_type", "void")), r"\bconst\b" => "")))
+                if !(rct == "void" || isempty(rct) || occursin(r"[*&(\[]", rct) || _is_primitive_type(rct))
+                    rkey = haskey(dwarf_structs, rct) ? rct : _fuzzy_dwarf_lookup(rct, dwarf_structs)
+                    JLCSIRGenerator.FunctionGen.holds_vector(rkey, dwarf_structs) &&
+                        push!(vector_offenders, "returns `$rct` by value, which holds a SIMD vector, $(_C_A64_VECTOR_WHY)")
                 end
             end
         else
@@ -2949,6 +3106,23 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 else
                     push!(slot_traps, _c_slot_trap_phrase(param_types[i], sz, slot, exact; placeholder))
                 end
+            end
+        elseif abi === :aapcs64
+            # AAPCS64: no slot and no copy to align (the copy's alignment is
+            # read by no AArch64 load). What Julia's lowering can miss is the
+            # even register pair a 16-aligned record of 16 bytes or less takes
+            # (`_c_register_pair_misplaced`), decided by the record's
+            # unadjusted alignment and the stand-in's.
+            for (i, _pt) in enumerate(param_types)
+                startswith(_pt, "Ptr{") && continue
+                raw = get(_unaligned_bdk, _pt, _pt)
+                info = get(dwarf_structs, raw, nothing)
+                (info isa AbstractDict && haskey(info, "members")) || continue
+                sz = _parse_dwarf_size(info)
+                sz > 0 || continue
+                sa = _stand_in_align(_pt)
+                _c_register_pair_misplaced(sz, _rec_unadjusted_align(info), sa; abi) || continue
+                push!(slot_traps, _c_register_pair_trap_phrase(_pt, sz; placeholder = sa === nothing))
             end
         else
             # Win64: a record by reference whose alignment the callee's loads
@@ -3138,9 +3312,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 va_fixed[i]["byval_carrier"] = carrier
             end
             va_trap = !isempty(vd.x87) ? (n -> _x87_trap_body(n, vd.x87)) :
-                      !isempty(vd.blob_abi_offenders) ? (n -> _c_blob_trap_body(n, vd.blob_abi_offenders)) :
+                      !isempty(vd.blob_abi_offenders) ? (n -> _c_blob_trap_body(n, vd.blob_abi_offenders; abi)) :
                       !isempty(vd.vector_offenders) ? (n -> _c_vector_trap_body(n, vd.vector_offenders)) :
-                      !isempty(vd.slot_traps) ? (n -> _c_slot_trap_body(n, vd.slot_traps)) : nothing
+                      !isempty(vd.slot_traps) ? (n -> _c_slot_trap_body(n, vd.slot_traps; abi)) : nothing
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 va_params, va_return, overloads,
@@ -3579,7 +3753,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
-            $(_c_blob_trap_body(julia_name, blob_abi_offenders))end
+            $(_c_blob_trap_body(julia_name, blob_abi_offenders; abi))end
 
             """
         elseif !isempty(vector_offenders)
@@ -3596,7 +3770,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
-            $(_c_slot_trap_body(julia_name, slot_traps))end
+            $(_c_slot_trap_body(julia_name, slot_traps; abi))end
 
             """
         elseif has_unknown_param || is_unknown_return

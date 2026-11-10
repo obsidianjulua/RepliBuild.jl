@@ -95,10 +95,10 @@ the thing, or leaks, or wraps an empty struct. The symptom → key table is in
 
 ## Requirements
 
-- **Linux or Windows.** Linux is ELF `.so`; Windows is PE `.dll` under
-  `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64), not MSVC. Both read DWARF
-  through GNU binutils. macOS is refused at load — the AAPCS64 ABI classifier
-  is not built.
+- **Linux (x86-64 or AArch64) or Windows (x86-64).** Linux is ELF `.so`;
+  Windows is PE `.dll` under `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64),
+  not MSVC. Both read DWARF through GNU binutils. macOS is refused at load — its
+  Mach-O plumbing and Apple's arm64 calling convention are not built.
 - **Julia 1.12 or 1.13**, the versions CI tests. `Project.toml` still admits
   1.10 and 1.11, which nothing tests.
 - **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every

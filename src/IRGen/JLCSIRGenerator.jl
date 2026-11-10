@@ -6,6 +6,7 @@ module JLCSIRGenerator
 
 using ..DWARFParser
 import ..MLIRNative: CXX_PERSONALITY
+import ..host_record_abi
 import JSON
 
 # Modular includes
@@ -289,7 +290,8 @@ end
 Generate complete JLCS MLIR module from vtable information and metadata.
 """
 function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
-                          needed_symbols::Union{Set{String}, Nothing}=nothing)
+                          needed_symbols::Union{Set{String}, Nothing}=nothing,
+                          abi::Symbol=host_record_abi())
     io = IOBuffer()
 
     println(io, "// JLCS IR - Generated from DWARF debug info")
@@ -539,7 +541,8 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         println(io, generate_function_thunks(filtered_functions, structs_meta;
                                              may_throw=is_cpp, class_raii=class_raii,
                                              vcall_info=vcall_info,
-                                             record_abi=get(metadata, "record_abi", Dict{String,Any}())))
+                                             record_abi=get(metadata, "record_abi", Dict{String,Any}()),
+                                             abi=abi))
     end
 
     # 5. Generate STL Container Accessor Thunks

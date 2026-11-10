@@ -464,6 +464,16 @@ include(joinpath(TEST_DIR, "test_struct_abi.jl"))
 
 include(joinpath(TEST_DIR, "test_sysv_abi_oracle.jl"))
 
+# ── 12b'. AAPCS64 call shapes against clang's aarch64 lowering ───────────────
+# FunctionGen's AAPCS64 classification, as buildCallShape acts on it with the
+# AArch64 target on any host (`jlcs_probe_aapcs64_call_shapes`), diffed against
+# `clang --target=aarch64-linux-gnu -S -emit-llvm` over hand-written records
+# built with real DWARF. A specification test, like test_win64_abi.jl: the live
+# run is the arm64 job of tier2-linux.yml. Skips without libJLCS or a clang
+# that targets AArch64.
+
+include(joinpath(TEST_DIR, "test_aapcs64_abi_spec.jl"))
+
 # ── 12c. SysV record classes, live ───────────────────────────────────────────
 # One record per way a by-value record is classified under SysV, built as C++
 # at -O0 and -O2, every take_R/make_R called through its Tier 2 thunk with the

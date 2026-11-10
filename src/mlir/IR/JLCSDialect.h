@@ -19,12 +19,15 @@ class ModuleOp;
 namespace jlcs {
     std::unique_ptr<Pass> createLowerJLCSToLLVMPass();
 
-    // Test seam: the call shape the lowering's buildCallShape gives every
-    // jlcs.ffe_call and jlcs.try_call in `module` under the x86-64 SysV rules,
-    // on any host, one line per call (format at SysVCallShapeProbe). Works on
-    // a clone, so `module` is unchanged. test/test_sysv_abi_oracle.jl diffs
-    // it against LLVM's ABI lowering library.
+    // Test seams: the call shape the lowering's buildCallShape gives every
+    // jlcs.ffe_call and jlcs.try_call in `module` under one convention's
+    // rules, on any host, one line per call (format at CallShapeProbe). Each
+    // works on a clone, so `module` is unchanged. test/test_sysv_abi_oracle.jl
+    // diffs the SysV answer against LLVM's ABI lowering library;
+    // test/test_aapcs64_abi_spec.jl diffs the AAPCS64 answer against clang's
+    // lowering for aarch64-linux-gnu.
     std::string describeSysVCallShapes(ModuleOp module);
+    std::string describeAAPCS64CallShapes(ModuleOp module);
 } // namespace jlcs
 } // namespace mlir
 

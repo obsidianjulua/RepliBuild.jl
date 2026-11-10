@@ -435,6 +435,23 @@ jlcsEngineCreate(mlir::ModuleOp op, int optLevel, bool dumpObject,
     if (engine->perfListener)
       objectLayer->registerJITEventListener(*engine->perfListener);
 
+    if (targetTriple.isOSBinFormatELF() && targetTriple.isAArch64()) {
+      // AArch64 ELF spells the personality in .eh_frame as
+      // DW_EH_PE_indirect|pcrel through a per-object slot,
+      // `DW.ref.__gxx_personality_v0`: a weak hidden symbol the MC layer
+      // emits after the IR layer has enumerated the module's symbols. Nothing
+      // claims it, RuntimeDyld then takes the .eh_frame relocation for an
+      // external one, and the lookup fails ("Symbols not found: [
+      // DW.ref.__gxx_personality_v0 ]"), taking every thunk of the library
+      // with it (tier2-linux's arm64 cell, 2026-11-09; LLVM's D143039 traces
+      // the same failure). Claiming the object's own extra symbols lets the
+      // slot be the object's, next to its code, where the 32-bit pc-relative
+      // reference reaches it. lli does the same for PowerPC, whose encoding is
+      // the same. x86-64 ELF references the personality through the GOT and
+      // has no slot.
+      objectLayer->setAutoClaimResponsibilityForObjectSymbols(true);
+    }
+
     if (targetTriple.isOSBinFormatCOFF()) {
       objectLayer->setOverrideObjectFlagsWithResponsibilityFlags(true);
       objectLayer->setAutoClaimResponsibilityForObjectSymbols(true);

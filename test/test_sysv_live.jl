@@ -58,7 +58,9 @@ function sysv_live_expected(record::String, direction::String)
     # SysV returns `{ long double }` in st0, which the thunk does not read, so
     # the generator traps the return. Win64 returns the 16-byte record through
     # a hidden pointer and the call works.
-    record == "c_ld" && direction == "make" && !Sys.iswindows() && return "TRAP"
+    # AAPCS64 returns it as a homogeneous floating-point aggregate of one
+    # fp128, in q0, and the call works there too.
+    record == "c_ld" && direction == "make" && RepliBuild.host_record_abi() === :sysv && return "TRAP"
     return "PASS"
 end
 

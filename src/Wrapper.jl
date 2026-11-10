@@ -14,6 +14,7 @@ import ..ConfigurationManager: RepliBuildConfig, get_output_path, get_module_nam
                                 get_build_path, get_cache_path,
                                 enforce_varargs_provenance, with_aot_thunks
 import ..Slicer
+import ..host_record_abi
 import ..ClangJLBridge
 import ..BuildBridge
 import ..MLIRNative

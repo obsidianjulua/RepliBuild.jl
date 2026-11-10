@@ -463,7 +463,8 @@ worth reading the division as prose:
    classifies, a misaligned field makes MEMORY except a bitfield, classes merge
    per eightbyte, over 16 bytes is MEMORY, an X87UP not under X87 is MEMORY.
 2. **The verdict travels on the call.** The thunk generator states it as
-   `sysv_args` (one entry per operand) and `sysv_ret` on each `jlcs.ffe_call` /
+   `sysv_args` (one entry per operand) and `sysv_ret` (`aapcs64_args` and
+   `aapcs64_ret` when generating for an AArch64 host) on each `jlcs.ffe_call` /
    `jlcs.try_call`: `mem:<align>`, `regs:int,sse`, `regs:none,sse` (a low
    eightbyte of padding, passed nowhere), or `ignore`.
 3. **`buildCallShape` acts on it.** Under the SysV target a stated operand or

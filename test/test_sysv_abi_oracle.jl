@@ -430,7 +430,11 @@ const SAO_EMPTY_VT = DWARFParser.VtableInfo(Dict{String,DWARFParser.ClassInfo}()
 `meta`. `traps`: callee => why FunctionGen gave it no thunk.
 """
 function sao_jlcs(meta)
-    ir = JLCSIRGenerator.generate_jlcs_ir(SAO_EMPTY_VT, meta)
+    # The SysV statements, whatever the host: an AArch64 host would state
+    # AAPCS64's, and the SysV probe would fall back to the body, which is what
+    # this test exists to replace. The refusals are SysV's too (the test
+    # applies the SysV answer).
+    ir = JLCSIRGenerator.generate_jlcs_ir(SAO_EMPTY_VT, meta; abi = :sysv)
     traps = Dict(String(m.captures[1]) => String(m.captures[2])
                  for m in eachmatch(r"(?m)^// no thunk for (\S+): (.*)$", ir))
     ctx = create_context()

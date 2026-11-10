@@ -93,6 +93,10 @@ const _FZ_FUNCTIONS = Any[
     # D2 listed before D0: what a finalizer calls must not follow the order.
     _fz_dtor("Shape", 2), _fz_dtor("Shape", 0),
     _fz_dtor("Rect", 0), _fz_dtor("Rect", 2),
+    # An instance method: its proxy must keep the owner alive across the call.
+    _fz_row("_ZNK4Rect4areaEv", "Rect::area() const";
+            params = (_fz_p("this", "Ptr{Rect}", "Rect*"),), hop = true,
+            ret = Dict{String,Any}("c_type" => "double", "julia_type" => "Cdouble", "size" => 8)),
     _fz_free("_Z9make_rectdd", "make_rect(double, double)", _FZ_DD...; ret = _fz_ret("Rect")),
     # Its name names no class: it makes a Rect.
     _fz_free("_Z12make_rect_nxdd", "make_rect_nx(double, double)", _FZ_DD...; ret = _fz_ret("Rect")),
@@ -170,6 +174,14 @@ const _FZ_FUNCTIONS = Any[
         @test !isempty(widget)
         @test occursin("ccall((:_Z14destroy_widgetP6Widget, LIBRARY_PATH), Cvoid, (Ptr{Cvoid},), o.handle)", widget)
         @test !occursin("Widget_destroy_Widget", widget)
+    end
+
+    @testset "a method proxy keeps its owner alive across the call" begin
+        # `obj` is dead once `obj.handle` is read, and the raw wrapper allocates
+        # before C++ runs: a collection there ran the finalizer above on the
+        # object the call was about to use (a segfault in the thunk, 2026-11-10).
+        @test occursin("area(obj::Rect) = GC.@preserve obj Rect_area(obj.handle)", code)
+        @test !occursin("area(obj::Rect) = Rect_area(obj.handle)", code)
     end
 
     @testset "a factory makes the class it returns, or one its name names that derives from it" begin

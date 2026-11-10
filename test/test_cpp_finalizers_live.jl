@@ -66,6 +66,9 @@ if requires("C++ finalizers, live", :libJLCS, :clangxx)
         @test occursin("ccall((:_ZN4LeafD0Ev, LIBRARY_PATH), Cvoid, (Ptr{Leaf},), x.handle)", code)
         @test occursin("ccall((:_ZN6Pooled12DeletePooledEPS_, LIBRARY_PATH), Cvoid, (Ptr{Pooled},), x.handle)", code)
         @test !occursin("ccall((:_ZN4Node10FreeMemoryEv, LIBRARY_PATH), Cvoid, (Ptr{Node},), x.handle)", code)
+        # The method proxy keeps the `Rect` alive across the Tier 2 call: the
+        # probe's `area(Rect(2, 3))` otherwise races its own finalizer.
+        @test occursin("area(obj::Rect) = GC.@preserve obj Rect_area(obj.handle)", code)
     end
 
     @testset "collected objects are freed" begin

@@ -6,9 +6,13 @@ name: Tier 2 (Linux)
 # what exercises Tier 2 on Linux between runs on a Linux box.
 #
 # Every cell of the support window: system LLVM/MLIR 22 and 23 from apt.llvm.org,
-# times Julia 1.12 and 1.13 at test.yml's exact versions. The job is heavy (the
-# toolchain, the dialect build, every fixture), so it runs on demand and on pull
-# requests that touch what devtests covers, not on every push.
+# times Julia 1.12 and 1.13 at test.yml's exact versions, on x86-64; plus one
+# AArch64 cell (LLVM 23, Julia 1.13 on GitHub's `ubuntu-24.04-arm` runner), the
+# only place the AAPCS64 struct ABI classifier runs live: on x86-64 it is
+# reached through the dialect's probe seam alone (test_aapcs64_abi_spec.jl).
+# The job is heavy (the toolchain, the dialect build, every fixture), so it runs
+# on demand and on pull requests that touch what devtests covers, not on every
+# push.
 
 on:
   workflow_dispatch:
@@ -59,8 +63,8 @@ defaults:
 
 jobs:
   devtests:
-    name: devtests — LLVM ${{ matrix.llvm }}, Julia ${{ matrix.julia }}
-    runs-on: ubuntu-latest
+    name: devtests — LLVM ${{ matrix.llvm }}, Julia ${{ matrix.julia }}, ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -71,6 +75,15 @@ jobs:
         # runs on each Julia's own libLLVM.
         llvm: ${{ fromJSON(inputs.llvm && format('["{0}"]', inputs.llvm) || '["22", "23"]') }}
         julia: ${{ fromJSON(inputs.julia && format('["{0}"]', inputs.julia) || '["1.12.7", "1.13.2"]') }}
+        runner: [ubuntu-latest]
+        # One AArch64 cell at the newest of each (apt.llvm.org publishes arm64
+        # for every branch it carries). A manual run with an `llvm` or `julia`
+        # input still adds it, so the arm64 answer is never more than one run
+        # away.
+        include:
+          - llvm: "23"
+            julia: "1.13.2"
+            runner: ubuntu-24.04-arm
     env:
       LLVM_MAJOR: ${{ matrix.llvm }}
     steps:
@@ -170,7 +183,7 @@ jobs:
           cmake --version | head -n 1
           readelf --version | head -n 1
           {
-            echo "### LLVM $LLVM_MAJOR, Julia $JULIA"
+            echo "### LLVM $LLVM_MAJOR, Julia $JULIA, $(uname -m)"
             echo "- Ubuntu $CODENAME, LLVM/Clang/MLIR $llvm (\`$PACKAGE\`)"
             echo "- REPLIBUILD_SKIP_TESTS: \`${REPLIBUILD_SKIP_TESTS:-none}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -187,7 +200,7 @@ jobs:
           path: |
             src/mlir/build/libJLCS.so*
             src/mlir/build/jlcs_llvm_version
-          key: libJLCS-${{ steps.llvm.outputs.codename }}-llvm${{ steps.toolchain.outputs.llvm }}-${{ hashFiles('src/mlir/CMakeLists.txt', 'src/mlir/build.sh', 'src/mlir/*.td', 'src/mlir/IR/*.h', 'src/mlir/impl/*') }}
+          key: libJLCS-${{ runner.arch }}-${{ steps.llvm.outputs.codename }}-llvm${{ steps.toolchain.outputs.llvm }}-${{ hashFiles('src/mlir/CMakeLists.txt', 'src/mlir/build.sh', 'src/mlir/*.td', 'src/mlir/IR/*.h', 'src/mlir/impl/*') }}
 
       - name: Build the JLCS dialect
         if: steps.jlcs.outputs.cache-hit != 'true'
@@ -244,7 +257,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: tier2-linux-llvm${{ matrix.llvm }}-julia${{ matrix.julia }}-attempt${{ github.run_attempt }}
+          name: tier2-linux-${{ runner.arch }}-llvm${{ matrix.llvm }}-julia${{ matrix.julia }}-attempt${{ github.run_attempt }}
           path: |
             test/*/julia/
             test/*/replibuild.toml
