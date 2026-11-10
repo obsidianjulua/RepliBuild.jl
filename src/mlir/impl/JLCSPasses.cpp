@@ -39,10 +39,10 @@ namespace {
 //
 // Keyed on the host for the same reason `kHostAbi` is: this library feeds an
 // in-process JIT and the AOT thunks built beside it, so the target IS the host.
-// JLCS_FORCE_ABI_WIN64 deliberately does NOT change it — that flag exists to
-// diff Win64 struct lowering from a Linux box, such a library cannot run
-// anything regardless, and giving it a personality the Linux runtime lacks
-// would break that build for nothing.
+// JLCS_FORCE_ABI_WIN64 / JLCS_FORCE_ABI_AAPCS64 deliberately do NOT change it —
+// those flags exist to diff another convention's struct lowering from this
+// box, such a library cannot run anything regardless, and giving it a
+// personality this runtime lacks would break that build for nothing.
 //
 // Declared here, above every use, rather than beside kHostAbi: the first use is
 // in the vcall lowering far above that point.
@@ -533,29 +533,49 @@ static uint64_t getPackedSizeInBits(Type type) {
 // Both rule sets are compiled on every host — only the default differs — so
 // the inactive one cannot bit-rot unnoticed the way a #ifdef'd-out branch does.
 
-enum class AbiTarget { SysV, Win64 };
+enum class AbiTarget { SysV, Win64, AAPCS64 };
 
-// -DJLCS_FORCE_ABI_WIN64 builds the Win64 rules into a Linux libJLCS. The
-// resulting library CANNOT run anything — the JIT would emit Win64 calls into a
-// SysV process — but the pass itself is IR→IR and touches no OS API, so it can
-// still be driven on Linux and its output diffed against
-// `clang --target=x86_64-w64-windows-gnu`. That is the only way to exercise the
-// Win64 LOWERING (not just the decision table) without a Windows host, so build
-// it to a scratch path and never over the working libJLCS.so.
+// -DJLCS_FORCE_ABI_WIN64 builds the Win64 rules into a Linux libJLCS, and
+// -DJLCS_FORCE_ABI_AAPCS64 the AArch64 ones into an x86-64 libJLCS (both are
+// CMake options of the same names). The resulting library CANNOT run anything
+// — the JIT would emit another convention's calls into this process — but the
+// pass itself is IR→IR and touches no OS API, so it can still be driven here
+// and its output diffed against `clang --target=x86_64-w64-windows-gnu` or
+// `--target=aarch64-linux-gnu`. That is the only way to exercise the other
+// LOWERING (not just the decision table, which the probe seam below reaches on
+// any host) without that host, so build it to a scratch path and never over
+// the working libJLCS.so.
 #if defined(JLCS_FORCE_ABI_WIN64)
 static constexpr AbiTarget kHostAbi = AbiTarget::Win64;
-#elif defined(_WIN32)
+#elif defined(JLCS_FORCE_ABI_AAPCS64)
+static constexpr AbiTarget kHostAbi = AbiTarget::AAPCS64;
+#elif defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
 static constexpr AbiTarget kHostAbi = AbiTarget::Win64;
+#elif defined(_WIN32)
+// Windows on ARM is AAPCS64 with Microsoft's variations; nothing here models
+// them, and RepliBuild refuses that host at load.
+#error "JLCS struct ABI classification has no rules for Windows on ARM."
+#elif defined(__APPLE__)
+// Apple's arm64 PCS departs from AAPCS64 (empty records dropped in C++,
+// variadic arguments always on the stack), and RepliBuild refuses macOS at load
+// for its Mach-O plumbing too. Not this target.
+#error "JLCS struct ABI classification has no rules for Apple's arm64 PCS (Darwin)."
+#elif defined(__aarch64__)
+static constexpr AbiTarget kHostAbi = AbiTarget::AAPCS64;
 #elif defined(__x86_64__) || defined(_M_X64)
 static constexpr AbiTarget kHostAbi = AbiTarget::SysV;
 #else
-// Silently applying x86-64 struct classification to AArch64 AAPCS (or anything
-// else) miscompiles every aggregate call with no diagnostic. Fail at build.
-#error "JLCS struct ABI classification supports x86-64 only (SysV or Win64)."
+// Silently applying one convention's struct classification to another
+// miscompiles every aggregate call with no diagnostic. Fail at build.
+#error "JLCS struct ABI classification supports x86-64 (SysV, Win64) and AArch64 Linux (AAPCS64) only."
 #endif
 
 // `regs` is the coerced scalar per argument register the aggregate occupies:
-// up to two on SysV (one per eightbyte), exactly one on Win64.
+// up to two on SysV (one per eightbyte), exactly one on Win64. Under AAPCS64 it
+// is exactly one entry too, holding the WHOLE coerced type: `i64`, `i128`, an
+// `[2 x i64]` or an `[N x fT]` array, which the AArch64 backend places as one
+// block of consecutive registers (an array or i128 argument is what tells it
+// to; a literal struct of two i64 would not be kept together).
 //
 // The three fields after it are set only from the generator's statement of the
 // record's SysV class (`SysVFacts` below), never from a body:
@@ -650,41 +670,150 @@ static bool parseSysVFacts(StringRef s, MLIRContext* ctx, SysVFacts& out, std::s
     return false;
 }
 
-// What a jlcs.ffe_call / jlcs.try_call states about its record crossings.
-// `args` has one entry per operand of the op (unstated where it says nothing).
+// --- The generator's statement of a record's AAPCS64 class ------------------
+//
+// The AArch64 twin of SysVFacts (`aapcs64_record_abi`, AAPCS64RecordABI.jl),
+// stated as `aapcs64_args` / `aapcs64_ret` by a generator running for an
+// AAPCS64 host:
+//
+//   "ignore"                  0 bytes: no operand, a void return
+//   "mem:<align>"             a pointer to a caller copy (no byval) or an sret
+//                             slot, of that alignment (≥ 8)
+//   "gpr:<n>"                 n general registers, 1 or 2: `i64` / `[2 x i64]`
+//   "i128"                    an even general register pair
+//   "int:<bits>"              a return of its exact size in one register
+//   "hfa:<f16|f32|f64|f128>:<n>"  a homogeneous floating-point aggregate,
+//                             `[n x fT]`, one floating register per leaf
+//
+// Why facts and not the body, again: an HFA of 12 bytes is `[3 x f32]` only if
+// every member is a float, and a tiled body spells a nested record as bytes;
+// an `i128` pair is decided by a member's `alignas`, which no body carries;
+// and whether 16 bytes with an `aligned(16)` of the record's own is `i128` or
+// `[2 x i64]` depends on arg vs return, which the generator states apart.
+struct A64Facts {
+    bool stated = false;
+    bool ignore = false;
+    bool memory = false;
+    unsigned align = 8;
+    Type coerced;                         // the one register block, when not memory/ignore
+};
+
+static bool parseA64Facts(StringRef s, MLIRContext* ctx, A64Facts& out, std::string& err) {
+    out = A64Facts();
+    if (s.empty())
+        return true;
+    out.stated = true;
+    if (s == "ignore") {
+        out.ignore = true;
+        return true;
+    }
+    if (s.consume_front("mem:")) {
+        unsigned a = 0;
+        if (s.getAsInteger(10, a) || a < 8 || !llvm::isPowerOf2_32(a)) {
+            err = ("a copy/sret alignment must be a power of two of at least 8: `mem:" + s + "`").str();
+            return false;
+        }
+        out.memory = true;
+        out.align = a;
+        return true;
+    }
+    if (s == "i128") {
+        out.coerced = IntegerType::get(ctx, 128);
+        return true;
+    }
+    if (s.consume_front("gpr:")) {
+        unsigned n = 0;
+        if (s.getAsInteger(10, n) || n < 1 || n > 2) {
+            err = ("a general-register record takes one or two registers: `gpr:" + s + "`").str();
+            return false;
+        }
+        Type i64 = IntegerType::get(ctx, 64);
+        out.coerced = n == 1 ? i64 : (Type)LLVM::LLVMArrayType::get(i64, 2);
+        return true;
+    }
+    if (s.consume_front("int:")) {
+        unsigned bits = 0;
+        if (s.getAsInteger(10, bits) || bits < 8 || bits > 64 || bits % 8 != 0) {
+            err = ("a one-register return is 8 to 64 bits, whole bytes: `int:" + s + "`").str();
+            return false;
+        }
+        out.coerced = IntegerType::get(ctx, bits);
+        return true;
+    }
+    if (s.consume_front("hfa:")) {
+        StringRef base, count;
+        std::tie(base, count) = s.split(':');
+        Type fT = base == "f16" ? (Type)Float16Type::get(ctx)
+                : base == "f32" ? (Type)Float32Type::get(ctx)
+                : base == "f64" ? (Type)Float64Type::get(ctx)
+                : base == "f128" ? (Type)Float128Type::get(ctx) : Type();
+        unsigned n = 0;
+        if (!fT || count.getAsInteger(10, n) || n < 1 || n > 4) {
+            err = ("an HFA is one to four leaves of f16, f32, f64 or f128: `hfa:" + s + "`").str();
+            return false;
+        }
+        out.coerced = LLVM::LLVMArrayType::get(fT, n);
+        return true;
+    }
+    err = ("not an AAPCS64 record class (`mem:<align>`, `gpr:<n>`, `i128`, `int:<bits>`, "
+           "`hfa:<fT>:<n>`, `ignore`): `" + s + "`").str();
+    return false;
+}
+
+// What a jlcs.ffe_call / jlcs.try_call states about its record crossings, under
+// each convention that reads a statement. `args` / `a64args` have one entry per
+// operand of the op (unstated where it says nothing). A module states one
+// convention's facts (the generator's host's); the other's stay unstated, and
+// a probe asking for that other convention classifies from the body.
 struct CallFacts {
     SysVFacts ret;
     SmallVector<SysVFacts, 4> args;
+    A64Facts a64ret;
+    SmallVector<A64Facts, 4> a64args;
     std::string error;
 };
 
-static CallFacts readCallFacts(Operation* op, unsigned numOperands) {
-    CallFacts f;
+template <typename Facts, typename Parse>
+static bool readFactAttrs(Operation* op, unsigned numOperands, StringRef retName, StringRef argsName,
+    Parse parse, Facts& ret, SmallVectorImpl<Facts>& args, std::string& error)
+{
     MLIRContext* ctx = op->getContext();
-    f.args.resize(numOperands);
-    if (auto ret = op->getAttrOfType<StringAttr>("sysv_ret")) {
-        if (!parseSysVFacts(ret.getValue(), ctx, f.ret, f.error))
-            f.error = "sysv_ret: " + f.error;
+    args.resize(numOperands);
+    if (auto r = op->getAttrOfType<StringAttr>(retName)) {
+        std::string err;
+        if (!parse(r.getValue(), ctx, ret, err)) {
+            error = (retName + ": " + err).str();
+            return false;
+        }
     }
-    if (auto arr = op->getAttrOfType<ArrayAttr>("sysv_args")) {
+    if (auto arr = op->getAttrOfType<ArrayAttr>(argsName)) {
         if (arr.size() != numOperands) {
-            f.error = ("sysv_args lists " + Twine(arr.size()) + " operands, the call has " +
-                       Twine(numOperands)).str();
-            return f;
+            error = (argsName + " lists " + Twine(arr.size()) + " operands, the call has " +
+                     Twine(numOperands)).str();
+            return false;
         }
         for (auto [i, a] : llvm::enumerate(arr)) {
             auto str = dyn_cast<StringAttr>(a);
             if (!str) {
-                f.error = "sysv_args: every entry is a string";
-                return f;
+                error = (argsName + ": every entry is a string").str();
+                return false;
             }
             std::string err;
-            if (!parseSysVFacts(str.getValue(), ctx, f.args[i], err)) {
-                f.error = ("sysv_args[" + Twine(i) + "]: " + err).str();
-                return f;
+            if (!parse(str.getValue(), ctx, args[i], err)) {
+                error = (argsName + "[" + Twine(i) + "]: " + err).str();
+                return false;
             }
         }
     }
+    return true;
+}
+
+static CallFacts readCallFacts(Operation* op, unsigned numOperands) {
+    CallFacts f;
+    if (!readFactAttrs(op, numOperands, "sysv_ret", "sysv_args", parseSysVFacts, f.ret, f.args, f.error))
+        return f;
+    readFactAttrs(op, numOperands, "aapcs64_ret", "aapcs64_args", parseA64Facts, f.a64ret, f.a64args,
+                  f.error);
     return f;
 }
 
@@ -840,6 +969,93 @@ static StructABI classifyWin64Struct(LLVM::LLVMStructType s, MLIRContext* ctx) {
     return r;
 }
 
+// AArch64 AAPCS64 (Linux), from the body: the fallback for hand-written IR with
+// no statement. The generator states the class from DWARF facts instead
+// (`aapcs64_record_abi`, read by classifyA64FromFacts below), because a body
+// cannot say what decides here: a tiled body spells a nested record as bytes
+// (no HFA), no body says `alignas` (no i128), and the record's own `aligned`
+// counts for a return and not for an argument.
+//
+//   * 0 bytes: ignored.
+//   * A homogeneous floating-point aggregate — every leaf a float of one
+//     width, at most four leaves, no padding (leaves × width == size) — is
+//     `[N x fT]`, one floating register per leaf, at ANY size.
+//   * Otherwise 16 bytes or less goes in general registers: an argument as
+//     `i64` or `[2 x i64]` by size, or `i128` when the record is 16-aligned
+//     (an even register pair); a return as `iN` of its exact size up to 8
+//     bytes, then `[2 x i64]` or `i128` by alignment. Field alignment plays no
+//     part: a packed `{ char; double }` is `[2 x i64]`.
+//   * Over 16 bytes: a pointer to a caller copy, with NO byval (the convention
+//     is a reference to a temporary, as on Win64), or an sret slot.
+// Register exhaustion is the backend's: an argument that does not fit in what
+// is left goes to the stack whole because its type is an array or i128, so
+// unlike SysV nothing here counts registers.
+static StructABI classifyAAPCS64Struct(LLVM::LLVMStructType s, MLIRContext* ctx, bool isReturn) {
+    StructABI r;
+    uint64_t size = abiSize(s);
+    if (size == 0) {
+        r.memoryClass = false;
+        r.ignore = true;
+        return r;
+    }
+    SmallVector<AbiLeaf, 8> leaves;
+    collectAbiLeaves(s, 0, leaves);
+    if (!leaves.empty() && llvm::all_of(leaves, [&](const AbiLeaf& l) {
+            return l.isFP && l.size == leaves[0].size; })) {
+        uint64_t w = leaves[0].size;
+        SmallVector<uint64_t, 8> at;
+        for (const AbiLeaf& l : leaves)
+            at.push_back(l.offset);
+        llvm::sort(at);
+        at.erase(std::unique(at.begin(), at.end()), at.end());   // a union's members share a position
+        bool contiguous = true;
+        for (size_t i = 0; i < at.size(); ++i)
+            contiguous = contiguous && at[i] == i * w;
+        Type base = w == 2 ? (Type)Float16Type::get(ctx) : w == 4 ? (Type)Float32Type::get(ctx)
+                  : w == 8 ? (Type)Float64Type::get(ctx) : w == 16 ? (Type)Float128Type::get(ctx) : Type();
+        if (base && at.size() <= 4 && contiguous && at.size() * w == size) {
+            r.memoryClass = false;
+            r.regs.push_back(LLVM::LLVMArrayType::get(base, at.size()));
+            return r;
+        }
+    }
+    uint64_t align = abiAlign(s);
+    if (size > 16) {
+        r.memAlign = static_cast<unsigned>(std::max<uint64_t>(align, 8));
+        return r;                                        // memoryClass: a pointer / sret
+    }
+    r.memoryClass = false;
+    if (isReturn && size <= 8) {
+        r.regs.push_back(IntegerType::get(ctx, static_cast<unsigned>(size * 8)));
+        return r;
+    }
+    if (align >= 16) {
+        r.regs.push_back(IntegerType::get(ctx, 128));
+        return r;
+    }
+    Type i64 = IntegerType::get(ctx, 64);
+    r.regs.push_back(size <= 8 ? i64 : (Type)LLVM::LLVMArrayType::get(i64, 2));
+    return r;
+}
+
+// The generator's AAPCS64 statement, as a StructABI.
+static StructABI classifyA64FromFacts(const A64Facts& f) {
+    StructABI r;
+    if (f.ignore) {
+        r.memoryClass = false;
+        r.ignore = true;
+        return r;
+    }
+    if (f.memory) {
+        r.memoryClass = true;
+        r.memAlign = f.align;
+        return r;
+    }
+    r.memoryClass = false;
+    r.regs.push_back(f.coerced);
+    return r;
+}
+
 // The generator's statement, as a StructABI.
 static StructABI classifyFromFacts(const SysVFacts& f) {
     StructABI r;
@@ -859,13 +1075,18 @@ static StructABI classifyFromFacts(const SysVFacts& f) {
     return r;
 }
 
-// SysV takes the generator's statement when there is one and the body
-// otherwise; Win64 crosses a record by size alone and never reads it.
+// SysV and AAPCS64 take the generator's statement when there is one and the
+// body otherwise; Win64 crosses a record by size alone and never reads one.
+// `isReturn` matters to AAPCS64 alone (and only to its body fallback: a
+// statement already says which side it is for).
 static StructABI classifyStruct(LLVM::LLVMStructType s, MLIRContext* ctx,
-    AbiTarget target, const SysVFacts& facts = SysVFacts())
+    AbiTarget target, const SysVFacts& facts = SysVFacts(), const A64Facts& a64 = A64Facts(),
+    bool isReturn = false)
 {
     if (target == AbiTarget::Win64)
         return classifyWin64Struct(s, ctx);
+    if (target == AbiTarget::AAPCS64)
+        return a64.stated ? classifyA64FromFacts(a64) : classifyAAPCS64Struct(s, ctx, isReturn);
     return facts.stated ? classifyFromFacts(facts) : classifySysVStruct(s, ctx);
 }
 
@@ -914,15 +1135,24 @@ static unsigned memorySlotAlign(Type t, AbiTarget target) {
     return static_cast<unsigned>(std::max<uint64_t>(floor, abiAlign(t)));
 }
 
-// The same, for a record whose SysV class the generator stated: the record's
-// own alignment from DWARF (`aligned(16)`, `__int128`, `long double` give 16,
-// which no body of ours says), still never below the floor.
+// The same, for a record whose class the generator stated (SysV or AAPCS64):
+// the record's own alignment from DWARF (`aligned(16)`, `__int128`, `long
+// double` give 16, which no body of ours says), still never below the floor.
 static unsigned memorySlotAlign(Type t, AbiTarget target, const StructABI& abi) {
     unsigned a = memorySlotAlign(t, target);
-    if (target == AbiTarget::SysV && abi.memAlign)
+    if (target != AbiTarget::Win64 && abi.memAlign)
         a = std::max(a, abi.memAlign);
     return a;
 }
+
+// The alloca behind a register-class record under AAPCS64: it holds the record
+// (stored whole) and is read back as the coerced block, which may be wider
+// (a 12-byte record read as `[2 x i64]`) or more aligned (`i128`). 16 covers
+// every block the convention makes and every record it puts in registers (an
+// HFA of fp128 is 16-aligned; nothing wider goes in registers), and an alloca
+// left to its type's alignment would under-align a 16-aligned record stored
+// into a `[2 x i64]` slot. SysV keeps its unaligned allocas, byte for byte.
+static constexpr unsigned kA64CoercionSlotAlign = 16;
 
 // --- Shared SysV call shape ------------------------------------------------
 //
@@ -958,6 +1188,18 @@ struct CallShape {
         unsigned align;
     };
     SmallVector<ByVal, 2> byval;
+    // Every by-value struct passed as a bare pointer to a caller copy (Win64,
+    // AAPCS64): its argument index and the copy's alignment. The lowering
+    // needs nothing from it; the probe seam reports it.
+    struct Indirect {
+        unsigned index;
+        unsigned align;
+    };
+    SmallVector<Indirect, 2> indirect;
+    // The alignment of the slot a coerced return is stored to and the record
+    // loaded from; 0 leaves it to the slot type's (`kA64CoercionSlotAlign`
+    // under AAPCS64).
+    unsigned retSlotAlign = 0;
 };
 
 static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location loc,
@@ -976,7 +1218,8 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
     // the generator's statement where it made one (`sysv_ret`).
     if (!resultTypeVec.empty()) {
         if (auto retStructType = dyn_cast<LLVM::LLVMStructType>(resultTypeVec[0])) {
-            auto abi = classifyStruct(retStructType, ctx, target, facts.ret);
+            auto abi = classifyStruct(retStructType, ctx, target, facts.ret, facts.a64ret,
+                                      /*isReturn=*/true);
             if (abi.ignore) {
                 s.retIgnored = true;
                 s.origRetStructType = retStructType;
@@ -991,6 +1234,8 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
                 s.coercedRetType = coercedType(abi, ctx);
                 s.retSlotType = coercionSlotType(abi, ctx);
                 s.retSlotOffset = coercionOffset(abi);
+                if (target == AbiTarget::AAPCS64)
+                    s.retSlotAlign = kA64CoercionSlotAlign;
             }
         }
     }
@@ -1026,7 +1271,8 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
 
         if (auto structType = dyn_cast<LLVM::LLVMStructType>(argType)) {
             auto abi = classifyStruct(structType, ctx, target,
-                k < facts.args.size() ? facts.args[k] : SysVFacts());
+                k < facts.args.size() ? facts.args[k] : SysVFacts(),
+                k < facts.a64args.size() ? facts.a64args[k] : A64Facts(), /*isReturn=*/false);
             // A record of padding only: C passes it nowhere, and passing a
             // register for it would shift every later argument.
             if (abi.ignore)
@@ -1046,12 +1292,14 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
             if (asRegs) {
                 // Register-class by-value struct: pass one scalar per register
                 // (through memory, matching clang's coercion). The 8-byte GEP
-                // stride is the SysV eightbyte layout; Win64 yields a single
-                // register, so the stride is never exercised there. A record
-                // whose low eightbyte is padding passes its high one alone,
-                // read from offset 8.
-                Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType,
-                    coercionSlotType(abi, ctx), one);
+                // stride is the SysV eightbyte layout; Win64 and AAPCS64 yield
+                // a single block, so the stride is never exercised there. A
+                // record whose low eightbyte is padding passes its high one
+                // alone, read from offset 8.
+                Type slotType = coercionSlotType(abi, ctx);
+                Value slot = target == AbiTarget::AAPCS64
+                    ? LLVM::AllocaOp::create(rewriter, loc, ptrType, slotType, one, kA64CoercionSlotAlign)
+                    : LLVM::AllocaOp::create(rewriter, loc, ptrType, slotType, one);
                 LLVM::StoreOp::create(rewriter, loc, arg, slot);
                 int32_t base = coercionOffset(abi);
                 for (unsigned i = 0; i < abi.regs.size(); ++i) {
@@ -1092,12 +1340,16 @@ static CallShape buildCallShape(ConversionPatternRewriter& rewriter, Location lo
             // alloca+store above ALREADY IS that temporary, so the pointer is
             // complete on its own; adding byval would ask the backend to make a
             // second copy into an outgoing area the convention does not have.
+            // AAPCS64 is the same shape: `getNaturalAlignIndirect(Ty,
+            // /*ByVal=*/false)` for a record over 16 bytes.
             unsigned align = memorySlotAlign(argType, target, abi);
             Value stackSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, argType,
                 one, align);
             LLVM::StoreOp::create(rewriter, loc, arg, stackSlot);
             if (target == AbiTarget::SysV)
                 s.byval.push_back({static_cast<unsigned>(s.args.size()), argType, align});
+            else
+                s.indirect.push_back({static_cast<unsigned>(s.args.size()), align});
             s.args.push_back(stackSlot);
             s.argTypes.push_back(ptrType);
             continue;
@@ -1138,7 +1390,9 @@ static Value materializeCallResult(ConversionPatternRewriter& rewriter, Location
     if (!s.coercedRetType)
         return callResults.empty() ? Value() : callResults[0];
     Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    Value slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, s.retSlotType, one);
+    Value slot = s.retSlotAlign
+        ? LLVM::AllocaOp::create(rewriter, loc, ptrType, s.retSlotType, one, s.retSlotAlign)
+        : LLVM::AllocaOp::create(rewriter, loc, ptrType, s.retSlotType, one);
     Value at = slot;
     if (s.retSlotOffset)
         at = LLVM::GEPOp::create(rewriter, loc, ptrType, rewriter.getI8Type(), slot,
@@ -1961,15 +2215,16 @@ struct LowerJLCSToLLVMPass
 };
 
 //===----------------------------------------------------------------------===//
-// SysV call-shape probe (test seam)
+// Call-shape probe (test seam)
 //===----------------------------------------------------------------------===//
 //
-// What buildCallShape makes of each jlcs.ffe_call and jlcs.try_call under the
-// x86-64 SysV rules, on any host. test/test_sysv_abi_oracle.jl diffs it against
-// LLVM's own ABI lowering library (JLCSAbiOracle.cpp). It calls the real
-// buildCallShape with an explicit AbiTarget::SysV, so it shares every line of
-// the decision with the lowering instead of restating it. The pass above is
-// untouched and still takes kHostAbi.
+// What buildCallShape makes of each jlcs.ffe_call and jlcs.try_call under one
+// convention's rules, on any host. test/test_sysv_abi_oracle.jl diffs the SysV
+// answer against LLVM's own ABI lowering library (JLCSAbiOracle.cpp), and
+// test/test_aapcs64_abi_spec.jl the AAPCS64 answer against clang's lowering for
+// aarch64-linux-gnu. It calls the real buildCallShape with an explicit
+// AbiTarget, so it shares every line of the decision with the lowering instead
+// of restating it. The pass above is untouched and still takes kHostAbi.
 //
 // A conversion is the only way to get the ConversionPatternRewriter that
 // buildCallShape takes. The IR it emits on the way (allocas, loads) is thrown
@@ -1977,22 +2232,26 @@ struct LowerJLCSToLLVMPass
 
 // One line per call: the callee, the return, then one field per argument.
 //   return:   void | ignore | scalar:<type> | sret:<slot align> | regs:[none,]<t>[,<t>]
-//   argument: scalar:<type> | ignore | byval:<align> | regs:[none,]<t>[,<t>]
-// `regs` lists the scalar per eightbyte, i64 for INTEGER and f64 for SSE, after
-// `none` when the low eightbyte is padding and only the high one is passed.
-// `ignore` is a record of padding alone, passed nowhere and returned as void.
+//   argument: scalar:<type> | ignore | byval:<align> | indirect:<align> | regs:[none,]<t>[,<t>]
+// `regs` lists the scalar per register block: under SysV one per eightbyte,
+// i64 for INTEGER and f64 for SSE, after `none` when the low eightbyte is
+// padding and only the high one is passed; under AAPCS64 the one coerced block
+// (`i64`, `!llvm.array<2 x i64>`, `i128`, `iN`, `!llvm.array<N x fT>`).
+// `byval` is SysV's caller copy in the argument area, `indirect` the bare
+// pointer to a copy Win64 and AAPCS64 pass. `ignore` is a record of padding
+// alone, passed nowhere and returned as void.
 // `unmodelled:` replaces the fields when an operand or result is not an LLVM
 // type yet: the real pass converts those first, and this probe does not.
-// `error:` replaces them when the call's `sysv_args`/`sysv_ret` do not parse.
+// `error:` replaces them when the call's statements do not parse.
 //
 // A probed op is marked, not replaced, which is what makes it legal: the
 // conversion then never needs a value of its result type.
-static constexpr llvm::StringLiteral kSysVProbedAttr = "jlcs.sysv_probed";
+static constexpr llvm::StringLiteral kProbedAttr = "jlcs.shape_probed";
 
-struct SysVCallShapeProbe : public ConversionPattern {
-    SysVCallShapeProbe(LLVMTypeConverter& typeConverter, MLIRContext* ctx,
-        StringRef opName, std::string& out)
-        : ConversionPattern(typeConverter, opName, 1, ctx), out(out)
+struct CallShapeProbe : public ConversionPattern {
+    CallShapeProbe(LLVMTypeConverter& typeConverter, MLIRContext* ctx,
+        StringRef opName, AbiTarget target, std::string& out)
+        : ConversionPattern(typeConverter, opName, 1, ctx), target(target), out(out)
     {
     }
 
@@ -2020,7 +2279,7 @@ struct SysVCallShapeProbe : public ConversionPattern {
             os << "\terror:" << facts.error << '\n';
         } else {
             CallShape s = buildCallShape(rewriter, op->getLoc(), resultTypeVec,
-                ValueRange(operands), facts, AbiTarget::SysV);
+                ValueRange(operands), facts, target);
 
             // `regs:none,<t>` is a record whose low eightbyte is padding: only
             // the high one is passed. `ignore` is a record of padding alone.
@@ -2040,7 +2299,7 @@ struct SysVCallShapeProbe : public ConversionPattern {
                 os << "ignore";
             } else if (s.coercedRetType) {
                 StructABI abi = classifyStruct(cast<LLVM::LLVMStructType>(resultTypeVec[0]), ctx,
-                    s.target, facts.ret);
+                    s.target, facts.ret, facts.a64ret, /*isReturn=*/true);
                 regsOf(abi, abi.regs);
             } else {
                 os << "scalar:" << resultTypeVec[0];
@@ -2066,7 +2325,15 @@ struct SysVCallShapeProbe : public ConversionPattern {
                     ++j;
                     continue;
                 }
-                StructABI abi = classifyStruct(st, ctx, s.target, facts.args[k]);
+                auto indirect = llvm::find_if(s.indirect,
+                    [&](const CallShape::Indirect& b) { return b.index == j; });
+                if (indirect != s.indirect.end()) {
+                    os << "indirect:" << indirect->align;
+                    ++j;
+                    continue;
+                }
+                StructABI abi = classifyStruct(st, ctx, s.target, facts.args[k], facts.a64args[k],
+                                               /*isReturn=*/false);
                 if (abi.ignore) {
                     os << "ignore";
                     continue;
@@ -2085,11 +2352,12 @@ struct SysVCallShapeProbe : public ConversionPattern {
         }
 
         rewriter.modifyOpInPlace(op, [&] {
-            op->setAttr(kSysVProbedAttr, rewriter.getUnitAttr());
+            op->setAttr(kProbedAttr, rewriter.getUnitAttr());
         });
         return success();
     }
 
+    AbiTarget target;
     std::string& out;
 };
 
@@ -2107,7 +2375,7 @@ std::unique_ptr<Pass> createLowerJLCSToLLVMPass()
     return std::make_unique<LowerJLCSToLLVMPass>();
 }
 
-std::string describeSysVCallShapes(ModuleOp module)
+static std::string describeCallShapes(ModuleOp module, AbiTarget abi)
 {
     MLIRContext* ctx = module.getContext();
     OwningOpRef<ModuleOp> clone(cast<ModuleOp>(module->clone()));
@@ -2116,17 +2384,27 @@ std::string describeSysVCallShapes(ModuleOp module)
     LLVMTypeConverter typeConverter(ctx);
     ConversionTarget target(*ctx);
     target.addDynamicallyLegalOp<FFECallOp, TryCallOp>(
-        [](Operation* op) { return op->hasAttr(kSysVProbedAttr); });
+        [](Operation* op) { return op->hasAttr(kProbedAttr); });
     target.markUnknownOpDynamicallyLegal([](Operation*) { return true; });
 
     RewritePatternSet patterns(ctx);
-    patterns.add<SysVCallShapeProbe>(typeConverter, ctx,
-        FFECallOp::getOperationName(), out);
-    patterns.add<SysVCallShapeProbe>(typeConverter, ctx,
-        TryCallOp::getOperationName(), out);
+    patterns.add<CallShapeProbe>(typeConverter, ctx,
+        FFECallOp::getOperationName(), abi, out);
+    patterns.add<CallShapeProbe>(typeConverter, ctx,
+        TryCallOp::getOperationName(), abi, out);
     if (failed(applyPartialConversion(*clone, target, std::move(patterns))))
         out += "?\terror:the probe conversion failed\n";
     return out;
+}
+
+std::string describeSysVCallShapes(ModuleOp module)
+{
+    return describeCallShapes(module, AbiTarget::SysV);
+}
+
+std::string describeAAPCS64CallShapes(ModuleOp module)
+{
+    return describeCallShapes(module, AbiTarget::AAPCS64);
 }
 
 } // namespace jlcs

@@ -102,7 +102,7 @@ const _TB_STRUCTS = Dict{String,Any}(
             @test (key, :sysv, _TBFG.sysv_trap_reason(key, S; ret = false, abi = :sysv)) == (key, :sysv, nothing)
             @test (key, :win64, _TBFG.sysv_trap_reason(key, S; ret = true, abi = :win64)) == (key, :win64, nothing)
         end
-        @test_throws ArgumentError _TBFG.sysv_trap_reason("U4", S; ret = false, abi = :aapcs64)
+        @test_throws ArgumentError _TBFG.sysv_trap_reason("U4", S; ret = false, abi = :aapcs32)
     end
 
     @testset "X2: a byte region crosses as a packed struct of its bytes" begin

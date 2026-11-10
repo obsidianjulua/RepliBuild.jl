@@ -4,6 +4,78 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### AArch64 AAPCS64 struct ABI classifier, Linux arm64 supported (2026-11-09)
+
+RepliBuild refused every host but Linux x86-64 and Windows x86-64 because the
+struct classifiers knew two conventions, x86-64 SysV and Microsoft x64, and
+`kHostAbi` in `JLCSPasses.cpp` `#error`ed elsewhere. The third convention is
+now built, on both tiers, and Linux AArch64 passes the load gate. Nothing
+changes on an x86-64 host: the SysV lowering is byte-identical (the oracle, the
+live SysV records, `test_struct_abi` and `abi_fuzz` on seeds 1–30 give the
+same answers), and Win64 reads no statement.
+
+- **One host decision.** `RepliBuild.host_record_abi()` (`:sysv`, `:win64`,
+  `:aapcs64`) is the one place the host is read. `GeneratorC._c_record_abi`
+  returns it, `FunctionGen.generate_function_thunks`, `thunk_crossings`,
+  `by_value_crossing` and `sysv_trap_reason` take it as `abi`, and
+  `generate_jlcs_ir` passes it down, so a test generates another host's
+  module here. `__init__` admits Linux x86-64 and AArch64 and Windows x86-64,
+  and names what is missing elsewhere.
+- **The rules** (`src/IRGen/ir_gen/AAPCS64RecordABI.jl`, read off clang 23 for
+  `aarch64-linux-gnu`): a homogeneous floating-point aggregate (at most four
+  leaves of one floating type, no padding, nested records and arrays
+  flattened, a union's members counted once per position, empty bases
+  skipped) goes in one floating register per leaf at ANY size, four doubles
+  included; otherwise a record of 16 bytes or less goes in general registers,
+  as `i64` or `[2 x i64]` by size, or `i128` (an even register pair) when its
+  alignment is 16, where an argument reads the UNADJUSTED alignment (a
+  member's `alignas`, a nested record's own `aligned`, never the record's own)
+  and a return the adjusted one; a return of 8 bytes or less is `iN` of its
+  exact size; over 16 bytes is a pointer to a caller copy with no `byval`, or
+  an sret slot. Field alignment plays no part (a packed `{ char; double }` is
+  `[2 x i64]`). A C++ empty record is one `i64` in and nothing out (clang's
+  rule for C++, which the thunks serve). The verdict travels on the call as
+  `aapcs64_args` / `aapcs64_ret`, one convention per module.
+- **The dialect.** `AbiTarget::AAPCS64`, selected by `__aarch64__` on Linux
+  (Darwin and Windows on ARM still `#error`, by name), or by the new CMake
+  option `JLCS_FORCE_ABI_AAPCS64` for an inspection-only build;
+  `JLCS_FORCE_ABI_WIN64` is a CMake option too. `buildCallShape` reads the
+  statement into one coerced block (`i64`, `[2 x i64]`, `i128`, `iN`,
+  `[N x fT]`) stored and reloaded through a 16-aligned slot: an array or
+  `i128` argument is what makes the AArch64 backend keep its registers
+  consecutive, and the SysV register-count demotion stays SysV's, since the
+  backend spills a block whole. An indirect argument is the Win64 shape (a
+  bare pointer to the alloca). `classifyAAPCS64Struct` classifies from the
+  body for hand-written IR. The probe seam is generalised:
+  `jlcs_probe_aapcs64_call_shapes` runs the real `buildCallShape` under the
+  AArch64 target on any host and reports `indirect:<align>` for the pointer
+  copies.
+- **Tier 3** (`GeneratorC`): `_c_class_window(abi)` (16 on SysV, 64 on
+  AAPCS64, 0 on Win64) replaces the literal 16 of the register-window
+  refusals, since a float-bearing blob of up to four `long double`s may be an
+  HFA; `_c_return_in_memory` is never `true` on AAPCS64 (an HFA over 16 bytes
+  returns in registers, and Julia's own lowering tells the two apart from the
+  stand-in's fields where an explicit sret could not); field misalignment and
+  copy alignment refuse nothing; the one new trap is
+  `_c_register_pair_misplaced`, a 16-aligned record of 16 bytes or less whose
+  stand-in is aligned below 16 and so lands in the wrong register pair; every
+  SIMD vector crossing is refused.
+- `long double` is spelled `C_LONG_DOUBLE_MLIR` on the thunk path: `f80` on
+  x86-64, `f128` on AArch64.
+- **Not modelled, refused:** a record holding a SIMD vector (AAPCS64's
+  homogeneous vector aggregates). A C translation unit inside a C++ library
+  is not told apart for the empty-record rule (C drops the argument).
+- **Tests.** `test_aapcs64_record_abi.jl` (runtests) pins one synthetic
+  record per rule, the statements, the empty-record crossings and GeneratorC's
+  predicates under `abi = :aapcs64`. `test_aapcs64_abi_spec.jl` (devtests)
+  builds a C corpus of hand-written records with real DWARF, probes the
+  dialect under the AArch64 target and diffs every call shape against
+  `clang --target=aarch64-linux-gnu -S -emit-llvm` of the same unit: a
+  specification test, like `test_win64_abi.jl`. The live run is the new
+  `ubuntu-24.04-arm` cell of `tier2-linux.yml` (LLVM 23, Julia 1.13), and
+  `test.yml` runs runtests on that runner too. Neither arm64 job has been
+  observed green yet: this change was made on an x86-64 box.
+
 ### A C enum takes any value of its underlying type (2026-11-08)
 
 LlamaChat's GUI drives a terminal pane through the Hub's libvterm wrapper and

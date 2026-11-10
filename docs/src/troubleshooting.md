@@ -35,7 +35,7 @@ Details and examples for each key: [Edit the TOML](config.md).
 
 | What you see | What to do |
 |--------------|------------|
-| `RepliBuild supports Linux and Windows` | It does. macOS is refused because the AAPCS64 ABI classifier is unbuilt, not because it is untested. |
+| `RepliBuild supports Linux (x86-64, AArch64) and Windows (x86-64)` | It does. macOS is refused because its Mach-O plumbing and Apple's arm64 calling convention are unbuilt, not because it is untested; other architectures have no struct ABI classifier. |
 | `check_environment()` marks a tool FAIL or WARN | The advice under that line is the fix. [Install](install.md) has the whole setup. |
 | `LLVM Toolchain not found` building C++ | No LLVM 21+ on `PATH` (or in `LLVM_CONFIG`). See [Install](install.md). |
 | C++ wrap fails, C works | The JLCS dialect library is not built: [Install → The JLCS dialect](install.md#The-JLCS-dialect). |

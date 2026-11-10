@@ -1,10 +1,11 @@
 # Install
 
-RepliBuild runs on **Linux** (ELF `.so`) and **Windows** (PE `.dll`, under
-`x86_64-w64-windows-gnu` — mingw via MSYS2 CLANG64, not MSVC). Both read DWARF
-through GNU binutils. macOS is refused at load: the AAPCS64 ABI classifier is
-not built, so arm64 Mach-O has no struct-passing rules to apply. This manual
-writes `.so`; on Windows read `.dll`.
+RepliBuild runs on **Linux** (ELF `.so`, x86-64 or AArch64) and **Windows** (PE
+`.dll`, under `x86_64-w64-windows-gnu` — mingw via MSYS2 CLANG64, not MSVC). Both
+read DWARF through GNU binutils. macOS is refused at load: its Mach-O plumbing
+(DWARF in a `.dSYM`, no dynamic symbol table, no GNU binutils dumper) and Apple's
+arm64 calling convention are not built. This manual writes `.so`; on Windows
+read `.dll`.
 
 ```julia
 using Pkg

@@ -428,7 +428,7 @@ function _sysv_type_align(c_type, julia_type, size::Int, structs, seen::Set{Stri
 end
 
 """
-    _sysv_record_align(key, structs, seen) -> Int
+    _sysv_record_align(key, structs, seen; own = true) -> Int
 
 The record's alignment: DW_AT_alignment where clang wrote it (it writes the
 actual alignment whenever `aligned` or `#pragma pack` applies, and nothing for
@@ -437,10 +437,15 @@ and bases' alignments, lowered until the layout fits it: the size a multiple
 and every placed member at a multiple of the smaller of it and the member's own.
 `packed { char; long double; }` is 17 bytes, so 16 lowers to 1, which is what
 clang gives it, and its byval slot is 8-aligned like clang's.
+
+With `own = false` the record's own DW_AT_alignment is not read, and the
+answer is the members' and bases' alone (a nested record's own attribute still
+counts, through its type): clang's "unadjusted" alignment, which AAPCS64 reads
+for an argument (`aapcs64_record_abi`).
 """
-function _sysv_record_align(key::String, structs, seen::Set{String} = Set{String}())
+function _sysv_record_align(key::String, structs, seen::Set{String} = Set{String}(); own::Bool = true)
     info = structs[key]
-    explicit = _parse_num(get(info, "alignment", nothing))
+    explicit = own ? _parse_num(get(info, "alignment", nothing)) : nothing
     explicit !== nothing && explicit > 0 && return explicit
     size = _sysv_record_size(info)
     is_union = get(info, "kind", "struct") == "union"
@@ -625,18 +630,20 @@ function sysv_statement(key, structs)::String
 end
 
 """
-    sysv_trap_reason(key, structs; ret, abi = host) -> Union{String,Nothing}
+    sysv_trap_reason(key, structs; ret, abi = host_record_abi()) -> Union{String,Nothing}
 
 Why the thunk generator refuses to pass (`ret = false`) or return (`ret = true`)
 the record `key` by value under `abi`, or `nothing`. SysV refuses a record of
 16 bytes or less whose class it cannot read from DWARF, one whose class no call
 statement states (a 16-byte SIMD vector), and a `long double` record as a
 return, which C leaves in st0 where no thunk reads. Win64 crosses a record by
-size alone, so it refuses nothing here.
+size alone, so it refuses nothing here. `:aapcs64` is `aapcs64_trap_reason`
+(AAPCS64RecordABI.jl): the one dispatcher every caller asks, whatever the host.
 """
-function sysv_trap_reason(key, structs; ret::Bool, abi::Symbol = Sys.iswindows() ? :win64 : :sysv)
+function sysv_trap_reason(key, structs; ret::Bool, abi::Symbol = host_record_abi())
     abi === :win64 && return nothing
-    abi === :sysv || throw(ArgumentError("unknown record ABI `$abi`; expected :sysv or :win64"))
+    abi === :aapcs64 && return aapcs64_trap_reason(key, structs; ret)
+    abi === :sysv || throw(ArgumentError("unknown record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
     (key === nothing || !haskey(structs, key)) && return nothing
     v = sysv_record_abi(key, structs)
     v.kind === :unknown &&

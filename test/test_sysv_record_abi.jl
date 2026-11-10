@@ -167,7 +167,7 @@ const _SR = Dict{String,Any}(
         for k in ("c_ld", "c_mystery")
             @test (k, _SRFG.sysv_trap_reason(k, _SR; ret = true, abi = :win64)) == (k, nothing)
         end
-        @test_throws ArgumentError _SRFG.sysv_trap_reason("c_ld", _SR; ret = true, abi = :aapcs64)
+        @test_throws ArgumentError _SRFG.sysv_trap_reason("c_ld", _SR; ret = true, abi = :aapcs32)
     end
 
     @testset "the generator states the class on the call" begin
