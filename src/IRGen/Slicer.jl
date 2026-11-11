@@ -523,13 +523,49 @@ LLVM 18 at the first call.
 _slice_cache_key(src_bytes; llvm_major::Integer=Base.libllvm_version.major) =
     bytes2hex(sha256(src_bytes))[1:16] * "-v" * SLICER_VERSION * "-llvm" * string(llvm_major)
 
+# Every key `_slice_cache_key` has written: a 16-hex content hash, the Slicer
+# version, and since v6 the libLLVM major. Anything else in `slices/` is not ours.
+const _SLICE_KEY_RE = r"^[0-9a-f]{16}-v[0-9A-Za-z.]+(?:-llvm(\d+))?$"
+
+"""
+    _prune_slice_cache(slices_root, key) -> Vector{String}
+
+Remove the slice-cache directories under `slices_root` that `key` replaces,
+and return their names. A project has one promoted module at a time, so every
+other key of the same libLLVM major is a module that was relinked away or a
+Slicer version that will not read it again; a key written before the major
+was part of it (`<hash>-v<N>`) is replaced the same way. A key of another
+major is kept: it is the other Julia's, and pruning it would make two Julias
+on one project re-slice each other's work on every wrap. Only key-shaped
+directories are touched.
+"""
+function _prune_slice_cache(slices_root::String, key::String)
+    m = match(_SLICE_KEY_RE, key)
+    major = m === nothing ? nothing : m.captures[1]
+    removed = String[]
+    isdir(slices_root) || return removed
+    for name in readdir(slices_root)
+        name == key && continue
+        km = match(_SLICE_KEY_RE, name)
+        km === nothing && continue
+        other = km.captures[1]
+        (other === nothing || other == major) || continue
+        path = joinpath(slices_root, name)
+        isdir(path) || continue
+        rm(path; recursive=true, force=true)
+        push!(removed, name)
+    end
+    return removed
+end
+
 """
     slice_library(abi_ll; targets, cache_dir=nothing) -> Dict{String,SliceResult}
 
 Slice `targets` out of the post-promotion module at `abi_ll`. Parses the
 module once and clones per target. With `cache_dir`, results are cached by
 (module content hash, target, SLICER_VERSION, libLLVM major; see
-`_slice_cache_key`) and served on hit.
+`_slice_cache_key`) and served on hit, and every key this one replaces is
+removed (`_prune_slice_cache`), so the cache holds one module per libLLVM major.
 
 An exception while slicing one target becomes that target's refusal, tagged
 `:slicer_error` (see `errored`), and is never cached; the other targets are
@@ -592,6 +628,17 @@ function slice_library(abi_ll::String; targets::Vector{String},
                 (key_dir === nothing || errored(r)) || _cache_store(key_dir, r)
             end
             LLVM.dispose(master)
+        end
+    end
+
+    # Housekeeping, never a verdict: a prune that fails leaves stale entries
+    # and nothing else.
+    if key_dir !== nothing
+        try
+            _prune_slice_cache(dirname(key_dir), basename(key_dir))
+        catch e
+            e isa InterruptException && rethrow()
+            @debug "Slicer: slice-cache prune failed" exception=(e, catch_backtrace())
         end
     end
 

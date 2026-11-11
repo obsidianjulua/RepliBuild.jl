@@ -275,7 +275,9 @@ If you are asked to work on it:
   in an older LLVM (`icmp samesign` is LLVM 20; Julia 1.12 is 18). The slice cache
   is per libLLVM major (`_slice_cache_key`), and a kernel keeps its ccall body
   when the running major is not the wrapper's `TIER1_LIBLLVM_MAJOR`
-  (`test_toolchain_switch.jl`).
+  (`test_toolchain_switch.jl`). `slice_library` prunes every other key of the
+  running major and keeps other majors' (`_prune_slice_cache`): a prune across
+  majors would make two Julias re-slice each other on every wrap.
 - **On Windows a longjmp cannot come back into a JIT'd slice frame.** Julia's JIT
   gives each function unwind info for exactly `[start, end)`, a slice ending in a
   noreturn call returns past it, and the SEH unwind mingw's `longjmp` performs dies
@@ -1289,7 +1291,6 @@ check before claiming portability again; reading `.gitignore` does not settle it
   `byval` and is right. GeneratorC's parameters, its `[wrap.varargs]` path and
   Tier 2 are covered (the invariants above; `test_c_sret_abi.jl`,
   `test_varargs_emission.jl`, `test_sysv_live.jl`).
-- `.replibuild_cache/slices/<modkey>/` accumulates unboundedly (harmless).
 - **Distinct types sharing a bare name keep one definition between them**
   (2026-10-23). It is marked `conflict` in the metadata, and the build names them
   (llama.cpp: pimpl `impl`s, `input_decision`, `llm_graph_input_kpool`). A by-value
