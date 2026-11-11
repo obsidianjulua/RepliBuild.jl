@@ -286,6 +286,19 @@ end
 # target's artifact. A path argument is made absolute against the directory
 # the link runs in; a flag (`-lfoo`, `-Wl,…`) and a bare file name (a library
 # by name) are kept as written.
+#
+# A shared target with VERSION/SOVERSION is linked by its real file name,
+# which the File API's artifact (and `nameOnDisk`) do not spell: the artifact
+# is the name link `libbase.so`, the link line names `libbase.so.1.2.3` (ELF)
+# or `libbase.1.2.3.dylib` (Mach-O). Such an argument is that artifact too.
+function _versioned_artifact(p::String, artifacts::Set{String})::Bool
+    m = match(r"^(.*\.so)(?:\.\d+)+$", p)
+    m !== nothing && String(m.captures[1]) in artifacts && return true
+    m = match(r"^(.*?)(?:\.\d+)+\.dylib$", p)
+    m !== nothing && string(m.captures[1], ".dylib") in artifacts && return true
+    return false
+end
+
 function _link_libraries(t::Dict, link_dir::String, windows::Bool,
                          artifacts::Set{String})::Vector{String}
     link = get(t, "link", nothing)
@@ -299,7 +312,7 @@ function _link_libraries(t::Dict, link_dir::String, windows::Bool,
                 continue
             end
             p = _abs(a, link_dir)
-            p in artifacts && continue
+            (p in artifacts || _versioned_artifact(p, artifacts)) && continue
             q = _posix(a)
             push!(libs, (_is_abs(q) || occursin('/', q)) ? p : a)
         end

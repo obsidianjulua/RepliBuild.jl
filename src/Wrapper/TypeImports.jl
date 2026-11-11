@@ -421,6 +421,26 @@ function _raii_rows(metadata, key::AbstractString)::Vector{Any}
     return rows
 end
 
+"Extensions of a translation unit's main file: a type declared only in one is local to it."
+const _TU_SOURCE_EXTS = (".c", ".cc", ".cpp", ".cxx", ".c++", ".cp", ".m", ".mm", ".cu")
+
+"""
+    _tu_local(entry) -> Bool
+
+Whether a type entry (metadata definition or manifest row) was declared only
+in translation units' own source files, never in a header. Such a type is
+private to the file that defines it: C has one tag scope, so two libraries'
+`typedef struct {…} MemBuffer;` in two `.c` files meet on name and scope and
+are still two types (libwebp's decoder and demuxer). Decided by extension
+alone, so it does not depend on how either library spelled the path. Unknown
+`decl_files` (metadata from before provenance) is not local.
+"""
+function _tu_local(entry)::Bool
+    files = get(entry, "decl_files", nothing)
+    files isa AbstractVector && !isempty(files) || return false
+    return all(f -> lowercase(last(splitext(String(f)))) in _TU_SOURCE_EXTS, files)
+end
+
 """
     _resolve_type_imports(metadata, earlier; pe = Sys.iswindows()) -> (imports, reports)
 
@@ -432,7 +452,10 @@ libraries wrapped before it (`_earlier_library`, topological order):
 2. The owner is the first earlier library whose manifest emitted the key as its
    own (never a placeholder). Two earlier libraries that both emitted it are
    siblings: the first is taken and the rest reported.
-3. With a definition here, the owner's must be the same type: the `scopes`
+3. With a definition here, the owner's must be the same type: neither is
+   local to a translation unit (`_tu_local`: declared only in source files,
+   never a header; two such are two types that share a name, so this one
+   stays this library's own, reported); the `scopes`
    meet (unknown on either side: own, reported); equal `layout_signature`s
    where this definition has one (unequal: an error naming both libraries,
    since two views of one type is an ODR violation between them); and no
@@ -482,6 +505,12 @@ function _resolve_type_imports(metadata, earlier::AbstractVector; pe::Bool = Sys
             if isempty(intersect(Set(String.(hs)), Set(String.(os))))
                 push!(reports, "$key: a different type from $(owner.mod)'s " *
                                "(scopes $(join(hs, ", ")) here, $(join(os, ", ")) there); stays this library's own")
+                continue
+            end
+            if _tu_local(here) || _tu_local(otype)
+                which = _tu_local(here) ? get(here, "decl_files", String[]) : get(otype, "decl_files", String[])
+                push!(reports, "$key: a different type from $(owner.mod)'s (declared in a source file, " *
+                               "not a header: $(join(basename.(String.(which)), ", "))); stays this library's own")
                 continue
             end
             hsig = _layout_signature(here)

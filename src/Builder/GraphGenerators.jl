@@ -252,14 +252,24 @@ command (the File API's "CMake Rules" source group, marked generated), which no
 step of a Ninja build writes. It stands for the command's output, the same path
 without `.rule`, and that is requested instead: for a header a custom target
 DEPENDS on, the `.rule` path is the output's only spelling in the graph.
+
+An `:object` target's artifact is not requested. A library that takes an
+OBJECT library's objects as sources (`add_library(lib \$<TARGET_OBJECTS:o>)`)
+lists each object file, marked generated, but a compile writes it, not a
+generator step: RepliBuild compiles the object target itself and folds its IR
+into that library (`GraphBuild._reach` matches the same listing). Requesting
+it would only refuse the build (`GeneratorNeedsCompile`).
 """
 function requested_sources(g::TargetGraph)::Vector{String}
+    canon(p) = _key(_posix(normpath(_posix(p))))
+    objects = Set{String}(canon(a) for t in g.targets if t.kind == :object for a in t.artifacts)
     seen = Set{String}()
     out = String[]
     for t in topological_order(g), s in t.sources
         s.generated || continue
         p = _posix(normpath(_posix(s.path)))
         (s.group == 0 && endswith(p, ".rule")) && (p = p[1:end-ncodeunits(".rule")])
+        _key(p) in objects && continue
         _key(p) in seen && continue
         push!(seen, _key(p))
         push!(out, p)

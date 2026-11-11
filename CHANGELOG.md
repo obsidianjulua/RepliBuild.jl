@@ -37,6 +37,52 @@ of them four at a time, 597s against 614s in one process; a 16-job selection
 the C area 11. CI runs `unit.jl` beside `runtests.jl`; devtests is unchanged
 there. `REPLIBUILD_SKIP_TESTS` still names fixtures to skip.
 
+### Graph mode builds libwebp: object sources, versioned sonames, file-local types (2026-11-11)
+
+The first upstream graph taken from a pinned dependency, the Hub's libwebp
+(sharpyuv ← webp ← libwebpmux / webpdemux), stopped three times, each on a
+shape common to CMake projects and reproduced first on a library-free fixture.
+
+- **An OBJECT library's objects listed as a consumer's sources were asked of
+  the generator step.** `add_library(webp $<TARGET_OBJECTS:webpdecode> …)`
+  makes the File API list each object file as a generated source of `webp`;
+  `GraphGenerators.requested_sources` requested all 112, and planning refused
+  with `GeneratorNeedsCompile` naming `webpdecode`, before anything ran. A
+  compile writes those files, not a generator, and `GraphBuild._reach` already
+  folds the object target by matching the same listing. `requested_sources` now
+  skips every `:object` target's artifacts (normalised, so CMake's `/./`
+  spelling of the artifact matches the consumer's). Objects consumed through
+  `target_link_libraries` were never listed this way and are unchanged.
+- **A VERSIONed shared dependency was linked by a file only CMake writes.**
+  With `VERSION`/`SOVERSION`, the File API's artifact (and `nameOnDisk`) is the
+  name link `libsharpyuv.so`, while a dependent's link line names the real file
+  `libsharpyuv.so.0.1.2`; the "not another target's artifact" filter compared
+  exact paths, kept it, and `webp`'s link failed (`no such file`).
+  `CMakeGraph._link_libraries` now also drops an argument that is an
+  artifact's versioned real name (`<artifact>.N[.N…]` on ELF,
+  `<stem>.N[.N…].dylib` on Mach-O). A system library's versioned file
+  (`/usr/lib/libz.so.1`) is not a target's artifact and stays.
+- **Two `.c`-file structs that share a name were one type with two layouts.**
+  webp's decoder and its demuxer each define `typedef struct {…} MemBuffer;` in
+  a `.c` file. C has one tag scope, so #80's identity check saw one scope and
+  two layouts and refused the wrap as an ODR violation. A type declared only in
+  translation units' own source files, never a header (`TypeImports._tu_local`,
+  by extension, so path spelling does not matter: these `decl_files` keep `./`
+  segments), is local to its file: it stays each library's own, reported. Header
+  types keep the ODR error unchanged.
+- **Tests.** `test_graph_generators.jl` (runtests): object artifacts listed as a
+  consumer's sources are not requested, the same path with no object target is.
+  `test_graph_generators_live.jl` (devtests): `graph_generators_test/` gains
+  `gg_parts` (OBJECT) consumed by `gg_whole` as `$<TARGET_OBJECTS>` and a
+  VERSIONed `gg_ver` it links; from cmake's own reply, the generator step
+  requests and compiles nothing, and no `gg_ver` file is a link library.
+  `test_cmake_graph.jl` (runtests): versioned ELF and Mach-O names are dropped,
+  a system library's and a prefix-sharing name are kept.
+  `test_cross_library_types.jl` (runtests): two `.c`-declared layouts are two
+  types (one side local is enough), header-declared ones still error. Each new
+  check fails with its fix neutered. The Hub's libwebp `test_deep.jl` passes
+  48/48, including an animation encoded by libwebpmux and decoded by webpdemux.
+
 ### A graph's CMake project can be a pinned dependency (2026-11-10)
 
 `GraphMode.configure` required `[graph] source` to be a directory of the

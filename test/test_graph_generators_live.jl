@@ -111,6 +111,31 @@ else
         @test read(b("gen/gg_table.h"), String) == before
         @test isempty(_gg_built(bld))
     end
+
+    @testset "an OBJECT library's objects as a consumer's sources request nothing" begin
+        # The graph from cmake's own File API reply, not built by hand: gg_whole
+        # lists gg_parts' object files (generated, spelled as CMake spells them).
+        # Before the fix this refused with GeneratorNeedsCompile naming gg_parts.
+        obld = _gg_posix(mktempdir()) * "/build"
+        full = RepliBuild.CMakeGraph.cmake_graph(src; build_dir = obld, use_llvm_env = false)
+        byname = Dict(t.name => t for t in full.targets)
+        parts, whole = byname["gg_parts"], byname["gg_whole"]
+        @test parts.kind == :object
+        @test any(s -> s.generated && (endswith(s.path, ".o") || endswith(s.path, ".obj")), whole.sources)
+        r = GGL.run_generators(BGL.TargetGraph(full.source_dir, full.build_dir,
+                                               [parts, byname["gg_ver"], whole]);
+                               use_llvm_env = false)
+        @test isempty(r.plan.requested)
+        @test isempty(r.ran)
+        @test isempty(_gg_built(obld))      # nothing compiled
+
+        # gg_whole links gg_ver, which has VERSION/SOVERSION: the link line
+        # names libgg_ver.so.1.2.3 (ELF), the artifact libgg_ver.so. It is a
+        # target of the graph, so it is not one of gg_whole's link libraries
+        # (else the graph build would link a file only CMake's build writes).
+        @test !any(l -> occursin("gg_ver", l) && !startswith(l, "-"), whole.link_libraries)
+        @test byname["gg_ver"].id in whole.dependencies
+    end
 end
 end # ninja
 end # requires

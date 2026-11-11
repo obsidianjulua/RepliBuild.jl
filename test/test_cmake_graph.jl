@@ -171,6 +171,23 @@ errtext(f) = try f(); "" catch e; sprint(showerror, e) end
         @test core.artifacts[1] == B * "/" * basename(core.artifacts[1])
     end
 
+    @testset "a VERSIONed target linked by its real file name is still an artifact" begin
+        # set_target_properties(base PROPERTIES VERSION 1.2.3 SOVERSION 1): the
+        # File API's artifact (and nameOnDisk) is the name link `libbase.so`,
+        # but a dependent's link line names the real file. libwebp's sharpyuv
+        # and webp are linked this way.
+        d = "/b"
+        arts = Set(["/b/libbase.so", "/b/libmac.dylib"])
+        frag(fs...) = Dict("link" => Dict("commandFragments" =>
+                           [Dict("role" => "libraries", "fragment" => f) for f in fs]))
+        @test CG._link_libraries(frag("libbase.so.1.2.3", "-lm"), d, false, arts) == ["-lm"]
+        @test CG._link_libraries(frag("libbase.so.1", "libmac.1.2.dylib"), d, false, arts) == String[]
+        # Not a target's: a system library's versioned file, and a name that
+        # only shares the prefix, stay link libraries.
+        @test CG._link_libraries(frag("/usr/lib/libz.so.1", "libbase2.so.1"), d, false, arts) ==
+              ["/usr/lib/libz.so.1", "libbase2.so.1"]
+    end
+
     @testset "graphfix: topological_order" begin
         order = [t.name for t in BG.topological_order(g)]
         # Ties break by sorted id ("core::…" < "ext_version::…" < "helpers::…").

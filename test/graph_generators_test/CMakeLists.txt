@@ -37,3 +37,16 @@ add_custom_command(
   COMMAND gg_tool ${CMAKE_CURRENT_BINARY_DIR}/tool_out.h
   VERBATIM)
 add_library(gg_tooluser SHARED tooluser.c ${CMAKE_CURRENT_BINARY_DIR}/tool_out.h)
+
+# An OBJECT library consumed as $<TARGET_OBJECTS:...> SOURCES of a shared
+# library, not through target_link_libraries (libwebp's and curl's pattern).
+# The File API lists gg_parts' object files as generated sources of gg_whole;
+# they are a compile's output, so the generator step must not request them.
+add_library(gg_parts OBJECT parts.c)
+add_library(gg_whole SHARED whole.c $<TARGET_OBJECTS:gg_parts>)
+
+# A VERSIONed shared dependency: gg_whole's link line names the real file
+# libgg_ver.so.1.2.3, while the File API's artifact is libgg_ver.so.
+add_library(gg_ver SHARED ver.c)
+set_target_properties(gg_ver PROPERTIES VERSION 1.2.3 SOVERSION 1)
+target_link_libraries(gg_whole PRIVATE gg_ver)
