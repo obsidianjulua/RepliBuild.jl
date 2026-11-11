@@ -360,7 +360,10 @@ If you are asked to work on it:
   like its parent, is unreachable). A vendored graph must bind its own copies:
   ELF graph libraries carry a soname, and a graph library's PE preload opens
   dependencies relative to the wrapper (`_link_dir_preload_snippet`, gated on
-  `config.graph`). (`test_graph_mode.jl`, devtests `test_graph_mode_live.jl`.)
+  `config.graph`). `wrap` hands each library the type manifests of the ones
+  wrapped before it, so a type an earlier library owns is imported, never
+  emitted again (`Wrapper/TypeImports.jl`; the invariant under Generators).
+  (`test_graph_mode.jl`, devtests `test_graph_mode_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
   where it lives.** An entry points at the project's own TOML; `register` builds
   and wraps in place, vendors the output to `builds/<hash_config>/` (immutable:
@@ -625,6 +628,36 @@ the test named when you touch the area.
 - **Two generators, one answer.** C and C++ duplicate type sets by design, for
   isolation. Shared decisions must still agree, so put the derivation in
   `Wrapper/Utils.jl` rather than copying it. Agreement is necessary, not sufficient.
+- **One Julia type per C++ type across a graph** (2026-11-10,
+  `Wrapper/TypeImports.jl`, design `docs/updates/CROSS_LIBRARY_TYPES.md`).
+  Every wrap writes `type_manifest.json` beside its library, derived from the
+  FINAL text: the types it defined as its own, with Julia name, kind, size,
+  `scopes`, layout signature, field layout, `Managed` type, strongly defined
+  members, and the symbols the wrapper binds. In graph mode `wrap` goes in
+  topological order and `_resolve_type_imports` decides each type against the
+  earlier manifests: the first earlier library that emitted it owns it when
+  the scopes meet, the layout signatures agree where both have one (unequal in
+  one scope is a wrap ERROR, never a silent pick) and no member is defined
+  strongly in both (an error; skipped on PE). Scope unknown keeps the type
+  own, reported; a name reached only by declaration imports on the bare name.
+  `_apply_type_imports!` gives the entry the owner's body marked `"imported"`,
+  so every layout reader sees the owner's definition, and **every per-type
+  emission loop in both generators asks `_emits_type`** (forward declarations,
+  structs, enums, `Managed`, factory structs, upcasts, setters, the layout
+  table). An imported type is one `const` naming the owner's through
+  `Base.parentmodule(@__MODULE__)` (`..Owner.X` is import syntax, not an
+  expression), emitted before the enums; `_assert_no_imported_redefinition`
+  refuses a text that defines one. The owner's `Managed`, factory struct and
+  `<f>_safe` are the owner's alone; `has_subclass` is widened with
+  `graph_subclassed`; a function an earlier wrapper binds is dropped; a
+  placeholder of a later owner gets the owner's `unsafe_convert`. The thunk
+  side reads `type_imports.json` through `JLCSIRGenerator.apply_type_imports!`
+  (JIT and AOT), whose RAII rows are `imported_raii` and get no thunk. The
+  metadata keys `scopes` and `decl_files` are collected BESIDE the definitions
+  (`_record_provenance!`), never inside them, or a header path would decide
+  which definition `_canonical_definition` keeps. A single-library wrap has
+  no earlier manifests and stays byte-identical. (`test_cross_library_types.jl`,
+  devtests `test_cross_library_types_live.jl` on `test/xlib_test/`.)
 - **Receiver (`this`) gates**: `FunctionGen._has_receiver` and GeneratorCpp's
   `_cpp_this_param` must agree (corpus test in `test_symbol_hygiene.jl` over the
   vendored `test/fixtures/receiver_gate_corpus.json`; regenerate with
@@ -1378,12 +1411,16 @@ DWARF-resolved destructors — **is** built.)
   project-level fast path (every build configures and runs every generator
   step), parallel metadata extraction, and a `[graph] source` from a
   `[dependencies]` git checkout.
-- Cross-library type identity in graph mode (2026-10-30). Each wrapper emits
-  every type its own DWARF holds, so B gets a second Julia type, often an empty
-  one, for each of A's types it touches, and a call into B with A's value is a
-  `MethodError`. A header enum B's DWARF lacks is emitted from the header as
-  `Cint` where A's DWARF says `unsigned int` (2026-10-31). Design:
-  `docs/updates/CROSS_LIBRARY_TYPES.md`.
+- Cross-library types in graph mode, what Option 1 left out (2026-11-10;
+  `docs/updates/CROSS_LIBRARY_TYPES.md` 6.9): hoisting a header-only type two
+  siblings use but no common dependency does (each keeps its own, reported);
+  imports between Hub packages linking each other (`link_dirs`), which need
+  registry dependencies and `use()` through `Base.require`; virtual delete for
+  a `Managed<K>` whose object's dynamic type is a subclass. Also: a class with
+  no members of its own has no `struct_definitions` entry, so it cannot say
+  what it derives from (`graph_subclassed` misses it) and gets a forward
+  declaration; and a header enum B's DWARF lacks is emitted from the header as
+  `Cint` where A's DWARF says `unsigned int` (2026-10-31).
 - Graph mode for CERN ROOT (2026-10-30), measured in `docs/updates/ROOT_RECON.md`.
   Linux only: ROOT on Windows is MSVC, and its CMake refuses MSYS2 CLANG64. Every
   ROOT library's dictionary needs ROOT's own patched LLVM/Clang 20 and cling built

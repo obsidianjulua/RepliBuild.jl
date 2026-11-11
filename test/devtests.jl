@@ -584,3 +584,12 @@ include(joinpath(TEST_DIR, "test_graph_generators_live.jl"))
 # gone. The planning half is test_graph_mode.jl (runtests).
 
 include(joinpath(TEST_DIR, "test_graph_mode_live.jl"))
+
+# ── 23. One Julia type per C++ type across a graph ────────────────────────────
+# Three libraries whose APIs share types (a C owner, a C++ owner, a C++
+# importer deriving from and embedding the owners' records): the importer's
+# wrapper imports the owners' types instead of emitting them again, and in a
+# child the owners' values pass into its functions on both tiers. The synthetic
+# half is test_cross_library_types.jl (runtests).
+
+include(joinpath(TEST_DIR, "test_cross_library_types_live.jl"))

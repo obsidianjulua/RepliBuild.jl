@@ -52,6 +52,9 @@ function build_aot_thunks(config, library_path;
 
     vtable_info = DWARFParser.parse_vtables(library_path)
     metadata = _read_json(metadata_path)
+    # The owners' definitions of the types this library imported from earlier
+    # libraries of its graph, if any (`type_imports.json`, beside the metadata).
+    JLCSIRGenerator.apply_type_imports!(metadata, output_dir)
 
     # AOT MUST HAVE THE WRAPPER'S THUNK SET, for the same reason the JIT path
     # reads the manifest (JITManager, "Load thunk manifest").

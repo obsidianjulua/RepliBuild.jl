@@ -795,6 +795,9 @@ function initialize_global_jit(binary_path::String)
             else
                 Dict()
             end
+            # The owners' definitions of the types this library imported from
+            # earlier libraries of its graph, if any (`type_imports.json`).
+            JLCSIRGenerator.apply_type_imports!(metadata, dirname(rp))
 
             # Register dispatch_ symbols for virtual methods
             lib_handle = Libdl.dlopen(rp)
