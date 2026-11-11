@@ -442,6 +442,12 @@ function _c_record_align(info, dwarf_structs;
     # (`_c_register_pair_misplaced`).
     al = own ? _c_explicit_align(get(info, "alignment", nothing)) : 1
     for m in get(info, "members", [])
+        # A member with no byte offset and no bits takes no storage: a C++
+        # static data member or the `__clang_vtable` placeholder. A bitfield
+        # has no byte offset either, and counts. C has neither of the others,
+        # so this moves no C answer; C++'s `_is_struct_unsafe` asks too.
+        (get(m, "offset", nothing) === nothing && !haskey(m, "bit_size") &&
+         !haskey(m, "data_bit_offset")) && continue
         al = max(al, _c_explicit_align(get(m, "alignment", nothing)))
         sz, jt, ct = get(m, "size", 0), get(m, "julia_type", "Any"), get(m, "c_type", "")
         jt isa AbstractString || (jt = "Any")

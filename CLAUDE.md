@@ -719,8 +719,13 @@ the test named when you touch the area.
   `DW_AT_alignment` on records and members as `alignment`, a vector member's as
   its size), and BRANCH 0 passes a buffer it aligned itself wherever that
   exceeds the stand-in's and 8 (`_c_sret_buffer_align`). The metadata needs a
-  rebuild to carry it. Record-level `alignment` also routes C++ to Tier 2
-  (`_is_struct_unsafe`).
+  rebuild to carry it. The same `_c_record_align` above 8 routes C++ to Tier 2
+  (`_is_struct_unsafe`), never the record's own `alignment` alone: a member's
+  `alignas` puts DW_AT_alignment on the member only, the record holding it, and
+  any record holding that, name none and have natural layouts, and a ccall read
+  such a by-value record from the wrong stack slot (2026-11-10). A member with
+  no byte offset and no bits (a C++ static) counts for nothing there.
+  (`test_record_natural_layout.jl`, devtests `test_cpp_record_routing.jl`.)
 - **A by-value MEMORY record's stack slot is placed by the compiler's `byval`
   alignment, never by DWARF.** Julia's `ccall` writes no alignment on its
   `byval`, so the backend uses the stand-in's (8), and a record C aligns to 16
@@ -1277,9 +1282,9 @@ check before claiming portability again; reading `.gitignore` does not settle it
   names; a trap stub is not coverage. The mpack stubs are SysV-only since
   2026-10-18: Win64 calls them.
 - **Over-aligned records, what the C sret and byval fixes do not cover**
-  (2026-10-18, narrowed 2026-10-25). GeneratorCpp's own ccall path has no
-  aligned buffer; only a record-level `alignment` keeps a function off it, so a
-  member-level `alignas` record can still get a misaligned sret there. An
+  (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
+  path has no aligned buffer, and every alignment DWARF records (the record's,
+  a member's, a nested record's) keeps a function off it. An
   alignment only a typedef carries (`typedef struct S T
   __attribute__((aligned(16)))`) is not in clang's DWARF, so a return buffer
   for one is placed by the stand-in; a parameter's slot is read off the IR's
