@@ -64,6 +64,28 @@ defines none of them (`Wrapper/TypeImports.jl`).
   (`test_cross_library_types.jl`; devtests `test_cross_library_types_live.jl`
   on `test/xlib_test/`, a C owner, a C++ owner and a C++ importer.)
 
+### The slice cache keeps one module per libLLVM major (2026-11-10)
+
+`.replibuild_cache/slices/` gained a directory per promoted module and never
+lost one: every relink that changed the module, every `SLICER_VERSION` bump,
+and every key written before the libLLVM major joined it stayed on disk (the
+Hub's sqlite held three, 11 MB, of which one could ever be read again). Clearing
+the wrapper's `julia/slices/` never touched it.
+
+- `slice_library` now ends by removing the keys its own key replaces
+  (`_prune_slice_cache`): every other key of the same libLLVM major, and every
+  legacy `<hash>-v<N>` key with no major. A key of another major is kept,
+  because it is the other Julia's: pruning it would make the two Julias in the
+  CI matrix re-slice each other's work on every wrap. Only key-shaped
+  directories are touched, and a prune that fails is logged at `@debug` and
+  changes no verdict.
+- One project has one promoted module, so a cache now holds at most one key
+  per libLLVM major. Graph mode does not slice; a `[cache] directory` shared
+  by two Tier 1 projects would make them prune each other (unchanged
+  correctness, lost cache hits).
+- Test: `test_slicer.jl`'s synthetic-IR testset "the slice cache keeps one
+  module per libLLVM major", which fails with the prune neutered.
+
 ### A method proxy keeps its owner alive across the call (2026-11-10)
 
 GeneratorCpp's method proxies read `area(obj::Rect) = Rect_area(obj.handle)`.

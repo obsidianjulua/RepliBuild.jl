@@ -22,6 +22,8 @@
 #   8. A throw while slicing one target is that target's refusal, never cached,
 #      and the other targets still slice; an interrupt still propagates.
 #      Synthetic IR, also run first.
+#   9. The slice cache holds one module per libLLVM major: a new key removes
+#      the keys it replaces and keeps another major's. Synthetic IR, run first.
 #
 # Usage: julia --project=. test/test_slicer.jl
 
@@ -229,6 +231,45 @@ attributes #0 = { optnone }
         end
         @test Slicer.sliced(Base.invokelatest(Slicer.slice_function, ll, "plain"))
     end
+end
+
+@testset "Slicer: the slice cache keeps one module per libLLVM major" begin
+    dir = mktempdir()
+    ll = joinpath(dir, "prune_probe_abi.ll")
+    cache = joinpath(dir, "cache")
+    root = joinpath(cache, "slices")
+    ir_a = "define i64 @plain(i64 %x) {\n  %r = add i64 %x, 1\n  ret i64 %r\n}\n"
+    ir_b = "define i64 @plain(i64 %x) {\n  %r = add i64 %x, 2\n  ret i64 %r\n}\n"
+
+    write(ll, ir_a)
+    key_a = Slicer._slice_cache_key(read(ll))
+    @test Slicer.sliced(Slicer.slice_function(ll, "plain"; cache_dir=cache))
+    @test readdir(root) == [key_a]
+
+    major = Base.libllvm_version.major
+    same_major = "0123456789abcdef-v" * Slicer.SLICER_VERSION * "-llvm$major"
+    old_version = "1123456789abcdef-v0-llvm$major"
+    legacy = "fedcba9876543210-v3"          # written before the key had a major
+    other_major = "aaaaaaaaaaaaaaaa-v" * Slicer.SLICER_VERSION * "-llvm$(major + 1)"
+    foreign = "notes"
+    for d in (same_major, old_version, legacy, other_major, foreign)
+        mkpath(joinpath(root, d))
+        write(joinpath(root, d, "plain.json"), "{}")
+    end
+
+    # The module is relinked: a new key replaces every key of this major.
+    write(ll, ir_b)
+    key_b = Slicer._slice_cache_key(read(ll))
+    @test key_b != key_a
+    r = Slicer.slice_function(ll, "plain"; cache_dir=cache)
+    @test Slicer.sliced(r)
+    @test occursin("add i64 %x, 2", r.ir)
+    @test sort(readdir(root)) == sort([key_b, other_major, foreign])
+
+    # A hit prunes nothing of its own and is still served from the cache.
+    @test isfile(joinpath(root, key_b, "plain.json"))
+    @test Slicer.slice_function(ll, "plain"; cache_dir=cache).ir == r.ir
+    @test sort(readdir(root)) == sort([key_b, other_major, foreign])
 end
 
 const FIXTURE = joinpath(@__DIR__, "slice_test")
