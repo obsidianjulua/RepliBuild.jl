@@ -168,11 +168,15 @@ function hash_config(config::RepliBuildConfig)::String
     # hash covers all of their inputs: every file of the CMake project's tree
     # (`GraphMode.input_files`: the CMake files decide every flag, and a
     # generator step reads files no target lists), path and content, and the
-    # toolchain of both buckets, since each library has its own.
+    # toolchain of both buckets, since each library has its own. A source
+    # that is a dependency's checkout is covered the same way, under its pin
+    # (`GraphMode.source_identity`): a moved `commit` or `sha256` re-vendors,
+    # and the files say whether the checkout is what the pin names.
     if config.graph !== nothing
         SHA.update!(ctx, Vector{UInt8}("replibuild-graph"))
         SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(:c)))
         SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(:cpp)))
+        SHA.update!(ctx, Vector{UInt8}(GraphMode.source_identity(config)))
         for (rel, path) in GraphMode.input_files(config)
             SHA.update!(ctx, Vector{UInt8}(rel))
             SHA.update!(ctx, read(path))

@@ -98,6 +98,158 @@ gm_target(root, id, kind; deps = String[], sources = String[], generated = Strin
         end
     end
 
+    @testset "[graph] dependency: the CMake project is a dependency's checkout" begin
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        git_dep = """
+            [dependencies.upstream]
+            type = "git"
+            url = "https://example.invalid/up.git"
+            tag = "v1"
+            commit = "$sha"
+            """
+        mktempdir() do dir
+            # A git dependency: `source` stays relative, inside the clone the
+            # resolver makes under the deps cache; `source_dir` joins them.
+            toml = gm_project(joinpath(dir, "g"), "[graph]\ndependency = \"upstream\"\nsource = \"./sub//cmake/\"\n" * git_dep)
+            cfg = GMC.load_config(toml)
+            root = _gm_posix(abspath(joinpath(dir, "g")))
+            gc = cfg.graph
+            @test gc.dependency == "upstream"
+            @test gc.source == "sub/cmake"                     # normalised, relative, no trailing /
+            checkout = root * "/.replibuild_cache/deps/upstream"
+            @test _gm_posix(RepliBuild.DependencyResolver.checkout_root(cfg, "upstream")) == checkout
+            @test GM.source_dir(cfg) == checkout * "/sub/cmake"
+            @test !isdir(checkout) && isempty(GM.input_files(cfg))     # not fetched: nothing to hash yet
+            # The default source is the checkout itself.
+            d = GMC.load_config(gm_project(joinpath(dir, "g0"), "[graph]\ndependency = \"upstream\"\n" * git_dep))
+            @test d.graph.source == "." && endswith(GM.source_dir(d), "/.replibuild_cache/deps/upstream")
+
+            # An archive's root is its `subdir`, else what it unpacked to; a
+            # local dependency's its path.
+            a = GMC.load_config(gm_project(joinpath(dir, "a"), """
+                [graph]
+                dependency = "tarball"
+                [dependencies.tarball]
+                type = "archive"
+                url = "https://example.invalid/t.tar.gz"
+                sha256 = "$(sha * "89abcdef89abcdef89abcdef")"
+                subdir = "t-1.0/src"
+                """))
+            @test endswith(GM.source_dir(a), "/.replibuild_cache/deps/tarball/t-1.0/src")
+            l = GMC.load_config(gm_project(joinpath(dir, "l"), """
+                [graph]
+                dependency = "vendored"
+                source = "proj"
+                [dependencies.vendored]
+                type = "local"
+                path = "../elsewhere"
+                """))
+            @test GM.source_dir(l) == _gm_posix(abspath(joinpath(dir, "elsewhere"))) * "/proj"
+
+            # What apart from the files names the source: the entry and its pin.
+            id = GM.source_identity(cfg)
+            @test occursin("upstream", id) && occursin(sha, id) && occursin("sub/cmake", id)
+            @test occursin("https://example.invalid/up.git", id) && occursin("\nv1\n", id)
+            @test GM.source_identity(cfg) == id
+            @test GM.source_identity(GMC.load_config(gm_project(joinpath(dir, "plain"), "[graph]\n"))) == ""
+            moved = GMC.load_config(gm_project(joinpath(dir, "m"), "[graph]\ndependency = \"upstream\"\nsource = \"sub/cmake\"\n" *
+                                                                  replace(git_dep, sha => "f" ^ 40)))
+            @test GM.source_identity(moved) != id
+
+            # Errors name the key and the entry.
+            e = _gm_error(() -> GMC.load_config(gm_project(joinpath(dir, "e1"), "[graph]\ndependency = \"upstrem\"\n" * git_dep)))
+            @test occursin("[graph] dependency = \"upstrem\"", e) && occursin("names no [dependencies] entry", e)
+            @test occursin("the entries: upstream", e)
+            e = _gm_error(() -> GMC.load_config(gm_project(joinpath(dir, "e2"), "[graph]\ndependency = \"x\"\n")))
+            @test occursin("[graph] dependency = \"x\"", e) && occursin("no [dependencies] section", e)
+            e = _gm_error(() -> GMC.load_config(gm_project(joinpath(dir, "e3"), """
+                [graph]
+                dependency = "zlib"
+                [dependencies.zlib]
+                type = "system"
+                pkg_config = "zlib"
+                """)))
+            @test occursin("[graph] dependency = \"zlib\"", e) && occursin("[dependencies.zlib]", e)
+            @test occursin("type = \"system\"", e) && occursin("no source tree", e)
+            e = _gm_error(() -> GMC.load_config(gm_project(joinpath(dir, "e4"), "[graph]\ndependency = \"upstream\"\nsource = \"/abs\"\n" * git_dep)))
+            @test occursin("[graph] source = \"/abs\"", e) && occursin("relative to the checkout", e)
+            e = _gm_error(() -> GMC.load_config(gm_project(joinpath(dir, "e5"), "[graph]\ndependency = \"upstream\"\nsource = \"sub/../..\"\n" * git_dep)))
+            @test occursin("[graph] source = \"sub/../..\"", e) && occursin("leaves the checkout", e)
+            e = _gm_error(() -> GMC.load_config(gm_project(joinpath(dir, "e6"), "[graph]\ndependency = 3\n" * git_dep)))
+            @test occursin("[graph] dependency must be a string", e)
+
+            # The configure refusals, before cmake is asked for anything: no
+            # checkout (the resolver did not fetch it), then a checkout that is
+            # not a CMake project.
+            e = _gm_error(() -> GM.configure(cfg))
+            @test occursin("[graph] dependency = \"upstream\"", e) && occursin("[dependencies.upstream]", e)
+            @test occursin("commit = \"$sha\"", e) && occursin("no checkout at $checkout/sub/cmake", e)
+            @test occursin("[graph] source = \"sub/cmake\" inside it", e)
+            @test !isdir(cfg.graph.cmake_dir)
+            mkpath(checkout * "/sub/cmake")
+            write(checkout * "/README", "")
+            e = _gm_error(() -> GM.configure(cfg))
+            @test occursin("[graph] dependency = \"upstream\"", e) && occursin("no CMakeLists.txt at $checkout/sub/cmake", e)
+            @test occursin("set [graph] source", e)
+            @test !isdir(cfg.graph.cmake_dir)
+            # The local-source refusal still names its key.
+            e = _gm_error(() -> GM.configure(GMC.load_config(gm_project(joinpath(dir, "plain"), "[graph]\n"))))
+            @test occursin("[graph] source = \"$(_gm_posix(abspath(joinpath(dir, "plain"))))\"", e)
+            @test occursin("no CMakeLists.txt", e)
+
+            # The registry's inputs: the checkout's files, relative to the
+            # source directory, so a hash does not depend on where the deps
+            # cache is; .git and the project's own directories excepted.
+            for f in ("sub/cmake/CMakeLists.txt", "sub/cmake/a/a.c", "sub/cmake/.git/HEAD", "sub/other.h")
+                mkpath(dirname(checkout * "/" * f))
+                write(checkout * "/" * f, f)
+            end
+            files = GM.input_files(cfg)
+            @test first.(files) == ["CMakeLists.txt", "a/a.c"]
+            @test all(f -> isfile(f.second) && startswith(_gm_posix(f.second), checkout * "/sub/cmake/"), files)
+            h = RepliBuild.PackageRegistry.hash_config(cfg)
+            @test h == RepliBuild.PackageRegistry.hash_config(cfg)
+            write(checkout * "/sub/cmake/a/a.c", "int a;")                  # the checkout's content
+            @test RepliBuild.PackageRegistry.hash_config(cfg) != h
+            write(checkout * "/sub/cmake/a/a.c", "sub/cmake/a/a.c")
+            @test RepliBuild.PackageRegistry.hash_config(cfg) == h
+            # A moved pin is a different build (the TOML and the identity both move).
+            mkpath(joinpath(dir, "m", ".replibuild_cache", "deps"))
+            cp(checkout, _gm_posix(abspath(joinpath(dir, "m"))) * "/.replibuild_cache/deps/upstream")
+            @test first.(GM.input_files(moved)) == first.(files)
+            @test RepliBuild.PackageRegistry.hash_config(moved) != h
+
+            # Manifest, info and the saved TOML carry the dependency.
+            io = IOBuffer()
+            GM.describe(io, cfg)
+            s = String(take!(io))
+            @test occursin("CMake project $checkout/sub/cmake", s)
+            @test occursin("from:    [dependencies.upstream] (git) https://example.invalid/up.git @ $(sha[1:12])", s)
+            @test !occursin("not fetched", s)
+            io = IOBuffer()
+            GM.describe(io, moved)
+            @test occursin("@ ffffffffffff", String(take!(io)))
+            io = IOBuffer()
+            GM.describe(io, d)
+            @test occursin("(not fetched)", String(take!(io)))
+
+            saved_path = joinpath(dir, "saved_dep.toml")
+            GMC.save_config(RepliBuild.ConfigurationManager.RepliBuildConfig(
+                (getfield(cfg, f) for f in fieldnames(typeof(cfg)) if f ∉ (:config_file, :loaded_at))...,
+                saved_path, cfg.loaded_at))
+            saved = TOML.parsefile(saved_path)
+            @test saved["graph"]["dependency"] == "upstream" && saved["graph"]["source"] == "sub/cmake"
+            @test saved["dependencies"]["upstream"]["commit"] == sha
+            @test sort!(collect(keys(saved["graph"]))) == ["build_type", "dependency", "source"]
+            reloaded = GMC.parse_graph_config(saved, root, cfg.paths)      # deps parsed from the data
+            @test reloaded.dependency == "upstream" && reloaded.source == "sub/cmake"
+            # A forced re-discovery keeps the key with the section, and the entry.
+            kept = RepliBuild.Discovery._collect_preserved_sections(toml)
+            @test kept[("graph", "dependency")] == "upstream" && kept[("graph", "source")] == "./sub//cmake/"
+            @test kept[("dependencies", "upstream")]["commit"] == sha
+        end
+    end
+
     @testset "library module names" begin
         names = GM.library_module_names
         # module_name_for first, then the rule.
@@ -313,7 +465,7 @@ gm_target(root, id, kind; deps = String[], sources = String[], generated = Strin
         lb = only(filter(l -> l.name == "beta", plan.libraries))
         mkpath(dirname(lz.library))
         write(replace(lz.library, r"\.so$" => ".dll"), "")
-        gc = GMC.GraphConfig(root * "/src", String[], String[], "Release", root * "/build/cmake", out)
+        gc = GMC.GraphConfig(root * "/src", "", String[], String[], "Release", root * "/build/cmake", out)
         graph_snippet = RepliBuild.Wrapper._link_dir_preload_snippet(GMB._library_config(lb; graph = gc))
         plain_snippet = RepliBuild.Wrapper._link_dir_preload_snippet(GMB._library_config(lb))
         if Sys.iswindows()

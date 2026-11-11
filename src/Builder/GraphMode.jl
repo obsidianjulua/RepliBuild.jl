@@ -49,10 +49,11 @@ import ..GraphGenerators
 import ..GraphBuild
 import ..GraphBuild: GraphPlan, LibraryPlan
 import ..Compiler
+import ..DependencyResolver
 import .._read_json
 
 export build_graph_project, wrap_graph_project, library_module_names, graph_module_text,
-       input_files, vendored_paths, vendored_complete, describe
+       source_dir, source_identity, input_files, vendored_paths, vendored_complete, describe
 
 "The graph manifest's file name, in the graph's output directory."
 const MANIFEST = "graph.toml"
@@ -154,6 +155,80 @@ end
 "`[graph] targets` as `GraphBuild`'s `only`: `nothing` (every library) when empty."
 _only(gc::GraphConfig) = isempty(gc.targets) ? nothing : gc.targets
 
+# ============================================================================
+# SOURCE
+# ============================================================================
+
+"""
+    source_dir(config) -> String
+
+The CMake project directory, absolute and `/`-separated: `[graph] source`
+itself, or, with `[graph] dependency`, `source` inside that dependency's
+checkout (`DependencyResolver.checkout_root`, which answers whether or not
+the checkout has been fetched). The one place the graph's source is read from
+the config: `configure`, `input_files`, the manifest and `clean` all ask it.
+"""
+function source_dir(config::RepliBuildConfig)::String
+    gc = config.graph
+    isempty(gc.dependency) && return gc.source
+    root = DependencyResolver.checkout_root(config, gc.dependency)
+    return ConfigurationManager._graph_path(gc.source == "." ? root : joinpath(root, gc.source))
+end
+
+"""
+    source_identity(config) -> String
+
+What names the graph's source apart from its files: `""` for a directory of
+the project, and for a `[graph] dependency` the entry's name, type, pin and
+location (`url`, `tag`, `commit`, `sha256`, `subdir`, `path`) with `[graph]
+source`, one line, `\\n`-separated fields. The registry's `hash_config` feeds
+it before the checkout's files, so a moved pin is a different build even
+before the checkout follows it.
+"""
+function source_identity(config::RepliBuildConfig)::String
+    gc = config.graph
+    isempty(gc.dependency) && return ""
+    dep = config.dependencies.items[gc.dependency]
+    return join(["replibuild-graph-dependency", gc.dependency, dep.type, dep.url, dep.tag,
+                 dep.commit, dep.sha256, dep.subdir, dep.path, gc.source], "\n")
+end
+
+"`[graph] source = …`, or `[graph] dependency = …` with the entry it names, for messages."
+function _source_label(config::RepliBuildConfig)::String
+    gc = config.graph
+    isempty(gc.dependency) && return "[graph] source = $(repr(gc.source))"
+    dep = config.dependencies.items[gc.dependency]
+    where = dep.type == "local" ? "path = $(repr(dep.path))" : "url = $(repr(dep.url))"
+    pin = dep.type == "archive" ? (isempty(dep.sha256) ? "" : ", sha256 = $(repr(dep.sha256))") :
+          dep.type == "git" ? (isempty(dep.commit) ? ", no commit pin" : ", commit = $(repr(dep.commit))") : ""
+    inside = gc.source == "." ? "" : ", [graph] source = $(repr(gc.source)) inside it"
+    return "[graph] dependency = $(repr(gc.dependency)) ([dependencies.$(gc.dependency)]: " *
+           "type = $(repr(dep.type)), $where$pin$inside)"
+end
+
+"""
+    check_source(config) -> String
+
+The CMake project directory (`source_dir`), after checking it holds a
+`CMakeLists.txt`. Otherwise an error naming the key and, for a dependency,
+the entry, its pin, and whether the checkout is missing (not resolved: the
+resolver's warning above says why) or merely not a CMake project.
+"""
+function check_source(config::RepliBuildConfig)::String
+    src = source_dir(config)
+    isfile(src * "/CMakeLists.txt") && return src
+    gc = config.graph
+    if isempty(gc.dependency)
+        error("$(_source_label(config)) has no CMakeLists.txt: graph mode builds a CMake project.")
+    elseif !isdir(DependencyResolver.checkout_root(config, gc.dependency))
+        error("$(_source_label(config)) has no checkout at $src: the dependency was not resolved. " *
+              "A warning above names why (a failed clone or fetch, a path that does not exist).")
+    else
+        error("$(_source_label(config)) has no CMakeLists.txt at $src: graph mode builds a CMake " *
+              "project. If the project is in a subdirectory of the checkout, set [graph] source to it.")
+    end
+end
+
 """
     check_targets(config, g)
 
@@ -169,7 +244,7 @@ function check_targets(config::RepliBuildConfig, g::BuildGraph.TargetGraph)
     isempty(unknown) && return nothing
     libs = sort!([t.name for t in g.targets if t.kind in (:shared, :module, :static)])
     error("[graph] targets in $(config.config_file) names $(join(repr.(unknown), ", ")), " *
-          "not a target of $(config.graph.source). Its library targets: $(join(libs, ", ")).")
+          "not a target of $(source_dir(config)). Its library targets: $(join(libs, ", ")).")
 end
 
 "The plan for `g` under the project's `[graph]` section."
@@ -193,15 +268,16 @@ end
 """
     configure(config) -> BuildGraph.TargetGraph
 
-Configure `[graph] source` into `[graph]`'s cmake directory with a File API
-query (`CMakeGraph.cmake_graph`, the Ninja generator), and read the graph.
+Configure the graph's source (`check_source`: `[graph] source`, or the
+checkout of `[graph] dependency`, which `RepliBuild.build` resolved before
+this) into `[graph]`'s cmake directory with a File API query
+(`CMakeGraph.cmake_graph`, the Ninja generator), and read the graph.
 """
 function configure(config::RepliBuildConfig)::BuildGraph.TargetGraph
     gc = config.graph
-    isfile(gc.source * "/CMakeLists.txt") ||
-        error("[graph] source = $(gc.source) has no CMakeLists.txt: graph mode builds a CMake project.")
+    src = check_source(config)
     mkpath(gc.cmake_dir)
-    return CMakeGraph.cmake_graph(gc.source; build_dir = gc.cmake_dir, options = gc.options,
+    return CMakeGraph.cmake_graph(src; build_dir = gc.cmake_dir, options = gc.options,
                                   build_type = gc.build_type)
 end
 
@@ -343,8 +419,9 @@ function write_manifest(config::RepliBuildConfig, plan::GraphPlan, names::Abstra
             "wrapper" => _rel(gc, _wrapper_path(lib, names)),
             "link_dependencies" => [byid[d].name for d in lib.link_dependencies]))
     end
-    data = Dict{String,Any}("module" => String(graph_module), "source" => gc.source,
+    data = Dict{String,Any}("module" => String(graph_module), "source" => source_dir(config),
                             "targets" => gc.targets, "libraries" => libs)
+    isempty(gc.dependency) || (data["dependency"] = gc.dependency)
     mkpath(gc.out_dir)
     open(gc.out_dir * "/" * MANIFEST, "w") do io
         TOML.print(io, data; sorted = true)
@@ -455,23 +532,26 @@ end
     input_files(config) -> Vector{Pair{String,String}}
 
 Every file a build of the graph can read from its source tree, as
-`path relative to [graph] source => absolute path`, in sorted order: the whole
-tree under `[graph] source` except `.git`, symlinked directories, and the
-project's build, output, cache and `.debug` directories when they lie inside it.
+`path relative to the source directory => absolute path`, in sorted order: the
+whole tree under `source_dir` (`[graph] source`, or the checkout of `[graph]
+dependency`) except `.git`, symlinked directories, and the project's build,
+output, cache and `.debug` directories when they lie inside it. Nothing when
+the directory does not exist (a dependency not fetched yet).
 
 The registry's `hash_config` feeds these for a graph. The whole tree, because
 a graph's inputs are not only its compiled sources and include directories: the
 CMake files decide every flag, and a generator step reads templates and scripts
-no target lists. Paths are relative, so a moved project keeps its hash.
+no target lists. Paths are relative, so a moved project keeps its hash, and a
+checkout hashes the same wherever its deps cache is.
 """
 function input_files(config::RepliBuildConfig)::Vector{Pair{String,String}}
-    gc = config.graph
     out = Pair{String,String}[]
-    isdir(gc.source) || return out
+    src = source_dir(config)
+    isdir(src) || return out
     skip = Set{String}(_canon(p) for p in (get_build_path(config), get_output_path(config),
                                             get_cache_path(config),
                                             joinpath(config.project.root, ".debug")))
-    return _walk!(out, gc.source, "", skip)
+    return _walk!(out, src, "", skip)
 end
 
 "The graph manifest under `dir`, or `nothing`."
@@ -527,7 +607,15 @@ exists, then the graph module.
 """
 function describe(io::IO, config::RepliBuildConfig)
     gc = config.graph
-    println(io, "  graph:   CMake project $(gc.source)")
+    println(io, "  graph:   CMake project $(source_dir(config))")
+    if !isempty(gc.dependency)
+        dep = config.dependencies.items[gc.dependency]
+        from = dep.type == "local" ? dep.path : dep.url
+        pin = !isempty(dep.commit) ? " @ $(dep.commit[1:12])" :
+              !isempty(dep.sha256) ? " sha256 $(dep.sha256[1:12])" : ""
+        println(io, "  from:    [dependencies.$(gc.dependency)] ($(dep.type)) $from$pin",
+                isdir(source_dir(config)) ? "" : " (not fetched)")
+    end
     println(io, "  targets: ", isempty(gc.targets) ? "every library" : join(gc.targets, ", "))
     m = _manifest(gc.out_dir)
     if m === nothing

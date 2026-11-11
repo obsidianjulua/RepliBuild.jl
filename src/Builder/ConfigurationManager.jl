@@ -278,8 +278,15 @@ every library itself (`GraphBuild`) and extracts each library's metadata;
 `wrap` writes one wrapper per library and a graph module that includes them
 (`GraphMode`).
 
-- `source`: the CMake project directory (the one holding `CMakeLists.txt`),
-  absolute and `/`-separated; relative in the TOML, against the project root.
+- `source`: the CMake project directory (the one holding `CMakeLists.txt`).
+  With no `dependency`, absolute and `/`-separated; relative in the TOML,
+  against the project root. With a `dependency`, the directory inside that
+  dependency's checkout, relative and `/`-separated (`"."`: the checkout
+  itself); `GraphMode.source_dir` joins it to the checkout.
+- `dependency`: the `[dependencies.<name>]` entry whose checkout is the CMake
+  project (a git, archive or local dependency), or `""` when `source` is a
+  directory of the project. `build` resolves it as a single library's build
+  does, pinned by `commit` or `sha256`, before configuring it.
 - `targets`: the library targets to build and wrap, by name or File API id;
   the shared libraries they link come too. Empty: every library target.
 - `options`: extra configure arguments, after RepliBuild's own.
@@ -291,6 +298,7 @@ every library itself (`GraphBuild`) and extracts each library's metadata;
 """
 struct GraphConfig
     source::String
+    dependency::String
     targets::Vector{String}
     options::Vector{String}
     build_type::String
@@ -372,7 +380,8 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
 
     ingest_config = parse_ingest_config(data, toml_path)
     paths_config = parse_paths_config(data)
-    graph_config = parse_graph_config(data, project_config.root, paths_config)
+    dependencies_config = parse_dependencies_config(data)
+    graph_config = parse_graph_config(data, project_config.root, paths_config, dependencies_config)
     (ingest_config !== nothing && graph_config !== nothing) &&
         error("$toml_path has both [ingest] and [graph]: ingest wraps one prebuilt library, " *
               "graph mode builds a CMake project's libraries. Keep one.")
@@ -399,7 +408,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
         parse_llvm_config(data),
         parse_workflow_config(data),
         parse_cache_config(data),
-        parse_dependencies_config(data),
+        dependencies_config,
         parse_types_config(data),
         ingest_config,
         graph_config,
@@ -1103,7 +1112,10 @@ function parse_ingest_config(data::Dict, toml_path::String)::Union{Nothing,Inges
 end
 
 "The keys a `[graph]` section may have."
-const GRAPH_KEYS = ("source", "targets", "options", "build_type")
+const GRAPH_KEYS = ("source", "dependency", "targets", "options", "build_type")
+
+"The dependency types whose checkout is a source tree a `[graph]` can configure."
+const GRAPH_DEPENDENCY_TYPES = ("git", "archive", "local")
 
 # Absolute, normalised and `/`-separated, without a trailing separator: every
 # path the graph modules store has that spelling (BuildGraph's rule).
@@ -1113,19 +1125,27 @@ function _graph_path(p::AbstractString)::String
 end
 
 """
-    parse_graph_config(data, root, paths) -> Union{Nothing,GraphConfig}
+    parse_graph_config(data, root, paths, deps = parse_dependencies_config(data))
+        -> Union{Nothing,GraphConfig}
 
 Parse the `[graph]` section; `nothing` when there is none (one library).
 `source` resolves against the project `root`, as `[compile]` paths do; the
 cmake build tree is `<[paths] build>/cmake` and the output directory
 `[paths] output`, both under the root unless absolute.
 
+`dependency` names the `[dependencies.<name>]` entry whose checkout is the
+CMake project. It must be an entry of `deps` of a type that has a source tree
+(`GRAPH_DEPENDENCY_TYPES`; a `system` dependency is flags), and `source` is
+then kept relative, `/`-separated and inside the checkout (`"."` by default):
+the checkout's place is the resolver's to say, so `GraphMode.source_dir`
+joins the two at build time.
+
 A `[graph]` section is new, so it is strict where older sections are not: an
 unknown key or a value of the wrong type is an error naming it, rather than a
 setting that silently does nothing.
 """
-function parse_graph_config(data::Dict, root::AbstractString,
-                            paths::PathsConfig)::Union{Nothing,GraphConfig}
+function parse_graph_config(data::Dict, root::AbstractString, paths::PathsConfig,
+                            deps::DependenciesConfig = parse_dependencies_config(data))::Union{Nothing,GraphConfig}
     haskey(data, "graph") || return nothing
     g = data["graph"]
     g isa AbstractDict || error("[graph] must be a table, e.g.\n[graph]\nsource = \".\"")
@@ -1144,9 +1164,51 @@ function parse_graph_config(data::Dict, root::AbstractString,
         return String[String(x) for x in v]
     end
     under_root(p) = _graph_path(isabspath(p) ? p : joinpath(root, p))
-    return GraphConfig(under_root(str("source", ".")), unique(strs("targets")), strs("options"),
+    dependency = str("dependency", "")
+    source = str("source", ".")
+    if isempty(dependency)
+        source = under_root(source)
+    else
+        source = _graph_dependency_source(dependency, source, deps)
+    end
+    return GraphConfig(source, dependency, unique(strs("targets")), strs("options"),
                        str("build_type", "Release"),
                        under_root(joinpath(paths.build, "cmake")), under_root(paths.output))
+end
+
+"""
+    _graph_dependency_source(dependency, source, deps) -> String
+
+Check `[graph] dependency` against the `[dependencies]` entries and spell
+`[graph] source` as a path inside its checkout: relative, `/`-separated,
+normalised, no trailing `/`, and never leaving the checkout (`..`). Every
+refusal names the key and the entry.
+"""
+function _graph_dependency_source(dependency::AbstractString, source::AbstractString,
+                                  deps::DependenciesConfig)::String
+    key = "[graph] dependency = $(repr(String(dependency)))"
+    if !haskey(deps.items, dependency)
+        known = sort!(collect(keys(deps.items)))
+        error(key * " names no [dependencies] entry" *
+              (isempty(known) ? "; the TOML has no [dependencies] section." :
+                                "; the entries: $(join(known, ", ")).") *
+              " A graph's source is a git, archive or local dependency ([dependencies.$dependency]).")
+    end
+    dep = deps.items[dependency]
+    dep.type in GRAPH_DEPENDENCY_TYPES ||
+        error(key * " names [dependencies.$dependency], type = $(repr(dep.type)), which has no source " *
+              "tree to configure. A graph's source is a dependency of type " *
+              join(repr.(GRAPH_DEPENDENCY_TYPES), ", ") * ".")
+    isabspath(source) &&
+        error("[graph] source = $(repr(String(source))) must be relative to the checkout of " *
+              "[dependencies.$dependency] when $key is set.")
+    s = replace(normpath(String(source)), '\\' => '/')
+    s = String(rstrip(s, '/'))
+    isempty(s) && (s = ".")
+    (s == ".." || startswith(s, "../")) &&
+        error("[graph] source = $(repr(String(source))) leaves the checkout of [dependencies.$dependency]; " *
+              "it must name a directory inside it.")
+    return s
 end
 
 """Validate TOML data has minimum required fields"""
@@ -1453,8 +1515,12 @@ function save_config(config::RepliBuildConfig)
     # [graph] — only emitted in graph mode. `cmake_dir` and `out_dir` are
     # derived from [paths], so they are not written.
     if config.graph !== nothing
-        graph_dict = Dict{String,Any}("source" => _portable_path(config.graph.source, root),
+        # With a dependency, `source` is already relative, to the checkout.
+        graph_dict = Dict{String,Any}("source" => isempty(config.graph.dependency) ?
+                                                      _portable_path(config.graph.source, root) :
+                                                      config.graph.source,
                                       "build_type" => config.graph.build_type)
+        isempty(config.graph.dependency) || (graph_dict["dependency"] = config.graph.dependency)
         isempty(config.graph.targets) || (graph_dict["targets"] = config.graph.targets)
         isempty(config.graph.options) || (graph_dict["options"] = config.graph.options)
         data["graph"] = graph_dict

@@ -4,6 +4,51 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A graph's CMake project can be a pinned dependency (2026-11-10)
+
+`GraphMode.configure` required `[graph] source` to be a directory of the
+project holding `CMakeLists.txt`, so a graph of an upstream project (ROOT) had
+to be checked out by hand beside the TOML, unpinned, while a single-library
+project has taken its sources from a pinned `[dependencies]` entry for a year.
+
+- `[graph] dependency = "<name>"` names a `[dependencies.<name>]` entry whose
+  checkout is the CMake project. The entry keeps every key it has as a
+  single library's dependency (`url`, `tag`, `commit`, `submodules`,
+  `sha256`, `subdir`, `path`); `source` becomes a directory inside the
+  checkout, relative (`"."` by default). A `system` entry, an absent entry, an
+  absolute `source` or one leaving the checkout are load errors naming the
+  key and the entry. The spelling: one key says *which* entry, and `source`
+  keeps its one meaning (the CMake directory) under a different root, so the
+  `[dependencies]` table stays the one place a source is pinned and fetched.
+- `build` already ran `resolve_dependencies` before graph mode, so the clone,
+  the pin check and the submodule fetch are the single-library path, untouched;
+  `DependencyResolver.checkout_root` says where that path puts a dependency's
+  tree, fetched or not, and `GraphMode.source_dir` joins `source` to it. It
+  is the one place the graph's source is read: `configure`, `check_targets`,
+  the manifest (which now records `dependency` and the checkout as `source`),
+  `input_files`, `describe` (a `from:` line with the pin) and `clean`'s
+  self-protection all ask it. `configure` refuses a checkout the resolver did
+  not fetch, or one with no `CMakeLists.txt` under `source`, naming the key,
+  the entry and its pin, before cmake runs.
+- `hash_config` feeds `GraphMode.source_identity` (the entry's name, type, pin
+  and location with `source`) before the checkout's files, which
+  `input_files` already walked relative to the source directory: a moved pin
+  is another hash before the clone follows it, an unchanged one hashes the
+  same wherever the deps cache sits, and a `clean(toml; deps = false)` keeps
+  the clone and the hash.
+- `Discovery.PRESERVED_TOML_KEYS` already kept `[graph]` whole and every
+  `[dependencies]` entry, so `discover(force = true)` keeps the key.
+- Tests: `test_graph_mode.jl` (parsing, every refusal, `source_dir` for the
+  three types, `input_files` and `hash_config` over a fake checkout, manifest,
+  `describe`, `save_config` round trip, preservation); `test_graph_mode_live.jl`
+  serves `test/graph_mode_test/` from a bare repository in a temp dir over
+  `file://`, pinned by tag and commit as the Hub pins, and builds, wraps,
+  probes and registers it as the local case does, then checks `clean(deps =
+  false)` keeps the clone and the next build reuses it, a second upstream
+  tag with a moved pin re-checks out and re-vendors through `use`, a pin the
+  tag does not meet is a refusal that leaves the clone as it was, and `clean`
+  removes the clone.
+
 ### C ccall coverage, re-measured: 99.6% (2026-11-10)
 
 The last measurement was from 2026-08-29 (98.6%, 5368/5444, 17 packages), taken
