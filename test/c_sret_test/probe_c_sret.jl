@@ -11,14 +11,16 @@ using .CSret
 import RepliBuild
 
 # Which answer this host should give where the conventions differ: SysV refuses
-# what the register window cannot classify and a 32-aligned slot; AAPCS64
-# refuses the 16-aligned AB16 as an argument (an even register pair the blob
-# cannot reach) and every record holding a SIMD vector, while the float blobs
-# whose facts rule an HFA out (AB16 and BF12 hold a bitfield) travel by size
-# like their blobs; Win64 passes everything by size or by reference and refuses
-# nothing here.
+# a blob whose eightbyte classes it cannot claim (AB16: SSE then INTEGER) and a
+# 32-aligned slot, while a float-bearing blob whose eightbytes are all INTEGER
+# (BF12: the bitfield shares the float's; TG16: INTEGER wins the union's) is a
+# plain call; AAPCS64 refuses the 16-aligned AB16 as an argument (an even
+# register pair the blob cannot reach) and every record holding a SIMD vector,
+# while the float blobs whose facts rule an HFA out (AB16 and BF12 hold a
+# bitfield) travel by size like their blobs; Win64 passes everything by size or
+# by reference and refuses nothing here.
 const ABI = RepliBuild.Wrapper._c_record_abi()
-const BLOB_RET_REFUSED = ABI === :sysv              # make_bf12, make_ab16
+const AB16_RET_REFUSED = ABI === :sysv              # make_ab16
 const AB16_ARG_REFUSED = ABI in (:sysv, :aapcs64)   # take_ab16
 const VECTOR_REFUSED = ABI === :aapcs64             # make_hvec, take_hvec
 
@@ -169,19 +171,15 @@ probe("make_out6") do p                     # unaligned field inside a packed me
         push!(p, "ret bytes = $d")
 end
 
-probe("make_bf12") do p                     # float blob, 12 B: Win64 sret, AAPCS64 x0:x1; SysV refused
+probe("make_bf12") do p                     # float blob, 12 B: Win64 sret, AAPCS64 x0:x1, SysV RAX:RDX (INTEGER, INTEGER)
     reset_rec()
-    if BLOB_RET_REFUSED
-        refused(p, () -> make_bf12(1.5f0, -3, 99))
-    else
-        r = make_bf12(1.5f0, -3, 99)
-        args_read(p, 3, [0 => UInt64(reinterpret(UInt32, 1.5f0)), 1 => s64(-3), 2 => s64(99)])
-        d = getfield(r, :_data)
-        b3 = Int(d[5] & 0x07)
-        b3 >= 4 && (b3 -= 8)                # a signed 3-bit field
-        (field(Float32, d, 0), b3, field(Int32, d, 8)) == (3.0f0, -3, Int32(100)) ||
-            push!(p, "ret bytes = $d")
-    end
+    r = make_bf12(1.5f0, -3, 99)
+    args_read(p, 3, [0 => UInt64(reinterpret(UInt32, 1.5f0)), 1 => s64(-3), 2 => s64(99)])
+    d = getfield(r, :_data)
+    b3 = Int(d[5] & 0x07)
+    b3 >= 4 && (b3 -= 8)                    # a signed 3-bit field
+    (field(Float32, d, 0), b3, field(Int32, d, 8)) == (3.0f0, -3, Int32(100)) ||
+        push!(p, "ret bytes = $d")
 end
 
 # Records more aligned than the Julia type standing in for them. The callee
@@ -193,9 +191,41 @@ call(f, args...) = Base.invokelatest(f, args...)
 f32(x) = UInt64(reinterpret(UInt32, Float32(x)))
 f64(x) = reinterpret(UInt64, Float64(x))
 
+# mpack_tag_t's shape, 16 B: an int and a union of integers, a float and a
+# double. SysV INTEGER, INTEGER (INTEGER wins the union's eightbyte), so the
+# blob travels as C does: RAX:RDX back, RDI:RSI in. Win64 sret and by reference;
+# AAPCS64 x0:x1 both ways. Refused nowhere.
+# TG16 is a struct of fields over the union's aligned region, so it is read and
+# built through its bytes at the C offsets, whatever the fields are called.
+fieldat(T, x, off) = let rr = Ref(x)
+    GC.@preserve rr unsafe_load(Ptr{T}(pointer_from_objref(rr) + off))
+end
+function from_bytes(T, bytes::NTuple)
+    rr = Ref{T}()
+    GC.@preserve rr unsafe_store!(Ptr{typeof(bytes)}(pointer_from_objref(rr)), bytes)
+    return rr[]
+end
+
+probe("make_tg16") do p
+    reset_rec()
+    r = make_tg16(3, 1.25)
+    args_read(p, 2, [0 => s64(3), 1 => f64(1.25)])
+    (fieldat(Int32, r, 0), fieldat(Float64, r, 8)) == (Int32(6), 1.75) ||
+        push!(p, "ret = ($(fieldat(Int32, r, 0)), $(fieldat(Float64, r, 8)))")
+end
+
+probe("take_tg16") do p
+    reset_rec()
+    v = from_bytes(TG16, (reinterpret(NTuple{4,UInt8}, Int32(5))..., 0x00, 0x00, 0x00, 0x00,
+                          reinterpret(NTuple{8,UInt8}, 2.5)...))
+    s = take_tg16(v)
+    args_read(p, 2, [0 => s64(5), 1 => f64(2.5)])
+    s == 10.0 || push!(p, "take_tg16 = $s")
+end
+
 probe("make_ab16") do p                     # 16 B blob, member _Alignas(16): Win64 sret, AAPCS64 x0:x1; SysV refused
     reset_rec()
-    if BLOB_RET_REFUSED
+    if AB16_RET_REFUSED
         refused(p, () -> call(make_ab16, 1.5f0, -2))
     else
         r = call(make_ab16, 1.5f0, -2)

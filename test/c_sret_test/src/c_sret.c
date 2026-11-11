@@ -123,6 +123,33 @@ BF12 make_bf12(float f, int b, int c)
     return r;
 }
 
+/* mpack_tag_t's shape: an integer tag and a union holding integers, a float
+   and a double. Both eightbytes are INTEGER on SysV (INTEGER wins the merge
+   of the union's members), so the byte blob standing in for it travels as C
+   does; a float member alone used to refuse it. */
+TG16 make_tg16(int type, double d)
+{
+    union { double d; unsigned long long u; } bits;
+    bits.d = d;
+    REC(0, type);
+    c1_rec[1] = bits.u;
+    c1_rec_n = 2;
+    TG16 r;
+    r.type = type * 2;
+    r.v.d = d + 0.5;
+    return r;
+}
+
+double take_tg16(TG16 v)
+{
+    union { double d; unsigned long long u; } bits;
+    bits.d = v.v.d;
+    REC(0, v.type);
+    c1_rec[1] = bits.u;
+    c1_rec_n = 2;
+    return v.v.d * 2.0 + v.type;
+}
+
 /* Over-aligned records: each maker fills the aligned global from its arguments
    and returns it, so the copy into the hidden return buffer is an aligned
    16-byte store. */

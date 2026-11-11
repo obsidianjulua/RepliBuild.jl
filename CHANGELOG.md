@@ -4,6 +4,37 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A float member makes no eightbyte SSE: the last 31 Hub C stubs are calls (2026-11-10)
+
+GeneratorC refused a by-value byte blob with a float member inside the SysV
+register window, since the `NTuple{N,UInt8}` stand-in claims INTEGER for every
+eightbyte and a float record goes in XMM registers. The refusal read the
+presence of a float, not the record's class. Under SysV an eightbyte's class is
+the merge of every member in it and INTEGER wins, so a union of an integer and a
+double, or a float beside a bitfield, is INTEGER and the blob travels exactly as
+C does. mpack's `mpack_tag_t` (an enum and a union of integers, a float and a
+double, 16 bytes) is INTEGER, INTEGER, and its 31 functions were the whole of
+the Hub's remaining C misses.
+
+- `_c_register_class_misstated` takes `sysv_classes`, the record's eightbyte
+  classes from its DWARF facts through the Tier 2 classifier
+  (`sysv_record_abi`, memoised as `_rec_sysv_classes`), and admits the record
+  when every eightbyte is INTEGER. An SSE eightbyte (`AB16`: two floats in
+  one), a low eightbyte of padding C passes nowhere, or facts the classifier
+  cannot read keep the refusal. Blobs and structs of fields over a byte region
+  (`abi_class_risk`) both: a region's bytes claim INTEGER too, and when C's
+  merge of the same members is INTEGER so is the stand-in's.
+- Measured with `test/tools/c_ccall_coverage.jl` after re-wrapping mpack in
+  place: 7790 of 7792 net of recipe exclusions, 99.97%; 100% with the two
+  sibling-reached names (zlib's `gzgetc`, mpack's `mpack_expect_cstr_match`)
+  counted. mpack's `test_deep.jl` passes on the re-wrapped wrapper.
+- Live on SysV with poisoned registers (`test_c_sret_abi.jl`): `BF12` (a
+  float, a bitfield, an int), refused since the C1 work, now returns in
+  RAX:RDX, and the new `TG16` (mpack_tag_t's shape) crosses both ways.
+  `AB16` stays refused. (`test_c_sret_classification.jl`,
+  `test_c_generator_policies.jl`: the synthetic `FloatBits`, `BF8`, `BF12`,
+  `Tag16` and `Tag16_v` are calls on SysV; the predicate's class table.)
+
 ### C ccall coverage, re-measured: 99.6% (2026-11-10)
 
 The last measurement was from 2026-08-29 (98.6%, 5368/5444, 17 packages), taken
