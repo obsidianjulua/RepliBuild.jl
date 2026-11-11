@@ -102,8 +102,9 @@ const _SRET_STRUCTS = Dict{String,Any}(
                                      "enumerators" => Any[Dict{String,Any}("name" => "E2_A", "value" => 0)]),
     # Bitfields are skipped, as clang skips them for this rule.
     "BitOnly" => _srec(4, _sm("c", "UInt8", "char", "0x0", 1), _sbit("b", "Cint", "int", 7, 9)),
-    # Float-bearing bitfield records are blobs whose SysV register class is
-    # unknowable: 12 bytes (sret on Win64) and 8 bytes (RAX on Win64).
+    # Float-bearing bitfield records are blobs; by their facts both are
+    # INTEGER (the bitfield shares the float's eightbyte), so the blob travels
+    # as C does: 12 bytes (sret on Win64) and 8 bytes (RAX on Win64).
     "BF12" => _srec(12, _sm("f", "Cfloat", "float", "0x0", 4),
                         _sbit("b", "Cint", "int", 3, 32),
                         _sm("c", "Cint", "int", "0x8", 4)),
@@ -111,7 +112,9 @@ const _SRET_STRUCTS = Dict{String,Any}(
     # mpack_tag_t's shape: an anonymous union of an integer and a double
     # becomes an aligned `NTuple{1, UInt64}` region, which claims INTEGER for an
     # eightbyte a float member also covers. The region and the struct holding
-    # it are `abi_class_risk`. An all-float region states its class (Float64).
+    # it are `abi_class_risk`; by their facts the eightbyte IS INTEGER (INTEGER
+    # wins the merge), so both are admitted. An all-float region states its
+    # class (Float64).
     "Tag16_v" => _sanon(_srec(8, _sm("i", "Clonglong", "long long", "0x0", 8),
                                  _sm("d", "Cdouble", "double", "0x0", 8); kind = "union")),
     "Tag16" => _srec(16, _sm("type", "Cint", "int", "0x0", 4),
@@ -509,6 +512,21 @@ Contents of the .debug_info section:
         end
         @test checked == length(table)
         @test_throws ArgumentError _SW._c_register_class_misstated(8, true; abi = :aapcs32)
+        # The record's eightbyte classes decide on SysV: all INTEGER admits the
+        # blob whatever it holds; an SSE eightbyte, padding C passes nowhere, or
+        # no facts keep the refusal. Other conventions ignore them.
+        classes = [([:int, :int], false), ([:int], false), ([:int, :sse], true), ([:sse], true),
+                   ([:none, :int], true), (Symbol[], true)]
+        checked = 0
+        for (cls, want) in classes
+            @test (cls, _SW._c_register_class_misstated(16, true; abi = :sysv, sysv_classes = cls)) == (cls, want)
+            @test (cls, _SW._c_register_class_misstated(16, true; abi = :win64, sysv_classes = cls)) == (cls, false)
+            @test (cls, _SW._c_register_class_misstated(16, true; abi = :aapcs64, sysv_classes = cls)) == (cls, true)
+            checked += 1
+        end
+        @test checked == length(classes)
+        @test _SW._c_register_class_misstated(16, true; abi = :sysv, sysv_classes = nothing) == true
+        @test _SW._c_register_class_misstated(16, true; abi = :aapcs64, hfa = false, sysv_classes = [:sse]) == false
     end
 
     @testset "record alignment: its own, its members', their types'" begin
@@ -789,17 +807,21 @@ Contents of the .debug_info section:
              ("make_is20",  :ccall,  :ccall),   # natural, > 16: Julia's own sret (the size test called it packed)
              ("make_pk17",  :sret,   :sret),    # packed, > 16
              ("make_out6",  :sret,   :ccall),   # SysV: nested unaligned field, size test blind
-             ("make_bf12",  :trap,   :ccall),   # float blob: SysV class unknowable; Win64 sret by size
+             ("make_bf12",  :ccall,  :ccall),   # float blob, INTEGER,INTEGER by its facts: RAX:RDX; Win64 sret by size
              ("take_p8",    :trap,   :ccall),   # SysV MEMORY vs blob INTEGER; Win64 i64 both
              ("take_t4",    :ccall,  :ccall),
-             # The register-class traps. SysV: the stand-in claims INTEGER for an
-             # eightbyte C passes in XMM. Win64: by size on both sides.
-             ("make_bf8",   :trap,   :ccall),   # float blob, RAX on Win64
-             ("take_bf8",   :trap,   :ccall),   # float blob, i64 on Win64
-             ("take_bf12",  :trap,   :ccall),   # float blob, by reference on Win64
-             ("make_tag16", :trap,   :ccall),   # mixed region (mpack_tag_t), sret on Win64
-             ("take_tag16", :trap,   :ccall),   # by reference on Win64
-             ("take_tag16_v", :trap, :ccall),   # the region itself, i64 on Win64
+             # The register-class rule. SysV: the stand-in claims INTEGER for every
+             # eightbyte, and the record's facts say whether C agrees: a float
+             # beside a bitfield, or a union of an integer and a double, is
+             # INTEGER (INTEGER wins the merge), so these blobs travel as C does;
+             # AB16 below (two floats in one eightbyte: SSE) stays refused.
+             # Win64: by size on both sides.
+             ("make_bf8",   :ccall,  :ccall),   # float blob, INTEGER: RAX on both
+             ("take_bf8",   :ccall,  :ccall),   # float blob, INTEGER: RDI; i64 on Win64
+             ("take_bf12",  :ccall,  :ccall),   # float blob, INTEGER,INTEGER; by reference on Win64
+             ("make_tag16", :ccall,  :ccall),   # mixed region (mpack_tag_t), INTEGER,INTEGER; sret on Win64
+             ("take_tag16", :ccall,  :ccall),   # by reference on Win64
+             ("take_tag16_v", :ccall, :ccall),  # the region itself, INTEGER; i64 on Win64
              ("take_fv8_v", :ccall,  :ccall),   # all-float region states SSE: no trap
              # Returned through a hidden pointer and more aligned than the Julia
              # type standing in: the wrapper's own buffer at the record's
@@ -847,11 +869,14 @@ Contents of the .debug_info section:
         checked += 1
     end
     @test checked == length(table)
-    # SysV names what it refused; Win64 refuses nothing for a class.
-    @test occursin("returns `BF8` by value", body(sysv, "make_bf8"))
-    @test occursin("takes `BF12` by value", body(sysv, "take_bf12"))
-    @test occursin("returns `Tag16` by value", body(sysv, "make_tag16"))
-    @test occursin("takes `Tag16_v` by value", body(sysv, "take_tag16_v"))
+    # SysV names what it refused (an SSE eightbyte the blob cannot claim) and
+    # calls what its facts settle as INTEGER; Win64 refuses nothing for a class.
+    @test occursin("returns `AB16` by value", body(sysv, "make_ab16"))
+    @test occursin("takes `AB16` by value", body(sysv, "take_ab16"))
+    @test occursin("ccall((:make_bf8, LIBRARY_PATH), BF8, (), )", body(sysv, "make_bf8"))
+    @test occursin("ccall((:take_bf12, LIBRARY_PATH), Cint, (BF12,), v)", body(sysv, "take_bf12"))
+    @test occursin("ccall((:make_tag16, LIBRARY_PATH), Tag16, (Clonglong,), n_c)", body(sysv, "make_tag16"))
+    @test occursin(r"ccall\(\(:take_tag16_v, LIBRARY_PATH\), \w+, \(Tag16_v,\), v\)", body(sysv, "take_tag16_v"))
     @test !occursin("SysV register window", win64)
     # Win64 hands the stand-in itself to ccall, which lowers it by size.
     @test occursin("ccall((:make_bf8, LIBRARY_PATH), BF8, (), )", body(win64, "make_bf8"))

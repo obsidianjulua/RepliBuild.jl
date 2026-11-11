@@ -641,15 +641,29 @@ named-field struct holding an opaque region of mixed float and integer members
     was refused for the double it holds (first arm64 run of
     test_anonymous_unions, 2026-11-10). `hfa = true` or `nothing` (facts the
     classifier cannot read) keeps the refusal. Other conventions ignore it.
+  * `:sysv`, with `sysv_classes`: the record's eightbyte classes from its DWARF
+    facts (`sysv_record_abi`'s `classes` for a `:regs` record). A float member
+    does not make an eightbyte SSE: the class is the merge of every member in
+    it, and INTEGER wins, so a union of an integer and a double, or a float
+    beside a bitfield, is INTEGER. When every eightbyte is INTEGER the blob
+    (and a struct of fields over a byte region) claims exactly that, and the
+    record is admitted whatever it holds: mpack's `mpack_tag_t` (an enum and a
+    union of integers, a float and a double), 31 trap stubs until 2026-11-10.
+    An SSE eightbyte, a low eightbyte of padding C passes nowhere (`:none`),
+    or `nothing` (a MEMORY or unreadable record, or facts the caller has none
+    of) keeps the refusal.
 
 A SysV return that C makes through a hidden pointer has no class to misstate;
 the caller exempts it with [`_c_return_in_memory`](@ref).
 """
 function _c_register_class_misstated(byte_size::Integer, class_risk::Bool;
-                                     abi::Symbol = _c_record_abi(), hfa::Union{Bool,Nothing} = nothing)
+                                     abi::Symbol = _c_record_abi(), hfa::Union{Bool,Nothing} = nothing,
+                                     sysv_classes::Union{AbstractVector,Nothing} = nothing)
     abi === :win64 && return false
     abi in (:sysv, :aapcs64) || throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
     abi === :aapcs64 && hfa === false && return false
+    abi === :sysv && sysv_classes !== nothing && !isempty(sysv_classes) &&
+        all(==(:int), sysv_classes) && return false
     return class_risk && byte_size <= _c_class_window(abi)
 end
 
@@ -2815,6 +2829,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         end
         v.kind === :hfa ? true : v.kind === :unknown ? nothing : false
     end
+    # The record's SysV eightbyte classes from its facts (`sysv_record_abi`),
+    # for a record that travels in registers; `nothing` for anything else (a
+    # MEMORY record, unreadable facts, no such record). Asked under SysV alone
+    # (`_c_register_class_misstated`'s `sysv_classes`).
+    _sysv_classes_memo = Dict{Any,Union{Vector{Symbol},Nothing}}()
+    _rec_sysv_classes(key) = get!(_sysv_classes_memo, key) do
+        (abi === :sysv && key isa AbstractString && haskey(dwarf_structs, key)) || return nothing
+        v = try
+            JLCSIRGenerator.FunctionGen.sysv_record_abi(key, dwarf_structs)
+        catch
+            return nothing
+        end
+        v.kind === :regs ? v.classes : nothing
+    end
     _stand_in_align(jname) =
         !(jname isa AbstractString) ? nothing :
         jname in blob_struct_names ? 1 :
@@ -2961,7 +2989,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 _rsz = blob_struct_sizes[_rname]
                 _rinfo = get(dwarf_structs, _rct, nothing)
                 _rkey = _rinfo !== nothing ? _rct : _fuzzy_dwarf_lookup(_rct, dwarf_structs)
-                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi, hfa = _rec_hfa(_rkey))
+                if _c_register_class_misstated(_rsz, get(blob_float_risk, _rname, true); abi, hfa = _rec_hfa(_rkey),
+                                               sysv_classes = _rec_sysv_classes(_rkey))
                     # A record C returns through a hidden pointer has no register
                     # class to get wrong: the caller's buffer is exact even for a
                     # blob (BRANCH 0 passes it explicitly wherever Julia's own
@@ -2990,7 +3019,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             # as unknowable from the Julia side.
             if _rname in abi_class_risk && 1 <= get(resolved_layouts, _rname, (0, 0))[1] <= _c_class_window(abi) &&
                _c_register_class_misstated(resolved_layouts[_rname][1], true; abi,
-                                           hfa = _rec_hfa(get(_unaligned_bdk, _rname, _rname)))
+                                           hfa = _rec_hfa(get(_unaligned_bdk, _rname, _rname)),
+                                           sysv_classes = _rec_sysv_classes(get(_unaligned_bdk, _rname, _rname)))
                 push!(blob_abi_offenders, "returns `$_rname` by value")
             end
         end
@@ -3012,12 +3042,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         for _pt in param_types
             if _pt in blob_struct_names && 1 <= get(blob_struct_sizes, _pt, 0) <= _c_class_window(abi) &&
                (_c_register_class_misstated(blob_struct_sizes[_pt], get(blob_float_risk, _pt, true); abi,
-                                            hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt))) ||
+                                            hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt)),
+                                            sysv_classes = _rec_sysv_classes(get(_unaligned_bdk, _pt, _pt))) ||
                 _blob_param_misaligned(_pt))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             elseif _pt in abi_class_risk && 1 <= get(resolved_layouts, _pt, (0, 0))[1] <= _c_class_window(abi) &&
                    _c_register_class_misstated(resolved_layouts[_pt][1], true; abi,
-                                               hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt)))
+                                               hfa = _rec_hfa(get(_unaligned_bdk, _pt, _pt)),
+                                               sysv_classes = _rec_sysv_classes(get(_unaligned_bdk, _pt, _pt)))
                 push!(blob_abi_offenders, "takes `$_pt` by value")
             end
         end
