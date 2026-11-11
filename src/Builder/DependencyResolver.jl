@@ -6,8 +6,118 @@ module DependencyResolver
 using ..ConfigurationManager
 using ..BuildBridge
 import Pkg   # PlatformEngines: download, verify and unpack archive dependencies
+import ProgressMeter
 
 export resolve_dependencies
+
+# ---------------------------------------------------------------------------
+# GIT PROGRESS (2026-11-10). A clone ran `git clone --quiet`, so a large
+# dependency (raylib, a Boost superproject) sat at "cloning <url>..." for
+# minutes with no sign of life. When stderr is a terminal, the network steps
+# (`clone`, `fetch`, `submodule update`) now run with `--progress` instead, and
+# git's own progress drives a ProgressMeter bar per local phase (receiving
+# objects, resolving deltas, updating files). Anywhere else (a redirected log,
+# CI, a background Hub build) they run with `--quiet`, as before: a bar redrawn
+# with `\r` is noise in a file.
+#
+# git writes progress records ending in `\r` and finished lines ending in `\n`,
+# and the server's (`remote: …`) can arrive in the middle of a local bar.
+# `--quiet --progress` keeps only the server's, so the progress path drops
+# `--quiet`, and with it gets the chatter `--quiet` suppressed ("Cloning
+# into…", a submodule's "registered for path…" and, on stdout, "checked
+# out…"). Those and the server's progress are dropped; every other line (a
+# `fatal:`, an `error:`, a `warning:`) is passed through, and a failed command
+# still raises `ProcessFailedException`, which the callers' catches test for.
+# ---------------------------------------------------------------------------
+
+# A local phase's progress record: "Receiving objects:  45% (1234/2740), 3.2 MiB | …".
+const _GIT_PROGRESS_RE = r"^([A-Z][a-z]+(?: [a-z]+)*):\s+\d+% \((\d+)/(\d+)\)"
+# What `--quiet` would have suppressed: the server's progress and totals, and
+# the narration of a clone or a submodule fetch.
+const _GIT_CHATTER_RE = r"^(?:remote: (?:[A-Z][a-z]+(?: [a-z]+)*: |Total )|Cloning into |Submodule '[^']*' \(.*\) registered for path )"
+
+_git_progress_enabled() = stderr isa Base.TTY
+
+"""
+    _git_progress(io; out=stderr, indent="      ")
+
+Read git's `--progress` stream from `io` to its end and draw it on `out`: one
+ProgressMeter bar per local phase. Chatter (`_GIT_CHATTER_RE`) is dropped; any
+other line is written to `out` as is. A bar git stopped short of its total (it
+failed mid-phase) is left where it stopped, never drawn at 100%.
+
+Every record is drawn (`force`): git already paces them, a few a second at
+most, and ProgressMeter's own pacing is for tight loops. Left to it, a phase of
+a few records drew nothing, and a bar that never drew in progress never draws
+its final line either.
+"""
+function _git_progress(io::IO; out::IO = stderr, indent::AbstractString = "      ")
+    bar = nothing
+    phase = ""
+    # A bar that reached its total has drawn its last line, newline included;
+    # one that did not is left as drawn, and the next output starts below it.
+    function close_bar()
+        bar === nothing || bar.counter >= bar.n || println(out)
+        bar = nothing
+    end
+    function record(r::AbstractString)
+        r = rstrip(r)
+        isempty(r) && return
+        m = match(_GIT_PROGRESS_RE, r)
+        if m !== nothing
+            n, total = parse(Int, m.captures[2]), parse(Int, m.captures[3])
+            total > 0 || return
+            if bar === nothing || m.captures[1] != phase
+                close_bar()
+                phase = String(m.captures[1])
+                bar = ProgressMeter.Progress(total; desc = indent * lowercase(phase) * " ",
+                                             output = out)
+            end
+            # update! draws the final line itself when the count reaches the total.
+            bar.counter < total && ProgressMeter.update!(bar, min(n, total); force = true)
+            # `phase` stays, so the repeated "100% …, done." record draws nothing new.
+            endswith(r, "done.") && close_bar()
+            return
+        end
+        occursin(_GIT_CHATTER_RE, r) && return
+        close_bar()
+        println(out, r)
+    end
+    pending = IOBuffer()
+    while !eof(io)
+        for b in readavailable(io)
+            if b == UInt8('\r') || b == UInt8('\n')
+                record(String(take!(pending)))
+            else
+                write(pending, b)
+            end
+        end
+    end
+    record(String(take!(pending)))
+    close_bar()
+    return nothing
+end
+
+"""
+    _run_git(quiet, progress; show=_git_progress_enabled(), out=stderr)
+
+Run the `quiet` command (`--quiet`), or, with `show`, the `progress` command
+(`--progress`, no `--quiet`) with its stderr drawn by `_git_progress` and its
+stdout discarded. Either way a failure raises `ProcessFailedException`.
+"""
+function _run_git(quiet::Cmd, progress::Cmd; show::Bool = _git_progress_enabled(), out::IO = stderr)
+    show || return run(quiet)
+    err = Pipe()
+    proc = run(pipeline(progress; stdout = devnull, stderr = err); wait = false)
+    close(err.in)
+    try
+        _git_progress(err; out)
+    finally
+        wait(proc)
+    end
+    success(proc) || throw(ProcessFailedException([proc]))
+    return proc
+end
 
 # ---------------------------------------------------------------------------
 # Git dependency cache markers (version-aware resolution)
@@ -179,7 +289,8 @@ function _fetch_dep_submodules(name::AbstractString, dep, dep_path::AbstractStri
     isempty(subs) && return nothing
     _require_recorded_submodules(name, dep, dep_path)
     println("    $name: fetching submodules $(_subsdisp(subs))")
-    run(`git -C $dep_path submodule --quiet update --init --checkout --force --depth 1 -- $subs`)
+    _run_git(`git -C $dep_path submodule --quiet update --init --checkout --force --depth 1 -- $subs`,
+             `git -C $dep_path submodule update --progress --init --checkout --force --depth 1 -- $subs`)
     return nothing
 end
 
@@ -241,7 +352,8 @@ function _clone_dep(name::AbstractString, dep, dep_path::AbstractString, marker_
     cloned = false
     try
         # Use '--' to separate options from positional arguments
-        run(`git clone --quiet -- $(dep.url) $dep_path`)
+        _run_git(`git clone --quiet -- $(dep.url) $dep_path`,
+                 `git clone --progress -- $(dep.url) $dep_path`)
         cloned = true
         if !isempty(dep.tag)
             cd(dep_path) do
@@ -278,7 +390,7 @@ function _recheckout_dep(name::AbstractString, dep, dep_path::AbstractString, ma
         cd(dep_path) do
             # Fetch is best-effort: an offline switch to an already-local tag must still work.
             try
-                run(`git fetch --quiet --tags origin`)
+                _run_git(`git fetch --quiet --tags origin`, `git fetch --progress --tags origin`)
             catch e
                 @warn "git fetch failed for $name; checking out against local refs" exception=e
             end
