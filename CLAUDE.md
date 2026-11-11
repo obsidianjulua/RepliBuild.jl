@@ -719,7 +719,15 @@ the test named when you touch the area.
     `_c_register_class_misstated` are the answers, and `_c_has_unaligned_field`
     is the walk. `_c_record_abi()` is the only place GeneratorC reads the target.
   - Register-class traps (a float-bearing blob, a mixed float/integer region) are
-    SysV's only: Win64 crosses a record by size alone on both sides.
+    SysV's only: Win64 crosses a record by size alone on both sides. And they
+    fire only where the record's eightbyte classes, read off its DWARF facts
+    (`sysv_record_abi`, the Tier 2 classifier, through `_rec_sysv_classes`),
+    include an SSE eightbyte or padding C passes nowhere: a float member alone
+    makes nothing SSE, since INTEGER wins the merge of an eightbyte's members,
+    so a union of an integer and a double (mpack's `mpack_tag_t`) or a float
+    beside a bitfield (`BF12`) is INTEGER, INTEGER and the blob travels as C
+    does (2026-11-10, the last 31 Hub C misses). A record whose facts cannot
+    be read keeps the refusal.
   - **Win64 passes a record over 8 bytes by reference to a copy aligned as the
     record is, and Julia's copy is aligned as the stand-in.** So
     `_c_byval_param_shape` under `:win64` carries a record aligned above 8
@@ -1309,14 +1317,17 @@ check before claiming portability again; reading `.gitignore` does not settle it
 ## Open problems
 
 - **C ccall coverage** is measured by `test/tools/c_ccall_coverage.jl` (reads the
-  Hub's wrappers and `.so`s as they are; rebuilds nothing). 2026-11-10, 4.4.0
-  wrappers, 26 C packages: 99.6% net of recipe exclusions, past the 99% target
-  (98.6% over 17 in August). The varargs misses are gone: a `[wrap.varargs]`
-  `@ccall` is a call. What is left is mpack's `mpack_tag_t` by value, 31 ABI-trap
-  stubs on SysV (a float-bearing byte blob in the register window; Win64 calls
-  them). Count `ccall` targets in parsed code, not emitted names: a trap stub is
-  not coverage, and a name a recipe's `exclude_symbols` drops (glfw's `_glfw*`)
-  is excluded, not missed.
+  Hub's wrappers and `.so`s as they are; rebuilds nothing; pass the Hub's path
+  from a worktree). 2026-11-10, 4.4.0 wrappers, 26 C packages: 99.97% net of
+  recipe exclusions, 100% with the two sibling-reached names counted (zlib's
+  `gzgetc` and mpack's `mpack_expect_cstr_match`, callable under their names
+  through a sibling symbol); 98.6% over 17 in August. The varargs misses went
+  with `[wrap.varargs]` (`@ccall` is a call) and mpack's 31 `mpack_tag_t` stubs
+  with the register-class rule (the record's eightbyte classes, not the
+  presence of a float). Count `ccall` targets in parsed code, not emitted
+  names: a trap stub is not coverage, and a name a recipe's `exclude_symbols`
+  drops (glfw's `_glfw*`) is excluded, not missed. Not an open problem any
+  more; kept for the method.
 - **Over-aligned records, what the C sret and byval fixes do not cover**
   (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
   path has no aligned buffer, and every alignment DWARF records (the record's,

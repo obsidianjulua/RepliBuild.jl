@@ -49,9 +49,9 @@ const C_SRET_TAKES = ["take_ab16", "take_v4a", "take_d4a", "take_ma32", "take_a3
                       "take_hvec", "take_hv4", "take_nesta"]
 const C_SRET_FUNCTIONS = ["f4", "f2", "make_ic12", "ic12_sum", "make_p4", "make_p8",
                           "take_p8", "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12",
-                          C_SRET_ALIGNED..., C_SRET_TAKES...]
+                          "make_tg16", "take_tg16", C_SRET_ALIGNED..., C_SRET_TAKES...]
 const C_SRET_RECORD_RETURNS = ["f4", "f2", "make_ic12", "make_p4", "make_p8",
-                               "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12",
+                               "make_big24", "make_is20", "make_pk17", "make_out6", "make_bf12", "make_tg16",
                                C_SRET_ALIGNED...]
 
 # One function's body in a generated wrapper (its `function name(` up to `end`).
@@ -83,14 +83,16 @@ function c_sret_aapcs64_shapes(wsrc::AbstractString)
     body(name) = c_sret_body(wsrc, name)
     plain = Dict("take_d4a" => "(Big24, D4A,), p, v)", "take_ma32" => "(Big24, MA32,), p, v)",
                  "take_nesta" => "(Big24, NestA,), p, v)", "take_a32" => "(Big24, A32,), p, v)",
-                 "take_v4a" => "(Big24, V4A,), p, v)", "take_hv4" => "(Big24, HV4,), p, v)", "take_p8" => "(P8,), v)")
+                 "take_v4a" => "(Big24, V4A,), p, v)", "take_hv4" => "(Big24, HV4,), p, v)", "take_p8" => "(P8,), v)",
+                 "take_tg16" => "(TG16,), v)")
     checked = 0
     for (f, sig) in sort!(collect(plain); by = first)
         @test (f, occursin("ccall((:$f, LIBRARY_PATH), ", body(f)) && occursin(sig, body(f))) == (f, true)
         checked += 1
     end
     for f in ("make_v4a", "make_d4a", "make_ma32", "make_a32", "make_hv4", "make_nesta", "make_ab16", "make_bf12",
-              "make_p4", "make_p8", "make_out6", "make_pk17", "make_big24", "make_is20", "make_ic12", "f2", "f4")
+              "make_tg16", "make_p4", "make_p8", "make_out6", "make_pk17", "make_big24", "make_is20", "make_ic12",
+              "f2", "f4")
         b = body(f)
         @test (f, occursin("ccall((:$f, LIBRARY_PATH), ", b) && !occursin("ret_ptr", b) && !occursin("ret_buf", b)) ==
               (f, true)
@@ -103,7 +105,7 @@ function c_sret_aapcs64_shapes(wsrc::AbstractString)
         @test (f, occursin("holds a SIMD vector", body(f))) == (f, true)
         checked += 1
     end
-    @test checked == 27
+    @test checked == 29
     @test !occursin("_rb_byval16(", wsrc)
     @test !occursin("ABI Safety Trap", body("take_a32"))      # no slot to align: a plain call
  end
@@ -183,8 +185,13 @@ function c_sret_aapcs64_shapes(wsrc::AbstractString)
             @test checked == 5
             @test occursin("ABI Safety Trap", body("take_a32"))
             @test occursin("32-byte-aligned stack slot", body("take_a32"))
-            @test occursin("ABI Safety Trap", body("take_ab16"))          # the register window, as before
+            @test occursin("ABI Safety Trap", body("take_ab16"))          # SSE then INTEGER: the blob cannot claim it
             @test occursin("ccall((:take_v4a, LIBRARY_PATH), Cfloat, (Big24, V4A,), p, v)", body("take_v4a"))
+            # INTEGER, INTEGER by the facts, whatever the float members: plain calls, as the blob travels.
+            @test occursin("ccall((:make_bf12, LIBRARY_PATH), BF12, (Cfloat, Cint, Cint,)", body("make_bf12"))
+            @test occursin("ccall((:make_tg16, LIBRARY_PATH), TG16, (Cint, Cdouble,)", body("make_tg16"))
+            @test occursin("ccall((:take_tg16, LIBRARY_PATH), Cdouble, (TG16,), v)", body("take_tg16"))
+            @test !occursin("ABI Safety Trap", body("make_bf12"))
             @test count("struct _RB_ByVal16{N}", wsrc) == 1
         else
             # Win64 passes each of these by reference to a copy aligned as the

@@ -25,7 +25,8 @@ typedef struct { int n; short s[8]; } IS20;            /* 20 B: memory on both; 
 typedef struct __attribute__((packed)) { char c; long long x; long long y; } PK17; /* 17 B: the explicit sret */
 typedef struct __attribute__((packed)) { char x; short y; } In3;           /* 3 B, align 1 */
 typedef struct { In3 in; char c[3]; } Out6;             /* 6 B: y at 1, SysV MEMORY; Win64 sret */
-typedef struct { float f; int b : 3; int c; } BF12;     /* 12 B float blob: Win64 sret; SysV refused */
+typedef struct { float f; int b : 3; int c; } BF12;     /* 12 B float blob: Win64 sret; SysV INTEGER,INTEGER (the bitfield shares the float's eightbyte), a plain call */
+typedef struct { int type; union { unsigned long long u; double d; float f; } v; } TG16; /* 16 B, mpack_tag_t's shape: SysV INTEGER,INTEGER (INTEGER wins the union's eightbyte); Win64 sret */
 
 /* Records more aligned than the Julia type standing in for them. Each maker
    copies an aligned global out (`return g_x;`), which clang stores through the
@@ -64,7 +65,9 @@ Big24 make_big24(long long a, long long b, int c);
 IS20  make_is20(int n);
 PK17  make_pk17(long long x);
 Out6  make_out6(short y);
-BF12  make_bf12(float f, int b, int c); /* Win64: sret; SysV: refused */
+BF12  make_bf12(float f, int b, int c); /* Win64: sret; SysV: RAX:RDX, as the blob */
+TG16  make_tg16(int type, double d);    /* Win64: sret; SysV: RAX:RDX, as the blob */
+double take_tg16(TG16 v);               /* SysV: RDI:RSI, as the blob; Win64: by reference */
 AB16  make_ab16(float a, int c);        /* Win64: aligned sret; SysV: refused */
 V4A   make_v4a(float x);
 D4A   make_d4a(double a);

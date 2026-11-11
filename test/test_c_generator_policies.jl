@@ -90,8 +90,9 @@ function _policy_metadata()
                 Dict{String,Any}("name" => "tag", "julia_type" => "Cchar", "c_type" => "char", "offset" => "0x0", "size" => 1),
                 Dict{String,Any}("name" => "val", "julia_type" => "Cint", "c_type" => "int", "offset" => "0x1", "size" => 4),
             ]),
-        # Bitfields make it a blob, and the float puts its first eightbyte in
-        # XMM on SysV, which the blob claims is INTEGER → trapped there. Win64
+        # Bitfields make it a blob. Its one eightbyte holds the float AND the
+        # bitfield, and INTEGER wins that merge, so on SysV C passes it in RAX,
+        # as the blob claims: a plain call (a float alone used to trap it). Win64
         # passes and returns any 8-byte record as an i64, blob included.
         "FloatBits" => Dict{String,Any}(
             "kind" => "struct", "byte_size" => "0x8",
@@ -277,11 +278,13 @@ end
         # SysV: packed (misaligned) all-int ≤16B by value → loud trap
         @test occursin("ABI Safety Trap: cannot call 'use_packed'", code)
         @test occursin("takes `PackedInt` by value", code)
-        # SysV: a float-bearing ≤16B blob → loud trap, as a param and a return
-        @test occursin("ABI Safety Trap: cannot call 'use_floatbits'", code)
-        @test occursin("takes `FloatBits` by value", code)
-        @test occursin("ABI Safety Trap: cannot call 'make_floatbits'", code)
-        @test occursin("returns `FloatBits` by value", code)
+        # SysV: a float-bearing ≤16B blob whose eightbytes are INTEGER by its
+        # facts (the float shares its eightbyte with the bitfield) → a plain
+        # call, as a param and a return; the blob claims INTEGER, as C passes it.
+        @test occursin("ccall((:use_floatbits, LIBRARY_PATH)", code)
+        @test !occursin("ABI Safety Trap: cannot call 'use_floatbits'", code)
+        @test occursin("ccall((:make_floatbits, LIBRARY_PATH)", code)
+        @test !occursin("ABI Safety Trap: cannot call 'make_floatbits'", code)
         # Aligned blob (INTEGER class both views) → normal ccall survives
         @test occursin("ccall((:use_aligned, LIBRARY_PATH)", code)
         @test !occursin("ABI Safety Trap: cannot call 'use_aligned'", code)
@@ -436,9 +439,15 @@ end
 
         # The trap fires before any ccall
         @test_throws ErrorException M.use_packed(p)
-        trap_msg(f) = try f(); "" catch e; sprint(showerror, e) end
-        @test occursin("ABI Safety Trap", trap_msg(() -> M.use_floatbits(M.FloatBits())))
-        @test occursin("ABI Safety Trap", trap_msg(M.make_floatbits))
+        trap_msg(f, args...) = try f(args...); "" catch e; sprint(showerror, e) end
+        @test occursin("ABI Safety Trap", trap_msg(M.use_packed, p))
+        # FloatBits is INTEGER by its facts, so its crossings reach the ccall:
+        # the symbol is not in libjulia, so the lookup fails instead of a trap.
+        for (f, args) in ((M.use_floatbits, (M.FloatBits(),)), (M.make_floatbits, ()))
+            msg = trap_msg(() -> f(args...))
+            @test (nameof(f), occursin("could not load symbol", msg)) == (nameof(f), true)
+            @test (nameof(f), occursin("ABI Safety Trap", msg)) == (nameof(f), false)
+        end
 
         # Raw _ptr variants are real callables
         @test isempty(methods(M.get_msg_ptr)) == false
