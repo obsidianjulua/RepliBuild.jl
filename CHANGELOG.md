@@ -4,6 +4,39 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Three test suites, one list, a runner that runs what a diff touches (2026-11-11)
+
+devtests was one 18-minute process that printed every build's progress and
+every file's summary in one stream, and runtests carried eighty toolchain-free
+files beside the registration basics. Agents lost iterations to it. The tree is
+now three suites over one list, `test/suites.jl`:
+
+- **pkg** (`runtests.jl`, what `Pkg.test()` runs): the package loads, VERSION
+  has one source, the config surface, the environment doctor, and the
+  structural guards (every `test_*.jl` listed in exactly one suite or in
+  `EXPERIMENTAL`, no include-time exit, every import declared). Seconds.
+- **unit** (`unit.jl`): the toolchain-free regression tests, in one process, as
+  runtests ran them.
+- **dev** (`devtests.jl`): everything that compiles, links or JITs
+  (`test/run.jl`). The seven discover-driven fixtures are jobs of their own
+  (`fixture:<name>`, `test/support/fixture.jl`), and the two inline testsets
+  devtests had (the pipeline on stress_test, ingest on c_test) are files
+  (`test_pipeline_live.jl`, `test_ingest_live.jl`).
+
+`run.jl` selects by the list and runs the selection in one process, each job a
+nested testset, so a failing file no longer ends the run. `--changed[=ref]`
+maps the diff to areas (`areas_of_path`: build, dwarf, c, cpp, dialect, graph)
+and runs the files that cover them, plus changed test files and the jobs
+locking a changed fixture; `--area=`, `--files=`, `--list`. `--processes` runs
+a child per job in parallel with a log each (`test/.logs/`), honouring `after`
+(a job runs after the jobs it names, skipped when one failed) and `locks` (two
+jobs on one fixture directory never run at once). Measured: a child compiles
+the build paths again before its first build, so children are not faster (48
+of them four at a time, 597s against 614s in one process; a 16-job selection
+2m30s either way). The win is selection: the dialect area is 16 of 48 jobs,
+the C area 11. CI runs `unit.jl` beside `runtests.jl`; devtests is unchanged
+there. `REPLIBUILD_SKIP_TESTS` still names fixtures to skip.
+
 ### A graph's CMake project can be a pinned dependency (2026-11-10)
 
 `GraphMode.configure` required `[graph] source` to be a directory of the
