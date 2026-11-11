@@ -109,7 +109,7 @@ Returns false (→ route to MLIR Tier 2) if any of:
 - STL container by value
 - Template type (contains `<`)
 - Not a natural layout (`_record_natural_layout`: packed, a bitfield or union inside, unmeasurable)
-- Overaligned (alignment > 8)
+- Over-aligned (`_c_record_align` > 8: the record's own, a member's, a nested record's)
 - Polymorphic (has vtable)
 - Inherits from base class
 - Non-POD class with members

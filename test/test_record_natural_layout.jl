@@ -100,6 +100,18 @@ const _NATURAL_STRUCTS = Dict{String,Any}(
     "U8" => _nrec(8, _nm("i", "Clonglong", "long long", "0x0", 8), _nm("d", "Cdouble", "double", "0x0", 8);
                   kind = "union"),
     "HoldsU8" => _nrec(16, _nm("k", "Cint", "int", "0x0", 4), _nm("u", "U8", "U8", "0x8", 8)),
+    # Over-aligned through a member (2026-11-10): `alignas(32)` on `a` is
+    # DW_AT_alignment on the member alone, and NestMA names no alignment at all.
+    # Both layouts are natural.
+    "MA32" => _nrec(32, merge(_nm("a", "Cdouble", "double", "0x0", 8), Dict{String,Any}("alignment" => 32)),
+                        _nm("b", "Cdouble", "double", "0x8", 8), _nm("c", "Cdouble", "double", "0x10", 8),
+                        _nm("d", "Cdouble", "double", "0x18", 8)),
+    "NestMA" => _nrec(32, _nm("m", "MA32", "MA32", "0x0", 32)),
+    # A static data member takes no storage: one of a type nothing can measure
+    # must not make the record's alignment the largest power of two in its size.
+    "StaticMystery" => _nrec(32, _nm("q", "Any", "Unknowable", nothing, 0),
+                                 _nm("a", "Cdouble", "double", "0x0", 8), _nm("b", "Cdouble", "double", "0x8", 8),
+                                 _nm("c", "Cdouble", "double", "0x10", 8), _nm("d", "Cdouble", "double", "0x18", 8)),
 )
 
 @testset "Record layouts: natural or not (routing)" begin
@@ -111,6 +123,7 @@ const _NATURAL_STRUCTS = Dict{String,Any}(
                       "BigEnum" => true, "Wide" => true, "ArrV" => true, "WithStatic" => true,
                       "Empty" => true, "WithStaticRec" => true, "TplArr" => true, "IntPairRec" => true,
                       "FloatPairRec" => true, "HoldsFBlob" => true,
+                      "MA32" => true, "NestMA" => true, "StaticMystery" => true,
                       "Pk5" => false, "Pr6" => false, "In3" => false, "Out6" => false, "Top6" => false,
                       "Gap12" => false, "BitRec" => false, "U4" => false, "HoldsU" => false,
                       "Mystery" => nothing)
@@ -140,6 +153,25 @@ const _NATURAL_STRUCTS = Dict{String,Any}(
         for k in ("Pk5", "Pr6", "Out6", "Top6", "Gap12", "BitRec", "HoldsU", "U4", "Mystery")
             @test (k, safe(k)) == (k, (false, false))
         end
+    end
+
+    @testset "C++ routing: over-aligned through a member, at any depth" begin
+        # Natural layouts whose own DWARF names no alignment: only the member's
+        # alignas says 32, and a ccall put the by-value record in the wrong
+        # stack slot (2026-11-10). Live: test_cpp_record_routing.jl.
+        align(k) = _NW._c_record_align(_NATURAL_STRUCTS[k], _NATURAL_STRUCTS)
+        safe(rec) = (_NW.is_ccall_safe(fn("take", "void", rec), _NATURAL_STRUCTS),
+                     _NW.is_ccall_safe(fn("give", rec), _NATURAL_STRUCTS))
+        checked = 0
+        for (k, al, want) in (("MA32", 32, (false, false)), ("NestMA", 32, (false, false)),
+                              # A static member, unmeasurable, counts for nothing.
+                              ("StaticMystery", 8, (true, true)), ("Wide", 8, (true, true)))
+            @test (k, align(k), safe(k)) == (k, al, want)
+            checked += 1
+        end
+        @test checked == 4
+        # A bitfield has no byte offset either, and still counts.
+        @test align("BitRec") == 4
     end
 
     @testset "C: is_c_lto_safe" begin

@@ -63,6 +63,45 @@ defines none of them (`Wrapper/TypeImports.jl`).
   has no metadata entry and so cannot say what it derives from.
   (`test_cross_library_types.jl`; devtests `test_cross_library_types_live.jl`
   on `test/xlib_test/`, a C owner, a C++ owner and a C++ importer.)
+### A C++ record over-aligned through a member goes to Tier 2 (2026-11-10)
+
+`struct MA32 { alignas(32) double a; double b, c, d; };` is 32-aligned, but
+clang writes that only as DW_AT_alignment on the member `a`: MA32's own DIE
+names no alignment, and `struct NestMA { MA32 m; }` names none anywhere in its
+own DWARF. Both layouts are natural (every member where natural alignment puts
+it, the size a multiple), so `_is_struct_unsafe`, which read only the record's
+own `alignment`, let an `extern "C"` or `noexcept` function taking or returning
+either reach GeneratorCpp's plain ccall. On SysV such a record by value is
+MEMORY class and sits on the stack at 32; behind a 24-byte stack argument the
+ccall put it at 24, and the callee summed the wrong bytes (`ma32_sum` gave
+651.5 where C gives 6355.5). A return went through a buffer aligned for the
+Julia stand-in, where the callee may store with aligned vector moves.
+
+- `_is_struct_unsafe` now asks `_c_record_align`, the derivation GeneratorC's
+  hidden return buffer already used: the record's own alignment, every member's
+  `alignas`, every member type's (scalars, arrays, nested records at any
+  depth). Above 8, the function goes to Tier 2, whose SysV classification
+  already read member alignment: both records cross a thunk correctly in both
+  directions.
+- `_c_record_align` skips a member with no byte offset and no bits, a C++
+  static data member or `__clang_vtable`, which takes no storage. Counted, a
+  static of a type nothing could measure made a 32-byte record 32-aligned. A
+  bitfield, which has no byte offset either, still counts; C has no other
+  offset-less member, so no C answer moves.
+- Records whose scalar members are aligned above 8 also go to Tier 2 now:
+  `long double`, whose return is refused there instead of crossing as bytes,
+  `__int128`, and SIMD vectors, which already went. So does a record whose
+  array member is `aligned(16)` (`test_simd_vectors.jl`'s RAl, 16 bytes),
+  which the vector gate had pinned to ccall as "not a vector": it is not one,
+  and that is now asserted on its own.
+- Tests: `test_record_natural_layout.jl` (synthetic MA32, NestMA, a
+  32-byte record with an unmeasurable static, and a bitfield's alignment);
+  devtests `test_cpp_record_routing.jl` adds MA32, NestMA, an `__int128`
+  record and an 8-aligned MEMORY control to its fixture, with tiers and live
+  calls both ways. Both fail with either half of the fix reverted. `abi_fuzz` cannot reach the
+  change: its C++ mode routes every function to Tier 2 by exception and its C
+  mode has no static members.
+- Still open: an alignment only a typedef carries is not in DWARF.
 
 ### The slice cache keeps one module per libLLVM major (2026-11-10)
 

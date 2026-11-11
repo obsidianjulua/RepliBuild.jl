@@ -128,6 +128,49 @@ PB12 make_pb12(int m1)
     return r;
 }
 
+MA32 make_ma32(double x)
+{
+    MA32 r = { x, x + 1.0, x + 2.0, x * 4.0 };
+    return r;
+}
+
+/* The pad is weighed too, so a record read from the pad's slot is caught. */
+double ma32_sum(Big24 pad, MA32 v)
+{
+    return (double)(pad.x + 2 * pad.y + 3 * pad.z) +
+           v.a + 10.0 * v.b + 100.0 * v.c + 1000.0 * v.d;
+}
+
+NestMA make_nestma(double x)
+{
+    NestMA r = { make_ma32(x) };
+    return r;
+}
+
+double nestma_sum(Big24 pad, NestMA v)
+{
+    return ma32_sum(pad, v.m);
+}
+
+/* v's high half is k + 1, so a 64-bit read of v is caught. */
+I128 make_i128(long long k)
+{
+    I128 r = { ((__int128)(k + 1) << 64) | (unsigned long long)(k * 3), k };
+    return r;
+}
+
+long long i128_sum(Big24 pad, I128 v)
+{
+    return (pad.x + 2 * pad.y + 3 * pad.z) + (long long)(v.v >> 64) * 10 +
+           (long long)(unsigned long long)v.v * 100 + v.k * 1000;
+}
+
+/* The control: a natural, 8-aligned MEMORY record stays on ccall. */
+long long big24_sum(Big24 v)
+{
+    return v.x + 2 * v.y + 3 * v.z;
+}
+
 }
 
 long long scalar_widths(int a, unsigned int b, unsigned long long c, Kind k)
