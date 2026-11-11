@@ -45,6 +45,19 @@ struct PK28 { char c; PR r; };
 struct PB12 { unsigned int m1; unsigned long long m2 : 7; };
 #pragma pack(pop)
 
+/* Over-aligned through a member (2026-11-10). `alignas` on a member puts
+   DW_AT_alignment on that member only: MA32's own DIE has none, and NestMA,
+   which holds one, has no alignment anywhere in its own DWARF. Both layouts are
+   natural (every member where natural alignment puts it, size a multiple), so
+   only the alignment says C aligns them to 32. A by-value argument of either is
+   MEMORY class and sits on the stack at 32; after Big24 (24 bytes, also on the
+   stack) a ccall put it at 24 and the callee read the wrong bytes. Tier 2. */
+struct MA32 { alignas(32) double a; double b, c, d; };
+struct NestMA { MA32 m; };
+struct Big24 { long long x, y, z; };                        /* natural, MEMORY, 8-aligned */
+/* 16-aligned by its scalar: `_c_record_align` counts that too, so Tier 2. */
+struct I128 { __int128 v; long long k; };
+
 /* C++ linkage, not noexcept: Tier 2 for its exceptions, with plain scalar
    arguments. The thunk loads each at its C width, so the wrapper must widen a
    narrower Julia integer before it boxes it (2026-11-03). Every argument has
@@ -73,6 +86,13 @@ PK28    make_pk28(int m1);
 int     pk28_sum(PK28 v);
 int     pb12_sum(PB12 v);
 PB12    make_pb12(int m1);
+MA32    make_ma32(double x);
+double  ma32_sum(Big24 pad, MA32 v);
+NestMA  make_nestma(double x);
+double  nestma_sum(Big24 pad, NestMA v);
+long long big24_sum(Big24 v);
+I128    make_i128(long long k);
+long long i128_sum(Big24 pad, I128 v);
 
 }
 

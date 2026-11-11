@@ -136,6 +136,45 @@ probe("pk28") do p
     (s = pk28_sum(r)) == 0x41 + 22 + 21 + 0x1234 || push!(p, "pk28_sum = $s")
 end
 
+# Over-aligned through a member (2026-11-10): MA32 and NestMA are 32-aligned
+# by a member's `alignas` alone. Passed after Big24, each lives on the stack at
+# 32; a ccall put it at 24, where Big24's last eightbyte and padding are.
+const PAD_SUM = 1 + 2 * 2 + 3 * 3
+ma32_want(x) = PAD_SUM + x + 10 * (x + 1) + 100 * (x + 2) + 1000 * (4x)
+
+probe("big24") do p
+    (s = big24_sum(Big24(1, 2, 3))) == PAD_SUM || push!(p, "big24_sum = $s")
+end
+
+probe("ma32") do p
+    r = make_ma32(1.5)
+    b = bytes(r)
+    sizeof(r) == 32 || push!(p, "sizeof = $(sizeof(r))")
+    Tuple(field(Float64, b, o) for o in (0, 8, 16, 24)) == (1.5, 2.5, 3.5, 6.0) ||
+        push!(p, "make_ma32 bytes = $b")
+    (s = ma32_sum(Big24(1, 2, 3), r)) == ma32_want(1.5) || push!(p, "ma32_sum = $s")
+end
+
+probe("nestma") do p
+    r = make_nestma(2.0)
+    b = bytes(r)
+    sizeof(r) == 32 || push!(p, "sizeof = $(sizeof(r))")
+    Tuple(field(Float64, b, o) for o in (0, 8, 16, 24)) == (2.0, 3.0, 4.0, 8.0) ||
+        push!(p, "make_nestma bytes = $b")
+    (s = nestma_sum(Big24(1, 2, 3), r)) == ma32_want(2.0) || push!(p, "nestma_sum = $s")
+end
+
+# 16-aligned by its `__int128`, so Tier 2 too: returned, then passed back
+# behind Big24. Low half k * 3, high half k + 1, then k.
+probe("i128") do p
+    r = make_i128(5)
+    b = bytes(r)
+    sizeof(r) == 32 || push!(p, "sizeof = $(sizeof(r))")
+    (field(UInt64, b, 0), field(Int64, b, 8), field(Int64, b, 16)) == (15, 6, 5) ||
+        push!(p, "make_i128 bytes = $b")
+    (s = i128_sum(Big24(1, 2, 3), r)) == PAD_SUM + 60 + 1500 + 5000 || push!(p, "i128_sum = $s")
+end
+
 # Scalars at their C width (2026-11-03): a Julia integer narrower than the C
 # parameter used to be boxed as is, and the thunk read past it.
 probe("scalar_widths") do p

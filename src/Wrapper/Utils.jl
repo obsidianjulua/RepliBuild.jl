@@ -1637,10 +1637,21 @@ function _is_struct_unsafe_impl(s_info, dwarf_structs)::Bool
         return true
     end
 
-    # Overaligned struct: alignment > 8 means SIMD/cache-line alignment
-    # that ccall won't respect (Julia uses natural alignment capped at 8)
-    alignment = get(s_info, "alignment", 0)
-    alignment = alignment isa String ? (try parse(Int, alignment) catch; 0 end) : alignment
+    # Over-aligned: C aligns the record above 8, so its hidden return buffer
+    # and its by-value stack slot are aligned past what ccall gives the Julia
+    # type standing in for it. The alignment is the record's own, any member's
+    # `alignas`, and any nested record's, at any depth (`_c_record_align`, the
+    # one derivation GeneratorC's sret buffer uses): `alignas` on a member puts
+    # DW_AT_alignment on that member only, so a record over-aligned that way,
+    # or one holding such a record, names no alignment of its own and has a
+    # natural layout. Read only its own, such a record went to ccall and was
+    # read from the wrong stack slot (2026-11-10). The nested calls below get
+    # no table, so they keep the record's own alignment.
+    alignment = if !isempty(dwarf_structs)
+        _c_record_align(s_info, dwarf_structs)
+    else
+        _c_explicit_align(get(s_info, "alignment", nothing))
+    end
     if alignment > 8
         return true
     end

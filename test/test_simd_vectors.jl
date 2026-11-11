@@ -843,7 +843,13 @@ _vfns(rt) = Any[n == "take_rarr" ? _vfunc(n; byval = [("RArr", 16)], rt) : _vfun
         @test !W.is_ccall_safe(_vfunc("take_rv8f"), _VSD)
         @test !W.is_ccall_safe(_vfunc("make_rnest"), _VSD)    # at depth
         @test W.is_ccall_safe(_vfunc("take_rplain"), _VSD)    # no vector anywhere
-        @test W.is_ccall_safe(_vfunc("take_ral"), _VSD)       # an aligned array, marked as looked at
+        # An aligned array, marked as looked at, is not a vector. RAl still goes
+        # to the thunk, for its alignment: `aligned(16)` on the member is
+        # DW_AT_alignment on the member alone, and a C++ record C aligns above 8
+        # is Tier 2 (`_is_struct_unsafe` asks `_c_record_align`, 2026-11-10).
+        @test !_VFG.holds_vector("RAl", _VSD)
+        @test W._c_record_align(_VSD["RAl"], _VSD) == 16
+        @test !W.is_ccall_safe(_vfunc("take_ral"), _VSD)
         # Old metadata cannot tell RAl's array from a vector: the thunk decides.
         old_sd, old_rt = _vstrip!(deepcopy(_VSD)), _vstrip!(deepcopy(_VRT))
         @test !W.is_ccall_safe(_vfunc("take_ral"; rt = old_rt), old_sd)
