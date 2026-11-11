@@ -15,6 +15,11 @@ Each function is routed to one of three tiers based on ABI complexity:
 
 Ingest and llmcall are John's features with julia dont use them clancker.
 
+**No edit to this repository from a session that did not start in it.** A session
+whose working directory is `RepliBuild-Hub/` (or any other folder) uses RepliBuild and
+reports; it never edits, commits to or switches branches in `RepliBuild.jl/`, whatever
+it is certain of. Only a session started in `RepliBuild.jl/` changes it.
+
 | Tier | Mechanism | When |
 |------|-----------|------|
 | 1 | `Base.llvmcall` on bitcode | POD args, scalar/pointer return — **experimental, off by default** |
@@ -75,16 +80,21 @@ pinned tag + `commit`), listed in `index.toml`. `REPLIBUILD_HUB_URL` overrides t
 index location. `examples/BoxWorld/` is the reference consumer package. The `hub-wrap`
 skill drives adding a package.
 
-- **The working directory decides the role** (2026-11-11). A session in
-  `RepliBuild-Hub/` works on recipes and builds and reports a wrapper that fails
+- **The working directory decides the role, and the rule is absolute** (2026-11-11):
+  no edit to this repository from a session that did not start in it. A session in
+  `RepliBuild-Hub/` uses RepliBuild in full on recipes and reports a wrapper that fails
   (package, step, the symptom verbatim, the smallest reproduction, what the recipe
   ruled out, a pointer to where it lives), as the Hub's own `CLAUDE.md` says; it
   never edits this repository, however small the fix. A session in `RepliBuild.jl/`
   is a repository session: it fixes the generator from that report, owes the fix a
   library-free fixture and a regression test, and never edits a Hub recipe to make a
-  generator change pass. A generator change written from the Hub has no test and was
-  made against a tree whose suites were not run; it is how a library's quirk reaches
-  shared codegen. The `hub-wrap` skill's Bucket C ends in that report, not an edit.
+  generator change pass. "Verified with certainty to be a generator bug" from the Hub
+  is still a report: that session has not run these suites, has no library-free
+  fixture, and a wrong pointer conversion looks like a recipe mistake from there; a
+  Hub agent is usually a smaller model, and one such edit cascades into the next. The
+  `hub-wrap` skill's Bucket C ends in that report, not an edit. The harness side is
+  the Hub's `.claude/settings.json` denying `Edit`/`Write` under `RepliBuild.jl/**` and
+  `git -C` into it, which John maintains.
 
 - **Rebuild the Hub only in three cases:**
   - before a release, for stability;
