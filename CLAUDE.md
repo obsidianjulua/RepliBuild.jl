@@ -16,9 +16,10 @@ Each function is routed to one of three tiers based on ABI complexity:
 Ingest and llmcall are John's features with julia dont use them clancker.
 
 **No edit to this repository from a session that did not start in it.** A session
-whose working directory is `RepliBuild-Hub/` (or any other folder) uses RepliBuild and
-reports; it never edits, commits to or switches branches in `RepliBuild.jl/`, whatever
-it is certain of. Only a session started in `RepliBuild.jl/` changes it.
+whose working directory is `RepliBuild-Hub/`, the home directory, or any other folder
+uses RepliBuild and reports; it never edits, commits to or switches branches in
+`RepliBuild.jl/`, whatever it is certain of. Only a session started in `RepliBuild.jl/`
+(or one of its worktrees) changes it.
 
 | Tier | Mechanism | When |
 |------|-----------|------|
@@ -93,8 +94,10 @@ skill drives adding a package.
   fixture, and a wrong pointer conversion looks like a recipe mistake from there; a
   Hub agent is usually a smaller model, and one such edit cascades into the next. The
   `hub-wrap` skill's Bucket C ends in that report, not an edit. The harness side is
-  the Hub's `.claude/settings.json` denying `Edit`/`Write` under `RepliBuild.jl/**` and
-  `git -C` into it, which John maintains.
+  a user-level `PreToolUse` hook on John's machine that refuses `Edit`/`Write`/
+  `NotebookEdit` under `RepliBuild.jl/` and write-shaped `Bash` naming it unless the
+  session's `cwd` is under `RepliBuild.jl/` (its worktrees included); a session
+  started anywhere else, the home directory included, gets a refusal naming this rule.
 
 - **Rebuild the Hub only in three cases:**
   - before a release, for stability;
