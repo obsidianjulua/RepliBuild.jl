@@ -4,6 +4,66 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### One Julia type per C++ type across the libraries of a graph (2026-11-10)
+
+Graph mode wrapped each library of a CMake project on its own, so library B got
+a second Julia type for each of library A's types its DWARF held, often an
+empty one, and passing A's object into B's function was a `MethodError`.
+Option 1 of `docs/updates/CROSS_LIBRARY_TYPES.md` is built: B's wrapper
+imports the types an earlier library of the graph emitted as its own and
+defines none of them (`Wrapper/TypeImports.jl`).
+
+- **Ownership comes from the graph plus what each wrapper emitted.** Every wrap
+  writes `type_manifest.json` beside its library, derived from the final text:
+  each type it defined, with its Julia name, kind (struct, blob, mutable,
+  factory struct, enum, placeholder), size, scopes, layout signature, the size
+  and alignment it measures as when it is a field, whether it carries a
+  register-class risk, its `Managed` type, its strongly defined members, and
+  the mangled symbols the wrapper binds. `GraphMode.wrap_graph_project` wraps
+  in topological order and hands each library the manifests of the ones before
+  it. The first earlier library whose manifest emitted a key as its own owns
+  it, when the identity check passes: the `scopes` meet (new metadata keys
+  `scopes` and `decl_files` on every record and enum entry, collected beside
+  the definitions so `_canonical_definition` is unchanged; unknown on either
+  side keeps the type own, reported), equal layout signatures where both have
+  one (unequal is a wrap error naming both libraries), and no member of the
+  type defined strongly in both (an error; not checked on PE). A name reached
+  only by declaration (a class another library homes) imports on the bare
+  name. Two earlier libraries that both emitted a type are siblings: the
+  first is taken and the rest reported.
+- **The importer's text.** The pre-pass in `wrap_introspective` marks each
+  imported entry with the owner's body, so every layout reader sees the owner's
+  definition; both generators ask one predicate, `_emits_type`, in every
+  per-type loop (forward declarations, structs, enums, `Managed` types,
+  factory structs, upcasts, the layout table). An imported type is one line,
+  `const X = Base.parentmodule(@__MODULE__).Owner.X` (`..Owner.X` is import
+  syntax, not an expression), in a section before the enums, with
+  `IMPORTED_FROM` (each owner's manifest and digest) and a `_check_type_imports`
+  `__init__` calls to warn when an owner was re-wrapped alone. A derived record
+  flattens an imported base's fields; a record embedding an imported one proves
+  its layout from the manifest's field facts; `Managed<X>`, factory structs and
+  `<f>_safe` belong to the owner; the D0 factory-struct rule is graph-wide
+  (`graph_subclassed`); a function an earlier wrapper binds is not wrapped
+  again. A class an earlier library could only forward-declare (its owner
+  wrapped later) keeps that placeholder, and the owner adds the
+  `Base.unsafe_convert` from its owning types to the placeholder's pointer.
+  `_assert_no_imported_redefinition` refuses a wrapper whose text defines an
+  imported name.
+- **The thunk side.** An importing wrap writes `type_imports.json`: the
+  owners' definitions, `record_abi` facts and constructor/destructor rows.
+  `JLCSIRGenerator.apply_type_imports!` merges it into the metadata the JIT
+  and the AOT builder hand to `generate_jlcs_ir`, so a by-value crossing of
+  an imported record has a layout where it trapped `:opaque`, and RAII finds
+  the owner's symbols; those rows get no thunk.
+- **Inert outside graph mode.** A single-library wrap has no earlier
+  manifests, so every type is own and the wrapper is byte-identical (checked
+  on the C and C++ fixtures); it writes a manifest nothing reads.
+- Not built, logged: hoisting sibling-only types, cross-project imports between
+  Hub packages, virtual delete, and a class with no members of its own, which
+  has no metadata entry and so cannot say what it derives from.
+  (`test_cross_library_types.jl`; devtests `test_cross_library_types_live.jl`
+  on `test/xlib_test/`, a C owner, a C++ owner and a C++ importer.)
+
 ### A method proxy keeps its owner alive across the call (2026-11-10)
 
 GeneratorCpp's method proxies read `area(obj::Rect) = Rect_area(obj.handle)`.

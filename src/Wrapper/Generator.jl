@@ -40,7 +40,8 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
                      headers::Vector{String}=String[],
                      generate_tests::Bool=false,
                      generate_docs::Bool=true,
-                     aot_compile=nothing)
+                     aot_compile=nothing,
+                     graph_imports=nothing)
 
 
     if !isfile(library_path)
@@ -67,7 +68,7 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
     end
 
     return wrap_introspective(config, library_path, headers, generate_docs=generate_docs,
-                              aot_compile=aot_compile)
+                              aot_compile=aot_compile, graph_imports=graph_imports)
 end
 
 # ThunkBuilder is loaded after Wrapper (it imports from it), so the default AOT
@@ -107,8 +108,8 @@ that names the library a wrapper was generated FROM, this holds what the
 generator said about it last time.
 """
 function _write_wrapper(output_file::AbstractString, wrapper_content::AbstractString,
-                        module_name::AbstractString)
-    _assert_wrapper_loadable(wrapper_content, module_name)
+                        module_name::AbstractString; imported::AbstractVector = String[])
+    _assert_wrapper_loadable(wrapper_content, module_name; imported = imported)
 
     if isfile(output_file)
         previous = try
@@ -160,8 +161,10 @@ Deliberately checks the generated TEXT rather than the generator's own record
 of what it defined. The bug was precisely that those two disagreed, so a guard
 built on the same bookkeeping would have agreed with the bug.
 """
-function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::AbstractString)
+function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::AbstractString;
+                                  imported::AbstractVector = String[])
     _assert_wrapper_parses(wrapper_content, module_name)
+    _assert_no_imported_redefinition(wrapper_content, module_name, imported)
     _assert_base_calls_qualified(wrapper_content, module_name)
     _assert_exports_defined(wrapper_content, module_name)
     _assert_no_duplicate_toplevel_names(wrapper_content, module_name)
@@ -1119,7 +1122,7 @@ This is the culmination of RepliBuild's vision: automatic, accurate, language-ag
 `aot_compile` is the AOT stage; see `wrap_library`.
 """
 function wrap_introspective(config::RepliBuildConfig, library_path::String, headers::Vector{String};
-                           generate_docs::Bool=true, aot_compile=nothing)
+                           generate_docs::Bool=true, aot_compile=nothing, graph_imports=nothing)
 
     if !isfile(library_path)
         error("Library not found: $library_path")
@@ -1270,6 +1273,33 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
                  " (with $(length(config.wrap.surface_types_extra)) keep-pattern(s))"))
     end
 
+    # Cross-library type identity (TypeImports.jl), in graph mode only:
+    # `graph_imports.earlier` lists the libraries wrapped before this one
+    # (`_earlier_library`, topological order) and `graph_imports.subclassed`
+    # the classes any library of the graph derives from. A type an earlier
+    # wrapper emitted as its own is imported, not emitted again; a function an
+    # earlier wrapper binds is not wrapped again. After the filters above, so a
+    # surface-filtered library imports only what it reaches.
+    type_imports = Dict{String,Any}()
+    imported_names = String[]
+    if graph_imports !== nothing
+        (type_imports, reports) = _resolve_type_imports(metadata, graph_imports.earlier)
+        for r in reports
+            println("  types: ", r)
+        end
+        _apply_type_imports!(metadata, type_imports)
+        dropped = _drop_functions_bound_earlier!(metadata, graph_imports.earlier)
+        dropped > 0 && println("  types: $dropped function(s) an earlier library of the graph binds, not wrapped again")
+        metadata["graph_subclassed"] = String[String(x) for x in graph_imports.subclassed]
+        metadata["earlier_placeholders"] = _earlier_placeholders(metadata, graph_imports.earlier)
+        if !isempty(type_imports)
+            owners = sort!(unique!(String[String(v["module"]) for v in values(type_imports)]))
+            println("  types: $(length(type_imports)) imported from $(join(owners, ", "))")
+        end
+        imported_names = _imported_type_names(metadata["struct_definitions"],
+                                              _type_sanitizer(config.wrap.language == :c ? :c : :cpp))
+    end
+
     functions = metadata["functions"]
 
     # Extract supplementary types from headers (enums, unused types, etc.)
@@ -1418,25 +1448,33 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     # Generate wrapper module
     module_name = get_module_name(config)
 
+    # The layout facts the generator records for `_type_manifest`: what each
+    # emitted type measures as when it is a field, and which types carry a
+    # register-class risk.
+    emitted_facts = Dict{String,Any}()
+
     (wrapper_content, needed_thunks) = if registry.language == :c
         # C path: Julia's internal LLVM handles the C ABI.
         # All dispatch goes through is_c_lto_safe() heuristics alone.
         (generate_introspective_module_c(config, library_path, metadata,
-                                         module_name, registry, generate_docs, thunks_lib_path), nothing)
+                                         module_name, registry, generate_docs, thunks_lib_path;
+                                         emitted_facts = emitted_facts), nothing)
     else
         # C++ path: Tier 2 is decided by is_ccall_safe alone.
         try
             generate_introspective_module_cpp(config, library_path, metadata,
                                               module_name, registry, generate_docs, thunks_lib_path;
-                                              aot_stage = aot_stage)
+                                              aot_stage = aot_stage, emitted_facts = emitted_facts)
         catch e
             e isa AOTStageFailed || rethrow()
             # The stage logged why. JIT dispatch needs no companion library, and
             # the generator does not modify `metadata`, so it can run again.
             @warn "AOT thunks were not compiled, so $(basename(e.thunks_lib)) is absent; emitting JIT dispatch"
             config = with_aot_thunks(config, false)
+            empty!(emitted_facts)
             generate_introspective_module_cpp(config, library_path, metadata,
-                                              module_name, registry, generate_docs, "")
+                                              module_name, registry, generate_docs, "";
+                                              emitted_facts = emitted_facts)
         end
     end
 
@@ -1445,7 +1483,17 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     mkpath(output_dir)
     output_file = joinpath(output_dir, "$(module_name).jl")
 
-    _write_wrapper(output_file, wrapper_content, module_name)
+    _write_wrapper(output_file, wrapper_content, module_name; imported = imported_names)
+
+    # What this wrap emitted as its own, for the libraries wrapped after it in a
+    # graph (`type_manifest.json`, every wrap), and the owners' definitions the
+    # thunk side needs for what it imported (`type_imports.json`, removed when
+    # nothing was imported). Both derived from the final text and metadata.
+    _write_type_manifest(output_dir,
+                         _type_manifest(metadata, wrapper_content, emitted_facts;
+                                        module_name = module_name, language = registry.language,
+                                        library = library_path))
+    _write_type_imports(output_dir, type_imports)
 
     # Thunk manifest for dead-thunk elimination — read by JITManager to skip
     # generating MLIR thunks for functions dispatched via ccall.

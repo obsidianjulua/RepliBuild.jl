@@ -7007,6 +7007,7 @@ function parse_dwarf_dump(output::AbstractString;
     struct_defs = Dict{String,Dict{String,Any}}()
     struct_candidates = Dict{String,Vector{Dict{String,Any}}}()
     toolchain_candidates = Dict{String,Vector{Dict{String,Any}}}()   # dropped by provenance
+    decl_files_of = Dict{String,Vector{String}}()                    # headers, per bare name
     record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
     for offset in die_order
         type_info = type_refs[offset]
@@ -7192,6 +7193,12 @@ function parse_dwarf_dump(output::AbstractString;
                     # bitten the generators repeatedly. Its layout is kept aside:
                     # the library may hold or pass it by value (`std::pair`), and
                     # `_promote_toolchain_records!` brings back exactly those.
+                    # Where this definition was declared, beside the definition and
+                    # not in it: `_canonical_definition` orders definitions by their
+                    # text, and a header path must not decide which one is kept.
+                    let p = String(get(type_info, "decl_file_path", ""))
+                        isempty(p) || push!(get!(() -> String[], decl_files_of, struct_name), replace(p, '\\' => '/'))
+                    end
                     if drops_type(type_info)
                         push!(get!(() -> Dict{String,Any}[], toolchain_candidates, struct_name), struct_def)
                         continue
@@ -7204,9 +7211,13 @@ function parse_dwarf_dump(output::AbstractString;
     end
     for (struct_name, defs) in struct_candidates
         struct_defs[struct_name] = _canonical_definition(defs)
+        _record_provenance!(struct_defs[struct_name], defs, get(decl_files_of, struct_name, String[]))
     end
     toolchain_defs = Dict{String,Dict{String,Any}}(name => _canonical_definition(defs)
                                                    for (name, defs) in toolchain_candidates)
+    for (name, defs) in toolchain_candidates
+        _record_provenance!(toolchain_defs[name], defs, get(decl_files_of, name, String[]))
+    end
     # An empty base holds no bytes, and a record with no members has no entry of
     # its own (`Tag` in `struct P : Tag { double a, b; }`, libstdc++'s
     # `__pair_base` under every `std::pair`). Say so on the base entry, or the
@@ -7229,6 +7240,8 @@ function parse_dwarf_dump(output::AbstractString;
     # name several enums.
     enum_defs = Dict{String,Dict{String,Any}}()
     enum_candidates = Dict{String,Vector{Dict{String,Any}}}()
+    enum_scopes_of = Dict{String,Vector{String}}()
+    enum_decl_files_of = Dict{String,Vector{String}}()
     for offset in die_order
         type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", nothing) == "enum"
@@ -7253,12 +7266,22 @@ function parse_dwarf_dump(output::AbstractString;
                         "byte_size" => get(type_info, "byte_size", "0x04"),
                         "enumerators" => enumerators
                     ))
+                    # Scope and header beside the definition (see the records above).
+                    let sp = get(type_info, "scope_parent", missing)
+                        sc = sp === missing ? nothing : _scope_of(sp, type_refs)
+                        sc === nothing || push!(get!(() -> String[], enum_scopes_of, enum_name), sc)
+                    end
+                    let p = String(get(type_info, "decl_file_path", ""))
+                        isempty(p) || push!(get!(() -> String[], enum_decl_files_of, enum_name), replace(p, '\\' => '/'))
+                    end
                 end
             end
         end
     end
     for (enum_name, defs) in enum_candidates
         enum_defs[enum_name] = _canonical_definition(defs)
+        _record_provenance!(enum_defs[enum_name], get(enum_scopes_of, enum_name, String[]),
+                            get(enum_decl_files_of, enum_name, String[]))
     end
 
 
@@ -7644,6 +7667,31 @@ function _scope_of(parent, type_refs::AbstractDict)
         p = get(die, "scope_parent", missing)
     end
     return join(parts, "::")
+end
+
+"""
+    _record_provenance!(def, scopes_or_defs, decl_files) -> def
+
+Where the definitions merged under one bare name were declared, on the kept
+entry: `scopes`, the sorted distinct enclosing scopes (`""` at global scope;
+each definition's `scope`, or the strings given), and `decl_files`, the sorted
+distinct `/`-separated header paths. Neither key is written when nothing is
+known, so a reader that needs them fails safe. Graph mode's cross-library
+type identity reads `scopes` (two libraries' `Config` are one type only when
+their scopes meet) and reports `decl_files`; nothing else does.
+"""
+function _record_provenance!(def::AbstractDict, scopes_or_defs::AbstractVector, decl_files::AbstractVector)
+    scopes = String[]
+    for x in scopes_or_defs
+        if x isa AbstractDict
+            haskey(x, "scope") && push!(scopes, String(x["scope"]))
+        else
+            push!(scopes, String(x))
+        end
+    end
+    isempty(scopes) || (def["scopes"] = sort!(unique!(scopes)))
+    isempty(decl_files) || (def["decl_files"] = sort!(unique!(String[String(f) for f in decl_files])))
+    return def
 end
 
 """

@@ -367,7 +367,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
                                       thunks_lib_path::String="";
-                                      aot_stage::Union{Nothing,Function}=nothing)
+                                      aot_stage::Union{Nothing,Function}=nothing,
+                                      emitted_facts::Union{Nothing,AbstractDict}=nothing)
 
     # Track exported symbols
     exports = String[]
@@ -547,6 +548,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # its bare name (TypesCpp._is_stl_internal_record).
     _stl_internal(n) = _is_stl_internal_record(String(n), dwarf_structs)
 
+    # Types an earlier library of the graph owns (TypeImports.jl): the pre-pass
+    # gave their entries the owner's body for every reader of layouts, and
+    # nothing in this wrapper defines them. Each emission loop below asks.
+    _imported(k) = !_emits_type(k, get(dwarf_structs, k, nothing))
+    imported_jl_names = Set{String}(_imported_type_names(dwarf_structs, _sanitize_cpp_type_name))
+    # `__init__` checks the owners' manifests when there are any.
+    _imports_init = isempty(imported_jl_names) ? "" : "\n            _check_type_imports()"
+
     # =============================================================================
     # AUTOMATIC FINALIZER GENERATION (Memory Safety)
     # =============================================================================
@@ -607,7 +616,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         let s = _sanitize_cpp_type_name(inner)
                             s in struct_types ? s : ""
                         end
-                isempty(sname) || _take_smallest!(d0_funcs, sname, func)
+                isempty(sname) || _imported(sname) || _take_smallest!(d0_funcs, sname, func)
             end
             continue
         end
@@ -620,6 +629,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         (startswith(arg_type, "Ptr{") && endswith(arg_type, "}")) || continue
         struct_name = arg_type[5:end-1]
         struct_name in struct_types || continue
+        _imported(struct_name) && continue
         lower_name = lowercase(f_name)
         (contains(lower_name, "delete") || contains(lower_name, "destroy") ||
          contains(lower_name, "free")) || continue
@@ -667,6 +677,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     has_subclass = Set{String}()
     for key in keys(dwarf_structs)
         union!(has_subclass, _base_keys(key))
+    end
+    # ...and in every other library of the graph (`_graph_subclassed`): a
+    # dependent deriving from a class of this library breaks the direct D0 call
+    # the same way.
+    for n in get(metadata, "graph_subclassed", String[])
+        k = _struct_key(replace(String(n), r"^(class|struct)\s+" => ""))
+        k === nothing || push!(has_subclass, k)
     end
 
     # The struct a function's pointer return names, or `nothing`.
@@ -751,6 +768,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
     for key in sort!(collect(keys(factory_funcs)))
         factories = factory_funcs[key]
+        _imported(key) && continue          # the owner's wrapper defines the class
         cls_nm = _sanitize_cpp_type_name(key)
         haskey(idiomatic_classes, cls_nm) && continue
         owner = nothing
@@ -851,6 +869,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
 
             enumerators = get(enum_info, "enumerators", [])
+
+            if _imported(enum_key)
+                # The owner's module defines it; a field or Tier 2 argument of
+                # this type still needs its width here.
+                emitted_enum_base[enum_name] = julia_underlying
+                haskey(_C_PRIM_FIELD_LAYOUT, julia_underlying) &&
+                    (emitted_enum_layout[enum_name] = _C_PRIM_FIELD_LAYOUT[julia_underlying])
+                continue
+            end
 
             if !isempty(enumerators)
                 # Sanitize first, then choose the shape. Mirrors GeneratorC.jl's
@@ -1474,6 +1501,25 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
             push!(seen_struct_defs, julia_struct_name)
             push!(defined_struct_names, julia_struct_name)
+
+            # Imported: one `const` naming the owner's type is its whole definition
+            # here. What a FIELD of this type measures as comes from the owner's
+            # manifest, so a record embedding it still proves its layout, and a
+            # blob stays a blob for the dispatch decision.
+            if _imported(struct_name)
+                imp = _import_of(dwarf_structs[struct_name])
+                lay = get(imp, "layout", nothing)
+                kind = String(get(imp, "kind", "struct"))
+                if kind in ("mutable", "idiomatic")
+                    push!(jl_mutable, julia_struct_name)
+                    kind == "mutable" && (jl_byte_records[julia_struct_name] = _parse_dwarf_size(dwarf_structs[struct_name]))
+                elseif lay isa AbstractVector && length(lay) == 2
+                    jl_layouts[julia_struct_name] = (Int(lay[1]), Int(lay[2]))
+                end
+                kind == "blob" && push!(blob_struct_names, julia_struct_name)
+                get(imp, "class_risk", false) == true && push!(sse_bytes_struct_names, julia_struct_name)
+                continue
+            end
 
             # Skip DWARF struct generation if we are generating a high-level idiomatic wrapper
             if haskey(idiomatic_classes, julia_struct_name)
@@ -2420,6 +2466,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         end
 
         for (s_name, s_info) in sort(collect(dwarf_structs), by = first)
+            _imported(s_name) && continue
             bases = get(s_info, "base_classes", [])
             (bases isa Vector && !isempty(bases)) || continue
 
@@ -2714,6 +2761,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
 
 
+    # Classes of this library an earlier library of the graph reached by
+    # declaration alone (`_earlier_placeholders`): its owning types convert to
+    # that library's placeholder pointer type.
+    let ph = get(metadata, "earlier_placeholders", Dict{String,Any}())
+        if !isempty(ph)
+            handle_types = Dict{String,Vector{String}}()
+            for (k, _) in ph
+                hts = String[]
+                jn = _sanitize_cpp_type_name(String(k))
+                haskey(idiomatic_classes, jn) && push!(hts, jn)
+                (haskey(deleters, String(k)) && !haskey(idiomatic_classes, jn)) && push!(hts, "Managed" * jn)
+                isempty(hts) || (handle_types[String(k)] = hts)
+            end
+            chunk = _placeholder_conversions_chunk(ph, handle_types)
+            isempty(chunk) || push!(struct_chunks, chunk)
+        end
+    end
+
     # Track exported function names
     # exports already initialized at top
 
@@ -2805,6 +2870,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
+    union!(typed_return_names, _imported_value_type_names(dwarf_structs, _sanitize_cpp_type_name))
 
     for func in functions
         func_name = func["name"]
@@ -4093,7 +4159,7 @@ $_preload_snippet            # Load main library explicitly to ensure symbols ar
                 RepliBuild.JITManager.warn_missing_thunks(_missing, THUNKS_LIBRARY_PATH)
             end
 
-            _check_build_identity()
+            _check_build_identity()$(_imports_init)
         $_setvbuf_snippet
         end
         """
@@ -4103,7 +4169,7 @@ $_preload_snippet            # Load main library explicitly to ensure symbols ar
             function __init__()
 $_preload_snippet                # Initialize this library's JIT engine (one engine per binary)
                 RepliBuild.JITManager.initialize_global_jit(LIBRARY_PATH)
-                _check_build_identity()
+                _check_build_identity()$(_imports_init)
             $_setvbuf_snippet
             end
             """
@@ -4115,7 +4181,7 @@ $_preload_snippet                # Initialize this library's JIT engine (one eng
             function __init__()
 $_preload_snippet                # Load library explicitly to ensure symbols are available
                 LIB_HANDLE[] = Libdl.dlopen(LIBRARY_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-                _check_build_identity()
+                _check_build_identity()$(_imports_init)
             $_setvbuf_snippet
             end
             """
@@ -4142,7 +4208,8 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     (_tiers, _kernels) = _dispatch_facts(func_chunks)
     introspection = _dispatch_tier_chunk(_tiers, _kernels) *
                     _layout_chunk(dwarf_structs,
-                                  union(_defined_type_names(_structs), _pending_enum_type_names(enum_chunks)),
+                                  setdiff(union(_defined_type_names(_structs), _pending_enum_type_names(enum_chunks)),
+                                          imported_jl_names),
                                   _sanitize_cpp_type_name)
 
     # Also derived from the FINAL text: the thunk-address slots the emitted call
@@ -4180,7 +4247,9 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # binds, read off the text it will be written with (minus the enums and
     # the export line). An enumerator that would rebind one of them is
     # prefixed with its enum's name (`_render_enum_chunks`).
-    taken = _toplevel_names(header * thunk_slots * init_block * metadata_section *
+    imports_section = _type_imports_chunk(dwarf_structs, _sanitize_cpp_type_name, metadata,
+                                          get_output_path(config))
+    taken = _toplevel_names(header * thunk_slots * init_block * metadata_section * imports_section *
                             _structs * union_accessor_defs * introspection * _funcs * footer)
     (rendered_enums, enum_member_names) = _render_enum_chunks(enum_chunks, taken)
     _enums = join(rendered_enums)
@@ -4196,13 +4265,19 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     splice!(all_exports, enum_exports_at:enum_exports_at-1, enum_exports)
 
     export_statement = _export_statement(all_exports,
-                                         _enums * _structs * union_accessor_defs *
+                                         imports_section * _enums * _structs * union_accessor_defs *
                                          introspection * _funcs)
 
-    wrapper_content = join([header, thunk_slots, init_block, metadata_section,
+    wrapper_content = join([header, thunk_slots, init_block, metadata_section, imports_section,
                             _enums, _structs,
                             union_accessor_defs, introspection, export_statement,
                             _funcs, footer])
+    if emitted_facts !== nothing
+        # What a wrap leaves for the libraries after it (`_type_manifest`).
+        emitted_facts["layouts"] = @isdefined(jl_layouts) ?
+            Dict{String,Any}(k => Any[v[1], v[2]] for (k, v) in jl_layouts) : Dict{String,Any}()
+        emitted_facts["class_risk"] = _blob_names
+    end
     return (wrapper_content, needed_function_thunks)
 end
 
