@@ -1308,12 +1308,15 @@ check before claiming portability again; reading `.gitignore` does not settle it
 
 ## Open problems
 
-- **C ccall coverage**: 98.6% (5368/5444, 2026-08-29), target 99%. The 76 misses:
-  43 varargs (declaration work via `[wrap.varargs]`), 27 mpack by-value aggregate
-  returns (typed correctly but emitted as ABI-trap stubs), 5 mpack by-value aggregate
-  args, and 1 counting artefact (zlib `gzgetc`). Measure `ccall` targets, not emitted
-  names; a trap stub is not coverage. The mpack stubs are SysV-only since
-  2026-10-18: Win64 calls them.
+- **C ccall coverage** is measured by `test/tools/c_ccall_coverage.jl` (reads the
+  Hub's wrappers and `.so`s as they are; rebuilds nothing). 2026-11-10, 4.4.0
+  wrappers, 26 C packages: 99.6% net of recipe exclusions, past the 99% target
+  (98.6% over 17 in August). The varargs misses are gone: a `[wrap.varargs]`
+  `@ccall` is a call. What is left is mpack's `mpack_tag_t` by value, 31 ABI-trap
+  stubs on SysV (a float-bearing byte blob in the register window; Win64 calls
+  them). Count `ccall` targets in parsed code, not emitted names: a trap stub is
+  not coverage, and a name a recipe's `exclude_symbols` drops (glfw's `_glfw*`)
+  is excluded, not missed.
 - **Over-aligned records, what the C sret and byval fixes do not cover**
   (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
   path has no aligned buffer, and every alignment DWARF records (the record's,

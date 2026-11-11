@@ -4,6 +4,25 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### C ccall coverage, re-measured: 99.6% (2026-11-10)
+
+The last measurement was from 2026-08-29 (98.6%, 5368/5444, 17 packages), taken
+by hand. `test/tools/c_ccall_coverage.jl` now takes it: for each Hub C package,
+the functions its shipped `.so` exports (`nm -D`, less `__rb_*`) against the
+`ccall`/`@ccall` targets in the wrapper's parsed code, with the recipe's
+`exclude_symbols` applied as wrap applies it and each miss labelled.
+
+On the 4.4.0 wrappers on disk, 26 C packages:
+
+- 7759 of 7792 exported functions are called, 99.58%, past the 99% target; on
+  August's 17 packages, 5419/5452 = 99.39%. Raw, before glfw's 235 excluded
+  `_glfw*` internals, 7759/8027.
+- The 43 varargs misses are gone: each is now a `[wrap.varargs]` `@ccall`.
+- Left: mpack's 31 functions that take or return `mpack_tag_t` by value, ABI
+  trap stubs on SysV, and two names reached through a sibling export (zlib's
+  `gzgetc` calls `gzgetc_`, mpack's `mpack_expect_cstr_match` its macro shim),
+  which are callable and only miss by symbol.
+
 ### One Julia type per C++ type across the libraries of a graph (2026-11-10)
 
 Graph mode wrapped each library of a CMake project on its own, so library B got
