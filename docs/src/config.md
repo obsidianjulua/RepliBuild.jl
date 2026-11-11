@@ -1046,8 +1046,10 @@ a generator step can read files no target lists.
 **Not applied per library yet.** The other `[wrap]` keys, `[compile]` and
 `[types]`: each library is wrapped with defaults (a non-empty
 `[compile] source_files` warns). `[link] optimization_level` and `fallback`
-apply to every library. Types are emitted per library: a type two libraries
-share is two Julia types (cross-library type identity is not built yet).
+apply to every library. A type two libraries share is one Julia type, owned by
+the first library in load order (see *One Julia type per C++ type* above). An
+imported enum brings its type but not its values: those stay in the owner's
+module (`Graph.Owner.VALUE`).
 
 ### `[llvm]`
 
