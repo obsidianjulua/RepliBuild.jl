@@ -266,6 +266,35 @@ const _XT_CLIB = _xt_meta(_XT_C_FUNCTIONS, _XT_C_STRUCTS)
             sprint(showerror, e)
         end
         @test occursin("Mismatch", err) && occursin("XCore", err) && occursin("two layouts", err)
+        # The same two layouts, each declared in its own .c file: file-local
+        # types that only share a name (C has one tag scope; libwebp's
+        # decoder and demuxer each define a `MemBuffer`). Own, reported, no error.
+        local_core = deepcopy(core)
+        local_core.manifest["types"]["Mismatch"]["decl_files"] = ["/p/src/dec/idec_dec.c"]
+        local_here = deepcopy(bad)
+        local_here["struct_definitions"]["Mismatch"]["decl_files"] = ["/p/src/demux/demux.c"]
+        (li, lr) = _XT_W._resolve_type_imports(local_here, Any[local_core]; pe = false)
+        @test !haskey(li, "Mismatch")
+        @test any(r -> startswith(r, "Mismatch:") && occursin("source file", r) && occursin("demux.c", r), lr)
+        # One side file-local is enough: a header type and a .c type are two.
+        (li1, _) = _XT_W._resolve_type_imports(local_here, Any[core]; pe = false)
+        @test !haskey(li1, "Mismatch")
+        # Declared in headers on both sides, the two layouts are still an ODR
+        # error between the libraries, as before.
+        hdr_core = deepcopy(core)
+        hdr_core.manifest["types"]["Mismatch"]["decl_files"] = ["/p/include/m.h"]
+        hdr_here = deepcopy(bad)
+        hdr_here["struct_definitions"]["Mismatch"]["decl_files"] = ["/p/include/./m.h"]
+        err = try
+            _XT_W._resolve_type_imports(hdr_here, Any[hdr_core]; pe = false)
+            ""
+        catch e
+            sprint(showerror, e)
+        end
+        @test occursin("two layouts", err)
+        @test _XT_W._tu_local(Dict("decl_files" => ["/p/a.C", "/p/b.cpp"])) &&
+              !_XT_W._tu_local(Dict("decl_files" => ["/p/a.c", "/p/a.h"])) &&
+              !_XT_W._tu_local(Dict("decl_files" => String[])) && !_XT_W._tu_local(Dict{String,Any}())
         # A member defined strongly in both: an error, not on PE.
         claimed = deepcopy(_XT_HIST)
         claimed["struct_definitions"]["TObject"] = deepcopy(_XT_CORE_STRUCTS["TObject"])

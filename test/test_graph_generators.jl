@@ -89,6 +89,25 @@ gen_edge() = custom(["gen.h", "gen.c", bp("gen.h"), bp("gen.c")], COPY_CMD;
         @test GG.requested_sources(graph(BASE)) == String[]
     end
 
+    @testset "requested: an OBJECT target's objects, listed as a consumer's sources, are not" begin
+        # add_library(whole SHARED whole.c $<TARGET_OBJECTS:parts>): CMake lists
+        # parts' object files as generated sources of whole. A compile writes
+        # them (GraphBuild folds parts into whole), so no generator step is
+        # asked for them; whole's real generated header still is. The artifact
+        # is spelled with CMake's `/./` and the source without it.
+        parts = tgt("parts", :object; sources = [src(sp("parts.c"))],
+                    artifacts = [bp("CMakeFiles/parts.dir/./parts.c.o")])
+        whole = tgt("whole", :shared; deps = ["parts"], artifacts = [bp("libwhole.so")],
+                    sources = [src(sp("whole.c")),
+                               src(bp("CMakeFiles/parts.dir/parts.c.o"); gen = true, group = 0),
+                               src(bp("whole_gen.h"); gen = true, group = 0)])
+        @test GG.requested_sources(graph(whole, parts)) == [bp("whole_gen.h")]
+        # Only an :object target's artifact is exempt: the same path listed with
+        # no object target owning it is still a request.
+        lone = tgt("lone", :shared; sources = [src(bp("CMakeFiles/parts.dir/parts.c.o"); gen = true, group = 0)])
+        @test GG.requested_sources(graph(lone)) == [bp("CMakeFiles/parts.dir/parts.c.o")]
+    end
+
     @testset "a library's artifact the command does not name is ordering, and dropped" begin
         ninja = FakeNinja(vcat(base_edges(), [gen_edge()]))
         plan = GG.plan_generators(graph(BASE, gg_target()), ninja)

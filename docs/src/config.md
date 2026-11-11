@@ -1009,7 +1009,10 @@ object or a value from one library's module passes straight into another's
 functions, a derived class flattens its base's fields, and a record embedding a
 shared one keeps its layout. Who owns a type follows the load order and an
 identity check: the types' enclosing scopes must meet (two `Config`s in two
-namespaces are two types and each library keeps its own), two definitions of
+namespaces are two types and each library keeps its own), a type declared only
+in a source file (`.c`, `.cpp`, …), never a header, is local to that file and
+stays its library's own (two `.c` files' `typedef struct {…} MemBuffer;` are two
+types, though C gives them one scope), two definitions of
 one type with different layouts are a wrap error naming both libraries, and a
 type whose members two libraries both define strongly is an error too. A
 header-only type used by two libraries that share no dependency stays one type
