@@ -1199,7 +1199,9 @@ function _graph_dependency_source(dependency::AbstractString, source::AbstractSt
         error(key * " names [dependencies.$dependency], type = $(repr(dep.type)), which has no source " *
               "tree to configure. A graph's source is a dependency of type " *
               join(repr.(GRAPH_DEPENDENCY_TYPES), ", ") * ".")
-    isabspath(source) &&
+    # A rooted path too: on Windows `isabspath("/abs")` is false, and `/abs`
+    # joined to the checkout would still not be a directory inside it.
+    (isabspath(source) || startswith(source, ('/', '\\'))) &&
         error("[graph] source = $(repr(String(source))) must be relative to the checkout of " *
               "[dependencies.$dependency] when $key is set.")
     s = replace(normpath(String(source)), '\\' => '/')
