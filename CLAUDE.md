@@ -75,6 +75,17 @@ pinned tag + `commit`), listed in `index.toml`. `REPLIBUILD_HUB_URL` overrides t
 index location. `examples/BoxWorld/` is the reference consumer package. The `hub-wrap`
 skill drives adding a package.
 
+- **The working directory decides the role** (2026-11-11). A session in
+  `RepliBuild-Hub/` works on recipes and builds and reports a wrapper that fails
+  (package, step, the symptom verbatim, the smallest reproduction, what the recipe
+  ruled out, a pointer to where it lives), as the Hub's own `CLAUDE.md` says; it
+  never edits this repository, however small the fix. A session in `RepliBuild.jl/`
+  is a repository session: it fixes the generator from that report, owes the fix a
+  library-free fixture and a regression test, and never edits a Hub recipe to make a
+  generator change pass. A generator change written from the Hub has no test and was
+  made against a tree whose suites were not run; it is how a library's quirk reaches
+  shared codegen. The `hub-wrap` skill's Bucket C ends in that report, not an edit.
+
 - **Rebuild the Hub only in three cases:**
   - before a release, for stability;
   - for the one package that exercises the calling path being changed, or that
