@@ -231,6 +231,13 @@ include(joinpath(@__DIR__, "test_dep_cache.jl"))
 
 include(joinpath(@__DIR__, "test_dep_submodules.jl"))
 
+# ── Git dependency progress (a transcript, then local repos over file://) ────
+# At a terminal, clone/fetch/submodule fetch run `--progress` and draw one
+# ProgressMeter bar per local phase; git's own messages pass through, and a
+# failure still raises. Elsewhere they run `--quiet` as before.
+
+include(joinpath(@__DIR__, "test_git_progress.jl"))
+
 # ── Archive dependencies: a tarball pinned by SHA-256 (no toolchain, no network)
 # `type = "archive"` fetches through Pkg's download-verify-unpack into the deps
 # cache, records the pin in a marker, and walks the unpacked tree like a clone

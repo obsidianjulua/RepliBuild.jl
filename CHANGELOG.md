@@ -4,6 +4,31 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### A git dependency shows its progress at a terminal (2026-11-10)
+
+`_clone_dep` ran `git clone --quiet`, so a large dependency (raylib, a Boost
+superproject) sat at "cloning <url>..." for minutes with no sign of life.
+
+- When stderr is a terminal, the clone, the pin re-checkout's `fetch` and the
+  submodule fetch run with `--progress`, and git's own progress drives one
+  ProgressMeter bar per local phase (receiving objects, resolving deltas,
+  updating files) under the "cloning" line (`_run_git`, `_git_progress`).
+  ProgressMeter was already a dependency.
+- `--quiet --progress` keeps only the server's progress, so the progress path
+  drops `--quiet`; the chatter that brings back (the server's phases and
+  totals, "Cloning into…", a submodule's "registered for path…" and its stdout)
+  is dropped, and every other line git writes (`fatal:`, `error:`,
+  `warning:`) is passed through. A failure still raises
+  `ProcessFailedException`, so the callers' pin and cleanup logic is unchanged,
+  and a bar git abandons stays where it stopped, never drawn at 100%.
+- Every record is drawn (`force`): git paces them itself, and ProgressMeter's
+  pacing, made for tight loops, drew nothing for a phase of a few records.
+- Off a terminal (a redirected log, CI, a background Hub build) every command
+  runs `--quiet`, exactly as before.
+- Test: `test_git_progress.jl` (runtests): a captured transcript, a live
+  file:// clone with progress forced on, a failing clone, and the quiet path.
+  It fails with the chatter filter or the forced draws taken out.
+
 ### One Julia type per C++ type across the libraries of a graph (2026-11-10)
 
 Graph mode wrapped each library of a CMake project on its own, so library B got
