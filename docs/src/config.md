@@ -46,6 +46,7 @@ destroying your intent. The preserved set is:
 | `[compile]` | `visibility` |
 | `[platform]` | `linux`, `windows`, `macos` |
 | `[dependencies]` | every `<name>` entry, whole |
+| `[graph]` | the whole section (`dependency` included) |
 
 A regenerated *non-empty* value wins; an empty or absent one gets the preserved
 value. A hand-edited key **not** in that table is wiped by `force=true`.
@@ -982,7 +983,8 @@ generator).
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `source` | String | `"."` | The CMake project directory (the one holding `CMakeLists.txt`), relative to the project root |
+| `source` | String | `"."` | The CMake project directory (the one holding `CMakeLists.txt`), relative to the project root; with `dependency`, relative to that dependency's checkout |
+| `dependency` | String | `""` | The `[dependencies.<name>]` entry whose checkout is the CMake project: a `git`, `archive` or `local` dependency. `build` resolves it first (clone, pin, submodules), then configures the checkout. See *A dependency as the source* below |
 | `targets` | Vector{String} | `[]` | Library targets to build and wrap, by CMake target name or File API id. The shared libraries they link come too. Empty: every library target. An executable or utility target is an error |
 | `options` | Vector{String} | `[]` | Extra arguments for the configure step (`-DFOO=ON`), after RepliBuild's own `-G Ninja -DCMAKE_BUILD_TYPE=… -DCMAKE_POLICY_VERSION_MINIMUM=3.5` |
 | `build_type` | String | `"Release"` | `CMAKE_BUILD_TYPE` of the configure; `""` omits it |
@@ -1043,6 +1045,49 @@ graph module. The hash covers every file of the CMake project's tree (`.git` and
 RepliBuild's own directories excepted), since CMake files decide every flag and
 a generator step can read files no target lists.
 
+**A dependency as the source.** A graph project need not hold the CMake
+project: `dependency` names a `[dependencies.<name>]` entry, and the entry's
+checkout is the source.
+
+```toml
+[graph]
+dependency = "root"              # the checkout of [dependencies.root]
+source     = "."                 # inside it; the default
+targets    = ["Core", "Hist"]
+
+[dependencies.root]
+type   = "git"
+url    = "https://github.com/root-project/root.git"
+tag    = "v6-34-04"
+commit = "<40-hex>"
+submodules = []                  # fetched into the checkout, if any are listed
+```
+
+- `build` resolves the dependency the way a single library's build does
+  (`DependencyResolver`): a `git` dependency is cloned into
+  `.replibuild_cache/deps/<name>/` and checked out at `tag`, its `commit` pin
+  verified and its listed `submodules` fetched; an `archive` is fetched,
+  checked against `sha256` and unpacked, its `subdir` the root; a `local`
+  dependency's `path` is used in place. Only then is the checkout configured.
+  A `system` dependency has no tree and is refused at load.
+- `source` is then a directory inside the checkout, `/`-separated, relative
+  (`"."` for the checkout itself): an absolute path, or one leaving the
+  checkout, is an error.
+- The dependency's `exclude` does not apply: CMake lists the sources.
+- Errors name the key and the entry: a `dependency` that names no
+  `[dependencies]` entry, one of type `system`, a checkout the resolver could
+  not fetch (its warning says why), or one with no `CMakeLists.txt` where
+  `source` points.
+- `clean` removes the clone with the rest of the cache; `clean(toml; deps =
+  false)` keeps it, and the next build verifies its pin instead of cloning
+  again, as for a single library. `discover(force = true)` keeps the key with
+  the `[graph]` section and the entry with `[dependencies]`.
+- The registry's hash covers the entry (name, type, url, tag, `commit`,
+  `sha256`, `subdir`, `path`) and every file of the checkout under `source`,
+  relative to it, so a moved pin is another build and an unchanged one is
+  not, wherever the deps cache is. The graph manifest records the checkout as
+  `source` and the entry as `dependency`.
+
 **Not applied per library yet.** The other `[wrap]` keys, `[compile]` and
 `[types]`: each library is wrapped with defaults (a non-empty
 `[compile] source_files` warns). `[link] optimization_level` and `fallback`
@@ -1095,7 +1140,9 @@ order. Do not use it to skip a stage; call the individual verbs instead.
 - **`[graph]` takes its sources and flags from the CMake project.** `[compile]`
   keys do not apply (a non-empty `source_files` warns), `[graph]` with
   `[ingest]` is an error, and `[wrap] module_name` names the graph module, not
-  a library.
+  a library. With `[graph] dependency`, the named `[dependencies]` entry is
+  the CMake project: its checkout is resolved first and configured, and its
+  `exclude` does not apply.
 - **`[binary] output_name` is overridden in ingest mode** when left empty, so
   `wrap()` finds the library where it expects it.
 - **`[cache] directory` is the cache path; `[paths] cache` is inert.** Likewise

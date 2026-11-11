@@ -566,8 +566,36 @@ function _fetch_archive(name::AbstractString, dep, dep_path::AbstractString, mar
 end
 
 """
+    checkout_root(config, name) -> String
+
+Where `resolve_dependencies` puts the source tree of `[dependencies.<name>]`,
+whether or not it has been fetched yet: a git dependency's clone and an
+archive's unpacked root under `<cache>/deps/<name>` (`_archive_root`, which
+answers the unpack directory itself until there is something in it), a local
+dependency's `path` under the project root. A `system` dependency has no
+tree and is an error. Graph mode configures this directory
+(`GraphMode.source_dir`); the registry hashes what is under it.
+"""
+function checkout_root(config::RepliBuildConfig, name::AbstractString)::String
+    haskey(config.dependencies.items, name) ||
+        error("[dependencies.$name]: no such dependency in $(config.config_file)")
+    dep = config.dependencies.items[name]
+    deps_cache = joinpath(ConfigurationManager.get_cache_path(config), "deps")
+    if dep.type == "git"
+        return joinpath(deps_cache, name)
+    elseif dep.type == "archive"
+        dep_path = joinpath(deps_cache, name)
+        isdir(dep_path) || isempty(dep.subdir) || return normpath(joinpath(dep_path, dep.subdir))
+        return isdir(dep_path) ? _archive_root(dep_path, dep.subdir) : dep_path
+    elseif dep.type == "local"
+        return abspath(joinpath(config.project.root, dep.path))
+    end
+    error("[dependencies.$name] is type = $(repr(dep.type)), which has no source tree")
+end
+
+"""
 Resolve dependencies declared in the configuration.
-Fetches git repos, queries pkg-config, and merges the resulting 
+Fetches git repos, queries pkg-config, and merges the resulting
 source files, include directories, and linker flags into a new configuration.
 """
 function resolve_dependencies(config::RepliBuildConfig)::RepliBuildConfig

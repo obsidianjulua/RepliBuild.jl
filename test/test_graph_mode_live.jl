@@ -176,5 +176,171 @@ else
 
     end # withenv
 end
+
+# The same project, served from a bare git repository and named by
+# `[graph] dependency`: the resolver clones and pins it under the project's
+# deps cache, the graph is configured from the clone, and everything the
+# local-source case checks holds. Then the dependency's clean rules: `deps =
+# false` keeps the clone and the next build reuses it; a moved pin is another
+# hash and another build; `clean` removes the clone.
+if Sys.which("git") === nothing
+    @testset "Graph mode (live): the CMake project from a pinned git dependency (skipped — not found: git)" begin
+        @test_skip false
+    end
+else
+@testset "Graph mode (live): the CMake project from a pinned git dependency" begin
+    work = _gml_posix(mktempdir())
+    gitrun(repo, args...) = run(`git -C $repo -c user.email=t@example.com -c user.name=tester -c commit.gpgsign=false -c tag.gpgsign=false -c core.autocrlf=false $(collect(args))`)
+    gitout(repo, args...) = String(strip(read(`git -C $repo $(collect(args))`, String)))
+    file_url(p) = "file://" * (Sys.iswindows() ? "/" * replace(abspath(p), '\\' => '/') : abspath(p))
+
+    # upstream: the fixture committed; upstream.git: the bare repository the
+    # project clones, like a forge would serve it.
+    up = work * "/upstream"
+    cp(GML_FIXTURE, up)
+    run(`git -C $up init -q`)
+    gitrun(up, "add", "-A"); gitrun(up, "commit", "-q", "-m", "fixture")
+    bare = work * "/upstream.git"
+    run(`git init -q --bare $bare`)
+    gitrun(bare, "symbolic-ref", "HEAD", "refs/heads/main")      # a clone checks out HEAD: the branch pushed below
+    gitrun(up, "remote", "add", "origin", bare)
+    gitrun(up, "tag", "v1")
+    gitrun(up, "push", "-q", "origin", "HEAD:refs/heads/main", "v1")
+    sha1 = gitout(up, "rev-parse", "HEAD")
+    @test occursin(r"^[0-9a-f]{40}$", sha1)
+
+    proj = work * "/gmdep"
+    mkpath(proj)
+    toml = proj * "/replibuild.toml"
+    # A tag and its commit, the Hub's convention: the tag is what is checked
+    # out, the commit what the checkout must be.
+    write_toml(tag, sha) = write(toml, """
+        [project]
+        name = "gm_fixture"
+        root = "."
+
+        [graph]
+        dependency = "upstream"
+        targets = ["cxxlib"]
+        build_type = "Release"
+
+        [dependencies.upstream]
+        type = "git"
+        url = "$(file_url(bare))"
+        tag = "$tag"
+        commit = "$sha"
+        """)
+    write_toml("v1", sha1)
+    clone = proj * "/.replibuild_cache/deps/upstream"
+    home = work * "/home"
+    withenv("REPLIBUILD_HOME" => home, "REPLIBUILD_JULIA_ENV" => "none") do
+
+    # ── build: resolve, then configure the clone ─────────────────────────────
+    out = RepliBuild.build(toml)
+    @test out == proj * "/julia"
+    @test isdir(clone * "/.git") && isfile(clone * "/CMakeLists.txt")
+    @test lowercase(gitout(clone, "rev-parse", "HEAD")) == sha1
+    @test isfile(proj * "/.replibuild_cache/deps/upstream.resolved")
+    manifest = TOML.parsefile(out * "/graph.toml")
+    libs = manifest["libraries"]
+    @test manifest["dependency"] == "upstream" && manifest["source"] == clone
+    @test length(libs) == 3
+    @test [l["name"] for l in libs] == ["cbase", "Core", "cxxlib"]
+    @test [l["module"] for l in libs] == ["Cbase", "RCore", "Cxxlib"]
+    @test !isdir(out * "/extra") && !isdir(out * "/gm_tool")
+    @test isfile(proj * "/build/cmake/gen/gm_version.h")             # the build step ran, from the clone
+    for l in libs
+        @test isfile(out * "/" * l["library"]) && isfile(out * "/" * l["metadata"])
+    end
+    io = IOBuffer()
+    RepliBuild.GraphMode.describe(io, RepliBuild.ConfigurationManager.load_config(toml))
+    s = String(take!(io))
+    @test occursin("CMake project $clone", s)
+    @test occursin("from:    [dependencies.upstream] (git) $(file_url(bare)) @ $(sha1[1:12])", s)
+
+    # ── wrap: the same graph the local source gives ──────────────────────────
+    graph_file = RepliBuild.wrap(toml)
+    @test graph_file == out * "/GmFixture.jl"
+    @test [m.captures[1] for m in eachmatch(r"^include\(\"(.*)\"\)$"m, read(graph_file, String))] ==
+          ["cbase/lib/Cbase.jl", "Core/lib/RCore.jl", "cxxlib/lib/Cxxlib.jl"]
+    v = gml_run("include($(repr(graph_file)))")
+    checked = 0
+    for name in ("module", "rcore", "one_cbase", "generated_header", "core_scale")
+        @test gml_pass(v, name)
+        checked += 1
+    end
+    @test checked == 5
+    @test get(v, "total", "") == "282"
+
+    # ── registry: the hash covers the pin and the clone ──────────────────────
+    # `use` hashes the loaded config with its dependencies resolved.
+    hash_now() = RepliBuild.PackageRegistry.hash_config(
+        RepliBuild.DependencyResolver.resolve_dependencies(RepliBuild.ConfigurationManager.load_config(toml)))
+    h1 = hash_now()
+    @test h1 == hash_now()
+    entry = RepliBuild.register(toml)
+    @test entry.build_hash == h1
+    vend = home * "/builds/" * h1
+    @test isfile(vend * "/GmFixture.jl") && isfile(vend * "/graph.toml")
+    @test all(isfile(vend * "/" * l[k]) for l in libs for k in ("library", "metadata", "wrapper"))
+    @test !occursin(clone, read(vend * "/cxxlib/lib/Cxxlib.jl", String)) ||
+          occursin("LIBRARY_PATH", read(vend * "/cxxlib/lib/Cxxlib.jl", String))
+
+    # ── clean(deps = false) keeps the clone, and the next build reuses it ────
+    # The sentinel sits in the clone's .git, which the hash never reads: a
+    # re-clone would lose it, a re-checkout keeps it.
+    sentinel = clone * "/.git/gml_sentinel"
+    write(sentinel, "")
+    RepliBuild.clean(toml; deps = false)
+    @test !isdir(proj * "/julia") && !isdir(proj * "/build")
+    @test isfile(sentinel) && isfile(proj * "/.replibuild_cache/deps/upstream.resolved")
+    @test !isdir(proj * "/.replibuild_cache/ir")
+    @test hash_now() == h1                                            # the clone is the same source
+    RepliBuild.build(toml)
+    @test isfile(sentinel)                                            # verified, not cloned again
+    @test isfile(out * "/" * libs[3]["library"])
+
+    # ── a moved pin: another commit upstream, another hash, another build ────
+    src = up * "/cxxlib/cxxlib.cpp"
+    write(src, replace(read(src, String), "#define GM_CXX_OFFSET 100" => "#define GM_CXX_OFFSET 200"))
+    gitrun(up, "commit", "-q", "-am", "offset 200")
+    gitrun(up, "tag", "v2")
+    gitrun(up, "push", "-q", "origin", "HEAD:refs/heads/main", "v2")
+    sha2 = gitout(up, "rev-parse", "HEAD")
+    @test sha2 != sha1
+    write_toml("v2", sha2)
+    @test lowercase(gitout(clone, "rev-parse", "HEAD")) == sha1       # the clone has not moved yet
+    h2 = hash_now()                                                   # resolving re-checks out to the pin, as `use` does
+    @test h2 != h1
+    @test lowercase(gitout(clone, "rev-parse", "HEAD")) == sha2
+    @test isfile(sentinel)                                            # the clone moved, it was not replaced
+    RepliBuild.build(toml)
+    @test hash_now() == h2                                            # the build changes no input
+    RepliBuild.wrap(toml)
+    @test get(gml_run("include($(repr(graph_file)))"), "total", "") == "482"
+    # `use` sees a hash no vendored build has, and builds and vendors it.
+    v = gml_run("RepliBuild.use(\"gm_fixture\")"; prelude = "using RepliBuild")
+    @test gml_pass(v, "one_cbase") && gml_pass(v, "rcore")
+    @test get(v, "total", "") == "482"
+    @test isdir(home * "/builds/" * h2) && isdir(vend)
+    @test RepliBuild.PackageRegistry._load_index().entries["gm_fixture"].build_hash == h2
+
+    # ── a pin the tag does not meet is a refusal, before any configure ───────
+    write_toml("v2", "f" ^ 40)
+    e = try RepliBuild.build(toml); "" catch err; sprint(showerror, err) end
+    @test occursin("upstream", e) && occursin("f" ^ 40, e)
+    @test lowercase(gitout(clone, "rev-parse", "HEAD")) == sha2       # the clone is as it was
+    write_toml("v2", sha2)
+
+    # ── clean removes the clone with the cache ───────────────────────────────
+    RepliBuild.clean(toml)
+    @test !isdir(proj * "/.replibuild_cache") && !isdir(proj * "/julia") && !isdir(proj * "/build")
+    io = IOBuffer()
+    RepliBuild.GraphMode.describe(io, RepliBuild.ConfigurationManager.load_config(toml))
+    @test occursin("(not fetched)", String(take!(io)))
+
+    end # withenv
+end
+end # git
 end # ninja
 end # requires

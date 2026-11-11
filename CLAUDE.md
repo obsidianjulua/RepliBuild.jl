@@ -1421,10 +1421,11 @@ DWARF-resolved destructors — **is** built.)
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).
 - Graph mode (2026-10-30) runs end to end for a CMake project configured with
-  Ninja. Not built: other `[wrap]`/`[compile]`/`[types]` keys per library, a
-  project-level fast path (every build configures and runs every generator
-  step), parallel metadata extraction, and a `[graph] source` from a
-  `[dependencies]` git checkout.
+  Ninja, from a directory of the project or from a `[dependencies]` checkout
+  (`[graph] dependency`, 2026-11-10). Not built: other
+  `[wrap]`/`[compile]`/`[types]` keys per library, a project-level fast path
+  (every build configures and runs every generator step), and parallel
+  metadata extraction.
 - Cross-library types in graph mode, what Option 1 left out (2026-11-10;
   `docs/updates/CROSS_LIBRARY_TYPES.md` 6.9): hoisting a header-only type two
   siblings use but no common dependency does (each keeps its own, reported);

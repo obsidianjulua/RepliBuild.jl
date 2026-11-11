@@ -1055,11 +1055,15 @@ Never a directory that holds the TOML or the CMake project (`output = "."`).
 """
 function _clean_graph(toml_path::String)
     haskey(TOML.parsefile(toml_path), "graph") || return
-    gc = ConfigurationManager.load_config(toml_path).graph
+    config = ConfigurationManager.load_config(toml_path)
+    gc = config.graph
+    # A dependency's checkout is `clean_internal`'s (the deps cache, kept by
+    # `deps = false`); `source_dir` still answers where it is, fetched or not.
+    source = GraphMode.source_dir(config)
     holds(dir, p) = startswith(Compiler._canon_path(p) * "/", Compiler._canon_path(dir) * "/")
     for dir in (gc.cmake_dir, gc.out_dir)
         isdir(dir) || continue
-        if holds(dir, toml_path) || holds(dir, gc.source)
+        if holds(dir, toml_path) || holds(dir, source)
             @warn "clean: not deleting $dir: it holds the project itself"
             continue
         end
