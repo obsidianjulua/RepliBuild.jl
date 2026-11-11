@@ -29,6 +29,105 @@ superproject) sat at "cloning <url>..." for minutes with no sign of life.
   file:// clone with progress forced on, a failing clone, and the quiet path.
   It fails with the chatter filter or the forced draws taken out.
 
+### One Julia type per C++ type across the libraries of a graph (2026-11-10)
+
+Graph mode wrapped each library of a CMake project on its own, so library B got
+a second Julia type for each of library A's types its DWARF held, often an
+empty one, and passing A's object into B's function was a `MethodError`.
+Option 1 of `docs/updates/CROSS_LIBRARY_TYPES.md` is built: B's wrapper
+imports the types an earlier library of the graph emitted as its own and
+defines none of them (`Wrapper/TypeImports.jl`).
+
+- **Ownership comes from the graph plus what each wrapper emitted.** Every wrap
+  writes `type_manifest.json` beside its library, derived from the final text:
+  each type it defined, with its Julia name, kind (struct, blob, mutable,
+  factory struct, enum, placeholder), size, scopes, layout signature, the size
+  and alignment it measures as when it is a field, whether it carries a
+  register-class risk, its `Managed` type, its strongly defined members, and
+  the mangled symbols the wrapper binds. `GraphMode.wrap_graph_project` wraps
+  in topological order and hands each library the manifests of the ones before
+  it. The first earlier library whose manifest emitted a key as its own owns
+  it, when the identity check passes: the `scopes` meet (new metadata keys
+  `scopes` and `decl_files` on every record and enum entry, collected beside
+  the definitions so `_canonical_definition` is unchanged; unknown on either
+  side keeps the type own, reported), equal layout signatures where both have
+  one (unequal is a wrap error naming both libraries), and no member of the
+  type defined strongly in both (an error; not checked on PE). A name reached
+  only by declaration (a class another library homes) imports on the bare
+  name. Two earlier libraries that both emitted a type are siblings: the
+  first is taken and the rest reported.
+- **The importer's text.** The pre-pass in `wrap_introspective` marks each
+  imported entry with the owner's body, so every layout reader sees the owner's
+  definition; both generators ask one predicate, `_emits_type`, in every
+  per-type loop (forward declarations, structs, enums, `Managed` types,
+  factory structs, upcasts, the layout table). An imported type is one line,
+  `const X = Base.parentmodule(@__MODULE__).Owner.X` (`..Owner.X` is import
+  syntax, not an expression), in a section before the enums, with
+  `IMPORTED_FROM` (each owner's manifest and digest) and a `_check_type_imports`
+  `__init__` calls to warn when an owner was re-wrapped alone. A derived record
+  flattens an imported base's fields; a record embedding an imported one proves
+  its layout from the manifest's field facts; `Managed<X>`, factory structs and
+  `<f>_safe` belong to the owner; the D0 factory-struct rule is graph-wide
+  (`graph_subclassed`); a function an earlier wrapper binds is not wrapped
+  again. A class an earlier library could only forward-declare (its owner
+  wrapped later) keeps that placeholder, and the owner adds the
+  `Base.unsafe_convert` from its owning types to the placeholder's pointer.
+  `_assert_no_imported_redefinition` refuses a wrapper whose text defines an
+  imported name.
+- **The thunk side.** An importing wrap writes `type_imports.json`: the
+  owners' definitions, `record_abi` facts and constructor/destructor rows.
+  `JLCSIRGenerator.apply_type_imports!` merges it into the metadata the JIT
+  and the AOT builder hand to `generate_jlcs_ir`, so a by-value crossing of
+  an imported record has a layout where it trapped `:opaque`, and RAII finds
+  the owner's symbols; those rows get no thunk.
+- **Inert outside graph mode.** A single-library wrap has no earlier
+  manifests, so every type is own and the wrapper is byte-identical (checked
+  on the C and C++ fixtures); it writes a manifest nothing reads.
+- Not built, logged: hoisting sibling-only types, cross-project imports between
+  Hub packages, virtual delete, and a class with no members of its own, which
+  has no metadata entry and so cannot say what it derives from.
+  (`test_cross_library_types.jl`; devtests `test_cross_library_types_live.jl`
+  on `test/xlib_test/`, a C owner, a C++ owner and a C++ importer.)
+### A C++ record over-aligned through a member goes to Tier 2 (2026-11-10)
+
+`struct MA32 { alignas(32) double a; double b, c, d; };` is 32-aligned, but
+clang writes that only as DW_AT_alignment on the member `a`: MA32's own DIE
+names no alignment, and `struct NestMA { MA32 m; }` names none anywhere in its
+own DWARF. Both layouts are natural (every member where natural alignment puts
+it, the size a multiple), so `_is_struct_unsafe`, which read only the record's
+own `alignment`, let an `extern "C"` or `noexcept` function taking or returning
+either reach GeneratorCpp's plain ccall. On SysV such a record by value is
+MEMORY class and sits on the stack at 32; behind a 24-byte stack argument the
+ccall put it at 24, and the callee summed the wrong bytes (`ma32_sum` gave
+651.5 where C gives 6355.5). A return went through a buffer aligned for the
+Julia stand-in, where the callee may store with aligned vector moves.
+
+- `_is_struct_unsafe` now asks `_c_record_align`, the derivation GeneratorC's
+  hidden return buffer already used: the record's own alignment, every member's
+  `alignas`, every member type's (scalars, arrays, nested records at any
+  depth). Above 8, the function goes to Tier 2, whose SysV classification
+  already read member alignment: both records cross a thunk correctly in both
+  directions.
+- `_c_record_align` skips a member with no byte offset and no bits, a C++
+  static data member or `__clang_vtable`, which takes no storage. Counted, a
+  static of a type nothing could measure made a 32-byte record 32-aligned. A
+  bitfield, which has no byte offset either, still counts; C has no other
+  offset-less member, so no C answer moves.
+- Records whose scalar members are aligned above 8 also go to Tier 2 now:
+  `long double`, whose return is refused there instead of crossing as bytes,
+  `__int128`, and SIMD vectors, which already went. So does a record whose
+  array member is `aligned(16)` (`test_simd_vectors.jl`'s RAl, 16 bytes),
+  which the vector gate had pinned to ccall as "not a vector": it is not one,
+  and that is now asserted on its own.
+- Tests: `test_record_natural_layout.jl` (synthetic MA32, NestMA, a
+  32-byte record with an unmeasurable static, and a bitfield's alignment);
+  devtests `test_cpp_record_routing.jl` adds MA32, NestMA, an `__int128`
+  record and an 8-aligned MEMORY control to its fixture, with tiers and live
+  calls both ways. Both fail with either half of the fix reverted. `abi_fuzz` cannot reach the
+  change: its C++ mode routes every function to Tier 2 by exception and its C
+  mode has no static members.
+- Still open: an alignment only a typedef carries is not in DWARF.
+
 ### The slice cache keeps one module per libLLVM major (2026-11-10)
 
 `.replibuild_cache/slices/` gained a directory per promoted module and never

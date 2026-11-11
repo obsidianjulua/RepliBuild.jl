@@ -442,6 +442,12 @@ function _c_record_align(info, dwarf_structs;
     # (`_c_register_pair_misplaced`).
     al = own ? _c_explicit_align(get(info, "alignment", nothing)) : 1
     for m in get(info, "members", [])
+        # A member with no byte offset and no bits takes no storage: a C++
+        # static data member or the `__clang_vtable` placeholder. A bitfield
+        # has no byte offset either, and counts. C has neither of the others,
+        # so this moves no C answer; C++'s `_is_struct_unsafe` asks too.
+        (get(m, "offset", nothing) === nothing && !haskey(m, "bit_size") &&
+         !haskey(m, "data_bit_offset")) && continue
         al = max(al, _c_explicit_align(get(m, "alignment", nothing)))
         sz, jt, ct = get(m, "size", 0), get(m, "julia_type", "Any"), get(m, "c_type", "")
         jt isa AbstractString || (jt = "Any")
@@ -993,7 +999,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
                                       thunks_lib_path::String="";
-                                      abi::Symbol = _c_record_abi())
+                                      abi::Symbol = _c_record_abi(),
+                                      emitted_facts::Union{Nothing,AbstractDict}=nothing)
     abi in (:sysv, :win64, :aapcs64) ||
         throw(ArgumentError("unknown C record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
 
@@ -1280,6 +1287,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         end
     end
 
+    # Types an earlier library of the graph owns (TypeImports.jl): the pre-pass
+    # gave their entries the owner's body for every reader of layouts, and
+    # nothing in this wrapper defines them. Each emission loop below asks.
+    _imported(k) = !_emits_type(k, get(dwarf_structs, k, nothing))
+    imported_jl_names = Set{String}(_imported_type_names(dwarf_structs, _sanitize_c_type_name))
+    # `__init__` checks the owners' manifests when there are any.
+    _imports_init = isempty(imported_jl_names) ? "" : "\n            _check_type_imports()"
+
     # =============================================================================
     # ENUM GENERATION (from DWARF)
     # =============================================================================
@@ -1345,6 +1360,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
 
             enumerators = get(enum_info, "enumerators", [])
+
+            # The owner's module defines it; `enum_layouts` above already has
+            # its width for the fields of this type.
+            _imported(enum_key) && continue
 
             if !isempty(enumerators)
                 # Sanitize FIRST, then choose the shape. Both branches consume the
@@ -1834,6 +1853,25 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             end
             push!(seen_struct_defs, julia_struct_name)
             push!(defined_struct_names, julia_struct_name)
+
+            # Imported: one `const` naming the owner's type is its whole definition
+            # here. What a FIELD of this type measures as comes from the owner's
+            # manifest, so a record embedding it still lays out exactly, and a
+            # blob stays a blob for the by-value verdicts.
+            if _imported(struct_name)
+                imp = _import_of(dwarf_structs[struct_name])
+                lay = get(imp, "layout", nothing)
+                kind = String(get(imp, "kind", "struct"))
+                if kind == "blob"
+                    push!(blob_struct_names, julia_struct_name)
+                    blob_struct_sizes[julia_struct_name] = _parse_dwarf_size(dwarf_structs[struct_name])
+                    blob_float_risk[julia_struct_name] = get(imp, "class_risk", false) == true
+                elseif lay isa AbstractVector && length(lay) == 2
+                    resolved_layouts[julia_struct_name] = (Int(lay[1]), Int(lay[2]))
+                end
+                get(imp, "class_risk", false) == true && push!(abi_class_risk, julia_struct_name)
+                continue
+            end
 
             # Check if we have DWARF member information for this struct
             if haskey(dwarf_structs, struct_name)
@@ -2702,8 +2740,10 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # (miniaudio's ma_fopen/ma_wfopen, 2026-08-02). Degrading the pointer to
     # `Ptr{Cvoid}` is ABI-identical and keeps the function callable.
     emitted_type_names = _defined_type_names(join(enum_chunks) * join(struct_chunks))
+    union!(emitted_type_names, imported_jl_names)     # the import `const` binds X
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(enum_chunks) * join(struct_chunks))
+    union!(typed_return_names, _imported_value_type_names(dwarf_structs, _sanitize_c_type_name))
 
     # Union accessors were built during struct emission and screened against the
     # INTENDED struct set (`known_struct_names`). A type that was planned but
@@ -4110,7 +4150,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # Must be in __init__ (not module body) for precompilation safety.
     # Build-identity check, shared by every __init__ variant below.
     _identity_snippet = """
-            _check_build_identity()
+            _check_build_identity()$(_imports_init)
     """
 
     # Pre-load [ingest] extra_link_libs. Must precede every dlopen below,
@@ -4226,14 +4266,17 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     (_tiers, _kernels) = _dispatch_facts(func_chunks)
     introspection = _dispatch_tier_chunk(_tiers, _kernels) *
                     _layout_chunk(dwarf_structs,
-                                  union(_defined_type_names(_structs), _pending_enum_type_names(enum_chunks)),
+                                  setdiff(union(_defined_type_names(_structs), _pending_enum_type_names(enum_chunks)),
+                                          imported_jl_names),
                                   _sanitize_c_type_name)
 
     # The enum section last, against every other top-level name the module
     # binds, read off the text it will be written with (minus the enums and
     # the export line). An enumerator that would rebind one of them is
     # prefixed with its enum's name (`_render_enum_chunks`).
-    taken = _toplevel_names(header * init_block * metadata_section * _structs * _unions *
+    imports_section = _type_imports_chunk(dwarf_structs, _sanitize_c_type_name, metadata,
+                                          get_output_path(config))
+    taken = _toplevel_names(header * init_block * metadata_section * imports_section * _structs * _unions *
                             tier1_registry * introspection * _funcs * footer)
     (rendered_enums, enum_member_names) = _render_enum_chunks(enum_chunks, taken)
     _enums = join(rendered_enums)
@@ -4249,10 +4292,16 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     splice!(all_exports, enum_exports_at:enum_exports_at-1, enum_exports)
 
     export_statement = _export_statement(all_exports,
-                                         _enums * _structs * _unions * tier1_registry *
+                                         imports_section * _enums * _structs * _unions * tier1_registry *
                                          introspection * _funcs)
 
-    return join([header, init_block, metadata_section, _enums, _structs, _unions,
+    if emitted_facts !== nothing
+        # What a wrap leaves for the libraries after it (`_type_manifest`).
+        emitted_facts["layouts"] = Dict{String,Any}(k => Any[v[1], v[2]] for (k, v) in resolved_layouts)
+        emitted_facts["class_risk"] = union(abi_class_risk,
+                                            Set{String}(k for (k, v) in blob_float_risk if v == true))
+    end
+    return join([header, init_block, metadata_section, imports_section, _enums, _structs, _unions,
                  tier1_registry, introspection, export_statement, _funcs, footer])
 end
 

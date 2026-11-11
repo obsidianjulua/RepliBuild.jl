@@ -7,6 +7,7 @@ module JLCSIRGenerator
 using ..DWARFParser
 import ..MLIRNative: CXX_PERSONALITY
 import ..host_record_abi
+import .._read_json
 import JSON
 
 # Modular includes
@@ -82,6 +83,51 @@ function _bare_class_name(cls::AbstractString)::String
     base = cut === nothing ? cls : cls[1:prevind(cls, cut)]
     sep = findlast("::", base)
     return sep === nothing ? String(base) : String(base[nextind(base, last(sep)):end])
+end
+
+"""
+    apply_type_imports!(metadata, dir) -> metadata
+
+The thunk side of cross-library type identity (Wrapper/TypeImports.jl). A
+wrapper that imported types from earlier libraries of its graph left
+`type_imports.json` beside its library: for each imported key, the owner's
+`struct_definitions` entry (its `conflict` marks included), its `record_abi`
+facts and its constructor and destructor rows. Merged here into the metadata
+`JITManager.initialize_global_jit` and `ThunkBuilder.build_aot_thunks` hand to
+`generate_jlcs_ir`: the owner's entry replaces this library's for the key and
+is added where it had none, so a thunk crossing the owner's record by value,
+or a record embedding it, has its layout (`by_value_crossing` says `:layout`
+where it said `:opaque`), and `_collect_class_raii` finds the owner's copy
+constructor and destructor. Those rows are marked `imported_raii` and get no
+thunk of their own. Without the file nothing changes.
+"""
+function apply_type_imports!(metadata, dir::AbstractString)
+    path = joinpath(dir, "type_imports.json")
+    isfile(path) || return metadata
+    file = _read_json(path)
+    imports = get(file, "imports", Dict{String,Any}())
+    isempty(imports) && return metadata
+    defs = get!(metadata, "struct_definitions", Dict{String,Any}())
+    abi = get!(metadata, "record_abi", Dict{String,Any}())
+    funcs = get!(metadata, "functions", Any[])
+    have = Set{String}(String(get(f, "mangled", "")) for f in funcs if f isa AbstractDict)
+    for key in sort!(collect(keys(imports)); by = string)
+        imp = imports[key]
+        entry = get(imp, "owner_entry", nothing)
+        entry isa AbstractDict || continue
+        defs[key] = entry
+        ra = get(imp, "record_abi", nothing)
+        ra isa AbstractDict && !haskey(abi, key) && (abi[key] = ra)
+        for row in get(imp, "raii", Any[])
+            row isa AbstractDict || continue
+            m = String(get(row, "mangled", ""))
+            (isempty(m) || m in have) && continue
+            row["imported_raii"] = true
+            push!(funcs, row)
+            push!(have, m)
+        end
+    end
+    return metadata
 end
 
 function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
@@ -397,6 +443,9 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         m in EH_RUNTIME_SYMBOLS && continue
         needed_symbols !== nothing && !(m in needed_symbols) && continue
         get(f, "is_vararg", false) && continue
+        # An owner's constructor or destructor merged in for RAII
+        # (`apply_type_imports!`) is called, never wrapped.
+        get(f, "imported_raii", false) == true && continue
         push!(fthunk_decls, m)
     end
     println(io, "  // External Dispatch Declarations (Virtual Methods)")
@@ -504,6 +553,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
             # appear in the wrapped library's own DWARF. See EH_RUNTIME_SYMBOLS.
             m in EH_RUNTIME_SYMBOLS && return false
             needed_symbols !== nothing && !(m in needed_symbols) && return false
+            get(f, "imported_raii", false) == true && return false   # see `apply_type_imports!`
             return true
         end
 

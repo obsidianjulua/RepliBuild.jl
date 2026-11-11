@@ -25,9 +25,10 @@
 # then the graph module `module <Graph>` that includes them in that order. Each
 # __init__ opens its own library, so a library's dependencies are open before
 # it is, which is the load order PE needs (Windows binds an import to a DLL
-# already loaded under that name). Types are still emitted per library: a type
-# two libraries share is two Julia types until cross-library type identity
-# (docs/updates/CROSS_LIBRARY_TYPES.md) is built.
+# already loaded under that name). A type an earlier library of the graph
+# emitted is imported by the later wrappers (a `const` naming the owner's), never
+# emitted again, so one C++ type is one Julia type across the graph
+# (Wrapper/TypeImports.jl; docs/updates/CROSS_LIBRARY_TYPES.md).
 #
 # Caching: GraphBuild skips the compile of an unchanged translation unit and
 # the link of a library whose link key is unchanged (`GraphBuild._link_key`),
@@ -48,6 +49,7 @@ import ..GraphGenerators
 import ..GraphBuild
 import ..GraphBuild: GraphPlan, LibraryPlan
 import ..Compiler
+import .._read_json
 
 export build_graph_project, wrap_graph_project, library_module_names, graph_module_text,
        input_files, vendored_paths, vendored_complete, describe
@@ -404,10 +406,22 @@ function wrap_graph_project(config::RepliBuildConfig)::String
     W = getfield(parentmodule(@__MODULE__), :Wrapper)
     graph_file = gc.out_dir * "/" * graph_module * ".jl"
     entries = Pair{String,String}[]
+    # Cross-library type identity (Wrapper/TypeImports.jl): each library is
+    # wrapped knowing what the libraries before it emitted (their type
+    # manifests, as built), so a type an earlier library owns is imported, not
+    # emitted again, and knowing which classes any library of the graph
+    # derives from. Topological order, so an owner is always wrapped first.
+    metadatas = Dict{String,Any}(lib.id => _read_json(_metadata_path(lib)) for lib in plan.libraries)
+    earlier = Any[]
     for lib in plan.libraries
         cfg = library_config(config, lib, names)
-        path = W.wrap_library(cfg, lib.library; generate_docs = true)
+        subclassed = W._graph_subclassed([metadatas[o.id] for o in plan.libraries if o.id != lib.id])
+        path = W.wrap_library(cfg, lib.library; generate_docs = true,
+                              graph_imports = (earlier = copy(earlier), subclassed = subclassed))
         push!(entries, names[lib.id] => replace(relpath(path, dirname(graph_file)), '\\' => '/'))
+        manifest = W._read_type_manifest(dirname(lib.library))
+        manifest === nothing && error("graph mode: wrap of $(lib.name) wrote no $(W.TYPE_MANIFEST)")
+        push!(earlier, W._earlier_library(names[lib.id], manifest, metadatas[lib.id], lib.library))
     end
     text = graph_module_text(graph_module, entries)
     parsed = Meta.parseall(text)

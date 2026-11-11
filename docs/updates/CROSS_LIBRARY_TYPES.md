@@ -1,7 +1,13 @@
 # Cross-library types — design
 
 **Date:** 2026-10-30
-**Status:** design only. No code is changed by this document.
+**Status:** implemented 2026-11-10 (Option 1, section 6, with John's section 9
+decisions: one graph module, reference imports allowed, a layout mismatch in
+one scope is a wrap error, sibling-only types reported). `Wrapper/TypeImports.jl`
+holds the rules; the import line is `const X = Base.parentmodule(@__MODULE__).A.X`,
+since `..A.X` is import syntax rather than an expression. Section 6.9 is still
+to come. Tests: `test/test_cross_library_types.jl`,
+`test/test_cross_library_types_live.jl` on `test/xlib_test/`.
 **Base:** `main` @ `e0dfddb`, plus the build-graph contract
 (`build-graph/contract` @ `9c9c507`, `src/Builder/BuildGraph.jl`). Every
 function named here was read on that date. Line numbers are left out on purpose.

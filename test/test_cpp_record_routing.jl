@@ -19,6 +19,10 @@
 #     record holding a pointer-aligned one keeps a packed body (X8).
 #   * a tiled record holding a bitfield has its bitfield's unit read where the
 #     thunk body puts it (X9).
+#   * a record over-aligned only by a member's `alignas`, or by holding such a
+#     record, goes to Tier 2: its layout is natural and its own DWARF names no
+#     alignment, and passed by value behind a stack argument a ccall read it
+#     from the wrong slot (2026-11-10).
 #
 # Needs clang++ and libJLCS (the Tier 2 thunks).
 # =============================================================================
@@ -95,6 +99,13 @@ if requires("C++ record routing", :libJLCS, :clangxx)
                     :make_u4 => :tier2, :make_u12 => :tier2, :make_bf8 => :tier2,
                     :make_pk28 => :tier2, :pk28_sum => :tier2,
                     :make_pb12 => :tier2, :pb12_sum => :tier2,
+                    # Over-aligned by a member's alignas, at any depth; the
+                    # 8-aligned MEMORY record beside them stays on ccall.
+                    :make_ma32 => :tier2, :ma32_sum => :tier2,
+                    :make_nestma => :tier2, :nestma_sum => :tier2,
+                    :big24_sum => :tier3,
+                    # 16-aligned by an `__int128` member.
+                    :make_i128 => :tier2, :i128_sum => :tier2,
                     # C++ linkage, not noexcept: a thunk, with scalar arguments.
                     :scalar_widths => :tier2)
         checked = 0
@@ -111,7 +122,8 @@ if requires("C++ record routing", :libJLCS, :clangxx)
         @test r.ok
         @test haskey(v, "PROBE_DONE")
         names = ["cs3", "mass", "enumrec", "pk5", "top6", "u4", "u12", "bf8",
-                 "u4ret", "u12ret", "bf8ret", "pb12", "pk28", "scalar_widths"]
+                 "u4ret", "u12ret", "bf8ret", "pb12", "pk28", "big24", "ma32", "nestma", "i128",
+                 "scalar_widths"]
         for n in names
             @test (n, get(v, n, "no PROBE line")) == (n, "PASS")
         end

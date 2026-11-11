@@ -685,6 +685,13 @@ include(joinpath(@__DIR__, "test_graph_generators.jl"))
 
 include(joinpath(@__DIR__, "test_graph_mode.jl"))
 
+# Cross-library type identity in graph mode (Wrapper/TypeImports.jl): who owns
+# a type the libraries of a graph share, what the importer emits for it, the
+# manifests, the thunk-side merge and the write-time guard, on synthetic
+# metadata. The live run is test_cross_library_types_live.jl (devtests §23).
+
+include(joinpath(@__DIR__, "test_cross_library_types.jl"))
+
 # ── Version is one number, read two ways (no toolchain) ──────────────────────
 # `RepliBuild.VERSION` is derived from Project.toml, so this is not tautological:
 # `pkgversion` answers from Julia's own package resolution, an independent path.
