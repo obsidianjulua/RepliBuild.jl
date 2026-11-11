@@ -10,8 +10,17 @@ include(wrapper)
 using .CSret
 import RepliBuild
 
-# Which answer this host should give where the two conventions differ.
+# Which answer this host should give where the conventions differ: SysV refuses
+# what the register window cannot classify and a 32-aligned slot; AAPCS64
+# refuses the 16-aligned AB16 as an argument (an even register pair the blob
+# cannot reach) and every record holding a SIMD vector, while the float blobs
+# whose facts rule an HFA out (AB16 and BF12 hold a bitfield) travel by size
+# like their blobs; Win64 passes everything by size or by reference and refuses
+# nothing here.
 const ABI = RepliBuild.Wrapper._c_record_abi()
+const BLOB_RET_REFUSED = ABI === :sysv              # make_bf12, make_ab16
+const AB16_ARG_REFUSED = ABI in (:sysv, :aapcs64)   # take_ab16
+const VECTOR_REFUSED = ABI === :aapcs64             # make_hvec, take_hvec
 
 const REC = cglobal((:c1_rec, CSret.LIBRARY_PATH), UInt64)
 const REC_N = cglobal((:c1_rec_n, CSret.LIBRARY_PATH), Cint)
@@ -50,11 +59,11 @@ function probe(f, name)
     println("PROBE $name: ", verdict)
 end
 
-# On SysV a crossing the blob cannot reproduce must refuse before the call.
+# A crossing this host's convention cannot reproduce must refuse before the call.
 function refused(p, f)
     try
         f()
-        push!(p, "called; SysV must refuse this crossing")
+        push!(p, "called; $ABI must refuse this crossing")
     catch e
         occursin("ABI Safety Trap", sprint(showerror, e)) ||
             push!(p, "threw something other than the ABI trap: " * first(sprint(showerror, e), 200))
@@ -160,9 +169,9 @@ probe("make_out6") do p                     # unaligned field inside a packed me
         push!(p, "ret bytes = $d")
 end
 
-probe("make_bf12") do p                     # float blob, 12 B: Win64 sret; SysV refused
+probe("make_bf12") do p                     # float blob, 12 B: Win64 sret, AAPCS64 x0:x1; SysV refused
     reset_rec()
-    if ABI === :sysv
+    if BLOB_RET_REFUSED
         refused(p, () -> make_bf12(1.5f0, -3, 99))
     else
         r = make_bf12(1.5f0, -3, 99)
@@ -184,9 +193,9 @@ call(f, args...) = Base.invokelatest(f, args...)
 f32(x) = UInt64(reinterpret(UInt32, Float32(x)))
 f64(x) = reinterpret(UInt64, Float64(x))
 
-probe("make_ab16") do p                     # 16 B blob, member _Alignas(16): Win64 sret; SysV refused
+probe("make_ab16") do p                     # 16 B blob, member _Alignas(16): Win64 sret, AAPCS64 x0:x1; SysV refused
     reset_rec()
-    if ABI === :sysv
+    if BLOB_RET_REFUSED
         refused(p, () -> call(make_ab16, 1.5f0, -2))
     else
         r = call(make_ab16, 1.5f0, -2)
@@ -227,11 +236,15 @@ probe("make_a32") do p                      # 32 B aligned(32)
     r.d == (4.5, -4.5) || push!(p, "ret = $r")
 end
 
-probe("make_hvec") do p                     # vector member: 16-aligned, no attribute
+probe("make_hvec") do p                     # vector member: 16-aligned, no attribute; AAPCS64 refuses it
     reset_rec()
-    r = call(make_hvec, 1.25f0, Int32(41))
-    args_read(p, 2, [0 => f32(1.25f0), 1 => s64(41)])
-    (r.v, r.k) == ((1.25f0, 2.25f0, 3.25f0, 4.25f0), Int32(42)) || push!(p, "ret = $r")
+    if VECTOR_REFUSED
+        refused(p, () -> call(make_hvec, 1.25f0, Int32(41)))
+    else
+        r = call(make_hvec, 1.25f0, Int32(41))
+        args_read(p, 2, [0 => f32(1.25f0), 1 => s64(41)])
+        (r.v, r.k) == ((1.25f0, 2.25f0, 3.25f0, 4.25f0), Int32(42)) || push!(p, "ret = $r")
+    end
 end
 
 probe("make_hv4") do p                      # member of an over-aligned typedef
@@ -260,11 +273,11 @@ end
 const BIG = CSret.with(Big24(); a = Clonglong(1), b = Clonglong(2), c = Int32(3))
 bytes32(x) = reinterpret(NTuple{4,UInt8}, x)
 
-probe("take_ab16") do p                     # SysV: refused (float blob); Win64: by reference
+probe("take_ab16") do p                     # SysV: refused (float blob); AAPCS64: refused (register pair); Win64: by reference
     reset_rec()
     # a = 1.5, b = 3.0, c = -2 (0b110 in a signed 3-bit field at byte 8)
     v = AB16((bytes32(1.5f0)..., bytes32(3.0f0)..., 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
-    if ABI === :sysv
+    if AB16_ARG_REFUSED
         refused(p, () -> call(take_ab16, BIG, v))
     else
         r = call(take_ab16, BIG, v)
@@ -309,12 +322,16 @@ probe("take_a32") do p                      # 32-aligned slot: SysV refused; Win
     end
 end
 
-probe("take_hvec") do p                     # vector member
+probe("take_hvec") do p                     # vector member; AAPCS64 refuses it
     reset_rec()
     v = CSret.with(HVec(); v = (1.25f0, 2.25f0, 3.25f0, 4.25f0), k = Int32(41))
-    r = call(take_hvec, BIG, v)
-    args_read(p, 6, [0 => s64(3), 1 => f32(1.25f0), 2 => f32(2.25f0), 3 => f32(3.25f0), 4 => f32(4.25f0), 5 => s64(41)])
-    r == 4642.75f0 || push!(p, "take_hvec = $r want 4642.75")
+    if VECTOR_REFUSED
+        refused(p, () -> call(take_hvec, BIG, v))
+    else
+        r = call(take_hvec, BIG, v)
+        args_read(p, 6, [0 => s64(3), 1 => f32(1.25f0), 2 => f32(2.25f0), 3 => f32(3.25f0), 4 => f32(4.25f0), 5 => s64(41)])
+        r == 4642.75f0 || push!(p, "take_hvec = $r want 4642.75")
+    end
 end
 
 probe("take_hv4") do p                      # member of an over-aligned typedef

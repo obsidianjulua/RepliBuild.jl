@@ -4,7 +4,7 @@ using ..TypeUtils
 using ..StructGen # for get_struct_type_string
 # One spelling-to-key lookup for signatures and struct bodies (TypeUtils, and the
 # package root, which the Builder reads too).
-import ..._scope_suffixes, ..._outside_template_args
+import ..._scope_suffixes, ..._outside_template_args, ...C_LONG_DOUBLE_MLIR, ...host_record_abi
 import ..TypeUtils: _fuzzy_struct_lookup
 
 export generate_function_thunks
@@ -16,6 +16,7 @@ _parse_num(x) = StructGen._parse_num(x)
 # `sysv_record_abi`, the `sysv_args`/`sysv_ret` statements this generator puts
 # on a call, and `sysv_trap_reason`.
 include("SysVRecordABI.jl")
+include("AAPCS64RecordABI.jl")
 
 
 """
@@ -64,7 +65,8 @@ the callee wrote XMM0. None of these crashed reliably; most returned a
 plausible wrong value. `GeneratorCpp` asks this same function, so a function
 the thunk cannot call is emitted as a trap on the Julia side, not as a call.
 """
-function by_value_crossing(c_type::AbstractString, structs, record_abi)
+function by_value_crossing(c_type::AbstractString, structs, record_abi;
+                           abi::Symbol = host_record_abi(), ret::Bool = false)
     t = _strip_top_cv(c_type)
     kind, key = _table_entry(t, structs)
     kind === :direct && return (:direct, nothing)
@@ -99,10 +101,20 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi)
                 # returned garbage instead of `x * 10 + y`. A width that is
                 # not 1/2/4/8 is not a Win64 register aggregate, so it is not
                 # this case and must not be dropped either.
-                if Sys.iswindows() && pass == "value" && bs in (1, 2, 4, 8)
+                if abi === :win64 && pass == "value" && bs in (1, 2, 4, 8)
                     return (:regpad, "i$(bs * 8)")
                 end
-                if !Sys.iswindows() || bs == 0 || pass === nothing
+                # AAPCS64 (Linux): clang passes a C++ empty record as one
+                # `i64` and returns it as void. Measured with clang 23 for
+                # aarch64-linux-gnu:
+                #   struct E0 {};
+                #   void arg_E0(E0);      // (i64)
+                #   E0 ret_E0(void);      // void
+                # (Apple's arm64 PCS drops the argument too; not this.)
+                if abi === :aapcs64 && pass == "value" && !ret && bs > 0
+                    return (:regpad, "i64")
+                end
+                if abi !== :win64 || bs == 0 || pass === nothing
                     return (:ignore, nothing)
                 end
                 return (:opaque, nothing)
@@ -129,10 +141,11 @@ function _table_entry(t::AbstractString, structs)
 
     mapped = map_cpp_type(t)
     named = startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
-    # A scalar the map knows: `i32`, `f64`, `i1`, …; not `f80`, which the map
-    # knows for a record member and no Julia value can hold (`long double` by
-    # itself stays `:opaque`, and both generators trap it).
-    (!named && mapped != "!llvm.ptr" && mapped != "" && mapped != "f80") && return (:direct, nothing)
+    # A scalar the map knows: `i32`, `f64`, `i1`, …; not `long double`'s
+    # (`C_LONG_DOUBLE_MLIR`), which the map knows for a record member and no
+    # Julia value can hold (`long double` by itself stays `:opaque`, and both
+    # generators trap it).
+    (!named && mapped != "!llvm.ptr" && mapped != "" && mapped != C_LONG_DOUBLE_MLIR) && return (:direct, nothing)
     # STL containers keep their own paths (pointer in, byte blob out).
     get_stl_container_size(t) > 0 && return (:direct, nothing)
 
@@ -324,21 +337,22 @@ record returned in st0), or when a bare SIMD vector crosses by value
 `layout_trap` holds the reasons it has always explained as a layout missing
 from DWARF, which a build flag can recover; `abi_trap` the convention's own
 refusals, which a shim taking a pointer or returning a `double` gets around;
-and `conflict_trap` the names several types share, which no flag can.
+and `conflict_trap` the names several types share, which no flag can. `abi`
+is the convention asked (`host_record_abi()` unless a test asks for another).
 """
-function thunk_crossings(func, structs, record_abi)
+function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_abi())
     # Typed so the thunk generator can prepend `this` as (:direct, nothing).
     params = Tuple{Symbol,Union{Nothing,String}}[
-        by_value_crossing(String(get(p, "c_type", "")), structs, record_abi)
+        by_value_crossing(String(get(p, "c_type", "")), structs, record_abi; abi)
         for p in get(func, "parameters", [])]
     ret_c = String(get(get(func, "return_type", Dict()), "c_type", "void"))
-    ret = by_value_crossing(ret_c, structs, record_abi)
+    ret = by_value_crossing(ret_c, structs, record_abi; abi, ret = true)
     reasons = String[]
     abi_reasons = String[]
     for (p, (k, key)) in zip(get(func, "parameters", []), params)
         k === :opaque && push!(reasons, "takes `$(get(p, "c_type", "?"))` by value")
         if k === :layout
-            why = sysv_trap_reason(key, structs; ret = false)
+            why = sysv_trap_reason(key, structs; ret = false, abi)
             why === nothing || push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $why")
         end
         crosses_as_vector(p) &&
@@ -346,7 +360,7 @@ function thunk_crossings(func, structs, record_abi)
     end
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
     if ret[1] === :layout
-        why = sysv_trap_reason(ret[2], structs; ret = true)
+        why = sysv_trap_reason(ret[2], structs; ret = true, abi)
         why === nothing || push!(abi_reasons, "returns `$ret_c` by value, $why")
     end
     crosses_as_vector(get(func, "return_type", Dict())) &&
@@ -509,7 +523,15 @@ end
 function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_throw::Bool=false,
                                   class_raii::Dict{String,Dict{Symbol,String}}=Dict{String,Dict{Symbol,String}}(),
                                   vcall_info::AbstractDict=Dict{String,Any}(),
-                                  record_abi::AbstractDict=Dict{String,Any}())
+                                  record_abi::AbstractDict=Dict{String,Any}(),
+                                  abi::Symbol=host_record_abi())
+    # The convention the thunks are generated for: the host's, since they run
+    # in this process. Every record crossing is refused or stated under it
+    # (`thunk_crossings`, `record_statement`); a test passes another to see
+    # what the generator would emit there.
+    abi in (:sysv, :win64, :aapcs64) ||
+        throw(ArgumentError("unknown record ABI `$abi`; expected :sysv, :win64 or :aapcs64"))
+    args_attr, ret_attr = record_statement_attrs(abi)
     io = IOBuffer()
     println(io, "// Function Thunks")
 
@@ -535,7 +557,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # thunk: every spelling of one would be a wrong call. GeneratorCpp
         # reaches the same verdict and emits a trap. The line stays in the
         # .mlir, which is the file a debugger shows.
-        crossings = thunk_crossings(func, structs, record_abi)
+        crossings = thunk_crossings(func, structs, record_abi; abi)
         if crossings.trap !== nothing
             println(io, "// no thunk for $(mangled): $(replace(crossings.trap, '\n' => ' '))")
             println(io, "")
@@ -658,7 +680,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
                     mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
                     is_packed_param = true
-                    kind === :layout && (sysv_fact = sysv_statement(lookup_key, structs))
+                    kind === :layout && (sysv_fact = record_statement(lookup_key, structs; ret = false, abi))
                 else
                     # Use FULL definition string to avoid alias parser issues in function signatures
                     mlir_t = StructGen.get_struct_definition_string(s_name, structs[lookup_key], structs)
@@ -666,7 +688,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     # crosses as a packed struct of its bytes (`_byte_region_size`).
                     br = match(r"^!llvm\.array<(\d+) x i8>$", mlir_t)
                     br === nothing || (mlir_t = _byte_blob_type(parse(Int, br.captures[1])))
-                    kind === :layout && (sysv_fact = sysv_statement(lookup_key, structs))
+                    kind === :layout && (sysv_fact = record_statement(lookup_key, structs; ret = false, abi))
                 end
             end
 
@@ -815,7 +837,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # One that comes back through the hidden pointer the thunk passes
         # (`ret_sret`) is no call result, and states nothing.
         ret_fact = ret_kind === :layout && ret_type != "" && !ret_sret && callee_discard_ret == "" ?
-                   sysv_statement(ret_key, structs) : ""
+                   record_statement(ret_key, structs; ret = true, abi) : ""
 
         # External declaration uses the actual C type (packed for packed structs).
         # `callee_discard_ret` is the Win64 empty-record return: real on the
@@ -964,17 +986,25 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         end
 
         # The hidden return pointer is the first argument (declared above).
-        ret_sret && (pushfirst!(call_args, "%sret_slot"); pushfirst!(arg_facts, ""))
+        # The hidden return pointer of a pass-by-reference record. On x86-64 a
+        # plain first pointer lands where the convention wants it (RDI, RCX);
+        # AAPCS64 wants it in x8, the indirect result register, which only an
+        # `sret` attribute on the call reaches, so the statement names the slot
+        # (`aapcs64_sret_statement`; Ticket came back as garbage on the first
+        # arm64 run, 2026-11-09).
+        ret_sret && (pushfirst!(call_args, "%sret_slot");
+                     pushfirst!(arg_facts, abi === :aapcs64 ? aapcs64_sret_statement(ret_key, structs) : ""))
 
-        # The call's attributes: the callee, and the SysV class of every record
-        # it passes or returns by value (`sysv_args`, one entry per operand;
-        # `sysv_ret`), which `buildCallShape` reads instead of the record's
-        # body. A call with no record crossing states nothing, so its IR is
-        # what it always was.
+        # The call's attributes: the callee, and the class of every record it
+        # passes or returns by value under the convention generated for
+        # (`sysv_args`, one entry per operand, and `sysv_ret`; `aapcs64_args`
+        # and `aapcs64_ret` for AAPCS64), which `buildCallShape` reads instead
+        # of the record's body. A call with no record crossing states nothing,
+        # so its IR is what it always was.
         call_attrs = "callee = @$(mangled)"
         any(!isempty, arg_facts) &&
-            (call_attrs *= ", sysv_args = [" * join(("\"$f\"" for f in arg_facts), ", ") * "]")
-        isempty(ret_fact) || (call_attrs *= ", sysv_ret = \"$ret_fact\"")
+            (call_attrs *= ", $args_attr = [" * join(("\"$f\"" for f in arg_facts), ", ") * "]")
+        isempty(ret_fact) || (call_attrs *= ", $ret_attr = \"$ret_fact\"")
 
         # Determine whether to use jlcs.try_call (exception-safe) or jlcs.ffe_call
         # Per-function noexcept: if the function is marked noexcept, use ffe_call even when may_throw is set

@@ -67,6 +67,31 @@ The IRGen producers and the DWARF size table have to match it the same way
 const C_WCHAR_MLIR = Sys.iswindows() ? "i16" : "i32"
 
 """
+    C_LONG_DOUBLE_MLIR
+
+The MLIR floating type for C's `long double`: `f80` (x87 extended precision,
+10 bytes stored and 16 allocated) on x86-64, `f128` (IEEE quad) on AArch64.
+A thunk body spelling an x87 type on an AArch64 host would ask the backend
+for a type it has no registers for.
+"""
+const C_LONG_DOUBLE_MLIR = Sys.ARCH === :aarch64 ? "f128" : "f80"
+
+"""
+    host_record_abi() -> :sysv | :win64 | :aapcs64
+
+The convention a by-value record crosses a call in on this host: x86-64 SysV
+on Linux x86-64, Microsoft x64 on Windows, AAPCS64 on Linux AArch64. RepliBuild
+builds for its host (the thunks it JITs and the `ccall`s it emits run in this
+process), so the host decides it, and `__init__` refuses every host this does
+not name. Every classifier takes the answer as an `abi` argument, so a test
+can ask for any convention on any host; this is the one place the host is
+read. `GeneratorC._c_record_abi` and the thunk generator's statements
+(`FunctionGen.generate_function_thunks`) both default to it.
+"""
+const _HOST_RECORD_ABI = Sys.iswindows() ? :win64 : Sys.ARCH === :aarch64 ? :aapcs64 : :sysv
+host_record_abi() = _HOST_RECORD_ABI
+
+"""
     INTERNAL_TYPE_BLOCKLIST
 
 Compiler and libc internals that leak through DWARF and must never reach a
@@ -294,17 +319,28 @@ end
 # byte-identically to `readelf` (both print from binutils' dwarf.c), so the
 # readelf-format parser in Compiler.jl needs no second dialect.
 #
-# macOS stays unsupported for a real reason, not an untested one: the AAPCS64
-# classifier is unbuilt (JLCSPasses.cpp carries SysV and Win64 only, and
-# `#error`s on non-x86-64), so an arm64 Mach-O host has no ABI rules to run.
+# Linux AArch64 satisfies the same four, and its calling convention is the
+# third one the classifiers know (AAPCS64: `host_record_abi`, JLCSPasses.cpp's
+# `AbiTarget::AAPCS64`). macOS stays unsupported for a real reason, not an
+# untested one: Mach-O keeps DWARF out of the dylib (a `.dSYM` from dsymutil),
+# has no dynamic symbol table for `nm -D` to read and no GNU binutils dumper,
+# and Apple's arm64 PCS departs from AAPCS64 (variadic arguments on the stack,
+# empty records dropped in C++). None of that is built. Windows on ARM and
+# every other Linux architecture have no classifier.
 #
 # The gate stays because the alternative is four confusing failures deep in the
 # pipeline instead of one clear message at load.
 function __init__()
-    if !(Sys.islinux() || Sys.iswindows())
-        error("RepliBuild supports Linux and Windows (detected $(Sys.KERNEL)). " *
-              "macOS is unsupported: the AAPCS64 ABI classifier is not built, " *
-              "so Mach-O/arm64 has no struct-passing rules to apply.")
+    supported = (Sys.islinux() && Sys.ARCH in (:x86_64, :aarch64)) ||
+                (Sys.iswindows() && Sys.ARCH === :x86_64)
+    if !supported
+        why = Sys.isapple() ?
+            "macOS is unsupported: its Mach-O plumbing (DWARF in a .dSYM, no dynamic symbol " *
+            "table, no GNU binutils dumper) and Apple's arm64 PCS are not built." :
+            "no ABI classifier is built for $(Sys.KERNEL) on $(Sys.ARCH) (x86-64 SysV, " *
+            "Microsoft x64 and AAPCS64 are)."
+        error("RepliBuild supports Linux (x86-64, AArch64) and Windows (x86-64); detected " *
+              "$(Sys.KERNEL) on $(Sys.ARCH). " * why)
     end
 end
 

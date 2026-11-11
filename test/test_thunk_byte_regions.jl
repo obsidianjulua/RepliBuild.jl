@@ -102,14 +102,14 @@ const _TB_STRUCTS = Dict{String,Any}(
             @test (key, :sysv, _TBFG.sysv_trap_reason(key, S; ret = false, abi = :sysv)) == (key, :sysv, nothing)
             @test (key, :win64, _TBFG.sysv_trap_reason(key, S; ret = true, abi = :win64)) == (key, :win64, nothing)
         end
-        @test_throws ArgumentError _TBFG.sysv_trap_reason("U4", S; ret = false, abi = :aapcs64)
+        @test_throws ArgumentError _TBFG.sysv_trap_reason("U4", S; ret = false, abi = :aapcs32)
     end
 
     @testset "X2: a byte region crosses as a packed struct of its bytes" begin
         funcs = Any[_tbfn("u4_sum", "int", "U4"), _tbfn("u12_sum", "int", "U12"),
                     _tbfn("bf8_sum", "int", "BF8"), _tbfn("make_u12", "U12"),
                     _tbfn("uf4_sum", "int", "UF4"), _tbfn("pk28_sum", "int", "PK28")]
-        ir = _TBFG.generate_function_thunks(funcs, S)
+        ir = _TBFG.generate_function_thunks(funcs, S; abi = :sysv)   # the SysV statements, on every host
         decls = Dict(m.captures[1] => m.match for m in eachmatch(r"func\.func private @(\w+)\(.*", ir))
         @test get(decls, "u4_sum", "") == "func.func private @u4_sum(!llvm.struct<packed (i8, i8, i8, i8)>) -> i32"
         @test get(decls, "u12_sum", "") == "func.func private @u12_sum(!llvm.struct<packed (i64, i8, i8, i8, i8)>) -> i32"

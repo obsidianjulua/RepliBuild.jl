@@ -3,7 +3,7 @@ module TypeUtils
 # C's `long` is 32 bits on Windows and 64 on Unix, and the width has to match
 # what the wrapper emits on the other side of the thunk. See the constant's
 # docstring in RepliBuild.jl.
-import ...C_LONG_MLIR
+import ...C_LONG_MLIR, ...C_LONG_DOUBLE_MLIR
 import ...C_WCHAR_MLIR
 import SHA
 import ...stl_container_size
@@ -124,16 +124,17 @@ function map_cpp_type(type_str::String)
     # emitted as 8 bytes and `{ __int128 x; }` as 16 bytes of alignment 1,
     # against the rule that an emitted struct is its DWARF size and layout.
     # `f80` is LLVM's x86 extended precision: 10 bytes stored, 16 allocated
-    # and 16-aligned, which is what `long double` is on x86-64. A `_Complex`
-    # is its two parts side by side, as clang lays it out.
+    # and 16-aligned, which is what `long double` is on x86-64; on AArch64 it
+    # is IEEE quad, `f128` (`C_LONG_DOUBLE_MLIR`). A `_Complex` is its two
+    # parts side by side, as clang lays it out.
     elseif type_str == "long double"
-        return "f80"
+        return C_LONG_DOUBLE_MLIR
     elseif type_str == "complex float" || type_str == "_Complex float"
         return "!llvm.struct<(f32, f32)>"
     elseif type_str == "complex double" || type_str == "_Complex double"
         return "!llvm.struct<(f64, f64)>"
     elseif type_str == "complex long double" || type_str == "_Complex long double"
-        return "!llvm.struct<(f80, f80)>"
+        return "!llvm.struct<($C_LONG_DOUBLE_MLIR, $C_LONG_DOUBLE_MLIR)>"
     elseif type_str == "__int128" || type_str == "unsigned __int128" ||
            type_str == "__int128_t" || type_str == "__uint128_t" || type_str == "Int128" || type_str == "UInt128"
         return "i128"

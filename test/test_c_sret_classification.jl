@@ -392,8 +392,9 @@ Contents of the .debug_info section:
 @testset "Tier 3 by-value record classification (C1)" begin
 
     @testset "the target comes from the host, in one place" begin
-        @test _SW._c_record_abi() === (Sys.iswindows() ? :win64 : :sysv)
-        @test_throws ArgumentError _SW._c_return_in_memory(8, false; abi = :aapcs64)
+        @test _SW._c_record_abi() === RepliBuild.host_record_abi()
+        @test _SW._c_record_abi() === (Sys.iswindows() ? :win64 : Sys.ARCH === :aarch64 ? :aapcs64 : :sysv)
+        @test_throws ArgumentError _SW._c_return_in_memory(8, false; abi = :aapcs32)
     end
 
     @testset "unaligned fields: the type's alignment, never the member's size" begin
@@ -485,7 +486,7 @@ Contents of the .debug_info section:
         end
         @test _SW._c_blob_param_misclassified(8, nothing; abi = :sysv)    # unprovable: refused
         @test !_SW._c_blob_param_misclassified(24, true; abi = :sysv)     # MEMORY on both views
-        @test_throws ArgumentError _SW._c_blob_param_misclassified(8, false; abi = :aapcs64)
+        @test_throws ArgumentError _SW._c_blob_param_misclassified(8, false; abi = :aapcs32)
     end
 
     @testset "register class: SysV eightbytes by member type; Win64 none" begin
@@ -507,7 +508,7 @@ Contents of the .debug_info section:
             checked += 1
         end
         @test checked == length(table)
-        @test_throws ArgumentError _SW._c_register_class_misstated(8, true; abi = :aapcs64)
+        @test_throws ArgumentError _SW._c_register_class_misstated(8, true; abi = :aapcs32)
     end
 
     @testset "record alignment: its own, its members', their types'" begin
@@ -595,7 +596,7 @@ Contents of the .debug_info section:
             checked += 1
         end
         @test checked == length(table)
-        @test_throws ArgumentError _SW._c_byval_param_shape(32, true, 16, true; abi = :aapcs64)
+        @test_throws ArgumentError _SW._c_byval_param_shape(32, true, 16, true; abi = :aapcs32)
     end
 
     @testset "the compiler's byval facts are matched to the MEMORY parameters" begin
@@ -775,7 +776,7 @@ Contents of the .debug_info section:
         occursin("ccall((:$name, LIBRARY_PATH)", b) ? :ccall : :other
     end
 
-    @test_throws ArgumentError gen(:aapcs64)
+    @test_throws ArgumentError gen(:aapcs32)
     sysv, win64 = gen(:sysv), gen(:win64)
     # :ccall on a record C returns through a hidden pointer means Julia's own
     # lowering passes it (Win64 by size; anything above 16 bytes).

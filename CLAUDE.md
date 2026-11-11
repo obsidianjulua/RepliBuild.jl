@@ -154,7 +154,8 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   does not start is reported as `BuildBridge.SPAWN_FAILED`, never replaced.
 - **C++ / Tier 2 uses system LLVM+MLIR 21+** (23.1.3 under MSYS2 CLANG64 on the
   reference host, which is Windows; on Linux, CI's `tier2-linux.yml` runs devtests
-  against apt.llvm.org's LLVM/MLIR 22 and 23) for the dialect and the external
+  against apt.llvm.org's LLVM/MLIR 22 and 23 on x86-64, and 23 on an
+  `ubuntu-24.04-arm` runner) for the dialect and the external
   pipeline. `libJLCS.so` (`libJLCS.dll` on Windows: it
   imports `libLLVM-<major>.dll` and links MLIR statically) is a gitignored build
   artifact pinned to the installed MLIR minor SONAME: rebuild after a minor upgrade. A patch
@@ -642,7 +643,12 @@ the test named when you touch the area.
   and `<X>_destroy_<X>` names all three, so a class with neither gets no owning
   type. A factory struct's D0 also needs a class nothing in the library derives
   from, and a factory makes the class its pointer names, or a subclass its name
-  names. (`test_cpp_finalizers.jl`, devtests `test_cpp_finalizers_live.jl`.)
+  names. **A method proxy keeps `obj` alive across the call** (`GC.@preserve
+  obj X_method(obj.handle, …)`): the owner is dead once its handle is read,
+  and a Tier 2 invoke allocates before C++ runs, so its finalizer could delete
+  the object under the call (2026-11-10). Anything that passes a handle out of
+  an owning type into Julia code, rather than straight into a `ccall`, needs
+  the same. (`test_cpp_finalizers.jl`, devtests `test_cpp_finalizers_live.jl`.)
 - **A pointer or reference return is typed from its declaration**
   (`_typed_pointer_return`, both generators): `T*`, `const T*`, `T&`, `T**` give
   `Ptr{T}`/`Ptr{Ptr{T}}` when `T` is a type the module emits
@@ -836,6 +842,53 @@ the test named when you touch the area.
 - **Thunk arg slots hold a pointer to the argument's storage.** One load gives the
   storage and a second gives the value; pointer args double-load. Callers put `&struct`
   in the slot, not `&Ref`.
+- **One struct-ABI rule set per convention, chosen by the host, in two places
+  that must agree.** `RepliBuild.host_record_abi()` (`:sysv`, `:win64`,
+  `:aapcs64`) is the one place Julia reads the host; every classifier takes it
+  as `abi`, and `generate_jlcs_ir` / `generate_function_thunks` take it too, so
+  a test generates another host's module here. `AbiTarget` / `kHostAbi` in
+  `JLCSPasses.cpp` is the C++ twin (`#error` for any other host, by name). A
+  module states ONE convention's facts: `sysv_args`/`sysv_ret`, or
+  `aapcs64_args`/`aapcs64_ret` for an AArch64 host (`record_statement`,
+  `record_statement_attrs`); the dialect reads its target's and falls back to
+  the body. The probe seams (`jlcs_probe_sysv_call_shapes`,
+  `jlcs_probe_aapcs64_call_shapes`) run the real `buildCallShape` under an
+  explicit target on any host; `-DJLCS_FORCE_ABI_WIN64` / `_AAPCS64` (CMake
+  options) build another host's LOWERING for inspection, never over the
+  working libJLCS.
+- **AAPCS64 (Linux AArch64)** (`ir_gen/AAPCS64RecordABI.jl`,
+  `classifyAAPCS64Struct`; rules read off clang 23): an HFA (at most four
+  leaves of one floating type, no padding, nested records and arrays
+  flattened, a union's members once per position, empty bases skipped) goes
+  in floating registers at ANY size; otherwise 16 bytes or less in general
+  registers, `i128` (an even pair) when the alignment is 16, where an
+  ARGUMENT reads the unadjusted alignment (members' and nested records' own,
+  never the record's own `aligned`: `_sysv_record_align(…; own = false)`) and
+  a RETURN the adjusted one, a return of 8 bytes or less `iN` of its size;
+  over 16 bytes a pointer to a copy with no `byval`, or sret. Field alignment
+  never matters. The coerced block is ONE `regs` entry (`i64`, `[2 x i64]`,
+  `i128`, `iN`, `[N x fT]`), stored and reloaded through a 16-aligned slot:
+  an array or `i128` keeps the backend's registers consecutive where a
+  literal struct would not, and the backend spills a block whole, so the SysV
+  register-count demotion stays SysV's. A C++ empty record is one `i64` in
+  and nothing out (`by_value_crossing`'s `ret`). A record holding a SIMD
+  vector is refused (HVA not modelled). `long double` is
+  `C_LONG_DOUBLE_MLIR` (`f128` there). GeneratorC: `_c_class_window` (16 / 64
+  / 0) replaces the literal 16 of the register-window refusals;
+  `_c_return_in_memory` is never `true` on AAPCS64 (an HFA over 16 bytes
+  returns in registers; Julia's lowering decides from the stand-in's fields);
+  `_c_register_pair_misplaced` is its one trap. **RuntimeDyld on AArch64 ELF
+  needs `setAutoClaimResponsibilityForObjectSymbols`** (`JlcsJIT.cpp`): the
+  `.eh_frame` personality goes through a per-object `DW.ref.__gxx_personality_v0`
+  slot the MC layer emits after the IR layer listed the symbols, and unclaimed
+  it is "Symbols not found" for every thunk of the library (first arm64 run,
+  2026-11-09). **A hidden return pointer needs `llvm.sret` there**: AArch64's
+  indirect result register is x8, not the first argument register, so the
+  generator states a pass-by-reference record's slot (`sret:<bytes>`) and
+  `buildCallShape` stamps the attribute on it and on its own sret slots,
+  under AAPCS64 alone (x86-64 IR unchanged; `Ticket` came back as garbage). (`test_aapcs64_record_abi.jl`, devtests
+  `test_aapcs64_abi_spec.jl` against clang's aarch64 IR; live only on
+  tier2-linux's arm64 cell.)
 - **A record's SysV class comes from its DWARF facts, never from the body it
   crosses as.** `FunctionGen.sysv_record_abi` (`ir_gen/SysVRecordABI.jl`)
   classifies members at their offsets, bitfields by bit range, nested records
@@ -1104,7 +1157,8 @@ Start here for any ABI question: register state is observable.
 - A background command's exit code is the wrapper's. Write `echo "EXIT=$?" >> log` and
   read that.
 - A test that states one host's answer instead of the invariant goes red on the other
-  host (Linux vs Windows). Drive host-conditional code with both spellings.
+  hosts (Linux x86-64, Linux AArch64, Windows). Drive host-conditional code with
+  every spelling, through the `abi` argument, never `Sys.iswindows()`.
 - A regression check for a generator change is the change's own regression test plus
   runtests and devtests. For ABI work, also run `test/tools/abi_fuzz.jl` on the same
   seeds before and after.
@@ -1131,7 +1185,8 @@ Start here for any ABI question: register state is observable.
 
 ## Windows (`x86_64-w64-windows-gnu`, MSYS2 CLANG64) — since v4.0.0
 
-Linux and Windows are supported; macOS is refused at load (no AAPCS64 classifier).
+Linux (x86-64 and AArch64) and Windows (x86-64) are supported; macOS is refused
+at load (Mach-O plumbing and Apple's arm64 PCS, see Not Yet Built).
 Setup and full findings: `docs/updates/WINDOWS_PORT.md`. The rules that bite code
 changes:
 
@@ -1295,7 +1350,20 @@ DWARF-resolved destructors — **is** built.)
   `yield`, `marshal_ret`. A computed verifier-coverage guard would also help.
 - In-IR virtual-base upcast op (no producer needs one yet).
 - vcall for struct-shaped virtual signatures (these keep static dispatch).
-- AAPCS64 classifier (macOS/ARM).
+- **macOS** (2026-11-09; the classifier was never the whole of it). Mach-O
+  keeps DWARF out of the dylib (a `.dSYM` from `dsymutil`: the extractor must
+  run it and point the dumper there), GNU readelf does not read Mach-O (so
+  `parse_dwarf_dump` needs an llvm-dwarfdump dialect, or a GNU objdump built
+  with Mach-O BFD), there is no dynsym (`_runtime_symbol_names` needs the
+  exports trie, `nm -gU` / `dyld_info -exports`, and C symbols carry a leading
+  underscore), and the link flags differ (no `-Bsymbolic`: two-level namespace
+  binds a dylib to itself like PE; `@loader_path` for `$ORIGIN`;
+  `-install_name`; `-no_uuid` for a reproducible link). Apple's arm64 PCS also
+  departs from AAPCS64 (empty records dropped in C++, variadics on the stack):
+  `kHostAbi` `#error`s on `__APPLE__`. Prototype on an Intel Mac runner first;
+  x86-64 macOS already has its classifier.
+- AAPCS64 homogeneous vector aggregates (a record holding a SIMD vector), and
+  Windows on ARM (2026-11-09). Both refused by name.
 - Codegen `.ll → .so` still shells to clang; not internalised.
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in

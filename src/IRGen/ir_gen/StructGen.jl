@@ -372,7 +372,7 @@ const _SCALAR_LAYOUT = Dict{String,Tuple{Int,Int}}(
     # `long double`: 10 bytes stored, 16 allocated, in a packed body too (LLVM
     # lays a packed struct out by alloc size). `__int128` is 16-aligned since
     # LLVM 18's x86-64 data layout, as it is in C.
-    "f16" => (2, 2), "f80" => (16, 16), "i128" => (16, 16),
+    "f16" => (2, 2), "f80" => (16, 16), "f128" => (16, 16), "i128" => (16, 16),
 )
 
 _align_to(x::Int, a::Int) = a <= 1 ? x : ((x + a - 1) ÷ a) * a

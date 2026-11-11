@@ -599,6 +599,16 @@ include(joinpath(@__DIR__, "test_thunk_byte_regions.jl"))
 
 include(joinpath(@__DIR__, "test_sysv_record_abi.jl"))
 
+# ── AAPCS64 record classes from DWARF facts (no toolchain) ──────────────────
+# `FunctionGen.aapcs64_record_abi` is the AArch64 twin of the SysV classifier:
+# HFAs in floating registers at any size, general registers by size with the
+# even pair for a 16-aligned record, a pointer to a copy above 16 bytes. One
+# synthetic record per rule, the statements the generator makes for an AAPCS64
+# host, and GeneratorC's predicates under `abi = :aapcs64`; the clang diff is
+# test_aapcs64_abi_spec.jl (devtests).
+
+include(joinpath(@__DIR__, "test_aapcs64_record_abi.jl"))
+
 # ── SIMD vectors by value (no toolchain) ────────────────────────────────────
 # DWARF spells a vector as the array of its lanes, and both tiers passed it
 # lane by lane: `{<4 x float>}` in two XMM registers, a bare vector as

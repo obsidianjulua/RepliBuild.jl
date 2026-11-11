@@ -25,7 +25,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu-24.04-arm is the AArch64 host: runtests there runs the
+        # Julia-side classifiers with `host_record_abi() == :aapcs64` and the
+        # load gate that admits Linux AArch64 (nothing else in this suite
+        # reads the architecture).
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest]
         # Exact versions: the C bucket runs on each Julia's own libLLVM
         # (1.12 has LLVM 18, 1.13 has LLVM 20).
         julia: ['1.12.7', '1.13.2']

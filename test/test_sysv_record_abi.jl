@@ -167,7 +167,7 @@ const _SR = Dict{String,Any}(
         for k in ("c_ld", "c_mystery")
             @test (k, _SRFG.sysv_trap_reason(k, _SR; ret = true, abi = :win64)) == (k, nothing)
         end
-        @test_throws ArgumentError _SRFG.sysv_trap_reason("c_ld", _SR; ret = true, abi = :aapcs64)
+        @test_throws ArgumentError _SRFG.sysv_trap_reason("c_ld", _SR; ret = true, abi = :aapcs32)
     end
 
     @testset "the generator states the class on the call" begin
@@ -176,7 +176,10 @@ const _SR = Dict{String,Any}(
                     _srfn("make_pad", "c_pad_only"), _srfn("take_ld", "double", "c_ld"),
                     _srfn("make_ld", "c_ld"), _srfn("take_mystery", "double", "c_mystery"),
                     _srfn("scalars", "double", "int", "double"), _srfn("take_big", "double", "c_al16_big")]
-        ir = _SRFG.generate_function_thunks(funcs, _SR)
+        # Generated for SysV on every host: an AArch64 host would state
+        # AAPCS64's classes (test_aapcs64_record_abi.jl), a Windows one reads
+        # none. Both other conventions are asked below by name.
+        ir = _SRFG.generate_function_thunks(funcs, _SR; abi = :sysv)
         @test occursin("callee = @take_fd, sysv_args = [\"regs:sse,sse\", \"\"]", ir)
         @test occursin("callee = @make_fd, sysv_ret = \"regs:sse,sse\"", ir)
         @test occursin("callee = @take_ubfd, sysv_args = [\"regs:none,sse\"]", ir)
@@ -191,30 +194,37 @@ const _SR = Dict{String,Any}(
         # read. Throwing instead took every thunk of a Win64 library with it.
         @test _SRFG.sysv_statement("c_mystery", _SR) == ""
         @test _SRFG.sysv_statement("c_f_d", _SR) == "regs:sse,sse"
-        # The refusals, with the convention's own reason, apart from the layout ones.
-        c = _SRFG.thunk_crossings(_srfn("make_ld", "c_ld"), _SR, Dict{String,Any}())
-        if Sys.iswindows()
-            @test c.trap === nothing
-            @test occursin("{ callee = @take_mystery }", ir)
-            @test occursin("callee = @make_ld, sysv_ret = \"mem:16\"", ir)
-        else
-            @test occursin("st0", c.abi_trap)
-            @test c.layout_trap === nothing
-            @test occursin(r"// no thunk for make_ld: returns `c_ld` by value, which SysV returns on the x87 stack", ir)
-            @test occursin(r"// no thunk for take_mystery: takes `c_mystery` by value, whose SysV class cannot be read", ir)
-        end
+        # The refusals, with the convention's own reason, apart from the layout
+        # ones. SysV refuses the x87 return and the unreadable class; Win64
+        # crosses both by size and reads no statement, so its module keeps the
+        # SysV statement on `make_ld` and makes the call. Each convention is
+        # asked by name, so this holds on every host.
+        c = _SRFG.thunk_crossings(_srfn("make_ld", "c_ld"), _SR, Dict{String,Any}(); abi = :sysv)
+        @test occursin("st0", c.abi_trap)
+        @test c.layout_trap === nothing
+        @test occursin(r"// no thunk for make_ld: returns `c_ld` by value, which SysV returns on the x87 stack", ir)
+        @test occursin(r"// no thunk for take_mystery: takes `c_mystery` by value, whose SysV class cannot be read", ir)
+        cw = _SRFG.thunk_crossings(_srfn("make_ld", "c_ld"), _SR, Dict{String,Any}(); abi = :win64)
+        @test cw.trap === nothing
+        irw = _SRFG.generate_function_thunks(funcs, _SR; abi = :win64)
+        @test occursin("{ callee = @take_mystery }", irw)
+        @test occursin("callee = @make_ld, sysv_ret = \"mem:16\"", irw)
     end
 
     @testset "StructGen emits long double, _Complex and __int128 at their size" begin
+        # `long double` is the host's: x87 `f80` on x86-64, IEEE `f128` on
+        # AArch64 (`C_LONG_DOUBLE_MLIR`); 16 bytes either way.
+        ld = RepliBuild.C_LONG_DOUBLE_MLIR
+        @test ld == (Sys.ARCH === :aarch64 ? "f128" : "f80")
         @test _SRSG.get_struct_definition_string("c_ld", _SR["c_ld"], _SR) ==
-              "!jlcs.c_struct<\"c_ld\", [f80], [[0 : i64]], packed = true>"
-        @test _SRSG.get_llvm_equivalent_type_string("c_ld", _SR["c_ld"], _SR) == "!llvm.struct<packed (f80) >"
+              "!jlcs.c_struct<\"c_ld\", [$ld], [[0 : i64]], packed = true>"
+        @test _SRSG.get_llvm_equivalent_type_string("c_ld", _SR["c_ld"], _SR) == "!llvm.struct<packed ($ld) >"
         @test _SRSG.get_struct_definition_string("c_cd", _SR["c_cd"], _SR) ==
               "!jlcs.c_struct<\"c_cd\", [!llvm.struct<(f64, f64)>], [[0 : i64]], packed = true>"
         @test _SRSG.get_struct_definition_string("c_i128_l", _SR["c_i128_l"], _SR) ==
               "!llvm.struct<\"c_i128_l\", (i128, i64, !llvm.array<8 x i8>)>"
         # Measured as emitted: 16 bytes each, 16-aligned.
-        @test _SRSG._mlir_layout("!llvm.struct<packed (f80) >", _SR) == (16, 1)
+        @test _SRSG._mlir_layout("!llvm.struct<packed ($ld) >", _SR) == (16, 1)
         @test _SRSG._mlir_layout("!llvm.struct<(i128, i64, !llvm.array<8 x i8>)>", _SR) == (32, 16)
         @test _SRSG._mlir_layout("!llvm.struct<(f32, f32)>", _SR) == (8, 4)
     end

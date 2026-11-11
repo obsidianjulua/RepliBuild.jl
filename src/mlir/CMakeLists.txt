@@ -87,6 +87,28 @@ add_llvm_library(JLCS SHARED
 # Enable C++ exceptions for our code (must come after LLVM's -fno-exceptions)
 target_compile_options(JLCS PRIVATE -fexceptions)
 
+# Another host's struct ABI rules, built into THIS host's libJLCS for
+# inspection: the result cannot run anything (the JIT would emit that
+# convention's calls into this process), so build it to a scratch directory,
+# never over the working library. The decision tables need neither: the probe
+# seams (jlcs_probe_sysv_call_shapes, jlcs_probe_aapcs64_call_shapes) take an
+# explicit target on any host. These exist for diffing the LOWERING (the
+# allocas, loads and call the pass emits) against clang's for the same
+# signatures. See kHostAbi in impl/JLCSPasses.cpp.
+option(JLCS_FORCE_ABI_WIN64 "Build the Win64 (Microsoft x64) struct ABI rules as the host's (inspection only)" OFF)
+option(JLCS_FORCE_ABI_AAPCS64 "Build the AArch64 AAPCS64 struct ABI rules as the host's (inspection only)" OFF)
+if(JLCS_FORCE_ABI_WIN64 AND JLCS_FORCE_ABI_AAPCS64)
+  message(FATAL_ERROR "JLCS_FORCE_ABI_WIN64 and JLCS_FORCE_ABI_AAPCS64 name two hosts; pick one")
+endif()
+if(JLCS_FORCE_ABI_WIN64)
+  target_compile_definitions(JLCS PRIVATE JLCS_FORCE_ABI_WIN64)
+  message(WARNING "JLCS: forcing the Win64 struct ABI rules; this libJLCS cannot run thunks on this host")
+endif()
+if(JLCS_FORCE_ABI_AAPCS64)
+  target_compile_definitions(JLCS PRIVATE JLCS_FORCE_ABI_AAPCS64)
+  message(WARNING "JLCS: forcing the AAPCS64 struct ABI rules; this libJLCS cannot run thunks on this host")
+endif()
+
 # === JIT & Execution Engine Linking ===
 # We must link these explicitly. -Wl,--whole-archive is strictly required on Linux
 # to force the linker to include the JIT registration symbols (Target/ExecutionEngine).
