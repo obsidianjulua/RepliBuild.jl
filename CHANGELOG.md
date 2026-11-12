@@ -4,6 +4,29 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### An imported enum brings its values (2026-11-11)
+
+The first report from the Hub's build-and-report loop (`hello_world`,
+`GENERATOR-imported-enum-values.md`): in graph mode an importer got an enum's
+type (`World.Mood === Hello.Mood`) and none of its enumerators, so a caller had
+to know which library owned each enum and spell its values through the owner.
+The import pre-pass aliased the type alone and the enumerator loop skipped an
+imported enum entirely. Now the owner's type manifest records each enum's
+enumerators as bound (`[base, bound, value]`, the collision prefix included:
+`_enumerator_facts` off the pending enums and what `_render_enum_chunks` bound),
+`_type_imports_chunk` emits one alias per enumerator to the owner's bound name,
+applying the owner's collision rule against the importer's own top-level names
+(an importer that binds `RED()` gets `Color_RED`), and the export list carries
+them. `World.Happy === Hello.Happy`. The live fixture then showed a second
+gap: a library whose DWARF lacks an enum it uses only through a header got that
+enum from the Clang.jl header walk, a second type beside the owner's. Header
+enums are now import candidates too (`__enum__<name>` keys off
+`header_enums`), the pre-pass runs after the header merge, and an imported
+header enum is removed from `header_enums` so nothing emits it twice.
+(`test_cross_library_types.jl`: both collision directions; devtests
+`test_cross_library_types_live.jl`: a C and a C++ owner's values through the
+importer, and a header-only use that imports instead of re-emitting.)
+
 ### Graph mode builds libwebp: object sources, versioned sonames, file-local types (2026-11-11)
 
 The first upstream graph taken from a pinned dependency, the Hub's libwebp

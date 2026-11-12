@@ -646,7 +646,11 @@ the test named when you touch the area.
   structs, enums, `Managed`, factory structs, upcasts, setters, the layout
   table). An imported type is one `const` naming the owner's through
   `Base.parentmodule(@__MODULE__)` (`..Owner.X` is import syntax, not an
-  expression), emitted before the enums; `_assert_no_imported_redefinition`
+  expression), emitted before the enums, and an imported enum brings one more
+  per enumerator, aliasing the name the owner's text BINDS (the manifest's
+  `enumerators`: `[base, bound, value]`), with the owner's collision rule
+  applied against the importer's own names (`World.Happy === Hello.Happy`; the
+  Hub's hello_world report, 2026-11-11); `_assert_no_imported_redefinition`
   refuses a text that defines one. The owner's `Managed`, factory struct and
   `<f>_safe` are the owner's alone; `has_subclass` is widened with
   `graph_subclassed`; a function an earlier wrapper binds is dropped; a
