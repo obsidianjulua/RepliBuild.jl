@@ -26,10 +26,21 @@ deliberately not on the user path.
 
 ## Tests
 
+Three suites over one list, `test/suites.jl`, run by `test/run.jl`:
+
 ```bash
-julia --project=. test/runtests.jl     # CI suite, no C++ toolchain
-julia --project=. test/devtests.jl     # full integration, needs the C++ bucket
+julia --project=. test/runtests.jl              # pkg: what Pkg.test runs — loads, version, config, structural guards
+julia --project=. test/unit.jl                  # unit: every toolchain-free regression test, one process
+julia --project=. test/devtests.jl              # dev: everything that compiles or JITs
+julia --project=. test/devtests.jl --changed    # only what the diff against origin/main touches
+julia --project=. test/devtests.jl --area=cpp   # one area: build, dwarf, c, cpp, dialect, graph
+julia --project=. test/run.jl dev --files=test_c_sret_abi.jl --processes --tail
 ```
+
+Jobs run in one process by default; `--processes` runs a child per job with
+its output in `test/.logs/<job>.log`. To add a test, add its line to
+`test/suites.jl`: the suite, the areas of `src/` it covers, the fixture
+directories it locks and the fixture jobs it runs after.
 
 Dialect and ABI truth lives in `test/test_mlir_templates.jl`,
 `test/test_jlcs_invariants.jl`, `test/test_jlcs_producers.jl`,

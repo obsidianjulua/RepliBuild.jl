@@ -24,6 +24,7 @@ __pycache__/
 test/*/build/
 test/*/julia/
 test/*/.replibuild_cache/
+test/.logs/
 
 # Vendored C/C++ sources (downloaded by setup.jl scripts)
 test/lua_test/src/
