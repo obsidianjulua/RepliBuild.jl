@@ -143,4 +143,18 @@ using .StlTest
         @test StlTest.map_size(m) == 3
     end
 
+    # ── 8. [wrap.rename]: `stl_test::scaled<long>` and `<double>` are `scaled` ──
+    # The fixture's curated config (test/suites.jl) maps `stl_test_scaled_*`
+    # to `scaled`. The derived names are bound NOWHERE; the two instantiations
+    # form one overload set Julia dispatches on the first argument.
+    @testset "renamed template instantiations" begin
+        @test isdefined(StlTest, :scaled)
+        @test !isdefined(StlTest, :stl_test_scaled_long)
+        @test !isdefined(StlTest, :stl_test_scaled_double)
+        @test :scaled in names(StlTest)
+        @test length(methods(StlTest.scaled)) == 2
+        @test StlTest.scaled(Clong(3), Cint(2)) == 6
+        @test StlTest.scaled(1.5, Cint(4)) == 6.0
+    end
+
 end

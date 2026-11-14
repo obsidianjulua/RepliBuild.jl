@@ -130,8 +130,14 @@ function _generate(lang::Symbol, functions::Vector{Any}; extra::String = "")
                               "struct_definitions" => Dict{String,Any}())
         gen = lang === :cpp ? W.generate_introspective_module_cpp :
                               W.generate_introspective_module_c
-        out = gen(cfg, _LIBREF, md, "NameSynth", W.create_type_registry(cfg), false)
-        return out isa Tuple ? String(first(out)) : String(out)
+        # As `wrap_library` runs it: the config's `[wrap.rename]` active for the
+        # generator, then checked against the text.
+        (out, rt) = W.with_renames(cfg.wrap.rename) do
+            gen(cfg, _LIBREF, md, "NameSynth", W.create_type_registry(cfg), false)
+        end
+        code = out isa Tuple ? String(first(out)) : String(out)
+        W._check_renames(rt, code, "NameSynth")
+        return code
     finally
         rm(dir; recursive = true, force = true)
     end
@@ -273,6 +279,176 @@ end
 # which parses, as a module named `3`, and fails at load. The parse guard now
 # refuses a module whose name is not an identifier, and the derived name never
 # starts with a digit or comes out empty.
+# ── [wrap.rename] (2026-11-13) ─────────────────────────────────────────────
+# A template instantiation's derived name carries its full template arguments
+# (Boost.Math's `pdf<double, policy<13 defaults>>` is 503 characters), and the
+# curated derivation is frozen. `[wrap.rename]` is the one hand-chosen name,
+# applied INSIDE `_julia_function_name` so every emitter sees it, with its
+# checks: a key that matches nothing, and a name that collides, are errors.
+const SCALED_L = "_ZN8stl_test6scaledIlEET_S1_i"
+const SCALED_D = "_ZN8stl_test6scaledIdEET_S1_i"
+
+@testset "[wrap.rename]" begin
+    @testset "a key renames by mangled symbol or derived name, as a glob" begin
+        (got, rt) = W.with_renames(Dict("_Z3fooi" => "foo_int", "ns_pdf_*" => "pdf")) do
+            (F("foo", "_Z3fooi"),
+             F("ns_pdf<double, policy<a> >", "_ZN2ns3pdfIdE"),
+             F("ns_pdf<float>", "_ZN2ns3pdfIfE"),
+             F("bar", "_Z3barv"))
+        end
+        @test got == ("foo_int", "pdf", "pdf", "bar")
+        @test W._RENAMES[] === nothing              # scoped to the block
+        @test rt.hit["_Z3fooi"] == 1 && rt.hit["ns_pdf_*"] == 2
+        @test rt.derived["bar"] == Set(["_Z3barv"])
+        @test Set(s for (_, s) in rt.renamed["pdf"]) == Set(["_ZN2ns3pdfIdE", "_ZN2ns3pdfIfE"])
+        text = "function foo_int() end
+function pdf() end
+function bar() end
+"
+        @test W._check_renames(rt, text, "M") === nothing
+        # The recursive mangled fallback does not consult the table twice.
+        @test first(W.with_renames(Dict("_Z1_v" => "x")) do; F("", "_Z1_v") end) == "x"
+    end
+
+    @testset "no table, no change" begin
+        (got, rt) = W.with_renames(Dict{String,String}()) do; F("foo", "_Z3fooi") end
+        @test got == "foo" && rt === nothing
+        @test W._check_renames(nothing, "", "M") === nothing
+        @test F("ns_pdf<double>", "_ZN2ns3pdfIdE") == "ns_pdf_double"   # outside any block
+    end
+
+    @testset "a key that matches nothing is an error naming it" begin
+        (_, rt) = W.with_renames(Dict("nomatch_*" => "x", "_Z3fooi" => "f")) do
+            F("foo", "_Z3fooi")
+        end
+        err = try; W._check_renames(rt, "function f() end
+", "M"); nothing; catch e; e; end
+        @test err isa ErrorException
+        msg = sprint(showerror, err)
+        @test occursin("nomatch_*", msg) && occursin("matched no function", msg)
+        @test !occursin("_Z3fooi", msg)
+    end
+
+    @testset "a chosen name that collides is an error naming both sides" begin
+        # ...with a function the derivation names the same...
+        (_, rt) = W.with_renames(Dict("_Z3fooi" => "bar")) do
+            (F("foo", "_Z3fooi"), F("bar", "_Z3barv"))
+        end
+        err = try; W._check_renames(rt, "function bar() end
+", "M"); nothing; catch e; e; end
+        @test err isa ErrorException
+        msg = sprint(showerror, err)
+        @test occursin("`bar`", msg) && occursin("_Z3fooi", msg) && occursin("_Z3barv", msg)
+        @test occursin("derived name", msg)
+        # ...and with a type the wrapper binds.
+        (_, rt) = W.with_renames(Dict("_Z3fooi" => "Shape")) do; F("foo", "_Z3fooi") end
+        err = try; W._check_renames(rt, "struct Shape
+    x::Cint
+end
+function Shape() end
+", "M"); nothing; catch e; e; end
+        @test err isa ErrorException
+        @test occursin("bound as a struct", sprint(showerror, err))
+        # Two renames onto one name are an overload set, not a collision.
+        (_, rt) = W.with_renames(Dict("_Z3fooi" => "f", "_Z3bari" => "f")) do
+            (F("foo", "_Z3fooi"), F("bar", "_Z3bari"))
+        end
+        @test W._check_renames(rt, "function f() end
+", "M") === nothing
+    end
+
+    @testset "two keys giving one symbol two names is an error at the symbol" begin
+        err = try
+            W.with_renames(Dict("_Z3fooi" => "a", "foo" => "b")) do; F("foo", "_Z3fooi") end
+            nothing
+        catch e; e; end
+        @test err isa ErrorException
+        @test occursin("more than one name", sprint(showerror, err))
+        @test W._RENAMES[] === nothing              # the finally ran
+    end
+
+    @testset "the overload prediction moves with the rename" begin
+        # Two instantiations the derivation names apart (`take_int_`, `take_double_`)
+        # are two one-member sets: no position is strict. Renamed onto one name
+        # they are one set that disagrees in the pointer's target, so position
+        # 1 is typed and Julia dispatches between them.
+        G = W
+        fns = Any[_fn(name = "take<int*>", mangled = "_Z4takeIPiEvT_",
+                      params = Any[_p("p", "Ptr{Cint}", "int*")]),
+                  _fn(name = "take<double*>", mangled = "_Z4takeIPdEvT_",
+                      params = Any[_p("p", "Ptr{Cdouble}", "double*")])]
+        ident(jt, ct) = String(jt)
+        plain = G._integer_width_overloads(fns, Set{String}(), ident)
+        @test isempty(plain)
+        (strict, _) = W.with_renames(Dict("take_*" => "take")) do
+            G._integer_width_overloads(fns, Set{String}(), ident)
+        end
+        @test strict == Dict("_Z4takeIPiEvT_" => Set([1]), "_Z4takeIPdEvT_" => Set([1]))
+    end
+
+    @testset "both generators bind the chosen name, and the old one nowhere" begin
+        cpp = _generate(:cpp, Any[
+            # A namespace function arrives with `class` = its namespace and
+            # `is_method` set (no receiver: `has_object_pointer` is false).
+            _fn(name = "scaled<long>", class = "stl_test", is_method = true, mangled = SCALED_L,
+                params = Any[_p("x", "Clong", "long"), _p("k", "Cint", "int")]),
+            _fn(name = "scaled<double>", class = "stl_test", is_method = true, mangled = SCALED_D,
+                params = Any[_p("x", "Cdouble", "double"), _p("k", "Cint", "int")]),
+            _fn(name = "untouched", mangled = "_Z9untouchedi"),
+        ]; extra = "[wrap.rename]\n\"stl_test_scaled_*\" = \"scaled\"\n")
+        c = _generate(:c, Any[
+            _fn(name = "very_long_generated_name_v2", mangled = "very_long_generated_name_v2"),
+            _fn(name = "local", mangled = "local", is_vararg = true),
+        ]; extra = "[wrap.varargs]\nlocal = [[\"Cint\"]]\n" *
+                   "[wrap.rename]\nvery_long_generated_name_v2 = \"short\"\nlocal = \"loc\"\n")
+        for (lang, code, want, gone) in (
+                (:cpp, cpp, ["scaled", "untouched"], ["stl_test_scaled_long", "stl_test_scaled_double"]),
+                (:c,   c,   ["short", "loc", "loc_Cint"], ["very_long_generated_name_v2", "local_", "local__Cint"]))
+            @testset "$lang" begin
+                @test (W._assert_wrapper_parses(code, "NameSynth_$lang"); true)
+                defined = W._defined_names(code)
+                exported = W._exported_names(code)
+                for n in want
+                    @test n in defined
+                    @test n in exported
+                end
+                for n in gone
+                    @test !(n in defined)
+                    @test !(n in exported)
+                    # No alias and no second definition. (The C symbol itself
+                    # still appears, as the ccall target and in the docstring.)
+                    @test !occursin(Regex("^function " * n * "\\(", "m"), code)
+                    @test !occursin(Regex("^(const|global) " * n * "\\b", "m"), code)
+                    @test !occursin(Regex("^export .*\\b" * n * "\\b", "m"), code)
+                end
+            end
+        end
+        # The two renamed instantiations are one overload set with typed dispatch.
+        @test count(==("scaled"), W._defined_names(cpp)) >= 1
+        @test occursin(r"function scaled\(x::Integer, k::Integer\)", cpp) ||
+              occursin(r"function scaled\(x::Clong, k::Integer\)", cpp)
+        @test occursin(r"function scaled\(x::(Cdouble|Float64|Real), k::Integer\)", cpp)
+    end
+
+    @testset "the config refuses a value that is not a binding name, and round-trips" begin
+        mktempdir() do dir
+            toml = joinpath(dir, "replibuild.toml")
+            write(toml, "[project]\nname = \"r\"\nroot = \"$(escape_string(dir))\"\n[wrap]\nlanguage = \"cpp\"\n[wrap.rename]\n\"_Z1\" = \"not an id\"\n")
+            err = try; RepliBuild.ConfigurationManager.load_config(toml); nothing; catch e; e; end
+            @test err isa ErrorException && occursin("not a Julia identifier", sprint(showerror, err))
+            write(toml, "[project]\nname = \"r\"\nroot = \"$(escape_string(dir))\"\n[wrap]\nlanguage = \"cpp\"\n[wrap.rename]\n\"_Z1\" = \"end\"\n")
+            err = try; RepliBuild.ConfigurationManager.load_config(toml); nothing; catch e; e; end
+            @test err isa ErrorException && occursin("not a Julia identifier", sprint(showerror, err))
+            write(toml, "[project]\nname = \"r\"\nroot = \"$(escape_string(dir))\"\n[wrap]\nlanguage = \"cpp\"\n[wrap.rename]\n\"boost_math_pdf_*\" = \"pdf\"\n_Z3fooi = \"foo!\"\n")
+            cfg = RepliBuild.ConfigurationManager.load_config(toml)
+            @test cfg.wrap.rename == Dict("boost_math_pdf_*" => "pdf", "_Z3fooi" => "foo!")
+            RepliBuild.ConfigurationManager.save_config(cfg)
+            @test RepliBuild.ConfigurationManager.load_config(toml).wrap.rename == cfg.wrap.rename
+            @test ("wrap", "rename") in RepliBuild.Discovery.PRESERVED_TOML_KEYS
+        end
+    end
+end
+
 @testset "module names are identifiers (abi_fuzz M1)" begin
     modname(project) = mktempdir() do dir
         write(joinpath(dir, "replibuild.toml"), """

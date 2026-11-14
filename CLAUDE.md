@@ -879,7 +879,15 @@ the test named when you touch the area.
   references. It is total: a catch-all after the curated list, an empty name
   falls back to the mangled symbol, and a reserved word gets a `_` suffix.
   Never inline a replace-list again. The curated part is frozen, because
-  consumers call those names. (`test_function_name_derivation.jl`.)
+  consumers call those names. **`[wrap.rename]` is applied inside it**
+  (`_RENAMES`, set by `with_renames` around the generator run in
+  `wrap_library`), keyed by mangled symbol or derived name as anchored globs,
+  so the overload prediction, both varargs paths and the proxy and deleter
+  references see the chosen name; a reference to a function must pass its
+  mangled symbol to the derivation (the proxy's short name is the one call
+  with `rename = false`). `_check_renames` then refuses an unmatched key and
+  a chosen name another function derives or the wrapper binds otherwise. The
+  old name is bound nowhere. (`test_function_name_derivation.jl`.)
 - **A C enum is open: any value of its underlying type is a value of the enum**
   (2026-11-08). Never emit `@enum`, which refuses undeclared values: libvterm's
   `VTERM_KEY_FUNCTION(n)` is `VTERM_KEY_FUNCTION_0 + n`, and `VTermKey(257)` was an
@@ -1594,12 +1602,16 @@ DWARF-resolved destructors — **is** built.)
   dictionary after its dependencies' `.pcm` files exist; the `.so` inputs Ninja
   lists are ordering only. First wrap set: Core, Thread, RIO, then MathCore →
   Matrix → Hist.
-- A template instantiation's Julia name carries its full template arguments
-  (`_julia_function_name`, `_sanitize_c_type_name`), and there is no rename
-  key: Boost.Math's thirteen `default_policy` arguments put `pdf` past 600
-  characters, and a consumer finds it by regex (2026-10-25). A short alias
-  needs a `[wrap]` table from mangled symbol or key to name, through both
-  generators' name derivations.
+- A type's Julia name carries its full template arguments
+  (`_sanitize_c_type_name`, `_sanitize_cpp_type_name`) and has no rename key
+  (2026-11-13; functions got `[wrap.rename]` that day). A type's name reaches
+  struct definitions, every signature spelling it (`_as_declared`), the
+  layout tables, `type_manifest.json` and the thunk side, through more than
+  one derivation, so a `[types.rename]` is not a one-place change.
+- A `std::vector` whose element is itself a `std::vector` (or any type with no
+  Julia layout in the wrapper) gets a method table but no `CppVector` factory,
+  with a warning (2026-11-13; clipper2's `Paths64`/`PathsD`). A factory needs
+  an element type `CppVector{T}` can hold.
 - **Boost is wrapped a library at a time** (2026-10-31): Hub `boostfilesystem`,
   `boostcharconv`, `boostjson`, each `boostorg/boost` with `submodules` set to
   the closure `tools/boostdep/depinst/depinst.py` computes (the guide's Boost

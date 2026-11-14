@@ -686,6 +686,54 @@ else.
 
 ---
 
+### 2.17 `rename` — a name of your own
+
+A function's Julia name is derived from its C++ spelling, template arguments
+included, and the derivation is frozen because consumers call its names. For a
+template instantiation that is the whole instantiation: Boost.Math's
+`pdf<double, policy<…>>` binds as a 503-character
+`boost_math_pdf_double_boost_math_policies_policy_…`, and a consumer finds it by
+regex. `[wrap.rename]` is the one place a name is chosen by hand.
+
+```toml
+[wrap.rename]
+"boost_math_pdf_*" = "pdf"
+"boost_math_cdf_*" = "cdf"
+_ZN8stl_test6scaledIlEET_S1_i = "scaled_long"
+```
+
+**Keys** name the function by its mangled symbol (`nm -D --defined-only <lib>`)
+or by the Julia name the wrapper binds without the rename (read it off the
+wrapper, or derive it from `nm | c++filt`). They are the anchored globs of
+`exclude_symbols`: `*` and `?`, every other character literal, a trailing `*`
+for a prefix. **Values** are the Julia identifier to bind; anything else is a
+load error, since the wrapper would not parse.
+
+The rename is applied inside the one name derivation, so every emitter sees it:
+the function definition, its export, the dispatch-tier table, a method proxy's
+reference to it, and the overload prediction that decides which parameters
+carry a C type. Several keys, or one glob, may give several functions one name:
+that is an overload set, and the parameters the set disagrees on are typed so
+Julia dispatches between them (the five `pdf` instantiations above become
+`pdf(dist::Ref{normal_distribution_…}, x)`, `pdf(dist::Ref{poisson_distribution_…}, k)`, …).
+
+**The old name is bound nowhere.** No alias, no deprecation stub: a consumer
+opts into the rename by changing the recipe and calls the new name.
+
+**What fails.** A key that matches no function is a hard error, like an
+`exclude_symbols` pattern that matches nothing: the author believes a function
+is reachable under a name it is not. A chosen name that another function would
+bind under the derivation, or that the wrapper binds as a type, constant,
+global or enumerator, is a hard error naming both sides; nothing is prefixed
+silently. Two keys giving one function two names is an error at that function.
+A symbol `exclude_symbols` drops cannot be renamed, and a wrap without
+`compilation_metadata.json` (the symbol-only generator) refuses a table.
+
+Types have no rename key: a type's name reaches struct definitions, every
+signature that spells it, the layout tables and the thunk side through
+several derivations, so renaming one is not a one-place change (see *Not Yet
+Built* in CLAUDE.md).
+
 ## 3. Section reference
 
 Types are TOML types. "Default" is what the parser uses when the key is
@@ -779,6 +827,7 @@ the per-file IR cache — it is keyed on a compile fingerprint as well as source
 | `headers` | Vector{String} | `[]` (every header at the top of each include dir) | The headers the Clang.jl walk starts from. The walk reads enums (including constant-only enums, which DWARF lacks) and callback typedefs, not macros: a macro reaches the wrapper only through `[wrap.macros]`. `#include`s are still followed. Spelled as in an `#include`: tried as an absolute path, then against the project root and each include dir. An entry that resolves to no file is a hard error at `wrap` *(preserved)* |
 | `shim_headers` | Vector{String} | `[]` | Headers the macro-shim TU includes. Does nothing without `[wrap.macros]` entries or `shim_defines`: no shim TU is written *(preserved)* |
 | `exclude_symbols` | Vector{String} | `[]` | Anchored globs for symbols to keep out of the wrapper; see §2.13 *(preserved)* |
+| `rename` | Table{String→String} | `{}` | `[wrap.rename]`: the Julia name to bind for a function, keyed by its mangled symbol or by the name the wrapper derives (anchored globs); see §2.17 *(preserved)* |
 | `shim_defines` | Vector{String} | `[]` | `#define`s at the top of the shim file, before its includes, and in no other file: `NAME` (defined as `1`) or `NAME=VALUE`. Builds a single-header library's implementation section from the TOML (§2.2). Needs `shim_headers` *(preserved)* |
 | `surface_types_only` | Bool | `false` | Emit only types reachable from the wrap surface instead of every type in DWARF; see §2.14 *(preserved)* |
 | `surface_types_extra` | Vector{String} | `[]` | Anchored globs for types to keep even when unreachable — callback-only structs, constant-only enums. A pattern matching nothing is an error *(preserved)* |
@@ -795,6 +844,18 @@ allowed type names.
 [wrap.varargs]
 proven_at       = "<upstream commit>"
 lua_pushfstring = [["Cstring"], ["Cint"], ["Cstring", "Cint"]]
+```
+
+### `[wrap.rename]` *(preserved)*
+
+`key = "julia_name"`, one per function (or per overload set, through a glob).
+The key is the function's mangled symbol or the Julia name the wrapper binds
+without the rename; the value must be a Julia identifier. See §2.17.
+
+```toml
+[wrap.rename]
+"boost_math_pdf_*" = "pdf"
+_ZN3fmt3v126vprintEPKcNS0_17basic_format_argsINS0_7contextEEE = "vprint"
 ```
 
 ### `[wrap.macros]` *(preserved)*

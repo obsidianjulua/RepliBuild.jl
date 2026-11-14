@@ -914,7 +914,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # Helper: sanitize a raw function name to the Julia identifier used in wrappers.
     # Proxies and deleters REFERENCE names the main loop defines, so this must be
     # the main loop's derivation, not a shorter copy of its list.
-    _sanitize_julia_fn(name::String)::String = _julia_function_name(name)
+    # With the symbol, so a `[wrap.rename]` keyed on it reaches the reference.
+    _sanitize_julia_fn(name::String, mangled::String = "")::String = _julia_function_name(name, mangled)
 
     # Determine which classes get full idiomatic wrappers: ≥1 factory function,
     # and a finalizer that frees what the factories return —
@@ -2789,7 +2790,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             seen_ctor_sigs = Set{String}()
 
             for fac_func in factories
-                fac_jl     = _sanitize_julia_fn(fac_func["name"])
+                fac_jl     = _sanitize_julia_fn(String(fac_func["name"]),
+                                                String(get(fac_func, "mangled", "")))
                 fac_params = get(fac_func, "parameters", Any[])
 
                 sig_parts  = String[]
@@ -2873,10 +2875,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 meth_name = meth["name"]
 
                 # The raw Julia wrapper for ClassName::method is named ClassName_method
-                raw_jl = _sanitize_julia_fn("$(cls_nm)_$(meth_name)")
+                raw_jl = _sanitize_julia_fn("$(cls_nm)_$(meth_name)",
+                                            String(get(meth, "mangled", "")))
 
-                # Proxy method name: just the method name part (multi-dispatch via Julia types)
-                proxy_nm = _sanitize_julia_fn(meth_name)
+                # Proxy method name: just the method name part (multi-dispatch via
+                # Julia types). Not a binding of the symbol, so no rename applies.
+                proxy_nm = _julia_function_name(meth_name; rename = false)
 
                 # Build parameter list, skipping the implicit 'this' pointer
                 meth_params = get(meth, "parameters", Any[])

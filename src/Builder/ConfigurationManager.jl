@@ -200,6 +200,15 @@ struct WrapConfig
     headers::Vector{String}
     cstring_owned::Dict{String,String}  # func => free symbol for malloc'd char* returns
     tier1::Tier1Config
+    # [wrap.rename]: the Julia name to bind for a function, keyed by its
+    # mangled symbol or by the name the derivation gives it (anchored globs,
+    # the exclude_symbols dialect). A template instantiation's derived name
+    # carries its full template arguments (Boost.Math's `pdf` passed 600
+    # characters), and this is the one place a consumer-facing name is chosen
+    # by hand. Applied inside `_julia_function_name`, so every emitter sees
+    # one answer; the old name is bound nowhere. A key matching nothing and a
+    # name colliding with another binding are wrap errors.
+    rename::Dict{String,String}
 end
 
 """Nested struct for [llvm] section"""
@@ -795,6 +804,31 @@ function parse_wrap_config(data::Dict)::WrapConfig
     language_str = get(wrap, "language", "cpp")
     language_sym = Symbol(language_str)
 
+    # [wrap.rename] — `key = "julia_name"`, key a mangled symbol or the Julia
+    # name the wrapper would bind (anchored glob). The value must be a Julia
+    # identifier: anything else would make the wrapper unparseable, which the
+    # write-time guard would then report as a generator bug.
+    rename = Dict{String,String}()
+    rename_raw = get(wrap, "rename", Dict())
+    rename_raw isa AbstractDict || error("""
+        RepliBuild: [wrap.rename] must be a table of `key = "julia_name"` entries,
+        got $(repr(rename_raw)).""")
+    for (k, v) in rename_raw
+        key = String(k)
+        isempty(strip(key)) && error("RepliBuild: [wrap.rename] has an empty key.")
+        v isa AbstractString || error("""
+            RepliBuild: [wrap.rename] $(repr(key)): the value must be a string naming the
+            Julia function to bind, got $(repr(v)).""")
+        value = String(v)
+        if !_is_julia_binding_name(value)
+            error("""
+            RepliBuild: [wrap.rename] $(repr(key)) = $(repr(value)): the value is not a Julia identifier.
+            It is the function name the wrapper binds, so it must be one (letters, digits,
+            `_` and `!`; not a reserved word).""")
+        end
+        rename[key] = value
+    end
+
     tier1_raw = get(wrap, "tier1", Dict())
     tier1 = Tier1Config(
         get(tier1_raw, "enable", false),
@@ -824,8 +858,24 @@ function parse_wrap_config(data::Dict)::WrapConfig
         surface_types_extra,
         wrap_headers,
         cstring_owned,
-        tier1
+        tier1,
+        rename
     )
+end
+
+"""
+    _is_julia_binding_name(name) -> Bool
+
+Whether `name` can be bound as a function at top level: an identifier the
+parser accepts in that position. `Base.isidentifier` alone says yes to
+reserved words (`end`, `function`), which the generated `function end(x)`
+would then fail on, so the parser is asked, in that exact position.
+"""
+function _is_julia_binding_name(name::AbstractString)::Bool
+    Base.isidentifier(name) || return false
+    ex = Meta.parse("function $(name)(x) end"; raise = false)
+    return ex isa Expr && ex.head === :function && ex.args[1] isa Expr &&
+           ex.args[1].head === :call && ex.args[1].args[1] === Symbol(name)
 end
 
 """Parse [llvm] section"""
@@ -1264,7 +1314,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         CompileConfig(String[], String[], ["-std=c++17", "-fPIC"], Dict{String,String}(), true, false, :default),
         LinkConfig("2", false, String[], String[], false, true),
         BinaryConfig(:shared, "", false),
-        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], String[], String[], false, String[], String[], Dict{String,String}(), Tier1Config(false, String[], 64, false)),
+        WrapConfig(true, :clang, :cpp, "", true, Dict{String,Vector{Vector{String}}}(), "", Dict{String,Dict{String,Any}}(), String[], String[], String[], false, String[], String[], Dict{String,String}(), Tier1Config(false, String[], 64, false), Dict{String,String}()),
         LLVMConfig(:auto, ""),
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
@@ -1435,6 +1485,9 @@ function save_config(config::RepliBuildConfig)
     end
     if !isempty(config.wrap.cstring_owned)
         wrap_dict["cstring_owned"] = config.wrap.cstring_owned
+    end
+    if !isempty(config.wrap.rename)
+        wrap_dict["rename"] = config.wrap.rename
     end
     if config.wrap.tier1.enable
         tier1_dict = Dict{String,Any}("enable" => true)
