@@ -99,8 +99,8 @@ the thing, or leaks, or wraps an empty struct. The symptom → key table is in
   Windows is PE `.dll` under `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64),
   not MSVC. Both read DWARF through GNU binutils. macOS is refused at load — its
   Mach-O plumbing and Apple's arm64 calling convention are not built.
-- **Julia 1.12 or 1.13**, the versions CI tests. `Project.toml` still admits
-  1.10 and 1.11, which nothing tests.
+- **Julia 1.12 or 1.13**, the versions CI tests, and what `Project.toml`
+  admits (`julia = "1.12"`).
 - **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every
   distribution has. Clang ships as a JLL; link/optimize/assemble run on Julia's
   own libLLVM. On Windows that JLL borrows the MSYS2 CLANG64 sysroot for its
