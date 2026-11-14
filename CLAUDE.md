@@ -986,8 +986,9 @@ the test named when you touch the area.
   `_Alloc_hider` behind its constructors, so a unit that emits no
   `basic_string` constructor (Ubuntu 24.04's libstdc++ 13 at `-std=c++17`;
   16 emits one) has it as a declaration-only DIE and `_M_dataplus` stays a
-  leaf: the reader takes that leaf, of that type and exactly pointer size, as
-  `_M_p`, and refuses any other size. Never decode by hardcoded
+  leaf: the reader takes that leaf, of that type and spanning exactly a
+  pointer (a declaration has no byte_size, so the span is the distance to the
+  next leaf), as `_M_p`, and refuses any other span. Never decode by hardcoded
   offsets or sizes. (`test_std_strings.jl`, devtests
   `test_sret_in_caller_buffer.jl`.)
 - **One struct-ABI rule set per convention, chosen by the host, in two places

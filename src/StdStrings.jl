@@ -105,16 +105,23 @@ function string_reader(layout::AbstractDict)::Union{Reader,String}
     # -std=c++17; libstdc++ 16 emits one), clang writes a declaration-only DIE
     # and the build's walk leaves `_M_dataplus` a leaf (it descends only into a
     # record with members). `_Alloc_hider`'s one data member is the pointer
-    # `_M_p`, so a leaf of that name and type of exactly pointer size is that
-    # pointer at the leaf's offset. Any other size is refused: it would mean a
-    # libstdc++ whose `_Alloc_hider` holds more than the pointer.
+    # `_M_p`, so a leaf of that name and type spanning exactly a pointer is that
+    # pointer at the leaf's offset. A declaration carries no byte_size, so the
+    # member's recorded size is 0; its span is then the distance to the next
+    # leaf the DWARF places after it. Any other span is refused: it would mean
+    # a libstdc++ whose `_Alloc_hider` holds more than the pointer.
     if p === nothing && n !== nothing
         dp = find(l -> _last(path(l)) == "_M_dataplus" && _is_alloc_hider(get(l, "c_type", "")) &&
                        byte(l) !== nothing)
         if dp !== nothing
+            at = Int(byte(dp))
             sz = Int(get(dp, "size", 0))
-            sz == sizeof(Ptr{Cvoid}) && return Reader(:pointer_length, Int(byte(dp)), Int(byte(n)))
-            return "its `_Alloc_hider` has no definition in the DWARF and is $(sz) bytes, not a pointer; that layout is not decoded"
+            if sz == 0
+                later = [Int(byte(l)) for l in leaves if byte(l) !== nothing && Int(byte(l)) > at]
+                sz = isempty(later) ? 0 : minimum(later) - at
+            end
+            sz == sizeof(Ptr{Cvoid}) && return Reader(:pointer_length, at, Int(byte(n)))
+            return "its `_Alloc_hider` has no definition in the DWARF and spans $(sz) bytes, not a pointer; that layout is not decoded"
         end
     end
 
