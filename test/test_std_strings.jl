@@ -151,10 +151,28 @@ end
           [("_M_dataplus._M_p", 0), ("_M_string_length", 8), ("_anon1._M_local_buf", 16),
            ("_anon1._M_allocated_capacity", 16)]
     @test _SS.string_reader(L) isa _SS.Reader
-    # A base with no definition that is not one empty byte: unread, said why.
-    L2 = _SC._string_layout(key, defs, Dict{String,Any}(), nothing)
-    @test occursin("base `allocator<char>` has no definition", L2["unread"])
-    @test isempty(L2["leaves"])
+    # A base with no definition and no size at all (clang emits an `extern
+    # template` allocator as a declaration-only DIE under libstdc++ 13):
+    # `_Alloc_hider`'s own member `_M_p` covers its whole 8 bytes, so the base
+    # is empty whatever the DWARF says, and the layout reads.
+    L2 = _SC._string_layout(key, defs, Dict{String,Any}(), "_ZN…D4Ev")
+    @test !haskey(L2, "unread")
+    @test [(l["path"], l["offset"]) for l in L2["leaves"]] == [(l["path"], l["offset"]) for l in L["leaves"]]
+    @test _SS.string_reader(L2) isa _SS.Reader
+    # The members leave room for the base: it may carry data we cannot see,
+    # so the refusal stays, and says why.
+    roomy = deepcopy(defs)
+    roomy["_Alloc_hider"]["byte_size"] = "0x10"
+    L3 = _SC._string_layout(key, roomy, Dict{String,Any}(), nothing)
+    @test occursin("base `allocator<char>` has no definition", L3["unread"])
+    @test occursin("leave room", L3["unread"])
+    @test isempty(L3["leaves"])
+    # The coverage test itself: tiled, a gap, overlapping union members, no size.
+    @test _SC._members_cover_record(defs["_Alloc_hider"])
+    @test _SC._members_cover_record(defs["_anon_u"])
+    @test !_SC._members_cover_record(roomy["_Alloc_hider"])
+    @test !_SC._members_cover_record(Dict{String,Any}("members" => Any[m("x", "int", "0x0", 4)]))
+    @test !_SC._members_cover_record(Dict{String,Any}("byte_size" => "0x8", "members" => Any[]))
 end
 
 end

@@ -7781,9 +7781,17 @@ function _string_layout(name::AbstractString, toolchain_defs::AbstractDict, stru
             bd = lookup(bt)
             # No definition and one byte: no data member (one would have given
             # it a definition), so an empty base, whatever it derives from
-            # (`allocator<char>` over `__new_allocator<char>`).
+            # (`allocator<char>` over `__new_allocator<char>`). No definition
+            # and no size either (libstdc++ declares `extern template class
+            # allocator<char>`, and clang then emits it as a declaration-only
+            # DIE under some header versions: Ubuntu 24.04's libstdc++ 13,
+            # 2026-11-14): the base contributes no bytes when the derived
+            # record's own members already cover its whole byte_size, since
+            # base and member subobjects never overlap. A base the members
+            # leave room for may carry data we cannot see, and stays a refusal.
             bd === nothing && byte_size_of(bt) == 1 && continue
-            bd === nothing && (reason[] = "base `$(bt)` has no definition"; return false)
+            bd === nothing && _members_cover_record(d) && continue
+            bd === nothing && (reason[] = "base `$(bt)` has no definition and `$(name)`'s members leave room for it"; return false)
             walk(bd, base + off(get(b, "offset", 0)), prefix, depth + 1) || return false
         end
         return true
@@ -8038,6 +8046,36 @@ function _canonical_definition(defs::AbstractVector)
 end
 
 # A record's or enum's `byte_size` (`"0x18"`) as an Int; `nothing` without one.
+"""
+    _members_cover_record(def) -> Bool
+
+Do `def`'s own byte-offset members tile `[0, byte_size)` without a gap? Then no
+base subobject has room: every base is empty (the empty-base optimisation),
+whatever the DWARF says or fails to say about it. Bitfields are not counted.
+"""
+function _members_cover_record(def::AbstractDict)::Bool
+    total = _definition_byte_size(def)
+    total === nothing && return false
+    iv = Tuple{Int,Int}[]
+    for m in get(def, "members", ())
+        o = get(m, "offset", nothing)
+        o === nothing && continue
+        sz = get(m, "size", 0)
+        sz isa Integer && sz > 0 || continue
+        s = string(o)
+        a = startswith(s, "0x") ? parse(Int, s[3:end]; base = 16) : parse(Int, s)
+        push!(iv, (a, a + Int(sz)))
+    end
+    isempty(iv) && return false
+    sort!(iv)
+    cur = 0
+    for (a, b) in iv
+        a > cur && return false
+        cur = max(cur, b)
+    end
+    return cur >= total
+end
+
 function _definition_byte_size(def::AbstractDict)
     bs = get(def, "byte_size", nothing)
     bs === nothing && return nothing
