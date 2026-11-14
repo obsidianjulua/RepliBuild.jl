@@ -945,6 +945,27 @@ the test named when you touch the area.
 - **Thunk arg slots hold a pointer to the argument's storage.** One load gives the
   storage and a second gives the value; pointer args double-load. Callers put `&struct`
   in the slot, not `&Ref`.
+- **A pass-by-reference return is built in the caller's buffer** (2026-11-13).
+  When `FunctionGen.returns_in_caller_buffer` holds (a `DW_CC_pass_by_reference`
+  return, either a `:layout` record or an STL container by value on its own
+  `:direct` path, whose byte-blob return LLVM's backend demoted to a hidden
+  pointer to its own temporary), the thunk is `thunk_symbol(m, true)`
+  (`<m>_thunk_inplace`), returns void, and takes the caller's buffer in argument
+  slot 0, passed like any pointer argument (so the other arguments start at slot
+  1); it forwards that pointer as the callee's hidden return pointer and never
+  allocas or reads the return. C++ builds such an object where it will live and
+  never moves it bytewise; the old thunk built it in its own frame and MLIR's
+  C-interface wrapper copied the bytes out, which left any object that points
+  into itself (`std::string`'s short buffer) dangling. Every call site asks the
+  same predicate and name (GeneratorCpp allocates the buffer with
+  `JITManager.return_slot`, calls the void `invoke`/`invoke_aot_ptr` with
+  `slot_address` first under `GC.@preserve`, and returns `slot_value`, so the
+  Julia return type does not change); an AOT slot's table entry is the thunk it
+  resolves (`_aot_fptr_const_name!`'s `thunk`), and the manifest scan maps both
+  spellings back to the mangled symbol (`_thunks_named_in_text`). The new name
+  makes a stale wrapper fail as a missing thunk, with a message saying to
+  re-wrap, instead of passing arguments where the buffer goes.
+  (`test_by_value_crossing.jl`, devtests `test_sret_in_caller_buffer.jl`.)
 - **One struct-ABI rule set per convention, chosen by the host, in two places
   that must agree.** `RepliBuild.host_record_abi()` (`:sysv`, `:win64`,
   `:aapcs64`) is the one place Julia reads the host; every classifier takes it
@@ -1081,8 +1102,9 @@ the test named when you touch the area.
   the library with it (`test_jlcs_producers.jl` §H).
 - **A by-value record crosses a thunk with its layout, as nothing, by address, or not
   at all.** Nothing means an empty class, which SysV gives no class. By address means
-  DWARF `DW_CC_pass_by_reference`, and such a return goes through an sret slot, first
-  argument, before `this`. Not at all means an ABI trap on the Julia side.
+  DWARF `DW_CC_pass_by_reference`, and such a return goes through the caller's
+  buffer (above), first argument, before `this`. Not at all means an ABI trap on the
+  Julia side.
   `FunctionGen.by_value_crossing` is the one verdict; the thunk generator and
   GeneratorCpp both act on it. `record_abi` in metadata carries the DWARF facts. A
   record must never fall to `!llvm.ptr`: that is how empty classes, declared-only
@@ -1474,6 +1496,16 @@ longer the only proof. Still open:
   ABI trap instead of a SIGSEGV, but the function is still uncallable until the package
   builds with `-Xclang -fno-use-ctor-homing` or `-fstandalone-debug`. Neither is a
   default yet (see Not Yet Built).
+
+Found later, and fixed (2026-11-13): **every pass-by-reference record return in
+Tier 2 was moved bytewise out of a dead frame.** The thunk passed its own alloca
+as the hidden return pointer and returned the bytes. It was masked because every
+by-reference record wrapped until then was trivially relocatable in practice
+(its bytes meant the same at any address), and no test returned an object that
+points into itself. libstdc++'s short `std::string` is one: its data pointer
+came back aimed at the thunk's frame, and its destructor then freed a stack
+address. Fixed by the caller's-buffer convention (JLCS invariants);
+`test_sret_in_caller_buffer.jl` fails without it.
 
 ## Not Yet Built (roadmap, not bugs)
 

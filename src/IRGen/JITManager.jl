@@ -125,6 +125,17 @@ Slow path: JIT engine lookup + copy-on-write Dict swap under lock.
             end
             ptr != C_NULL && break
         end
+        if ptr == C_NULL && endswith(func_name, "_thunk")
+            # The thunk exists under its in-place name: the wrapper predates
+            # by-reference returns built in the caller's buffer.
+            for eng in GLOBAL_JIT.engines
+                eng.jit_engine === nothing && continue
+                if MLIRNative.lookup(eng.jit_engine, func_name * "_inplace") != C_NULL ||
+                   MLIRNative.lookup(eng.jit_engine, "_" * func_name * "_inplace") != C_NULL
+                    throw(ErrorException(_stale_inplace_message(func_name)))
+                end
+            end
+        end
         if ptr == C_NULL
             searched = isempty(GLOBAL_JIT.engines) ? "none" :
                 join((basename(e.binary_path) *
@@ -144,6 +155,59 @@ Slow path: JIT engine lookup + copy-on-write Dict swap under lock.
         return ptr
     end
 end
+
+"""
+    return_slot(::Type{T}) -> slot
+
+A home for a `T` the callee builds in place: a thunk `<m>_thunk_inplace`
+(`FunctionGen.returns_in_caller_buffer`) takes `slot_address(slot)` as its first
+argument and constructs the C++ object there, and `slot_value(slot)` is the Julia
+value the wrapper returns. A `Ref{T}` for an isbits `T`; for a `mutable` `T` (a
+named union or bitfield record, whose one field is its C bytes) the object
+itself, zeroed, as `_invoke_call` allocates one. The generated call keeps the
+slot alive with `GC.@preserve` across the call, so the address does not move
+while C++ builds the object.
+"""
+@generated function return_slot(::Type{T}) where T
+    if ismutabletype(T)
+        if !(isconcretetype(T) && fieldcount(T) > 0 && sizeof(T) > 0 &&
+             all(i -> isbitstype(fieldtype(T, i)), 1:fieldcount(T)))
+            msg = "JIT invoke: cannot return `$T` in place: it is a mutable type " *
+                  "without an inline byte layout to fill."
+            return :(error($msg))
+        end
+        n = sizeof(T)
+        return quote
+            obj = ccall(:jl_new_struct_uninit, Any, (Any,), $T)::$T
+            GC.@preserve obj ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
+                                   pointer_from_objref(obj), 0, $n)
+            obj
+        end
+    end
+    if !isbitstype(T)
+        msg = "JIT invoke: cannot return `$T` in place: it has no fixed C layout."
+        return :(error($msg))
+    end
+    return :(Ref{$T}())
+end
+slot_address(slot::Base.RefValue) = Base.unsafe_convert(Ptr{Cvoid}, slot)
+slot_address(slot) = pointer_from_objref(slot)
+slot_value(slot::Base.RefValue) = slot[]
+slot_value(slot) = slot
+
+"""
+    _stale_inplace_message(name) -> String
+
+What a call to the thunk `name` means when the library has `<name>_inplace`
+instead: the wrapper was generated before a pass-by-reference return was built
+in the caller's buffer (`FunctionGen.returns_in_caller_buffer`, 2026-11-13),
+and calls the thunk with the old shape. The new name exists so that call fails
+here instead of passing its arguments where the buffer goes.
+"""
+_stale_inplace_message(name::AbstractString) =
+    "thunk `$(name)` not found, but `$(name)_inplace` is: this wrapper was generated " *
+    "before RepliBuild built by-reference returns in the caller's buffer, and calls " *
+    "the thunk with the old shape. Re-wrap it with the RepliBuild now loaded."
 
 @noinline function _jit_not_initialized_error()
     msg = "JIT not initialized."
@@ -649,7 +713,9 @@ function resolve_thunk!(slot::Base.RefValue{Ptr{Cvoid}}, handle::Ptr{Cvoid},
     end
     p = Libdl.dlsym(handle, name; throw_error = false)
     if p === nothing
-        push!(missing, String(name))
+        stale = endswith(name, "_thunk") &&
+                Libdl.dlsym(handle, name * "_inplace"; throw_error = false) !== nothing
+        push!(missing, stale ? _stale_inplace_message(name) : String(name))
         return C_NULL
     end
     slot[] = p

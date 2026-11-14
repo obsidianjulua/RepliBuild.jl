@@ -192,6 +192,7 @@ const TESTS = TestFile[
     T("test_abi_nested.jl", :dev, [:c], locks = ["abi_nested_test"]),
     T("test_c_sret_abi.jl", :dev, [:c], locks = ["c_sret_test"]),
     T("test_cpp_record_routing.jl", :dev, [:cpp], locks = ["cpp_routing_test"]),
+    T("test_sret_in_caller_buffer.jl", :dev, [:dialect, :cpp], locks = ["sret_inplace_test"]),
     T("test_determinism_fixture.jl", :dev, [:dwarf, :c, :cpp], locks = ["determinism_test"]),
     T("test_conflict_trap_fixture.jl", :dev, [:dwarf, :c, :cpp],
       locks = ["conflict_trap_test", "conflict_trap_c_test"]),

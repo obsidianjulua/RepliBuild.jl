@@ -613,15 +613,30 @@ Contents of the .debug_info section:
         # the object through the int argument's register (a SIGSEGV at 42).
         # On x86-64 the slot is a plain first pointer (RDI, RCX take it); on
         # AAPCS64 the call states it (`sret:4`), which puts it in x8.
+        # The hidden pointer is the CALLER's buffer (2026-11-13): argument slot
+        # 0, forwarded, never an alloca of the thunk's own and never read back,
+        # so the object is built where it lives. The thunk is void, under its
+        # own name, and the int argument moves to slot 1.
         for abi in (:sysv, :win64, :aapcs64)
             ir = gen(fn("_ZN2ee10make_ownerEi", ["int"], "Owner"); abi)
             @test (abi, decl(ir, "_ZN2ee10make_ownerEi")) == (abi, "func.func private @_ZN2ee10make_ownerEi(!llvm.ptr, i32)")
-            @test (abi, occursin(r"%sret_slot = llvm\.alloca %sret_one x \S", ir)) == (abi, true)
+            @test (abi, occursin("func.func @_ZN2ee10make_ownerEi_thunk_inplace(%args_ptr: !llvm.ptr)  attributes", ir)) == (abi, true)
+            @test (abi, occursin("@_ZN2ee10make_ownerEi_thunk(", ir)) == (abi, false)
+            @test (abi, occursin("%sret_cell = \"jlcs.get_field\"(%args_ptr) {fieldOffset = 0 : i64}", ir)) == (abi, true)
+            @test (abi, occursin("%sret_slot = llvm.load %sret_cell : !llvm.ptr -> !llvm.ptr", ir)) == (abi, true)
+            @test (abi, occursin("%val_ptr_1 = \"jlcs.get_field\"(%args_ptr) {fieldOffset = 8 : i64}", ir)) == (abi, true)
+            @test (abi, occursin("llvm.alloca", ir)) == (abi, false)
             attrs = abi === :aapcs64 ? "callee = @_ZN2ee10make_ownerEi, aapcs64_args = \\[\"sret:4\", \"\"\\]" :
                                        "callee = @_ZN2ee10make_ownerEi"
             @test (abi, occursin(Regex("jlcs\\.try_call %sret_slot, %val_1 \\{ $attrs \\}"), ir)) == (abi, true)
-            @test (abi, occursin(r"llvm\.load %sret_slot", ir)) == (abi, true)
+            @test (abi, occursin(r"llvm\.load %sret_slot", ir)) == (abi, false)
+            # The call sites ask the same predicate the thunk was built from.
+            f = fn("_ZN2ee10make_ownerEi", ["int"], "Owner")
+            @test (abi, BVF.returns_in_caller_buffer(f, structs, ra; abi)) == (abi, true)
+            @test (abi, BVF.thunk_symbol("_ZN2ee10make_ownerEi", true)) == (abi, "_ZN2ee10make_ownerEi_thunk_inplace")
         end
+        # A record returned by value, trivially: the old shape and name.
+        @test !BVF.returns_in_caller_buffer(fn("_Z3boxv", ["Box<double>"], "Box<double>"), structs, ra)
 
         # Laid out, non-trivial, no destructor to run: the callee takes the
         # address of a temporary, and the slot already holds a private copy.
