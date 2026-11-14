@@ -17,6 +17,7 @@
 # check builds a module from the emitted text with include_string.
 
 using Test
+using RepliBuild
 
 @testset "Export hygiene" begin
     W = RepliBuild.Wrapper

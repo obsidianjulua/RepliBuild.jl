@@ -29,8 +29,8 @@ on:
         description: >-
           REPLIBUILD_SKIP_TESTS: comma-separated devtests fixtures to skip while
           they are known red (stress_test, mi_test, vi_test, stl_test, c_test,
-          c_abomination_test, callback_test). It does not reach the test_*.jl
-          files devtests includes.
+          c_abomination_test, callback_test), with the test files that run
+          after them (test/suites.jl).
         type: string
         default: ''
   pull_request:
@@ -246,6 +246,8 @@ jobs:
           status.tier2_ready || error("check_environment(): Tier 2 is not ready (report above)")
           RepliBuild.MLIRNative.test_dialect()
 
+      # A full run is one process (test/run.jl: a child pays Julia's compilation
+      # of the build paths again, so children only win for a selection).
       - name: devtests.jl
         timeout-minutes: 120
         run: julia --project=. test/devtests.jl
