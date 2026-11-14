@@ -145,9 +145,12 @@ touch:
 | C++ `std::vector<int>` (or any template) in the wrapper | `[types] templates` + `template_headers` |
 | A header-only library, or a header's inline functions | A file that compiles them, or `[wrap.macros]`: [Header-only libraries](#Header-only-libraries) |
 | A git pin that survives a moved tag | `commit` (full 40-hex SHA) |
+| A release tarball, or a few libraries of a superproject | `type = "archive"`, `submodules`: [Dependencies](dependencies.md) |
+| A shorter Julia name for a function | `[wrap.rename]` |
 
-The complete list, every default, and worked configs:
-[Edit the TOML](config.md). Symptom → key: [Troubleshooting](troubleshooting.md).
+What the file is for and everything it can do: [The recipe](toml.md). The
+complete list, every default, and worked configs: [Edit the TOML](config.md).
+Symptom → key: [Troubleshooting](troubleshooting.md).
 
 A C library from git looks like this:
 
@@ -425,7 +428,8 @@ headers reach ([Edit the TOML](config.md), the `[dependencies]` table), so one
 compiled Boost library is one package: its own `src/`, the header-only
 libraries it includes, and nothing else. Boost's own tool computes that list
 from a checkout of the superproject with `tools/boostdep` and the library
-fetched:
+fetched ([Dependencies](dependencies.md#Submodules) says how the list
+resolves):
 
 ```bash
 python tools/boostdep/depinst/depinst.py -X test -X example -X doc filesystem
@@ -448,15 +452,22 @@ Most of a Boost library's public API is inline wrappers over its compiled
 library's `*_SOURCE` define the headers leave that inline API undefined, so
 the keep file `#undef`s it before its first include and compiles as a user of
 the library. A `BOOST_FORCEINLINE` member gets no symbol either way; call
-the `detail::` function it forwards to. Hub `boostfilesystem`, `boostcharconv`
-and `boostjson` are the worked examples.
+the `detail::` function it forwards to.
 
 **A template instantiation's name spells out its arguments**, defaults
-included, and there is no key to rename it yet. Boost.Math's `pdf` comes out
-over 600 characters long, because its policy type spells out thirteen
-`default_policy` arguments. List the candidates with
-`filter(n -> occursin("pdf", string(n)), names(M; all = true))`, and bind the
-one you want to a short name in your own module: `const pdf = getfield(M, name)`.
+included. Boost.Math's `pdf` comes out over 600 characters long, because its
+policy type spells out thirteen `default_policy` arguments. `[wrap.rename]`
+gives it a name of your own, and one glob can give a whole family one name, as
+an overload set Julia dispatches on
+([Edit the TOML](config.md#2.17-rename-—-a-name-of-your-own)):
+
+```toml
+[wrap.rename]
+"boost_math_pdf_*" = "pdf"
+```
+
+List the candidates first with
+`filter(n -> occursin("pdf", string(n)), names(M; all = true))`.
 
 A large template library also puts its internal types in DWARF.
 `[wrap] surface_types_only` ([Edit the TOML](config.md), §2.14) emits only the
@@ -493,6 +504,26 @@ Julia, or write the parts you want in Julia against its types.
 - The files RepliBuild writes for you, `replibuild_shims.c` (`.cpp` in a C++
   build) and `replibuild_templates.cpp`, are in `.replibuild_cache/`. Open them
   to see what was compiled.
+
+## A CMake project of several libraries
+
+When the project builds several libraries that link each other, or a library
+whose CMake build gives files their own flags or generates headers, do not
+flatten it into one flag set: add a `[graph]` section and RepliBuild takes the
+build graph from CMake itself, builds each library, and wraps them as one
+module with a submodule per library.
+
+```toml
+[project]
+name = "libwebp"
+
+[graph]
+dependency = "libwebp"                    # a [dependencies] entry, or omit it
+targets    = ["webpdemux", "libwebpmux"]  # and the libraries they link
+```
+
+`discover` does not write this section; add it by hand. [Graph mode](graph.md)
+is the whole story.
 
 ## Ingest (experimental, C only)
 

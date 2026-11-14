@@ -61,6 +61,14 @@ The copy in `lib/` is self-contained:
    machine's RepliBuild install. That means a system LLVM/MLIR 21+ there, and the
    dialect built against it ([Install](install.md#The-JLCS-dialect)).
 
+A [graph](graph.md) wrapper vendors the same way, as a tree: copy `julia/`
+whole (the graph module, `graph.toml`, and each library's `<target>/lib/`
+directory), include the graph module, and leave each library's wrapper where
+the graph module expects it. The graph module opens the libraries
+dependencies first, and each binds the copies opened before it (by soname on
+Linux, by a path relative to its wrapper on Windows), so a moved graph keeps
+using its own libraries.
+
 Alternatives:
 - `RepliBuild.use("box2d")` at runtime, once that name is registered (scripts,
   not precompiled packages).

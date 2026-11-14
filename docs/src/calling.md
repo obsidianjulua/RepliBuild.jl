@@ -95,7 +95,21 @@ free function a `Ptr{Cvoid}` (`M.cJSON_free(Ptr{Cvoid}(p))`; the `Cstring` itsel
 is a `MethodError`), or give a buffer the library got from `malloc` to
 `M.libc_free(p)`.
 
-**Pointers and references.** `T*` → `Ptr{T}`, `T**` → `Ptr{Ptr{T}}`, `T&` → `Ref{T}`.
+**Pointers and references.** A pointer or reference **return** is typed from
+its declaration: `T*`, `const T*` and `T&` return `Ptr{T}`, `T**` returns
+`Ptr{Ptr{T}}`, when the wrapper emits `T` (an opaque `struct T end` handle
+included). `void*`, function pointers, types the wrapper does not emit, and
+records that are `mutable struct`s in Julia (unions, bitfield records) return
+`Ptr{Cvoid}`. Typing is not ownership: a typed pointer gets no finalizer, and
+memory the library owns (`GetIO()`) stays the library's. A pointer
+**parameter** takes a `Ptr{T}` or a `Ref{T}`, and in a C++ wrapper also a
+`Managed` object, a `String` for a `char*`, or anything else Julia converts
+with `Base.unsafe_convert`.
+
+**ABI traps.** A function the wrapper cannot call correctly on this host — a
+`long double` by value, a record whose layout DWARF does not settle — is still
+defined, and calling it throws an error that starts `ABI Safety Trap` and
+names the reason. The rest of the module is unaffected.
 
 ## Arguments
 
@@ -116,6 +130,18 @@ value and `to_chars(…, long long, int)` an `Int64`, while the `base` they
 agree on takes any `Integer`. Two C types that are one width on the host
 (`int` and `long` on Windows, `long` and `long long` on Linux) are one
 method, taking any `Integer`.
+
+**C++ overloads** of one name are one Julia function with several methods, and
+the positions the overloads disagree on are typed so Julia dispatches between
+them; every other position stays loose. A pointer where one overload takes
+`const char*` and another `const void*` takes `Union{AbstractString, Cstring,
+Ptr{UInt8}, Ptr{Int8}, AbstractVector{UInt8}}` in the first method, so a
+`String` selects it; a pointer to a record takes `Ptr{T}`, `Ref{T}`, an
+`AbstractVector{T}` or the record's owning types; an enum position takes that
+enum, never a plain integer (which belongs to an integer overload). An argument
+that fits none of the methods is a `MethodError`, never a call to the wrong
+overload. An rvalue overload (`f(T&&)`) beside its `f(const T&)` twin is not
+emitted: Julia has no moves, and the copy is what a caller means.
 
 **Variadic functions** have one function per overload declared in
 `[wrap.varargs]`, named after its variadic types: `lua_pushfstring_Cstring(L,
@@ -201,9 +227,74 @@ withptr(f, h) = (r = Ref(h); GC.@preserve r f(Base.unsafe_convert(Ptr{typeof(h)}
 name = withptr(node -> pugi_xml_node_name(node), root)
 ```
 
+### Values that cross by value
+
+A C++ function that takes or returns a record **by value** gets that record's
+Julia struct, built from its DWARF layout, whoever declared it — the library,
+or the C++ standard library:
+
+| C++ | Julia |
+|:----|:------|
+| `std::pair<double, double>` | `pair_double_double` with fields `first`, `second` |
+| `std::array<double, 2>` | `array_double_2UL`, the elements in `_M_elems` |
+| `std::tuple<int, double>`, `std::optional<double>` | a struct laid out from the standard library's bases (libstdc++ stores a tuple's elements in reverse) |
+| `std::complex<double>` / `<float>` | `complex_double` / `complex_float`, one `ComplexF64` / `ComplexF32` field |
+| `std::string_view` | its pointer and length |
+| `std::string` **returned** | a Julia `String` |
+| a library record holding any of these | its fields, the standard-library ones included |
+
+```julia
+r = M.minmax_pair(3.0, 1.5)                 # std::pair<double, double>
+(r.first, r.second)                         # (1.5, 3.0)
+M.pair_sum(M.pair_double_double(1.25, 2.5)) # a pair passed by value
+```
+
+Standard-library types appear in the wrapper only when an exported function
+or global reaches them by value, so the wrapper stays the library's API, not a
+binding of the standard library. A record that cannot be laid out (one with a
+virtual base, or one holding a type nothing lays out) keeps its functions as
+ABI traps.
+
+**`std::string` returns.** A function returning `std::string` by value
+returns a `String`: the wrapper reads the characters where C++ built the
+object, then runs the string's destructor there. The name keeps libstdc++'s
+ABI tag (`short_str_abi_cxx11`). When the wrapper cannot decode the string —
+metadata from before the layout was recorded (rebuild), a `std::wstring` or
+other wide string, an unknown standard-library layout — the function returns
+the object's raw bytes instead, and a comment beside the call in the wrapper
+says why. A `std::string` **parameter** is not built yet: it takes the
+object's byte stand-in, which a caller cannot construct, so call an overload
+that takes `const char*` where the library has one.
+
+**Classes returned by value.** A class with a non-trivial copy constructor or
+destructor is returned through a buffer the wrapper owns: C++ constructs it
+there, as C++ itself would, and the function returns its bytes as the Julia
+value. Its destructor is not run (a `std::string` is the exception), so a
+class that owns resources is better reached through a factory or `Managed`
+type, and the Julia copy of a class that points into itself still points at
+the buffer it was built in.
+
 **Exceptions.** A C++ exception that escapes the callee arrives as
 `RepliBuild.JITManager.CxxException` with the original `what()` string. Catch it
 like any Julia exception.
+
+## A graph module
+
+A [graph](graph.md) wrapper is one module holding one submodule per library:
+`Libwebp.Webp`, `Libwebp.Libwebpmux`. Call each library through its submodule.
+A type several libraries use is one type, so values move between them with no
+conversion:
+
+```julia
+include("julia/HelloWorld.jl")
+H, W = HelloWorld.Hello, HelloWorld.World
+W.Vec2 === H.Vec2            # true: World imports Hello's type
+W.Happy === H.Happy          # an imported enum brings its values
+W.hw_travel(H.hw_vec2(0f0, 0f0), H.hw_vec2(3f0, 4f0))   # Hello's values into World: 5.0f0
+```
+
+Load the graph module, never one library's wrapper on its own: a wrapper that
+imports types reaches its owners through the graph module.
 
 ## Introspection
 
