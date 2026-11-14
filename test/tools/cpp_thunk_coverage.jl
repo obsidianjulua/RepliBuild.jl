@@ -46,13 +46,23 @@
 #               long double by value               `_x87_trap_body`
 #               unmapped type (FFI trap)           BRANCH 0's "FFI Safety Trap"
 #             and, for the record traps, which record blocks how many functions.
-#   dropped   in the surface, neither bound nor trapped, by what the
-#             generator did:
+#   expected  in the surface, not bound, and meant: several C++ entry points a
+#             Julia caller cannot tell apart stand behind one Julia method, so
+#             these are set aside, not missed:
 #               destructor variant       D0/D1/D2 of a class another variant of which
 #                                        is bound: one Julia method by construction
+#               const/non-const pair     same parameters, receiver constness only
+#               rvalue twin              a `T&&` overload beside its `const T&` twin,
+#                                        which the generator does not emit
+#               one width, two spellings `set_value(long)` beside `(long long)` on LP64
+#   dropped   in the surface, neither bound, trapped nor expected: a distinct
+#             entry point lost, by what the generator did:
+#               overload set collapsed   another overload of the C++ name is bound and
+#                                        the two became one `::Any` signature
+#               name derivation          another C++ function spells to the same Julia
+#                                        name (`operator<` and `operator>` are both `_`)
 #               dispatch collision       its thunk is in the manifest, so a chunk was
 #                                        emitted, and `_dedup_method_chunks` dropped it
-#                                        for a later chunk with the same `::Any` signature
 #               varargs                  variadic and not declared in [wrap.varargs]
 #               not emitted              nothing in the wrapper names it
 #   types     the records the wrapper defines: with fields, as a byte blob
@@ -63,8 +73,10 @@
 #             and factory structs are counted apart.
 #
 # Prints a Markdown table per library, the totals, the misses by cause
-# (sorted by count, the first symbols of each), the trapped records, and one
-# summary line:  cpp coverage: <bound>/<surface> (<pct>%), traps <n>, dropped <n>
+# (sorted by count, the first symbols of each), the expected drops, the
+# trapped records, and one summary line over the callable surface (the
+# surface less the expected drops):
+#   cpp coverage: <bound>/<callable> (<pct>%), traps <n>, dropped <n>, expected <n>
 #
 # Vacuous green is refused: at least one library must be measured and the
 # total surface must be nonzero.
@@ -382,7 +394,8 @@ function measure(lib)
 
     tier3 = String[]; tier2 = String[]
     traps = Dict{String,Vector{String}}()          # cause => symbols
-    dropped = Dict{String,Vector{String}}()        # cause => symbols
+    dropped = Dict{String,Vector{String}}()        # cause => symbols: misses
+    expected = Dict{String,Vector{String}}()       # cause => symbols: drops the generator means
     blocked = Dict{String,Int}()                   # record => functions it traps
     bound = Set{String}()
     for m in surface
@@ -393,6 +406,28 @@ function measure(lib)
     _cxx_name(m) = (d = String(get(byman[m], "demangled", "")); i = findfirst('(', d);
                     i === nothing ? d : d[1:prevind(d, i)])
     bound_names = Set(_cxx_name(m) for m in bound)
+    # The generator's own name for a function (`_julia_function_name`), so a
+    # drop can be told from a name two C++ functions share once spelled.
+    _jl_name(f) = begin
+        nm = String(get(f, "name", "")); cls = String(get(f, "class", ""))
+        RepliBuild.Wrapper._julia_function_name(
+            get(f, "is_method", false) == true && !isempty(cls) ? "$(cls)_$nm" : nm, String(get(f, "mangled", nm)))
+    end
+    _arity(f) = length(get(f, "parameters", Any[]))
+    bound_jl = Dict{Tuple{String,Int},Vector{String}}()
+    for b in bound
+        push!(get!(bound_jl, (_jl_name(byman[b]), _arity(byman[b])), String[]), b)
+    end
+    # Parameter shapes a Julia caller cannot tell apart: the C types with
+    # `const` and `&&`→`&` normalised (an rvalue beside its lvalue twin), and
+    # with every integer at the Julia type it names on this host (two C
+    # spellings of one width).
+    _norm(c) = replace(replace(String(c), r"\b(const|volatile)\b\s*" => ""), r"\s+" => "")
+    _lv_shape(f) = [replace(_norm(get(p, "c_type", "")), "&&" => "&") for p in get(f, "parameters", Any[])]
+    _has_rvalue(f) = any(p -> endswith(_norm(get(p, "c_type", "")), "&&"), get(f, "parameters", Any[]))
+    _width_shape(f) = [(jt = String(get(p, "julia_type", "")); jt in RepliBuild.Wrapper._INTEGER_CTYPES ?
+                        RepliBuild.Wrapper._concrete_ctype(jt) : _norm(get(p, "c_type", "")))
+                       for p in get(f, "parameters", Any[])]
     for m in surface
         f = byman[m]
         if m in ccall_targets
@@ -409,20 +444,34 @@ function measure(lib)
         else
             g = _dtor_group(m)
             twin = const_twin(m)
-            cause = if g !== nothing && any(b -> _dtor_group(b) == g, bound)
-                "destructor variant (one Julia method per class)"
+            same_name = get(bound_jl, (_jl_name(f), _arity(f)), String[])
+            cxx = _cxx_name(m)
+            siblings = [b for b in same_name if _cxx_name(b) == cxx]
+            # Expected: what the generator drops on purpose, one Julia method
+            # standing for several C++ entry points a Julia caller cannot tell
+            # apart. Dropped: a distinct, callable entry point lost.
+            if g !== nothing && any(b -> _dtor_group(b) == g, bound)
+                push!(get!(expected, "destructor variant (D0/D1/D2: one Julia method per class)", String[]), m)
             elseif twin !== nothing && twin in bound
-                "const/non-const overload pair collapsed to one signature"
-            elseif get(f, "is_vararg", false) == true
-                "varargs not declared in [wrap.varargs]"
-            elseif _cxx_name(m) in bound_names
-                "overload set collapsed to one ::Any signature (another overload is bound)"
-            elseif m in manifest
-                "dispatch collision (thunk in manifest, chunk dropped by dedup)"
+                push!(get!(expected, "const/non-const method pair (receiver constness; one kept)", String[]), m)
+            elseif _has_rvalue(f) && any(b -> !_has_rvalue(byman[b]) && _lv_shape(byman[b]) == _lv_shape(f), siblings)
+                push!(get!(expected, "rvalue-reference overload beside its lvalue twin (not emitted)", String[]), m)
+            elseif any(b -> _width_shape(byman[b]) == _width_shape(f), siblings)
+                push!(get!(expected, "integer overload of one width in another C spelling (one kept)", String[]), m)
             else
-                "not emitted"
+                cause = if get(f, "is_vararg", false) == true
+                    "varargs not declared in [wrap.varargs]"
+                elseif !isempty(siblings)
+                    "overload set collapsed to one ::Any signature (another overload is bound)"
+                elseif !isempty(same_name)
+                    "Julia name shared with another C++ function (name derivation: `$(_jl_name(f))`)"
+                elseif m in manifest
+                    "dispatch collision (thunk in manifest, chunk dropped by dedup)"
+                else
+                    "not emitted"
+                end
+                push!(get!(dropped, cause, String[]), m)
             end
-            push!(get!(dropped, cause, String[]), m)
         end
     end
 
@@ -437,8 +486,9 @@ function measure(lib)
 
     return (; row = lib.row, ok = true, surface = length(surface), tier3 = length(tier3), tier2 = length(tier2),
             ntrap = sum(length, values(traps); init = 0), ndrop = sum(length, values(dropped); init = 0),
-            traps, dropped, blocked, kinds, imported, excluded, unexported, earlier, unused_thunks, foreign_thunks,
-            byman, generator = gen === nothing ? "?" : gen.captures[1], indexed = lib.indexed)
+            nexpected = sum(length, values(expected); init = 0),
+            traps, dropped, expected, blocked, kinds, imported, excluded, unexported, earlier, unused_thunks,
+            foreign_thunks, byman, generator = gen === nothing ? "?" : gen.captures[1], indexed = lib.indexed)
 end
 
 # ─── report ──────────────────────────────────────────────────────────────────
@@ -452,18 +502,19 @@ pct(a, b) = b == 0 ? "—" : string(round(100a / b; digits = 2))
 _short(s, n = 90) = length(s) > n ? s[1:prevind(s, n)] * "…" : s
 _dem(r, m) = _short(String(get(r.byman[m], "demangled", m)))
 
-println("| Library | Bound / surface | % | Tier 3 | Tier 2 | Traps | Dropped | Excluded / earlier | Types f/b/u/o/i | Generator |")
-println("|---|---|---|---|---|---|---|---|---|---|")
+println("| Library | Bound / callable | % | Tier 3 | Tier 2 | Traps | Dropped | Expected | Excluded / earlier | Types f/b/u/o/i | Generator |")
+println("|---|---|---|---|---|---|---|---|---|---|---|")
 for r in rows
     if !r.ok
-        println("| $(r.row) | — | — | | | | | $(r.note) | | |")
+        println("| $(r.row) | — | — | | | | | | $(r.note) | | |")
         continue
     end
     note = r.indexed ? "" : " (not indexed)"
     b = r.tier3 + r.tier2
+    callable = r.surface - r.nexpected
     k = r.kinds
-    println("| $(r.row)$note | $b/$(r.surface) | $(pct(b, r.surface)) | $(r.tier3) | $(r.tier2) | $(r.ntrap) | ",
-            "$(r.ndrop) | $(r.excluded == 0 ? "" : r.excluded)$(r.earlier == 0 ? "" : " / $(r.earlier) earlier") | ",
+    println("| $(r.row)$note | $b/$callable | $(pct(b, callable)) | $(r.tier3) | $(r.tier2) | $(r.ntrap) | ",
+            "$(r.ndrop) | $(r.nexpected) | $(r.excluded == 0 ? "" : r.excluded)$(r.earlier == 0 ? "" : " / $(r.earlier) earlier") | ",
             "$(k[:fields])/$(k[:blob])/$(k[:byte_record])/$(k[:opaque])/$(r.imported) | $(r.generator) |")
 end
 
@@ -472,11 +523,15 @@ tier3 = sum(r -> r.tier3, ok; init = 0)
 tier2 = sum(r -> r.tier2, ok; init = 0)
 ntrap = sum(r -> r.ntrap, ok; init = 0)
 ndrop = sum(r -> r.ndrop, ok; init = 0)
+nexpected = sum(r -> r.nexpected, ok; init = 0)
 bound = tier3 + tier2
+callable = surface - nexpected
 println()
 println("libraries measured: $(length(ok)) of $(length(rows)) rows")
 println("surface (unique mangled, net of exclusions, not-exported and earlier-bound): $surface")
-println("bound:   $bound/$surface = $(pct(bound, surface))%  (tier 3: $tier3, tier 2: $tier2)")
+println("expected drops (several C++ entry points behind one Julia method, by design): $nexpected")
+println("callable (surface less expected): $callable")
+println("bound:   $bound/$callable = $(pct(bound, callable))%  (tier 3: $tier3, tier 2: $tier2)")
 println("traps:   $ntrap   dropped: $ndrop   unexported: $(sum(r -> r.unexported, ok; init = 0))")
 println("thunks in a manifest nothing invokes: $(sum(r -> r.unused_thunks, ok; init = 0))" *
         "   thunks invoked outside the surface (STL members): $(sum(r -> r.foreign_thunks, ok; init = 0))")
@@ -506,6 +561,20 @@ for (c, xs) in sort!(collect(causes); by = x -> (-length(x[2]), x[1]))
     end
 end
 
+exp_causes = Dict{String,Vector{Tuple{String,String}}}()
+for r in ok, (c, ms) in r.expected, m in ms
+    push!(get!(exp_causes, c, Tuple{String,String}[]), (r.row, m))
+end
+if !isempty(exp_causes)
+    println("\nexpected drops (not misses):")
+    for (c, xs) in sort!(collect(exp_causes); by = x -> (-length(x[2]), x[1]))
+        println("  $(length(xs))  $c")
+        for (row, m) in xs[1:("--list" in ARGS ? end : min(3, end))]
+            println("        $row  ", _dem(byrow[row], m))
+        end
+    end
+end
+
 blocked = Dict{String,Int}()
 for r in ok, (rec, n) in r.blocked
     blocked[rec] = get(blocked, rec, 0) + n
@@ -518,7 +587,7 @@ if !isempty(blocked)
 end
 
 println()
-println("cpp coverage: $bound/$surface ($(pct(bound, surface))%), traps $ntrap, dropped $ndrop")
+println("cpp coverage: $bound/$callable ($(pct(bound, callable))%), traps $ntrap, dropped $ndrop, expected $nexpected")
 
 isempty(ok) && error("no C++ library was measured: nothing to report")
 surface > 0 || error("the measured surface is empty: the metadata lists no functions")

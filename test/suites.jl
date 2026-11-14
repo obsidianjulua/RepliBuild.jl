@@ -98,6 +98,7 @@ const TESTS = TestFile[
     T("test_toolchain_records.jl", :unit, [:dwarf, :cpp]),
     T("test_record_scope.jl", :unit, [:dwarf, :cpp]),
     T("test_integer_width_overloads.jl", :unit, [:cpp]),
+    T("test_tier2_typed_dispatch.jl", :unit, [:cpp]),
     T("test_cpp_return_resolution.jl", :unit, [:cpp]),
     T("test_typed_pointer_returns.jl", :unit, [:c, :cpp]),
     T("test_tier2_scalar_widths.jl", :unit, [:cpp]),
