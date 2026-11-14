@@ -335,7 +335,10 @@ const W = RepliBuild.Wrapper
         # the thunk set was derived twice — by AOT from metadata, by wrap from
         # the dispatch decision — and Clipper2 lost 7 of 156. Wrap's AOT stage
         # compiles from its own set now; this check still runs after it.
-        taken = Dict("_FPTR__ZN1A1fEv" => "_ZN1A1fEv")
+        # Registered the way the generator registers a slot: the table maps it
+        # to the thunk it resolves.
+        taken = Dict{String,String}()
+        @test W._aot_fptr_const_name!(taken, "_ZN1A1fEv") == "_FPTR__ZN1A1fEv"
         text  = "RepliBuild.JITManager.invoke_aot_ptr(_FPTR__ZN1A1fEv[], Cint)"
 
         # The two derivations the check and the emitted table share. If these
@@ -343,6 +346,16 @@ const W = RepliBuild.Wrapper
         @test W._aot_thunk_slot_names(text, taken) == ["_FPTR__ZN1A1fEv"]
         @test W._aot_thunk_symbol(taken, "_FPTR__ZN1A1fEv") ==
               "_mlir_ciface__ZN1A1fEv_thunk"
+        # A return built in the caller's buffer resolves its own thunk, under a
+        # slot still named from the mangled symbol (2026-11-13).
+        t2 = Dict{String,String}()
+        s2 = W._aot_fptr_const_name!(t2, "_ZN1A1gEv"; thunk = "_ZN1A1gEv_thunk_inplace")
+        @test s2 == "_FPTR__ZN1A1gEv"
+        @test W._aot_thunk_symbol(t2, s2) == "_mlir_ciface__ZN1A1gEv_thunk_inplace"
+        # The manifest scan finds an in-place call in both spellings, by its
+        # mangled symbol: the JIT string, and the AOT slot.
+        @test W._thunks_named_in_text("invoke(\"_mlir_ciface__Z1bv_thunk_inplace\", p, 1)\n" *
+                                      "invoke_aot_ptr($(s2)[], p)", t2) == Set(["_Z1bv", "_ZN1A1gEv"])
         @test occursin("\"$(W._aot_thunk_symbol(taken, "_FPTR__ZN1A1fEv"))\"",
                        W._aot_thunk_slot_chunk(text, taken))
 
