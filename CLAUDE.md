@@ -1328,6 +1328,26 @@ check before claiming portability again; reading `.gitignore` does not settle it
   names: a trap stub is not coverage, and a name a recipe's `exclude_symbols`
   drops (glfw's `_glfw*`) is excluded, not missed. Not an open problem any
   more; kept for the method.
+- **C++ coverage** is measured by `test/tools/cpp_thunk_coverage.jl`, the C
+  tool's twin (reads the Hub's wrappers, `compilation_metadata.json`,
+  `thunk_manifest.json` and the graph manifests as they are; rebuilds
+  nothing; pass the Hub's path). The surface is one function per mangled
+  symbol net of `exclude_symbols`; bound means a `ccall` target or an invoked
+  thunk in the PARSED code (`_mlir_ciface_<m>_thunk`, an AOT slot through
+  `_THUNK_SLOTS`, an AOT virtual `thunk_<m>`), never the manifest alone;
+  every miss is a trap split by the generator's reason text or a drop split
+  by what the generator did. 2026-11-13, 4.4.0 wrappers, 12 C++ libraries:
+  98.0%, 6 traps, 89 drops. The three causes, by count: an overload set
+  collapsing to one `::Any` signature so only one overload is reachable
+  (pugixml's `set_value(long)`/`(unsigned long)`, imgui's `GetID(const
+  char*)`); the D0/D1/D2 variants of one destructor, one Julia method by
+  construction, which is right; and a `const`/non-`const` method pair
+  collapsing the same way (tinyxml2's `ToElement()` and kin). The first and
+  third are the one problem: Tier 2 parameters are `::Any`, so dispatch
+  cannot tell the overloads apart. The 6 traps are fmt's `long double` and
+  `allocator<char>` and clipper2's `std::function`, all by value. The
+  manifest lists thunks for chunks the dedup dropped (87 across the Hub),
+  which the JIT compiles for nothing.
 - **Over-aligned records, what the C sret and byval fixes do not cover**
   (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
   path has no aligned buffer, and every alignment DWARF records (the record's,
