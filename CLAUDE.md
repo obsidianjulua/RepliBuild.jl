@@ -3,7 +3,8 @@
 Guidance for Claude Code working in this repository. This file is loaded into every
 session, so it holds **only what changes how you work here**: commands, architecture,
 invariants that must not be broken, and open problems. History — measurements, blast
-radii, dated sweeps, how a bug was found — belongs in `CHANGELOG.md` and git, not here.
+radii, dated sweeps, how a bug was found — belongs in the pull request that shipped it and in git, not here;
+`CHANGELOG.md` is compiled from merged PRs at release registration.
 The pre-2026-09-22 long-form version of this file is in git history if a rationale is
 ever needed (`git log -p -- CLAUDE.md`).
 
@@ -446,6 +447,17 @@ the test named when you touch the area.
   `_runtime_symbol_names`, the one source for "what the loader binds"
   (`verify_wrap_surface` reads it too). One unbindable thunk fails the library's
   whole JIT module. (`test_windows_port.jl`, `test_libcxx_exports.jl`.)
+  **A callee outside that set is bound only through the library's own
+  handle** (2026-11-13): `extract_stl_method_symbols` admits an undefined
+  member of a listed container when `dlsym` through the library (opened
+  `RTLD_NOW | RTLD_LOCAL`, then closed) resolves it (`runtime_library`), and
+  `initialize_global_jit` pre-flights every callee the thunk module names
+  (`_preflight_callees`): the library's own are ORC's, a foreign one the
+  handle resolves is registered on that engine at that address
+  (`register_symbol`), never through `RTLD_DEFAULT`, whose answer could be
+  Julia's own libstdc++ (the zlib lesson), and one the handle cannot resolve
+  gets no thunk, since ORC blocks on an unresolved symbol instead of raising.
+  (`test_jit_runtime_symbols.jl`, devtests `test_jit_runtime_symbols_live.jl`.)
 - **libc++ 23 hides its own functions** with a `#pragma clang attribute` in
   `__configuration/namespace.h`. It applies on COFF too, and no macro opts out. On
   MinGW clang turns hidden into `-exclude-symbols:`, so those members never reach the
@@ -455,6 +467,21 @@ the test named when you touch the area.
   twin wins) and stay unbound.
 - `nm -D` output is parsed only by `Compiler._nm_dynamic_names`, which cuts ELF
   `@VER`/`@@VER` suffixes. Mangled output only: demangled names can contain `@`.
+- **A symbol's mangled and demangled names are paired by position, never by
+  address** (`_pair_nm_outputs`, 2026-11-13): `extract_symbols_from_binary`
+  takes both `nm` listings with `-p` (the symbol table's own order; nm's
+  default sort collates demangled names under `-C`) and reads them line by
+  line. Several symbols share an address: Tier 1's `__rb_` aliases, and
+  clang's constructor and destructor aliases (`-mconstructor-aliases`; at
+  `-O1` and above a derived class's trivial destructor is its base's D2), so
+  an address map gave tinyxml2's `~XMLComment` the symbol of `~XMLNode`. The
+  map stays only as the fallback for listings that do not line up. The
+  ORDER of the metadata's functions, which every wrapper follows, is still
+  nm's sorted demangled listing (`_order_like_listing`): it is a locale
+  collation (`en_US.UTF-8` folds case and skips punctuation) that nothing in
+  Julia reproduces, so a third `nm -gC` call supplies it, with D1 before D2
+  among aliases so the dedup keeps the variant it always kept.
+  (`test_symbol_hygiene.jl`, `test_cpp_finalizers.jl` and its live twin.)
 - **AOT thunks are compiled by wrap's last stage, never by build.** Only the C++
   generator knows which thunks a wrapper binds. It writes that set to
   `thunk_manifest.json` on **every** wrap, JIT included (JITManager compiles only
@@ -670,7 +697,11 @@ the test named when you touch the area.
   structs, enums, `Managed`, factory structs, upcasts, setters, the layout
   table). An imported type is one `const` naming the owner's through
   `Base.parentmodule(@__MODULE__)` (`..Owner.X` is import syntax, not an
-  expression), emitted before the enums; `_assert_no_imported_redefinition`
+  expression), emitted before the enums, and an imported enum brings one more
+  per enumerator, aliasing the name the owner's text BINDS (the manifest's
+  `enumerators`: `[base, bound, value]`), with the owner's collision rule
+  applied against the importer's own names (`World.Happy === Hello.Happy`; the
+  Hub's hello_world report, 2026-11-11); `_assert_no_imported_redefinition`
   refuses a text that defines one. The owner's `Managed`, factory struct and
   `<f>_safe` are the owner's alone; `has_subclass` is widened with
   `graph_subclassed`; a function an earlier wrapper binds is dropped; a
@@ -1087,9 +1118,18 @@ the test named when you touch the area.
   `_glfw` state global kept glibc's `pthread_mutex_t` and friends. It never promotes an STL
   container (`stl_container_size`; those keep their own path) or an
   `INTERNAL_TYPE_BLOCKLIST` name, and a library record of the same name keeps its
-  entry. Still traps, with no entry to promote: libstdc++'s `tuple` and `optional`
-  (no member of their own), `complex` (clang names both `_Complex` widths
-  `complex`). A 1-byte empty base (`__pair_base`, a library `Tag`) is marked
+  entry. **A toolchain record is laid out from its bases** (2026-11-13,
+  `_laid_out_from_bases`): libstdc++'s `tuple` and `optional` have no member of
+  their own, so the parser gives a toolchain record whose bytes come from
+  non-virtual bases an entry (a library record still gets none), and promotion
+  puts every non-empty base's members, at depth, at the base's offset, in
+  place of the base; a shared name is numbered (`_M_head_impl_1`), and a union
+  drops a 1-byte empty-record member (`_Storage`'s `_Empty_byte`). Readers then
+  see members at offsets, as for any record. `complex` is sized by the parser
+  (`_complex_base_name`). `std::complex<long double>` is callable on both
+  conventions: MEMORY (sret) on x86-64 SysV, an HFA of two `f128` on AArch64
+  (`long double` is a quad there), so a test reading one back reads it in C++,
+  never by decoding x87 bytes. A 1-byte empty base (`__pair_base`, a library `Tag`) is marked
   `"empty"` on the base entry and the SysV classifier skips it; unmarked, every
   record deriving from one trapped, the library's own included. Whether a member
   is held by value reads `_outside_template_args` (`pair<int*, bool>` is a
@@ -1368,6 +1408,26 @@ check before claiming portability again; reading `.gitignore` does not settle it
   names: a trap stub is not coverage, and a name a recipe's `exclude_symbols`
   drops (glfw's `_glfw*`) is excluded, not missed. Not an open problem any
   more; kept for the method.
+- **C++ coverage** is measured by `test/tools/cpp_thunk_coverage.jl`, the C
+  tool's twin (reads the Hub's wrappers, `compilation_metadata.json`,
+  `thunk_manifest.json` and the graph manifests as they are; rebuilds
+  nothing; pass the Hub's path). The surface is one function per mangled
+  symbol net of `exclude_symbols`; bound means a `ccall` target or an invoked
+  thunk in the PARSED code (`_mlir_ciface_<m>_thunk`, an AOT slot through
+  `_THUNK_SLOTS`, an AOT virtual `thunk_<m>`), never the manifest alone;
+  every miss is a trap split by the generator's reason text or a drop split
+  by what the generator did. 2026-11-13, 4.4.0 wrappers, 12 C++ libraries:
+  98.0%, 6 traps, 89 drops. The three causes, by count: an overload set
+  collapsing to one `::Any` signature so only one overload is reachable
+  (pugixml's `set_value(long)`/`(unsigned long)`, imgui's `GetID(const
+  char*)`); the D0/D1/D2 variants of one destructor, one Julia method by
+  construction, which is right; and a `const`/non-`const` method pair
+  collapsing the same way (tinyxml2's `ToElement()` and kin). The first and
+  third are the one problem: Tier 2 parameters are `::Any`, so dispatch
+  cannot tell the overloads apart. The 6 traps are fmt's `long double` and
+  `allocator<char>` and clipper2's `std::function`, all by value. The
+  manifest lists thunks for chunks the dedup dropped (87 across the Hub),
+  which the JIT compiles for nothing.
 - **Over-aligned records, what the C sret and byval fixes do not cover**
   (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
   path has no aligned buffer, and every alignment DWARF records (the record's,
@@ -1418,13 +1478,12 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
-- Toolchain records by value with no layout to keep stay ABI traps (2026-11-08):
-  libstdc++'s `std::tuple` and `std::optional` are bases all the way down, with no
-  member of their own and so no definition; `std::complex`'s member is
-  `__complex__ double`, and clang names `_Complex float` and `_Complex double`
-  both `complex`. Laying out a record from its bases, and reading the complex
-  width from `byte_size`, would cover them. Everything else the library reaches
-  by value now keeps its layout (above).
+- Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
+  `optional` and `complex` are laid out, above): one with a virtual base, a
+  struct (not a union) holding an empty record as a member, and anything
+  holding a type nothing lays out. libc++'s `tuple` (`__tuple_impl` over
+  `__tuple_leaf` bases) has the same shape as libstdc++'s and is not yet
+  measured on a libc++ host.
 - `parse_dwarf_dump` holds the whole `readelf` dump and every DIE as a `Dict`.
   oneDNN's (`libonednn.so`) parse passed a 24 GB cap and was OOM-killed at
   2519a16 (2026-10-29), so a oneDNN build needs most of a 64 GB box. A streaming
@@ -1494,8 +1553,8 @@ DWARF-resolved destructors — **is** built.)
   `boostcharconv`, `boostjson`, each `boostorg/boost` with `submodules` set to
   the closure `tools/boostdep/depinst/depinst.py` computes (the guide's Boost
   section has the recipe). Not built: a decoder for a `std::string` returned by
-  value (a 32-byte stand-in, libstdc++'s size; libc++'s object is 24), and
-  binding the STL members that live in the C++ runtime library (below).
+  value (a 32-byte stand-in, libstdc++'s size; libc++'s object is 24), and a
+  `std::string` table without the instantiation TU (below).
 - **`long double` by value is a trap on every tier** (scoped 2026-11-03, not
   built). The scalar is x87 extended precision: SysV passes it in memory and
   returns it in `ST0`, which `ccall` cannot reach, so Tier 3 can never carry
@@ -1514,17 +1573,43 @@ DWARF-resolved destructors — **is** built.)
   boostcharconv (`to_chars(long double)` and kin) and 3 in fmt, no consumer
   behind them, and MSVC's `long double` is a `double`, so Windows-native
   libraries rarely expose it. About three days with both hosts verified.
-- STL members that live in the C++ runtime library are unbound: libc++'s
-  `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
-  them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches
-  only the wrapped library. Binding them needs the engine to also search the
-  library's runtime dependencies (2026-10-16).
+- STL members that live in the C++ runtime library (2026-10-16, corrected
+  2026-11-13). On Linux they bind: a `[types] templates` entry instantiates
+  every member in the library itself (stl_test: 205 `basic_string` members
+  defined, none undefined), and a member a library calls in libstdc++ without
+  instantiating it resolves through the library's OWN handle, since glibc's
+  `dlsym` searches a library's dependency tree (382 of 382 undefined `std::`
+  symbols across the Hub's C++ libraries, once nm's `@GLIBCXX_…` version
+  suffix is cut from the name; with it on, none resolve, which is what the
+  earlier entry measured). `extract_stl_method_symbols` admits such a member
+  to the table (`runtime_library`) and `initialize_global_jit` pre-flights
+  every callee through the handle and binds a foreign one on the engine at
+  that address (`_preflight_callees`, `register_symbol`), never through
+  `RTLD_DEFAULT`. What stays unbound: Windows/libc++, where a DLL handle sees
+  only its own exports (`libc++.dll` exports the extern-template members, so
+  a named search of it would be the shape), and a container a library uses
+  but does not list in `[types] templates`, which has no table at all. AOT
+  thunks need nothing: the thunks library leaves a libstdc++ callee undefined
+  and binds it at `dlopen` from the global scope, where Julia's bundled
+  libstdc++ comes first; ABI-compatible for `basic_string`, and a symbol newer
+  than Julia's copy would miss there.
+- `std::string` without the instantiation TU (2026-11-13; what the
+  `std::string`-by-value decoder would want): a table built from the
+  libstdc++ the library's handle resolves (its `nm -D`, filtered to
+  `basic_string<char>` members the handle binds) instead of from the
+  library's own symbols. Not built: it reads another library's symbol table
+  at build, a step away from the compile's own DWARF as the source of truth,
+  so it is John's call. A `[types]` key that merely skipped the TU would give
+  a half table (only the members the library itself calls) and was refused.
 
 ## Maintaining this file
 
-- Keep it lean. When you fix something, put the story in `CHANGELOG.md` under
-  `## Unreleased`, and add a line here only if it creates a rule a future session must
-  follow.
+- Keep it lean. When you fix something, put the story in the pull request's
+  description under a `## Changelog` heading (dated title, what shipped, what was
+  found, which tests), and add a line here only if it creates a rule a future
+  session must follow. **A PR never edits `CHANGELOG.md`** (John, 2026-11-14): open
+  PRs conflicted on its Unreleased section, so that section is compiled from the
+  merged PRs' `## Changelog` headings when a release is registered.
 - Derived claims (counts, line numbers, versions, test totals) are what rot. Prefer
   naming the test that computes them over writing the number. Avoid `file:line`
   citations; name the function.

@@ -123,6 +123,7 @@ const TESTS = TestFile[
     T("test_windows_port.jl", :unit, [:build, :cpp]),
     T("test_thunk_manifest.jl", :unit, [:cpp]),
     T("test_stl_table_matching.jl", :unit, [:build, :cpp]),
+    T("test_jit_runtime_symbols.jl", :unit, [:build, :cpp]),
     T("test_libcxx_exports.jl", :unit, [:build, :cpp]),
     T("test_platform_overlay.jl", :unit, [:build]),
     T("test_portable_paths.jl", :unit, [:build]),
@@ -155,6 +156,7 @@ const TESTS = TestFile[
     # ── dev: compiles, links or JITs ─────────────────────────────────────────
     # The pipeline end to end on stress_test, and ingest on c_test's library.
     T("test_pipeline_live.jl", :dev, [:build], locks = ["stress_test"], after = ["fixture:stress_test"]),
+    T("test_jit_runtime_symbols_live.jl", :dev, [:build, :cpp], locks = ["stl_test"], after = ["fixture:stl_test"]),
     T("test_ingest_live.jl", :dev, [:build, :c], locks = ["c_test"], after = ["fixture:c_test"]),
     T("test_registry_local_first.jl", :dev, [:build], locks = ["c_test"], after = ["fixture:c_test"]),
     # The dialect: templates, exceptions, unwinding, AOT, invariants, producers, ABI.

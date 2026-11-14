@@ -79,3 +79,17 @@ public:
     static void DeletePooled(Pooled *p);
 };
 Pooled *spawn_pooled() noexcept;
+
+// A derived class whose destructor adds nothing: at -O1 and above clang emits
+// its D1/D2 as aliases of Leaf's D2 (`-mconstructor-aliases`), so the two
+// classes' destructors are one address with four names. Each must keep its
+// own name in the metadata; the Twig's owner frees through Twig's own D0.
+class Twig : public Leaf {
+public:
+    explicit Twig(int v);
+    ~Twig() override;
+    int extra() const;
+private:
+    int extra_;   // a member of its own, so the class has a DWARF entry
+};
+Twig *spawn_twig(int v) noexcept;

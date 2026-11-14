@@ -50,13 +50,17 @@ xl_probe_code(load::String, prelude::String) = """
     check("identity_leaf", M.Xb.Leaf === M.Xa.Leaf, (M.Xb.Leaf, M.Xa.Leaf))
     check("identity_pt", M.Xb.Pt === M.Xc.Pt && M.Xa.Pt === M.Xc.Pt, (M.Xb.Pt, M.Xa.Pt, M.Xc.Pt))
     check("identity_mode", M.Xb.Mode === M.Xc.Mode, (M.Xb.Mode, M.Xc.Mode))
+    # The enums' values come with them, from a C owner and a C++ owner alike.
+    check("enum_values", M.Xb.GREEN === M.Xa.GREEN && M.Xb.RED === M.Xa.RED && M.Xb.MODE_B === M.Xc.MODE_B &&
+                         M.Xa.MODE_C === M.Xc.MODE_C, (isdefined(M.Xb, :GREEN), isdefined(M.Xb, :MODE_B)))
     # The owners' values cross into xb's functions: a factory object (its
     # unsafe_convert is keyed on xa's type), a record by value through a Tier 2
     # thunk that needed xa's layout, an enum, the C owner's POD through C++.
     p = M.Xa.make_plain(3, 4.5)
     check("plain_value", p.x == 3 && p.y == 4.5, p)
     s = M.Xa.Shape(Int32(7))
-    check("use", M.Xb.use(s, p, M.Xa.GREEN) == 70 + 3 + 4 + 2, M.Xb.use(s, p, M.Xa.GREEN))
+    check("use", M.Xb.use(s, p, M.Xa.GREEN) == 70 + 3 + 4 + 2 && M.Xb.use(s, p, M.Xb.GREEN) == 79,
+          M.Xb.use(s, p, M.Xa.GREEN))
     q = M.Xb.twice(p)
     check("twice", q isa M.Xa.Plain && q.x == 6 && q.y == 9.0, q)
     pt = M.Xc.xc_make(1, 2.0)
@@ -89,7 +93,7 @@ xl_probe_code(load::String, prelude::String) = """
     """
 
 const XL_PROBES = ["identity_plain", "identity_color", "identity_shape", "identity_leaf", "identity_pt",
-                   "identity_mode", "plain_value", "use", "twice", "pt_c_owner", "mode", "virtual_dispatch",
+                   "identity_mode", "enum_values", "plain_value", "use", "twice", "pt_c_owner", "mode", "virtual_dispatch",
                    "subleaf_virtual", "derived_fields", "subleaf_fields", "holder", "layout_table",
                    "leaf_layout_not_handle", "shape_factory_struct", "imports_listed"]
 
@@ -159,7 +163,9 @@ else
               Dict("Derived" => "struct", "SubLeaf" => "struct", "Holder" => "struct")
         @test !isfile(libdir("xc") * "/" * W.TYPE_IMPORTS)                  # the first library imports nothing
         xa_imports = RepliBuild._read_json(libdir("xa") * "/" * W.TYPE_IMPORTS)["imports"]
-        @test sort(collect(keys(xa_imports))) == ["Pt"]
+        # Pt by value; Mode only through xc.h, which the header walk found: an
+        # owner emitted it, so xa imports it instead of emitting a second type.
+        @test sort(collect(keys(xa_imports))) == ["Pt", "__enum__Mode"]
         xb_imports = RepliBuild._read_json(libdir("xb") * "/" * W.TYPE_IMPORTS)["imports"]
         @test sort(collect(keys(xb_imports))) == ["Leaf", "Plain", "Pt", "Shape", "__enum__Color", "__enum__Mode"]
         @test xb_imports["Plain"]["module"] == "Xa" && xb_imports["Pt"]["module"] == "Xc"
@@ -176,6 +182,10 @@ else
             @test (name, occursin("Managed$name", xb)) == (name, false)
         end
         @test !occursin(r"^primitive type (Color|Mode)\b"m, xb)
+        for (v, owner) in (("GREEN", "Xa"), ("RED", "Xa"), ("MODE_B", "Xc"))
+            @test (v, occursin("\nconst $v = Base.parentmodule(@__MODULE__).$owner.$v\n", xb)) == (v, true)
+        end
+        @test occursin(r"^export [^\n]*\bGREEN\b"m, xb) && occursin(r"^export [^\n]*\bMODE_B\b"m, xb)
         @test !occursin(r":Plain => \d"m, xb) && occursin(r":Derived => 16"m, xb)
         derived = match(r"^struct Derived\n(.*?)\nend"ms, xb)
         @test derived !== nothing && occursin("id_::Cint", derived.captures[1]) && occursin("extra_::Cint", derived.captures[1])
@@ -184,6 +194,7 @@ else
         # The owner's text is the single-library shape plus its own import from xc.
         xa = read(out * "/" * libs[2]["wrapper"], String)
         @test occursin("\nconst Pt = Base.parentmodule(@__MODULE__).Xc.Pt\n", xa)
+        @test occursin("\nconst Mode = Base.parentmodule(@__MODULE__).Xc.Mode\n", xa) && !occursin("primitive type Mode", xa)
         @test occursin("\nstruct Plain\n", xa) && occursin("\nmutable struct Shape\n", xa) && occursin("\nstruct Leaf\n", xa)
         @test !occursin("Base.parentmodule", read(out * "/" * libs[1]["wrapper"], String))
     end

@@ -87,6 +87,8 @@ const _XT_CORE_FUNCTIONS = Any[
     _xt_row("_Z10make_plainid", "make_plain(int, double)";
             params = (_xt_p("x", "Cint", "int"), _xt_p("y", "Cdouble", "double")), ret = _xt_val("Plain", 16)),
     _xt_row("_Z11color_value5Color", "color_value(Color)"; params = (_xt_p("c", "Color", "Color"),), ret = _XT_INT),
+    # Named like an enumerator: XCore binds `GREEN()` and its enumerator becomes `Color_GREEN`.
+    _xt_row("_Z5GREENv", "GREEN()"; ret = _XT_INT),
     _xt_row("_Z8take_cfgN1a6ConfigE", "take_cfg(a::Config)"; params = (_xt_p("c", "Config", "Config"),), ret = _XT_INT),
     _xt_row("_Z7only_fn4Only", "only_fn(Only)"; params = (_xt_p("o", "Only", "Only"),), ret = _XT_INT),
     _xt_row("_Z6no_scope7NoScope", "no_scope(NoScope)"; params = (_xt_p("n", "NoScope", "NoScope"),), ret = _XT_INT),
@@ -116,6 +118,8 @@ const _XT_HIST_FUNCTIONS = Any[
     _xt_row("_Z5twice5Plain", "twice(Plain)"; params = (_xt_p("p", "Plain", "Plain"),), ret = _xt_val("Plain", 16)),
     _xt_row("_Z10spawn_histi", "spawn_hist(int)"; params = (_xt_p("n", "Cint", "int"),), ret = _xt_ptr("THist")),
     _xt_row("_Z8take_cfgN1b6ConfigE", "take_cfg(b::Config)"; params = (_xt_p("c", "Config", "Config"),), ret = _XT_INT),
+    # Named like an imported enumerator: XHist binds `RED()`, so the import is `Color_RED`.
+    _xt_row("_Z3REDv", "RED()"; ret = _XT_INT),
 ]
 
 # XTree: reaches THist by declaration (XHist is earlier) and TLater by
@@ -220,11 +224,16 @@ const _XT_CLIB = _xt_meta(_XT_C_FUNCTIONS, _XT_C_STRUCTS)
         @test core_manifest["types"]["Plain"]["layout"] == [16, 8]
         @test core_manifest["types"]["Config"]["scopes"] == ["a"]
         @test core_manifest["types"]["NoScope"]["scopes"] === nothing
+        # An enum's enumerators as bound: XCore's own `GREEN()` moved the enumerator.
+        @test core_manifest["types"]["__enum__Color"]["enumerators"] == [["RED", "RED", 1], ["GREEN", "Color_GREEN", 2]]
+        @test occursin("\nconst Color_GREEN = Color(2)\n", core_text) && occursin("\nconst RED = Color(1)\n", core_text)
+        @test core_manifest["types"]["Plain"]["enumerators"] === nothing
         @test "_Z11make_objectv" in core_manifest["bound_symbols"]
         @test !occursin("Base.parentmodule", core_text) && !occursin("IMPORTED_FROM", core_text)
         @test occursin("\nmutable struct ManagedTObject\n", core_text) && !occursin("\nmutable struct TObject\n", core_text)
         # No import, no import chunk, no sidecar.
-        @test _XT_W._type_imports_chunk(_XT_CORE["struct_definitions"], _XT_W._sanitize_cpp_type_name, _XT_CORE, ".") == ""
+        @test _XT_W._type_imports_chunk(_XT_CORE["struct_definitions"], _XT_W._sanitize_cpp_type_name, _XT_CORE, ".") ==
+              ("", Dict{String,Vector{String}}())
         d = mktempdir()
         _XT_W._write_type_imports(d, Dict{String,Any}())
         @test !isfile(joinpath(d, _XT_W.TYPE_IMPORTS))
@@ -320,6 +329,13 @@ const _XT_CLIB = _xt_meta(_XT_C_FUNCTIONS, _XT_C_STRUCTS)
         end
         @test !occursin("ManagedTObject", hist_text)
         @test !occursin("primitive type Color", hist_text)
+        # The enum's values come with it, aliasing what the owner binds: GREEN
+        # under XCore's collision name, RED under XHist's own (it binds `RED()`).
+        @test occursin("\nconst GREEN = Base.parentmodule(@__MODULE__).XCore.Color_GREEN\n", hist_text)
+        @test occursin("\nconst Color_RED = Base.parentmodule(@__MODULE__).XCore.RED\n", hist_text)
+        @test !occursin("\nconst RED = ", hist_text)
+        @test occursin(r"^export [^\n]*\bColor_RED\b"m, hist_text) && occursin(r"^export [^\n]*\bGREEN\b"m, hist_text)
+        @test hist_imports["__enum__Color"]["enumerators"] == [["RED", "RED", 1], ["GREEN", "Color_GREEN", 2]]
         sizes = match(r"^const STRUCT_SIZES = Dict\{Symbol,Int\}\(\n(.*?)\n\)"ms, hist_text)
         @test sizes !== nothing && occursin(":THist => 24", sizes.captures[1]) && occursin(":Config => 4", sizes.captures[1])
         @test !occursin(":Plain =>", hist_text) && !occursin(":TObject =>", hist_text)

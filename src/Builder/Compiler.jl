@@ -3300,27 +3300,42 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
         return Dict{String,Any}()
     end
 
-    # Run nm to get mangled names (include W=weak symbols for template instantiations)
-    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+    # Every global symbol, defined (T/W: the library's own, template
+    # instantiations among them) AND undefined (U: what the library calls in
+    # the C++ runtime), in the symbol table's own order (`-p`) so the two
+    # listings pair line by line (`_stl_methods_from_nm`).
+    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-gp", binary_path])
     if exitcode1 != 0
         @warn "nm failed for STL symbol extraction"
         return Dict{String,Any}()
     end
 
-    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gpC", binary_path])
     if exitcode2 != 0
         @warn "nm demangled failed for STL symbol extraction"
         return Dict{String,Any}()
     end
 
+    # An undefined member of a listed container is bindable when the library's
+    # OWN handle resolves it: glibc's dlsym searches a library's dependency
+    # tree, so libstdc++'s `basic_string<char>` members answer through the
+    # library that links them. A PE handle resolves only the DLL's own exports,
+    # so there the probe resolves none and nothing changes.
+    undefined = Set{String}(_nm_undefined_names(mangled_output))
+    resolvable = isempty(undefined) ? Set{String}() : _resolved_through_library(binary_path, undefined)
+
     (stl_methods, unbindable) = _stl_methods_from_nm(mangled_output, demangled_output, templates;
-                                                     runtime = _runtime_symbol_names(binary_path))
+                                                     runtime = _runtime_symbol_names(binary_path),
+                                                     resolvable = resolvable)
+    runtime_n = sum(count(m -> get(m, "runtime_library", false) == true, ms) for ms in values(stl_methods); init = 0)
+    runtime_n == 0 || println("  STL: $runtime_n member(s) of [types] templates bind from the C++ runtime " *
+                              "library through the library's own handle")
     if !isempty(unbindable)
         shown = join(first(unbindable, 8), "\n  ")
         more = length(unbindable) > 8 ? "\n  … and $(length(unbindable) - 8) more" : ""
         @warn "STL: $(length(unbindable)) member(s) of [types] templates are in the symbol " *
-              "table but not among the library's runtime symbols, so no thunk can bind " *
-              "them; the wrapper leaves them out:\n  $shown$more"
+              "table but neither among the library's runtime symbols nor resolvable through " *
+              "its handle, so no thunk can bind them; the wrapper leaves them out:\n  $shown$more"
     end
     # An entry with no table is never silent: clipper2's
     # `std::vector<Clipper2Lib::Point64>` and fmt's `fmt::basic_memory_buffer<char>`
@@ -3404,6 +3419,72 @@ function _stl_template_tags(demangled_output::AbstractString)::Dict{Int,String}
 end
 
 """
+    _nm_undefined_names(nm_output) -> Vector{String}
+
+The names of the undefined (`U`) symbols in an `nm -g` listing, their version
+suffix cut (`_ZNSt…@GLIBCXX_3.4.21` is how nm spells a reference to a versioned
+symbol; `dlsym` takes the bare name).
+"""
+function _nm_undefined_names(nm_output::AbstractString)::Vector{String}
+    return [name for (typ, _, name) in _nm_symbol_lines(nm_output) if typ == "U"]
+end
+
+"""
+    _nm_symbol_lines(nm_output) -> Vector{NTuple{3,String}}
+
+Every code or undefined symbol of an `nm -g` listing as `(type, address,
+name)`: a defined code symbol (`T`/`W`/`t`/`w`, after a hex address) with its
+address, an undefined one (`U`, no address) with `""`. The name is everything
+after the type, so a demangled name keeps its spaces, and an undefined name
+loses its version suffix (`@GLIBCXX_3.4.21`; demangled lines carry it too).
+Lines of other kinds (data, weak undefined `w` without an address) are left out
+of both listings alike, so the two pair by position.
+"""
+function _nm_symbol_lines(nm_output::AbstractString)::Vector{NTuple{3,String}}
+    out = NTuple{3,String}[]
+    for line in eachsplit(nm_output, '\n')
+        parts = split(strip(line))
+        length(parts) >= 2 || continue
+        if parts[1] == "U"
+            name = join(parts[2:end], " ")
+            push!(out, ("U", "", String(replace(name, r"@[A-Za-z0-9_.]+$" => ""))))
+        elseif length(parts) >= 3 && String(parts[2]) in ("T", "W", "t", "w") &&
+               occursin(r"^[0-9a-fA-F]+$", parts[1])
+            push!(out, (String(parts[2]), String(parts[1]), join(parts[3:end], " ")))
+        end
+    end
+    return out
+end
+
+"""
+    _resolved_through_library(lib_path, names) -> Set{String}
+
+The `names` that `dlsym` resolves through `lib_path`'s OWN handle: the library
+is opened `RTLD_NOW | RTLD_LOCAL`, asked, and closed again, the Tier 1
+pre-flight's discipline (`_tier1_preflight!`), never `RTLD_DEFAULT`, whose
+answer could be another copy of the runtime (Julia's own libstdc++: the zlib
+lesson). An empty set when the library will not open; the caller then has
+today's table.
+"""
+function _resolved_through_library(lib_path::AbstractString, names)::Set{String}
+    out = Set{String}()
+    handle = try
+        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+    catch e
+        @warn "STL: could not open $(basename(lib_path)) to probe its runtime symbols" exception = e
+        return out
+    end
+    try
+        for n in names
+            Libdl.dlsym(handle, n; throw_error = false) === nothing || push!(out, String(n))
+        end
+    finally
+        Libdl.dlclose(handle)
+    end
+    return out
+end
+
+"""
     _stl_methods_from_nm(mangled_output, demangled_output, templates; runtime=nothing)
         -> (stl_methods, unbindable)
 
@@ -3418,10 +3499,23 @@ goes down with it. That is what libc++ 23 did on Windows — its members were
 `unbindable` names each `Container::method` that had symbols but no bindable
 variant, for the caller to report. A method whose other variant binds (a C1
 constructor beside an exported C2) is not unbindable.
+
+`resolvable` is the set of UNDEFINED symbols (`U` lines, version suffix cut)
+the library's own handle resolves (`_resolved_through_library`): a member of a
+listed container the library calls in the C++ runtime rather than
+instantiating itself. Such a member enters the table marked
+`"runtime_library" => true`, and the JIT binds it at the address the handle
+gives (`JITManager`); an undefined member outside `resolvable` is unbindable.
+Undefined lines have no address, so they pair with their mangled names by
+position, which needs both listings in the symbol table's own order
+(`nm -gp`, `nm -gpC`); listings that do not line up (the address-keyed shape
+the older callers and tests pass) keep the address map and see no undefined
+symbol (2026-11-13).
 """
 function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::AbstractString,
                               templates::Vector{String};
-                              runtime::Union{Nothing,AbstractSet{<:AbstractString}}=nothing)
+                              runtime::Union{Nothing,AbstractSet{<:AbstractString}}=nothing,
+                              resolvable::Union{Nothing,AbstractSet{<:AbstractString}}=nothing)
     # Build address -> mangled mapping (include T and W symbol types)
     address_to_mangled = Dict{String,String}()
     address_to_type = Dict{String,String}()
@@ -3434,6 +3528,16 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
             address_to_type[parts[1]] = parts[2]
         end
     end
+
+    # Every code (T/W/t/w, with an address) or undefined (U, no address) line
+    # of a listing as `(type, address, name)`, the version suffix cut from an
+    # undefined name. The two listings pair by position when they line up
+    # (same count, same type at each line: `nm -gp` and `nm -gpC`); only then
+    # is an undefined symbol reachable, since it has no address to pair by.
+    m_syms = _nm_symbol_lines(mangled_output)
+    d_syms = _nm_symbol_lines(demangled_output)
+    positional = length(m_syms) == length(d_syms) &&
+                 all(i -> m_syms[i][1] == d_syms[i][1], eachindex(m_syms))
 
     # Build normalized template set for matching
     template_set = Set{String}()
@@ -3471,18 +3575,11 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
     stl_methods = Dict{String,Any}()
     skipped = Set{Tuple{String,String}}()   # (container, method) with an unbindable symbol
 
-    for line in split(demangled_output, '\n')
-        line = strip(line)
-        isempty(line) && continue
-        parts = split(line)
-        length(parts) >= 3 || continue
-
-        address = parts[1]
-        sym_type = parts[2]
-        demangled = join(parts[3:end], " ")
-
-        # Only consider T (text) and W (weak) symbols
-        sym_type in ("T", "W", "t", "w") || continue
+    for (i, (sym_type, address, demangled)) in enumerate(d_syms)
+        is_undefined = sym_type == "U"
+        # An undefined symbol is a candidate only when it can be paired and
+        # the handle resolves it.
+        is_undefined && !(positional && resolvable !== nothing) && continue
 
         # Match pattern: ContainerType::MethodSignature. Paren-aware: see
         # `_stl_split_class_method` — a `<>`-only scan walks into ctor args.
@@ -3508,8 +3605,9 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
 
         (method_name, is_const) = classification
 
-        # Get mangled name
-        mangled = get(address_to_mangled, address, "")
+        # Get mangled name: its own line's when the listings line up, else
+        # the one at its address.
+        mangled = positional ? m_syms[i][3] : get(address_to_mangled, address, "")
         isempty(mangled) && continue
 
         # For constructors/destructors, accept C1/C2 and D1/D2 variants
@@ -3522,8 +3620,15 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
         end
 
         # Before the dedup below, so an unbindable variant cannot shadow a
-        # bindable one (C1 first in nm, only C2 exported).
-        if runtime !== nothing && !(mangled in runtime)
+        # bindable one (C1 first in nm, only C2 exported). A defined symbol
+        # must be among the library's runtime symbols; an undefined one must
+        # resolve through its handle.
+        if is_undefined
+            if !(mangled in resolvable)
+                push!(skipped, (container_normalized, method_name))
+                continue
+            end
+        elseif runtime !== nothing && !(mangled in runtime)
             push!(skipped, (container_normalized, method_name))
             continue
         end
@@ -3547,6 +3652,9 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
             "full_signature" => method_sig
         )
         canonical == container_normalized || (entry["container"] = canonical)
+        # Lives in the C++ runtime library, not in this one: the JIT binds it
+        # at the address the library's handle resolves (`JITManager`).
+        is_undefined && (entry["runtime_library"] = true)
         push!(stl_methods[container_normalized], entry)
     end
 
@@ -4223,21 +4331,133 @@ function _runtime_symbol_names(binary_path::String)
 end
 
 """
+    _nm_code_lines(output) -> Vector{NTuple{3,String}}
+
+The `(address, type, name)` of every code symbol in an `nm` listing: types
+`T` (text) and `W` (weak), which cover C++ template instantiations and inline
+functions whose definitions live in headers, and the local-linkage `t`/`w`
+nm reports for static functions, so a static C function exported through
+`-fvisibility=default` still surfaces. The name is everything after the type,
+so a demangled name keeps its spaces.
+"""
+function _nm_code_lines(output::AbstractString)::Vector{NTuple{3,String}}
+    out = NTuple{3,String}[]
+    for line in split(output, '\n')
+        line = strip(line)
+        isempty(line) && continue
+        parts = split(line)
+        length(parts) >= 3 || continue
+        String(parts[2]) in ("T", "W", "t", "w") || continue
+        push!(out, (String(parts[1]), String(parts[2]), join(parts[3:end], " ")))
+    end
+    return out
+end
+
+"""
+    _pair_nm_outputs(mangled_output, demangled_output) -> Vector{NTuple{4,String}}
+
+Every code symbol as `(address, type, mangled, demangled)`, from the two
+listings `nm -gp --defined-only` (mangled) and `nm -gpC --defined-only`
+(demangled) of one binary. With `-p` (no sort) both print the symbol table in
+its own order, so line *i* of one is line *i* of the other, and each symbol
+keeps its own two names.
+
+Pairing by ADDRESS, as this did until 2026-11-13, gave every symbol at an
+address the mangled name of whichever symbol nm listed last there. Clang
+emits constructors and destructors as aliases (`-mconstructor-aliases`): D1
+is D2's alias always, and at `-O1` and above a derived class's trivial
+destructor is an alias of its base's, so tinyxml2's `~XMLComment`,
+`~XMLUnknown`, `~XMLDeclaration` and `~XMLNode` D1/D2 were eight names at one
+address. The metadata then carried `XMLNode`'s D2 symbol four times, once per
+class, demangled as each derived destructor and with each derived class as
+its `class`, and the derived classes' own symbols not at all:
+`XMLComment_destroy_XMLComment` called `_ZN8tinyxml27XMLNodeD2Ev` under
+`this::Ptr{XMLNode}`. The address map stays as the fallback for an `nm` whose
+two listings do not line up (a count or an address differs), with a warning;
+there, as before, a `__rb_` alias (`_alias_exports!`, Tier 1) never displaces
+the real name at its address and any other name may.
+"""
+function _pair_nm_outputs(mangled_output::AbstractString, demangled_output::AbstractString)
+    mangled = _nm_code_lines(mangled_output)
+    demangled = _nm_code_lines(demangled_output)
+    aligned = length(mangled) == length(demangled) &&
+              all(i -> mangled[i][1] == demangled[i][1] && mangled[i][2] == demangled[i][2],
+                  eachindex(mangled))
+    if aligned
+        return [(d[1], d[2], m[3], d[3]) for (m, d) in zip(mangled, demangled)]
+    end
+    @warn "nm's mangled and demangled listings do not line up ($(length(mangled)) and " *
+          "$(length(demangled)) code symbols); pairing them by address, where aliased " *
+          "symbols (constructors, destructors) share one name"
+    address_to_mangled = Dict{String,String}()
+    for (address, _, name) in mangled
+        prev = get(address_to_mangled, address, nothing)
+        if prev === nothing || !startswith(name, "__rb_") || startswith(prev, "__rb_")
+            address_to_mangled[address] = name
+        end
+    end
+    return [(address, typ, get(address_to_mangled, address, name), name) for (address, typ, name) in demangled]
+end
+
+"""
+    _order_like_listing(pairs, sorted_output) -> Vector{NTuple{4,String}}
+
+`pairs` (`_pair_nm_outputs`) in the order of `sorted_output`, nm's own sorted
+demangled listing (`nm -gC --defined-only`, no `-p`): the order the metadata's
+`functions` have always had, which every emitted wrapper follows, and which
+nm collates by the locale (`en_US.UTF-8` folds case and skips punctuation),
+so nothing here reproduces it. Each sorted line takes the next pair with its
+address, type and demangled name; among aliases of one demangled name (D1 and
+D2, C1 and C2 at one address) the smaller mangled name comes first, so
+`_dedup_method_chunks`' last definition is the D2 and C2 the address map used
+to give both lines. A pair no sorted line claims is appended, sorted the same
+way, with a warning.
+"""
+function _order_like_listing(pairs::AbstractVector{NTuple{4,String}}, sorted_output::AbstractString)
+    queues = Dict{NTuple{3,String},Vector{NTuple{4,String}}}()
+    for p in pairs
+        push!(get!(() -> NTuple{4,String}[], queues, (p[1], p[2], p[4])), p)
+    end
+    for q in values(queues)
+        sort!(q; by = p -> p[3])
+    end
+    out = NTuple{4,String}[]
+    for key in _nm_code_lines(sorted_output)
+        q = get(queues, key, nothing)
+        (q === nothing || isempty(q)) && continue
+        push!(out, popfirst!(q))
+    end
+    left = sort!([p for q in values(queues) for p in q]; by = p -> (p[4], p[3]))
+    isempty(left) || @warn "$(length(left)) code symbol(s) of nm's unsorted listing are not in its sorted one; appended"
+    append!(out, left)
+    return out
+end
+
+"""
 Extract symbol information from compiled binary using nm.
 Returns vector of symbol dictionaries with mangled/demangled names.
 """
 function extract_symbols_from_binary(binary_path::String)
-    # Run nm WITHOUT demangling to get mangled names
-    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+    # Two listings in the symbol table's own order (`-p`), so they pair line
+    # by line (`_pair_nm_outputs`), and the sorted demangled listing for the
+    # order (`_order_like_listing`): nm's default sort collates the demangled
+    # names when `-C` is given and the mangled ones otherwise, and the
+    # metadata's order is the wrapper's.
+    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-gp", "--defined-only", binary_path])
     if exitcode1 != 0
         @warn "nm command failed: $mangled_output"
         return Dict{String,Any}[]
     end
 
-    # Run nm WITH demangling to get human-readable names
-    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gpC", "--defined-only", binary_path])
     if exitcode2 != 0
         @warn "nm demangled command failed: $demangled_output"
+        return Dict{String,Any}[]
+    end
+
+    (sorted_output, exitcode3) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    if exitcode3 != 0
+        @warn "nm sorted command failed: $sorted_output"
         return Dict{String,Any}[]
     end
 
@@ -4246,128 +4466,81 @@ function extract_symbols_from_binary(binary_path::String)
     # means the question could not be asked, and then nothing is screened out.
     exported = _pe_exported_names(binary_path)
 
-    # Build address → mangled mapping. Accept T (text/code) and W (weak)
-    # symbols. Weak symbols cover C++ template instantiations and inline
-    # functions whose definitions live in headers — these are wrappable just
-    # like normal text symbols. Lowercase t/w are local-linkage variants that
-    # nm reports for static functions; include them so static C functions
-    # exported via -fvisibility=default still surface.
-    address_to_mangled = Dict{String,String}()
-    code_symbol_types = ("T", "W", "t", "w")
-    for line in split(mangled_output, '\n')
-        line = strip(line)
-        if isempty(line)
-            continue
-        end
-        parts = split(line)
-        if length(parts) >= 3 && parts[2] in code_symbol_types
-            address = parts[1]
-            mangled = parts[3]
-            # Several symbols can share an address, and since 2026-10-24 every
-            # exported definition of a Tier 1 build does: its `__rb_<lib>_`
-            # alias (`_alias_exports!`) sits on the same code. The alias is
-            # slice-binding surface, never API, and must not stand in for the
-            # real name here — which it did for every function whose alias nm
-            # listed after it (nm sorts by the locale's collation, so which
-            # names those were depended on the host). A `__rb_` name never
-            # displaces another name at its address; any other name may.
-            prev = get(address_to_mangled, address, nothing)
-            if prev === nothing || !startswith(mangled, "__rb_") || startswith(prev, "__rb_")
-                address_to_mangled[address] = mangled
-            end
-        end
-    end
-
     # Build symbols array with both mangled and demangled
     symbols = Dict{String,Any}[]
-    for line in split(demangled_output, '\n')
-        line = strip(line)
-        if isempty(line)
+    paired = _order_like_listing(_pair_nm_outputs(mangled_output, demangled_output), sorted_output)
+    for (address, symbol_type, mangled_name, demangled_name) in paired
+        # Filter out libstdc++/libc++ internals that get inlined into the
+        # binary as weak symbols. These come from #include <vector> et al.
+        # — they're "defined-only" because the inliner emitted them, not
+        # because the user wrote them. Wrapping them produces signatures
+        # referencing types we never declared (e.g. `std::less<void>`).
+        # Deliberate STL container wrapping goes through extract_stl_method_symbols
+        # under [types].templates, not this general path.
+        if _is_stdlib_internal(mangled_name, demangled_name)
             continue
         end
 
-        parts = split(line)
-        if length(parts) >= 3
-            address = parts[1]
-            symbol_type = parts[2]
-            demangled_name = join(parts[3:end], " ")
-
-            if symbol_type in code_symbol_types
-                mangled_name = get(address_to_mangled, address, demangled_name)
-
-                # Filter out libstdc++/libc++ internals that get inlined into the
-                # binary as weak symbols. These come from #include <vector> et al.
-                # — they're "defined-only" because the inliner emitted them, not
-                # because the user wrote them. Wrapping them produces signatures
-                # referencing types we never declared (e.g. `std::less<void>`).
-                # Deliberate STL container wrapping goes through extract_stl_method_symbols
-                # under [types].templates, not this general path.
-                if _is_stdlib_internal(mangled_name, demangled_name)
-                    continue
-                end
-
-                # Not in the PE export directory ⇒ not API, whatever nm says.
-                # This is the screen that keeps mingw's statically-linked CRT
-                # out: snprintf and friends are defined globals in the COFF
-                # symbol table and absent from the export directory, so nothing
-                # can reach them through the library — GetProcAddress consults
-                # only that directory. Wrapping one produced a thunk the JIT
-                # could not resolve, and the failure hung the run.
-                if exported !== nothing && !(mangled_name in exported)
-                    continue
-                end
-
-                # Promoted statics (`__rb_<lib>_*`, static-promotion pass) are
-                # slice-binding surface, not API: they carry no matching DWARF
-                # entry under the promoted name, so wrapping them would emit
-                # zero-arg garbage. The wrapper never sees them; slices bind by
-                # symbol at JIT time.
-                if startswith(mangled_name, "__rb_") || startswith(demangled_name, "__rb_")
-                    continue
-                end
-
-                # The templates TU's own helpers (`replibuild_force::ref<T>`,
-                # `replibuild_force::tag<T, N>`; `_TEMPLATE_FORCE_PREAMBLE`,
-                # `_write_template_tu`) are never API: `ref` returns a
-                # reference to address 1 and exists to be named, `tag` to be
-                # read off the symbol table. They were wrapped as functions
-                # (clipper2's wrapper carried five) until 2026-11-13.
-                if occursin("replibuild_force::", demangled_name)
-                    continue
-                end
-
-                # Itanium adjustor thunks are vtable-slot entry points, not API:
-                # they fix up `this` on entry (a fixed subtraction, or a vcall
-                # offset read through the vptr) and tail-jump to the real method.
-                # Nothing should reach one BY NAME — an override is reached
-                # through the vtable (the vcall producer) or after an explicit
-                # upcast (`Derived_as_Base2`).
-                #
-                # Same reasoning as `__rb_*` above, and the same failure: no
-                # DWARF subprogram describes a thunk, so `parse_function_signatures`
-                # infers the signature from the demangled string — where the
-                # "class" is the demangler's PHRASE ("non-virtual thunk to
-                # Derived"), not a class name. No aggregate is named that, so
-                # neither receiver gate (`FunctionGen._has_receiver`,
-                # `GeneratorCpp`'s `struct_types` check) synthesizes `this`, and
-                # the wrapper emits a zero-argument function calling a method that
-                # needs `this` in rdi. Proven live 2026-08-13, not latent:
-                # `ViTest.virtual_thunk_to_Diamond_tag()` was exported and
-                # SIGSEGV'd — the virtual-thunk form dereferences the garbage
-                # `this` twice (`mov (%rdi),%rax; mov -0x20(%rax),%rax`) to read
-                # the vcall offset out of the vptr.
-                if _is_itanium_thunk(mangled_name, demangled_name)
-                    continue
-                end
-
-                push!(symbols, Dict(
-                    "mangled" => mangled_name,
-                    "demangled" => demangled_name,
-                    "type" => symbol_type,
-                    "address" => address
-                ))
-            end
+        # Not in the PE export directory ⇒ not API, whatever nm says.
+        # This is the screen that keeps mingw's statically-linked CRT
+        # out: snprintf and friends are defined globals in the COFF
+        # symbol table and absent from the export directory, so nothing
+        # can reach them through the library — GetProcAddress consults
+        # only that directory. Wrapping one produced a thunk the JIT
+        # could not resolve, and the failure hung the run.
+        if exported !== nothing && !(mangled_name in exported)
+            continue
         end
+
+        # Promoted statics (`__rb_<lib>_*`, static-promotion pass) are
+        # slice-binding surface, not API: they carry no matching DWARF
+        # entry under the promoted name, so wrapping them would emit
+        # zero-arg garbage. The wrapper never sees them; slices bind by
+        # symbol at JIT time.
+        if startswith(mangled_name, "__rb_") || startswith(demangled_name, "__rb_")
+            continue
+        end
+
+        # The templates TU's own helpers (`replibuild_force::ref<T>`,
+        # `replibuild_force::tag<T, N>`; `_TEMPLATE_FORCE_PREAMBLE`,
+        # `_write_template_tu`) are never API: `ref` returns a
+        # reference to address 1 and exists to be named, `tag` to be
+        # read off the symbol table. They were wrapped as functions
+        # (clipper2's wrapper carried five) until 2026-11-13.
+        if occursin("replibuild_force::", demangled_name)
+            continue
+        end
+
+        # Itanium adjustor thunks are vtable-slot entry points, not API:
+        # they fix up `this` on entry (a fixed subtraction, or a vcall
+        # offset read through the vptr) and tail-jump to the real method.
+        # Nothing should reach one BY NAME — an override is reached
+        # through the vtable (the vcall producer) or after an explicit
+        # upcast (`Derived_as_Base2`).
+        #
+        # Same reasoning as `__rb_*` above, and the same failure: no
+        # DWARF subprogram describes a thunk, so `parse_function_signatures`
+        # infers the signature from the demangled string — where the
+        # "class" is the demangler's PHRASE ("non-virtual thunk to
+        # Derived"), not a class name. No aggregate is named that, so
+        # neither receiver gate (`FunctionGen._has_receiver`,
+        # `GeneratorCpp`'s `struct_types` check) synthesizes `this`, and
+        # the wrapper emits a zero-argument function calling a method that
+        # needs `this` in rdi. Proven live 2026-08-13, not latent:
+        # `ViTest.virtual_thunk_to_Diamond_tag()` was exported and
+        # SIGSEGV'd — the virtual-thunk form dereferences the garbage
+        # `this` twice (`mov (%rdi),%rax; mov -0x20(%rax),%rax`) to read
+        # the vcall offset out of the vptr.
+        if _is_itanium_thunk(mangled_name, demangled_name)
+            continue
+        end
+
+        push!(symbols, Dict(
+            "mangled" => mangled_name,
+            "demangled" => demangled_name,
+            "type" => symbol_type,
+            "address" => address
+        ))
     end
 
     return symbols
@@ -7258,7 +7431,17 @@ function parse_dwarf_dump(output::AbstractString;
                     end
                 end
 
-                if !isempty(resolved_members)
+                # A record with no member of its own has no entry, with one
+                # exception: a toolchain record whose bytes come from its
+                # non-virtual bases (libstdc++'s `std::tuple` and `_Tuple_impl`,
+                # `std::optional` and `_Optional_payload`, libc++'s `__tuple_impl`).
+                # `_promote_toolchain_records!` lays it out from them. A library
+                # record keeps the old rule; its Julia type has no fields to give.
+                from_bases = isempty(resolved_members) && drops_type(type_info) &&
+                    any(d -> isa(d, Dict) && get(d, "kind", nothing) == "inheritance" &&
+                             get(d, "virtual", false) != true,
+                        get(children_by_parent, offset, ()))
+                if !isempty(resolved_members) || from_bases
                     struct_def = Dict{String,Any}(
                         "kind" => get(type_info, "kind", "struct"),
                         "byte_size" => get(type_info, "byte_size", "0x0"),
@@ -7495,7 +7678,12 @@ function parse_dwarf_dump(output::AbstractString;
             isnothing(type_ref) || push!(toolchain_seeds, resolve_type(type_ref, type_refs))
         end
     end
-    _promote_toolchain_records!(struct_defs, toolchain_defs, toolchain_seeds)
+    # The 1-byte empty records, the rule the empty-base marking above uses: a
+    # union may hold one beside its real members (libstdc++'s `_Storage` holds
+    # `_Empty_byte` beside the value of a `std::optional`).
+    empty_records = Set{String}(k for (k, f) in record_facts
+                                if get(f, "empty", false) == true && _definition_byte_size(f) == 1)
+    _promote_toolchain_records!(struct_defs, toolchain_defs, toolchain_seeds; empty_records)
 
     # ---- Repair by-value AGGREGATE return types that resolved to `Any` ----
     #
@@ -7921,8 +8109,82 @@ function _key_in(t::AbstractString, table::AbstractDict)
     return nothing
 end
 
+_member_offset_int(v) = v isa Integer ? Int(v) :
+    (s = string(v); startswith(s, "0x") ? parse(Int, s[3:end]; base = 16) : parse(Int, s))
+
 """
-    _promote_toolchain_records!(struct_defs, toolchain_defs, seed_types) -> Vector{String}
+    _laid_out_from_bases(def, lookup, own_members) -> Dict
+
+A copy of the toolchain record `def` whose members are `own_members(def)` plus
+every member of every non-empty, non-virtual base `lookup(type)` finds, at
+depth, each at the base's offset plus its own (a bitfield's `data_bit_offset`
+moved by as many bytes), sorted by offset; its `base_classes` keeps the empty
+bases and any base `lookup` does not know, as before. A name two members share
+is the first's in offset order and `<name>_1`, `<name>_2` after it. When a base
+deeper down cannot be looked up, the copy keeps `def`'s own members and bases:
+a layout missing bytes is worse than the old refusal-free shape.
+"""
+function _laid_out_from_bases(def::AbstractDict, lookup, own_members)
+    out = Dict{String,Any}(def)
+    shifted(m, d) = begin
+        m2 = Dict{String,Any}(m)
+        o = get(m, "offset", nothing)
+        o === nothing || (m2["offset"] = "0x" * string(_member_offset_int(o) + d; base = 16))
+        haskey(m, "data_bit_offset") && (m2["data_bit_offset"] = Int(m["data_bit_offset"]) + 8d)
+        m2
+    end
+    function flatten(d::AbstractDict, at::Int)
+        ms = Any[shifted(m, at) for m in own_members(d)]
+        for b in get(d, "base_classes", ())
+            get(b, "empty", false) == true && continue
+            get(b, "virtual", false) == true && return nothing
+            bd = lookup(String(get(b, "type", "")))
+            bd === nothing && return nothing
+            sub = flatten(bd, at + _member_offset_int(get(b, "offset", 0)))
+            sub === nothing && return nothing
+            append!(ms, sub)
+        end
+        return ms
+    end
+
+    members = Any[shifted(m, 0) for m in own_members(def)]
+    kept = Any[]
+    for b in get(def, "base_classes", ())
+        bd = (get(b, "empty", false) == true || get(b, "virtual", false) == true) ? nothing :
+             lookup(String(get(b, "type", "")))
+        if bd === nothing
+            push!(kept, b)
+            continue
+        end
+        sub = flatten(bd, _member_offset_int(get(b, "offset", 0)))
+        if sub === nothing
+            out["members"] = own_members(def)
+            return out
+        end
+        append!(members, sub)
+    end
+    # Offset order; a bitfield by its bits, a static (no offset, no bits) last.
+    pos(m) = get(m, "offset", nothing) !== nothing ? 8 * _member_offset_int(m["offset"]) :
+             haskey(m, "data_bit_offset") ? Int(m["data_bit_offset"]) : typemax(Int)
+    sort!(members; by = pos, alg = Base.Sort.DEFAULT_STABLE)
+    seen = Dict{String,Int}()
+    for m in members
+        n = String(get(m, "name", ""))
+        k = get(seen, n, 0)
+        seen[n] = k + 1
+        k == 0 || (m["name"] = "$(n)_$(k)")
+    end
+    out["members"] = members
+    if isempty(kept)
+        delete!(out, "base_classes")
+    else
+        out["base_classes"] = kept
+    end
+    return out
+end
+
+"""
+    _promote_toolchain_records!(struct_defs, toolchain_defs, seed_types; empty_records) -> Vector{String}
 
 Put back into `struct_defs` the toolchain records the library holds or passes by
 value, and return their keys, sorted. Each one is marked `"toolchain" => true`.
@@ -7941,24 +8203,44 @@ dynamic symbol table) and from what a reached record holds by value, through
 members (arrays included) and bases, whether that record is the library's own
 (`Span { std::pair<int, int> range; … }` returned by value) or one promoted
 here. A library record nothing exported crosses by value promotes nothing. It is promoted only
-when its whole by-value closure has a layout: every member a scalar, pointer,
-reference, enum, STL container (held as bytes, as in a library record), library
-record or promotable toolchain record, and every base one of those last two or
-marked `"empty"` (`std::pair`'s `__pair_base`). Anything else stays out,
-and its crossings stay traps: a derived record with no members of its own
-(`std::tuple`, `std::optional` in libstdc++, which have no entry to promote), a
-`__complex__` member (`std::complex`; clang names `_Complex float` and `_Complex
-double` both `complex`, so the name cannot be mapped), a virtual base, a
-conflicted entry.
+when its whole by-value closure has a layout: every member a scalar (a
+`complex float`/`double`/`long double` included: the parser reads the width off
+the base type's `byte_size`, `_complex_base_name`), pointer, reference, enum,
+STL container (held as bytes, as in a library record), library record or
+promotable toolchain record, and every base one of those last two or marked
+`"empty"` (`std::pair`'s `__pair_base`). Anything else stays out, and its
+crossings stay traps: a virtual base, a conflicted entry, a member nothing can
+lay out.
+
+**A toolchain record is laid out from its bases** (`_laid_out_from_bases`): a
+promoted one gets every member of every non-empty, non-virtual base, at depth,
+at the base's offset plus the member's, in place of that base, and its
+`base_classes` keeps only the empty ones. libstdc++'s `std::tuple` and
+`std::optional` have no member of their own (the parser gives such a toolchain
+record an entry for this), so they had no layout; and every reader of a
+definition (StructGen, the SysV classifier, both generators) reads members at
+offsets, so a flattened record needs nothing new downstream. A name two
+members share (each `_Head_base`'s `_M_head_impl`) is kept by the first in
+offset order; the later ones are `<name>_1`, `<name>_2`. A union drops a member
+whose type is a 1-byte empty record (`empty_records`; `_Storage`'s
+`_Empty_byte` beside a `std::optional`'s value): it overlaps the others and
+holds no bytes they do not.
 
 Never promoted: an STL container, which keeps its own path (pointer in, byte blob
 out; `stl_container_size`), and a name on `INTERNAL_TYPE_BLOCKLIST`, which no
 generator emits. A library record of the same name keeps its entry.
 """
 function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::AbstractDict,
-                                     seed_types)::Vector{String}
+                                     seed_types; empty_records = Set{String}())::Vector{String}
     isempty(toolchain_defs) && return String[]
     promotable(k) = !(k in INTERNAL_TYPE_BLOCKLIST) && stl_container_size(k) == 0
+    is_union(def) = get(def, "kind", "struct") == "union"
+    # The members a definition contributes: all of them, less a union's empty
+    # record members (see above).
+    empty_record(t) = any(c -> c in empty_records, _scope_suffixes(String(t)))
+    own_members(def) = is_union(def) ?
+        [m for m in get(def, "members", ()) if !empty_record(get(m, "c_type", ""))] :
+        collect(get(def, "members", ()))
 
     # The type `t` holds in place: `nothing` for a pointer, reference or function
     # pointer (it holds an address), else the spelling with top-level cv and
@@ -7981,7 +8263,7 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         push!(stack, key)
         def = toolchain_defs[key]
         ok = get(def, "conflict", false) != true &&
-             all(m -> holds_ok(String(get(m, "c_type", "")), stack), get(def, "members", ())) &&
+             all(m -> holds_ok(String(get(m, "c_type", "")), stack), own_members(def)) &&
              all(b -> get(b, "virtual", false) != true &&
                       (get(b, "empty", false) == true || base_ok(String(get(b, "type", "")), stack)),
                  get(def, "base_classes", ()))
@@ -7994,6 +8276,8 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         e === nothing && return true
         (isempty(e) || e in ("unknown", "Any", "void")) && return false
         get_type_size(e) > 0 && return true
+        # `_complex_base_name`'s spellings, which only a sized base type gets.
+        e in ("complex float", "complex double", "complex long double") && return true
         cuts = _scope_suffixes(e)
         any(c -> haskey(struct_defs, "__enum__" * c), cuts) && return true
         stl_container_size(e) > 0 && return true
@@ -8030,7 +8314,10 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         lk === nothing || return walk(lk)                # the library's own, or done
         tk = _key_in(e, toolchain_defs)
         (tk === nothing || !promotable(tk) || !complete(tk, String[])) && return
-        def = toolchain_defs[tk]
+        def = _laid_out_from_bases(toolchain_defs[tk], k -> begin
+                  bk = _key_in(k, toolchain_defs)
+                  bk === nothing ? nothing : toolchain_defs[bk]
+              end, own_members)
         def["toolchain"] = true
         struct_defs[tk] = def
         push!(promoted, tk)
