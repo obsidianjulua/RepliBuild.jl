@@ -4,28 +4,38 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
-### An imported enum brings its values (2026-11-11)
+### Three test suites, one list, a runner that runs what a diff touches (2026-11-11)
 
-The first report from the Hub's build-and-report loop (`hello_world`,
-`GENERATOR-imported-enum-values.md`): in graph mode an importer got an enum's
-type (`World.Mood === Hello.Mood`) and none of its enumerators, so a caller had
-to know which library owned each enum and spell its values through the owner.
-The import pre-pass aliased the type alone and the enumerator loop skipped an
-imported enum entirely. Now the owner's type manifest records each enum's
-enumerators as bound (`[base, bound, value]`, the collision prefix included:
-`_enumerator_facts` off the pending enums and what `_render_enum_chunks` bound),
-`_type_imports_chunk` emits one alias per enumerator to the owner's bound name,
-applying the owner's collision rule against the importer's own top-level names
-(an importer that binds `RED()` gets `Color_RED`), and the export list carries
-them. `World.Happy === Hello.Happy`. The live fixture then showed a second
-gap: a library whose DWARF lacks an enum it uses only through a header got that
-enum from the Clang.jl header walk, a second type beside the owner's. Header
-enums are now import candidates too (`__enum__<name>` keys off
-`header_enums`), the pre-pass runs after the header merge, and an imported
-header enum is removed from `header_enums` so nothing emits it twice.
-(`test_cross_library_types.jl`: both collision directions; devtests
-`test_cross_library_types_live.jl`: a C and a C++ owner's values through the
-importer, and a header-only use that imports instead of re-emitting.)
+devtests was one 18-minute process that printed every build's progress and
+every file's summary in one stream, and runtests carried eighty toolchain-free
+files beside the registration basics. Agents lost iterations to it. The tree is
+now three suites over one list, `test/suites.jl`:
+
+- **pkg** (`runtests.jl`, what `Pkg.test()` runs): the package loads, VERSION
+  has one source, the config surface, the environment doctor, and the
+  structural guards (every `test_*.jl` listed in exactly one suite or in
+  `EXPERIMENTAL`, no include-time exit, every import declared). Seconds.
+- **unit** (`unit.jl`): the toolchain-free regression tests, in one process, as
+  runtests ran them.
+- **dev** (`devtests.jl`): everything that compiles, links or JITs
+  (`test/run.jl`). The seven discover-driven fixtures are jobs of their own
+  (`fixture:<name>`, `test/support/fixture.jl`), and the two inline testsets
+  devtests had (the pipeline on stress_test, ingest on c_test) are files
+  (`test_pipeline_live.jl`, `test_ingest_live.jl`).
+
+`run.jl` selects by the list and runs the selection in one process, each job a
+nested testset, so a failing file no longer ends the run. `--changed[=ref]`
+maps the diff to areas (`areas_of_path`: build, dwarf, c, cpp, dialect, graph)
+and runs the files that cover them, plus changed test files and the jobs
+locking a changed fixture; `--area=`, `--files=`, `--list`. `--processes` runs
+a child per job in parallel with a log each (`test/.logs/`), honouring `after`
+(a job runs after the jobs it names, skipped when one failed) and `locks` (two
+jobs on one fixture directory never run at once). Measured: a child compiles
+the build paths again before its first build, so children are not faster (48
+of them four at a time, 597s against 614s in one process; a 16-job selection
+2m30s either way). The win is selection: the dialect area is 16 of 48 jobs,
+the C area 11. CI runs `unit.jl` beside `runtests.jl`; devtests is unchanged
+there. `REPLIBUILD_SKIP_TESTS` still names fixtures to skip.
 
 ### Graph mode builds libwebp: object sources, versioned sonames, file-local types (2026-11-11)
 
