@@ -8,6 +8,7 @@
 // as that pointer and copy the bytes out, so `self` came back aiming at the
 // thunk's dead frame. Built in the caller's buffer, `self` is that buffer.
 #pragma once
+#include <string>
 
 struct SelfRef {
     SelfRef *self;
@@ -21,6 +22,13 @@ struct SelfRef {
 SelfRef make_self(int x);                 // C++ linkage, not noexcept: Tier 2
 int     self_ok(const SelfRef &s);         // 1 when s.self == &s, else 0
 int     self_value(const SelfRef &s);
+
+// An STL container returned by value is pass-by-reference too, on its own
+// `:direct` path. A short string keeps its characters inside the object, so
+// built in place, its data pointer points into the caller's buffer.
+std::string short_str(int x);
+int         str_data_inside(const std::string &s);   // 1 when s.data() is inside s
+int         str_size(const std::string &s);
 
 // Control: trivially copyable, returned by value the way it always was.
 struct Plain { int a, b, c; };

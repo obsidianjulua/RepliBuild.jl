@@ -299,8 +299,10 @@ end
     returns_in_caller_buffer(func, structs, record_abi; abi) -> Bool
 
 Whether `func`'s thunk constructs its return in a buffer the CALLER supplies:
-a record with a layout (`by_value_crossing` says `:layout`) that DWARF says is
-non-trivial for the purposes of calls (`record_passes_by_reference`). Such an
+a record DWARF says is non-trivial for the purposes of calls
+(`record_passes_by_reference`), with a layout (`by_value_crossing` says
+`:layout`) or an STL container returned by value (its own `:direct` path:
+`std::string`, `std::map`). Such an
 object is built where the caller asked and is never moved; the thunk returns
 void, its first argument slot holds the buffer's address, and its name is
 `thunk_symbol(mangled, true)`. The thunk generator and every call site (the
@@ -318,7 +320,16 @@ function returns_in_caller_buffer(func, structs, record_abi; abi::Symbol = host_
     return _returns_in_caller_buffer(ret_c, k, key, record_abi)
 end
 _returns_in_caller_buffer(ret_c, kind, key, record_abi) =
-    kind === :layout && record_passes_by_reference(ret_c, key, record_abi)
+    (kind === :layout && record_passes_by_reference(ret_c, key, record_abi)) ||
+    (kind === :direct && _stl_by_value(ret_c) && record_passes_by_reference(ret_c, nothing, record_abi))
+
+# An STL container returned by value: `by_value_crossing`'s STL branch, which
+# answers `:direct` because the container has no layout of its own here. Its
+# thunk returns a byte blob of the container's size, and a blob over 16 bytes
+# was demoted by LLVM's backend to a hidden pointer to ITS temporary: the same
+# bytewise move. `record_abi` says whether C++ returns it by reference.
+_stl_by_value(ret_c) = (t = _strip_top_cv(String(ret_c));
+                        !occursin(r"[*&(\[]", _outside_template_args(t)) && get_stl_container_size(t) > 0)
 
 """
     thunk_symbol(mangled, in_caller_buffer) -> String

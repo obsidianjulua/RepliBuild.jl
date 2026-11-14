@@ -23,7 +23,8 @@ function probe(f, name)
     println("PROBE $name: ", verdict)
 end
 check(p, what, got, want) = got == want || push!(p, "$what: got $got, want $want")
-fn(name) = MD["functions"][findfirst(f -> get(f, "name", "") == name, MD["functions"])]
+fn(name) = MD["functions"][something(findfirst(f -> get(f, "name", "") == name, MD["functions"]),
+                                     findfirst(f -> occursin(string(length(name), name), get(f, "mangled", "")), MD["functions"]))]
 
 # make_self(7), called the way the thunk generator says its thunk takes it:
 # in the caller's buffer when `returns_in_caller_buffer` holds, else the old
@@ -49,6 +50,37 @@ probe("built_in_the_callers_buffer") do p
         check(p, "self_ok", M.self_ok(buf), Int32(1))
         check(p, "self_value", M.self_value(buf), Int32(7))
     end
+end
+
+# An STL container by value is pass-by-reference too. A short string keeps its
+# characters inside the object, so built in the caller's buffer its data
+# points into that buffer (C++'s own check, so it holds for libstdc++ and
+# libc++ alike); built in a temporary and moved, it points elsewhere.
+probe("stl_string_built_in_the_callers_buffer") do p
+    f = fn("short_str")
+    inplace = FG.returns_in_caller_buffer(f, SD, RA)
+    check(p, "short_str returns in the caller's buffer", inplace, true)
+    name = "_mlir_ciface_" * FG.thunk_symbol(f["mangled"], inplace)
+    buf = Ref{NTuple{32,UInt8}}()
+    GC.@preserve buf begin
+        addr = Base.unsafe_convert(Ptr{Cvoid}, buf)
+        if inplace
+            RepliBuild.JITManager.invoke(name, addr, Int32(2))
+        else
+            buf[] = RepliBuild.JITManager.invoke(name, NTuple{32,UInt8}, Int32(2))
+        end
+        check(p, "str_data_inside", M.str_data_inside(addr), Int32(1))
+        check(p, "str_size", M.str_size(addr), Int32(2))
+    end
+end
+
+# The generated wrapper's own call: it allocates the buffer, calls the in-place
+# thunk, and returns the value, with the Julia return type it always had.
+probe("wrapper_call_site") do p
+    r = M.make_self(9)
+    check(p, "make_self returns", typeof(r), M.SelfRef)
+    check(p, "v, w", (r.v, r.w), (Int32(9), 4.5))
+    check(p, "self was set", r.self != C_NULL, true)
 end
 
 # A wrapper generated before the change calls the old name with the old shape.

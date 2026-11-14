@@ -905,8 +905,10 @@ the test named when you touch the area.
   storage and a second gives the value; pointer args double-load. Callers put `&struct`
   in the slot, not `&Ref`.
 - **A pass-by-reference return is built in the caller's buffer** (2026-11-13).
-  When `FunctionGen.returns_in_caller_buffer` holds (a `:layout` return that is
-  `DW_CC_pass_by_reference`), the thunk is `thunk_symbol(m, true)`
+  When `FunctionGen.returns_in_caller_buffer` holds (a `DW_CC_pass_by_reference`
+  return, either a `:layout` record or an STL container by value on its own
+  `:direct` path, whose byte-blob return LLVM's backend demoted to a hidden
+  pointer to its own temporary), the thunk is `thunk_symbol(m, true)`
   (`<m>_thunk_inplace`), returns void, and takes the caller's buffer in argument
   slot 0, passed like any pointer argument (so the other arguments start at slot
   1); it forwards that pointer as the callee's hidden return pointer and never
@@ -914,8 +916,14 @@ the test named when you touch the area.
   never moves it bytewise; the old thunk built it in its own frame and MLIR's
   C-interface wrapper copied the bytes out, which left any object that points
   into itself (`std::string`'s short buffer) dangling. Every call site asks the
-  same predicate and name; the new name makes a stale wrapper fail as a missing
-  thunk instead of passing arguments where the buffer goes.
+  same predicate and name (GeneratorCpp allocates the buffer with
+  `JITManager.return_slot`, calls the void `invoke`/`invoke_aot_ptr` with
+  `slot_address` first under `GC.@preserve`, and returns `slot_value`, so the
+  Julia return type does not change); an AOT slot's table entry is the thunk it
+  resolves (`_aot_fptr_const_name!`'s `thunk`), and the manifest scan maps both
+  spellings back to the mangled symbol (`_thunks_named_in_text`). The new name
+  makes a stale wrapper fail as a missing thunk, with a message saying to
+  re-wrap, instead of passing arguments where the buffer goes.
   (`test_by_value_crossing.jl`, devtests `test_sret_in_caller_buffer.jl`.)
 - **One struct-ABI rule set per convention, chosen by the host, in two places
   that must agree.** `RepliBuild.host_record_abi()` (`:sysv`, `:win64`,

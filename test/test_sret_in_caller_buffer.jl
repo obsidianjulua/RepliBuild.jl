@@ -64,7 +64,9 @@ if requires("A pass-by-reference return is built in the caller's buffer", :libJL
     v = probe_verdicts(r.output)
     @test r.ok
     @test haskey(v, "PROBE_DONE")
-    names = ["built_in_the_callers_buffer", "stale_call_says_rewrap", "trivial_record_unchanged"]
+    names = ["built_in_the_callers_buffer", "stl_string_built_in_the_callers_buffer",
+             "wrapper_call_site", "stale_call_says_rewrap",
+             "trivial_record_unchanged"]
     for n in names
         @test (n, get(v, n, "no PROBE line")) == (n, "PASS")
     end

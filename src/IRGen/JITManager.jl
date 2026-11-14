@@ -156,6 +156,45 @@ Slow path: JIT engine lookup + copy-on-write Dict swap under lock.
 end
 
 """
+    return_slot(::Type{T}) -> slot
+
+A home for a `T` the callee builds in place: a thunk `<m>_thunk_inplace`
+(`FunctionGen.returns_in_caller_buffer`) takes `slot_address(slot)` as its first
+argument and constructs the C++ object there, and `slot_value(slot)` is the Julia
+value the wrapper returns. A `Ref{T}` for an isbits `T`; for a `mutable` `T` (a
+named union or bitfield record, whose one field is its C bytes) the object
+itself, zeroed, as `_invoke_call` allocates one. The generated call keeps the
+slot alive with `GC.@preserve` across the call, so the address does not move
+while C++ builds the object.
+"""
+@generated function return_slot(::Type{T}) where T
+    if ismutabletype(T)
+        if !(isconcretetype(T) && fieldcount(T) > 0 && sizeof(T) > 0 &&
+             all(i -> isbitstype(fieldtype(T, i)), 1:fieldcount(T)))
+            msg = "JIT invoke: cannot return `$T` in place: it is a mutable type " *
+                  "without an inline byte layout to fill."
+            return :(error($msg))
+        end
+        n = sizeof(T)
+        return quote
+            obj = ccall(:jl_new_struct_uninit, Any, (Any,), $T)::$T
+            GC.@preserve obj ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
+                                   pointer_from_objref(obj), 0, $n)
+            obj
+        end
+    end
+    if !isbitstype(T)
+        msg = "JIT invoke: cannot return `$T` in place: it has no fixed C layout."
+        return :(error($msg))
+    end
+    return :(Ref{$T}())
+end
+slot_address(slot::Base.RefValue) = Base.unsafe_convert(Ptr{Cvoid}, slot)
+slot_address(slot) = pointer_from_objref(slot)
+slot_value(slot::Base.RefValue) = slot[]
+slot_value(slot) = slot
+
+"""
     _stale_inplace_message(name) -> String
 
 What a call to the thunk `name` means when the library has `<name>_inplace`
