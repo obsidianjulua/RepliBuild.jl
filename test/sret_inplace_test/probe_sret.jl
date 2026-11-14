@@ -74,6 +74,27 @@ probe("stl_string_built_in_the_callers_buffer") do p
     end
 end
 
+# A std::string return is a Julia String (StdStrings.take_string!): read where
+# C++ built it, then ended there by its destructor. Ended on a moved copy, a
+# short string's destructor freed a stack address; a thousand calls of each
+# size run the destructor on both of its branches.
+probe("std_string_is_a_julia_string") do p
+    check(p, "short", M.short_str_abi_cxx11(2), "cc")
+    check(p, "heap", M.long_str_abi_cxx11(100), "x"^100 * "100")
+    for i in 1:1000
+        M.short_str_abi_cxx11(i % 20) == string(Char('a' + i % 20))^2 || (push!(p, "short call $i"); break)
+        M.long_str_abi_cxx11(40 + i % 50) == "x"^(40 + i % 50) * string(40 + i % 50) || (push!(p, "heap call $i"); break)
+    end
+end
+
+# A wide string is not decoded: it keeps its raw bytes, and the wrapper says why.
+probe("wstring_keeps_its_bytes") do p
+    check(p, "wide_str type", typeof(M.wide_str_abi_cxx11(3)), NTuple{32,UInt8})
+    src = read(wrapper, String)
+    occursin(r"# std::string `basic_string<wchar_t[^`]*` returned as its raw bytes: its character type is `wchar_t`", src) ||
+        push!(p, "no wchar_t reason beside wide_str's call")
+end
+
 # The generated wrapper's own call: it allocates the buffer, calls the in-place
 # thunk, and returns the value, with the Julia return type it always had.
 probe("wrapper_call_site") do p

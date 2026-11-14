@@ -966,6 +966,25 @@ the test named when you touch the area.
   makes a stale wrapper fail as a missing thunk, with a message saying to
   re-wrap, instead of passing arguments where the buffer goes.
   (`test_by_value_crossing.jl`, devtests `test_sret_in_caller_buffer.jl`.)
+- **A `std::basic_string<char>` returned by value is a Julia `String`**
+  (2026-11-13, `StdStrings`). It is read where C++ built it (the caller's buffer,
+  above) and ended there, never from a copy: libstdc++'s short string points
+  into itself. The build records, on the string's `record_abi` entry,
+  `string_layout` (`Compiler._string_layout`: leaves with dotted paths and
+  absolute offsets through nested records, unions and non-empty bases, the
+  character type, and the destructor declared in the record, which pass 2 files
+  by the DIE open a level up); `StdStrings.string_reader` recognises libstdc++'s
+  `_M_p`/`_M_string_length` and libc++'s `__l`/`__s` with the `__is_long_` bit
+  and refuses anything else; GeneratorCpp's `_string_return_plan` emits
+  `StdStrings.take_string!` or keeps the bytes with a comment naming the type
+  and the reason (old metadata says rebuild; `wchar_t` and the other character
+  types are not decoded). The destructor (`D1`) is found per host at first use,
+  never at wrap time: through the wrapped library's handle, which on ELF also
+  searches its dependencies (libstdc++ defines it when the library does not),
+  and on PE the C++ runtime by name (`cxx_runtime_libraries(abi)`). None found:
+  the bytes, and a warning naming the function once. Never decode by hardcoded
+  offsets or sizes. (`test_std_strings.jl`, devtests
+  `test_sret_in_caller_buffer.jl`.)
 - **One struct-ABI rule set per convention, chosen by the host, in two places
   that must agree.** `RepliBuild.host_record_abi()` (`:sysv`, `:win64`,
   `:aapcs64`) is the one place Julia reads the host; every classifier takes it
@@ -1589,9 +1608,18 @@ DWARF-resolved destructors — **is** built.)
 - **Boost is wrapped a library at a time** (2026-10-31): Hub `boostfilesystem`,
   `boostcharconv`, `boostjson`, each `boostorg/boost` with `submodules` set to
   the closure `tools/boostdep/depinst/depinst.py` computes (the guide's Boost
-  section has the recipe). Not built: a decoder for a `std::string` returned by
-  value (a 32-byte stand-in, libstdc++'s size; libc++'s object is 24), and a
-  `std::string` table without the instantiation TU (below).
+  section has the recipe). Not built: a `std::string` table without the
+  instantiation TU (below). (A `std::string` returned by value is a `String`
+  since 2026-11-13, above.)
+- `const std::string&` (and by-value `std::string`) PARAMETERS taking a Julia
+  `String` (2026-11-13, deferred from the return decoder). A parameter needs a
+  real `basic_string` object to point at, which only the C++ side can build:
+  call the string's constructor (`basic_string(const char*, size_t,
+  const allocator&)`, found per host like the destructor, `StdStrings.destructor`)
+  into a slot, pass the slot, then end it. Today such a parameter takes the
+  `NTuple` stand-in a caller cannot build. Wide strings (`wchar_t`, `char16_t`,
+  `char32_t`) are not decoded in either direction: the caller chooses the
+  transcoding.
 - **`long double` by value is a trap on every tier** (scoped 2026-11-03, not
   built). The scalar is x87 extended precision: SysV passes it in memory and
   returns it in `ST0`, which `ccall` cannot reach, so Tier 3 can never carry

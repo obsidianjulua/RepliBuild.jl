@@ -317,6 +317,43 @@ function _rvalue_shadowed(functions)::Set{String}
 end
 
 """
+    _string_return_plan(c_ret, record_abi) -> nothing | (reader, dtor) | String
+
+What a wrapper does with a `std::basic_string` its function returns by value,
+built in the caller's buffer (`FunctionGen.returns_in_caller_buffer`):
+`nothing` when the return is no `basic_string`; `(reader, dtor)` when it is read
+into a `String` (`StdStrings.take_string!`): the `StdStrings.Reader` from the
+layout the build recorded (`record_abi`'s `string_layout`) and the
+complete-object destructor's symbol (`D1`, from the declared `D4`); else the
+reason it keeps the stand-in, which the wrapper writes beside the call, naming
+the type (the coverage tool attributes stand-ins by that text).
+"""
+function _string_return_plan(c_ret::AbstractString, record_abi)
+    t = JLCSIRGenerator.FunctionGen._strip_top_cv(String(c_ret))
+    key = nothing
+    for cand in JLCSIRGenerator.FunctionGen._scope_suffixes(t)
+        if startswith(cand, "basic_string<") && haskey(record_abi, cand)
+            key = cand
+            break
+        end
+    end
+    key === nothing && return nothing
+    layout = get(record_abi[key], "string_layout", nothing)
+    layout === nothing &&
+        return "std::string `$key` returned as its raw bytes: the metadata predates `string_layout`; " *
+               "rebuild the package (delete .replibuild_cache/project_hash) to record the string's layout"
+    r = StdStrings.string_reader(layout)
+    r isa String && return "std::string `$key` returned as its raw bytes: $r"
+    d = get(layout, "destructor", nothing)
+    d isa AbstractString ||
+        return "std::string `$key` returned as its raw bytes: the DWARF declares no destructor for it"
+    return (r, replace(String(d), r"D[24]Ev$" => "D1Ev"))
+end
+
+_reader_literal(r) = "RepliBuild.StdStrings.Reader($(repr(r.kind)), $(r.ptr), $(r.len), $(r.flag_bit), " *
+                     "$(r.short_data), $(r.short_len_bit), $(r.short_len_bits))"
+
+"""
     _thunks_named_in_text(text, taken) -> Set{String}
 
 The mangled symbols whose thunk the emitted `text` calls, in every spelling a
@@ -3476,10 +3513,18 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # return type is what it was.
             in_place = !is_void_ret && !is_cstring_ret &&
                        JLCSIRGenerator.FunctionGen.returns_in_caller_buffer(func, dwarf_structs, record_abi)
+            # A `std::string` built there is read into a `String` and ended
+            # (`_string_return_plan`, `StdStrings.take_string!`), or keeps
+            # its bytes with the reason written beside the call.
+            string_plan = in_place ? _string_return_plan(jit_c_ret, record_abi) : nothing
             in_place_body(call) =
+                (string_plan isa String ? "    # $(string_plan)\n" : "") *
                 "    _rb_ret = RepliBuild.JITManager.return_slot($jit_ret_type)\n" *
                 "    GC.@preserve _rb_ret $call\n" *
-                "    return RepliBuild.JITManager.slot_value(_rb_ret)"
+                (string_plan isa Tuple ?
+                    "    return RepliBuild.StdStrings.take_string!(_rb_ret, $(_reader_literal(string_plan[1])), " *
+                    "LIBRARY_PATH, $(repr(string_plan[2])), $(repr(julia_name)))" :
+                    "    return RepliBuild.JITManager.slot_value(_rb_ret)")
             in_place_args = isempty(invoke_args) ? "RepliBuild.JITManager.slot_address(_rb_ret)" :
                             "RepliBuild.JITManager.slot_address(_rb_ret), $invoke_args"
 

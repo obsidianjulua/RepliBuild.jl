@@ -21,6 +21,7 @@ import ..MLIRNative
 import ..DWARFParser
 import ..JLCSIRGenerator
 import .._read_json
+import ..StdStrings   # a std::string return read into a String (GeneratorCpp)
 
 export wrap_library, wrap_basic, extract_symbols
 export TypeRegistry, SymbolInfo, ParamInfo

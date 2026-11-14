@@ -16,3 +16,5 @@ int str_data_inside(const std::string &s) {
     return (d >= b && d < b + sizeof(s)) ? 1 : 0;
 }
 int str_size(const std::string &s) { return (int)s.size(); }
+std::string  long_str(int n) { return std::string(n, 'x') + std::to_string(n); }
+std::wstring wide_str(int n) { return std::wstring(n, L'w'); }
