@@ -4,53 +4,6 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
-### A derived class's aliased destructor keeps its own symbol (2026-11-13)
-
-tinyxml2's metadata carried `_ZN8tinyxml27XMLNodeD2Ev` four times: once as
-`XMLNode::~XMLNode()`, and once each as `XMLComment::~XMLComment()`,
-`XMLUnknown::~XMLUnknown()` and `XMLDeclaration::~XMLDeclaration()`, with the
-derived class as `class` and `this::XMLNode*`, while the derived classes' own
-D1/D2 symbols were in no entry. `XMLComment_destroy_XMLComment` called
-`XMLNode`'s base destructor under a `Ptr{XMLNode}` receiver
-(`cpp_thunk_coverage.jl` found the three as unexplained drops).
-
-- The cause was `extract_symbols_from_binary`, not DWARF: it paired `nm`'s
-  mangled and demangled listings by ADDRESS, and clang emits constructors and
-  destructors as aliases (`-mconstructor-aliases`: D1 is D2's alias always,
-  and at `-O1` and above a derived class's trivial destructor is an alias of
-  its base's), so eight names sat at one address and every one of them took
-  the mangled name nm listed last there. The two listings are now taken with
-  `-p` (the symbol table's own order, which nm's default sort does not give:
-  with `-C` it collates the demangled names) and paired line by line
-  (`_pair_nm_outputs`), so each symbol keeps its own two names; the address
-  map stays as the fallback, with a warning, for an `nm` whose listings do not
-  line up, where a `__rb_` alias still never displaces the real name. The
-  pairs are then put in the order of nm's sorted demangled listing
-  (`_order_like_listing`), the order the metadata and so every wrapper has
-  always had (a locale collation nothing in Julia reproduces), with D1 before
-  D2 and C1 before C2 among aliases of one name, so the dedup keeps the
-  variant it kept before and a package without the shape re-wraps
-  byte-identical apart from the alias variants its manifest gains. The class
-  then comes from each symbol's own demangled prefix, as the rule says, and a
-  derived destructor's thunk calls the derived symbol (the same code, by its
-  own name).
-- The STL method table (`_stl_methods_from_nm`) keeps its address map: it
-  dedups constructor and destructor variants per method on purpose, and its
-  synthetic tests pair by address.
-- Tests: `test_symbol_hygiene.jl` pairs the tinyxml2 listing shape (eight
-  names at one address, a data symbol and a spaced demangled name between
-  them) and checks the fallback; `test_cpp_finalizers.jl` runs the generator
-  on metadata derived from such listings and checks each class's destroy
-  function names its own symbol and the owner frees through the derived D0;
-  `test_cpp_finalizers_live.jl` builds the fixture at `-O2` with a `Twig :
-  Leaf` whose destructor adds nothing, checks the two D2s share an address in
-  the library, that the metadata gives `Twig` its own D0/D1/D2 and `Leaf`'s
-  symbols stay `Leaf`'s, and that collected `ManagedTwig`s run `Leaf`'s
-  destructor body and `Leaf`'s `operator delete` once each.
-- tinyxml2, metadata re-extracted from its cached IR and re-wrapped (nothing
-  recompiled): the three destroy functions now call their own classes'
-  symbols; see the PR for the diff.
-
 ### Three test suites, one list, a runner that runs what a diff touches (2026-11-11)
 
 devtests was one 18-minute process that printed every build's progress and
