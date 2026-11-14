@@ -43,3 +43,19 @@ int map_lookup(const std::map<int, int>& m, int key) {
 int map_size(const std::map<int, int>& m) {
     return static_cast<int>(m.size());
 }
+
+std::vector<stl_test::Pt64> make_pts(int n) {
+    std::vector<stl_test::Pt64> pts;
+    for (int i = 0; i < n; i++) {
+        pts.push_back(stl_test::Pt64{i, 2L * i});
+    }
+    return pts;
+}
+
+long sum_pts_x(const std::vector<stl_test::Pt64>& pts) {
+    long total = 0;
+    for (const auto& p : pts) {
+        total += p.x;
+    }
+    return total;
+}

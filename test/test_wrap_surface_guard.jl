@@ -73,13 +73,16 @@ function build_fixture(dir::String; hidden::Bool, promote::Bool)
     rc2 == 0 && isfile(so) ? so : nothing
 end
 
-"""Write a `compilation_metadata.json` naming `names` as wrappable functions."""
-function write_metadata(dir::String, names::Vector{String})
+"""Write a `compilation_metadata.json` naming `names` as wrappable functions,
+and `stl` as the STL method table (`container => [methods…]`)."""
+function write_metadata(dir::String, names::Vector{String};
+                        stl::Dict{String,<:Any} = Dict{String,Any}())
     path = joinpath(dir, "compilation_metadata.json")
     open(path, "w") do io
         JSON.print(io, Dict(
             "functions" => [Dict("name" => n, "mangled" => n, "demangled" => n,
                                  "exported" => true) for n in names],
+            "stl_methods" => stl,
         ))
     end
     return path
@@ -172,6 +175,29 @@ end
             @testset "R1 — empty surface is refused" begin
                 collapsed = build_fixture(dir; hidden=true, promote=true)
                 md = write_metadata(dir, String[])
+                err = try
+                    C.verify_wrap_surface(cfg, collapsed, md); nothing
+                catch e; e end
+                @test err isa ErrorException
+                @test occursin("EMPTY", sprint(showerror, err))
+            end
+
+            # A templates-only package (`[types] templates`, no source of its
+            # own) has no `functions`: its surface is the STL method table the
+            # C++ generator binds as container factories. Since the templates
+            # TU's own `replibuild_force::` helpers are filtered out of
+            # `functions` (2026-11-13), the table is what stands for the
+            # surface, and only a table with no member at all is the empty
+            # surface again.
+            @testset "R1 — a templates-only surface is its STL table" begin
+                collapsed = build_fixture(dir; hidden=true, promote=true)
+                bound = Dict{String,Any}("std::vector<int>" => [Dict(
+                    "method" => "size", "symbol" => "_ZNKSt6vectorIiSaIiEE4sizeEv")])
+                md = write_metadata(dir, String[]; stl = bound)
+                @test C.verify_wrap_surface(cfg, collapsed, md) === nothing
+                # Every entry empty (a table of gaps) is no surface.
+                md = write_metadata(dir, String[];
+                                    stl = Dict{String,Any}("std::vector<int>" => Any[]))
                 err = try
                     C.verify_wrap_surface(cfg, collapsed, md); nothing
                 catch e; e end

@@ -51,6 +51,27 @@ function _is_ctor_or_dtor_cpp(class_name::AbstractString, func_name::AbstractStr
 end
 
 """
+    _stl_vector_element_type(elem_cpp, defined_struct_names, infer) -> Union{String,Nothing}
+
+The Julia type a `CppVector` holds for a `std::vector<elem_cpp>`: the struct
+this module emitted for a record element (its innermost scope sanitized the
+way records are named: `Clipper2Lib::Point<long>` → `Point_long`), else what
+the registry infers for a scalar (`infer`), and `nothing` when neither gives a
+type with a layout (`_UnsafeUnknown`, `Any`, a name nothing emitted).
+"""
+function _stl_vector_element_type(elem_cpp::AbstractString, defined_struct_names, infer)::Union{Nothing,String}
+    bare = _cpp_innermost_scope(String(elem_cpp))
+    for candidate in (_sanitize_cpp_type_name(bare), _sanitize_cpp_type_name(String(elem_cpp)))
+        candidate in defined_struct_names && return candidate
+    end
+    jt = String(infer(String(elem_cpp)))
+    (jt in ("Any", "_UnsafeUnknown", "") || startswith(jt, "Ptr{Cvoid}")) && return nothing
+    occursin(r"[{}]", jt) && return jt                   # a composed type resolves through its parts
+    (jt in defined_struct_names || isdefined(Base, Symbol(jt)) || isdefined(Core, Symbol(jt))) && return jt
+    return nothing
+end
+
+"""
     _cpp_innermost_scope(cls) -> String
 
 Last `::`-separated component of `cls`, at angle-bracket depth 0, **keeping**
@@ -4130,12 +4151,27 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             safe_name = replace(replace(replace(container_type, "::" => "_"), "<" => "_"), ">" => "")
             safe_name = replace(replace(safe_name, " " => ""), "," => "_")
 
-            # Determine element type for CppVector
+            # Determine element type for CppVector. The element is read from
+            # the compiler's spelling of the container when the table recorded
+            # one (`container`: `std::vector<Clipper2Lib::Point<long>>` for an
+            # entry written with the typedef `Point64`), and a record element
+            # is the struct this module emitted for it (`Point_long`), which
+            # `CppVector{T}` reads with `unsafe_load(Ptr{T})`. An element with
+            # no Julia layout gets no factory: `CppVector{_UnsafeUnknown}` would
+            # read garbage, so the entry is named instead.
             if startswith(container_type, "std::vector<")
-                elem_match = match(r"std::vector<(.+)>$", container_type)
+                canonical = String(get(first(methods), "container", container_type))
+                elem_match = match(r"^std::vector<(.+)>$", canonical)
+                elem_match === nothing && (elem_match = match(r"^std::vector<(.+)>$", container_type))
                 if !isnothing(elem_match)
                     elem_cpp = String(strip(elem_match.captures[1]))
-                    elem_julia = _normalize_stl_elem_type(infer_julia_type(registry, elem_cpp; context="STL factory element type"))
+                    elem_julia = _stl_vector_element_type(elem_cpp, defined_struct_names,
+                                                          t -> _normalize_stl_elem_type(infer_julia_type(registry, t; context="STL factory element type")))
+                    if elem_julia === nothing
+                        @warn "STL: no CppVector factory for $(repr(container_type)): its element type " *
+                              "$(repr(elem_cpp)) has no Julia layout in this wrapper"
+                        continue
+                    end
 
                     factory_name = "create_$(safe_name)"
                     push!(exports, factory_name)
