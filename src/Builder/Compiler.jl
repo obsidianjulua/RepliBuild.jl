@@ -4072,21 +4072,133 @@ function _runtime_symbol_names(binary_path::String)
 end
 
 """
+    _nm_code_lines(output) -> Vector{NTuple{3,String}}
+
+The `(address, type, name)` of every code symbol in an `nm` listing: types
+`T` (text) and `W` (weak), which cover C++ template instantiations and inline
+functions whose definitions live in headers, and the local-linkage `t`/`w`
+nm reports for static functions, so a static C function exported through
+`-fvisibility=default` still surfaces. The name is everything after the type,
+so a demangled name keeps its spaces.
+"""
+function _nm_code_lines(output::AbstractString)::Vector{NTuple{3,String}}
+    out = NTuple{3,String}[]
+    for line in split(output, '\n')
+        line = strip(line)
+        isempty(line) && continue
+        parts = split(line)
+        length(parts) >= 3 || continue
+        String(parts[2]) in ("T", "W", "t", "w") || continue
+        push!(out, (String(parts[1]), String(parts[2]), join(parts[3:end], " ")))
+    end
+    return out
+end
+
+"""
+    _pair_nm_outputs(mangled_output, demangled_output) -> Vector{NTuple{4,String}}
+
+Every code symbol as `(address, type, mangled, demangled)`, from the two
+listings `nm -gp --defined-only` (mangled) and `nm -gpC --defined-only`
+(demangled) of one binary. With `-p` (no sort) both print the symbol table in
+its own order, so line *i* of one is line *i* of the other, and each symbol
+keeps its own two names.
+
+Pairing by ADDRESS, as this did until 2026-11-13, gave every symbol at an
+address the mangled name of whichever symbol nm listed last there. Clang
+emits constructors and destructors as aliases (`-mconstructor-aliases`): D1
+is D2's alias always, and at `-O1` and above a derived class's trivial
+destructor is an alias of its base's, so tinyxml2's `~XMLComment`,
+`~XMLUnknown`, `~XMLDeclaration` and `~XMLNode` D1/D2 were eight names at one
+address. The metadata then carried `XMLNode`'s D2 symbol four times, once per
+class, demangled as each derived destructor and with each derived class as
+its `class`, and the derived classes' own symbols not at all:
+`XMLComment_destroy_XMLComment` called `_ZN8tinyxml27XMLNodeD2Ev` under
+`this::Ptr{XMLNode}`. The address map stays as the fallback for an `nm` whose
+two listings do not line up (a count or an address differs), with a warning;
+there, as before, a `__rb_` alias (`_alias_exports!`, Tier 1) never displaces
+the real name at its address and any other name may.
+"""
+function _pair_nm_outputs(mangled_output::AbstractString, demangled_output::AbstractString)
+    mangled = _nm_code_lines(mangled_output)
+    demangled = _nm_code_lines(demangled_output)
+    aligned = length(mangled) == length(demangled) &&
+              all(i -> mangled[i][1] == demangled[i][1] && mangled[i][2] == demangled[i][2],
+                  eachindex(mangled))
+    if aligned
+        return [(d[1], d[2], m[3], d[3]) for (m, d) in zip(mangled, demangled)]
+    end
+    @warn "nm's mangled and demangled listings do not line up ($(length(mangled)) and " *
+          "$(length(demangled)) code symbols); pairing them by address, where aliased " *
+          "symbols (constructors, destructors) share one name"
+    address_to_mangled = Dict{String,String}()
+    for (address, _, name) in mangled
+        prev = get(address_to_mangled, address, nothing)
+        if prev === nothing || !startswith(name, "__rb_") || startswith(prev, "__rb_")
+            address_to_mangled[address] = name
+        end
+    end
+    return [(address, typ, get(address_to_mangled, address, name), name) for (address, typ, name) in demangled]
+end
+
+"""
+    _order_like_listing(pairs, sorted_output) -> Vector{NTuple{4,String}}
+
+`pairs` (`_pair_nm_outputs`) in the order of `sorted_output`, nm's own sorted
+demangled listing (`nm -gC --defined-only`, no `-p`): the order the metadata's
+`functions` have always had, which every emitted wrapper follows, and which
+nm collates by the locale (`en_US.UTF-8` folds case and skips punctuation),
+so nothing here reproduces it. Each sorted line takes the next pair with its
+address, type and demangled name; among aliases of one demangled name (D1 and
+D2, C1 and C2 at one address) the smaller mangled name comes first, so
+`_dedup_method_chunks`' last definition is the D2 and C2 the address map used
+to give both lines. A pair no sorted line claims is appended, sorted the same
+way, with a warning.
+"""
+function _order_like_listing(pairs::AbstractVector{NTuple{4,String}}, sorted_output::AbstractString)
+    queues = Dict{NTuple{3,String},Vector{NTuple{4,String}}}()
+    for p in pairs
+        push!(get!(() -> NTuple{4,String}[], queues, (p[1], p[2], p[4])), p)
+    end
+    for q in values(queues)
+        sort!(q; by = p -> p[3])
+    end
+    out = NTuple{4,String}[]
+    for key in _nm_code_lines(sorted_output)
+        q = get(queues, key, nothing)
+        (q === nothing || isempty(q)) && continue
+        push!(out, popfirst!(q))
+    end
+    left = sort!([p for q in values(queues) for p in q]; by = p -> (p[4], p[3]))
+    isempty(left) || @warn "$(length(left)) code symbol(s) of nm's unsorted listing are not in its sorted one; appended"
+    append!(out, left)
+    return out
+end
+
+"""
 Extract symbol information from compiled binary using nm.
 Returns vector of symbol dictionaries with mangled/demangled names.
 """
 function extract_symbols_from_binary(binary_path::String)
-    # Run nm WITHOUT demangling to get mangled names
-    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+    # Two listings in the symbol table's own order (`-p`), so they pair line
+    # by line (`_pair_nm_outputs`), and the sorted demangled listing for the
+    # order (`_order_like_listing`): nm's default sort collates the demangled
+    # names when `-C` is given and the mangled ones otherwise, and the
+    # metadata's order is the wrapper's.
+    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-gp", "--defined-only", binary_path])
     if exitcode1 != 0
         @warn "nm command failed: $mangled_output"
         return Dict{String,Any}[]
     end
 
-    # Run nm WITH demangling to get human-readable names
-    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gpC", "--defined-only", binary_path])
     if exitcode2 != 0
         @warn "nm demangled command failed: $demangled_output"
+        return Dict{String,Any}[]
+    end
+
+    (sorted_output, exitcode3) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    if exitcode3 != 0
+        @warn "nm sorted command failed: $sorted_output"
         return Dict{String,Any}[]
     end
 
@@ -4095,118 +4207,71 @@ function extract_symbols_from_binary(binary_path::String)
     # means the question could not be asked, and then nothing is screened out.
     exported = _pe_exported_names(binary_path)
 
-    # Build address → mangled mapping. Accept T (text/code) and W (weak)
-    # symbols. Weak symbols cover C++ template instantiations and inline
-    # functions whose definitions live in headers — these are wrappable just
-    # like normal text symbols. Lowercase t/w are local-linkage variants that
-    # nm reports for static functions; include them so static C functions
-    # exported via -fvisibility=default still surface.
-    address_to_mangled = Dict{String,String}()
-    code_symbol_types = ("T", "W", "t", "w")
-    for line in split(mangled_output, '\n')
-        line = strip(line)
-        if isempty(line)
-            continue
-        end
-        parts = split(line)
-        if length(parts) >= 3 && parts[2] in code_symbol_types
-            address = parts[1]
-            mangled = parts[3]
-            # Several symbols can share an address, and since 2026-10-24 every
-            # exported definition of a Tier 1 build does: its `__rb_<lib>_`
-            # alias (`_alias_exports!`) sits on the same code. The alias is
-            # slice-binding surface, never API, and must not stand in for the
-            # real name here — which it did for every function whose alias nm
-            # listed after it (nm sorts by the locale's collation, so which
-            # names those were depended on the host). A `__rb_` name never
-            # displaces another name at its address; any other name may.
-            prev = get(address_to_mangled, address, nothing)
-            if prev === nothing || !startswith(mangled, "__rb_") || startswith(prev, "__rb_")
-                address_to_mangled[address] = mangled
-            end
-        end
-    end
-
     # Build symbols array with both mangled and demangled
     symbols = Dict{String,Any}[]
-    for line in split(demangled_output, '\n')
-        line = strip(line)
-        if isempty(line)
+    paired = _order_like_listing(_pair_nm_outputs(mangled_output, demangled_output), sorted_output)
+    for (address, symbol_type, mangled_name, demangled_name) in paired
+        # Filter out libstdc++/libc++ internals that get inlined into the
+        # binary as weak symbols. These come from #include <vector> et al.
+        # — they're "defined-only" because the inliner emitted them, not
+        # because the user wrote them. Wrapping them produces signatures
+        # referencing types we never declared (e.g. `std::less<void>`).
+        # Deliberate STL container wrapping goes through extract_stl_method_symbols
+        # under [types].templates, not this general path.
+        if _is_stdlib_internal(mangled_name, demangled_name)
             continue
         end
 
-        parts = split(line)
-        if length(parts) >= 3
-            address = parts[1]
-            symbol_type = parts[2]
-            demangled_name = join(parts[3:end], " ")
-
-            if symbol_type in code_symbol_types
-                mangled_name = get(address_to_mangled, address, demangled_name)
-
-                # Filter out libstdc++/libc++ internals that get inlined into the
-                # binary as weak symbols. These come from #include <vector> et al.
-                # — they're "defined-only" because the inliner emitted them, not
-                # because the user wrote them. Wrapping them produces signatures
-                # referencing types we never declared (e.g. `std::less<void>`).
-                # Deliberate STL container wrapping goes through extract_stl_method_symbols
-                # under [types].templates, not this general path.
-                if _is_stdlib_internal(mangled_name, demangled_name)
-                    continue
-                end
-
-                # Not in the PE export directory ⇒ not API, whatever nm says.
-                # This is the screen that keeps mingw's statically-linked CRT
-                # out: snprintf and friends are defined globals in the COFF
-                # symbol table and absent from the export directory, so nothing
-                # can reach them through the library — GetProcAddress consults
-                # only that directory. Wrapping one produced a thunk the JIT
-                # could not resolve, and the failure hung the run.
-                if exported !== nothing && !(mangled_name in exported)
-                    continue
-                end
-
-                # Promoted statics (`__rb_<lib>_*`, static-promotion pass) are
-                # slice-binding surface, not API: they carry no matching DWARF
-                # entry under the promoted name, so wrapping them would emit
-                # zero-arg garbage. The wrapper never sees them; slices bind by
-                # symbol at JIT time.
-                if startswith(mangled_name, "__rb_") || startswith(demangled_name, "__rb_")
-                    continue
-                end
-
-                # Itanium adjustor thunks are vtable-slot entry points, not API:
-                # they fix up `this` on entry (a fixed subtraction, or a vcall
-                # offset read through the vptr) and tail-jump to the real method.
-                # Nothing should reach one BY NAME — an override is reached
-                # through the vtable (the vcall producer) or after an explicit
-                # upcast (`Derived_as_Base2`).
-                #
-                # Same reasoning as `__rb_*` above, and the same failure: no
-                # DWARF subprogram describes a thunk, so `parse_function_signatures`
-                # infers the signature from the demangled string — where the
-                # "class" is the demangler's PHRASE ("non-virtual thunk to
-                # Derived"), not a class name. No aggregate is named that, so
-                # neither receiver gate (`FunctionGen._has_receiver`,
-                # `GeneratorCpp`'s `struct_types` check) synthesizes `this`, and
-                # the wrapper emits a zero-argument function calling a method that
-                # needs `this` in rdi. Proven live 2026-08-13, not latent:
-                # `ViTest.virtual_thunk_to_Diamond_tag()` was exported and
-                # SIGSEGV'd — the virtual-thunk form dereferences the garbage
-                # `this` twice (`mov (%rdi),%rax; mov -0x20(%rax),%rax`) to read
-                # the vcall offset out of the vptr.
-                if _is_itanium_thunk(mangled_name, demangled_name)
-                    continue
-                end
-
-                push!(symbols, Dict(
-                    "mangled" => mangled_name,
-                    "demangled" => demangled_name,
-                    "type" => symbol_type,
-                    "address" => address
-                ))
-            end
+        # Not in the PE export directory ⇒ not API, whatever nm says.
+        # This is the screen that keeps mingw's statically-linked CRT
+        # out: snprintf and friends are defined globals in the COFF
+        # symbol table and absent from the export directory, so nothing
+        # can reach them through the library — GetProcAddress consults
+        # only that directory. Wrapping one produced a thunk the JIT
+        # could not resolve, and the failure hung the run.
+        if exported !== nothing && !(mangled_name in exported)
+            continue
         end
+
+        # Promoted statics (`__rb_<lib>_*`, static-promotion pass) are
+        # slice-binding surface, not API: they carry no matching DWARF
+        # entry under the promoted name, so wrapping them would emit
+        # zero-arg garbage. The wrapper never sees them; slices bind by
+        # symbol at JIT time.
+        if startswith(mangled_name, "__rb_") || startswith(demangled_name, "__rb_")
+            continue
+        end
+
+        # Itanium adjustor thunks are vtable-slot entry points, not API:
+        # they fix up `this` on entry (a fixed subtraction, or a vcall
+        # offset read through the vptr) and tail-jump to the real method.
+        # Nothing should reach one BY NAME — an override is reached
+        # through the vtable (the vcall producer) or after an explicit
+        # upcast (`Derived_as_Base2`).
+        #
+        # Same reasoning as `__rb_*` above, and the same failure: no
+        # DWARF subprogram describes a thunk, so `parse_function_signatures`
+        # infers the signature from the demangled string — where the
+        # "class" is the demangler's PHRASE ("non-virtual thunk to
+        # Derived"), not a class name. No aggregate is named that, so
+        # neither receiver gate (`FunctionGen._has_receiver`,
+        # `GeneratorCpp`'s `struct_types` check) synthesizes `this`, and
+        # the wrapper emits a zero-argument function calling a method that
+        # needs `this` in rdi. Proven live 2026-08-13, not latent:
+        # `ViTest.virtual_thunk_to_Diamond_tag()` was exported and
+        # SIGSEGV'd — the virtual-thunk form dereferences the garbage
+        # `this` twice (`mov (%rdi),%rax; mov -0x20(%rax),%rax`) to read
+        # the vcall offset out of the vptr.
+        if _is_itanium_thunk(mangled_name, demangled_name)
+            continue
+        end
+
+        push!(symbols, Dict(
+            "mangled" => mangled_name,
+            "demangled" => demangled_name,
+            "type" => symbol_type,
+            "address" => address
+        ))
     end
 
     return symbols

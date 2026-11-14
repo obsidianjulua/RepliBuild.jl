@@ -453,6 +453,21 @@ the test named when you touch the area.
   twin wins) and stay unbound.
 - `nm -D` output is parsed only by `Compiler._nm_dynamic_names`, which cuts ELF
   `@VER`/`@@VER` suffixes. Mangled output only: demangled names can contain `@`.
+- **A symbol's mangled and demangled names are paired by position, never by
+  address** (`_pair_nm_outputs`, 2026-11-13): `extract_symbols_from_binary`
+  takes both `nm` listings with `-p` (the symbol table's own order; nm's
+  default sort collates demangled names under `-C`) and reads them line by
+  line. Several symbols share an address: Tier 1's `__rb_` aliases, and
+  clang's constructor and destructor aliases (`-mconstructor-aliases`; at
+  `-O1` and above a derived class's trivial destructor is its base's D2), so
+  an address map gave tinyxml2's `~XMLComment` the symbol of `~XMLNode`. The
+  map stays only as the fallback for listings that do not line up. The
+  ORDER of the metadata's functions, which every wrapper follows, is still
+  nm's sorted demangled listing (`_order_like_listing`): it is a locale
+  collation (`en_US.UTF-8` folds case and skips punctuation) that nothing in
+  Julia reproduces, so a third `nm -gC` call supplies it, with D1 before D2
+  among aliases so the dedup keeps the variant it always kept.
+  (`test_symbol_hygiene.jl`, `test_cpp_finalizers.jl` and its live twin.)
 - **AOT thunks are compiled by wrap's last stage, never by build.** Only the C++
   generator knows which thunks a wrapper binds. It writes that set to
   `thunk_manifest.json` on **every** wrap, JIT included (JITManager compiles only

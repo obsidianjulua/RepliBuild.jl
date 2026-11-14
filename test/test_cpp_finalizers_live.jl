@@ -31,7 +31,7 @@ if requires("C++ finalizers, live", :libJLCS, :clangxx)
     root = "$(escape_string(FINALIZER_DIR))"
 
     [compile]
-    flags = ["-std=c++17", "-fPIC"]
+    flags = ["-std=c++17", "-fPIC", "-O2"]
     source_files = ["$(escape_string(joinpath(FINALIZER_DIR, "src", "finalizers.cpp")))"]
     include_dirs = ["$(escape_string(joinpath(FINALIZER_DIR, "include")))"]
 
@@ -71,10 +71,28 @@ if requires("C++ finalizers, live", :libJLCS, :clangxx)
         @test occursin("area(obj::Rect) = GC.@preserve obj Rect_area(obj.handle)", code)
     end
 
+    @testset "an aliased destructor keeps its own name (-O2: Twig's D2 is Leaf's)" begin
+        so = joinpath(FINALIZER_DIR, "julia", "libfinalizers.so")
+        nm = read(`nm -gp --defined-only $so`, String)
+        addr(sym) = (m = match(Regex("^(\\S+) [TW] " * sym * "\$", "m"), nm); m === nothing ? "" : m.captures[1])
+        # The shape the fixture is built for: the two D2s share one address.
+        @test addr("_ZN4TwigD2Ev") != "" && addr("_ZN4TwigD2Ev") == addr("_ZN4LeafD2Ev")
+        md = RepliBuild._read_json(joinpath(FINALIZER_DIR, "julia", "compilation_metadata.json"))
+        fns = md["functions"]
+        twig = [f for f in fns if f["class"] == "Twig"]
+        @test Set(f["mangled"] for f in twig if occursin(r"D[0-2]Ev$", f["mangled"])) ==
+              Set(["_ZN4TwigD0Ev", "_ZN4TwigD1Ev", "_ZN4TwigD2Ev"])
+        @test !any(f -> startswith(f["mangled"], "_ZN4Leaf") && f["class"] != "Leaf", fns)
+        @test !any(f -> f["mangled"] == "_ZN4LeafD2Ev" && f["demangled"] != "Leaf::~Leaf()", fns)
+        destroy = (m = match(r"function Twig_destroy_Twig\(.*?\nend"s, code); m === nothing ? "" : m.match)
+        @test occursin("_ZN4TwigD", destroy) && !occursin("_ZN4LeafD", destroy)
+        @test occursin("ccall((:_ZN4TwigD0Ev, LIBRARY_PATH), Cvoid, (Ptr{Twig},), x.handle)", code)
+    end
+
     @testset "collected objects are freed" begin
         names = ["rect_finalizer_deletes", "widget_finalizer_calls_destroy_widget", "managed_leaf_deletes",
                  "managed_node_deletes", "managed_pooled_calls_its_static_deleter", "nothing_owns_a_plain",
-                 "no_invented_class"]
+                 "no_invented_class", "managed_twig_deletes_through_its_own_destructor"]
         r = run_isolated(`$FINALIZER_PROBE $wrapper`)
         v = probe_verdicts(r.output)
         @test r.ok

@@ -216,4 +216,67 @@ const _FZ_FUNCTIONS = Any[
             @test (name, occursin("function $name(", code)) == (name, true)
         end
     end
+
+    @testset "a derived class's aliased destructor is its own, never the base's" begin
+        # tinyxml2's shape (2026-11-13): clang emits a derived class's trivial
+        # destructor as an alias of its base's D2 (`-mconstructor-aliases`, -O1
+        # and up), so `~XMLComment` D1/D2 and `~XMLNode` D1/D2 are one address.
+        # `extract_symbols_from_binary` paired nm's two listings by address and
+        # gave the derived destructors the base's mangled name under their own
+        # demangled one: `XMLComment_destroy_XMLComment` called
+        # `_ZN8tinyxml27XMLNodeD2Ev`. The metadata here is what the build
+        # derives from the two listings (`_pair_nm_outputs`,
+        # `parse_function_signatures`), and the wrapper must bind each class's
+        # destructor to that class's own symbol. Negative check: make
+        # `_pair_nm_outputs` take its address-map fallback unconditionally.
+        C = RepliBuild.Compiler
+        nm_m = """
+        0000000000009220 T _ZN8tinyxml27XMLNodeD0Ev
+        000000000000b440 T _ZN8tinyxml27XMLNodeD1Ev
+        000000000000b440 T _ZN8tinyxml27XMLNodeD2Ev
+        000000000000b440 T _ZN8tinyxml210XMLCommentD1Ev
+        000000000000b440 T _ZN8tinyxml210XMLCommentD2Ev
+        000000000000bfc0 T _ZN8tinyxml210XMLCommentD0Ev
+        000000000000c000 T _ZN8tinyxml210XMLComment8ToCommentEv
+        """
+        nm_d = """
+        0000000000009220 T tinyxml2::XMLNode::~XMLNode()
+        000000000000b440 T tinyxml2::XMLNode::~XMLNode()
+        000000000000b440 T tinyxml2::XMLNode::~XMLNode()
+        000000000000b440 T tinyxml2::XMLComment::~XMLComment()
+        000000000000b440 T tinyxml2::XMLComment::~XMLComment()
+        000000000000bfc0 T tinyxml2::XMLComment::~XMLComment()
+        000000000000c000 T tinyxml2::XMLComment::ToComment()
+        """
+        syms = [Dict{String,Any}("mangled" => p[3], "demangled" => p[4]) for p in C._pair_nm_outputs(nm_m, nm_d)]
+        fns = C.parse_function_signatures(syms)
+        for f in fns
+            f["is_noexcept"] = false; f["is_vararg"] = false
+            f["return_type"] = _FZ_VOID
+            f["parameters"] = Any[]
+        end
+        @test length(fns) == 7
+        @test count(f -> f["mangled"] == "_ZN8tinyxml27XMLNodeD2Ev", fns) == 1
+        @test only(f for f in fns if f["mangled"] == "_ZN8tinyxml27XMLNodeD2Ev")["class"] == "tinyxml2::XMLNode"
+        @test Set(f["mangled"] for f in fns if f["class"] == "tinyxml2::XMLComment") ==
+              Set(["_ZN8tinyxml210XMLCommentD0Ev", "_ZN8tinyxml210XMLCommentD1Ev", "_ZN8tinyxml210XMLCommentD2Ev",
+                   "_ZN8tinyxml210XMLComment8ToCommentEv"])
+
+        structs = Dict{String,Any}(
+            "XMLNode" => _fz_rec("class", 8, _fz_vptr("XMLNode")),
+            "XMLComment" => _fz_rec("class", 8; base = "XMLNode"))
+        meta = Dict{String,Any}("functions" => fns, "globals" => Dict{String,Any}(), "struct_definitions" => structs)
+        r = _FZ_W.generate_introspective_module_cpp(cfg, _FZ_LIB, meta, "DtorAlias",
+                                                    _FZ_W.create_type_registry(cfg), true)
+        text = r isa Tuple ? String(first(r)) : String(r)
+        destroy = _fz_chunk(text, "function tinyxml2_XMLComment_destroy_XMLComment(", "\nend")
+        @test !isempty(destroy)
+        @test occursin("_ZN8tinyxml210XMLComment", destroy)            # its own symbol
+        @test !occursin("XMLNodeD", destroy)                           # never the base's
+        node_destroy = _fz_chunk(text, "function tinyxml2_XMLNode_destroy_XMLNode(", "\nend")
+        @test occursin("_ZN8tinyxml27XMLNodeD", node_destroy)
+        # The owner frees through the derived class's deleting destructor.
+        @test occursin("ccall((:_ZN8tinyxml210XMLCommentD0Ev, LIBRARY_PATH), Cvoid",
+                       _fz_chunk(text, "mutable struct ManagedXMLComment\n", "export ManagedXMLComment"))
+    end
 end
