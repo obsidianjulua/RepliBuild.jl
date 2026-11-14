@@ -39,11 +39,27 @@ std::string_view      tail_view(const char *s, int n);
 __attribute__((visibility("hidden"))) std::pair<short, short> hidden_pair(short a);
 int map_lookup(int k);
 
-// Still traps: no layout to keep (tuple and optional are bases all the way
-// down in libstdc++; complex's member is `__complex__ double`).
+// Laid out from their bases (2026-11-13). libstdc++'s tuple and optional have
+// no member of their own, only bases, so they had no layout and trapped:
+// tuple<int, double> holds the double at 0 and the int at 8, through two
+// `_Head_base`s; optional<T> holds a `_Storage` union (T beside an empty
+// `_Empty_byte`) and an engaged flag. complex's member is a `__complex__`
+// scalar, whose width the parser reads off its byte_size.
 std::tuple<int, double> tup(int a, double b);
 std::optional<double>   maybe(bool has, double v);
+std::optional<int>      maybe_int(bool has, int v);
 std::complex<double>    cplx(double re, double im);
+std::complex<float>     cplxf(float re, float im);
+double tup_sum(std::tuple<int, double> t);              // the same records as parameters
+double maybe_or(std::optional<double> o, double fallback);
+int    maybe_int_or(std::optional<int> o, int fallback);
+double cplx_norm(std::complex<double> z);
+float  cplxf_norm(std::complex<float> z);
+
+// A bare `long double _Complex` comes back in st0/st1, which nothing can call;
+// this record holding one is 32 bytes whose first eightbyte is X87, so SysV
+// returns it in memory (sret), and it is callable.
+std::complex<long double> cplxl(double re, double im);
 
 // Controls with no toolchain type in them.
 struct Tag {};

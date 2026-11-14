@@ -26,7 +26,16 @@ std::string_view      tail_view(const char *s, int n) {
 
 std::tuple<int, double> tup(int a, double b) { return {a, b}; }
 std::optional<double>   maybe(bool has, double v) { if (has) return v; return std::nullopt; }
+std::optional<int>      maybe_int(bool has, int v) { if (has) return v; return std::nullopt; }
 std::complex<double>    cplx(double re, double im) { return {re, im}; }
+std::complex<float>     cplxf(float re, float im) { return {re, im}; }
+// Each element weighed differently, so one read from the other's place shows.
+double tup_sum(std::tuple<int, double> t) { return std::get<0>(t) * 10 + std::get<1>(t); }
+double maybe_or(std::optional<double> o, double fallback) { return o.value_or(fallback); }
+int    maybe_int_or(std::optional<int> o, int fallback) { return o.value_or(fallback); }
+double cplx_norm(std::complex<double> z) { return z.real() * 100 + z.imag(); }
+float  cplxf_norm(std::complex<float> z) { return z.real() * 100 + z.imag(); }
+std::complex<long double> cplxl(double re, double im) { return {re, im}; }
 
 LP     make_lp(double a, double b) { LP p; p.a = a; p.b = b; return p; }
 double lp_sum(LP p) { return p.a + p.b; }

@@ -9,7 +9,8 @@
 # and two trapped functions. `Compiler._promote_toolchain_records!` keeps exactly
 # the toolchain records the library reaches by value; an empty base is marked so
 # the SysV classifier skips it (std::pair's `__pair_base`, and a library `Tag`);
-# GeneratorCpp's STL screen lets a promoted record through.
+# GeneratorCpp's STL screen lets a promoted record through. tuple and optional
+# are laid out from their bases and complex from its sized member (2026-11-13).
 #
 # This builds toolchain_byvalue_test, checks what the metadata and the wrapper
 # say, and calls every function in a child process (a wrong crossing returns
@@ -72,9 +73,27 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
             @test get(get(sd, k, Dict()), "toolchain", false) == true
         end
         @test any(k -> startswith(k, "basic_string_view<char") && get(sd[k], "toolchain", false) == true, keys(sd))
-        # No layout to keep, so no entry: these stay traps.
-        @test !any(k -> startswith(k, "tuple<") || startswith(k, "optional<") || startswith(k, "complex<"),
-                   [k for (k, v) in sd if get(v, "toolchain", false) == true])
+        # Laid out from their bases (2026-11-13): members at the bases' offsets,
+        # the bases gone but the empty ones, a shared name numbered.
+        layout(k) = [(m["name"], m["c_type"], m["offset"]) for m in sd[k]["members"]]
+        for k in ("tuple<int, double>", "optional<double>", "optional<int>", "complex<double>",
+                  "complex<float>", "complex<long double>")
+            @test (k, get(get(sd, k, Dict()), "toolchain", false)) == (k, true)
+        end
+        @test layout("tuple<int, double>") ==
+              [("_M_head_impl", "double", "0x0"), ("_M_head_impl_1", "int", "0x8")]
+        @test !haskey(sd["tuple<int, double>"], "base_classes")
+        @test layout("optional<double>") == [("_M_payload", "_Optional_payload<double, true, true, true>", "0x0")]
+        @test all(b -> get(b, "empty", false) == true, sd["optional<double>"]["base_classes"])
+        @test layout("_Optional_payload<double, true, true, true>") ==
+              [("_M_payload", "_Storage<double, true>", "0x0"), ("_M_engaged", "bool", "0x8")]
+        # The union drops the empty `_Empty_byte` beside the value.
+        @test layout("_Storage<double, true>") == [("_M_value", "double", "0x0")]
+        # The complex width, read off the base type's byte_size.
+        @test layout("complex<double>") == [("_M_value", "complex double", "0x0")]
+        @test layout("complex<float>") == [("_M_value", "complex float", "0x0")]
+        # The intermediate bases are flattened, not promoted.
+        @test !any(k -> startswith(k, "_Tuple_impl") || startswith(k, "_Head_base"), keys(sd))
         # Only what an exported, non-std function crosses by value: a hidden
         # function's pair stays out, and so do the iterators libstdc++'s exported
         # std::map instantiations return.
@@ -101,11 +120,10 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
         @test occursin(r"struct Span\n\s+range::pair_int_int\n", code)
         for f in ("minmax_pair", "tagged", "divmod", "fpair", "triple", "nested", "find_first",
                   "pair_sum", "pair_imix", "make_span", "span_weight", "arr2", "tail_view",
-                  "make_lp", "lp_sum", "make_outer3")
+                  "make_lp", "lp_sum", "make_outer3",
+                  "tup", "maybe", "maybe_int", "cplx", "cplxf", "tup_sum", "maybe_or",
+                  "maybe_int_or", "cplx_norm", "cplxf_norm", "cplxl")
             @test !occursin("ABI Safety Trap: cannot call '$f'", code)
-        end
-        for f in ("tup", "maybe", "cplx")
-            @test occursin("ABI Safety Trap: cannot call '$f'", code)
         end
         @test !occursin("tbv_ledger", code)
     end
@@ -114,7 +132,9 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
         names = ["pair_sse_sse", "pair_int_sse", "pair_one_integer", "pair_two_floats",
                  "pair_memory_return", "pair_inside_pair", "pair_pointer_in_arguments",
                  "pair_parameters", "library_record_holds_pair", "std_array", "string_view",
-                 "map_lookup_is_a_plain_call", "still_traps", "control_empty_base", "control_template_in_memory_return"]
+                 "map_lookup_is_a_plain_call", "tuple_from_bases", "optional_from_bases",
+                 "complex_width", "complex_long_double_in_memory", "control_empty_base",
+                 "control_template_in_memory_return"]
         r = run_isolated(`$TBV_PROBE $wrapper`)
         v = probe_verdicts(r.output)
         @test r.ok

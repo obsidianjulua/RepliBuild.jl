@@ -1063,9 +1063,16 @@ the test named when you touch the area.
   `_glfw` state global kept glibc's `pthread_mutex_t` and friends. It never promotes an STL
   container (`stl_container_size`; those keep their own path) or an
   `INTERNAL_TYPE_BLOCKLIST` name, and a library record of the same name keeps its
-  entry. Still traps, with no entry to promote: libstdc++'s `tuple` and `optional`
-  (no member of their own), `complex` (clang names both `_Complex` widths
-  `complex`). A 1-byte empty base (`__pair_base`, a library `Tag`) is marked
+  entry. **A toolchain record is laid out from its bases** (2026-11-13,
+  `_laid_out_from_bases`): libstdc++'s `tuple` and `optional` have no member of
+  their own, so the parser gives a toolchain record whose bytes come from
+  non-virtual bases an entry (a library record still gets none), and promotion
+  puts every non-empty base's members, at depth, at the base's offset, in
+  place of the base; a shared name is numbered (`_M_head_impl_1`), and a union
+  drops a 1-byte empty-record member (`_Storage`'s `_Empty_byte`). Readers then
+  see members at offsets, as for any record. `complex` is sized by the parser
+  (`_complex_base_name`), and `std::complex<long double>` is MEMORY (sret), so
+  callable. A 1-byte empty base (`__pair_base`, a library `Tag`) is marked
   `"empty"` on the base entry and the SysV classifier skips it; unmarked, every
   record deriving from one trapped, the library's own included. Whether a member
   is held by value reads `_outside_template_args` (`pair<int*, bool>` is a
@@ -1378,13 +1385,12 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
-- Toolchain records by value with no layout to keep stay ABI traps (2026-11-08):
-  libstdc++'s `std::tuple` and `std::optional` are bases all the way down, with no
-  member of their own and so no definition; `std::complex`'s member is
-  `__complex__ double`, and clang names `_Complex float` and `_Complex double`
-  both `complex`. Laying out a record from its bases, and reading the complex
-  width from `byte_size`, would cover them. Everything else the library reaches
-  by value now keeps its layout (above).
+- Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
+  `optional` and `complex` are laid out, above): one with a virtual base, a
+  struct (not a union) holding an empty record as a member, and anything
+  holding a type nothing lays out. libc++'s `tuple` (`__tuple_impl` over
+  `__tuple_leaf` bases) has the same shape as libstdc++'s and is not yet
+  measured on a libc++ host.
 - `parse_dwarf_dump` holds the whole `readelf` dump and every DIE as a `Dict`.
   oneDNN's (`libonednn.so`) parse passed a 24 GB cap and was OOM-killed at
   2519a16 (2026-10-29), so a oneDNN build needs most of a 64 GB box. A streaming
