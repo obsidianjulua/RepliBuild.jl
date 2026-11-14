@@ -654,6 +654,22 @@ the test named when you touch the area.
   width dedup instead of defining one signature twice, which precompilation
   refuses. A change to how the loop types or names a function
   must move the prediction with it. (`test_integer_width_overloads.jl`.)
+  **The same rule types a pointer and an enum** (2026-11-13): a pointer
+  parameter is `::Any` (a `Managed` object, a `Ref`, a `String` pass through
+  `unsafe_convert`) and an emitted enum relaxes to `::Any` too (an `Integer`
+  still passes), unless the set disagrees on the position, which then takes
+  `_strict_param_spelling`: the pointer's target as a `Union` of what callers
+  pass (`_CHAR_POINTER_UNION` for a `char*`; `Ptr{T}`, `Ref{T}`,
+  `AbstractVector{T}` and the owning types for a record; `Any` for `void*`
+  and for a target nothing emits), the enum as itself, never `Union{E,
+  Integer}`, which would take an integer overload's arguments. The
+  prediction and the loop spell a strict position through that one function.
+  A `T&&` overload beside its `const T&` twin is not emitted at all
+  (`_rvalue_shadowed`): both are one Julia signature and the kept one used
+  to be whichever came last, a move where the caller meant a copy. The thunk
+  manifest is the set the FINAL text calls (`_thunks_named_in_text`), so a
+  chunk the dedup dropped leaves no thunk; the 87 it left across the Hub
+  were compiled for nothing. (`test_tier2_typed_dispatch.jl`.)
 - **A Tier 2 argument is converted to its C width in the emitted body.** A
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box
@@ -1402,18 +1418,21 @@ check before claiming portability again; reading `.gitignore` does not settle it
   thunk in the PARSED code (`_mlir_ciface_<m>_thunk`, an AOT slot through
   `_THUNK_SLOTS`, an AOT virtual `thunk_<m>`), never the manifest alone;
   every miss is a trap split by the generator's reason text or a drop split
-  by what the generator did. 2026-11-13, 4.4.0 wrappers, 12 C++ libraries:
-  98.0%, 6 traps, 89 drops. The three causes, by count: an overload set
-  collapsing to one `::Any` signature so only one overload is reachable
-  (pugixml's `set_value(long)`/`(unsigned long)`, imgui's `GetID(const
-  char*)`); the D0/D1/D2 variants of one destructor, one Julia method by
-  construction, which is right; and a `const`/non-`const` method pair
-  collapsing the same way (tinyxml2's `ToElement()` and kin). The first and
-  third are the one problem: Tier 2 parameters are `::Any`, so dispatch
-  cannot tell the overloads apart. The 6 traps are fmt's `long double` and
-  `allocator<char>` and clipper2's `std::function`, all by value. The
-  manifest lists thunks for chunks the dedup dropped (87 across the Hub),
-  which the JIT compiles for nothing.
+  by what the generator did, or set aside as expected when several C++ entry
+  points stand behind one Julia method by design (destructor variants,
+  `const`/non-`const` pairs, an rvalue overload beside its twin, two C
+  spellings of one integer width), measured over the callable surface.
+  2026-11-13, 4.4.0 wrappers, 12 C++ libraries, after the typed Tier 2
+  dispatch (the invariant above) with pugixml and tinyxml2 re-wrapped: 99.4%,
+  6 traps, 21 drops, 60 expected. The drops left: 11 imgui and msdfgen
+  overload sets the generator now separates and their next wrap recovers;
+  pugixml's `operator<`/`operator>` and `<=`/`>=`, which
+  `_julia_function_name` spells alike (`operator_`, `operator_assign`; the
+  curated names are frozen); tinyxml2's `~XMLComment`/`~XMLUnknown`/
+  `~XMLDeclaration` entries whose metadata carries `XMLNode`'s D2 symbol
+  (attribution to check in the DWARF parser); imgui's two undeclared
+  varargs. The 6 traps are fmt's `long double` and `allocator<char>` and
+  clipper2's `std::function`, all by value.
 - **Over-aligned records, what the C sret and byval fixes do not cover**
   (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
   path has no aligned buffer, and every alignment DWARF records (the record's,
