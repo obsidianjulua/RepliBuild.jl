@@ -85,6 +85,25 @@ probe("std_string_is_a_julia_string") do p
         M.short_str_abi_cxx11(i % 20) == string(Char('a' + i % 20))^2 || (push!(p, "short call $i"); break)
         M.long_str_abi_cxx11(40 + i % 50) == "x"^(40 + i % 50) * string(40 + i % 50) || (push!(p, "heap call $i"); break)
     end
+    # On a miss, say WHY the generator kept the bytes: the reason it wrote beside
+    # the call, and the layout the build recorded (the four gates of
+    # `_string_return_plan` are all visible from these two).
+    if !isempty(p)
+        src = read(wrapper, String)
+        m = match(r"# std::string `basic_string<char[^`]*` returned as its raw bytes: ([^\n]*)", src)
+        push!(p, m === nothing ? "wrapper gives no raw-bytes reason for the char string" : "wrapper reason: " * m.captures[1])
+        k = findfirst(startswith("basic_string<char"), collect(keys(RA)))
+        if k === nothing
+            push!(p, "record_abi has no basic_string<char…> key; keys: " * join(filter(startswith("basic_string"), collect(keys(RA))), ", "))
+        else
+            key = collect(keys(RA))[k]
+            lay = get(RA[key], "string_layout", nothing)
+            push!(p, lay === nothing ? "record_abi[$key] has no string_layout" :
+                  "string_layout: unread=" * repr(get(lay, "unread", nothing)) * " char_type=" * repr(get(lay, "char_type", nothing)) *
+                  " destructor=" * repr(get(lay, "destructor", nothing)) * " leaves=" *
+                  join([string(get(l, "path", "?"), "@", get(l, "offset", get(l, "data_bit_offset", "?"))) for l in get(lay, "leaves", Any[])], ","))
+        end
+    end
 end
 
 # A wide string is not decoded: it keeps its raw bytes, and the wrapper says why.
