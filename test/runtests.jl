@@ -277,6 +277,11 @@ include(joinpath(@__DIR__, "test_toolchain_records.jl"))
 
 include(joinpath(@__DIR__, "test_record_scope.jl"))
 include(joinpath(@__DIR__, "test_integer_width_overloads.jl"))
+# The same prediction for a pointer's target and an enum beside a pointer
+# (2026-11-13): `GetID(const char*)`/`(const void*)` were one `::Any` signature;
+# a move overload beside its copy overload is not emitted; the thunk manifest is
+# what the final text calls.
+include(joinpath(@__DIR__, "test_tier2_typed_dispatch.jl"))
 
 # ── Tier 2 returns the Julia side must type (no toolchain) ──────────────────
 # Boost.JSON's inline DOM API (2026-11-01): a `const` record return looked up

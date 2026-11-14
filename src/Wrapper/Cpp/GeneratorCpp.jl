@@ -141,24 +141,101 @@ function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base)
 end
 
 """
-    _integer_width_overloads(functions, struct_types, ccall_param_type; concrete) -> Dict{String,Set{Int}}
+    _type_name_bound(t, defined_names) -> Bool
+
+Whether a parameter annotation `t` resolves when the wrapper is included: a
+composed type (`Ref{ImVec2}`, `NTuple{4, UInt8}`, a `Union`) resolves through
+its parts; a bare name must be a record this module emits or a name bound in
+`Base`/`Core`. An emitted enum is NOT bound here on purpose: an enum parameter
+relaxes to `::Any` like a pointer unless an overload set disagrees on it
+(`_strict_param_spelling`), so a caller may keep passing an `Integer`.
+"""
+function _type_name_bound(t::AbstractString, defined_names)::Bool
+    occursin(r"[{}<>,\s\.]", t) && return true
+    t in defined_names && return true
+    sym = Symbol(t)
+    return isdefined(Base, sym) || isdefined(Core, sym)
+end
+
+"The `::Any`-relaxed kind a parameter's C type takes in a signature the loop builds."
+_relaxed_param_kind(t::AbstractString, bound) =
+    t in _INTEGER_CTYPES ? "Integer" :
+    (startswith(t, "Ptr{") || !bound(t)) ? "Any" : String(t)
+
+const _CHAR_POINTER_CTYPES = ("Ptr{UInt8}", "Ptr{Int8}", "Ptr{Cchar}", "Ptr{Cuchar}", "Cstring")
+const _CHAR_POINTER_UNION = "Union{AbstractString, Cstring, Ptr{UInt8}, Ptr{Int8}, AbstractVector{UInt8}}"
+
+"""
+    _strict_param_spelling(t; bound, owners, is_enum) -> String
+
+The dispatch-relevant Julia type a parameter of C type `t` takes at a position
+an overload set disagrees on: what tells the overloads apart while admitting
+what callers pass today through `::Any`.
+
+  * an integer: its C type (`Cint`, `Clonglong`), as before;
+  * `Ptr{Cvoid}`: `Any`, the catch-all the `void*` overload always was;
+  * a `char*` of either sign, or `Cstring`: a `String`, a `Cstring`, a byte
+    pointer or a byte vector (`_CHAR_POINTER_UNION`), which is what
+    `JITManager.invoke` and `ccall` convert;
+  * `Ptr{T}` for a `T` this module emits (or an enum): `Ptr{T}`, `Ref{T}`, an
+    `AbstractVector{T}`, and the owning types that `unsafe_convert` to
+    `Ptr{T}` (`Managed<T>`, a factory struct; `owners(T)`), so a `Managed`
+    object still passes where it did;
+  * `Ptr{T}` for a `T` nothing emits: `Any` (the name would not resolve);
+  * an emitted enum: the enum type itself, never `Integer`: beside an integer
+    overload, `Union{E, Integer}` would take the integers meant for it;
+  * anything else: `t` as the loop already spells it.
+
+The overload prediction (`_integer_width_overloads`) and the function loop
+both spell a strict position through this, so they agree by construction.
+"""
+function _strict_param_spelling(t::AbstractString; bound = _ -> true, owners = _ -> String[],
+                                is_enum = _ -> false)::String
+    t = String(t)
+    t in _INTEGER_CTYPES && return t
+    t == "Ptr{Cvoid}" && return "Any"
+    t in _CHAR_POINTER_CTYPES && return _CHAR_POINTER_UNION
+    m = match(r"^Ptr\{(.+)\}$", t)
+    if m !== nothing
+        inner = String(m.captures[1])
+        (bound(inner) || is_enum(inner)) || return "Any"
+        parts = ["Ptr{$inner}", "Ref{$inner}", "AbstractVector{$inner}"]
+        append!(parts, owners(inner))
+        return "Union{" * join(unique(parts), ", ") * "}"
+    end
+    is_enum(t) && return t
+    bound(t) || return "Any"
+    return t
+end
+
+"""
+    _integer_width_overloads(functions, struct_types, ccall_param_type; concrete, bound, owners, is_enum)
+        -> Dict{String,Set{Int}}
 
 For each mangled symbol whose wrapper would share its Julia name and dispatch
 signature with another C++ entry point, the positions in `func["parameters"]`
-whose integer **width** differs within that set. The signature is predicted the
-way the function loop builds it: integer parameters `Integer`, pointers `Any`,
-a receiver `Any` in front when the loop would inject one, and the name from
-`_julia_function_name`. A function the loop skips (varargs) is not grouped.
+the set disagrees on: where the strict spellings (`_strict_param_spelling`)
+of the members differ. The signature is predicted the way the function loop
+builds it: integer parameters `Integer`, pointers and unbound names (an enum
+among them) `Any`, a receiver `Any` in front when the loop would inject one,
+and the name from `_julia_function_name`. A function the loop skips (varargs)
+is not grouped.
 
-A width is the Julia type the C alias names on this host (`concrete`, by
-default `_concrete_ctype`): `int` and `long` are one width on LLP64, `long`
-and `long long` on LP64. A set that differs only in the spelling of one width
-is not a disagreement; it stays `::Integer` and `_dedup_method_chunks` folds
-it as it always did, instead of two `function`s with one dispatch signature,
-which precompilation refuses. Tests pass another map to drive both hosts.
+It began with integers alone (2026-10-31) and the name kept: a width is the
+Julia type the C alias names on this host (`concrete`, by default
+`_concrete_ctype`): `int` and `long` are one width on LLP64, `long` and `long
+long` on LP64. A set that differs only in the spelling of one width is not a
+disagreement; it stays `::Integer` and `_dedup_method_chunks` folds it as it
+always did, instead of two `function`s with one dispatch signature, which
+precompilation refuses. Tests pass another map to drive both hosts. Pointer
+and enum positions joined it when 52 of the Hub's 89 dropped C++ functions
+were overloads that differed in a pointer's target or in an enum against a
+pointer (pugixml's `append_child(xml_node_type)` beside `(const char*)`,
+imgui's `GetID(const char*)` beside `(const void*)`, 2026-11-13).
 """
 function _integer_width_overloads(functions, struct_types, ccall_param_type;
-                                  concrete = _concrete_ctype)
+                                  concrete = _concrete_ctype, bound = _ -> true,
+                                  owners = _ -> String[], is_enum = _ -> false)
     groups = Dict{String,Vector{Tuple{String,Vector{String}}}}()
     for func in functions
         get(func, "is_vararg", false) == true && continue
@@ -175,27 +252,90 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
                   (_cpp_this_param(class_name, func_name, struct_types) !== nothing || hop === true)
         ctypes = String[ccall_param_type(String(get(p, "julia_type", "Any")), String(get(p, "c_type", "")))
                         for p in raw]
-        kinds = [t in _INTEGER_CTYPES ? "Integer" : (startswith(t, "Ptr{") ? "Any" : t) for t in ctypes]
+        kinds = [_relaxed_param_kind(t, bound) for t in ctypes]
         injects && pushfirst!(kinds, "Any")
+        # A receiver DWARF supplied is position 1 of `ctypes`; it is never a
+        # strict position (below), so it is recorded as such.
+        has_this && (ctypes[1] = "this")
         push!(get!(() -> Tuple{String,Vector{String}}[], groups, jname * "(" * join(kinds, ",") * ")"),
               (mangled, ctypes))
     end
+    spell(t) = t in _INTEGER_CTYPES ? concrete(t) :
+               _concrete_sig_type(_strict_param_spelling(t; bound, owners, is_enum))
     strict = Dict{String,Set{Int}}()
     for (_, members) in groups
         length(unique(first.(members))) >= 2 || continue
         n = length(members[1][2])
         all(m -> length(m[2]) == n, members) || continue
         for i in 1:n
-            spellings = Set(m[2][i] for m in members)
-            all(w -> w in _INTEGER_CTYPES, spellings) || continue
-            # Two spellings of one width (`int`/`long` on LLP64) are one type.
-            length(Set(concrete(w) for w in spellings)) >= 2 || continue
+            # The receiver stays `::Any`, whatever the metadata says it
+            # points at: two entries of one destructor attributed to a base
+            # and a derived class differ only there (tinyxml2's
+            # `~XMLComment` entries, one carrying `XMLNode`'s D2 symbol),
+            # and typing it would take the `::Any` receiver every caller
+            # passes a `Ptr{Cvoid}` or a `Managed` object to.
+            any(m -> m[2][i] == "this", members) && continue
+            # Two spellings of one type (`int`/`long` on LLP64, `char*` of
+            # either sign) are one type.
+            length(Set(spell(m[2][i]) for m in members)) >= 2 || continue
             for (mangled, _) in members
                 push!(get!(() -> Set{Int}(), strict, mangled), i)
             end
         end
     end
     return strict
+end
+
+"""
+    _rvalue_shadowed(functions) -> Set{String}
+
+The mangled symbols of overloads taking an rvalue reference (`T&&`) where
+another overload of the same name takes the same parameters by lvalue
+reference (`const T&`, `T&`). Julia has no rvalue: a caller passes a `Ref`
+to either, and both are one Julia signature. The move overload steals from
+its argument, so when `_dedup_method_chunks` kept it (msdfgen's
+`Shape::addContour(Contour&&)`, pugixml's `xpath_node_set(xpath_node_set&&)`)
+a caller copying an object emptied it. These are not emitted; the lvalue
+overload is the one a Julia caller means. A `T&&` overload with no lvalue
+twin is emitted as before.
+"""
+function _rvalue_shadowed(functions)::Set{String}
+    norm(c) = replace(replace(String(c), r"\b(const|volatile)\b\s*" => ""), r"\s+" => "")
+    key(f) = (String(get(f, "name", "")), String(get(f, "class", "")),
+              [replace(norm(get(p, "c_type", "")), "&&" => "&") for p in get(f, "parameters", Any[])])
+    lvalue = Set{Any}()
+    for f in functions
+        any(p -> endswith(norm(get(p, "c_type", "")), "&&"), get(f, "parameters", Any[])) && continue
+        push!(lvalue, key(f))
+    end
+    out = Set{String}()
+    for f in functions
+        any(p -> endswith(norm(get(p, "c_type", "")), "&&"), get(f, "parameters", Any[])) || continue
+        key(f) in lvalue && push!(out, String(get(f, "mangled", "")))
+    end
+    return out
+end
+
+"""
+    _thunks_named_in_text(text, taken) -> Set{String}
+
+The mangled symbols whose thunk the emitted `text` calls, in every spelling a
+call site has: `"_mlir_ciface_<m>_thunk"` (JIT), an AOT slot `_FPTR_x[]`
+resolved through `taken` (`_aot_fptr_const_name!`), and an AOT virtual
+`ccall((:thunk_<m>, THUNKS_LIBRARY_PATH), …)`. The thunk manifest is the set
+wrap derived intersected with this: a chunk `_dedup_method_chunks` dropped
+must not leave a thunk the JIT compiles for no call site (87 across the Hub,
+2026-11-13).
+"""
+function _thunks_named_in_text(text::AbstractString, taken::Dict{String,String})::Set{String}
+    out = Set{String}(String(m.captures[1]) for m in eachmatch(r"_mlir_ciface_(\S+?)_thunk\b", text))
+    for m in eachmatch(r"\b(_FPTR_\w+)\b", text)
+        haskey(taken, m.captures[1]) && push!(out, taken[m.captures[1]])
+    end
+    for m in eachmatch(r"ccall\(\(:thunk_(\S+?),\s*THUNKS_LIBRARY_PATH\)", text)
+        push!(out, String(m.captures[1]))
+    end
+    return out
 end
 
 function _cpp_this_param(class_name::AbstractString, func_name::AbstractString,
@@ -2866,7 +3006,27 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # between them keep that type (`value::Cint`, `value::Clonglong`), so
     # dispatch tells them apart; the parameters the group agrees on stay
     # `::Integer`. Positions index `func["parameters"]`, before any `this`.
-    strict_int_positions = _integer_width_overloads(functions, struct_types, _ccall_param_type)
+    # The same for a pointer's target and for an enum beside a pointer: those
+    # positions take `_strict_param_spelling`, with the names this module
+    # emits, the owning types that convert to each record's pointer, and the
+    # enums it emitted, which the loop below spells the same way.
+    _sig_type_bound(t) = _type_name_bound(t, defined_struct_names)
+    _sig_is_enum(t) = haskey(emitted_enum_base, String(t))
+    _sig_owners(t) = begin
+        jn = String(t)
+        out = String[]
+        haskey(idiomatic_classes, jn) && push!(out, jn)
+        any(k -> _sanitize_cpp_type_name(k) == jn && !haskey(idiomatic_classes, jn), keys(deleters)) &&
+            push!(out, "Managed" * jn)
+        out
+    end
+    # An rvalue-reference overload beside its lvalue twin is not emitted at
+    # all (`_rvalue_shadowed`), so it takes no part in the prediction either.
+    rvalue_shadowed = _rvalue_shadowed(functions)
+    strict_int_positions = _integer_width_overloads(
+        [f for f in functions if !(String(get(f, "mangled", "")) in rvalue_shadowed)],
+        struct_types, _ccall_param_type;
+        bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum)
 
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
@@ -2876,6 +3036,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         func_name = func["name"]
         mangled = func["mangled"]
         demangled = func["demangled"]
+
+        # A move overload beside its copy overload: one Julia signature, and
+        # the lvalue one is what a Julia caller means (`_rvalue_shadowed`).
+        mangled in rvalue_shadowed && continue
 
         # =========================================================
         # TIERED DISPATCH DECISION
@@ -3048,22 +3212,21 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             actual_c_type = _ccall_param_type(param["julia_type"], get(param, "c_type", ""))
             push!(param_types, actual_c_type)
 
-            # Map C integer types to natural Julia types with range checking
-            if actual_c_type in _INTEGER_CTYPES
-                # An overload set that differs here keeps the C width (see
-                # `strict_int_positions`); everything else takes any Integer.
-                raw_i = i - (this_injected ? 1 : 0)
-                strict = raw_i in get(strict_int_positions, mangled, _NO_POSITIONS)
-                push!(julia_param_types, strict ? actual_c_type : "Integer")
-                push!(needs_conversion, true)
-            elseif startswith(actual_c_type, "Ptr{")
-                # Relax pointer types to Any to allow Managed wrappers via Base.unsafe_convert
-                push!(julia_param_types, "Any")
-                push!(needs_conversion, false)
-            else
-                push!(julia_param_types, actual_c_type)
-                push!(needs_conversion, false)
-            end
+            # The ergonomic Julia type: any Integer for a C integer, `Any` for
+            # a pointer (so a `Managed` object, a `Ref`, a `String` pass through
+            # `Base.unsafe_convert`) and for a name this module never emitted
+            # (an enum, an STL internal; an unbound name in a signature kills
+            # the module at include, see `_type_name_bound`). At a position an
+            # overload set disagrees on (`strict_int_positions`) the type is
+            # the one that tells the overloads apart (`_strict_param_spelling`):
+            # the C width, the pointer's target, the enum.
+            raw_i = i - (this_injected ? 1 : 0)
+            strict = raw_i in get(strict_int_positions, mangled, _NO_POSITIONS)
+            push!(julia_param_types,
+                  strict ? _strict_param_spelling(actual_c_type; bound = _sig_type_bound,
+                                                  owners = _sig_owners, is_enum = _sig_is_enum) :
+                           _relaxed_param_kind(actual_c_type, _sig_type_bound))
+            push!(needs_conversion, actual_c_type in _INTEGER_CTYPES)
         end
 
         # Julia function name (avoid conflicts and sanitize)
@@ -3095,20 +3258,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # `Any` is ABI-neutral for these: Tier 2 marshals through
         # JITManager.invoke, which packs by runtime value, and `this::Any` is
         # already the norm. Only bare identifiers are rewritten — a composed type
-        # (`Ref{ImVec2}`, `Ptr{Cvoid}`) resolves through its parts and is left alone.
-        _param_type_is_bound(t::AbstractString) = begin
-            occursin(r"[{}<>,\s\.]", t) && return true
-            t in defined_struct_names && return true
-            sym = Symbol(t)
-            isdefined(Base, sym) || isdefined(Core, sym)
-        end
-
+        # (`Ref{ImVec2}`, `Ptr{Cvoid}`) resolves through its parts and is left
+        # alone. `julia_param_types` is already spelled that way
+        # (`_relaxed_param_kind`, `_strict_param_spelling`); the check here is
+        # the guard that keeps it so.
         param_sig_parts = String[]
         for (name, typ) in zip(param_names, julia_param_types)
             if name == "varargs..."
                 push!(param_sig_parts, name)
             else
-                safe_typ = _param_type_is_bound(String(typ)) ? typ : "Any"
+                safe_typ = (_sig_type_bound(String(typ)) || _sig_is_enum(String(typ))) ? typ : "Any"
                 push!(param_sig_parts, "$name::$safe_typ")
             end
         end
@@ -4200,6 +4359,15 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # reached the Hub (see `_export_statement`). Must stay below the dedup.
     _structs = join(struct_chunks)
     _funcs   = join(func_chunks)
+
+    # The thunk set is what the FINAL text calls. The loop recorded a thunk
+    # for every Tier 2 chunk it emitted, and the dedup above dropped chunks;
+    # a thunk no call site names would be compiled by the JIT for nothing,
+    # and listed as bound by anything that reads the manifest
+    # (`_thunks_named_in_text`).
+    let named = _thunks_named_in_text(_structs * _funcs, aot_fptr_taken)
+        filter!(m -> m in named, needed_function_thunks)
+    end
 
     # Derived from the FINAL chunks: what dispatches how (C++ is Tier 2/3, so
     # this is a lookup table with no kernels), and the layout facts consumers

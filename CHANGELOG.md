@@ -4,6 +4,57 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+### Tier 2 overloads dispatch on a pointer's target and on an enum (2026-11-13)
+
+A Tier 2 pointer parameter is `::Any`, so a `Managed` object, a `Ref`, a
+`String` pass through `Base.unsafe_convert`, and an emitted enum relaxed the
+same way (its name was not in the bound set). So `GetID(const char*)` and
+`GetID(const void*)`, `append_child(xml_node_type)` and `(const char*)`,
+`load_file(const char*)` and `(const wchar_t*)` were one Julia signature
+each, and `_dedup_method_chunks` kept whichever came last: 52 of the 89
+dropped C++ functions `test/tools/cpp_thunk_coverage.jl` counted on the Hub.
+
+- `_integer_width_overloads`, which already kept the C width on the integer
+  positions an overload set disagrees on, now marks pointer and enum
+  positions the same way, and both it and the function loop spell a strict
+  position through `_strict_param_spelling`: a `char*` of either sign as
+  `Union{AbstractString, Cstring, Ptr{UInt8}, Ptr{Int8}, AbstractVector{UInt8}}`,
+  a record's pointer as `Union{Ptr{T}, Ref{T}, AbstractVector{T}}` with the
+  owning types that `unsafe_convert` to it (`Managed<T>`, a factory struct), an
+  enum as itself (never `Union{E, Integer}`, which would take an integer
+  overload's arguments), `void*` and a target nothing emits as the `Any` they
+  were. A position the set agrees on is as ergonomic as before, so a wrapper
+  with no such overload set is byte-identical. A receiver is never strict:
+  tinyxml2's metadata carries `~XMLComment` entries whose `this` points at
+  `XMLNode` (one of them `XMLNode`'s D2 symbol), and typing them would have
+  taken the `::Any` receiver every caller passes a `Ptr{Cvoid}` to.
+- A `T&&` overload beside its `const T&`/`T&` twin is not emitted at all
+  (`_rvalue_shadowed`). Julia has no rvalue, both were one signature, and
+  the kept one was whichever came last: msdfgen's `Shape::addContour`,
+  pugixml's `xpath_node_set(xpath_node_set&&)` moved where a caller copied.
+  A `T&&` overload with no twin is emitted as before.
+- `thunk_manifest.json` is written from the set the FINAL text calls
+  (`_thunks_named_in_text`: the JIT string, the AOT slot through the
+  `_THUNK_SLOTS` table, the AOT virtual `thunk_<m>`), after the dedup, so a
+  dropped chunk leaves no thunk; across the Hub the manifests listed 87 that
+  no call site named and the JIT compiled for nothing. The AOT stage takes
+  the same set.
+- `cpp_thunk_coverage.jl` sets the drops the generator means aside as
+  "expected" with their reason (destructor variants, `const`/non-`const`
+  pairs, an rvalue overload beside its twin, two C spellings of one integer
+  width), reports them apart, and measures over the callable surface; a
+  C++ function whose Julia name another function spells to (pugixml's
+  `operator<` and `operator>` are both `operator_`) is named as such.
+- Measured on the Hub, before and after re-wrapping pugixml and tinyxml2
+  alone (nothing rebuilt): `cpp coverage: 4703/4738 (99.26%), traps 6,
+  dropped 29, expected 60` → `4711/4738 (99.43%), traps 6, dropped 21,
+  expected 60`. The two wrappers changed in exactly the recovered overloads
+  (pugixml: `load_file`/`save_file` with `const wchar_t*`, the four
+  `*_child(xml_node_type)`; tinyxml2: `LoadFile`/`SaveFile` with `const
+  char*`) and their manifests shrank by 23 and 24 thunks. The 11 remaining
+  overload drops are imgui's and msdfgen's, which recover on their next wrap.
+  (`test_tier2_typed_dispatch.jl`.)
+
 ### C++ coverage, measured: 98.0% (2026-11-13)
 
 C sat at a measured 99.97% because `test/tools/c_ccall_coverage.jl` counts
