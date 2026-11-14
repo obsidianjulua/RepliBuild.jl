@@ -44,5 +44,7 @@ jobs:
         run: |
           using Pkg
           Pkg.instantiate()
-      - name: runtests.jl
+      - name: runtests.jl (pkg suite)
         run: julia --project=. test/runtests.jl
+      - name: unit.jl (toolchain-free regression tests)
+        run: julia --project=. test/unit.jl

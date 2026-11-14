@@ -28,6 +28,7 @@
 # fixture-level end-to-end assertions live in mi_test/vi_test verify.jl.
 
 using Test
+using RepliBuild
 using Libdl
 import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON itself
 

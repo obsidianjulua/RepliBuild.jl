@@ -9,6 +9,7 @@
 # =============================================================================
 
 using Test
+using RepliBuild
 
 @testset "Per-file IR cache: compile-flag invalidation" begin
     dir = mktempdir()
