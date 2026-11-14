@@ -122,7 +122,7 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
                   "pair_sum", "pair_imix", "make_span", "span_weight", "arr2", "tail_view",
                   "make_lp", "lp_sum", "make_outer3",
                   "tup", "maybe", "maybe_int", "cplx", "cplxf", "tup_sum", "maybe_or",
-                  "maybe_int_or", "cplx_norm", "cplxf_norm", "cplxl")
+                  "maybe_int_or", "cplx_norm", "cplxf_norm", "cplxl", "cplxl_re", "cplxl_im")
             @test !occursin("ABI Safety Trap: cannot call '$f'", code)
         end
         @test !occursin("tbv_ledger", code)
@@ -133,7 +133,7 @@ if requires("Toolchain records by value, live", :libJLCS, :clangxx)
                  "pair_memory_return", "pair_inside_pair", "pair_pointer_in_arguments",
                  "pair_parameters", "library_record_holds_pair", "std_array", "string_view",
                  "map_lookup_is_a_plain_call", "tuple_from_bases", "optional_from_bases",
-                 "complex_width", "complex_long_double_in_memory", "control_empty_base",
+                 "complex_width", "complex_long_double", "control_empty_base",
                  "control_template_in_memory_return"]
         r = run_isolated(`$TBV_PROBE $wrapper`)
         v = probe_verdicts(r.output)

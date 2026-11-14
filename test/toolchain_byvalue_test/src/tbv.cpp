@@ -36,6 +36,8 @@ int    maybe_int_or(std::optional<int> o, int fallback) { return o.value_or(fall
 double cplx_norm(std::complex<double> z) { return z.real() * 100 + z.imag(); }
 float  cplxf_norm(std::complex<float> z) { return z.real() * 100 + z.imag(); }
 std::complex<long double> cplxl(double re, double im) { return {re, im}; }
+double cplxl_re(const std::complex<long double> &z) { return (double)z.real(); }
+double cplxl_im(const std::complex<long double> &z) { return (double)z.imag(); }
 
 LP     make_lp(double a, double b) { LP p; p.a = a; p.b = b; return p; }
 double lp_sum(LP p) { return p.a + p.b; }

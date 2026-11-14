@@ -56,10 +56,16 @@ int    maybe_int_or(std::optional<int> o, int fallback);
 double cplx_norm(std::complex<double> z);
 float  cplxf_norm(std::complex<float> z);
 
-// A bare `long double _Complex` comes back in st0/st1, which nothing can call;
-// this record holding one is 32 bytes whose first eightbyte is X87, so SysV
-// returns it in memory (sret), and it is callable.
+// A record holding a `long double _Complex`, callable on both conventions: on
+// x86-64 it is 32 bytes whose first eightbyte is X87, so SysV returns it in
+// memory (sret); on AArch64 `long double` is an IEEE quad and the record is an
+// HFA of two, returned in v0 and v1. (A bare `long double _Complex` would come
+// back in st0/st1 on x86-64, which nothing can call.) The readers take it by
+// reference and read it in the host's own `long double`, so the test needs no
+// knowledge of that format.
 std::complex<long double> cplxl(double re, double im);
+double cplxl_re(const std::complex<long double> &z);
+double cplxl_im(const std::complex<long double> &z);
 
 // Controls with no toolchain type in them.
 struct Tag {};

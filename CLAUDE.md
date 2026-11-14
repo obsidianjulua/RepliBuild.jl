@@ -1071,8 +1071,10 @@ the test named when you touch the area.
   place of the base; a shared name is numbered (`_M_head_impl_1`), and a union
   drops a 1-byte empty-record member (`_Storage`'s `_Empty_byte`). Readers then
   see members at offsets, as for any record. `complex` is sized by the parser
-  (`_complex_base_name`), and `std::complex<long double>` is MEMORY (sret), so
-  callable. A 1-byte empty base (`__pair_base`, a library `Tag`) is marked
+  (`_complex_base_name`). `std::complex<long double>` is callable on both
+  conventions: MEMORY (sret) on x86-64 SysV, an HFA of two `f128` on AArch64
+  (`long double` is a quad there), so a test reading one back reads it in C++,
+  never by decoding x87 bytes. A 1-byte empty base (`__pair_base`, a library `Tag`) is marked
   `"empty"` on the base entry and the SysV classifier skips it; unmarked, every
   record deriving from one trapped, the library's own included. Whether a member
   is held by value reads `_outside_template_args` (`pair<int*, bool>` is a

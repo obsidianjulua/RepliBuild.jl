@@ -37,16 +37,21 @@ is a `complex` scalar, which promotion did not count as laid out.
 - **complex.** The parser already named the width from the base type's
   `byte_size` (`complex float` at 8, `complex double` at 16, `complex long
   double` at 32, `_complex_base_name`); promotion now counts those as laid
-  out. `std::complex<long double>` is 32 bytes whose first eightbyte is X87, so
-  SysV returns it through `sret`, and it is callable (checked against clang's
-  IR and the returned x87 values).
+  out. `std::complex<long double>` is callable on both conventions: 32 bytes
+  whose first eightbyte is X87, so x86-64 SysV returns it through `sret`; on
+  AArch64 `long double` is an IEEE quad, and the record is an HFA of two, in
+  v0 and v1 (`test_aapcs64_record_abi.jl`, and `test_aapcs64_abi_spec.jl`
+  against clang's aarch64 lowering). The live probe reads the value back
+  through C++ in the host's own `long double`: an x87 decoder in the first
+  version read a quad's zero low fraction bytes as the mantissa and failed on
+  the arm64 CI cell with `(0.0, 0.0)`.
 - Tests: `test_toolchain_records.jl` (CI) gains libstdc++-shaped tuple,
   optional, complex and bitfield-in-a-base tables, and the deeper-base
   fallback; it fails with `_laid_out_from_bases` neutered by its exact
   signature, with the complex acceptance removed, and with the union's
   empty-member drop removed. devtests 8g `test_toolchain_byvalue_live.jl`:
   `tup`, `maybe`, `cplx` were asserted traps; they and new `maybe_int`,
-  `cplxf`, `cplxl` and by-value parameters (`tup_sum`, `maybe_or`,
+  `cplxf`, `cplxl` (read back by `cplxl_re`/`cplxl_im`) and by-value parameters (`tup_sum`, `maybe_or`,
   `maybe_int_or`, `cplx_norm`, `cplxf_norm`) are called through Tier 2 with
   the values C++ computes.
 

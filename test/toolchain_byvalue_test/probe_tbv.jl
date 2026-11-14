@@ -117,13 +117,15 @@ probe("complex_width") do p
     check(p, "cplxf", (length(bw), at(Float32, bw, 0), at(Float32, bw, 4)), (8, 0.5f0, 4.0f0))
     check(p, "cplxf_norm", M.cplxf_norm(w), 54.0f0)
 end
-# A record holding a `long double _Complex` is MEMORY class (sret), not x87.
-# Each half is an x87 80-bit value in a 16-byte slot.
-f80(b, o) = (m = at(UInt64, b, o); se = at(UInt16, b, o + 8);
-             (se >> 15 == 1 ? -1 : 1) * ldexp(Float64(m), Int(se & 0x7fff) - 16383 - 63))
-probe("complex_long_double_in_memory") do p
-    b = bytes(M.cplxl(1.5, -2.25))
-    check(p, "cplxl", (length(b), f80(b, 0), f80(b, 16)), (32, 1.5, -2.25))
+# A record holding a `long double _Complex`: MEMORY (sret) on x86-64, an HFA of
+# two quads on AArch64. C++ reads it back in the host's own `long double`, so
+# the probe asks no format question (an x87 decoder read a quad's zero low
+# fraction bytes as the mantissa and got 0.0 on the arm64 CI cell).
+probe("complex_long_double") do p
+    z = M.cplxl(1.5, -2.25)
+    check(p, "sizeof", sizeof(z), 32)
+    r = Ref(z)
+    check(p, "cplxl", (M.cplxl_re(r), M.cplxl_im(r)), (1.5, -2.25))
 end
 probe("control_empty_base") do p
     r = M.make_lp(1.0, 2.0)
