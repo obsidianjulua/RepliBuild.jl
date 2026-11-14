@@ -28,13 +28,23 @@ RepliBuild operates on what Clang already resolved, not on a source AST.
 ## Build & Test Commands
 
 ```bash
-julia --project=. test/runtests.jl      # CI tests, no C++ toolchain needed
-julia --project=. test/devtests.jl      # full integration (C++ needs system LLVM 21+/MLIR, clang, cmake)
-julia --project=. test/test_<name>.jl   # single file
+julia --project=. test/runtests.jl              # pkg suite: Pkg.test / registration basics + structural guards (seconds)
+julia --project=. test/unit.jl                  # unit suite: every toolchain-free regression test (~5 min)
+julia --project=. test/devtests.jl              # dev suite: everything that compiles/JITs (~10 min on 12 threads)
+julia --project=. test/devtests.jl --changed    # only what the diff against origin/main touches (also unit.jl)
+julia --project=. test/devtests.jl --area=c     # one area: build, dwarf, c, cpp, dialect, graph
+julia --project=. test/run.jl dev --files=test_c_sret_abi.jl --processes --tail   # a child per job, logs printed
+julia --project=. test/test_<name>.jl           # single file
 cd src/mlir && ./build.sh               # build the JLCS dialect (Tier 2 only)
 julia --project=. -e 'using RepliBuild; RepliBuild.check_environment()'
 julia --project=docs docs/make.jl       # docs build
 ```
+
+`test/suites.jl` is the one list of test files: suite, areas, the fixture
+directories a file locks, the jobs it runs after. `test/run.jl` reads it; the
+three suite files are entry points to it. Jobs run in one process by default;
+a child per job (`--processes`) is not faster, since each child compiles the
+build paths again (~50 s), but gives isolation and `test/.logs/<job>.log`.
 
 ## API
 
@@ -1169,9 +1179,20 @@ Start here for any ABI question: register state is observable.
 
 ## Testing rules
 
-- **Every `test_*.jl` is included by exactly one suite.** `runtests.jl` enforces
-  wiring (parsing real `include` lines) and disjointness (the `SHARED` dict holds
-  deliberate exceptions, currently empty). CI files need no toolchain.
+- **Every `test_*.jl` is listed in `test/suites.jl`, in exactly one suite**
+  (`:unit`, toolchain-free; `:dev`, compiles or JITs), or in its `EXPERIMENTAL`
+  list. `runtests.jl` enforces it, and that no suite file `include`s a test
+  file itself. A new file is wired by adding one line there: its `areas`
+  (which parts of `src/` it exercises, so `--changed` can pick it), `locks`
+  (every fixture directory it builds in or reads from: under `--processes`
+  two jobs sharing a lock never run at once) and `after` (the
+  `fixture:<name>` jobs whose wrapper it reads; a file that runs after a
+  fixture must lock it too). A dev file must stand alone in a fresh process
+  (`using Test`, `using RepliBuild`, `REPLIBUILD_HOME` set if unset, the
+  fixture it reads named in `after`) and assert deltas, since a selection
+  runs only some of its neighbours.
+  `areas_of_path` is the change map; a source file no rule knows selects
+  everything, so a new `src/` directory needs a rule there.
 - **No test may read the Hub or a home-directory path.** Grep for the shape
   (`homedir()`, `expanduser`, `"/home/`), not the string. Vendor fixtures instead,
   with a generator script that refuses to write a vacuous fixture. Hand-run tools live
@@ -1199,13 +1220,16 @@ Start here for any ABI question: register state is observable.
 - **Output is `@test`, not prints.** A failed `@test` inside a testset does not throw,
   so a `println("✓ …")` after it prints on failure too. `@info` only for what the
   summary cannot show (which platform arm ran).
-- devtests aborts a file at the first failing top-level testset, so one red hides an
-  unknown number of unrun tests. Put cheap probes early.
+- A file aborts at its first failing top-level testset, so one red hides an
+  unknown number of unrun tests in that file. Put cheap probes early. The
+  other files still run: run.jl nests each job in one testset, so a failing
+  file no longer ends the suite.
 - Assert **deltas** on process-global state (JIT engines, fixture counters), not
   absolutes, because files share one process. Assert **names**, not counts, downstream
   of static promotion.
 - A background command's exit code is the wrapper's. Write `echo "EXIT=$?" >> log` and
-  read that.
+  read that. Under `--processes` the runner's own logs are `test/.logs/<job>.log`
+  and `test/.logs/summary.tsv`.
 - A test that states one host's answer instead of the invariant goes red on the other
   hosts (Linux x86-64, Linux AArch64, Windows). Drive host-conditional code with
   every spelling, through the `abi` argument, never `Sys.iswindows()`.
@@ -1220,8 +1244,10 @@ Start here for any ABI question: register state is observable.
 - Fixtures: `c_test/`, `stress_test/`, `stl_test/`, `mi_test/`, `vi_test/`,
   `callback_test/`, `c_abomination_test/`,
   `convenience_overload_test/`, `aot_test/`, `slice_test/` (Tier 1) are
-  discover-driven projects. Fixture tomls are regenerated by devtests'
-  `discover(force=true)`, with `CURATED_FIXTURE_CONFIG` re-seeded after
+  discover-driven projects. The first seven are the dev suite's
+  `fixture:<name>` jobs (`test/support/fixture.jl`): `discover(force=true)`
+  regenerates the toml, the fixture's `curated` config in `suites.jl` is
+  re-seeded after, then build, wrap and its `verify.jl` in a child
   (`test_aot_thunks.jl` sets its own `aot_thunks = true` the same way).
   `abi_nested_test/` and `c_sret_test/` are projects whose test writes the toml
   and runs build + wrap.
