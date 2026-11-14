@@ -233,10 +233,11 @@ const _AR = Dict{String,Any}(
     end
 
     @testset "a pass-by-reference return names its hidden pointer for x8" begin
-        # DW_CC_pass_by_reference: the thunk owns an sret slot and passes it
-        # first. AAPCS64 wants that pointer in x8, which only `llvm.sret`
-        # reaches, so the statement names the slot and its bytes; x86-64 puts
-        # it in the first argument register and states nothing.
+        # DW_CC_pass_by_reference: the thunk forwards the caller's buffer as
+        # the hidden return pointer, first (`returns_in_caller_buffer`).
+        # AAPCS64 wants that pointer in x8, which only `llvm.sret` reaches, so
+        # the statement names the slot and its bytes; x86-64 puts it in the
+        # first argument register and states nothing.
         structs = Dict{String,Any}("Ticket" => _arrec(12, _arm("n", "int", "0x0", 4), _arm("a", "int", "0x4", 4),
                                                       _arm("b", "int", "0x8", 4)))
         ra = Dict{String,Any}("Ticket" => Dict{String,Any}("pass" => "reference", "byte_size" => "0xc"))
@@ -250,6 +251,25 @@ const _AR = Dict{String,Any}(
             @test (other, occursin("%sret_slot", irx)) == (other, true)
             @test (other, occursin("sret:", irx)) == (other, false)
             @test (other, occursin("{ callee = @make_ticket }", irx)) == (other, true)
+        end
+        @test occursin("func.func @make_ticket_thunk_inplace(", ir)
+
+        # An STL container returned by value has no table entry (its own
+        # `:direct` path), so the slot's bytes come from its `record_abi`
+        # facts, never from a table of container sizes (libstdc++'s string is
+        # 32 bytes, libc++'s 24). Asked by key, generating this module threw
+        # `String(::Nothing)` at JIT init on the arm64 CI cell (2026-11-13).
+        sra = Dict{String,Any}("basic_string<char, std::char_traits<char>, std::allocator<char> >" =>
+                                   Dict{String,Any}("pass" => "reference", "byte_size" => "0x18"))
+        g = _arfn("_Z5greetv", "basic_string<char, std::char_traits<char>, std::allocator<char> >")
+        @test _ARFG.returns_in_caller_buffer(g, Dict{String,Any}(), sra; abi = :aapcs64)
+        irs = _ARFG.generate_function_thunks(Any[g], Dict{String,Any}(); record_abi = sra, abi = :aapcs64)
+        @test occursin("func.func @_Z5greetv_thunk_inplace(", irs)
+        @test occursin("callee = @_Z5greetv, aapcs64_args = [\"sret:24\"]", irs)
+        for other in (:sysv, :win64)
+            irx = _ARFG.generate_function_thunks(Any[g], Dict{String,Any}(); record_abi = sra, abi = other)
+            @test (other, occursin("_Z5greetv_thunk_inplace(", irx)) == (other, true)
+            @test (other, occursin("sret:", irx)) == (other, false)
         end
     end
 

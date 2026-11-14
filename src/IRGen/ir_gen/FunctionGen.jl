@@ -323,6 +323,21 @@ _returns_in_caller_buffer(ret_c, kind, key, record_abi) =
     (kind === :layout && record_passes_by_reference(ret_c, key, record_abi)) ||
     (kind === :direct && _stl_by_value(ret_c) && record_passes_by_reference(ret_c, nothing, record_abi))
 
+# The DWARF byte size `record_abi` holds for the record `c_type` names, looked up
+# as `record_passes_by_reference` looks it up: the size of an STL container's
+# hidden return slot, which has no table entry of its own (libstdc++'s string
+# is 32 bytes, libc++'s 24, so never a table of sizes).
+function _record_abi_bytes(c_type::AbstractString, record_abi)
+    t = _strip_top_cv(String(c_type))
+    for cand in _scope_suffixes(t)
+        facts = get(record_abi, cand, nothing)
+        facts === nothing && continue
+        n = _parse_num(get(facts, "byte_size", nothing))
+        n === nothing || return n
+    end
+    error("no byte size in record_abi for `$c_type`, which returns_in_caller_buffer said is passed by reference")
+end
+
 # An STL container returned by value: `by_value_crossing`'s STL branch, which
 # answers `:direct` because the container has no layout of its own here. Its
 # thunk returns a byte blob of the container's size, and a blob over 16 bytes
@@ -1041,7 +1056,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # (`aapcs64_sret_statement`; Ticket came back as garbage on the first
         # arm64 run, 2026-11-09).
         ret_sret && (pushfirst!(call_args, "%sret_slot");
-                     pushfirst!(arg_facts, abi === :aapcs64 ? aapcs64_sret_statement(ret_key, structs) : ""))
+                     pushfirst!(arg_facts, abi === :aapcs64 ?
+                         aapcs64_sret_statement(ret_key, structs;
+                                                bytes = ret_key === nothing ? _record_abi_bytes(ret_c_type, record_abi) : nothing) :
+                         ""))
 
         # The call's attributes: the callee, and the class of every record it
         # passes or returns by value under the convention generated for
