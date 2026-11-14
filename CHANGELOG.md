@@ -37,57 +37,6 @@ of them four at a time, 597s against 614s in one process; a 16-job selection
 the C area 11. CI runs `unit.jl` beside `runtests.jl`; devtests is unchanged
 there. `REPLIBUILD_SKIP_TESTS` still names fixtures to skip.
 
-### A toolchain record is laid out from its bases (2026-11-13)
-
-An exported C++ function that returned or took `std::tuple`, `std::optional`
-or `std::complex` by value was an ABI trap stub on every host. The 2026-10-29
-promotion keeps the layout of a toolchain record the library reaches by value,
-but these had none to keep: libstdc++'s `tuple<int, double>` and
-`optional<double>` have no member of their own (every byte comes through
-bases: `_Tuple_impl` over `_Head_base`, `_Optional_base` over a memberless
-`_Optional_payload` over `_Optional_payload_base`), and the parser gives a
-record with no members no entry. `complex<double>` had an entry, but its member
-is a `complex` scalar, which promotion did not count as laid out.
-
-- **An entry from bases.** `parse_dwarf_dump` now records a toolchain record
-  with no member of its own when it has a non-virtual base. A library record
-  keeps the old rule (no member, no entry): its Julia type would have no fields.
-- **A layout from bases.** `_promote_toolchain_records!` promotes such a record
-  through `_laid_out_from_bases`: every member of every non-empty, non-virtual
-  base, at depth, at the base's offset plus its own (a bitfield's
-  `data_bit_offset` with it), in place of the base, which leaves
-  `base_classes`. `tuple<int, double>` is `_M_head_impl::double` at 0 and
-  `_M_head_impl_1::int` at 8 (libstdc++ stores elements in reverse; a shared
-  name is numbered). The intermediate bases are flattened, never promoted. A
-  base that cannot be looked up stays a base; one deeper down leaves the record
-  unflattened rather than missing bytes. Everything downstream (StructGen, the
-  SysV classifier, both generators) already reads members at offsets, so
-  nothing else changed.
-- **A union's empty member.** `optional`'s `_Storage<T>` union holds the value
-  beside an empty `_Empty_byte` (no entry). A union now drops a member whose
-  type is a 1-byte empty record (the rule the empty-base marking uses): it
-  overlaps the others and holds no bytes they do not.
-- **complex.** The parser already named the width from the base type's
-  `byte_size` (`complex float` at 8, `complex double` at 16, `complex long
-  double` at 32, `_complex_base_name`); promotion now counts those as laid
-  out. `std::complex<long double>` is callable on both conventions: 32 bytes
-  whose first eightbyte is X87, so x86-64 SysV returns it through `sret`; on
-  AArch64 `long double` is an IEEE quad, and the record is an HFA of two, in
-  v0 and v1 (`test_aapcs64_record_abi.jl`, and `test_aapcs64_abi_spec.jl`
-  against clang's aarch64 lowering). The live probe reads the value back
-  through C++ in the host's own `long double`: an x87 decoder in the first
-  version read a quad's zero low fraction bytes as the mantissa and failed on
-  the arm64 CI cell with `(0.0, 0.0)`.
-- Tests: `test_toolchain_records.jl` (CI) gains libstdc++-shaped tuple,
-  optional, complex and bitfield-in-a-base tables, and the deeper-base
-  fallback; it fails with `_laid_out_from_bases` neutered by its exact
-  signature, with the complex acceptance removed, and with the union's
-  empty-member drop removed. devtests 8g `test_toolchain_byvalue_live.jl`:
-  `tup`, `maybe`, `cplx` were asserted traps; they and new `maybe_int`,
-  `cplxf`, `cplxl` (read back by `cplxl_re`/`cplxl_im`) and by-value parameters (`tup_sum`, `maybe_or`,
-  `maybe_int_or`, `cplx_norm`, `cplxf_norm`) are called through Tier 2 with
-  the values C++ computes.
-
 ### Graph mode builds libwebp: object sources, versioned sonames, file-local types (2026-11-11)
 
 The first upstream graph taken from a pinned dependency, the Hub's libwebp
