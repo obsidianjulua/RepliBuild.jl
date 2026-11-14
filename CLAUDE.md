@@ -434,7 +434,9 @@ the test named when you touch the area.
 
 - **Metadata comes from `nm -g`; the runtime resolves through dynsym (`nm -D`, or the
   PE export directory).** `verify_wrap_surface` runs before the project hash is saved.
-  **R1**: an empty surface is a hard error, with or without promotion. **R2**: every
+  **R1**: an empty surface is a hard error, with or without promotion; a
+  templates-only package has no `functions`, so its STL method table stands
+  for its surface, and a table with no member is empty too. **R2**: every
   wrappable function must be in the dynamic table under its mangled name.
   (`test_wrap_surface_guard.jl`, devtests §6c.)
 - **A thunk calls its target by name, so the target must be in that runtime set**,
@@ -498,10 +500,11 @@ the test named when you touch the area.
   (`test_surface_types.jl`.)
 - `_drop_unresolvable_globals!` removes globals absent from dynsym before either
   generator runs, unconditionally.
-- `extract_symbols_from_binary` filters `__rb_*` and Itanium adjustor thunks
-  (`_is_itanium_thunk`: `_ZTh`/`_ZTv`/`_ZTc`, while keeping `_ZTV`/`_ZTI`/`_ZTS`/`_ZTT`).
-  A thunk wrapped as an API function is a zero-arg call that segfaults.
-  (`test_symbol_hygiene.jl`.)
+- `extract_symbols_from_binary` filters `__rb_*`, Itanium adjustor thunks
+  (`_is_itanium_thunk`: `_ZTh`/`_ZTv`/`_ZTc`, while keeping `_ZTV`/`_ZTI`/`_ZTS`/`_ZTT`)
+  and the templates TU's own `replibuild_force::` helpers (`ref<T>`, `tag<T, N>`),
+  which exist to be named, not called. A thunk wrapped as an API function is a
+  zero-arg call that segfaults. (`test_symbol_hygiene.jl`, `test_stl_table_matching.jl`.)
 - `[link] link_dirs` emits `-Wl,-rpath` (`$ORIGIN` first) alongside `-L`. `-L` alone
   loads the distro copy at runtime, giving two copies of process-global state. This is
   what makes Hub packages composable.
@@ -616,6 +619,17 @@ the test named when you touch the area.
   `"toolchain"` (promoted, above) is never STL-internal either. Never call the
   name-only screen in the generator. The key needs a rebuild.
   (`test_record_scope.jl`, `test_toolchain_records.jl`.)
+- **A `[types] templates` entry is matched to the compiler's spelling, never to
+  its own text.** The templates TU instantiates `replibuild_force::tag<T, N>(T*)`
+  per entry, and `_stl_methods_from_nm` reads the demangled `T` off the symbol
+  table to key the STL method table by the entry as written
+  (`std::vector<Clipper2Lib::Point64>` reaches `vector<Point<long>>`'s members;
+  the entry's `container` field carries the canonical spelling). Only
+  `_STL_TABLE_CONTAINERS` get a table; any other template is instantiated for
+  its DWARF alone. An entry that yields no table is a `@warn` from
+  `_stl_table_gaps`, never silence, and a vector factory whose element has no
+  Julia layout in the wrapper is a `@warn`, never `CppVector{Any}`.
+  (`test_stl_table_matching.jl`, `stl_test/verify.jl`'s `Pt64` testset.)
 - **Integer parameters are `::Integer` unless an overload set disagrees on their
   width.** `_integer_width_overloads` predicts each wrapper's name and dispatch
   signature the way the function loop builds them and marks the positions a set

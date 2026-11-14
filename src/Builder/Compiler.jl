@@ -2477,6 +2477,17 @@ function _write_template_tu(path::String, headers::Vector{String},
         for t in instantiation_types
             println(io, "template class $t;")
         end
+        # One tag per entry, so the symbol table says how the compiler spells
+        # each listed type: `template void replibuild_force::tag<T, N>(T*);`
+        # demangles with T in its canonical form (a typedef resolved, default
+        # template arguments written out, `Clipper2Lib::Point64` →
+        # `Clipper2Lib::Point<long>`), and `_stl_methods_from_nm` reads N and
+        # T back to match entry N against nm's spelling of its members.
+        println(io, "")
+        println(io, "namespace replibuild_force { template <class T, int N> void tag(T*) {} }")
+        for (i, t) in enumerate(instantiation_types)
+            println(io, "template void replibuild_force::tag<$t, $(i - 1)>($t*);")
+        end
         if force
             println(io, "")
             println(io, _TEMPLATE_FORCE_PREAMBLE)
@@ -2811,7 +2822,16 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     #
     # So the trigger is the empty surface itself. Promotion only selects which
     # advice to give.
-    if isempty(functions)
+    #
+    # A templates-only package (`[types] templates` and no source of its own:
+    # test_stl_extract's -O2 ctor probe) has no `functions`: its whole surface
+    # is the STL method table, which the C++ generator binds as container
+    # factories. Its own helpers (`replibuild_force::ref`/`tag`) are filtered
+    # out of `functions` since 2026-11-13, so the table is what stands for the
+    # surface there, and an empty table is the empty surface again.
+    stl_table = get(metadata, "stl_methods", nothing)
+    stl_bound = stl_table isa Dict && any(v -> v isa Vector && !isempty(v), values(stl_table))
+    if isempty(functions) && !stl_bound
         cause = promoted_count > 0 ? """
         $(promoted_count) of those symbols are `__rb_*` promoted internals, so the
         API was RENAMED away: `-fvisibility=hidden` made every unannotated function
@@ -3037,13 +3057,17 @@ function _normalize_stl_type(demangled_type::String)::String
         t = replace(t, " >" => ">")
     end
 
-    # std::vector<T, std::allocator<T>> -> std::vector<T>
-    m = match(r"^std::vector<(.+),\s*std::allocator<.*>>$", t)
-    if !isnothing(m)
-        elem = strip(m.captures[1])
-        # Remove trailing comma if present
-        elem = rstrip(elem, [',', ' '])
-        return "std::vector<$elem>"
+    # std::vector<T, std::allocator<T>> -> std::vector<T>. The arguments are
+    # split at depth 0, and the element is normalised in turn: a
+    # `std::vector<std::vector<Point<long>, std::allocator<…>>, std::allocator<…>>`
+    # (clipper2's `Paths64`) has an allocator at both depths, and a greedy
+    # regex took the inner one as part of the element (2026-11-13).
+    if startswith(t, "std::vector<") && endswith(t, ">")
+        args = _split_template_args_toplevel(t[length("std::vector<")+1:prevind(t, lastindex(t))])
+        if !isempty(args)
+            elem = _normalize_stl_type(String(rstrip(args[1], [',', ' '])))
+            return "std::vector<$elem>"
+        end
     end
 
     # std::basic_string<char, std::char_traits<char>, std::allocator<char>>
@@ -3068,21 +3092,44 @@ function _normalize_stl_type(demangled_type::String)::String
         return "std::basic_string<char>"
     end
 
-    # std::map<K, V, std::less<K>, std::allocator<...>>
-    m = match(r"^std::map<(.+),\s*std::less<.*>,\s*std::allocator<.*>>$", t)
-    if !isnothing(m)
-        inner = strip(m.captures[1])
-        return "std::map<$inner>"
-    end
-
+    # std::map<K, V, std::less<K>, std::allocator<...>> -> std::map<K, V>, and
     # std::unordered_map<K, V, std::hash<K>, std::equal_to<K>, std::allocator<...>>
-    m = match(r"^std::unordered_map<(.+),\s*std::hash<.*>,\s*std::equal_to<.*>,\s*std::allocator<.*>>$", t)
-    if !isnothing(m)
-        inner = strip(m.captures[1])
-        return "std::unordered_map<$inner>"
+    # -> std::unordered_map<K, V>: the first two depth-0 arguments, each
+    # normalised in turn.
+    for head in ("std::map<", "std::unordered_map<")
+        if startswith(t, head) && endswith(t, ">")
+            args = _split_template_args_toplevel(t[length(head)+1:prevind(t, lastindex(t))])
+            if length(args) >= 2
+                k = _normalize_stl_type(String(strip(args[1])))
+                v = _normalize_stl_type(String(strip(args[2])))
+                return head * k * ", " * v * ">"
+            end
+        end
     end
 
     return t
+end
+
+"The comma-separated arguments of a template argument list, split at angle-bracket and parenthesis depth 0."
+function _split_template_args_toplevel(s::AbstractString)::Vector{String}
+    out = String[]
+    depth = 0
+    start = firstindex(s)
+    i = start
+    while i <= lastindex(s)
+        c = s[i]
+        if c == '<' || c == '('
+            depth += 1
+        elseif c == '>' || c == ')'
+            depth -= 1
+        elseif c == ',' && depth == 0
+            push!(out, String(strip(s[start:prevind(s, i)])))
+            start = nextind(s, i)
+        end
+        i = nextind(s, i)
+    end
+    push!(out, String(strip(s[start:end])))
+    return out
 end
 
 """
@@ -3275,7 +3322,85 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
               "table but not among the library's runtime symbols, so no thunk can bind " *
               "them; the wrapper leaves them out:\n  $shown$more"
     end
+    # An entry with no table is never silent: clipper2's
+    # `std::vector<Clipper2Lib::Point64>` and fmt's `fmt::basic_memory_buffer<char>`
+    # both produced none, and nothing said so (2026-11-13).
+    for (entry, why) in _stl_table_gaps(templates, stl_methods)
+        @warn "STL: [types] templates entry $(repr(entry)) yields no container table: $why"
+    end
     return stl_methods
+end
+
+"The STL containers the method table and the wrapper's factories know."
+const _STL_TABLE_CONTAINERS = ("std::vector<", "std::basic_string<", "std::map<", "std::unordered_map<")
+
+"""
+    _stl_table_gaps(templates, stl_methods) -> Vector{Tuple{String,String}}
+
+Each `[types] templates` entry with no method table, with why. A template
+outside `_STL_TABLE_CONTAINERS` (`fmt::basic_memory_buffer<char>`) is
+instantiated for its DWARF alone and gets no factory, which `[types]
+templates` is also for; one of the known containers with no table had no
+member in the symbol table under the compiler's spelling of it.
+"""
+function _stl_table_gaps(templates, stl_methods)::Vector{Tuple{String,String}}
+    gaps = Tuple{String,String}[]
+    for t in templates
+        key = t == "std::string" ? "std::basic_string<char>" : String(t)
+        (haskey(stl_methods, key) && !isempty(stl_methods[key])) && continue
+        haskey(stl_methods, String(t)) && !isempty(stl_methods[String(t)]) && continue
+        if any(p -> startswith(key, p), _STL_TABLE_CONTAINERS)
+            push!(gaps, (String(t), "no member of it is in the library's symbol table under the compiler's " *
+                                    "spelling (the instantiation TU tags each entry; is the type complete " *
+                                    "where the TU includes it?)"))
+        else
+            push!(gaps, (String(t), "it is not a container the STL table knows (std::vector, std::string, " *
+                                    "std::map, std::unordered_map); it was instantiated so its DWARF exists, " *
+                                    "which is all [types] templates does for it, and no factory is emitted"))
+        end
+    end
+    return gaps
+end
+
+"""
+    _stl_template_tags(demangled_output) -> Dict{Int,String}
+
+Entry index → the compiler's canonical spelling of the listed type, read off
+the `replibuild_force::tag<T, N>(T*)` instantiations the templates TU emits
+(`_write_template_tu`), each normalised as the method table normalises nm's
+container spellings. A listed `std::vector<Clipper2Lib::Point64>` is spelled
+`std::vector<Clipper2Lib::Point<long>, std::allocator<…>>` on every member
+symbol, which no string match on the recipe's typedef could find.
+"""
+function _stl_template_tags(demangled_output::AbstractString)::Dict{Int,String}
+    tags = Dict{Int,String}()
+    marker = "replibuild_force::tag<"
+    for line in eachsplit(demangled_output, '\n')
+        i = findfirst(marker, line)
+        i === nothing && continue
+        start = last(i) + 1
+        depth = 1
+        j = start
+        stop = 0
+        while j <= lastindex(line)
+            c = line[j]
+            if c == '<'
+                depth += 1
+            elseif c == '>'
+                depth -= 1
+                depth == 0 && (stop = j; break)
+            end
+            j = nextind(line, j)
+        end
+        stop == 0 && continue
+        inner = String(line[start:prevind(line, stop)])
+        k = findlast(',', inner)
+        k === nothing && continue
+        n = tryparse(Int, strip(inner[nextind(inner, k):end]))
+        n === nothing && continue
+        tags[n] = _normalize_stl_type(String(strip(inner[1:prevind(inner, k)])))
+    end
+    return tags
 end
 
 """
@@ -3321,6 +3446,24 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
             push!(template_set, "std::string")
         end
     end
+    # The compiler's spelling of each entry (`_stl_template_tags`), so a member
+    # spelled `std::vector<Clipper2Lib::Point<long>>` matches the entry written
+    # `std::vector<Clipper2Lib::Point64>`. The table is keyed by the entry as
+    # written, which names the factory; each member records the canonical
+    # spelling (`container`), which the generator reads for the element type.
+    canonical_to_entry = Dict{String,String}()
+    for (n, canon) in _stl_template_tags(demangled_output)
+        1 <= n + 1 <= length(templates) || continue
+        # Only a container the table knows: a tagged `fmt::basic_memory_buffer`
+        # has `size()` and `data()` too, and would otherwise get a table no
+        # factory reads and thunks nothing calls, instead of the warning that
+        # says what [types] templates does for it.
+        any(p -> startswith(canon, p), _STL_TABLE_CONTAINERS) || continue
+        entry = String(templates[n + 1])
+        entry == "std::string" && (entry = "std::basic_string<char>")
+        canon == entry && continue
+        canonical_to_entry[canon] = entry
+    end
 
     # Debug: print what we're looking for
     @debug "STL template set: $template_set"
@@ -3350,8 +3493,14 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
         # Normalize the container type
         container_normalized = _normalize_stl_type(container_full)
 
-        # Check if this container matches any configured template
-        container_normalized in template_set || continue
+        # Check if this container matches any configured template, as written
+        # or in the compiler's spelling of it.
+        canonical = container_normalized
+        if haskey(canonical_to_entry, container_normalized)
+            container_normalized = canonical_to_entry[container_normalized]
+        elseif !(container_normalized in template_set)
+            continue
+        end
 
         # Classify the method
         classification = _classify_stl_method(method_sig, container_normalized)
@@ -3390,13 +3539,15 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
             continue
         end
 
-        push!(stl_methods[container_normalized], Dict{String,Any}(
+        entry = Dict{String,Any}(
             "mangled" => mangled,
             "demangled" => demangled,
             "method" => method_name,
             "is_const" => is_const,
             "full_signature" => method_sig
-        ))
+        )
+        canonical == container_normalized || (entry["container"] = canonical)
+        push!(stl_methods[container_normalized], entry)
     end
 
     kept(c, m) = any(x -> get(x, "method", "") == m, get(stl_methods, c, Dict{String,Any}[]))
@@ -4172,6 +4323,16 @@ function extract_symbols_from_binary(binary_path::String)
                 # zero-arg garbage. The wrapper never sees them; slices bind by
                 # symbol at JIT time.
                 if startswith(mangled_name, "__rb_") || startswith(demangled_name, "__rb_")
+                    continue
+                end
+
+                # The templates TU's own helpers (`replibuild_force::ref<T>`,
+                # `replibuild_force::tag<T, N>`; `_TEMPLATE_FORCE_PREAMBLE`,
+                # `_write_template_tu`) are never API: `ref` returns a
+                # reference to address 1 and exists to be named, `tag` to be
+                # read off the symbol table. They were wrapped as functions
+                # (clipper2's wrapper carried five) until 2026-11-13.
+                if occursin("replibuild_force::", demangled_name)
                     continue
                 end
 
