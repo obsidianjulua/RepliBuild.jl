@@ -124,6 +124,17 @@ Slow path: JIT engine lookup + copy-on-write Dict swap under lock.
             end
             ptr != C_NULL && break
         end
+        if ptr == C_NULL && endswith(func_name, "_thunk")
+            # The thunk exists under its in-place name: the wrapper predates
+            # by-reference returns built in the caller's buffer.
+            for eng in GLOBAL_JIT.engines
+                eng.jit_engine === nothing && continue
+                if MLIRNative.lookup(eng.jit_engine, func_name * "_inplace") != C_NULL ||
+                   MLIRNative.lookup(eng.jit_engine, "_" * func_name * "_inplace") != C_NULL
+                    throw(ErrorException(_stale_inplace_message(func_name)))
+                end
+            end
+        end
         if ptr == C_NULL
             searched = isempty(GLOBAL_JIT.engines) ? "none" :
                 join((basename(e.binary_path) *
@@ -143,6 +154,20 @@ Slow path: JIT engine lookup + copy-on-write Dict swap under lock.
         return ptr
     end
 end
+
+"""
+    _stale_inplace_message(name) -> String
+
+What a call to the thunk `name` means when the library has `<name>_inplace`
+instead: the wrapper was generated before a pass-by-reference return was built
+in the caller's buffer (`FunctionGen.returns_in_caller_buffer`, 2026-11-13),
+and calls the thunk with the old shape. The new name exists so that call fails
+here instead of passing its arguments where the buffer goes.
+"""
+_stale_inplace_message(name::AbstractString) =
+    "thunk `$(name)` not found, but `$(name)_inplace` is: this wrapper was generated " *
+    "before RepliBuild built by-reference returns in the caller's buffer, and calls " *
+    "the thunk with the old shape. Re-wrap it with the RepliBuild now loaded."
 
 @noinline function _jit_not_initialized_error()
     msg = "JIT not initialized."
@@ -648,7 +673,9 @@ function resolve_thunk!(slot::Base.RefValue{Ptr{Cvoid}}, handle::Ptr{Cvoid},
     end
     p = Libdl.dlsym(handle, name; throw_error = false)
     if p === nothing
-        push!(missing, String(name))
+        stale = endswith(name, "_thunk") &&
+                Libdl.dlsym(handle, name * "_inplace"; throw_error = false) !== nothing
+        push!(missing, stale ? _stale_inplace_message(name) : String(name))
         return C_NULL
     end
     slot[] = p

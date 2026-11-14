@@ -296,6 +296,45 @@ function record_passes_by_reference(c_type::AbstractString, key, record_abi)::Bo
 end
 
 """
+    returns_in_caller_buffer(func, structs, record_abi; abi) -> Bool
+
+Whether `func`'s thunk constructs its return in a buffer the CALLER supplies:
+a record with a layout (`by_value_crossing` says `:layout`) that DWARF says is
+non-trivial for the purposes of calls (`record_passes_by_reference`). Such an
+object is built where the caller asked and is never moved; the thunk returns
+void, its first argument slot holds the buffer's address, and its name is
+`thunk_symbol(mangled, true)`. The thunk generator and every call site (the
+generated wrapper) ask this one function, so the two always agree.
+
+Before 2026-11-13 the thunk built the object in its own `alloca` and returned
+the bytes, which MLIR's C-interface wrapper copied into the caller's buffer: a
+bytewise move of an object C++ says may not be moved that way. It held only for
+records with no pointer into themselves; libstdc++'s short `std::string` came
+back pointing at the thunk's dead frame.
+"""
+function returns_in_caller_buffer(func, structs, record_abi; abi::Symbol = host_record_abi())::Bool
+    ret_c = String(get(get(func, "return_type", Dict()), "c_type", "void"))
+    (k, key) = by_value_crossing(ret_c, structs, record_abi; abi, ret = true)
+    return _returns_in_caller_buffer(ret_c, k, key, record_abi)
+end
+_returns_in_caller_buffer(ret_c, kind, key, record_abi) =
+    kind === :layout && record_passes_by_reference(ret_c, key, record_abi)
+
+"""
+    thunk_symbol(mangled, in_caller_buffer) -> String
+
+The thunk's own name (`<mangled>_thunk`), and `<mangled>_thunk_inplace` for one
+that constructs its return in the caller's buffer (`returns_in_caller_buffer`).
+The two calling shapes differ (`T ciface(void**)` or `void ciface(T*, void**)`
+against `void ciface(void**)` with the buffer in slot 0), and a wrapper
+generated for one must never reach the other: under a new name, a stale call
+fails as a missing thunk instead of passing its arguments where the buffer
+goes. The C interface MLIR exports is `_mlir_ciface_` followed by this.
+"""
+thunk_symbol(mangled::AbstractString, in_caller_buffer::Bool) =
+    in_caller_buffer ? "$(mangled)_thunk_inplace" : "$(mangled)_thunk"
+
+"""
     _byte_region_size(key, structs) -> Union{Int,Nothing}
 
 `N` when the record `key` names has no body a thunk can type field by field, so
@@ -828,11 +867,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # the callee returns void, at every size. The size-based classifier
         # only agrees above 16 bytes (MEMORY class); below that it read EAX
         # while the callee stored the object through whatever the first
-        # argument register held. The thunk owns the slot and returns the
-        # bytes, exactly as for a MEMORY-class return.
-        ret_sret = ret_kind === :layout && ret_type != "" &&
-                   record_passes_by_reference(ret_c_type, ret_key, record_abi)
-        sret_slot_type = is_packed_ret ? ret_packed_type : ret_type
+        # argument register held. That pointer is the CALLER's buffer, read
+        # from argument slot 0 (`returns_in_caller_buffer`): the object is
+        # built where it will live and never moved. The thunk returns void.
+        ret_sret = ret_type != "" && _returns_in_caller_buffer(ret_c_type, ret_kind, ret_key, record_abi)
         # The SysV class of a record the call itself returns (`sysv_call_fact`).
         # One that comes back through the hidden pointer the thunk passes
         # (`ret_sret`) is no call result, and states nothing.
@@ -846,24 +884,17 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         ext_mlir_ret = ext_ret_type == "" || ext_ret_type == "!llvm.void" ? "" : "-> $ext_ret_type"
 
         # Thunk returns aligned type so Julia can read it correctly
-        thunk_ret_type = is_packed_ret ? ret_aligned_type : ret_type
+        thunk_ret_type = ret_sret ? "" : (is_packed_ret ? ret_aligned_type : ret_type)
         thunk_mlir_ret = thunk_ret_type == "" || thunk_ret_type == "!llvm.void" ? "" : "-> $thunk_ret_type"
         func_ret = ret_sret || ret_type == "" || ret_type == "!llvm.void" ? "" : ret_type
         ret_sret && pushfirst!(arg_types, "!llvm.ptr")
 
-        # The epilogue after a call that returns nothing: plain `return`, or
-        # the sret slot read back (and re-laid-out when the C layout is packed).
+        # The epilogue after a call that returns nothing: plain `return`. A
+        # return the callee built in the caller's buffer is already where it
+        # belongs (`is_packed_ret` is only ever a layout whose packed and
+        # natural spellings are the same bytes).
         emit_void_epilogue = function ()
-            if !ret_sret
-                println(io, "  return")
-            elseif is_packed_ret
-                println(io, "  %sret_val = llvm.load %sret_slot : !llvm.ptr -> $(sret_slot_type)")
-                println(io, "  %ret_aligned = jlcs.marshal_ret %sret_val { numMembers = $(ret_num_members) : i64 } : ($(ret_packed_type)) -> $(ret_aligned_type)")
-                println(io, "  return %ret_aligned : $(ret_aligned_type)")
-            else
-                println(io, "  %sret_val = llvm.load %sret_slot : !llvm.ptr -> $(sret_slot_type)")
-                println(io, "  return %sret_val : $(sret_slot_type)")
-            end
+            println(io, "  return")
         end
 
         # 1. External Declaration (Real C++ Symbol)
@@ -873,10 +904,15 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # 2. Thunk (Exposed to JIT)
         # Append _thunk suffix to avoid collision
         # Add llvm.emit_c_interface to generate _mlir_ciface_ wrapper for invokePacked
-        println(io, "func.func @$(mangled)_thunk(%args_ptr: !llvm.ptr) $(thunk_mlir_ret) attributes { llvm.emit_c_interface } {")
+        println(io, "func.func @$(thunk_symbol(mangled, ret_sret))(%args_ptr: !llvm.ptr) $(thunk_mlir_ret) attributes { llvm.emit_c_interface } {")
         if ret_sret
-            println(io, "  %sret_one = llvm.mlir.constant(1 : i64) : i64")
-            println(io, "  %sret_slot = llvm.alloca %sret_one x $(sret_slot_type) : (i64) -> !llvm.ptr")
+            # Slot 0 is the caller's buffer, passed like any pointer argument:
+            # the slot holds a pointer to the storage of the buffer's address
+            # (`invoke` marshals every argument that way), so `get_field`
+            # gives that storage and one load gives the buffer, which is
+            # forwarded as the callee's hidden return pointer, never read.
+            println(io, "  %sret_cell = \"jlcs.get_field\"(%args_ptr) {fieldOffset = 0 : i64} : (!llvm.ptr) -> !llvm.ptr")
+            println(io, "  %sret_slot = llvm.load %sret_cell : !llvm.ptr -> !llvm.ptr")
         end
 
         # Scope-RAII entry allocas: one caller-owned temporary per non-trivial
@@ -931,7 +967,8 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             # the argument's STORAGE, so scalars and pointers both need the
             # second load below. The .mlir is the debugger's source file, so
             # what is written here is what gdb shows at the breakpoint.
-            slot_off = 8 * (i - 1)
+            # Slot 0 is the caller's return buffer when the thunk has one.
+            slot_off = 8 * (i - 1 + (ret_sret ? 1 : 0))
             println(io, "  %val_ptr_$(i) = \"jlcs.get_field\"(%args_ptr) {fieldOffset = $(slot_off) : i64} : (!llvm.ptr) -> !llvm.ptr")
 
             if load.address

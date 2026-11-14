@@ -372,6 +372,13 @@ include(joinpath(TEST_DIR, "test_c_sret_abi.jl"))
 
 include(joinpath(TEST_DIR, "test_cpp_record_routing.jl"))
 
+# ── 8c'. A pass-by-reference return is built in the caller's buffer ─────────
+# SelfRef stores its own address; returned by value through a Tier 2 thunk,
+# that address must be the caller's buffer (the thunk used to build it in its
+# own alloca and copy the bytes out). Needs clang++ and libJLCS.
+
+include(joinpath(TEST_DIR, "test_sret_in_caller_buffer.jl"))
+
 # ── 8d. Emission determinism on a real C/C++ build ───────────────────────────
 # A C unit and two C++ units define the same types differently, two pimpl
 # classes share `impl`, and a lambda sits in a std::function. The extracted
