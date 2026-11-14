@@ -4,96 +4,38 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
-### Tier 2 overloads dispatch on a pointer's target and on an enum (2026-11-13)
+### Three test suites, one list, a runner that runs what a diff touches (2026-11-11)
 
-A Tier 2 pointer parameter is `::Any`, so a `Managed` object, a `Ref`, a
-`String` pass through `Base.unsafe_convert`, and an emitted enum relaxed the
-same way (its name was not in the bound set). So `GetID(const char*)` and
-`GetID(const void*)`, `append_child(xml_node_type)` and `(const char*)`,
-`load_file(const char*)` and `(const wchar_t*)` were one Julia signature
-each, and `_dedup_method_chunks` kept whichever came last: 52 of the 89
-dropped C++ functions `test/tools/cpp_thunk_coverage.jl` counted on the Hub.
+devtests was one 18-minute process that printed every build's progress and
+every file's summary in one stream, and runtests carried eighty toolchain-free
+files beside the registration basics. Agents lost iterations to it. The tree is
+now three suites over one list, `test/suites.jl`:
 
-- `_integer_width_overloads`, which already kept the C width on the integer
-  positions an overload set disagrees on, now marks pointer and enum
-  positions the same way, and both it and the function loop spell a strict
-  position through `_strict_param_spelling`: a `char*` of either sign as
-  `Union{AbstractString, Cstring, Ptr{UInt8}, Ptr{Int8}, AbstractVector{UInt8}}`,
-  a record's pointer as `Union{Ptr{T}, Ref{T}, AbstractVector{T}}` with the
-  owning types that `unsafe_convert` to it (`Managed<T>`, a factory struct), an
-  enum as itself (never `Union{E, Integer}`, which would take an integer
-  overload's arguments), `void*` and a target nothing emits as the `Any` they
-  were. A position the set agrees on is as ergonomic as before, so a wrapper
-  with no such overload set is byte-identical. A receiver is never strict:
-  tinyxml2's metadata carries `~XMLComment` entries whose `this` points at
-  `XMLNode` (one of them `XMLNode`'s D2 symbol), and typing them would have
-  taken the `::Any` receiver every caller passes a `Ptr{Cvoid}` to.
-- A `T&&` overload beside its `const T&`/`T&` twin is not emitted at all
-  (`_rvalue_shadowed`). Julia has no rvalue, both were one signature, and
-  the kept one was whichever came last: msdfgen's `Shape::addContour`,
-  pugixml's `xpath_node_set(xpath_node_set&&)` moved where a caller copied.
-  A `T&&` overload with no twin is emitted as before.
-- `thunk_manifest.json` is written from the set the FINAL text calls
-  (`_thunks_named_in_text`: the JIT string, the AOT slot through the
-  `_THUNK_SLOTS` table, the AOT virtual `thunk_<m>`), after the dedup, so a
-  dropped chunk leaves no thunk; across the Hub the manifests listed 87 that
-  no call site named and the JIT compiled for nothing. The AOT stage takes
-  the same set.
-- `cpp_thunk_coverage.jl` sets the drops the generator means aside as
-  "expected" with their reason (destructor variants, `const`/non-`const`
-  pairs, an rvalue overload beside its twin, two C spellings of one integer
-  width), reports them apart, and measures over the callable surface; a
-  C++ function whose Julia name another function spells to (pugixml's
-  `operator<` and `operator>` are both `operator_`) is named as such.
-- Measured on the Hub, before and after re-wrapping pugixml and tinyxml2
-  alone (nothing rebuilt): `cpp coverage: 4703/4738 (99.26%), traps 6,
-  dropped 29, expected 60` → `4711/4738 (99.43%), traps 6, dropped 21,
-  expected 60`. The two wrappers changed in exactly the recovered overloads
-  (pugixml: `load_file`/`save_file` with `const wchar_t*`, the four
-  `*_child(xml_node_type)`; tinyxml2: `LoadFile`/`SaveFile` with `const
-  char*`) and their manifests shrank by 23 and 24 thunks. The 11 remaining
-  overload drops are imgui's and msdfgen's, which recover on their next wrap.
-  (`test_tier2_typed_dispatch.jl`.)
+- **pkg** (`runtests.jl`, what `Pkg.test()` runs): the package loads, VERSION
+  has one source, the config surface, the environment doctor, and the
+  structural guards (every `test_*.jl` listed in exactly one suite or in
+  `EXPERIMENTAL`, no include-time exit, every import declared). Seconds.
+- **unit** (`unit.jl`): the toolchain-free regression tests, in one process, as
+  runtests ran them.
+- **dev** (`devtests.jl`): everything that compiles, links or JITs
+  (`test/run.jl`). The seven discover-driven fixtures are jobs of their own
+  (`fixture:<name>`, `test/support/fixture.jl`), and the two inline testsets
+  devtests had (the pipeline on stress_test, ingest on c_test) are files
+  (`test_pipeline_live.jl`, `test_ingest_live.jl`).
 
-### C++ coverage, measured: 98.0% (2026-11-13)
-
-C sat at a measured 99.97% because `test/tools/c_ccall_coverage.jl` counts
-real `ccall` targets in the parsed wrappers and names every miss by cause;
-C++ coverage was a feeling. `test/tools/cpp_thunk_coverage.jl` is its twin,
-hand-run and unwired, reading the Hub's wrappers, metadata, thunk manifests
-and graph manifests as they are:
-
-- The surface is one function per mangled symbol (DWARF lists a definition
-  once per compilation unit) net of `[wrap] exclude_symbols` matched as wrap
-  matches them, functions the metadata marks not exported, and, in a graph,
-  functions an earlier library's wrapper binds (`type_manifest.json`
-  `bound_symbols`). Graph packages give one row per C++ library; their C
-  libraries are the C tool's and are skipped with a note.
-- Bound is what the PARSED code does: a `ccall`/`@ccall` target (Tier 3) or
-  an invoked thunk (Tier 2: `JITManager.invoke("_mlir_ciface_<m>_thunk")`,
-  an AOT slot resolved through the emitted `_THUNK_SLOTS` table, an AOT
-  virtual `ccall((:thunk_<m>, THUNKS_LIBRARY_PATH))`). A thunk the manifest
-  lists and nothing invokes is not bound.
-- Every miss is attributed: a trap stub by the reason its message carries
-  (no layout, SysV refusal with the classifier's reason, conflicted name,
-  unresolved return, `long double`, FFI trap), with the records that block
-  functions counted; a drop by what the generator did (a destructor variant,
-  a `const`/non-`const` pair or an overload set collapsing to one `::Any`
-  signature in `_dedup_method_chunks`, undeclared varargs, a manifest thunk
-  whose chunk the dedup dropped, or nothing emitted). Types are counted as
-  emitted: fields, byte blob, byte record, opaque, imported, owner.
-- On the 4.4.0 wrappers, 12 C++ libraries (11 packages and hello_world's two
-  graph libraries): 4703 of 4798 bound (98.02%; 1293 by ccall, 3410 by
-  thunk), 6 traps, 89 drops. By count: 37 overloads collapsed to one `::Any`
-  signature with another overload bound, 28 destructor variants (one Julia
-  method per class, by construction), 15 `const`/non-`const` pairs, 7 other
-  dispatch collisions (pugixml's `operator>`/`operator>=`, two tinyxml2
-  destructors), 3 by-value records with no layout (fmt's `allocator<char>`,
-  clipper2's `std::function`), 3 `long double` by value (fmt), 2 undeclared
-  varargs (imgui). Also found: the thunk manifest is written from the
-  pre-dedup set, so it lists 87 thunks across the Hub that no call site
-  invokes and the JIT compiles for nothing.
-- Vacuous green is refused: at least one library measured, nonzero surface.
+`run.jl` selects by the list and runs the selection in one process, each job a
+nested testset, so a failing file no longer ends the run. `--changed[=ref]`
+maps the diff to areas (`areas_of_path`: build, dwarf, c, cpp, dialect, graph)
+and runs the files that cover them, plus changed test files and the jobs
+locking a changed fixture; `--area=`, `--files=`, `--list`. `--processes` runs
+a child per job in parallel with a log each (`test/.logs/`), honouring `after`
+(a job runs after the jobs it names, skipped when one failed) and `locks` (two
+jobs on one fixture directory never run at once). Measured: a child compiles
+the build paths again before its first build, so children are not faster (48
+of them four at a time, 597s against 614s in one process; a 16-job selection
+2m30s either way). The win is selection: the dialect area is 16 of 48 jobs,
+the C area 11. CI runs `unit.jl` beside `runtests.jl`; devtests is unchanged
+there. `REPLIBUILD_SKIP_TESTS` still names fixtures to skip.
 
 ### Graph mode builds libwebp: object sources, versioned sonames, file-local types (2026-11-11)
 
