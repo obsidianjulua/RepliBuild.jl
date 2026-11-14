@@ -982,7 +982,12 @@ the test named when you touch the area.
   never at wrap time: through the wrapped library's handle, which on ELF also
   searches its dependencies (libstdc++ defines it when the library does not),
   and on PE the C++ runtime by name (`cxx_runtime_libraries(abi)`). None found:
-  the bytes, and a warning naming the function once. Never decode by hardcoded
+  the bytes, and a warning naming the function once. libstdc++ homes
+  `_Alloc_hider` behind its constructors, so a unit that emits no
+  `basic_string` constructor (Ubuntu 24.04's libstdc++ 13 at `-std=c++17`;
+  16 emits one) has it as a declaration-only DIE and `_M_dataplus` stays a
+  leaf: the reader takes that leaf, of that type and exactly pointer size, as
+  `_M_p`, and refuses any other size. Never decode by hardcoded
   offsets or sizes. (`test_std_strings.jl`, devtests
   `test_sret_in_caller_buffer.jl`.)
 - **One struct-ABI rule set per convention, chosen by the host, in two places

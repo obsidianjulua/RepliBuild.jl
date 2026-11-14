@@ -62,6 +62,10 @@ Reader(kind::Symbol, ptr::Int, len::Int) = Reader(kind, ptr, len, -1, -1, -1, 0)
 _last(path) = (i = findlast('.', path); i === nothing ? path : path[i+1:end])
 _ends(path, suffix) = path == suffix || endswith(path, "." * suffix)
 _is_pointer(ct) = endswith(strip(String(ct)), "*")
+function _is_alloc_hider(ct)
+    t = strip(replace(String(ct), r"^(?:(?:const|volatile)\s+)+" => ""))
+    return t == "_Alloc_hider" || endswith(t, "::_Alloc_hider")
+end
 
 """
     string_reader(layout) -> Union{Reader,String}
@@ -95,6 +99,23 @@ function string_reader(layout::AbstractDict)::Union{Reader,String}
     n = find(l -> _last(path(l)) == "_M_string_length" && byte(l) !== nothing)
     if p !== nothing && n !== nothing
         return Reader(:pointer_length, Int(byte(p)), Int(byte(n)))
+    end
+    # libstdc++ homes `_Alloc_hider` behind its constructors: where the unit
+    # emits no basic_string constructor (Ubuntu 24.04's libstdc++ 13 at
+    # -std=c++17; libstdc++ 16 emits one), clang writes a declaration-only DIE
+    # and the build's walk leaves `_M_dataplus` a leaf (it descends only into a
+    # record with members). `_Alloc_hider`'s one data member is the pointer
+    # `_M_p`, so a leaf of that name and type of exactly pointer size is that
+    # pointer at the leaf's offset. Any other size is refused: it would mean a
+    # libstdc++ whose `_Alloc_hider` holds more than the pointer.
+    if p === nothing && n !== nothing
+        dp = find(l -> _last(path(l)) == "_M_dataplus" && _is_alloc_hider(get(l, "c_type", "")) &&
+                       byte(l) !== nothing)
+        if dp !== nothing
+            sz = Int(get(dp, "size", 0))
+            sz == sizeof(Ptr{Cvoid}) && return Reader(:pointer_length, Int(byte(dp)), Int(byte(n)))
+            return "its `_Alloc_hider` has no definition in the DWARF and is $(sz) bytes, not a pointer; that layout is not decoded"
+        end
     end
 
     ld = find(l -> _ends(path(l), "__l.__data_") && _is_pointer(get(l, "c_type", "")) && byte(l) !== nothing)

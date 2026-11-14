@@ -55,6 +55,24 @@ const _LIBCXX = Dict{String,Any}("char_type" => "char", "destructor" => "_ZNSt3_
     @test occursin("without the `__is_long_` bit", _SS.string_reader(old_libcxx))
     @test occursin("neither libstdc++'s",
                    _SS.string_reader(Dict{String,Any}("char_type" => "char", "leaves" => Any[_leaf("p", "char*", 0)])))
+    # Ubuntu 24.04's libstdc++ 13: `_Alloc_hider` is a declaration-only DIE
+    # (constructor homing), so the build leaves `_M_dataplus` a leaf. Of exactly
+    # pointer size it is `_M_p`, under either spelling of its type; any other
+    # size is refused with the reason.
+    rest = _LIBSTDCXX["leaves"][2:end]
+    homed = merge(_LIBSTDCXX, Dict{String,Any}("leaves" => Any[_leaf("_M_dataplus", "_Alloc_hider", 0), rest...]))
+    h = _SS.string_reader(homed)
+    @test h isa _SS.Reader
+    @test (h.kind, h.ptr, h.len) == (:pointer_length, 0, 8)
+    scoped = merge(_LIBSTDCXX, Dict{String,Any}("leaves" => Any[_leaf("_M_dataplus",
+                   "basic_string<char, std::char_traits<char>, std::allocator<char> >::_Alloc_hider", 0), rest...]))
+    @test _SS.string_reader(scoped) isa _SS.Reader
+    wide = merge(_LIBSTDCXX, Dict{String,Any}("leaves" => Any[_leaf("_M_dataplus", "_Alloc_hider", 0; size = 16), rest...]))
+    @test occursin("`_Alloc_hider` has no definition", _SS.string_reader(wide))
+    @test occursin("16 bytes, not a pointer", _SS.string_reader(wide))
+    # A leaf of another name or type is not taken for the pointer.
+    other = merge(_LIBSTDCXX, Dict{String,Any}("leaves" => Any[_leaf("_M_dataplus", "size_t", 0), rest...]))
+    @test occursin("neither libstdc++'s", _SS.string_reader(other))
 end
 
 @testset "reading the characters where the object is" begin
@@ -159,6 +177,17 @@ end
     @test !haskey(L2, "unread")
     @test [(l["path"], l["offset"]) for l in L2["leaves"]] == [(l["path"], l["offset"]) for l in L["leaves"]]
     @test _SS.string_reader(L2) isa _SS.Reader
+    # `_Alloc_hider` itself declaration-only (what libstdc++ 13's DWARF holds;
+    # the parser keeps no entry for a declaration): the walk leaves `_M_dataplus`
+    # a leaf of 8 bytes, and the reader takes it for `_M_p`.
+    homed = deepcopy(defs)
+    delete!(homed, "_Alloc_hider")
+    L4 = _SC._string_layout(key, homed, Dict{String,Any}(), "_ZN…D4Ev")
+    @test !haskey(L4, "unread")
+    @test [(l["path"], l["offset"], l["size"]) for l in L4["leaves"]][1] == ("_M_dataplus", 0, 8)
+    r4 = _SS.string_reader(L4)
+    @test r4 isa _SS.Reader
+    @test (r4.kind, r4.ptr, r4.len) == (:pointer_length, 0, 8)
     # The members leave room for the base: it may carry data we cannot see,
     # so the refusal stays, and says why.
     roomy = deepcopy(defs)
