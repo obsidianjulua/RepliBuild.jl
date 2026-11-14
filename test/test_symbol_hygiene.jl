@@ -433,4 +433,97 @@ import JSON   # runtests.jl loads only Test + RepliBuild; this file needs JSON i
         @test C._structor_dwarf_key("_ZC1EC2E", amb) === nothing
         @test C._structor_dwarf_key("_ZC1EC2E", Dict("_ZC4EC2E" => 1)) == "_ZC4EC2E"
     end
+
+    @testset "aliased constructors and destructors keep their own names" begin
+        # tinyxml2 at -O2, as `nm -gp --defined-only` lists it: clang emitted the
+        # trivial derived destructors as aliases of XMLNode's D2
+        # (`-mconstructor-aliases`), eight names at one address. Pairing the two
+        # listings by address gave every one of them the mangled name nm listed
+        # last there, so the metadata carried `_ZN8tinyxml27XMLNodeD2Ev` demangled
+        # as `tinyxml2::XMLComment::~XMLComment()` with class XMLComment, and the
+        # derived classes' own symbols not at all (2026-11-13).
+        # Negative check: make `_pair_nm_outputs` take its address-map fallback
+        # unconditionally and the first assertions fail.
+        names = ["_ZN8tinyxml210XMLCommentD1Ev", "_ZN8tinyxml210XMLCommentD2Ev",
+                 "_ZN8tinyxml210XMLUnknownD1Ev", "_ZN8tinyxml210XMLUnknownD2Ev",
+                 "_ZN8tinyxml214XMLDeclarationD1Ev", "_ZN8tinyxml214XMLDeclarationD2Ev",
+                 "_ZN8tinyxml27XMLNodeD1Ev", "_ZN8tinyxml27XMLNodeD2Ev"]
+        dem = ["tinyxml2::XMLComment::~XMLComment()", "tinyxml2::XMLComment::~XMLComment()",
+               "tinyxml2::XMLUnknown::~XMLUnknown()", "tinyxml2::XMLUnknown::~XMLUnknown()",
+               "tinyxml2::XMLDeclaration::~XMLDeclaration()", "tinyxml2::XMLDeclaration::~XMLDeclaration()",
+               "tinyxml2::XMLNode::~XMLNode()", "tinyxml2::XMLNode::~XMLNode()"]
+        # The symbol table's own order, the same in both listings; a data symbol
+        # and a function with spaces in its demangled name between them.
+        order = [8, 3, 1, 7, 5, 2, 6, 4]
+        m = IOBuffer(); d = IOBuffer()
+        println(m, "0000000000016d20 D _ZTVN8tinyxml27XMLNodeE"); println(d, "0000000000016d20 D vtable for tinyxml2::XMLNode")
+        for i in order
+            println(m, "000000000000b440 T ", names[i]); println(d, "000000000000b440 T ", dem[i])
+        end
+        println(m, "000000000000dea0 T _ZN8tinyxml27XMLUtil10ToUnsignedEPKcPj")
+        println(d, "000000000000dea0 T tinyxml2::XMLUtil::ToUnsigned(char const*, unsigned int*)")
+        println(m, "000000000000bfc0 W _ZN8tinyxml210XMLCommentD0Ev"); println(d, "000000000000bfc0 W tinyxml2::XMLComment::~XMLComment()")
+        pairs = C._pair_nm_outputs(String(take!(m)), String(take!(d)))
+        @test length(pairs) == 10                                  # the data symbol is not a code symbol
+        checked = 0
+        for (address, typ, mangled, demangled) in pairs
+            address == "000000000000b440" || continue
+            i = findfirst(==(mangled), names)
+            @test i !== nothing && dem[i] == demangled            # each symbol keeps its own two names
+            @test typ == "T"
+            checked += 1
+        end
+        @test checked == 8
+        @test Set(p[3] for p in pairs) ⊇ Set(names)                # every alias is a symbol of its own
+        @test ("000000000000dea0", "T", "_ZN8tinyxml27XMLUtil10ToUnsignedEPKcPj",
+               "tinyxml2::XMLUtil::ToUnsigned(char const*, unsigned int*)") in pairs
+        @test ("000000000000bfc0", "W", "_ZN8tinyxml210XMLCommentD0Ev", "tinyxml2::XMLComment::~XMLComment()") in pairs
+
+        # Through `parse_function_signatures`, as the build reads them: one
+        # entry per symbol, class from its own demangled name.
+        syms = [Dict{String,Any}("mangled" => p[3], "demangled" => p[4]) for p in pairs]
+        fns = C.parse_function_signatures(syms)
+        by_m = Dict(f["mangled"] => f for f in fns)
+        @test by_m["_ZN8tinyxml210XMLCommentD2Ev"]["class"] == "tinyxml2::XMLComment"
+        @test by_m["_ZN8tinyxml27XMLNodeD2Ev"]["class"] == "tinyxml2::XMLNode"
+        @test length(unique(f["mangled"] for f in fns)) == length(fns)
+        @test !any(f -> f["mangled"] == "_ZN8tinyxml27XMLNodeD2Ev" && f["class"] != "tinyxml2::XMLNode", fns)
+
+        # The metadata's order is nm's sorted demangled listing, the order every
+        # wrapper follows: the pairs are put in it (`_order_like_listing`), and
+        # among aliases of one demangled name the smaller mangled name comes
+        # first, so the dedup's last definition stays the D2 the address map
+        # used to give both lines.
+        sorted_listing = """
+        000000000000bfc0 W tinyxml2::XMLComment::~XMLComment()
+        000000000000b440 T tinyxml2::XMLComment::~XMLComment()
+        000000000000b440 T tinyxml2::XMLComment::~XMLComment()
+        000000000000b440 T tinyxml2::XMLDeclaration::~XMLDeclaration()
+        000000000000b440 T tinyxml2::XMLDeclaration::~XMLDeclaration()
+        000000000000b440 T tinyxml2::XMLNode::~XMLNode()
+        000000000000b440 T tinyxml2::XMLNode::~XMLNode()
+        000000000000b440 T tinyxml2::XMLUnknown::~XMLUnknown()
+        000000000000b440 T tinyxml2::XMLUnknown::~XMLUnknown()
+        000000000000dea0 T tinyxml2::XMLUtil::ToUnsigned(char const*, unsigned int*)
+        """
+        ordered = C._order_like_listing(pairs, sorted_listing)
+        @test [p[3] for p in ordered] == ["_ZN8tinyxml210XMLCommentD0Ev",
+                                          "_ZN8tinyxml210XMLCommentD1Ev", "_ZN8tinyxml210XMLCommentD2Ev",
+                                          "_ZN8tinyxml214XMLDeclarationD1Ev", "_ZN8tinyxml214XMLDeclarationD2Ev",
+                                          "_ZN8tinyxml27XMLNodeD1Ev", "_ZN8tinyxml27XMLNodeD2Ev",
+                                          "_ZN8tinyxml210XMLUnknownD1Ev", "_ZN8tinyxml210XMLUnknownD2Ev",
+                                          "_ZN8tinyxml27XMLUtil10ToUnsignedEPKcPj"]
+        # A pair the sorted listing does not name is appended, with a warning.
+        short = join(split(sorted_listing, '\n')[2:end], '\n')
+        tail = @test_logs (:warn, r"not in its sorted one") C._order_like_listing(pairs, short)
+        @test length(tail) == 10 && tail[end][3] == "_ZN8tinyxml210XMLCommentD0Ev"
+
+        # Listings that do not line up fall back to the address map, with a
+        # warning, where a `__rb_` alias never displaces the real name.
+        m2 = "0000000000001000 T real_fn\n0000000000001000 T __rb_lib_real_fn\n0000000000002000 T other\n"
+        d2 = "0000000000002000 T other\n0000000000001000 T real_fn\n0000000000001000 T __rb_lib_real_fn\n"
+        fb = @test_logs (:warn, r"do not line up") C._pair_nm_outputs(m2, d2)
+        @test all(p -> p[3] == (p[1] == "0000000000001000" ? "real_fn" : "other"), fb)
+        @test length(fb) == 3
+    end
 end

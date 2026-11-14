@@ -68,6 +68,18 @@ probe("managed_pooled_calls_its_static_deleter") do p
     M.pooled_deletes() > 0 || push!(p, "Pooled::DeletePooled never ran")
 end
 
+# Twig's destructor is an alias of Leaf's D2 (-O1 and up). Its owner must free
+# through Twig's own D0: Leaf's body runs once per Twig and Leaf's operator
+# delete frees it, so both counters advance together.
+probe("managed_twig_deletes_through_its_own_destructor") do p
+    d0, f0 = M.leaf_dtors(), M.leaf_frees()
+    churn(() -> M.spawn_twig_safe(5), 10)
+    collect_all()
+    d, f = M.leaf_dtors() - d0, M.leaf_frees() - f0
+    f > 0 || push!(p, "no Twig was freed (destructor bodies: $d)")
+    f == d || push!(p, "$d destructor bodies but $f frees")
+end
+
 probe("nothing_owns_a_plain") do p
     for name in (:ManagedPlain, :make_plain_safe, :spawn_plain_safe)
         isdefined(M, name) && push!(p, "$name is defined")
