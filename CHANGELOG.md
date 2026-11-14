@@ -4,45 +4,6 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
-### C++ coverage, measured: 98.0% (2026-11-13)
-
-C sat at a measured 99.97% because `test/tools/c_ccall_coverage.jl` counts
-real `ccall` targets in the parsed wrappers and names every miss by cause;
-C++ coverage was a feeling. `test/tools/cpp_thunk_coverage.jl` is its twin,
-hand-run and unwired, reading the Hub's wrappers, metadata, thunk manifests
-and graph manifests as they are:
-
-- The surface is one function per mangled symbol (DWARF lists a definition
-  once per compilation unit) net of `[wrap] exclude_symbols` matched as wrap
-  matches them, functions the metadata marks not exported, and, in a graph,
-  functions an earlier library's wrapper binds (`type_manifest.json`
-  `bound_symbols`). Graph packages give one row per C++ library; their C
-  libraries are the C tool's and are skipped with a note.
-- Bound is what the PARSED code does: a `ccall`/`@ccall` target (Tier 3) or
-  an invoked thunk (Tier 2: `JITManager.invoke("_mlir_ciface_<m>_thunk")`,
-  an AOT slot resolved through the emitted `_THUNK_SLOTS` table, an AOT
-  virtual `ccall((:thunk_<m>, THUNKS_LIBRARY_PATH))`). A thunk the manifest
-  lists and nothing invokes is not bound.
-- Every miss is attributed: a trap stub by the reason its message carries
-  (no layout, SysV refusal with the classifier's reason, conflicted name,
-  unresolved return, `long double`, FFI trap), with the records that block
-  functions counted; a drop by what the generator did (a destructor variant,
-  a `const`/non-`const` pair or an overload set collapsing to one `::Any`
-  signature in `_dedup_method_chunks`, undeclared varargs, a manifest thunk
-  whose chunk the dedup dropped, or nothing emitted). Types are counted as
-  emitted: fields, byte blob, byte record, opaque, imported, owner.
-- On the 4.4.0 wrappers, 12 C++ libraries (11 packages and hello_world's two
-  graph libraries): 4703 of 4798 bound (98.02%; 1293 by ccall, 3410 by
-  thunk), 6 traps, 89 drops. By count: 37 overloads collapsed to one `::Any`
-  signature with another overload bound, 28 destructor variants (one Julia
-  method per class, by construction), 15 `const`/non-`const` pairs, 7 other
-  dispatch collisions (pugixml's `operator>`/`operator>=`, two tinyxml2
-  destructors), 3 by-value records with no layout (fmt's `allocator<char>`,
-  clipper2's `std::function`), 3 `long double` by value (fmt), 2 undeclared
-  varargs (imgui). Also found: the thunk manifest is written from the
-  pre-dedup set, so it lists 87 thunks across the Hub that no call site
-  invokes and the JIT compiles for nothing.
-- Vacuous green is refused: at least one library measured, nonzero surface.
 ### Three test suites, one list, a runner that runs what a diff touches (2026-11-11)
 
 devtests was one 18-minute process that printed every build's progress and
