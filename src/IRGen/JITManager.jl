@@ -8,6 +8,7 @@ using ..MLIRNative
 import ..MLIRNative: CXX_PERSONALITY
 using ..JLCSIRGenerator
 using ..DWARFParser
+import ..Compiler
 using Libdl
 import .._read_json
 
@@ -763,6 +764,95 @@ function configure_jit_dump_session!()
 end
 
 """
+    _module_callees(metadata, needed_symbols) -> Set{String}
+
+The mangled symbols the thunk module for this library will call: the
+functions the manifest lists (every function in the metadata when there is no
+manifest) and the STL method table's members.
+"""
+function _module_callees(metadata, needed_symbols)::Set{String}
+    out = Set{String}()
+    if needed_symbols !== nothing
+        union!(out, needed_symbols)
+    else
+        for f in get(metadata, "functions", Any[])
+            m = String(get(f, "mangled", ""))
+            isempty(m) || push!(out, m)
+        end
+    end
+    for (_, methods) in get(metadata, "stl_methods", Dict{String,Any}())
+        for m in methods
+            s = String(get(m, "mangled", ""))
+            isempty(s) || push!(out, s)
+        end
+    end
+    return out
+end
+
+"""
+    _preflight_callees(lookup, callees, own) -> (bound::Dict{String,Ptr{Cvoid}}, unresolved::Vector{String})
+
+Which of `callees` the library does not define (`own`, its runtime symbol
+names) but `lookup(name)` resolves (`dlsym` through the library's own handle;
+`nothing` or `C_NULL` when it does not), and which it resolves nowhere. A
+callee in `own` is ORC's to bind through the library, as always, and is
+neither. Pure, so a test drives it with any `lookup`.
+"""
+function _preflight_callees(lookup, callees, own)
+    bound = Dict{String,Ptr{Cvoid}}()
+    unresolved = String[]
+    for name in sort!(collect(callees))
+        name in own && continue
+        ptr = lookup(name)
+        if ptr === nothing || ptr == C_NULL
+            push!(unresolved, name)
+        else
+            bound[name] = ptr
+        end
+    end
+    return (bound, unresolved)
+end
+
+"Remove the STL table entries whose symbol is in `unresolved`, in place."
+function _drop_stl_methods!(metadata, unresolved)
+    haskey(metadata, "stl_methods") || return metadata
+    gone = Set{String}(unresolved)
+    for (c, methods) in metadata["stl_methods"]
+        filter!(m -> !(String(get(m, "mangled", "")) in gone), methods)
+    end
+    return metadata
+end
+
+# Declarations the thunk module carries that no pre-flight owns: helpers
+# registered process-wide before the engine exists (`register_symbol_global`
+# in `initialize_global_jit`, the dialect's own runtime, the C++ EH entry
+# points `JlcsJIT.cpp` defines) and the `__def_` type anchors the IR generator
+# declares and never calls.
+const _GLOBAL_DECLARATION_PREFIXES = ("dispatch_", "jlcs_", "__cxa_", "__gxx_personality", "_mlir_", "llvm.",
+                                      "malloc", "free", "memcpy", "memset", "__def_")
+
+"""
+    _check_module_declarations(ir_source, own, bound, lib)
+
+Every `func.func private @name(` the module declares is the library's
+(`own`), bound through its handle (`bound`), or a helper registered before the
+engine exists; anything else is named in a warning, because the first thunk
+that reaches it would block the process rather than fail.
+"""
+function _check_module_declarations(ir_source::AbstractString, own, bound, lib::AbstractString)
+    stray = String[]
+    for m in eachmatch(r"func\.func private @([^\s(]+)\(", ir_source)
+        n = String(m.captures[1])
+        (n in own || haskey(bound, n)) && continue
+        any(p -> startswith(n, p), _GLOBAL_DECLARATION_PREFIXES) && continue
+        push!(stray, n)
+    end
+    isempty(stray) || @warn "JIT: $(basename(lib))'s thunk module declares $(length(stray)) symbol(s) nothing " *
+                            "pre-flighted; a thunk that reaches one will block, not fail" symbols = join(sort(stray), ", ")
+    return stray
+end
+
+"""
     initialize_global_jit(binary_path::String)
 
 Initialize a JIT engine for `binary_path`. Called once per wrapped library,
@@ -894,9 +984,35 @@ function initialize_global_jit(binary_path::String)
                 nothing
             end
 
+            # 3b. Pre-flight every callee the thunk module will name through
+            # the library's OWN handle. A callee the library defines is bound by
+            # ORC through the library as always. One it does not define but its
+            # handle resolves (a C++ runtime member it calls, `runtime_library`
+            # in the STL table; glibc's dlsym searches a library's dependency
+            # tree) is bound after the engine exists at exactly that address,
+            # on this engine (`register_symbol`), never through RTLD_DEFAULT,
+            # whose answer could be another copy of the runtime. One the handle
+            # cannot resolve gets no thunk: ORC does not raise on an unresolved
+            # symbol, it blocks, so the module must never name it.
+            own = something(Compiler._runtime_symbol_names(rp), Set{String}())
+            callees = _module_callees(metadata, needed_symbols)
+            (runtime_bound, unresolved) = _preflight_callees(
+                n -> Libdl.dlsym(lib_handle, n; throw_error=false), callees, own)
+            if !isempty(unresolved)
+                @warn "JIT: $(length(unresolved)) callee(s) of $(basename(rp))'s thunks resolve neither " *
+                      "in the library nor through its handle; their thunks are left out, and the " *
+                      "wrapper's methods on them raise instead of hanging" unresolved = join(sort(unresolved), ", ")
+                needed_symbols === nothing || setdiff!(needed_symbols, unresolved)
+                _drop_stl_methods!(metadata, unresolved)
+            end
+
             # 4. Generate MLIR Module for vtables + needed function thunks
             ir_source = JLCSIRGenerator.generate_jlcs_ir(eng.vtable_info, metadata;
                                                           needed_symbols=needed_symbols)
+            # The declarations the module actually carries: every one must be
+            # the library's, pre-flighted above, or a helper registered
+            # globally, or the first call into it would block the process.
+            _check_module_declarations(ir_source, own, runtime_bound, basename(rp))
 
             # 4. Parse and Lower Module
             #
@@ -929,6 +1045,15 @@ function initialize_global_jit(binary_path::String)
             want_obj = haskey(ENV, "REPLIBUILD_JIT_OBJDUMP")
             eng.jit_engine = create_jit(mod, opt_level=1, dump_object=want_obj,
                                         shared_libs=[rp, jlcs_lib_path])
+
+            # The runtime-library callees, at the addresses the library's own
+            # handle gave, on this engine alone. ORC materialises a thunk at its
+            # first lookup, so a symbol defined here is seen by every thunk.
+            for name in sort!(collect(keys(runtime_bound)))
+                MLIRNative.register_symbol(eng.jit_engine, name, runtime_bound[name])
+            end
+            isempty(runtime_bound) ||
+                @debug "JIT: $(length(runtime_bound)) runtime-library callee(s) bound through $(basename(rp))'s handle"
 
             if want_obj
                 obj = joinpath(debug_base, "obj", first(splitext(basename(rp))) * ".o")

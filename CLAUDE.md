@@ -445,6 +445,17 @@ the test named when you touch the area.
   `_runtime_symbol_names`, the one source for "what the loader binds"
   (`verify_wrap_surface` reads it too). One unbindable thunk fails the library's
   whole JIT module. (`test_windows_port.jl`, `test_libcxx_exports.jl`.)
+  **A callee outside that set is bound only through the library's own
+  handle** (2026-11-13): `extract_stl_method_symbols` admits an undefined
+  member of a listed container when `dlsym` through the library (opened
+  `RTLD_NOW | RTLD_LOCAL`, then closed) resolves it (`runtime_library`), and
+  `initialize_global_jit` pre-flights every callee the thunk module names
+  (`_preflight_callees`): the library's own are ORC's, a foreign one the
+  handle resolves is registered on that engine at that address
+  (`register_symbol`), never through `RTLD_DEFAULT`, whose answer could be
+  Julia's own libstdc++ (the zlib lesson), and one the handle cannot resolve
+  gets no thunk, since ORC blocks on an unresolved symbol instead of raising.
+  (`test_jit_runtime_symbols.jl`, devtests `test_jit_runtime_symbols_live.jl`.)
 - **libc++ 23 hides its own functions** with a `#pragma clang attribute` in
   `__configuration/namespace.h`. It applies on COFF too, and no macro opts out. On
   MinGW clang turns hidden into `-exclude-symbols:`, so those members never reach the
@@ -1528,8 +1539,8 @@ DWARF-resolved destructors — **is** built.)
   `boostcharconv`, `boostjson`, each `boostorg/boost` with `submodules` set to
   the closure `tools/boostdep/depinst/depinst.py` computes (the guide's Boost
   section has the recipe). Not built: a decoder for a `std::string` returned by
-  value (a 32-byte stand-in, libstdc++'s size; libc++'s object is 24), and
-  binding the STL members that live in the C++ runtime library (below).
+  value (a 32-byte stand-in, libstdc++'s size; libc++'s object is 24), and a
+  `std::string` table without the instantiation TU (below).
 - **`long double` by value is a trap on every tier** (scoped 2026-11-03, not
   built). The scalar is x87 extended precision: SysV passes it in memory and
   returns it in `ST0`, which `ccall` cannot reach, so Tier 3 can never carry
@@ -1548,11 +1559,34 @@ DWARF-resolved destructors — **is** built.)
   boostcharconv (`to_chars(long double)` and kin) and 3 in fmt, no consumer
   behind them, and MSVC's `long double` is a `double`, so Windows-native
   libraries rarely expose it. About three days with both hosts verified.
-- STL members that live in the C++ runtime library are unbound: libc++'s
-  `basic_string<char>` extern-template members on Windows (`libc++.dll` exports
-  them), libstdc++'s on Linux (undefined in the wrapped library). The JIT searches
-  only the wrapped library. Binding them needs the engine to also search the
-  library's runtime dependencies (2026-10-16).
+- STL members that live in the C++ runtime library (2026-10-16, corrected
+  2026-11-13). On Linux they bind: a `[types] templates` entry instantiates
+  every member in the library itself (stl_test: 205 `basic_string` members
+  defined, none undefined), and a member a library calls in libstdc++ without
+  instantiating it resolves through the library's OWN handle, since glibc's
+  `dlsym` searches a library's dependency tree (382 of 382 undefined `std::`
+  symbols across the Hub's C++ libraries, once nm's `@GLIBCXX_…` version
+  suffix is cut from the name; with it on, none resolve, which is what the
+  earlier entry measured). `extract_stl_method_symbols` admits such a member
+  to the table (`runtime_library`) and `initialize_global_jit` pre-flights
+  every callee through the handle and binds a foreign one on the engine at
+  that address (`_preflight_callees`, `register_symbol`), never through
+  `RTLD_DEFAULT`. What stays unbound: Windows/libc++, where a DLL handle sees
+  only its own exports (`libc++.dll` exports the extern-template members, so
+  a named search of it would be the shape), and a container a library uses
+  but does not list in `[types] templates`, which has no table at all. AOT
+  thunks need nothing: the thunks library leaves a libstdc++ callee undefined
+  and binds it at `dlopen` from the global scope, where Julia's bundled
+  libstdc++ comes first; ABI-compatible for `basic_string`, and a symbol newer
+  than Julia's copy would miss there.
+- `std::string` without the instantiation TU (2026-11-13; what the
+  `std::string`-by-value decoder would want): a table built from the
+  libstdc++ the library's handle resolves (its `nm -D`, filtered to
+  `basic_string<char>` members the handle binds) instead of from the
+  library's own symbols. Not built: it reads another library's symbol table
+  at build, a step away from the compile's own DWARF as the source of truth,
+  so it is John's call. A `[types]` key that merely skipped the TU would give
+  a half table (only the members the library itself calls) and was refused.
 
 ## Maintaining this file
 
