@@ -39,11 +39,33 @@ std::string_view      tail_view(const char *s, int n);
 __attribute__((visibility("hidden"))) std::pair<short, short> hidden_pair(short a);
 int map_lookup(int k);
 
-// Still traps: no layout to keep (tuple and optional are bases all the way
-// down in libstdc++; complex's member is `__complex__ double`).
+// Laid out from their bases (2026-11-13). libstdc++'s tuple and optional have
+// no member of their own, only bases, so they had no layout and trapped:
+// tuple<int, double> holds the double at 0 and the int at 8, through two
+// `_Head_base`s; optional<T> holds a `_Storage` union (T beside an empty
+// `_Empty_byte`) and an engaged flag. complex's member is a `__complex__`
+// scalar, whose width the parser reads off its byte_size.
 std::tuple<int, double> tup(int a, double b);
 std::optional<double>   maybe(bool has, double v);
+std::optional<int>      maybe_int(bool has, int v);
 std::complex<double>    cplx(double re, double im);
+std::complex<float>     cplxf(float re, float im);
+double tup_sum(std::tuple<int, double> t);              // the same records as parameters
+double maybe_or(std::optional<double> o, double fallback);
+int    maybe_int_or(std::optional<int> o, int fallback);
+double cplx_norm(std::complex<double> z);
+float  cplxf_norm(std::complex<float> z);
+
+// A record holding a `long double _Complex`, callable on both conventions: on
+// x86-64 it is 32 bytes whose first eightbyte is X87, so SysV returns it in
+// memory (sret); on AArch64 `long double` is an IEEE quad and the record is an
+// HFA of two, returned in v0 and v1. (A bare `long double _Complex` would come
+// back in st0/st1 on x86-64, which nothing can call.) The readers take it by
+// reference and read it in the host's own `long double`, so the test needs no
+// knowledge of that format.
+std::complex<long double> cplxl(double re, double im);
+double cplxl_re(const std::complex<long double> &z);
+double cplxl_im(const std::complex<long double> &z);
 
 // Controls with no toolchain type in them.
 struct Tag {};

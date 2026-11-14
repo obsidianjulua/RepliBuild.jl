@@ -4306,20 +4306,26 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # binds, read off the text it will be written with (minus the enums and
     # the export line). An enumerator that would rebind one of them is
     # prefixed with its enum's name (`_render_enum_chunks`).
-    imports_section = _type_imports_chunk(dwarf_structs, _sanitize_c_type_name, metadata,
-                                          get_output_path(config))
-    taken = _toplevel_names(header * init_block * metadata_section * imports_section * _structs * _unions *
-                            tier1_registry * introspection * _funcs * footer)
+    # Imported types and their enumerators first, against the names the rest
+    # of the module binds; then the own enums against everything, imports included.
+    own_text = header * init_block * metadata_section * _structs * _unions *
+               tier1_registry * introspection * _funcs * footer
+    (imports_section, imported_enum_names) =
+        _type_imports_chunk(dwarf_structs, _sanitize_c_type_name, metadata, get_output_path(config),
+                            _toplevel_names(own_text))
+    taken = _toplevel_names(own_text * imports_section)
     (rendered_enums, enum_member_names) = _render_enum_chunks(enum_chunks, taken)
     _enums = join(rendered_enums)
 
     # The enum segment of the export list, at the position recorded above, in
-    # the names the `@enum`s bind. An alias carries its canonical's members.
+    # the names the `@enum`s bind. An alias carries its canonical's members; an
+    # imported enum's are the aliases the import section bound.
     enum_exports = String[]
     for enum_key in sort!(collect(enum_types))
         enum_name = replace(enum_key, "__enum__" => "")
         push!(enum_exports, enum_name)
-        append!(enum_exports, get(enum_member_names, enum_name, String[]))
+        append!(enum_exports, get(enum_member_names, enum_name,
+                                  get(imported_enum_names, _sanitize_c_type_name(enum_name), String[])))
     end
     splice!(all_exports, enum_exports_at:enum_exports_at-1, enum_exports)
 
@@ -4332,6 +4338,7 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
         emitted_facts["layouts"] = Dict{String,Any}(k => Any[v[1], v[2]] for (k, v) in resolved_layouts)
         emitted_facts["class_risk"] = union(abi_class_risk,
                                             Set{String}(k for (k, v) in blob_float_risk if v == true))
+        emitted_facts["enumerators"] = _enumerator_facts(enum_chunks, enum_member_names)
     end
     return join([header, init_block, metadata_section, imports_section, _enums, _structs, _unions,
                  tier1_registry, introspection, export_statement, _funcs, footer])

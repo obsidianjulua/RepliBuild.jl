@@ -57,3 +57,9 @@ Pooled::~Pooled() {}
 void Pooled::DeletePooled(Pooled *p) { ++g_pooled_deletes; delete p; }
 
 Pooled *spawn_pooled() noexcept { return new Pooled(); }
+
+Twig::Twig(int v) : Leaf(v), extra_(v + 1) {}
+Twig::~Twig() {}
+int Twig::extra() const { return extra_; }
+
+Twig *spawn_twig(int v) noexcept { return new Twig(v); }

@@ -53,6 +53,9 @@ const _AR = Dict{String,Any}(
     "F1"     => _arrec(4, _arm("f", "float", "0x0", 4)),
     "CF"     => _arrec(8, _arm("z", "complex float", "0x0", 8; jt = "ComplexF32")),
     "CD"     => _arrec(16, _arm("z", "complex double", "0x0", 16; jt = "ComplexF64")),
+    # std::complex<long double>: two quads, an HFA at 32 bytes (the arm64 CI
+    # cell returns it in v0 and v1; x86-64 SysV returns the same bytes in memory)
+    "CLD"    => _arrec(32, _arm("_M_value", "complex long double", "0x0", 32)),
     "UFF"    => _arrec(4, _arm("f", "float", "0x0", 4), _arm("g", "float", "0x0", 4); kind = "union"),
     "HALF3"  => _arrec(6, _arm("h", "_Float16[3]", "0x0", 6; jt = "NTuple{3, Float16}")),
     "LD"     => _arrec(16, _arm("x", "long double", "0x0", 16)),
@@ -111,7 +114,7 @@ const _AR = Dict{String,Any}(
     @testset "an HFA goes in floating registers at any size" begin
         want = Dict("HFA2" => "hfa:f32:2", "HFA4" => "hfa:f32:4", "HFAD4" => "hfa:f64:4", "D3" => "hfa:f64:3",
                     "NHFA" => "hfa:f32:3", "AIN" => "hfa:f32:2", "CF" => "hfa:f32:2", "CD" => "hfa:f64:2",
-                    "UFF" => "hfa:f32:1", "HALF3" => "hfa:f16:3", "LD" => "hfa:f128:1", "LD2" => "hfa:f128:2",
+                    "UFF" => "hfa:f32:1", "HALF3" => "hfa:f16:3", "LD" => "hfa:f128:1", "LD2" => "hfa:f128:2", "CLD" => "hfa:f128:2",
                     "EB" => "hfa:f32:1")
         checked = 0
         for k in sort!(collect(keys(want)))

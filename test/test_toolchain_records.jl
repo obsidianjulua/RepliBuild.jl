@@ -11,7 +11,9 @@
 # entry and stopped the SysV classifier; it is marked and skipped. GeneratorCpp's
 # STL screen named `pair<` and `basic_string_view<`, and a promoted record now
 # passes it. A tiled body whose emitted members do not add up to the record's
-# DWARF size is laid out by offset instead of returned short.
+# DWARF size is laid out by offset instead of returned short. A toolchain record
+# whose bytes come from its bases (libstdc++'s tuple, optional) is laid out
+# from them, and a sized `complex` member counts as laid out (2026-11-13).
 #
 # No toolchain needed. test_toolchain_byvalue_live.jl calls the real thing.
 
@@ -106,6 +108,120 @@ end
     tc["pair<double, double>"]["base_classes"][1]["empty"] = false
     sd = Dict{String,Dict{String,Any}}()
     @test isempty(_TR_C._promote_toolchain_records!(sd, tc, ["pair<double, double>"]))
+end
+
+# libstdc++'s shapes (2026-11-13): tuple and optional have no member of their
+# own, only bases; optional's payload is a union of the value and an empty
+# `_Empty_byte`; complex's member is a `complex` base type the parser sizes.
+_tr_base(t, off) = Dict{String,Any}("type" => t, "offset" => off, "virtual" => false)
+function _tr_from_bases()
+    Dict{String,Dict{String,Any}}(
+        "tuple<int, double>"          => _tr_rec("0x10", Any[]; bases = [_tr_base("_Tuple_impl<0UL, int, double>", 0)]),
+        "_Tuple_impl<0UL, int, double>" => _tr_rec("0x10", Any[];
+            bases = [_tr_base("_Tuple_impl<1UL, double>", 0), _tr_base("_Head_base<0UL, int, false>", 8)]),
+        "_Tuple_impl<1UL, double>"    => _tr_rec("0x8", Any[]; bases = [_tr_base("_Head_base<1UL, double, false>", 0)]),
+        "_Head_base<0UL, int, false>" => _tr_rec("0x4", [_tr_mem("_M_head_impl", "int", "0x0", 4)]),
+        "_Head_base<1UL, double, false>" => _tr_rec("0x8", [_tr_mem("_M_head_impl", "double", "0x0", 8)]),
+        "optional<double>" => _tr_rec("0x10", Any[];
+            bases = [_tr_base("_Optional_base<double, true, true>", 0),
+                     _tr_empty_base("_Enable_copy_move<true, true, true, true, std::optional<double> >")]),
+        "_Optional_base<double, true, true>" =>
+            _tr_rec("0x10", [_tr_mem("_M_payload", "_Optional_payload<double, true, true, true>", "0x0", 16)]),
+        "_Optional_payload<double, true, true, true>" =>
+            _tr_rec("0x10", Any[]; bases = [_tr_base("_Optional_payload_base<double>", 0)]),
+        "_Optional_payload_base<double>" =>
+            _tr_rec("0x10", [_tr_mem("_M_payload", "_Storage<double, true>", "0x0", 8),
+                             _tr_mem("_M_engaged", "bool", "0x8", 1)]),
+        "_Storage<double, true>" => _tr_rec("0x8", [_tr_mem("_M_empty", "_Empty_byte", "0x0", 1),
+                                                    _tr_mem("_M_value", "double", "0x0", 8)]; kind = "union"),
+        "complex<double>" => _tr_rec("0x10", [_tr_mem("_M_value", "complex double", "0x0", 16)]),
+        "complex<float>"  => _tr_rec("0x8", [_tr_mem("_M_value", "complex float", "0x0", 8)]),
+        # A bitfield in a base at offset 4 moves by 32 bits.
+        "bits_at_4" => _tr_rec("0x8", [_tr_mem("k", "int", "0x0", 4)]; bases = [_tr_base("bits", 4)]),
+        "bits" => _tr_rec("0x4", [Dict{String,Any}("name" => "f", "c_type" => "unsigned int", "julia_type" => "Cuint",
+                                                   "offset" => nothing, "size" => 4, "bit_size" => 3,
+                                                   "data_bit_offset" => 2)]),
+    )
+end
+_TR_EMPTY = Set(["_Empty_byte"])
+_tr_layout(d) = [(m["name"], m["c_type"], m["offset"]) for m in d["members"]]
+
+@testset "a record whose bytes come from its bases is laid out from them" begin
+    @testset "tuple: the bases' members at the bases' offsets, a shared name numbered" begin
+        sd = Dict{String,Dict{String,Any}}()
+        got = _TR_C._promote_toolchain_records!(sd, _tr_from_bases(), ["std::tuple<int, double>"];
+                                                empty_records = _TR_EMPTY)
+        # The intermediate bases are flattened into it, never promoted themselves.
+        @test got == ["tuple<int, double>"]
+        t = sd["tuple<int, double>"]
+        @test _tr_layout(t) == [("_M_head_impl", "double", "0x0"), ("_M_head_impl_1", "int", "0x8")]
+        @test !haskey(t, "base_classes")
+        @test t["toolchain"] == true
+        # The classifier reads it like any record: SSE, then INTEGER.
+        v = _TR_FG.sysv_record_abi("tuple<int, double>", Dict{String,Any}(sd))
+        @test (v.kind, v.classes) == (:regs, [:sse, :int])
+    end
+
+    @testset "optional: a union's empty member dropped, the empty base kept marked" begin
+        sd = Dict{String,Dict{String,Any}}()
+        got = _TR_C._promote_toolchain_records!(sd, _tr_from_bases(), ["optional<double>"];
+                                                empty_records = _TR_EMPTY)
+        @test got == ["_Optional_payload<double, true, true, true>", "_Storage<double, true>", "optional<double>"]
+        @test _tr_layout(sd["optional<double>"]) ==
+              [("_M_payload", "_Optional_payload<double, true, true, true>", "0x0")]
+        @test [b["type"] for b in sd["optional<double>"]["base_classes"]] ==
+              ["_Enable_copy_move<true, true, true, true, std::optional<double> >"]
+        @test _tr_layout(sd["_Optional_payload<double, true, true, true>"]) ==
+              [("_M_payload", "_Storage<double, true>", "0x0"), ("_M_engaged", "bool", "0x8")]
+        @test _tr_layout(sd["_Storage<double, true>"]) == [("_M_value", "double", "0x0")]
+        # clang returns `optional<double>` as { double, i8 }.
+        v = _TR_FG.sysv_record_abi("optional<double>", Dict{String,Any}(sd))
+        @test (v.kind, v.classes) == (:regs, [:sse, :int])
+        # Not knowing `_Empty_byte` is empty, the union holds a record with no
+        # entry, and nothing is promoted: the old refusal.
+        @test isempty(_TR_C._promote_toolchain_records!(Dict{String,Dict{String,Any}}(), _tr_from_bases(),
+                                                        ["optional<double>"]))
+    end
+
+    @testset "complex: the width the parser read off byte_size" begin
+        @test _TR_C._complex_base_name(8) == "complex float"
+        @test _TR_C._complex_base_name(16) == "complex double"
+        @test _TR_C._complex_base_name(32) == "complex long double"
+        @test _TR_C._complex_base_name(12) == "complex"    # unknown: left unnamed, refused
+        sd = Dict{String,Dict{String,Any}}()
+        got = _TR_C._promote_toolchain_records!(sd, _tr_from_bases(), ["complex<double>", "complex<float>"])
+        @test got == ["complex<double>", "complex<float>"]
+        structs = Dict{String,Any}(sd)
+        # Two doubles are two SSE eightbytes; two floats share one.
+        @test (_TR_FG.sysv_record_abi("complex<double>", structs).classes) == [:sse, :sse]
+        @test (_TR_FG.sysv_record_abi("complex<float>", structs).classes) == [:sse]
+        # The name alone still names no width (the table above).
+        @test isempty(_tr_promote(["complex<double>"])[2])
+    end
+
+    @testset "a bitfield in a base moves with it" begin
+        sd = Dict{String,Dict{String,Any}}()
+        @test _TR_C._promote_toolchain_records!(sd, _tr_from_bases(), ["bits_at_4"]) == ["bits_at_4"]
+        m = sd["bits_at_4"]["members"]
+        @test [x["name"] for x in m] == ["k", "f"]
+        @test m[2]["data_bit_offset"] == 2 + 32 && m[2]["offset"] === nothing
+    end
+
+    @testset "a base deeper down that cannot be looked up keeps the record as it was" begin
+        tc = _tr_from_bases()
+        own(d) = collect(get(d, "members", ()))
+        known = Set(["_Tuple_impl<1UL, double>", "_Head_base<1UL, double, false>"])
+        lookup(k) = k in known ? tc[k] : nothing
+        d = _TR_C._laid_out_from_bases(tc["_Tuple_impl<0UL, int, double>"], lookup, own)
+        # `_Head_base<0UL, int, false>` is unknown at the top: kept as a base.
+        @test _tr_layout(d) == [("_M_head_impl", "double", "0x0")]
+        @test [b["type"] for b in d["base_classes"]] == ["_Head_base<0UL, int, false>"]
+        # Unknown below the top: nothing is flattened, nothing is lost.
+        lookup2(k) = k == "_Tuple_impl<1UL, double>" ? tc[k] : nothing
+        d2 = _TR_C._laid_out_from_bases(tc["_Tuple_impl<0UL, int, double>"], lookup2, own)
+        @test isempty(d2["members"])
+        @test length(d2["base_classes"]) == 2
+    end
 end
 
 @testset "an empty base adds nothing to the SysV class" begin

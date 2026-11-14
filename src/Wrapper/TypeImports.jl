@@ -319,9 +319,9 @@ the identity check compares, the layout facts a dependent's layout proof needs
 to embed it (`facts["layouts"]`: the generator's `jl_layouts` or
 `resolved_layouts` entry, size and alignment as a field), whether the type
 carries a register-class risk (`facts["class_risk"]`: a byte blob standing in
-for a float-bearing record), the `Managed` type if one was emitted, the
-strongly defined members (the ownership guard), and a digest of the metadata
-entry. Forward declarations the text emitted (`struct X end`) are listed as
+for a float-bearing record), the `Managed` type if one was emitted, an enum's
+enumerators as bound (`facts["enumerators"]`), the strongly defined members
+(the ownership guard), and a digest of the metadata entry. Forward declarations the text emitted (`struct X end`) are listed as
 `placeholder`s under their name, so a later owner can add their conversions.
 `bound_symbols` lists every mangled symbol the wrapper binds, so a later
 wrapper drops the functions it would bind again.
@@ -333,6 +333,7 @@ function _type_manifest(metadata, text::AbstractString, facts::AbstractDict;
     kinds = _emitted_type_kinds(text)
     layouts = get(facts, "layouts", Dict{String,Any}())
     class_risk = get(facts, "class_risk", Set{String}())
+    enumerators = get(facts, "enumerators", Dict{String,Any}())
     types = Dict{String,Any}()
     covered = Set{String}()
     for key in sort!(collect(keys(defs)); by = string)
@@ -355,6 +356,11 @@ function _type_manifest(metadata, text::AbstractString, facts::AbstractDict;
             "layout" => layout === nothing ? nothing : Any[layout[1], layout[2]],
             "class_risk" => jn in class_risk,
             "managed" => get(kinds, "Managed" * jn, "") == "managed" ? "Managed" * jn : nothing,
+            # For an enum: `[base, bound, value]` per enumerator, in declaration
+            # order, where `bound` is the name the owner's text binds it under
+            # (`_render_enum_chunks`'s collision rule applied), so an importer
+            # aliases what exists.
+            "enumerators" => kind == "enum" ? get(enumerators, jn, nothing) : nothing,
             "strong_members" => _strong_members(metadata, String(key)),
             "entry_sha" => _sha256_hex(_canonical_text(info)))
     end
@@ -447,8 +453,9 @@ end
 Who owns each type this wrapper's metadata defines or reaches, against the
 libraries wrapped before it (`_earlier_library`, topological order):
 
-1. The candidates are every key of `struct_definitions` and every record name
-   reached without a definition (`_referenced_record_names`), in sorted order.
+1. The candidates are every key of `struct_definitions`, every record name
+   reached without a definition (`_referenced_record_names`), and every header
+   enum (`header_enums`) with no DWARF entry here, in sorted order.
 2. The owner is the first earlier library whose manifest emitted the key as its
    own (never a placeholder). Two earlier libraries that both emitted it are
    siblings: the first is taken and the rest reported.
@@ -477,7 +484,13 @@ function _resolve_type_imports(metadata, earlier::AbstractVector; pe::Bool = Sys
     reports = String[]
     isempty(earlier) && return (imports, reports)
     defs = get(metadata, "struct_definitions", Dict{String,Any}())
-    candidates = sort!(unique!(vcat(String[String(k) for k in keys(defs)], _referenced_record_names(metadata))))
+    # A header enum (the Clang.jl walk's, `header_enums`) this library's DWARF
+    # lacks is a candidate on its key: an owner that emitted it from DWARF or
+    # from the same header defines the one type.
+    header_enum_keys = String["__enum__" * String(n) for n in keys(get(metadata, "header_enums", Dict{String,Any}()))
+                              if !haskey(defs, "__enum__" * String(n))]
+    candidates = sort!(unique!(vcat(String[String(k) for k in keys(defs)], _referenced_record_names(metadata),
+                                    header_enum_keys)))
     for key in candidates
         owners = Any[]
         for e in earlier
@@ -539,6 +552,7 @@ function _resolve_type_imports(metadata, earlier::AbstractVector; pe::Bool = Sys
             "layout" => get(otype, "layout", nothing),
             "class_risk" => get(otype, "class_risk", false) == true,
             "managed" => get(otype, "managed", nothing),
+            "enumerators" => get(otype, "enumerators", nothing),
             "owner_entry" => deepcopy(oentry),
             "record_abi" => deepcopy(get(get(owner.metadata, "record_abi", Dict{String,Any}()), key, nothing)),
             "raii" => deepcopy(_raii_rows(owner.metadata, key)),
@@ -571,10 +585,15 @@ function _apply_type_imports!(metadata, imports::AbstractDict)
         entry = deepcopy(imp["owner_entry"])
         entry["imported"] = Dict{String,Any}("module" => imp["module"], "name" => imp["julia_name"],
                                              "kind" => imp["kind"], "layout" => imp["layout"],
-                                             "class_risk" => imp["class_risk"])
+                                             "class_risk" => imp["class_risk"],
+                                             "enumerators" => get(imp, "enumerators", nothing))
         defs[key] = entry
         if imp["record_abi"] !== nothing && !haskey(abi, key)
             abi[key] = deepcopy(imp["record_abi"])
+        end
+        # An imported enum is not emitted from the header too.
+        if startswith(key, "__enum__") && haskey(metadata, "header_enums")
+            delete!(metadata["header_enums"], key[9:end])
         end
     end
     owners = Dict{String,Any}()
@@ -697,37 +716,82 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    _type_imports_chunk(dwarf_structs, sanitize, metadata, output_dir) -> String
+    _type_imports_chunk(dwarf_structs, sanitize, metadata, output_dir, taken)
+        -> (text, enumerator_names)
 
 The import section of a wrapper: one
-`const <name> = Base.parentmodule(@__MODULE__).<Owner>.<name>` per imported type, sorted by owner then name, then `IMPORTED_FROM` (each owner's
-manifest, relative to this wrapper, and its digest as imported) and
-`_check_type_imports`, which `__init__` calls to warn when an owner was
-re-wrapped since. Empty when nothing is imported, so a single-library wrapper
-is unchanged.
+`const <name> = Base.parentmodule(@__MODULE__).<Owner>.<name>` per imported
+type, sorted by owner then name; for an imported enum, one more per enumerator,
+aliasing the name the owner's text binds it under, so a value reads the same
+from either module (`World.Happy === Hello.Happy`; the Hub's hello_world report,
+2026-11-11). An enumerator whose name the importer binds itself (`taken`:
+`_toplevel_names` of the wrapper without this section), names as an imported
+type, or shares with another imported enum is bound as `<enum>_<name>`, the
+rule the owner's `_render_enum_chunks` applies, with a comment saying so. Then
+`IMPORTED_FROM` (each owner's manifest, relative to this wrapper, and its digest
+as imported) and `_check_type_imports`, which `__init__` calls to warn when an
+owner was re-wrapped since. `enumerator_names` maps each imported enum's name
+here to the enumerator names bound here, for the export list. Empty when
+nothing is imported, so a single-library wrapper is unchanged.
 """
-function _type_imports_chunk(dwarf_structs, sanitize, metadata, output_dir::AbstractString)::String
+function _type_imports_chunk(dwarf_structs, sanitize, metadata, output_dir::AbstractString,
+                             taken::AbstractDict = Dict{String,Symbol}())
     lines = Tuple{String,String,String}[]
+    enums = Tuple{String,String,String,Vector{Any}}[]   # (module, name here, owner's name, enumerators)
     for (k, v) in dwarf_structs
         imp = _import_of(v)
         imp === nothing && continue
-        push!(lines, (String(imp["module"]), _type_julia_spelling(k, sanitize), String(imp["name"])))
+        name = _type_julia_spelling(k, sanitize)
+        push!(lines, (String(imp["module"]), name, String(imp["name"])))
+        en = get(imp, "enumerators", nothing)
+        en isa AbstractVector && !isempty(en) && push!(enums, (String(imp["module"]), name, String(imp["name"]), en))
     end
-    isempty(lines) && return ""
+    enumerator_names = Dict{String,Vector{String}}()
+    isempty(lines) && return ("", enumerator_names)
     sort!(unique!(lines))
+    sort!(enums; by = e -> (e[1], e[2]))
     io = IOBuffer()
     print(io, """
         # ── Types owned by other libraries of this graph ─────────────────────────
         # Each is defined once, by the wrapper of the library that homes it, and
         # imported here so one C++ type is one Julia type across the graph: a
         # pointer, a `Managed` object or a value from that module passes straight
-        # into this one's functions. This file loads only through the graph module,
+        # into this one's functions. An enum's values come with it, under the names
+        # the owner binds them to. This file loads only through the graph module,
         # which includes the owners first.
         """)
     for (mod, name, owner_name) in lines
         # `..Owner.X` is import syntax, not an expression: the parent module is
         # the graph module, which included the owner before this file.
         println(io, "const ", name, " = Base.parentmodule(@__MODULE__).", mod, ".", owner_name)
+    end
+    # The enumerators, with the owner's collision rule: a base name this wrapper
+    # binds itself, names as an imported type, or shares with another imported
+    # enum is bound as `<enum>_<name>`.
+    used = Set{String}(keys(taken))
+    union!(used, (l[2] for l in lines))
+    owners_of = Dict{String,Vector{String}}()
+    for (_, name, _, en) in enums, e in en
+        e isa AbstractVector && length(e) >= 2 && push!(get!(owners_of, String(e[1]), String[]), name)
+    end
+    for (mod, name, owner_name, en) in enums
+        bound_here = String[]
+        for e in en
+            (e isa AbstractVector && length(e) >= 2) || continue
+            base = String(e[1])
+            owner_bound = String(e[2])
+            collides = haskey(taken, base) || any(l -> l[2] == base, lines) || length(owners_of[base]) > 1
+            final = collides ? "$(name)_$(base)" : base
+            while collides && final in used
+                final *= "_"
+            end
+            push!(used, final)
+            push!(bound_here, final)
+            collides && println(io, "# `", base, "` also names something this module binds; the enumerator is `", final, "`.")
+            println(io, "const ", _escape_keyword(final), " = Base.parentmodule(@__MODULE__).", mod, ".",
+                    _escape_keyword(owner_bound))
+        end
+        enumerator_names[name] = bound_here
     end
     owners = get(metadata, "type_imports", Dict{String,Any}())
     print(io, "\nconst IMPORTED_FROM = Dict{Symbol,Tuple{String,String}}(\n")
@@ -760,7 +824,32 @@ function _type_imports_chunk(dwarf_structs, sanitize, metadata, output_dir::Abst
         end
 
         """)
-    return String(take!(io))
+    return (String(take!(io)), enumerator_names)
+end
+
+"""
+    _enumerator_facts(enum_chunks, enum_member_names) -> Dict{String,Any}
+
+What `_type_manifest` records per emitted enum, from the generator's pending
+enum list and what `_render_enum_chunks` bound: `enum name => [[base, bound,
+value], …]` in declaration order, `base` the sanitized enumerator name and
+`bound` the name the text binds it under (the collision prefix applied). An
+alias carries its canonical's enumerators; a bitflag alias has no enum type and
+is left out.
+"""
+function _enumerator_facts(enum_chunks, enum_member_names::AbstractDict)
+    out = Dict{String,Any}()
+    for c in enum_chunks
+        c isa _PendingEnum || continue
+        bound = get(enum_member_names, c.name, nothing)
+        bound isa AbstractVector && length(bound) == length(c.members) || continue
+        _is_bitflag_enum(last.(c.members)) && continue
+        out[c.name] = Any[Any[String(b), String(bd), v] for ((b, v), bd) in zip(c.members, bound)]
+    end
+    for c in enum_chunks
+        c isa _PendingEnumAlias && haskey(out, c.canonical) && (out[c.name] = out[c.canonical])
+    end
+    return out
 end
 
 """
