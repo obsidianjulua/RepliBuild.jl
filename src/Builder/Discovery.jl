@@ -71,6 +71,10 @@ const PRESERVED_TOML_KEYS = [
     # re-discovery is worse than losing most keys here, because the wrapper
     # still generates: it just quietly regrows the surface someone cut.
     ("wrap", "exclude_symbols"),
+    # A consumer-facing name chosen by hand (a template instantiation's derived
+    # name carries every template argument); consumers call it, so losing the
+    # table renames their API back.
+    ("wrap", "rename"),
     # Same class as exclude_symbols and worse to lose silently: the package
     # opted into emitting only reachable types BECAUSE the full DWARF set does
     # not load. A forced re-discovery that resets this regenerates a wrapper
@@ -666,7 +670,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         String[],                                # surface_types_extra
         String[],                                # headers (empty = auto-discover)
         Dict{String,String}(),                   # cstring_owned
-        ConfigurationManager.Tier1Config(false, String[], 64, false)  # tier1 (opt-in)
+        ConfigurationManager.Tier1Config(false, String[], 64, false),  # tier1 (opt-in)
+        Dict{String,String}(),                   # rename
     )
 
     llvm_config = ConfigurationManager.LLVMConfig(

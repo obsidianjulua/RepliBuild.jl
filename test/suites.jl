@@ -61,7 +61,10 @@ const FIXTURES = Fixture[
     Fixture("vi_test", "Virtual Inheritance (diamond, dynamic vbase upcasts)", [:cpp, :dialect], Dict()),
     Fixture("stl_test", "STL Templates (vector, string, map)", [:cpp, :dialect],
             Dict("types" => Dict("templates" => ["std::vector<int>", "std::string", "std::map<int, int>"],
-                                 "template_headers" => ["<vector>", "<string>", "<map>"]))),
+                                 "template_headers" => ["<vector>", "<string>", "<map>"]),
+                 # Both instantiations of `stl_test::scaled<T>` bound as one
+                 # overload set `scaled` (verify.jl, test_function_name_derivation.jl).
+                 "wrap" => Dict("rename" => Dict("stl_test_scaled_*" => "scaled")))),
     Fixture("c_test", "C Fundamentals (structs, enums, LTO, packed, unions)", [:c, :build], Dict()),
     Fixture("c_abomination_test", "C Edge Cases (opaque structs, nested callbacks)", [:c], Dict()),
     Fixture("callback_test", "Callbacks (Julia ↔ C++)", [:cpp, :dialect], Dict()),

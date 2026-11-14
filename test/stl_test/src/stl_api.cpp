@@ -43,3 +43,9 @@ int map_lookup(const std::map<int, int>& m, int key) {
 int map_size(const std::map<int, int>& m) {
     return static_cast<int>(m.size());
 }
+
+namespace stl_test {
+template <typename T> T scaled(T x, int k) { return x * static_cast<T>(k); }
+template long scaled<long>(long, int);
+template double scaled<double>(double, int);
+}

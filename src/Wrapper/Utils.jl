@@ -174,7 +174,8 @@ them would rename working APIs. A collision on name and dispatch signature is
 reported by `_dedup_method_chunks`. Anything keyed per symbol uses `mangled`
 (`_slice_const_name!`, `_aot_fptr_const_name!`).
 """
-function _julia_function_name(raw::AbstractString, mangled::AbstractString = "")::String
+function _julia_function_name(raw::AbstractString, mangled::AbstractString = "";
+                              rename::Bool = true)::String
     n = String(raw)
     n = replace(n, "~"  => "destroy_")   # destructor
     n = replace(n, "::" => "_")
@@ -203,12 +204,160 @@ function _julia_function_name(raw::AbstractString, mangled::AbstractString = "")
     was_all_underscore = !isempty(n) && all(==('_'), n)
     n = String(rstrip(n, '_'))
     if isempty(n)
-        fallback = (isempty(mangled) || mangled == raw) ? "" : _julia_function_name(mangled)
+        fallback = (isempty(mangled) || mangled == raw) ? "" :
+                   _julia_function_name(mangled; rename = false)
         n = (was_all_underscore || isempty(fallback)) ? "c__" : fallback
     end
     Base.is_id_start_char(first(n)) || (n = "_" * n)
     n in _JULIA_RESERVED_WORDS && (n *= "_")
+    # `[wrap.rename]`, the one hand-chosen name, applied here so the function
+    # loop, the overload prediction, both varargs paths and the proxy and
+    # deleter references all see it. Off (`rename = false`) only for a name
+    # that is not a binding of the symbol: the proxy's short method name.
+    rt = _RENAMES[]
+    if rename && rt !== nothing
+        n = _apply_rename!(rt, n, mangled)
+    end
     return n
+end
+
+# ── [wrap.rename] ───────────────────────────────────────────────────────────
+
+"""
+    _RenameTable
+
+The `[wrap.rename]` table compiled for one wrap, with what the derivation
+recorded while it ran. `entries` are `(key, anchored glob, Julia name)` in the
+TOML's sorted key order; `hit` counts the symbols each key renamed, so a key
+that matched nothing is reported (`_check_renames`); `derived` maps every
+name the derivation gave a symbol that was NOT renamed to those symbols, and
+`renamed` maps each chosen name to the `(key, symbol)` pairs that chose it,
+so a rename onto a name another function already binds is an error naming
+both, never a silent prefix.
+
+A key matches the function's mangled symbol or the Julia name the derivation
+would bind (what the wrapper reads today). Several keys, or one glob, may map
+several symbols to one name: that is an overload set, and `_integer_width_overloads`
+types the positions it disagrees on, since it asks the same derivation. Two
+keys giving one symbol two different names is an error at the symbol.
+"""
+mutable struct _RenameTable
+    entries::Vector{Tuple{String,Regex,String}}
+    hit::Dict{String,Int}
+    derived::Dict{String,Set{String}}
+    renamed::Dict{String,Vector{Tuple{String,String}}}
+end
+
+function _RenameTable(table::AbstractDict)
+    entries = Tuple{String,Regex,String}[]
+    for k in sort!(collect(String.(keys(table))))
+        push!(entries, (k, _glob_to_regex(k), String(table[k])))
+    end
+    return _RenameTable(entries, Dict{String,Int}(e[1] => 0 for e in entries),
+                        Dict{String,Set{String}}(),
+                        Dict{String,Vector{Tuple{String,String}}}())
+end
+
+# The table of the wrap in progress. Both generators run inside
+# `with_renames`; nothing else may set it. Julia 1.10 has no ScopedValue.
+const _RENAMES = Ref{Union{Nothing,_RenameTable}}(nothing)
+
+"""
+    with_renames(f, table) -> (f(), rt)
+
+Run `f` (a generator) with `table` (`config.wrap.rename`) as the active rename
+table, and return its result with the table for `_check_renames`. An empty
+table installs nothing and returns `nothing` for it.
+"""
+function with_renames(f, table::AbstractDict)
+    isempty(table) && return (f(), nothing)
+    rt = _RenameTable(table)
+    _RENAMES[] !== nothing && error("RepliBuild: with_renames nested; a wrap runs one generator at a time")
+    _RENAMES[] = rt
+    try
+        return (f(), rt)
+    finally
+        _RENAMES[] = nothing
+    end
+end
+
+function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractString)::String
+    symbol = isempty(mangled) ? derived : String(mangled)
+    chosen = Dict{String,Vector{String}}()      # Julia name => keys that chose it
+    for (key, re, value) in rt.entries
+        (occursin(re, derived) || (!isempty(mangled) && occursin(re, mangled))) || continue
+        rt.hit[key] += 1
+        push!(get!(() -> String[], chosen, value), key)
+    end
+    if isempty(chosen)
+        push!(get!(() -> Set{String}(), rt.derived, derived), symbol)
+        return derived
+    end
+    if length(chosen) > 1
+        error("""
+        RepliBuild: [wrap.rename] gives `$symbol` (derived name `$derived`) more than one name:
+          $(join(("$(repr(k)) => $(repr(v))" for (v, ks) in sort!(collect(chosen)) for k in ks), "\n  "))
+
+        Each symbol takes exactly one Julia name. Narrow the keys so one matches it,
+        or make them agree.""")
+    end
+    (value, keys_) = first(chosen)
+    pairs = get!(() -> Tuple{String,String}[], rt.renamed, value)
+    for k in keys_
+        (k, symbol) in pairs || push!(pairs, (k, symbol))
+    end
+    return value
+end
+
+"""
+    _check_renames(rt, wrapper_content, module_name)
+
+After the generator ran: every `[wrap.rename]` key renamed at least one
+symbol, and no chosen name is also bound by something else. A key that
+matches nothing is stale or mistyped (the `exclude_symbols` contract: the
+author believes a function is reachable under a name it is not). A chosen
+name that the derivation also gives an un-renamed function, or that the
+wrapper binds as a type, constant, global or enumerator, is an error naming
+both sides: a silent prefix would hide the API the author chose.
+"""
+function _check_renames(rt::Union{Nothing,_RenameTable}, wrapper_content::AbstractString,
+                        module_name::AbstractString)
+    rt === nothing && return nothing
+    unmatched = [k for (k, _, _) in rt.entries if rt.hit[k] == 0]
+    if !isempty(unmatched)
+        error("""
+        [wrap.rename]: $(length(unmatched)) key(s) matched no function in '$module_name':
+          $(join(unmatched, "\n  "))
+
+        A key is the function's mangled symbol (`nm -D --defined-only <lib>`) or the
+        Julia name the wrapper binds for it without the rename (read it off the
+        wrapper, or `nm | c++filt` for the C++ spelling the name is derived from).
+        Keys are anchored globs (`*` and `?`; every other character literal), so a
+        prefix needs a trailing `*`. A symbol `[wrap] exclude_symbols` drops, or a
+        varargs function's typed overloads, cannot be renamed.""")
+    end
+    taken = _toplevel_names(wrapper_content)
+    offenders = String[]
+    for value in sort!(collect(keys(rt.renamed)))
+        sources = rt.renamed[value]
+        who = join(("$(repr(k)) (`$sym`)" for (k, sym) in sources), ", ")
+        if haskey(rt.derived, value)
+            others = join(("`$s`" for s in sort!(collect(rt.derived[value]))), ", ")
+            push!(offenders, "  `$value`, chosen by $who, is also the derived name of $others")
+        end
+        kind = get(taken, value, :function)
+        if kind !== :function
+            push!(offenders, "  `$value`, chosen by $who, is also bound as $(_describe_binding(kind))")
+        end
+    end
+    isempty(offenders) && return nothing
+    error("""
+    [wrap.rename]: $(length(offenders)) chosen name(s) collide with another binding in '$module_name':
+    $(join(offenders, "\n"))
+
+    A renamed function joins no overload set by accident and shadows no type: pick
+    another name, or rename the other function too (two keys may share one name
+    on purpose; Julia then dispatches on the parameter types the set differs in).""")
 end
 
 """

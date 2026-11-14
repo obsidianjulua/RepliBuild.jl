@@ -23,3 +23,13 @@ int map_lookup(const std::map<int, int>& m, int key);
 
 // Return the number of entries in the map
 int map_size(const std::map<int, int>& m);
+
+// A function template instantiated twice. Its derived Julia names carry the
+// template argument (`stl_test_scaled_long`, `stl_test_scaled_double`); the
+// fixture's `[wrap.rename]` binds both as `scaled`, an overload set Julia
+// dispatches on the first argument (`Integer` against `Float64`).
+namespace stl_test {
+template <typename T> T scaled(T x, int k);
+extern template long scaled<long>(long, int);
+extern template double scaled<double>(double, int);
+}

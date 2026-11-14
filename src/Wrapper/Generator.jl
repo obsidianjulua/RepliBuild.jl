@@ -857,6 +857,13 @@ function wrap_basic(config::RepliBuildConfig, library_path::String; generate_doc
 
     # Generate wrapper module
     module_name = get_module_name(config)
+    # The basic generator names functions after their symbols and asks no
+    # derivation, so a rename table has nothing to apply to: say so rather
+    # than bind the old names under a config that promises new ones.
+    isempty(config.wrap.rename) || error("""
+        [wrap.rename] needs compilation metadata: this wrap has none ($(metadata_file)
+        is absent), so the basic generator binds every function under its symbol name.
+        Build first, or drop the table.""")
     wrapper_content = generate_basic_module(config, library_path, functions, data_symbols,
                                            module_name, registry, generate_docs)
 
@@ -1456,30 +1463,36 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     # register-class risk.
     emitted_facts = Dict{String,Any}()
 
-    (wrapper_content, needed_thunks) = if registry.language == :c
-        # C path: Julia's internal LLVM handles the C ABI.
-        # All dispatch goes through is_c_lto_safe() heuristics alone.
-        (generate_introspective_module_c(config, library_path, metadata,
-                                         module_name, registry, generate_docs, thunks_lib_path;
-                                         emitted_facts = emitted_facts), nothing)
-    else
-        # C++ path: Tier 2 is decided by is_ccall_safe alone.
-        try
-            generate_introspective_module_cpp(config, library_path, metadata,
-                                              module_name, registry, generate_docs, thunks_lib_path;
-                                              aot_stage = aot_stage, emitted_facts = emitted_facts)
-        catch e
-            e isa AOTStageFailed || rethrow()
-            # The stage logged why. JIT dispatch needs no companion library, and
-            # the generator does not modify `metadata`, so it can run again.
-            @warn "AOT thunks were not compiled, so $(basename(e.thunks_lib)) is absent; emitting JIT dispatch"
-            config = with_aot_thunks(config, false)
-            empty!(emitted_facts)
-            generate_introspective_module_cpp(config, library_path, metadata,
-                                              module_name, registry, generate_docs, "";
-                                              emitted_facts = emitted_facts)
+    # `[wrap.rename]` is active for exactly the generator run (`with_renames`),
+    # and checked against the text it produced: every key renamed something,
+    # and no chosen name collides with another binding.
+    ((wrapper_content, needed_thunks), rename_table) = with_renames(config.wrap.rename) do
+        if registry.language == :c
+            # C path: Julia's internal LLVM handles the C ABI.
+            # All dispatch goes through is_c_lto_safe() heuristics alone.
+            (generate_introspective_module_c(config, library_path, metadata,
+                                             module_name, registry, generate_docs, thunks_lib_path;
+                                             emitted_facts = emitted_facts), nothing)
+        else
+            # C++ path: Tier 2 is decided by is_ccall_safe alone.
+            try
+                generate_introspective_module_cpp(config, library_path, metadata,
+                                                  module_name, registry, generate_docs, thunks_lib_path;
+                                                  aot_stage = aot_stage, emitted_facts = emitted_facts)
+            catch e
+                e isa AOTStageFailed || rethrow()
+                # The stage logged why. JIT dispatch needs no companion library, and
+                # the generator does not modify `metadata`, so it can run again.
+                @warn "AOT thunks were not compiled, so $(basename(e.thunks_lib)) is absent; emitting JIT dispatch"
+                config = with_aot_thunks(config, false)
+                empty!(emitted_facts)
+                generate_introspective_module_cpp(config, library_path, metadata,
+                                                  module_name, registry, generate_docs, "";
+                                                  emitted_facts = emitted_facts)
+            end
         end
     end
+    _check_renames(rename_table, wrapper_content, module_name)
 
     # Write to file
     output_dir = get_output_path(config)

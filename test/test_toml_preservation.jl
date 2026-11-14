@@ -38,11 +38,16 @@ const DISC = RepliBuild.Discovery
         [wrap.cstring_owned]
         demo_print = "demo_free"
 
+        [wrap.rename]
+        "demo_pdf_*" = "pdf"
+
         [wrap.varargs]
         demo_log = [["Cint"], ["Cint", "Cdouble"]]
         """)
         kept = DISC._collect_preserved_sections(toml)
         @test kept !== nothing
+        # A hand-chosen consumer-facing name; consumers call it.
+        @test kept[("wrap", "rename")] == Dict("demo_pdf_*" => "pdf")
         @test kept[("types", "templates")] == ["std::vector<int>"]
         @test kept[("types", "template_headers")] == ["<vector>"]
         @test kept[("wrap", "shim_headers")] == ["demo.h"]
