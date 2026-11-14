@@ -29,6 +29,11 @@ int     self_value(const SelfRef &s);
 std::string short_str(int x);
 int         str_data_inside(const std::string &s);   // 1 when s.data() is inside s
 int         str_size(const std::string &s);
+// Read into a Julia String and ended there (StdStrings.take_string!): a heap
+// string's buffer is freed by its own destructor. A wide string keeps its raw
+// bytes, with the reason in the wrapper.
+std::string  long_str(int n);
+std::wstring wide_str(int n);
 
 // Control: trivially copyable, returned by value the way it always was.
 struct Plain { int a, b, c; };

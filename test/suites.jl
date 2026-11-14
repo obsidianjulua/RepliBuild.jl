@@ -99,6 +99,7 @@ const TESTS = TestFile[
     T("test_struct_layout.jl", :unit, [:dialect, :cpp]),
     T("test_template_members.jl", :unit, [:dialect, :cpp]),
     T("test_toolchain_records.jl", :unit, [:dwarf, :cpp]),
+    T("test_std_strings.jl", :unit, [:dwarf, :cpp]),
     T("test_record_scope.jl", :unit, [:dwarf, :cpp]),
     T("test_integer_width_overloads.jl", :unit, [:cpp]),
     T("test_tier2_typed_dispatch.jl", :unit, [:cpp]),

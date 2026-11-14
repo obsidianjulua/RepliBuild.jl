@@ -6787,6 +6787,14 @@ function parse_dwarf_dump(output::AbstractString;
         formal_params_in_die = 0
     end
 
+    # The DIE open at each depth, as (offset, tag): a subprogram's parent is the
+    # one a level up. Read for one fact, the record a destructor is declared in
+    # (`destructor_of`, keyed by the record's DIE offset), which the record loop
+    # below files under the record's name for `record_abi` (`string_layout`).
+    die_at_depth = Dict{Int,Tuple{String,String}}()
+    current_function_parent = nothing
+    destructor_of = Dict{String,String}()
+
     for line in split(output, '\n')
         line = strip(line)
 
@@ -6796,6 +6804,14 @@ function parse_dwarf_dump(output::AbstractString;
         level_match = match(r"^\s*<(\d+)><", line)
         if !isnothing(level_match)
             last_seen_level = parse(Int, level_match.captures[1])
+            dm = match(r"^<(\d+)><([0-9a-fA-F]+)>: Abbrev Number: \d+ \((DW_TAG_\w+)\)", line)
+            if dm !== nothing
+                d = parse(Int, dm.captures[1])
+                die_at_depth[d] = ("0x" * dm.captures[2], String(dm.captures[3]))
+                for k in collect(keys(die_at_depth))
+                    k > d && delete!(die_at_depth, k)
+                end
+            end
         end
         # Use last seen level for attributes (which don't have level prefix)
         current_level = last_seen_level
@@ -6884,6 +6900,8 @@ function parse_dwarf_dump(output::AbstractString;
 
                 current_function_offset = "0x" * offset_match.captures[1]
                 current_function_level = current_level
+                current_function_parent = current_level === nothing ? nothing :
+                                          get(die_at_depth, current_level - 1, nothing)
                 current_function_name = nothing
                 current_function_linkage = nothing
                 function_processed = false  # Reset flag for new function
@@ -7063,6 +7081,13 @@ function parse_dwarf_dump(output::AbstractString;
                 current_function_linkage = String(strip(linkage_match.captures[1]))  # Convert SubString to String
                 if !isnothing(current_function_offset)
                     linkage_by_offset[current_function_offset] = current_function_linkage
+                end
+                # A destructor declared in a record: `D4` is clang's unified
+                # spelling, `D1`/`D2` a variant's.
+                if current_function_parent !== nothing &&
+                   current_function_parent[2] in ("DW_TAG_class_type", "DW_TAG_structure_type") &&
+                   occursin(r"D[124]Ev$", current_function_linkage)
+                    get!(destructor_of, current_function_parent[1], current_function_linkage)
                 end
             end
         end
@@ -7343,11 +7368,15 @@ function parse_dwarf_dump(output::AbstractString;
     toolchain_candidates = Dict{String,Vector{Dict{String,Any}}}()   # dropped by provenance
     decl_files_of = Dict{String,Vector{String}}()                    # headers, per bare name
     record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
+    destructor_by_name = Dict{String,String}()       # → record_abi's string_layout
     for offset in die_order
         type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class", "union"]
             struct_name = get(type_info, "name", "unknown")
             if struct_name != "unknown" && struct_name != "unknown_struct" && struct_name != "unknown_class" && struct_name != "unknown_union"
+                let dk = get(destructor_of, offset, nothing)
+                    dk === nothing || get!(destructor_by_name, String(struct_name), dk)
+                end
                 # Every named DEFINITION (a declaration has no byte_size), before
                 # any provenance or member filter: calling a function that takes
                 # `std::string_view` by value needs the ABI facts of a type the
@@ -7820,6 +7849,18 @@ function parse_dwarf_dump(output::AbstractString;
             facts === nothing || (record_abi[name] = facts)
         end
     end
+    # A `std::basic_string` crossed by value: how to read it and end it
+    # (`_string_layout`), for GeneratorCpp's decoder (`StdStrings`).
+    for name in collect(keys(record_abi))
+        startswith(name, "basic_string<") || continue
+        entry = Dict{String,Any}(record_abi[name])
+        entry["string_layout"] = _string_layout(name, toolchain_defs, struct_defs,
+                                                get(destructor_by_name, name, nothing);
+                                                byte_size_of = t -> (fk = _key_in(String(t), record_facts);
+                                                                     fk === nothing ? nothing :
+                                                                     _definition_byte_size(record_facts[fk])))
+        record_abi[name] = entry
+    end
 
     return (return_types, struct_defs, global_vars, typedef_table, record_abi)
 end
@@ -7832,6 +7873,96 @@ DW_CC_pass_by_value) or `"reference"` (4, DW_CC_pass_by_reference). `nothing`
 when the attribute is absent, which is every C record.
 """
 _record_pass_convention(cc) = cc == 5 ? "value" : cc == 4 ? "reference" : nothing
+
+"""
+    _string_layout(name, toolchain_defs, struct_defs, destructor) -> Dict
+
+What a Julia caller needs to read a `std::basic_string` returned by value and to
+end it, from the record's own DWARF: `"leaves"`, every member at depth with its
+dotted `path` (`_M_dataplus._M_p`), `c_type`, absolute `offset` in bytes (or,
+for a bitfield, `bit_size` and absolute `data_bit_offset`), through nested
+records, unions and non-empty bases; `"char_type"`, the first template type
+argument; `"destructor"`, the linkage name of the destructor declared in the
+record (clang's unified `D4`, as written), or `nothing`. A part that cannot be
+walked (a virtual base, a record with no definition that is not one empty
+byte, nesting past 12) leaves
+`"leaves"` empty and says why in `"unread"`, and the generator keeps the
+stand-in. Which leaves mean what is the reader's business
+(`StdStrings.string_reader`), not the build's: libstdc++ and libc++ spell the
+string differently, and a layout this does not recognise must be refused
+there, not guessed here.
+"""
+function _string_layout(name::AbstractString, toolchain_defs::AbstractDict, struct_defs::AbstractDict,
+                        destructor::Union{Nothing,AbstractString}; byte_size_of = t -> nothing)
+    lookup(t) = (k = _key_in(String(t), toolchain_defs); k !== nothing ? toolchain_defs[k] :
+                 (k2 = _key_in(String(t), struct_defs); k2 === nothing ? nothing : struct_defs[k2]))
+    out = Dict{String,Any}("leaves" => Any[], "destructor" => destructor, "char_type" => nothing)
+    def = lookup(name)
+    if def === nothing
+        out["unread"] = "no definition of `$(name)` in the DWARF"
+        return out
+    end
+    for tp in get(def, "template_params", ())
+        if get(tp, "kind", "") == "type"
+            out["char_type"] = String(get(tp, "type", ""))
+            break
+        end
+    end
+    off(v) = v isa Integer ? Int(v) : (s = string(v); startswith(s, "0x") ? parse(Int, s[3:end]; base = 16) : parse(Int, s))
+    leaves = Any[]
+    reason = Ref{Union{Nothing,String}}(nothing)
+    function walk(d, base::Int, prefix::String, depth::Int)
+        depth > 12 && (reason[] = "nesting deeper than 12 in `$(name)`"; return false)
+        for m in get(d, "members", ())
+            mname = String(get(m, "name", ""))
+            o = get(m, "offset", nothing)
+            if o === nothing
+                haskey(m, "data_bit_offset") || continue          # a static: no storage
+                push!(leaves, Dict{String,Any}("path" => prefix * mname, "c_type" => String(get(m, "c_type", "")),
+                                               "bit_size" => m["bit_size"],
+                                               "data_bit_offset" => 8base + Int(m["data_bit_offset"])))
+                continue
+            end
+            at = base + off(o)
+            ct = String(get(m, "c_type", ""))
+            held = strip(replace(ct, r"^(?:(?:const|volatile)\s+)+" => ""))
+            sub = (occursin(r"[*&\[]", _outside_template_args(held)) ? nothing : lookup(held))
+            if sub !== nothing && haskey(sub, "members")
+                walk(sub, at, prefix * mname * ".", depth + 1) || return false
+            else
+                push!(leaves, Dict{String,Any}("path" => prefix * mname, "c_type" => ct, "offset" => at,
+                                               "size" => get(m, "size", 0)))
+            end
+        end
+        for b in get(d, "base_classes", ())
+            get(b, "empty", false) == true && continue
+            bt = String(get(b, "type", ""))
+            get(b, "virtual", false) == true && (reason[] = "virtual base `$(bt)`"; return false)
+            bd = lookup(bt)
+            # No definition and one byte: no data member (one would have given
+            # it a definition), so an empty base, whatever it derives from
+            # (`allocator<char>` over `__new_allocator<char>`). No definition
+            # and no size either (libstdc++ declares `extern template class
+            # allocator<char>`, and clang then emits it as a declaration-only
+            # DIE under some header versions: Ubuntu 24.04's libstdc++ 13,
+            # 2026-11-14): the base contributes no bytes when the derived
+            # record's own members already cover its whole byte_size, since
+            # base and member subobjects never overlap. A base the members
+            # leave room for may carry data we cannot see, and stays a refusal.
+            bd === nothing && byte_size_of(bt) == 1 && continue
+            bd === nothing && _members_cover_record(d) && continue
+            bd === nothing && (reason[] = "base `$(bt)` has no definition and `$(name)`'s members leave room for it"; return false)
+            walk(bd, base + off(get(b, "offset", 0)), prefix, depth + 1) || return false
+        end
+        return true
+    end
+    if walk(def, 0, "", 0)
+        out["leaves"] = leaves
+    else
+        out["unread"] = something(reason[], "unreadable")
+    end
+    return out
+end
 
 """
     _function_pointer_typedef(type_ref, type_refs) -> Union{String,Nothing}
@@ -8075,6 +8206,36 @@ function _canonical_definition(defs::AbstractVector)
 end
 
 # A record's or enum's `byte_size` (`"0x18"`) as an Int; `nothing` without one.
+"""
+    _members_cover_record(def) -> Bool
+
+Do `def`'s own byte-offset members tile `[0, byte_size)` without a gap? Then no
+base subobject has room: every base is empty (the empty-base optimisation),
+whatever the DWARF says or fails to say about it. Bitfields are not counted.
+"""
+function _members_cover_record(def::AbstractDict)::Bool
+    total = _definition_byte_size(def)
+    total === nothing && return false
+    iv = Tuple{Int,Int}[]
+    for m in get(def, "members", ())
+        o = get(m, "offset", nothing)
+        o === nothing && continue
+        sz = get(m, "size", 0)
+        sz isa Integer && sz > 0 || continue
+        s = string(o)
+        a = startswith(s, "0x") ? parse(Int, s[3:end]; base = 16) : parse(Int, s)
+        push!(iv, (a, a + Int(sz)))
+    end
+    isempty(iv) && return false
+    sort!(iv)
+    cur = 0
+    for (a, b) in iv
+        a > cur && return false
+        cur = max(cur, b)
+    end
+    return cur >= total
+end
+
 function _definition_byte_size(def::AbstractDict)
     bs = get(def, "byte_size", nothing)
     bs === nothing && return nothing
