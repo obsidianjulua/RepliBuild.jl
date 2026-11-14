@@ -33,3 +33,19 @@ template <typename T> T scaled(T x, int k);
 extern template long scaled<long>(long, int);
 extern template double scaled<double>(double, int);
 }
+
+// A record template behind a typedef, as clipper2 spells `Point64 =
+// Point<int64_t>`: [types] templates lists `std::vector<stl_test::Pt64>` and
+// every member symbol spells the element `stl_test::Pt<long>`.
+namespace stl_test {
+template <typename T>
+struct Pt {
+    T x;
+    T y;
+};
+using Pt64 = Pt<long>;
+}  // namespace stl_test
+
+// Build n points (i, 2i); sum the x coordinates.
+std::vector<stl_test::Pt64> make_pts(int n);
+long sum_pts_x(const std::vector<stl_test::Pt64>& pts);

@@ -48,4 +48,19 @@ namespace stl_test {
 template <typename T> T scaled(T x, int k) { return x * static_cast<T>(k); }
 template long scaled<long>(long, int);
 template double scaled<double>(double, int);
+
+std::vector<stl_test::Pt64> make_pts(int n) {
+    std::vector<stl_test::Pt64> pts;
+    for (int i = 0; i < n; i++) {
+        pts.push_back(stl_test::Pt64{i, 2L * i});
+    }
+    return pts;
+}
+
+long sum_pts_x(const std::vector<stl_test::Pt64>& pts) {
+    long total = 0;
+    for (const auto& p : pts) {
+        total += p.x;
+    }
+    return total;
 }

@@ -2119,18 +2119,22 @@ merge distinct symbols), so a Julia-keyed slot would let two functions share one
 address and each call whichever thunk `__init__` happened to resolve last — a
 wrong-function call with no error anywhere.
 
-`taken` maps each issued constant to its owning symbol, so sanitizing a
-character that is not legal in an identifier cannot reintroduce the collision.
+`taken` maps each issued constant to the thunk it resolves, `<mangled>_thunk`
+or, for a return built in the caller's buffer, `<mangled>_thunk_inplace`
+(`FunctionGen.thunk_symbol`, passed as `thunk`), so sanitizing a character that
+is not legal in an identifier cannot reintroduce the collision. The constant's
+name comes from the mangled symbol either way.
 """
-function _aot_fptr_const_name!(taken::Dict{String,String}, mangled::AbstractString)
+function _aot_fptr_const_name!(taken::Dict{String,String}, mangled::AbstractString;
+                               thunk::AbstractString = "$(mangled)_thunk")
     base = "_FPTR_" * replace(mangled, r"[^A-Za-z0-9_]" => "_")
     name = base
     n = 1
-    while get(taken, name, mangled) != mangled
+    while get(taken, name, thunk) != thunk
         n += 1
         name = "$(base)_$n"
     end
-    taken[name] = mangled
+    taken[name] = thunk
     return name
 end
 
@@ -2183,7 +2187,7 @@ end
 # `_THUNK_SLOTS` table AND by the presence check — a second copy of this format
 # string is a way for the wrapper to look for a name the check never verified.
 _aot_thunk_symbol(taken::Dict{String,String}, slot::AbstractString) =
-    "_mlir_ciface_$(taken[slot])_thunk"
+    "_mlir_ciface_$(taken[slot])"
 
 function _aot_thunk_slot_chunk(func_text::AbstractString, taken::Dict{String,String})
     referenced = _aot_thunk_slot_names(func_text, taken)

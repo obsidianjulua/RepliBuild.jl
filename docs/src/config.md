@@ -122,9 +122,21 @@ template_headers = ["<vector>", "<string>", "<map>"]
   ([Header-only libraries](guide.md#Header-only-libraries)).
 
 Once instantiated, the STL method symbols are extracted
-(`extract_stl_method_symbols`) and become container accessor thunks. A C++
-library whose *public* API is STL-free needs none of this — box2d 2.4 reports
-`stl_methods = 0` and declares no templates.
+(`extract_stl_method_symbols`) and become container accessor thunks behind a
+`create_<container>()` factory (`CppVector`, `CppString`, `CppMap`). That table
+knows `std::vector`, `std::string`, `std::map` and `std::unordered_map`; any
+other template you list (`fmt::basic_memory_buffer<char>`) is instantiated so
+its DWARF exists, which is all `[types] templates` does for it, and the build
+says so: an entry that yields no table is a **warning naming the entry and
+why**, never silence. An entry may be spelled with a typedef
+(`std::vector<Clipper2Lib::Point64>`): the stub tags each entry with the
+compiler's own spelling of it, so its members (`std::vector<Clipper2Lib::Point<long>,
+…>` in the symbol table) still find it, and the factory is named after the
+entry as you wrote it (`create_std_vector_Clipper2Lib_Point64`). A `std::vector`
+of a record gets a factory only when the wrapper emits that record's struct;
+otherwise the warning names the element. A C++ library whose *public* API is
+STL-free needs none of this — box2d 2.4 reports `stl_methods = 0` and declares
+no templates.
 
 !!! warning "This section is preserved but not derived"
     `[types].templates` is one of the preserved keys precisely because a rescan

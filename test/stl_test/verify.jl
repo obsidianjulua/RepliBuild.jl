@@ -116,6 +116,23 @@ using .StlTest
         @test length(m) == 0
     end
 
+    # ── 8. std::vector of a library record behind a typedef ─────────────────
+    # `std::vector<stl_test::Pt64>` is listed; its members spell the element
+    # `stl_test::Pt<long>`, and the factory is named after the entry as written.
+    @testset "CppVector of a record behind a typedef" begin
+        @test isdefined(StlTest, :create_std_vector_stl_test_Pt64)
+        v = StlTest.create_std_vector_stl_test_Pt64()
+        @test v isa RepliBuild.STLWrappers.CppVector{StlTest.Pt_long}
+        @test length(v) == 0
+        push!(v, StlTest.Pt_long(3, 6))
+        push!(v, StlTest.Pt_long(4, 8))
+        @test length(v) == 2
+        @test v[1].x == 3 && v[2].y == 8
+        @test StlTest.sum_pts_x(v) == 7
+        raw = StlTest.make_pts(Cint(3))
+        @test raw isa NTuple{24, UInt8}
+    end
+
     # ── 7. map_lookup (takes const std::map<int,int>&) ───────────────────────
     @testset "map_lookup" begin
         m = StlTest.create_std_map_int_int()

@@ -60,8 +60,9 @@ const FIXTURES = Fixture[
     Fixture("mi_test", "Multiple Inheritance (two-base layout, upcasts)", [:cpp, :dialect], Dict()),
     Fixture("vi_test", "Virtual Inheritance (diamond, dynamic vbase upcasts)", [:cpp, :dialect], Dict()),
     Fixture("stl_test", "STL Templates (vector, string, map)", [:cpp, :dialect],
-            Dict("types" => Dict("templates" => ["std::vector<int>", "std::string", "std::map<int, int>"],
-                                 "template_headers" => ["<vector>", "<string>", "<map>"]),
+            Dict("types" => Dict("templates" => ["std::vector<int>", "std::string", "std::map<int, int>",
+                                                 "std::vector<stl_test::Pt64>"],
+                                 "template_headers" => ["<vector>", "<string>", "<map>", "stl_api.h"]),
                  # Both instantiations of `stl_test::scaled<T>` bound as one
                  # overload set `scaled` (verify.jl, test_function_name_derivation.jl).
                  "wrap" => Dict("rename" => Dict("stl_test_scaled_*" => "scaled")))),
@@ -125,6 +126,7 @@ const TESTS = TestFile[
     T("test_llp64_widths.jl", :unit, [:dialect, :cpp]),
     T("test_windows_port.jl", :unit, [:build, :cpp]),
     T("test_thunk_manifest.jl", :unit, [:cpp]),
+    T("test_stl_table_matching.jl", :unit, [:build, :cpp]),
     T("test_jit_runtime_symbols.jl", :unit, [:build, :cpp]),
     T("test_libcxx_exports.jl", :unit, [:build, :cpp]),
     T("test_platform_overlay.jl", :unit, [:build]),
@@ -195,6 +197,7 @@ const TESTS = TestFile[
     T("test_abi_nested.jl", :dev, [:c], locks = ["abi_nested_test"]),
     T("test_c_sret_abi.jl", :dev, [:c], locks = ["c_sret_test"]),
     T("test_cpp_record_routing.jl", :dev, [:cpp], locks = ["cpp_routing_test"]),
+    T("test_sret_in_caller_buffer.jl", :dev, [:dialect, :cpp], locks = ["sret_inplace_test"]),
     T("test_determinism_fixture.jl", :dev, [:dwarf, :c, :cpp], locks = ["determinism_test"]),
     T("test_conflict_trap_fixture.jl", :dev, [:dwarf, :c, :cpp],
       locks = ["conflict_trap_test", "conflict_trap_c_test"]),

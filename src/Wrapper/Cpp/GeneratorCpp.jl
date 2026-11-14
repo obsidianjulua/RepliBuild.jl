@@ -51,6 +51,27 @@ function _is_ctor_or_dtor_cpp(class_name::AbstractString, func_name::AbstractStr
 end
 
 """
+    _stl_vector_element_type(elem_cpp, defined_struct_names, infer) -> Union{String,Nothing}
+
+The Julia type a `CppVector` holds for a `std::vector<elem_cpp>`: the struct
+this module emitted for a record element (its innermost scope sanitized the
+way records are named: `Clipper2Lib::Point<long>` → `Point_long`), else what
+the registry infers for a scalar (`infer`), and `nothing` when neither gives a
+type with a layout (`_UnsafeUnknown`, `Any`, a name nothing emitted).
+"""
+function _stl_vector_element_type(elem_cpp::AbstractString, defined_struct_names, infer)::Union{Nothing,String}
+    bare = _cpp_innermost_scope(String(elem_cpp))
+    for candidate in (_sanitize_cpp_type_name(bare), _sanitize_cpp_type_name(String(elem_cpp)))
+        candidate in defined_struct_names && return candidate
+    end
+    jt = String(infer(String(elem_cpp)))
+    (jt in ("Any", "_UnsafeUnknown", "") || startswith(jt, "Ptr{Cvoid}")) && return nothing
+    occursin(r"[{}]", jt) && return jt                   # a composed type resolves through its parts
+    (jt in defined_struct_names || isdefined(Base, Symbol(jt)) || isdefined(Core, Symbol(jt))) && return jt
+    return nothing
+end
+
+"""
     _cpp_innermost_scope(cls) -> String
 
 Last `::`-separated component of `cls`, at angle-bracket depth 0, **keeping**
@@ -328,9 +349,13 @@ must not leave a thunk the JIT compiles for no call site (87 across the Hub,
 2026-11-13).
 """
 function _thunks_named_in_text(text::AbstractString, taken::Dict{String,String})::Set{String}
-    out = Set{String}(String(m.captures[1]) for m in eachmatch(r"_mlir_ciface_(\S+?)_thunk\b", text))
+    # `_thunk_inplace` too: a return built in the caller's buffer
+    # (`FunctionGen.thunk_symbol`); `\b` alone stops at neither.
+    out = Set{String}(String(m.captures[1])
+                      for m in eachmatch(r"_mlir_ciface_(\S+?)_thunk(?:_inplace)?\b", text))
     for m in eachmatch(r"\b(_FPTR_\w+)\b", text)
-        haskey(taken, m.captures[1]) && push!(out, taken[m.captures[1]])
+        haskey(taken, m.captures[1]) &&
+            push!(out, replace(taken[m.captures[1]], r"_thunk(?:_inplace)?$" => ""))
     end
     for m in eachmatch(r"ccall\(\(:thunk_(\S+?),\s*THUNKS_LIBRARY_PATH\)", text)
         push!(out, String(m.captures[1]))
@@ -3467,6 +3492,22 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             cstring_free_sym = is_cstring_ret ?
                 get(config.wrap.cstring_owned, func_name, "") : ""
 
+            # A record C++ returns through a hidden pointer it constructs
+            # into (`DW_CC_pass_by_reference`): the thunk builds it in the
+            # caller's buffer, `<m>_thunk_inplace`. The same predicate the
+            # thunk generator asks, so the call and the thunk always agree.
+            # The wrapper allocates the buffer (`return_slot`), keeps it
+            # where it is across the call, and returns its value: the Julia
+            # return type is what it was.
+            in_place = !is_void_ret && !is_cstring_ret &&
+                       JLCSIRGenerator.FunctionGen.returns_in_caller_buffer(func, dwarf_structs, record_abi)
+            in_place_body(call) =
+                "    _rb_ret = RepliBuild.JITManager.return_slot($jit_ret_type)\n" *
+                "    GC.@preserve _rb_ret $call\n" *
+                "    return RepliBuild.JITManager.slot_value(_rb_ret)"
+            in_place_args = isempty(invoke_args) ? "RepliBuild.JITManager.slot_address(_rb_ret)" :
+                            "RepliBuild.JITManager.slot_address(_rb_ret), $invoke_args"
+
             if config.compile.aot_thunks
                 # AOT dispatch is the JIT dispatch with a different way of
                 # finding the function: `invoke_aot` takes the thunks handle and
@@ -3500,8 +3541,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 # `_aot_thunk_slot_chunk`, which derives the slots from the FINAL
                 # wrapper text so a call site cannot reference one that no
                 # `__init__` fills.
-                _aot_slot = _aot_fptr_const_name!(aot_fptr_taken, mangled) * "[]"
-                if is_void_ret
+                _aot_slot = _aot_fptr_const_name!(aot_fptr_taken, mangled;
+                    thunk = JLCSIRGenerator.FunctionGen.thunk_symbol(mangled, in_place)) * "[]"
+                if in_place
+                    invoke_call = "RepliBuild.JITManager.invoke_aot_ptr($_aot_slot, $in_place_args)"
+                elseif is_void_ret
                     invoke_call = if isempty(invoke_args)
                         "RepliBuild.JITManager.invoke_aot_ptr($_aot_slot)"
                     else
@@ -3521,6 +3565,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         _aot_head * "    ptr = " * invoke_call,
                         _aot_head * "    return " * invoke_call,
                         cstring_free_sym; doc_comment=doc_comment)
+                elseif in_place
+                    func_def = """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        # [Tier 2] Dispatch to MLIR AOT Thunk, built in the caller's buffer
+                    $(in_place_body(invoke_call))
+                    end
+                    """
                 else
                     func_def = """
                     $doc_comment
@@ -3531,7 +3583,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     """
                 end
             else
-                if is_void_ret
+                if in_place
+                    invoke_call = "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(JLCSIRGenerator.FunctionGen.thunk_symbol(mangled, true))\", $in_place_args)"
+                elseif is_void_ret
                     invoke_call = if isempty(invoke_args)
                         "RepliBuild.JITManager.invoke(\"_mlir_ciface_$(mangled)_thunk\")"
                     else
@@ -3551,6 +3605,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         _jit_head * "    ptr = " * invoke_call,
                         _jit_head * "    return " * invoke_call,
                         cstring_free_sym; doc_comment=doc_comment)
+                elseif in_place
+                    func_def = """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        # [Tier 2] Dispatch to MLIR JIT, built in the caller's buffer
+                    $(in_place_body(invoke_call))
+                    end
+                    """
                 else
                     func_def = """
                     $doc_comment
@@ -4093,12 +4155,27 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             safe_name = replace(replace(replace(container_type, "::" => "_"), "<" => "_"), ">" => "")
             safe_name = replace(replace(safe_name, " " => ""), "," => "_")
 
-            # Determine element type for CppVector
+            # Determine element type for CppVector. The element is read from
+            # the compiler's spelling of the container when the table recorded
+            # one (`container`: `std::vector<Clipper2Lib::Point<long>>` for an
+            # entry written with the typedef `Point64`), and a record element
+            # is the struct this module emitted for it (`Point_long`), which
+            # `CppVector{T}` reads with `unsafe_load(Ptr{T})`. An element with
+            # no Julia layout gets no factory: `CppVector{_UnsafeUnknown}` would
+            # read garbage, so the entry is named instead.
             if startswith(container_type, "std::vector<")
-                elem_match = match(r"std::vector<(.+)>$", container_type)
+                canonical = String(get(first(methods), "container", container_type))
+                elem_match = match(r"^std::vector<(.+)>$", canonical)
+                elem_match === nothing && (elem_match = match(r"^std::vector<(.+)>$", container_type))
                 if !isnothing(elem_match)
                     elem_cpp = String(strip(elem_match.captures[1]))
-                    elem_julia = _normalize_stl_elem_type(infer_julia_type(registry, elem_cpp; context="STL factory element type"))
+                    elem_julia = _stl_vector_element_type(elem_cpp, defined_struct_names,
+                                                          t -> _normalize_stl_elem_type(infer_julia_type(registry, t; context="STL factory element type")))
+                    if elem_julia === nothing
+                        @warn "STL: no CppVector factory for $(repr(container_type)): its element type " *
+                              "$(repr(elem_cpp)) has no Julia layout in this wrapper"
+                        continue
+                    end
 
                     factory_name = "create_$(safe_name)"
                     push!(exports, factory_name)
