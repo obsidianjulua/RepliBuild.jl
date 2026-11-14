@@ -23,8 +23,8 @@ RepliBuild.check_environment()
 whatever is missing. `status.ready` means C builds will work. `status.tier2_ready`
 means C++ and the hard ABI cases (Tier 2) will work too.
 
-**Julia.** CI tests Julia 1.12 and 1.13. `Project.toml` still admits 1.10 and
-1.11, which nothing tests.
+**Julia.** CI tests Julia 1.12 and 1.13, and `Project.toml` admits nothing
+older (`julia = "1.12"`).
 
 ## C libraries
 

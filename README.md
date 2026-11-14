@@ -89,8 +89,8 @@ lists every key, what discovery cannot infer, and a symptom → key index.
   not MSVC. Both read DWARF through GNU binutils. macOS is refused at load: its
   Mach-O plumbing (DWARF in a `.dSYM`, no dynamic symbol table, no GNU dumper)
   and Apple's arm64 calling convention are not built.
-- **Julia 1.12 or 1.13**, the versions CI tests. `Project.toml` still admits
-  1.10 and 1.11, which nothing tests.
+- **Julia 1.12 or 1.13**, the versions CI tests, and what `Project.toml`
+  admits (`julia = "1.12"`).
 - **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every
   distribution has. Clang ships as a JLL, and link/optimize/assemble run on
   Julia's own libLLVM. On Windows, MSYS2 CLANG64 and GNU `objdump` (below).

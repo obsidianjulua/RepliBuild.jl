@@ -23,6 +23,91 @@ registered release, which can be older than what is described here;
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
   folder ([Install](install.md#The-JLCS-dialect)).
 
+## v4.5.0 (2026-11-14)
+
+**Every C++ wrapper must be generated again, and the project is rebuilt for
+the new decoders.** The Tier 2 thunk for a function returning a record C++
+passes by reference (`std::string`, `std::map`, any class with a non-trivial
+destructor) changed its convention and its name: a wrapper written by 4.4.0 or
+earlier fails to load with a message saying to re-wrap, instead of calling the
+old thunk. Linux AArch64 is supported, a `std::string` returned by value is a
+Julia `String`, and overloads that were one method are separate methods. Julia
+1.12 is the oldest release supported (`Project.toml` admitted 1.10 and 1.11,
+which nothing tested).
+
+- **Linux AArch64.** The AAPCS64 struct rules (a homogeneous floating
+  aggregate in floating registers, 16 bytes or less in general registers,
+  larger by reference) on both tiers, and the JIT fixes the first arm64 run
+  needed. CI runs devtests on an arm64 runner. macOS is still refused, and
+  Windows on ARM is not built.
+- **`std::string` returned by value is a `String`.** The wrapper reads the
+  characters where C++ built the object and ends it there; libstdc++'s and
+  libc++'s layouts, `char` strings only. A string the wrapper cannot decode
+  keeps its bytes, with the reason in a comment beside the call. Needs a
+  rebuild: the layout is recorded at build time. A `std::string` parameter
+  still takes the byte stand-in (on the Not Yet Built list).
+- **`std::tuple`, `std::optional` and `std::complex` by value are callable**,
+  laid out from their bases; `std::complex<long double>` on both conventions.
+- **Pass-by-reference returns were built in a dead frame.** Every Tier 2
+  function returning such a record moved the object's bytes out of the thunk's
+  own stack; it held while the bytes meant the same at any address, and
+  libstdc++'s short string does not. The object is now built in the caller's
+  buffer. This is the thunk convention change above.
+- **C++ overloads dispatch on a pointer's target and on an enum.**
+  `GetID(const char*)` and `GetID(const void*)`, or `f(Kind)` and `f(int)`,
+  were one Julia signature, and the one kept was whichever came last. The
+  positions an overload set disagrees on now take a `Union` of what callers
+  pass (`String`, `Ptr`, `Ref`, a `Managed` object, an `AbstractVector`), or
+  the enum itself; every other pointer position stays `::Any`. An argument
+  outside that `Union` is a `MethodError` where it used to pick an overload.
+  An rvalue overload beside its `const&` twin is not emitted (a move where the
+  caller meant a copy).
+- **`[wrap.rename]`.** A table of `key = "julia_name"`, keyed by the mangled
+  symbol or the derived Julia name (anchored globs), applied inside the one
+  name derivation so every emitter binds the chosen name. For Boost.Math's
+  600-character template names ([TOML reference](config.md)).
+- **Wrapper names and types that change — re-wrap, and update callers:**
+  - C enums are open types (`primitive type E <: RepliBuild.OpenEnums.OpenEnum`)
+    instead of `@enum`: any value of the underlying type is a value
+    (`VTERM_KEY_FUNCTION(n)`), declared values print by name, undeclared ones
+    as `E(v)`. Integer conversion and `ccall` passing are unchanged.
+  - A pointer or reference return is `Ptr{T}` when the wrapper emits `T`
+    (opaque handles included); `void*`, function pointers and mutable records
+    stay `Ptr{Cvoid}`. Typing is not ownership: no finalizer is attached.
+  - `[types] templates` entries written through a typedef
+    (`std::vector<Point64>`) yield the container's table and a factory named
+    as written; an entry that yields nothing is a warning, not an empty table.
+- **Graph mode** (a CMake project as one package): one Julia type per C++
+  type across the graph's libraries, and an imported enum brings its values
+  (`World.Happy === Hello.Happy`); the project can be a pinned
+  `[dependencies]` checkout (`[graph] dependency`); object-library sources,
+  versioned sonames and file-local types (libwebp builds).
+- **Calls that crossed wrong:**
+  - A C record whose eightbyte holds a float beside integers or bytes (a union
+    of `int` and `double`, a float next to a bitfield) was an ABI trap; it
+    crosses as C does. The last 31 Hub C stubs are calls.
+  - A C++ record over-aligned only through a member's `alignas` was read from
+    the wrong stack slot by `ccall`; it goes to Tier 2.
+  - A derived class whose trivial destructor aliases its base's (tinyxml2's
+    `~XMLComment`) carried the base's destructor symbol, so its finalizer ran
+    the base destructor.
+  - A method proxy's owner could be collected during a Tier 2 call; it is kept
+    alive across the call.
+  - A thunk's callee in the C++ runtime library (a `basic_string` member the
+    library calls but does not instantiate) binds through the library's own
+    handle; one the handle cannot resolve is dropped with a warning instead of
+    blocking the JIT.
+- **Builds and tooling:**
+  - A git dependency prints its clone and fetch progress at a terminal.
+  - The Tier 1 slice cache is per libLLVM major, so two Julia releases on one
+    checkout no longer re-slice each other on every wrap.
+  - `test/suites.jl` is the one list of test files; `test/devtests.jl
+    --changed` runs what a diff touches. `test/tools/cpp_thunk_coverage.jl`
+    measures C++ coverage on the Hub as `c_ccall_coverage.jl` does for C.
+- **Fixes in what `build` extracts — rebuild, then re-wrap:** the string
+  layout; toolchain records laid out from bases; destructor attribution for
+  aliased destructors.
+
 ## v4.4.0 (2026-11-08)
 
 **A function that returns or takes `std::pair`, `std::array` or
