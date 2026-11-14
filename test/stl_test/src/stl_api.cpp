@@ -48,6 +48,7 @@ namespace stl_test {
 template <typename T> T scaled(T x, int k) { return x * static_cast<T>(k); }
 template long scaled<long>(long, int);
 template double scaled<double>(double, int);
+}  // namespace stl_test
 
 std::vector<stl_test::Pt64> make_pts(int n) {
     std::vector<stl_test::Pt64> pts;
