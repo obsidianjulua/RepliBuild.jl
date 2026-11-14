@@ -1273,33 +1273,6 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
                  " (with $(length(config.wrap.surface_types_extra)) keep-pattern(s))"))
     end
 
-    # Cross-library type identity (TypeImports.jl), in graph mode only:
-    # `graph_imports.earlier` lists the libraries wrapped before this one
-    # (`_earlier_library`, topological order) and `graph_imports.subclassed`
-    # the classes any library of the graph derives from. A type an earlier
-    # wrapper emitted as its own is imported, not emitted again; a function an
-    # earlier wrapper binds is not wrapped again. After the filters above, so a
-    # surface-filtered library imports only what it reaches.
-    type_imports = Dict{String,Any}()
-    imported_names = String[]
-    if graph_imports !== nothing
-        (type_imports, reports) = _resolve_type_imports(metadata, graph_imports.earlier)
-        for r in reports
-            println("  types: ", r)
-        end
-        _apply_type_imports!(metadata, type_imports)
-        dropped = _drop_functions_bound_earlier!(metadata, graph_imports.earlier)
-        dropped > 0 && println("  types: $dropped function(s) an earlier library of the graph binds, not wrapped again")
-        metadata["graph_subclassed"] = String[String(x) for x in graph_imports.subclassed]
-        metadata["earlier_placeholders"] = _earlier_placeholders(metadata, graph_imports.earlier)
-        if !isempty(type_imports)
-            owners = sort!(unique!(String[String(v["module"]) for v in values(type_imports)]))
-            println("  types: $(length(type_imports)) imported from $(join(owners, ", "))")
-        end
-        imported_names = _imported_type_names(metadata["struct_definitions"],
-                                              _type_sanitizer(config.wrap.language == :c ? :c : :cpp))
-    end
-
     functions = metadata["functions"]
 
     # Extract supplementary types from headers (enums, unused types, etc.)
@@ -1398,6 +1371,36 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
         else
             merge!(metadata["header_enums"], header_types["enums"])
         end
+    end
+
+    # Cross-library type identity (TypeImports.jl), in graph mode only:
+    # `graph_imports.earlier` lists the libraries wrapped before this one
+    # (`_earlier_library`, topological order) and `graph_imports.subclassed`
+    # the classes any library of the graph derives from. A type an earlier
+    # wrapper emitted as its own is imported, not emitted again; a function an
+    # earlier wrapper binds is not wrapped again. After the filters above, so a
+    # surface-filtered library imports only what it reaches, and after the
+    # header enums above: an enum this library's DWARF lacks but a header it
+    # includes declares is a candidate too, else the header walk would emit a
+    # second type for one an owner already defined (xlib's `Mode`, 2026-11-11).
+    type_imports = Dict{String,Any}()
+    imported_names = String[]
+    if graph_imports !== nothing
+        (type_imports, reports) = _resolve_type_imports(metadata, graph_imports.earlier)
+        for r in reports
+            println("  types: ", r)
+        end
+        _apply_type_imports!(metadata, type_imports)
+        dropped = _drop_functions_bound_earlier!(metadata, graph_imports.earlier)
+        dropped > 0 && println("  types: $dropped function(s) an earlier library of the graph binds, not wrapped again")
+        metadata["graph_subclassed"] = String[String(x) for x in graph_imports.subclassed]
+        metadata["earlier_placeholders"] = _earlier_placeholders(metadata, graph_imports.earlier)
+        if !isempty(type_imports)
+            owners = sort!(unique!(String[String(v["module"]) for v in values(type_imports)]))
+            println("  types: $(length(type_imports)) imported from $(join(owners, ", "))")
+        end
+        imported_names = _imported_type_names(metadata["struct_definitions"],
+                                              _type_sanitizer(config.wrap.language == :c ? :c : :cpp))
     end
 
     # Store function pointer typedefs for callback documentation

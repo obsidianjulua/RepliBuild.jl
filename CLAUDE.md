@@ -3,7 +3,8 @@
 Guidance for Claude Code working in this repository. This file is loaded into every
 session, so it holds **only what changes how you work here**: commands, architecture,
 invariants that must not be broken, and open problems. History — measurements, blast
-radii, dated sweeps, how a bug was found — belongs in `CHANGELOG.md` and git, not here.
+radii, dated sweeps, how a bug was found — belongs in the pull request that shipped it and in git, not here;
+`CHANGELOG.md` is compiled from merged PRs at release registration.
 The pre-2026-09-22 long-form version of this file is in git history if a rationale is
 ever needed (`git log -p -- CLAUDE.md`).
 
@@ -656,7 +657,11 @@ the test named when you touch the area.
   structs, enums, `Managed`, factory structs, upcasts, setters, the layout
   table). An imported type is one `const` naming the owner's through
   `Base.parentmodule(@__MODULE__)` (`..Owner.X` is import syntax, not an
-  expression), emitted before the enums; `_assert_no_imported_redefinition`
+  expression), emitted before the enums, and an imported enum brings one more
+  per enumerator, aliasing the name the owner's text BINDS (the manifest's
+  `enumerators`: `[base, bound, value]`), with the owner's collision rule
+  applied against the importer's own names (`World.Happy === Hello.Happy`; the
+  Hub's hello_world report, 2026-11-11); `_assert_no_imported_redefinition`
   refuses a text that defines one. The owner's `Managed`, factory struct and
   `<f>_safe` are the owner's alone; `has_subclass` is widened with
   `graph_subclassed`; a function an earlier wrapper binds is dropped; a
@@ -1508,9 +1513,12 @@ DWARF-resolved destructors — **is** built.)
 
 ## Maintaining this file
 
-- Keep it lean. When you fix something, put the story in `CHANGELOG.md` under
-  `## Unreleased`, and add a line here only if it creates a rule a future session must
-  follow.
+- Keep it lean. When you fix something, put the story in the pull request's
+  description under a `## Changelog` heading (dated title, what shipped, what was
+  found, which tests), and add a line here only if it creates a rule a future
+  session must follow. **A PR never edits `CHANGELOG.md`** (John, 2026-11-14): open
+  PRs conflicted on its Unreleased section, so that section is compiled from the
+  merged PRs' `## Changelog` headings when a release is registered.
 - Derived claims (counts, line numbers, versions, test totals) are what rot. Prefer
   naming the test that computes them over writing the number. Avoid `file:line`
   citations; name the function.
