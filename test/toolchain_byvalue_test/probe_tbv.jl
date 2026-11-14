@@ -18,7 +18,6 @@ function probe(f, name)
     println("PROBE $name: ", verdict)
 end
 check(p, what, got, want) = got == want || push!(p, "$what: got $got, want $want")
-traps(f) = try f(); false catch e; occursin("ABI Safety Trap", sprint(showerror, e)) end
 zeroof(::Type{T}) where {T<:Tuple} = ntuple(i -> zeroof(fieldtype(T, i)), fieldcount(T))
 zeroof(::Type{T}) where {T} = zero(T)
 build(T; kw...) = T((haskey(kw, n) ? kw[n] : zeroof(fieldtype(T, i)) for (i, n) in enumerate(fieldnames(T)))...)
@@ -82,10 +81,51 @@ probe("map_lookup_is_a_plain_call") do p
     check(p, "map_lookup(2)", M.map_lookup(2), Int32(23))
     check(p, "map_lookup(9)", M.map_lookup(9), Int32(-1))
 end
-probe("still_traps") do p
-    traps(() -> M.tup(1, 2.0)) || push!(p, "tup did not trap")
-    traps(() -> M.maybe(true, 2.0)) || push!(p, "maybe did not trap")
-    traps(() -> M.cplx(1.0, 2.0)) || push!(p, "cplx did not trap")
+# Laid out from their bases (2026-11-13). Returned records are read as their C
+# bytes, so the check does not depend on the Julia type's field names, then
+# passed back in by value.
+bytes(x) = (r = Ref(x); GC.@preserve r copy(unsafe_wrap(Array, Ptr{UInt8}(pointer_from_objref(r)), sizeof(x))))
+at(T, b, off) = GC.@preserve b unsafe_load(Ptr{T}(pointer(b) + off))
+probe("tuple_from_bases") do p
+    t = M.tup(7, 2.5)
+    b = bytes(t)
+    check(p, "sizeof tuple<int, double>", length(b), 16)
+    # libstdc++ stores the elements in reverse: the double at 0, the int at 8.
+    check(p, "tup", (at(Float64, b, 0), at(Int32, b, 8)), (2.5, Int32(7)))
+    check(p, "tup_sum", M.tup_sum(t), 72.5)
+end
+probe("optional_from_bases") do p
+    some, none = M.maybe(true, 3.25), M.maybe(false, 9.0)
+    bs, bn = bytes(some), bytes(none)
+    check(p, "maybe(true)", (at(Float64, bs, 0), bs[9]), (3.25, 0x01))
+    check(p, "maybe(false) engaged", bn[9], 0x00)
+    check(p, "maybe_or(some)", M.maybe_or(some, -1.0), 3.25)
+    check(p, "maybe_or(none)", M.maybe_or(none, -1.0), -1.0)
+    si, ni = M.maybe_int(true, 41), M.maybe_int(false, 5)
+    bi = bytes(si)
+    check(p, "maybe_int(true)", (at(Int32, bi, 0), bi[5]), (Int32(41), 0x01))
+    check(p, "maybe_int_or(some)", M.maybe_int_or(si, -1), Int32(41))
+    check(p, "maybe_int_or(none)", M.maybe_int_or(ni, -1), Int32(-1))
+end
+probe("complex_width") do p
+    z = M.cplx(1.5, -2.0)
+    bz = bytes(z)
+    check(p, "cplx", (length(bz), at(Float64, bz, 0), at(Float64, bz, 8)), (16, 1.5, -2.0))
+    check(p, "cplx_norm", M.cplx_norm(z), 148.0)
+    w = M.cplxf(0.5f0, 4.0f0)
+    bw = bytes(w)
+    check(p, "cplxf", (length(bw), at(Float32, bw, 0), at(Float32, bw, 4)), (8, 0.5f0, 4.0f0))
+    check(p, "cplxf_norm", M.cplxf_norm(w), 54.0f0)
+end
+# A record holding a `long double _Complex`: MEMORY (sret) on x86-64, an HFA of
+# two quads on AArch64. C++ reads it back in the host's own `long double`, so
+# the probe asks no format question (an x87 decoder read a quad's zero low
+# fraction bytes as the mantissa and got 0.0 on the arm64 CI cell).
+probe("complex_long_double") do p
+    z = M.cplxl(1.5, -2.25)
+    check(p, "sizeof", sizeof(z), 32)
+    r = Ref(z)
+    check(p, "cplxl", (M.cplxl_re(r), M.cplxl_im(r)), (1.5, -2.25))
 end
 probe("control_empty_base") do p
     r = M.make_lp(1.0, 2.0)

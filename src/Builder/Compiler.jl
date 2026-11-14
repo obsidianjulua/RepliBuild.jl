@@ -7097,7 +7097,17 @@ function parse_dwarf_dump(output::AbstractString;
                     end
                 end
 
-                if !isempty(resolved_members)
+                # A record with no member of its own has no entry, with one
+                # exception: a toolchain record whose bytes come from its
+                # non-virtual bases (libstdc++'s `std::tuple` and `_Tuple_impl`,
+                # `std::optional` and `_Optional_payload`, libc++'s `__tuple_impl`).
+                # `_promote_toolchain_records!` lays it out from them. A library
+                # record keeps the old rule; its Julia type has no fields to give.
+                from_bases = isempty(resolved_members) && drops_type(type_info) &&
+                    any(d -> isa(d, Dict) && get(d, "kind", nothing) == "inheritance" &&
+                             get(d, "virtual", false) != true,
+                        get(children_by_parent, offset, ()))
+                if !isempty(resolved_members) || from_bases
                     struct_def = Dict{String,Any}(
                         "kind" => get(type_info, "kind", "struct"),
                         "byte_size" => get(type_info, "byte_size", "0x0"),
@@ -7334,7 +7344,12 @@ function parse_dwarf_dump(output::AbstractString;
             isnothing(type_ref) || push!(toolchain_seeds, resolve_type(type_ref, type_refs))
         end
     end
-    _promote_toolchain_records!(struct_defs, toolchain_defs, toolchain_seeds)
+    # The 1-byte empty records, the rule the empty-base marking above uses: a
+    # union may hold one beside its real members (libstdc++'s `_Storage` holds
+    # `_Empty_byte` beside the value of a `std::optional`).
+    empty_records = Set{String}(k for (k, f) in record_facts
+                                if get(f, "empty", false) == true && _definition_byte_size(f) == 1)
+    _promote_toolchain_records!(struct_defs, toolchain_defs, toolchain_seeds; empty_records)
 
     # ---- Repair by-value AGGREGATE return types that resolved to `Any` ----
     #
@@ -7760,8 +7775,82 @@ function _key_in(t::AbstractString, table::AbstractDict)
     return nothing
 end
 
+_member_offset_int(v) = v isa Integer ? Int(v) :
+    (s = string(v); startswith(s, "0x") ? parse(Int, s[3:end]; base = 16) : parse(Int, s))
+
 """
-    _promote_toolchain_records!(struct_defs, toolchain_defs, seed_types) -> Vector{String}
+    _laid_out_from_bases(def, lookup, own_members) -> Dict
+
+A copy of the toolchain record `def` whose members are `own_members(def)` plus
+every member of every non-empty, non-virtual base `lookup(type)` finds, at
+depth, each at the base's offset plus its own (a bitfield's `data_bit_offset`
+moved by as many bytes), sorted by offset; its `base_classes` keeps the empty
+bases and any base `lookup` does not know, as before. A name two members share
+is the first's in offset order and `<name>_1`, `<name>_2` after it. When a base
+deeper down cannot be looked up, the copy keeps `def`'s own members and bases:
+a layout missing bytes is worse than the old refusal-free shape.
+"""
+function _laid_out_from_bases(def::AbstractDict, lookup, own_members)
+    out = Dict{String,Any}(def)
+    shifted(m, d) = begin
+        m2 = Dict{String,Any}(m)
+        o = get(m, "offset", nothing)
+        o === nothing || (m2["offset"] = "0x" * string(_member_offset_int(o) + d; base = 16))
+        haskey(m, "data_bit_offset") && (m2["data_bit_offset"] = Int(m["data_bit_offset"]) + 8d)
+        m2
+    end
+    function flatten(d::AbstractDict, at::Int)
+        ms = Any[shifted(m, at) for m in own_members(d)]
+        for b in get(d, "base_classes", ())
+            get(b, "empty", false) == true && continue
+            get(b, "virtual", false) == true && return nothing
+            bd = lookup(String(get(b, "type", "")))
+            bd === nothing && return nothing
+            sub = flatten(bd, at + _member_offset_int(get(b, "offset", 0)))
+            sub === nothing && return nothing
+            append!(ms, sub)
+        end
+        return ms
+    end
+
+    members = Any[shifted(m, 0) for m in own_members(def)]
+    kept = Any[]
+    for b in get(def, "base_classes", ())
+        bd = (get(b, "empty", false) == true || get(b, "virtual", false) == true) ? nothing :
+             lookup(String(get(b, "type", "")))
+        if bd === nothing
+            push!(kept, b)
+            continue
+        end
+        sub = flatten(bd, _member_offset_int(get(b, "offset", 0)))
+        if sub === nothing
+            out["members"] = own_members(def)
+            return out
+        end
+        append!(members, sub)
+    end
+    # Offset order; a bitfield by its bits, a static (no offset, no bits) last.
+    pos(m) = get(m, "offset", nothing) !== nothing ? 8 * _member_offset_int(m["offset"]) :
+             haskey(m, "data_bit_offset") ? Int(m["data_bit_offset"]) : typemax(Int)
+    sort!(members; by = pos, alg = Base.Sort.DEFAULT_STABLE)
+    seen = Dict{String,Int}()
+    for m in members
+        n = String(get(m, "name", ""))
+        k = get(seen, n, 0)
+        seen[n] = k + 1
+        k == 0 || (m["name"] = "$(n)_$(k)")
+    end
+    out["members"] = members
+    if isempty(kept)
+        delete!(out, "base_classes")
+    else
+        out["base_classes"] = kept
+    end
+    return out
+end
+
+"""
+    _promote_toolchain_records!(struct_defs, toolchain_defs, seed_types; empty_records) -> Vector{String}
 
 Put back into `struct_defs` the toolchain records the library holds or passes by
 value, and return their keys, sorted. Each one is marked `"toolchain" => true`.
@@ -7780,24 +7869,44 @@ dynamic symbol table) and from what a reached record holds by value, through
 members (arrays included) and bases, whether that record is the library's own
 (`Span { std::pair<int, int> range; … }` returned by value) or one promoted
 here. A library record nothing exported crosses by value promotes nothing. It is promoted only
-when its whole by-value closure has a layout: every member a scalar, pointer,
-reference, enum, STL container (held as bytes, as in a library record), library
-record or promotable toolchain record, and every base one of those last two or
-marked `"empty"` (`std::pair`'s `__pair_base`). Anything else stays out,
-and its crossings stay traps: a derived record with no members of its own
-(`std::tuple`, `std::optional` in libstdc++, which have no entry to promote), a
-`__complex__` member (`std::complex`; clang names `_Complex float` and `_Complex
-double` both `complex`, so the name cannot be mapped), a virtual base, a
-conflicted entry.
+when its whole by-value closure has a layout: every member a scalar (a
+`complex float`/`double`/`long double` included: the parser reads the width off
+the base type's `byte_size`, `_complex_base_name`), pointer, reference, enum,
+STL container (held as bytes, as in a library record), library record or
+promotable toolchain record, and every base one of those last two or marked
+`"empty"` (`std::pair`'s `__pair_base`). Anything else stays out, and its
+crossings stay traps: a virtual base, a conflicted entry, a member nothing can
+lay out.
+
+**A toolchain record is laid out from its bases** (`_laid_out_from_bases`): a
+promoted one gets every member of every non-empty, non-virtual base, at depth,
+at the base's offset plus the member's, in place of that base, and its
+`base_classes` keeps only the empty ones. libstdc++'s `std::tuple` and
+`std::optional` have no member of their own (the parser gives such a toolchain
+record an entry for this), so they had no layout; and every reader of a
+definition (StructGen, the SysV classifier, both generators) reads members at
+offsets, so a flattened record needs nothing new downstream. A name two
+members share (each `_Head_base`'s `_M_head_impl`) is kept by the first in
+offset order; the later ones are `<name>_1`, `<name>_2`. A union drops a member
+whose type is a 1-byte empty record (`empty_records`; `_Storage`'s
+`_Empty_byte` beside a `std::optional`'s value): it overlaps the others and
+holds no bytes they do not.
 
 Never promoted: an STL container, which keeps its own path (pointer in, byte blob
 out; `stl_container_size`), and a name on `INTERNAL_TYPE_BLOCKLIST`, which no
 generator emits. A library record of the same name keeps its entry.
 """
 function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::AbstractDict,
-                                     seed_types)::Vector{String}
+                                     seed_types; empty_records = Set{String}())::Vector{String}
     isempty(toolchain_defs) && return String[]
     promotable(k) = !(k in INTERNAL_TYPE_BLOCKLIST) && stl_container_size(k) == 0
+    is_union(def) = get(def, "kind", "struct") == "union"
+    # The members a definition contributes: all of them, less a union's empty
+    # record members (see above).
+    empty_record(t) = any(c -> c in empty_records, _scope_suffixes(String(t)))
+    own_members(def) = is_union(def) ?
+        [m for m in get(def, "members", ()) if !empty_record(get(m, "c_type", ""))] :
+        collect(get(def, "members", ()))
 
     # The type `t` holds in place: `nothing` for a pointer, reference or function
     # pointer (it holds an address), else the spelling with top-level cv and
@@ -7820,7 +7929,7 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         push!(stack, key)
         def = toolchain_defs[key]
         ok = get(def, "conflict", false) != true &&
-             all(m -> holds_ok(String(get(m, "c_type", "")), stack), get(def, "members", ())) &&
+             all(m -> holds_ok(String(get(m, "c_type", "")), stack), own_members(def)) &&
              all(b -> get(b, "virtual", false) != true &&
                       (get(b, "empty", false) == true || base_ok(String(get(b, "type", "")), stack)),
                  get(def, "base_classes", ()))
@@ -7833,6 +7942,8 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         e === nothing && return true
         (isempty(e) || e in ("unknown", "Any", "void")) && return false
         get_type_size(e) > 0 && return true
+        # `_complex_base_name`'s spellings, which only a sized base type gets.
+        e in ("complex float", "complex double", "complex long double") && return true
         cuts = _scope_suffixes(e)
         any(c -> haskey(struct_defs, "__enum__" * c), cuts) && return true
         stl_container_size(e) > 0 && return true
@@ -7869,7 +7980,10 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         lk === nothing || return walk(lk)                # the library's own, or done
         tk = _key_in(e, toolchain_defs)
         (tk === nothing || !promotable(tk) || !complete(tk, String[])) && return
-        def = toolchain_defs[tk]
+        def = _laid_out_from_bases(toolchain_defs[tk], k -> begin
+                  bk = _key_in(k, toolchain_defs)
+                  bk === nothing ? nothing : toolchain_defs[bk]
+              end, own_members)
         def["toolchain"] = true
         struct_defs[tk] = def
         push!(promoted, tk)

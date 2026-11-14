@@ -85,6 +85,7 @@ const AAS_RECORDS = [
     ("HALF3",  "typedef struct { _Float16 h[3]; } HALF3;"),
     ("LD",     "typedef struct { long double x; } LD;"),
     ("LD2",    "typedef struct { long double a, b; } LD2;"),
+    ("CLD",    "typedef struct { _Complex long double z; } CLD;"),   # std::complex<long double>
     # what breaks an HFA
     ("HFA5",   "typedef struct { float a, b, c, d, e; } HFA5;"),
     ("HFAPAD", "typedef struct { float a; float b; char pad; } HFAPAD;"),
