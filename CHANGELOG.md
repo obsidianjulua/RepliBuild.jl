@@ -4,6 +4,307 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.5.0 (2026-11-14)
+
+Version 4.4.0 → 4.5.0; Julia compat `1.12` (CI tests 1.12 and 1.13, nothing
+tested older). **Every C++ wrapper must be generated again** (the Tier 2
+thunk of a pass-by-reference return changed name and convention), and a
+rebuild records the `std::string` layouts the new decoder reads. The
+sections from #88 to #98 are compiled from the merged pull requests'
+`## Changelog` headings (#93 and #96 are one change, merged twice); #74 to #86
+wrote theirs into this file directly, before that rule.
+
+### A std::string returned by value is a Julia String (2026-11-14)
+
+A C++ function returning `std::basic_string<char>` by value returned an opaque `NTuple{32, UInt8}`, and the C++ object was never ended. Since #96 the string is built in the caller's buffer, so it can be read where it lives: libstdc++'s short string points into itself, and a copy would point at nothing.
+
+- The build records each by-value `basic_string`'s layout from its own DWARF on its `record_abi` entry (`string_layout`): the members at depth with their offsets, the character type, and the destructor declared in the record. A package gains decoders on a rebuild.
+- `StdStrings.string_reader` recognises libstdc++'s and libc++'s layouts and refuses anything else with a reason; no offset or size is hardcoded.
+- The wrapper reads the characters into a `String` (`StdStrings.take_string!`), then calls the destructor on the object where it lives. The destructor is found per host at first use: through the library's own handle, which on ELF reaches libstdc++ when the library does not define it, and on Windows the C++ runtime by name. With none, the bytes come back with one warning, never a silent leak.
+- A string the wrapper cannot decode keeps its bytes, with the reason beside the call: old metadata (rebuild), `wchar_t`/`char16_t`/`char32_t` strings, an unknown layout.
+- Parameters taking a `String` are not built (they need the runtime's constructor); logged in Not Yet Built.
+- Tests: `test_std_strings.jl` (unit), devtests `test_sret_in_caller_buffer.jl`; pugixml rebuilt: `as_utf8`, `evaluate_string` and `path` return `String`s.
+
+**CI follow-up.** Every devtests cell (libstdc++ 13 on Ubuntu 24.04, x86-64 and arm64) returned the raw 32 bytes for `std_string_is_a_julia_string`. The probe now reports the wrapper's reason and the recorded layout on a miss (a925d26), which named the gate: the layout was read, but `_M_dataplus` was a leaf at offset 0, with no `_M_p` under it. Reproduced against Ubuntu's extracted libstdc++ 13 headers: at `-std=c++17` that unit emits no `basic_string` constructor, so clang's constructor homing writes `_Alloc_hider` as a declaration-only DIE; libstdc++ 16 (the dev box) emits one and the definition. `string_reader` now takes a leaf named `_M_dataplus`, typed `_Alloc_hider` (bare or scoped), spanning exactly a pointer as the data pointer at the leaf's offset, and refuses any other span with the reason. A declaration-only DIE has no byte_size, so the parser records the member's size as 0 (what 7ede52b's first CI run showed); the span is then the distance to the next leaf, which the DWARF does place. 647c1b2's rule (a definition-less base contributes no bytes when the derived record's members tile its whole size) was a hypothesis the probe disproved as the cause; it stays, tested, because the shape is real. Verified where it can be: `test_std_strings.jl` 50/50 with the homed-leaf cases; the live path on libstdc++ 13 is CI's to show.
+
+### `[wrap.rename]`: a Julia function name chosen by hand (2026-11-14)
+
+- `[wrap.rename]`: a table of `key = "julia_name"`, key the function's mangled symbol or the Julia name the wrapper derives (anchored globs), applied inside the one name derivation so every emitter binds the chosen name and the old name is bound nowhere. A key matching no function, a chosen name colliding with another binding, or two keys naming one function differently are hard errors naming the parties; a non-identifier value is a load error. Preserved across `discover(force=true)`.
+- The C++ generator's factory and proxy references pass the function's mangled symbol to the name derivation, so a rename keyed on the symbol reaches them.
+- `stl_test` gains a renamed function template as the live case; `test_function_name_derivation.jl` covers the table, its checks and the overload prediction.
+
+### A pass-by-reference return is built in the caller's buffer (2026-11-13)
+
+Every Tier 2 function returning a record C++ passes by reference
+(`DW_CC_pass_by_reference`: a class with a non-trivial copy constructor or
+destructor, `std::string`, `std::map`, …) got an object that had been moved
+bytewise out of a dead stack frame. C++ builds such a return where the hidden
+pointer says and never moves it. The thunk passed its own `alloca` as that
+pointer and returned the bytes, which MLIR's C-interface wrapper copied into the
+caller's buffer; an STL container returned by value took a byte-blob path whose
+large return LLVM's backend demoted to a hidden pointer to its own temporary,
+with the same result. It held only while the object meant the same bytes at any
+address. Found while decoding a returned `std::string`: libstdc++'s short-string
+pointer came back aimed at the thunk's frame, and the destructor then freed a
+stack address.
+
+- **The thunk** (`FunctionGen.returns_in_caller_buffer`, the one predicate the
+  thunk and every call site ask): for such a return it is
+  `thunk_symbol(m, true)`, `<m>_thunk_inplace`, returns void, and takes the
+  caller's buffer in argument slot 0, like any pointer argument (the other
+  arguments start at slot 1). It forwards that pointer as the callee's hidden
+  return pointer, still stated as `sret` under AAPCS64 (x8), and never allocas
+  or reads the return.
+- **The call site** (GeneratorCpp): `_rb_ret = JITManager.return_slot(T)` (a
+  `Ref` for an isbits `T`, a zeroed object for a mutable one), the void
+  `invoke`/`invoke_aot_ptr` with `slot_address(_rb_ret)` first under
+  `GC.@preserve`, then `return slot_value(_rb_ret)`. The Julia return type is
+  what it was. An AOT slot's table entry is the thunk it resolves, and the
+  manifest scan reads both spellings, so the manifest is unchanged.
+- **A stale wrapper fails loudly.** One generated before this calls
+  `<m>_thunk`, which no longer exists for such a function; the JIT lookup and
+  the AOT slot resolution say the wrapper predates the change and to re-wrap,
+  instead of passing arguments where the buffer goes. **Every C++ Hub wrapper
+  with a by-reference return needs a re-wrap** (no rebuild): pugixml 9 call
+  sites, fmt 8, measured; the re-wrap changes those call sites and nothing else.
+- Tests: `test_by_value_crossing.jl` (the thunk's new shape, every host
+  convention), `test_introspection.jl` (AOT slot symbols, the manifest scan),
+  devtests 8c' `test_sret_in_caller_buffer.jl`: a class that stores `this`,
+  and a short `std::string`, are built in the caller's buffer (C++'s own
+  checks agree), the wrapper's call site works, the old name gets the re-wrap
+  message. With the predicate neutered by its exact signature, `self` comes
+  back a stack address and the string's data lies outside the buffer.
+
+### `[types] templates` entries match the compiler's spelling; an empty table warns (2026-11-13)
+
+- `[types] templates`: an entry is matched to the compiler's spelling of the container through a per-entry `replibuild_force::tag<T, N>` instantiation, so a typedef in the recipe (`std::vector<Clipper2Lib::Point64>`) yields the table of `std::vector<Clipper2Lib::Point<long>>` and a factory named after the entry as written. Before, clipper2's two listed vectors gave empty tables and no factory, silently.
+- An entry that yields no table is a warning naming the reason; a vector factory whose element type has no Julia layout in the wrapper is a warning and no factory, never `CppVector{Any}`.
+- `_normalize_stl_type` normalises nested template arguments at depth 0; the greedy regex mis-read `std::vector<std::vector<…>>`.
+- The templates TU's `replibuild_force::` helpers are filtered out of the wrappable surface (clipper2's wrapper carried five, fmt's two, as Tier 2 functions). `verify_wrap_surface` R1 accepts a templates-only package whose surface is its STL method table.
+- New unit test `test_stl_table_matching.jl`; `stl_test` fixture gains a `std::vector` of a library record behind a typedef, created and read through its factory in a child.
+
+### A thunk's runtime-library callee binds through the library's own handle (2026-11-13)
+
+The ledger said STL members living in the C++ runtime library were unbound because the JIT searched only the wrapped library. Measured: a `[types] templates` entry instantiates every member in the library (stl_test: 205 `basic_string` members defined, 0 undefined), and a member a library calls in libstdc++ without instantiating resolves through the library's own handle on glibc (382 of 382 undefined `std::` symbols across the Hub's C++ libraries, once nm's `@GLIBCXX_…` version suffix is cut; with it on, none).
+
+- `extract_stl_method_symbols` admits an undefined member of a listed container when a build-time pre-flight through the library's handle (`RTLD_NOW | RTLD_LOCAL`, `dlsym`, `dlclose`) resolves it, marked `runtime_library`; nm's two listings are read with `-p` and paired by position, the version suffix cut (`_nm_symbol_lines`).
+- `initialize_global_jit` pre-flights every callee its thunk module names through the library's own handle (`_preflight_callees`): the library's own are ORC's, a foreign one the handle resolves is registered on that engine at that address (`register_symbol`), never through `RTLD_DEFAULT`, and one the handle cannot resolve is dropped from the module with a warning, so ORC never blocks on it. `_check_module_declarations` names any declaration nothing pre-flighted.
+- AOT thunks need nothing: the thunks library binds such a callee at `dlopen` from the global scope (Julia's bundled libstdc++ first; ABI-compatible for `basic_string`).
+- On the Hub this binds nothing new today (every listed container is instantiated; clipper2's and fmt's listed containers give empty tables), so the live test proves determinism and no regression. What stays unbound: Windows/libc++ (a DLL handle sees only its exports) and containers a library uses but does not list.
+- Tests: `test_jit_runtime_symbols.jl` (unit), `test_jit_runtime_symbols_live.jl` (dev, after `fixture:stl_test`).
+
+### A derived class's aliased destructor keeps its own symbol (2026-11-13)
+
+tinyxml2's metadata carried `_ZN8tinyxml27XMLNodeD2Ev` four times: once as
+`XMLNode::~XMLNode()`, and once each as `XMLComment::~XMLComment()`,
+`XMLUnknown::~XMLUnknown()` and `XMLDeclaration::~XMLDeclaration()`, with the
+derived class as `class` and `this::XMLNode*`, while the derived classes' own
+D1/D2 symbols were in no entry. `XMLComment_destroy_XMLComment` called
+`XMLNode`'s base destructor under a `Ptr{XMLNode}` receiver
+(`cpp_thunk_coverage.jl` found the three as unexplained drops).
+
+- The cause was `extract_symbols_from_binary`, not DWARF: it paired `nm`'s
+  mangled and demangled listings by ADDRESS, and clang emits constructors and
+  destructors as aliases (`-mconstructor-aliases`: D1 is D2's alias always,
+  and at `-O1` and above a derived class's trivial destructor is an alias of
+  its base's), so eight names sat at one address and every one of them took
+  the mangled name nm listed last there. The two listings are now taken with
+  `-p` (the symbol table's own order, which nm's default sort does not give:
+  with `-C` it collates the demangled names) and paired line by line
+  (`_pair_nm_outputs`), so each symbol keeps its own two names; the address
+  map stays as the fallback, with a warning, for an `nm` whose listings do not
+  line up, where a `__rb_` alias still never displaces the real name. The
+  pairs are then put in the order of nm's sorted demangled listing
+  (`_order_like_listing`), the order the metadata and so every wrapper has
+  always had (a locale collation nothing in Julia reproduces), with D1 before
+  D2 and C1 before C2 among aliases of one name, so the dedup keeps the
+  variant it kept before and a package without the shape re-wraps
+  byte-identical apart from the alias variants its manifest gains. The class
+  then comes from each symbol's own demangled prefix, as the rule says, and a
+  derived destructor's thunk calls the derived symbol (the same code, by its
+  own name).
+- The STL method table (`_stl_methods_from_nm`) keeps its address map: it
+  dedups constructor and destructor variants per method on purpose, and its
+  synthetic tests pair by address.
+- Tests: `test_symbol_hygiene.jl` pairs the tinyxml2 listing shape (eight
+  names at one address, a data symbol and a spaced demangled name between
+  them) and checks the fallback; `test_cpp_finalizers.jl` runs the generator
+  on metadata derived from such listings and checks each class's destroy
+  function names its own symbol and the owner frees through the derived D0;
+  `test_cpp_finalizers_live.jl` builds the fixture at `-O2` with a `Twig :
+  Leaf` whose destructor adds nothing, checks the two D2s share an address in
+  the library, that the metadata gives `Twig` its own D0/D1/D2 and `Leaf`'s
+  symbols stay `Leaf`'s, and that collected `ManagedTwig`s run `Leaf`'s
+  destructor body and `Leaf`'s `operator delete` once each.
+- tinyxml2, metadata re-extracted from its cached IR and re-wrapped (nothing
+  recompiled): the three destroy functions now call their own classes'
+  symbols; see the PR for the diff.
+
+### Tier 2 overloads dispatch on a pointer's target and on an enum (2026-11-13)
+
+A Tier 2 pointer parameter is `::Any`, so a `Managed` object, a `Ref`, a
+`String` pass through `Base.unsafe_convert`, and an emitted enum relaxed the
+same way (its name was not in the bound set). So `GetID(const char*)` and
+`GetID(const void*)`, `append_child(xml_node_type)` and `(const char*)`,
+`load_file(const char*)` and `(const wchar_t*)` were one Julia signature
+each, and `_dedup_method_chunks` kept whichever came last: 52 of the 89
+dropped C++ functions `test/tools/cpp_thunk_coverage.jl` counted on the Hub.
+
+- `_integer_width_overloads`, which already kept the C width on the integer
+  positions an overload set disagrees on, now marks pointer and enum
+  positions the same way, and both it and the function loop spell a strict
+  position through `_strict_param_spelling`: a `char*` of either sign as
+  `Union{AbstractString, Cstring, Ptr{UInt8}, Ptr{Int8}, AbstractVector{UInt8}}`,
+  a record's pointer as `Union{Ptr{T}, Ref{T}, AbstractVector{T}}` with the
+  owning types that `unsafe_convert` to it (`Managed<T>`, a factory struct), an
+  enum as itself (never `Union{E, Integer}`, which would take an integer
+  overload's arguments), `void*` and a target nothing emits as the `Any` they
+  were. A position the set agrees on is as ergonomic as before, so a wrapper
+  with no such overload set is byte-identical. A receiver is never strict:
+  tinyxml2's metadata carries `~XMLComment` entries whose `this` points at
+  `XMLNode` (one of them `XMLNode`'s D2 symbol), and typing them would have
+  taken the `::Any` receiver every caller passes a `Ptr{Cvoid}` to.
+- A `T&&` overload beside its `const T&`/`T&` twin is not emitted at all
+  (`_rvalue_shadowed`). Julia has no rvalue, both were one signature, and
+  the kept one was whichever came last: msdfgen's `Shape::addContour`,
+  pugixml's `xpath_node_set(xpath_node_set&&)` moved where a caller copied.
+  A `T&&` overload with no twin is emitted as before.
+- `thunk_manifest.json` is written from the set the FINAL text calls
+  (`_thunks_named_in_text`: the JIT string, the AOT slot through the
+  `_THUNK_SLOTS` table, the AOT virtual `thunk_<m>`), after the dedup, so a
+  dropped chunk leaves no thunk; across the Hub the manifests listed 87 that
+  no call site named and the JIT compiled for nothing. The AOT stage takes
+  the same set.
+- `cpp_thunk_coverage.jl` sets the drops the generator means aside as
+  "expected" with their reason (destructor variants, `const`/non-`const`
+  pairs, an rvalue overload beside its twin, two C spellings of one integer
+  width), reports them apart, and measures over the callable surface; a
+  C++ function whose Julia name another function spells to (pugixml's
+  `operator<` and `operator>` are both `operator_`) is named as such.
+- Measured on the Hub, before and after re-wrapping pugixml and tinyxml2
+  alone (nothing rebuilt): `cpp coverage: 4703/4738 (99.26%), traps 6,
+  dropped 29, expected 60` → `4711/4738 (99.43%), traps 6, dropped 21,
+  expected 60`. The two wrappers changed in exactly the recovered overloads
+  (pugixml: `load_file`/`save_file` with `const wchar_t*`, the four
+  `*_child(xml_node_type)`; tinyxml2: `LoadFile`/`SaveFile` with `const
+  char*`) and their manifests shrank by 23 and 24 thunks. The 11 remaining
+  overload drops are imgui's and msdfgen's, which recover on their next wrap.
+  (`test_tier2_typed_dispatch.jl`.)
+
+### A toolchain record is laid out from its bases (2026-11-13)
+
+An exported C++ function that returned or took `std::tuple`, `std::optional`
+or `std::complex` by value was an ABI trap stub on every host. The 2026-10-29
+promotion keeps the layout of a toolchain record the library reaches by value,
+but these had none to keep: libstdc++'s `tuple<int, double>` and
+`optional<double>` have no member of their own (every byte comes through
+bases: `_Tuple_impl` over `_Head_base`, `_Optional_base` over a memberless
+`_Optional_payload` over `_Optional_payload_base`), and the parser gives a
+record with no members no entry. `complex<double>` had an entry, but its member
+is a `complex` scalar, which promotion did not count as laid out.
+
+- **An entry from bases.** `parse_dwarf_dump` now records a toolchain record
+  with no member of its own when it has a non-virtual base. A library record
+  keeps the old rule (no member, no entry): its Julia type would have no fields.
+- **A layout from bases.** `_promote_toolchain_records!` promotes such a record
+  through `_laid_out_from_bases`: every member of every non-empty, non-virtual
+  base, at depth, at the base's offset plus its own (a bitfield's
+  `data_bit_offset` with it), in place of the base, which leaves
+  `base_classes`. `tuple<int, double>` is `_M_head_impl::double` at 0 and
+  `_M_head_impl_1::int` at 8 (libstdc++ stores elements in reverse; a shared
+  name is numbered). The intermediate bases are flattened, never promoted. A
+  base that cannot be looked up stays a base; one deeper down leaves the record
+  unflattened rather than missing bytes. Everything downstream (StructGen, the
+  SysV classifier, both generators) already reads members at offsets, so
+  nothing else changed.
+- **A union's empty member.** `optional`'s `_Storage<T>` union holds the value
+  beside an empty `_Empty_byte` (no entry). A union now drops a member whose
+  type is a 1-byte empty record (the rule the empty-base marking uses): it
+  overlaps the others and holds no bytes they do not.
+- **complex.** The parser already named the width from the base type's
+  `byte_size` (`complex float` at 8, `complex double` at 16, `complex long
+  double` at 32, `_complex_base_name`); promotion now counts those as laid
+  out. `std::complex<long double>` is callable on both conventions: 32 bytes
+  whose first eightbyte is X87, so x86-64 SysV returns it through `sret`; on
+  AArch64 `long double` is an IEEE quad, and the record is an HFA of two, in
+  v0 and v1 (`test_aapcs64_record_abi.jl`, and `test_aapcs64_abi_spec.jl`
+  against clang's aarch64 lowering). The live probe reads the value back
+  through C++ in the host's own `long double`: an x87 decoder in the first
+  version read a quad's zero low fraction bytes as the mantissa and failed on
+  the arm64 CI cell with `(0.0, 0.0)`.
+- Tests: `test_toolchain_records.jl` (CI) gains libstdc++-shaped tuple,
+  optional, complex and bitfield-in-a-base tables, and the deeper-base
+  fallback; it fails with `_laid_out_from_bases` neutered by its exact
+  signature, with the complex acceptance removed, and with the union's
+  empty-member drop removed. devtests 8g `test_toolchain_byvalue_live.jl`:
+  `tup`, `maybe`, `cplx` were asserted traps; they and new `maybe_int`,
+  `cplxf`, `cplxl` (read back by `cplxl_re`/`cplxl_im`) and by-value parameters (`tup_sum`, `maybe_or`,
+  `maybe_int_or`, `cplx_norm`, `cplxf_norm`) are called through Tier 2 with
+  the values C++ computes.
+
+### C++ coverage, measured: 98.0% (2026-11-13)
+
+C sat at a measured 99.97% because `test/tools/c_ccall_coverage.jl` counts
+real `ccall` targets in the parsed wrappers and names every miss by cause;
+C++ coverage was a feeling. `test/tools/cpp_thunk_coverage.jl` is its twin,
+hand-run and unwired, reading the Hub's wrappers, metadata, thunk manifests
+and graph manifests as they are:
+
+- The surface is one function per mangled symbol (DWARF lists a definition
+  once per compilation unit) net of `[wrap] exclude_symbols` matched as wrap
+  matches them, functions the metadata marks not exported, and, in a graph,
+  functions an earlier library's wrapper binds (`type_manifest.json`
+  `bound_symbols`). Graph packages give one row per C++ library; their C
+  libraries are the C tool's and are skipped with a note.
+- Bound is what the PARSED code does: a `ccall`/`@ccall` target (Tier 3) or
+  an invoked thunk (Tier 2: `JITManager.invoke("_mlir_ciface_<m>_thunk")`,
+  an AOT slot resolved through the emitted `_THUNK_SLOTS` table, an AOT
+  virtual `ccall((:thunk_<m>, THUNKS_LIBRARY_PATH))`). A thunk the manifest
+  lists and nothing invokes is not bound.
+- Every miss is attributed: a trap stub by the reason its message carries
+  (no layout, SysV refusal with the classifier's reason, conflicted name,
+  unresolved return, `long double`, FFI trap), with the records that block
+  functions counted; a drop by what the generator did (a destructor variant,
+  a `const`/non-`const` pair or an overload set collapsing to one `::Any`
+  signature in `_dedup_method_chunks`, undeclared varargs, a manifest thunk
+  whose chunk the dedup dropped, or nothing emitted). Types are counted as
+  emitted: fields, byte blob, byte record, opaque, imported, owner.
+- On the 4.4.0 wrappers, 12 C++ libraries (11 packages and hello_world's two
+  graph libraries): 4703 of 4798 bound (98.02%; 1293 by ccall, 3410 by
+  thunk), 6 traps, 89 drops. By count: 37 overloads collapsed to one `::Any`
+  signature with another overload bound, 28 destructor variants (one Julia
+  method per class, by construction), 15 `const`/non-`const` pairs, 7 other
+  dispatch collisions (pugixml's `operator>`/`operator>=`, two tinyxml2
+  destructors), 3 by-value records with no layout (fmt's `allocator<char>`,
+  clipper2's `std::function`), 3 `long double` by value (fmt), 2 undeclared
+  varargs (imgui). Also found: the thunk manifest is written from the
+  pre-dedup set, so it lists 87 thunks across the Hub that no call site
+  invokes and the JIT compiles for nothing.
+- Vacuous green is refused: at least one library measured, nonzero surface.
+
+### An imported enum brings its values (2026-11-11)
+
+The first report from the Hub's build-and-report loop (`hello_world`,
+`GENERATOR-imported-enum-values.md`): in graph mode an importer got an enum's
+type (`World.Mood === Hello.Mood`) and none of its enumerators, so a caller had
+to know which library owned each enum and spell its values through the owner.
+The import pre-pass aliased the type alone and the enumerator loop skipped an
+imported enum entirely. Now the owner's type manifest records each enum's
+enumerators as bound (`[base, bound, value]`, the collision prefix included:
+`_enumerator_facts` off the pending enums and what `_render_enum_chunks` bound),
+`_type_imports_chunk` emits one alias per enumerator to the owner's bound name,
+applying the owner's collision rule against the importer's own top-level names
+(an importer that binds `RED()` gets `Color_RED`), and the export list carries
+them. `World.Happy === Hello.Happy`. The live fixture then showed a second
+gap: a library whose DWARF lacks an enum it uses only through a header got that
+enum from the Clang.jl header walk, a second type beside the owner's. Header
+enums are now import candidates too (`__enum__<name>` keys off
+`header_enums`), the pre-pass runs after the header merge, and an imported
+header enum is removed from `header_enums` so nothing emits it twice.
+(`test_cross_library_types.jl`: both collision directions; devtests
+`test_cross_library_types_live.jl`: a C and a C++ owner's values through the
+importer, and a header-only use that imports instead of re-emitting.)
+
 ### Three test suites, one list, a runner that runs what a diff touches (2026-11-11)
 
 devtests was one 18-minute process that printed every build's progress and

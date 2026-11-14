@@ -6,7 +6,10 @@ hand-written shim. `discover()` writes what it can see by scanning. The rest is
 what **you** tell it, and [§2](#2.-What-discovery-cannot-know) is the list of
 exactly that.
 
-How to get to a file you can edit: [Wrap a library](guide.md). Symptom → key:
+What the file is for, and a map of what it can do: [The recipe](toml.md).
+Where sources come from: [Dependencies](dependencies.md). A CMake project of
+several libraries: [Graph mode](graph.md). How to get to a file you can edit:
+[Wrap a library](guide.md). Symptom → key:
 [Troubleshooting](troubleshooting.md). The tables below are what the parser
 actually does — including keys it validates loudly, keys it warns about, and the
 handful it currently accepts and ignores.
@@ -38,6 +41,7 @@ destroying your intent. The preserved set is:
 | `[wrap]` | `shim_defines` |
 | `[wrap]` | `cstring_owned` |
 | `[wrap]` | `exclude_symbols` |
+| `[wrap]` | `rename` |
 | `[wrap]` | `surface_types_only` |
 | `[wrap]` | `surface_types_extra` |
 | `[wrap]` | `headers` |
@@ -317,6 +321,18 @@ flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
 
 DWARF is RepliBuild's input format, so this flag is load-bearing, not bloat. Reach
 for it whenever a struct you can see in the header comes out with no fields.
+
+In C++ the usual cause is *constructor homing*: clang writes a class's full
+definition only where its constructor is emitted, so a header-only value type
+whose constructors are all inline is a declaration everywhere. `-Xclang
+-fno-use-ctor-homing` turns just that off, at a fraction of
+`-fstandalone-debug`'s size (which also emits all of the standard library's
+types). Hub boostmath builds its distribution classes this way:
+
+```toml
+[compile]
+flags = ["-O2", "-fPIC", "-std=c++17", "-Xclang", "-fno-use-ctor-homing"]
+```
 
 ### 2.6 Excluding what is not the library
 
@@ -684,8 +700,6 @@ project that way, with `/` separators; paths outside the project stay absolute.
 A config with absolute paths into one machine's tree (`/home/…`) builds nowhere
 else.
 
----
-
 ### 2.17 `rename` — a name of your own
 
 A function's Julia name is derived from its C++ spelling, template arguments
@@ -729,10 +743,11 @@ silently. Two keys giving one function two names is an error at that function.
 A symbol `exclude_symbols` drops cannot be renamed, and a wrap without
 `compilation_metadata.json` (the symbol-only generator) refuses a table.
 
-Types have no rename key: a type's name reaches struct definitions, every
+Types have no rename key yet: a type's name reaches struct definitions, every
 signature that spells it, the layout tables and the thunk side through
-several derivations, so renaming one is not a one-place change (see *Not Yet
-Built* in CLAUDE.md).
+several derivations, so renaming one is not a one-place change. In your own
+module, `const Normal = M.normal_distribution_double_…` gives a type a short
+name without touching the wrapper.
 
 ## 3. Section reference
 
@@ -965,35 +980,12 @@ pugixml = { type = "git", url = "https://github.com/zeux/pugixml.git", tag = "v1
 | `exclude` | Vector{String} | `[]` | Paths to skip during source injection, for every dependency type — §2.6 |
 | `submodules` | Vector{String} | `[]` (none) | `type = "git"` only. Submodule paths of the superproject to fetch; see below |
 
-Git dependencies clone into `.replibuild_cache/deps/<name>/` and re-checkout on
-tag change. Resolved sources merge into the compilation graph before `[compile]`
-runs, so they are compiled with the same toolchain and flags as your own files —
-which is exactly why the resulting DWARF is consistent across the whole project.
-
-**Archives.** A library that ships as a tarball rather than a git repository
-(NASA's CDF, most of what GNU and the national labs distribute) is an
-`archive` dependency: the tarball's `url` and its `sha256`. It is fetched
-through Pkg's own download-verify-unpack engine into
-`.replibuild_cache/deps/<name>/`, the hash is checked before anything is
-unpacked, and the unpacked tree is then walked like a clone, `exclude`
-included. The marker records url and hash, so a changed pin re-fetches and an
-unchanged one is reused across builds; `clean()` deletes the unpacked tree and
-the next build fetches again, checking the same hash. There is no "latest":
-without `sha256` the recipe does not load.
-
-```toml
-[dependencies.cdf]
-type   = "archive"
-url    = "https://spdf.gsfc.nasa.gov/pub/software/cdf/dist/cdf39_1/linux/cdf39_1-dist-cdf.tar.gz"
-sha256 = "f9574315a028e8f71257fd55c375639c95fea607a5df70fb6629dc1e22adc68b"
-subdir = "cdf39_1-dist/src"          # the library's tree inside the archive
-exclude = ["tools", "lib/libmain.c"]
-```
-
-**Submodules.** A clone fetches no submodules, so a superproject such as
-boostorg/boost comes back as an almost empty tree. `submodules` names the ones to
-fetch, and only those: a superproject can have hundreds, and the list is never
-taken to mean all of them.
+Git and archive dependencies land in `.replibuild_cache/deps/<name>/`; a local
+one is used in place. Every dependency's sources merge into the one library
+the recipe builds, compiled with the project's toolchain and flags. How a
+dependency is walked, pinned and cleaned, archives, and how `submodules`
+resolve a superproject's libraries (Boost) are on
+[Dependencies](dependencies.md).
 
 ```toml
 [dependencies.boost]
@@ -1001,30 +993,13 @@ type       = "git"
 url        = "https://github.com/boostorg/boost.git"
 tag        = "boost-1.86.0"
 commit     = "<40-hex>"
-submodules = ["libs/math", "libs/config"]
-exclude    = ["libs/math/src/tr1"]
+submodules = ["libs/filesystem", "libs/config", "libs/core"]   # exactly these, shallow, at their gitlinks
+exclude    = ["libs/config/checks"]
 ```
 
-- Each listed submodule is fetched shallow (`git submodule update --init --depth 1`)
-  at the commit the superproject's tree records for it, never recursively, so
-  submodules of a submodule are not fetched.
-- `commit` pins the submodules too, because the superproject's tree records each
-  submodule's commit. A listed submodule whose checkout is not that commit is a
-  **hard error**, like a pin mismatch; delete the clone (or `clean` the project)
-  to fetch it again.
-- A listed path where the superproject records no submodule is a hard error.
-- Changing the list re-resolves the dependency, as a tag change does.
-- Each fetched submodule is one more source root of the same dependency: the
-  resolver adds `<submodule>`, `<submodule>/include` and `<submodule>/src` to the
-  include path and walks it for sources like the dependency's root, with the same
-  skipped directories. `exclude` matches a path relative to the dependency's root,
-  so submodule files are named as `libs/math/…`. Everything still compiles into
-  one library with the project's flags.
-- A submodule that is not listed contributes nothing, even when an earlier list
-  fetched it.
-- Entries are validated at load: a relative `/`-separated path of letters,
-  digits, `.`, `_`, `+` and `-`, with no `.` or `..` component, no empty
-  component, and no leading `-`.
+`submodules` entries are validated at load: a relative `/`-separated path of
+letters, digits, `.`, `_`, `+` and `-`, with no `.` or `..` component, no empty
+component and no leading `-`, on a `git` dependency only.
 
 ### `[ingest]`
 
@@ -1073,104 +1048,22 @@ Where things go (`[paths]` relative to the project root):
 | `<paths.output>/<target>/lib/` | One library, its `compilation_metadata.json`, its wrapper `<Module>.jl`, its `type_manifest.json` (the types the wrapper defined as its own) and, when it imported types, `type_imports.json` (the owners' definitions, for the thunks) |
 | `<paths.output>/<target>/{ir,build}/` | Its IR and link intermediates; never vendored |
 | `<paths.output>/<Graph>.jl` | The graph module: `module <Graph>` including every library's wrapper in load order |
-
-**One Julia type per C++ type across the graph.** A type several libraries
-share is defined once, by the wrapper of the first library in load order whose
-wrapper emitted it, and imported by the later ones
-(`const X = Base.parentmodule(@__MODULE__).Owner.X`), so a pointer, a `Managed`
-object or a value from one library's module passes straight into another's
-functions, a derived class flattens its base's fields, and a record embedding a
-shared one keeps its layout. Who owns a type follows the load order and an
-identity check: the types' enclosing scopes must meet (two `Config`s in two
-namespaces are two types and each library keeps its own), a type declared only
-in a source file (`.c`, `.cpp`, …), never a header, is local to that file and
-stays its library's own (two `.c` files' `typedef struct {…} MemBuffer;` are two
-types, though C gives them one scope), two definitions of
-one type with different layouts are a wrap error naming both libraries, and a
-type whose members two libraries both define strongly is an error too. A
-header-only type used by two libraries that share no dependency stays one type
-per library; the wrap reports these. A library's wrapper therefore loads only
-through the graph module, which includes the owners first.
 | `<paths.output>/graph.toml` | The graph manifest: each library, its module and what it links |
 
-**Module names.** The graph module is named like a single library's wrapper:
-`[wrap] module_name`, else CamelCase of `[project] name`; a name Julia binds
-already (`Core`, `Base`, `Matrix`, …) is an error that says to set
-`[wrap] module_name`. Each library's module is CamelCase of its target name,
-renamed by one rule: a name bound in `Base` or `Core`, or `Libdl` or
-`RepliBuild`, gets an `R` in front (`Core` → `RCore`), and a name equal,
-ignoring case, to the graph module's or an earlier library's gets `_2`, `_3`, …
-(in load order). Call a library's functions as `Graph.RCore.f(…)`.
+With `dependency`, `source` is a directory inside that checkout,
+`/`-separated and relative (`"."` for the checkout itself); an absolute path,
+or one leaving the checkout, is an error, as is a `dependency` naming no
+`[dependencies]` entry or a `system` one. The dependency's `exclude` does not
+apply: CMake lists the sources.
 
-**Load order.** Each library's `__init__` opens its library, and the graph
-module includes the wrappers dependencies first, so a library's dependencies
-are open before it is. On Windows a graph library's wrapper also opens the
-DLLs it links where they sit in the graph, relative to the wrapper, before
-their build-time paths; on ELF every graph library has its file name as its
-soname. Both keep a moved or vendored graph on its own copies.
-
-**Caching.** An unchanged translation unit is not recompiled; a library whose
-IR, compile keys, link arguments and dependencies are unchanged is not relinked
-(`<paths.output>/<target>/link.key`), and its metadata is not extracted again
-(`metadata.key`). Every `build` still configures, runs the generator steps and
-checks those keys. `clean` removes the CMake build tree and the output directory.
-
-**Registry.** `register` vendors the graph as one unit (graph module, manifest,
-each library's `lib/` directory) to `builds/<hash>/`, and `use(name)` returns the
-graph module. The hash covers every file of the CMake project's tree (`.git` and
-RepliBuild's own directories excepted), since CMake files decide every flag and
-a generator step can read files no target lists.
-
-**A dependency as the source.** A graph project need not hold the CMake
-project: `dependency` names a `[dependencies.<name>]` entry, and the entry's
-checkout is the source.
-
-```toml
-[graph]
-dependency = "root"              # the checkout of [dependencies.root]
-source     = "."                 # inside it; the default
-targets    = ["Core", "Hist"]
-
-[dependencies.root]
-type   = "git"
-url    = "https://github.com/root-project/root.git"
-tag    = "v6-34-04"
-commit = "<40-hex>"
-submodules = []                  # fetched into the checkout, if any are listed
-```
-
-- `build` resolves the dependency the way a single library's build does
-  (`DependencyResolver`): a `git` dependency is cloned into
-  `.replibuild_cache/deps/<name>/` and checked out at `tag`, its `commit` pin
-  verified and its listed `submodules` fetched; an `archive` is fetched,
-  checked against `sha256` and unpacked, its `subdir` the root; a `local`
-  dependency's `path` is used in place. Only then is the checkout configured.
-  A `system` dependency has no tree and is refused at load.
-- `source` is then a directory inside the checkout, `/`-separated, relative
-  (`"."` for the checkout itself): an absolute path, or one leaving the
-  checkout, is an error.
-- The dependency's `exclude` does not apply: CMake lists the sources.
-- Errors name the key and the entry: a `dependency` that names no
-  `[dependencies]` entry, one of type `system`, a checkout the resolver could
-  not fetch (its warning says why), or one with no `CMakeLists.txt` where
-  `source` points.
-- `clean` removes the clone with the rest of the cache; `clean(toml; deps =
-  false)` keeps it, and the next build verifies its pin instead of cloning
-  again, as for a single library. `discover(force = true)` keeps the key with
-  the `[graph]` section and the entry with `[dependencies]`.
-- The registry's hash covers the entry (name, type, url, tag, `commit`,
-  `sha256`, `subdir`, `path`) and every file of the checkout under `source`,
-  relative to it, so a moved pin is another build and an unchanged one is
-  not, wherever the deps cache is. The graph manifest records the checkout as
-  `source` and the entry as `dependency`.
+How the graph is built, how targets pull in the libraries they link, module
+names, load order, one Julia type per C++ type across libraries, caching and
+the registry: [Graph mode](graph.md).
 
 **Not applied per library yet.** The other `[wrap]` keys, `[compile]` and
 `[types]`: each library is wrapped with defaults (a non-empty
 `[compile] source_files` warns). `[link] optimization_level` and `fallback`
-apply to every library. A type two libraries share is one Julia type, owned by
-the first library in load order (see *One Julia type per C++ type* above). An
-imported enum brings its type but not its values: those stay in the owner's
-module (`Graph.Owner.VALUE`).
+apply to every library.
 
 ### `[llvm]`
 
@@ -1403,6 +1296,9 @@ G = include(RepliBuild.wrap("replibuild.toml"))   # or RepliBuild.register + use
 G.Hist.some_function(1)
 ```
 
+A pinned upstream as the CMake project (`[graph] dependency`) is the Hub's
+libwebp recipe, on [Graph mode](graph.md#A-recipe).
+
 ### A pre-built C binary (ingest)
 
 ```toml
@@ -1437,3 +1333,5 @@ Symptom → key, including build and cache failures, lives on
 | Build refused: "wrappable surface … is EMPTY" / "NOT reachable" | §2.12 — `visibility = "hidden"` on a library that does not annotate |
 | Missing header / missing `-D` | §2.7, §2.9 |
 | Setting does nothing | §5 — typos are silent |
+| A dependency's submodule headers not found | [Dependencies](dependencies.md#Which-submodules-a-library-needs) |
+| Function name is hundreds of characters long | §2.17 |

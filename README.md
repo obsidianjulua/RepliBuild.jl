@@ -79,8 +79,16 @@ ret = "int"
 templates = ["std::vector<int>"]    # C++: force DWARF for these instantiations
 ```
 
-The [configuration page](https://obsidianjulua.github.io/RepliBuild.jl/stable/config/)
+[The recipe](https://obsidianjulua.github.io/RepliBuild.jl/stable/toml/) explains
+what the file is for and maps everything it can do; the
+[configuration page](https://obsidianjulua.github.io/RepliBuild.jl/stable/config/)
 lists every key, what discovery cannot infer, and a symptom → key index.
+
+A CMake project of several libraries that link each other is one recipe too:
+a `[graph]` section takes the build graph from CMake's own File API, builds
+every library, and wraps them as one Julia module with a submodule per library
+and one Julia type per C++ type across them
+([Graph mode](https://obsidianjulua.github.io/RepliBuild.jl/stable/graph/)).
 
 ## Requirements
 
@@ -134,7 +142,10 @@ the port found.
 
 - [User manual](https://obsidianjulua.github.io/RepliBuild.jl/stable/) — the complete index
 - [Wrap a library](https://obsidianjulua.github.io/RepliBuild.jl/stable/guide/) ·
+  [The recipe](https://obsidianjulua.github.io/RepliBuild.jl/stable/toml/) ·
   [Edit the TOML](https://obsidianjulua.github.io/RepliBuild.jl/stable/config/) ·
+  [Dependencies](https://obsidianjulua.github.io/RepliBuild.jl/stable/dependencies/) ·
+  [Graph mode](https://obsidianjulua.github.io/RepliBuild.jl/stable/graph/) ·
   [Call a wrapper](https://obsidianjulua.github.io/RepliBuild.jl/stable/calling/) ·
   [API](https://obsidianjulua.github.io/RepliBuild.jl/stable/api/)
 - [Developer](https://obsidianjulua.github.io/RepliBuild.jl/stable/developer/) — architecture (JLCS, inheritance ABI, internals)

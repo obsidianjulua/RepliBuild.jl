@@ -12,16 +12,31 @@ not maintain generated bindings.
 It wraps a library from its source, on your machine. It is not a replacement for
 BinaryBuilder and JLL packages, which ship prebuilt binaries for every platform.
 
-This site is the user manual: how to install, how to wrap a library, what to
-edit in the TOML, and how to call the result.
+This site is the user manual. It has two halves, because using RepliBuild
+is two jobs:
+
+- **The recipe.** `replibuild.toml` is the whole interface: every fact about a
+  library that the compiler cannot tell RepliBuild — where the source comes
+  from and at which pin, the flags its build system would pass, its macros and
+  variadic functions, who frees what, which symbols are not API, what a
+  function should be called — is one key in that file, and nothing else is
+  ever written by hand. [The recipe](toml.md) explains the model and maps
+  everything a recipe can do.
+- **The wrapper.** What `wrap` writes is an ordinary Julia module. [Call a
+  wrapper](calling.md) is how C and C++ types, objects, overloads, strings and
+  standard-library values look from Julia, and [Ship a package](using-wrappers.md)
+  is how to build a Julia package on one.
 
 ## I want to…
 
 | Goal | Page |
 |:-----|:-----|
 | Check the toolchain | [Install](install.md) |
-| Wrap a C/C++ project | [Wrap a library](guide.md) |
-| Fill in macros, varargs, ownership, flags, excludes | [Edit the TOML](config.md) |
+| Wrap a C/C++ project, start to finish | [Wrap a library](guide.md) |
+| Understand what the TOML is and what it can do | [The recipe](toml.md) |
+| Fill in macros, varargs, ownership, flags, excludes, renames | [Edit the TOML](config.md) |
+| Build from a pinned git tag, a tarball, or a Boost submodule set | [Dependencies](dependencies.md) |
+| Wrap a CMake project of several libraries as one module | [Graph mode](graph.md) |
 | Call the generated functions, structs, and C++ classes | [Call a wrapper](calling.md) |
 | Ship a Julia package on top of a wrapper | [Ship a package](using-wrappers.md) |
 | Reload a project you already wrapped | [Registry](use.md) |
@@ -88,9 +103,13 @@ You add the things it cannot see:
 - compile flags, `-D` defines, include dirs, link libraries
 - paths that must not compile (tests, examples, CLIs)
 - C++ template instantiations you actually want in the wrapper
+- the pinned upstream the library comes from, and the parts of it that are not
+  the library
+- a short name for a function whose derived one is not usable
 
 Omit one of those and the build usually *succeeds* — the wrapper is just missing
-the thing, or leaks, or wraps an empty struct. The symptom → key table is in
+the thing, or leaks, or wraps an empty struct. [The recipe](toml.md) maps
+every key to what it does; the symptom → key table is in
 [Troubleshooting](troubleshooting.md).
 
 ## Requirements

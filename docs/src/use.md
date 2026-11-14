@@ -52,6 +52,11 @@ wrapper; one that already has RepliBuild keeps it.
 `register(toml; build=false)` records the project without building it. The
 first `use` builds and vendors it.
 
+A [graph](graph.md) project registers as one unit: the graph module, its
+manifest and every library's directory are vendored together, and `use(name)`
+returns the graph module (`use("libwebp").Webp`). Its hash covers every file of
+the CMake project, since CMake files decide every flag.
+
 ## What `use` loads
 
 `use("name")` compares the project's inputs with the build it vendored:
