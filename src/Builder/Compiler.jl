@@ -3253,29 +3253,110 @@ function extract_stl_method_symbols(binary_path::String, templates::Vector{Strin
         return Dict{String,Any}()
     end
 
-    # Run nm to get mangled names (include W=weak symbols for template instantiations)
-    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-g", "--defined-only", binary_path])
+    # Every global symbol, defined (T/W: the library's own, template
+    # instantiations among them) AND undefined (U: what the library calls in
+    # the C++ runtime), in the symbol table's own order (`-p`) so the two
+    # listings pair line by line (`_stl_methods_from_nm`).
+    (mangled_output, exitcode1) = BuildBridge.execute("nm", ["-gp", binary_path])
     if exitcode1 != 0
         @warn "nm failed for STL symbol extraction"
         return Dict{String,Any}()
     end
 
-    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gC", "--defined-only", binary_path])
+    (demangled_output, exitcode2) = BuildBridge.execute("nm", ["-gpC", binary_path])
     if exitcode2 != 0
         @warn "nm demangled failed for STL symbol extraction"
         return Dict{String,Any}()
     end
 
+    # An undefined member of a listed container is bindable when the library's
+    # OWN handle resolves it: glibc's dlsym searches a library's dependency
+    # tree, so libstdc++'s `basic_string<char>` members answer through the
+    # library that links them. A PE handle resolves only the DLL's own exports,
+    # so there the probe resolves none and nothing changes.
+    undefined = Set{String}(_nm_undefined_names(mangled_output))
+    resolvable = isempty(undefined) ? Set{String}() : _resolved_through_library(binary_path, undefined)
+
     (stl_methods, unbindable) = _stl_methods_from_nm(mangled_output, demangled_output, templates;
-                                                     runtime = _runtime_symbol_names(binary_path))
+                                                     runtime = _runtime_symbol_names(binary_path),
+                                                     resolvable = resolvable)
+    runtime_n = sum(count(m -> get(m, "runtime_library", false) == true, ms) for ms in values(stl_methods); init = 0)
+    runtime_n == 0 || println("  STL: $runtime_n member(s) of [types] templates bind from the C++ runtime " *
+                              "library through the library's own handle")
     if !isempty(unbindable)
         shown = join(first(unbindable, 8), "\n  ")
         more = length(unbindable) > 8 ? "\n  … and $(length(unbindable) - 8) more" : ""
         @warn "STL: $(length(unbindable)) member(s) of [types] templates are in the symbol " *
-              "table but not among the library's runtime symbols, so no thunk can bind " *
-              "them; the wrapper leaves them out:\n  $shown$more"
+              "table but neither among the library's runtime symbols nor resolvable through " *
+              "its handle, so no thunk can bind them; the wrapper leaves them out:\n  $shown$more"
     end
     return stl_methods
+end
+
+"""
+    _nm_undefined_names(nm_output) -> Vector{String}
+
+The names of the undefined (`U`) symbols in an `nm -g` listing, their version
+suffix cut (`_ZNSt…@GLIBCXX_3.4.21` is how nm spells a reference to a versioned
+symbol; `dlsym` takes the bare name).
+"""
+function _nm_undefined_names(nm_output::AbstractString)::Vector{String}
+    return [name for (typ, _, name) in _nm_symbol_lines(nm_output) if typ == "U"]
+end
+
+"""
+    _nm_symbol_lines(nm_output) -> Vector{NTuple{3,String}}
+
+Every code or undefined symbol of an `nm -g` listing as `(type, address,
+name)`: a defined code symbol (`T`/`W`/`t`/`w`, after a hex address) with its
+address, an undefined one (`U`, no address) with `""`. The name is everything
+after the type, so a demangled name keeps its spaces, and an undefined name
+loses its version suffix (`@GLIBCXX_3.4.21`; demangled lines carry it too).
+Lines of other kinds (data, weak undefined `w` without an address) are left out
+of both listings alike, so the two pair by position.
+"""
+function _nm_symbol_lines(nm_output::AbstractString)::Vector{NTuple{3,String}}
+    out = NTuple{3,String}[]
+    for line in eachsplit(nm_output, '\n')
+        parts = split(strip(line))
+        length(parts) >= 2 || continue
+        if parts[1] == "U"
+            name = join(parts[2:end], " ")
+            push!(out, ("U", "", String(replace(name, r"@[A-Za-z0-9_.]+$" => ""))))
+        elseif length(parts) >= 3 && String(parts[2]) in ("T", "W", "t", "w") &&
+               occursin(r"^[0-9a-fA-F]+$", parts[1])
+            push!(out, (String(parts[2]), String(parts[1]), join(parts[3:end], " ")))
+        end
+    end
+    return out
+end
+
+"""
+    _resolved_through_library(lib_path, names) -> Set{String}
+
+The `names` that `dlsym` resolves through `lib_path`'s OWN handle: the library
+is opened `RTLD_NOW | RTLD_LOCAL`, asked, and closed again, the Tier 1
+pre-flight's discipline (`_tier1_preflight!`), never `RTLD_DEFAULT`, whose
+answer could be another copy of the runtime (Julia's own libstdc++: the zlib
+lesson). An empty set when the library will not open; the caller then has
+today's table.
+"""
+function _resolved_through_library(lib_path::AbstractString, names)::Set{String}
+    out = Set{String}()
+    handle = try
+        Libdl.dlopen(lib_path, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+    catch e
+        @warn "STL: could not open $(basename(lib_path)) to probe its runtime symbols" exception = e
+        return out
+    end
+    try
+        for n in names
+            Libdl.dlsym(handle, n; throw_error = false) === nothing || push!(out, String(n))
+        end
+    finally
+        Libdl.dlclose(handle)
+    end
+    return out
 end
 
 """
@@ -3293,10 +3374,23 @@ goes down with it. That is what libc++ 23 did on Windows — its members were
 `unbindable` names each `Container::method` that had symbols but no bindable
 variant, for the caller to report. A method whose other variant binds (a C1
 constructor beside an exported C2) is not unbindable.
+
+`resolvable` is the set of UNDEFINED symbols (`U` lines, version suffix cut)
+the library's own handle resolves (`_resolved_through_library`): a member of a
+listed container the library calls in the C++ runtime rather than
+instantiating itself. Such a member enters the table marked
+`"runtime_library" => true`, and the JIT binds it at the address the handle
+gives (`JITManager`); an undefined member outside `resolvable` is unbindable.
+Undefined lines have no address, so they pair with their mangled names by
+position, which needs both listings in the symbol table's own order
+(`nm -gp`, `nm -gpC`); listings that do not line up (the address-keyed shape
+the older callers and tests pass) keep the address map and see no undefined
+symbol (2026-11-13).
 """
 function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::AbstractString,
                               templates::Vector{String};
-                              runtime::Union{Nothing,AbstractSet{<:AbstractString}}=nothing)
+                              runtime::Union{Nothing,AbstractSet{<:AbstractString}}=nothing,
+                              resolvable::Union{Nothing,AbstractSet{<:AbstractString}}=nothing)
     # Build address -> mangled mapping (include T and W symbol types)
     address_to_mangled = Dict{String,String}()
     address_to_type = Dict{String,String}()
@@ -3309,6 +3403,16 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
             address_to_type[parts[1]] = parts[2]
         end
     end
+
+    # Every code (T/W/t/w, with an address) or undefined (U, no address) line
+    # of a listing as `(type, address, name)`, the version suffix cut from an
+    # undefined name. The two listings pair by position when they line up
+    # (same count, same type at each line: `nm -gp` and `nm -gpC`); only then
+    # is an undefined symbol reachable, since it has no address to pair by.
+    m_syms = _nm_symbol_lines(mangled_output)
+    d_syms = _nm_symbol_lines(demangled_output)
+    positional = length(m_syms) == length(d_syms) &&
+                 all(i -> m_syms[i][1] == d_syms[i][1], eachindex(m_syms))
 
     # Build normalized template set for matching
     template_set = Set{String}()
@@ -3328,18 +3432,11 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
     stl_methods = Dict{String,Any}()
     skipped = Set{Tuple{String,String}}()   # (container, method) with an unbindable symbol
 
-    for line in split(demangled_output, '\n')
-        line = strip(line)
-        isempty(line) && continue
-        parts = split(line)
-        length(parts) >= 3 || continue
-
-        address = parts[1]
-        sym_type = parts[2]
-        demangled = join(parts[3:end], " ")
-
-        # Only consider T (text) and W (weak) symbols
-        sym_type in ("T", "W", "t", "w") || continue
+    for (i, (sym_type, address, demangled)) in enumerate(d_syms)
+        is_undefined = sym_type == "U"
+        # An undefined symbol is a candidate only when it can be paired and
+        # the handle resolves it.
+        is_undefined && !(positional && resolvable !== nothing) && continue
 
         # Match pattern: ContainerType::MethodSignature. Paren-aware: see
         # `_stl_split_class_method` — a `<>`-only scan walks into ctor args.
@@ -3359,8 +3456,9 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
 
         (method_name, is_const) = classification
 
-        # Get mangled name
-        mangled = get(address_to_mangled, address, "")
+        # Get mangled name: its own line's when the listings line up, else
+        # the one at its address.
+        mangled = positional ? m_syms[i][3] : get(address_to_mangled, address, "")
         isempty(mangled) && continue
 
         # For constructors/destructors, accept C1/C2 and D1/D2 variants
@@ -3373,8 +3471,15 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
         end
 
         # Before the dedup below, so an unbindable variant cannot shadow a
-        # bindable one (C1 first in nm, only C2 exported).
-        if runtime !== nothing && !(mangled in runtime)
+        # bindable one (C1 first in nm, only C2 exported). A defined symbol
+        # must be among the library's runtime symbols; an undefined one must
+        # resolve through its handle.
+        if is_undefined
+            if !(mangled in resolvable)
+                push!(skipped, (container_normalized, method_name))
+                continue
+            end
+        elseif runtime !== nothing && !(mangled in runtime)
             push!(skipped, (container_normalized, method_name))
             continue
         end
@@ -3390,13 +3495,17 @@ function _stl_methods_from_nm(mangled_output::AbstractString, demangled_output::
             continue
         end
 
-        push!(stl_methods[container_normalized], Dict{String,Any}(
+        entry = Dict{String,Any}(
             "mangled" => mangled,
             "demangled" => demangled,
             "method" => method_name,
             "is_const" => is_const,
             "full_signature" => method_sig
-        ))
+        )
+        # Lives in the C++ runtime library, not in this one: the JIT binds it
+        # at the address the library's handle resolves (`JITManager`).
+        is_undefined && (entry["runtime_library"] = true)
+        push!(stl_methods[container_normalized], entry)
     end
 
     kept(c, m) = any(x -> get(x, "method", "") == m, get(stl_methods, c, Dict{String,Any}[]))
