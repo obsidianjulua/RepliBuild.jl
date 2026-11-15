@@ -73,14 +73,41 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi;
     if kind === :enum
         return _conflicted_entry(key, structs) ? (:conflict, key) : (:enum, key)
     elseif kind === :layout
+        # An empty record has an entry too since every defined library record
+        # has one (2026-11-14), and its layout is one byte nothing reads: the
+        # convention's answer for an empty record (dropped, a register pad,
+        # by reference) comes first, as it did while the entry was missing.
+        # Only `record_abi`'s `empty` says so; a memberless derived record
+        # (`P3 : Pair {}`) has bytes, and is laid out from its bases.
+        verdict = _record_facts_verdict(t, record_abi, abi, ret; empty_only = true)
+        verdict === nothing || return verdict[1] === :conflict ? (:conflict, key) : verdict
         held = conflicted_within(key, structs)
         return held === nothing ? (:layout, key) : (:conflict, held)
     end
 
+    verdict = _record_facts_verdict(t, record_abi, abi, ret)
+    verdict === nothing || return verdict
+    return (:opaque, nothing)
+end
+
+# What `record_abi`'s facts say about a by-value `t` with no layout to cross by
+# (or, with `empty_only`, only when they say the record is empty): `:indirect`
+# for DW_CC_pass_by_reference, `:ignore`/`:regpad` for an empty record by the
+# convention, `(:opaque, nothing)` for an empty record a convention passes whole
+# and no layout types; `nothing` when the facts decide nothing. Conflicted facts
+# decide nothing without a layout, and with one (`empty_only`) they say
+# `(:conflict, nothing)`: the caller names the entry.
+function _record_facts_verdict(t::AbstractString, record_abi, abi::Symbol, ret::Bool;
+                               empty_only::Bool = false)
     suffixes = _scope_suffixes(t)
     for cand in suffixes
         facts = get(record_abi, cand, nothing)
-        (facts === nothing || get(facts, "conflict", false) == true) && continue
+        facts === nothing && continue
+        if get(facts, "conflict", false) == true
+            empty_only && return (:conflict, nothing)
+            continue
+        end
+        empty_only && get(facts, "empty", false) != true && return nothing
         pass = get(facts, "pass", nothing)
         pass == "reference" && return (:indirect, nothing)
         if get(facts, "empty", false) == true
@@ -117,12 +144,12 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi;
                 if abi !== :win64 || bs == 0 || pass === nothing
                     return (:ignore, nothing)
                 end
-                return (:opaque, nothing)
+                return empty_only ? nothing : (:opaque, nothing)
             end
         end
         break
     end
-    return (:opaque, nothing)
+    return nothing
 end
 
 _strip_top_cv(c_type) = String(replace(replace(strip(String(c_type)), r"^(?:(?:const|volatile)\s+)+" => ""),
@@ -414,9 +441,14 @@ function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_ab
     ret = by_value_crossing(ret_c, structs, record_abi; abi, ret = true)
     reasons = String[]
     abi_reasons = String[]
+    # A record C++ passes by invisible reference (`DW_CC_pass_by_reference`)
+    # crosses as a pointer on every convention, so it needs no class: asked
+    # anyway, AAPCS64 refused a memberless class with a virtual base (`VB`)
+    # that it passed by address until the record gained an entry (2026-11-14).
+    by_ref(c, key) = record_passes_by_reference(c, key, record_abi)
     for (p, (k, key)) in zip(get(func, "parameters", []), params)
         k === :opaque && push!(reasons, "takes `$(get(p, "c_type", "?"))` by value")
-        if k === :layout
+        if k === :layout && !by_ref(String(get(p, "c_type", "")), key)
             why = sysv_trap_reason(key, structs; ret = false, abi)
             why === nothing || push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $why")
         end
@@ -424,7 +456,7 @@ function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_ab
             push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $(_BARE_VECTOR_PHRASE)")
     end
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
-    if ret[1] === :layout
+    if ret[1] === :layout && !by_ref(ret_c, ret[2])
         why = sysv_trap_reason(ret[2], structs; ret = true, abi)
         why === nothing || push!(abi_reasons, "returns `$ret_c` by value, $why")
     end
@@ -714,7 +746,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             # of the bytes behind the slot (`Ref(arg)`), so that address is the
             # temporary. Passed in registers, the callee read the object's first
             # eightbyte as its address.
-            by_address = kind === :layout && lookup_key !== nothing &&
+            # `:indirect` with an entry is the same record: an empty class with a
+            # destructor (`Guard`) has had a one-byte entry since 2026-11-14,
+            # and the definition string below must not replace the pointer.
+            by_address = kind in (:layout, :indirect) && lookup_key !== nothing &&
                          !haskey(class_raii, strip(replace(t, r"\bconst\b" => ""))) &&
                          record_passes_by_reference(t, rec_key, record_abi)
             if by_address
