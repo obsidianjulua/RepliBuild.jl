@@ -415,7 +415,11 @@ Contents of the .debug_info section:
         @test ra["Tag"]    == Dict("byte_size" => "0x1", "pass" => "value",     "empty" => true)
         @test ra["Guard"]  == Dict("byte_size" => "0x1", "pass" => "reference", "empty" => true)
         @test ra["Owner"]  == Dict("byte_size" => "0x4", "pass" => "reference", "empty" => false)
-        @test ra["Handle"] == Dict("byte_size" => "0x4", "pass" => "reference", "empty" => false)
+        # `Handle` declares a copy constructor, which the entry records too
+        # (2026-11-15, `_record_declared_constructors!`); the others declare none.
+        @test ra["Handle"] == Dict("byte_size" => "0x4", "pass" => "reference", "empty" => false,
+                                   "constructors" => [Dict("symbol" => "_ZN2ee6HandleC4ERKS0_", "accessibility" => "public",
+                                                           "deleted" => false, "artificial" => false)])
         # A base class is bytes the callee reads: not empty.
         @test ra["P3"]     == Dict("byte_size" => "0x8", "pass" => "value",     "empty" => false)
         # A declaration has no byte_size, so no facts; `Pair` is only ever a
