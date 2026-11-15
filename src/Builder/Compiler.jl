@@ -7460,17 +7460,34 @@ function parse_dwarf_dump(output::AbstractString;
                     end
                 end
 
-                # A record with no member of its own has no entry, with one
-                # exception: a toolchain record whose bytes come from its
-                # non-virtual bases (libstdc++'s `std::tuple` and `_Tuple_impl`,
-                # `std::optional` and `_Optional_payload`, libc++'s `__tuple_impl`).
-                # `_promote_toolchain_records!` lays it out from them. A library
-                # record keeps the old rule; its Julia type has no fields to give.
+                # A toolchain record with no member of its own has an entry only
+                # when its bytes come from its non-virtual bases (libstdc++'s
+                # `std::tuple` and `_Tuple_impl`, `std::optional` and
+                # `_Optional_payload`, libc++'s `__tuple_impl`):
+                # `_promote_toolchain_records!` lays it out from them.
                 from_bases = isempty(resolved_members) && drops_type(type_info) &&
                     any(d -> isa(d, Dict) && get(d, "kind", nothing) == "inheritance" &&
                              get(d, "virtual", false) != true,
                         get(children_by_parent, offset, ()))
-                if !isempty(resolved_members) || from_bases
+                # Every DEFINED library record has an entry, members or not
+                # (2026-11-14): a derived class that adds methods and no field
+                # (Bullet's `btBoxShape`, `btQuaternion`; 39 of its 603 records),
+                # a stateless functor, an interface. Without one the wrapper had
+                # no `STRUCT_SIZES` entry to size the class's constructor
+                # storage by, every class deriving from it lost the bases above
+                # it (`btConvexInternalShape` carried a 32-byte pad where
+                # `btCollisionShape`'s fields belong), and graph mode could not
+                # see what it derives from. The entry carries `members = []` and
+                # `base_classes`; GeneratorCpp flattens the bases into fields,
+                # and the thunk side reads a record's class from its bases'
+                # leaves. A declaration has no `byte_size`; a size-0 record is
+                # GNU C's empty struct, which has nothing to size; an anonymous
+                # record exists to be embedded; a lambda's closure type cannot be
+                # named. A virtual base is flattened by nobody, so such a record
+                # gets its entry and keeps every refusal it had.
+                library_defined = isempty(resolved_members) && !drops_type(type_info) &&
+                    _memberless_record_entry(String(struct_name), type_info)
+                if !isempty(resolved_members) || from_bases || library_defined
                     struct_def = Dict{String,Any}(
                         "kind" => get(type_info, "kind", "struct"),
                         "byte_size" => get(type_info, "byte_size", "0x0"),
@@ -8234,6 +8251,21 @@ function _members_cover_record(def::AbstractDict)::Bool
         cur = max(cur, b)
     end
     return cur >= total
+end
+
+"""
+    _memberless_record_entry(name, type_info) -> Bool
+
+Whether a library record with no member of its own gets a `struct_definitions`
+entry: a definition (it has a `byte_size`) of more than zero bytes (GNU C's
+empty struct has nothing to size), not an anonymous record (it exists to be
+embedded) and not a lambda's closure type (nothing can name it). Every such
+record does (2026-11-14): see the parser's note at its call.
+"""
+function _memberless_record_entry(name::AbstractString, type_info::AbstractDict)::Bool
+    return something(_definition_byte_size(type_info), 0) > 0 &&
+           get(type_info, "anonymous", false) != true &&
+           !startswith(name, "(lambda")
 end
 
 function _definition_byte_size(def::AbstractDict)

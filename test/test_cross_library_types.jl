@@ -491,4 +491,17 @@ const _XT_CLIB = _xt_meta(_XT_C_FUNCTIONS, _XT_C_STRUCTS)
         @test _XT_W._reached_c_type_name("void *") === nothing
         @test _XT_W._reached_c_type_name("int (*)(int)") === nothing
     end
+
+    @testset "a memberless derived class says what it derives from" begin
+        # A class with no member of its own had no `struct_definitions` entry,
+        # so a dependent deriving from an owner's class through one was
+        # invisible to the owner (`has_subclass`, the D0 factory-struct rule).
+        # Since 2026-11-14 the parser gives it an entry with its bases.
+        dep = Dict{String,Any}("struct_definitions" => Dict{String,Any}(
+            "TKid" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x10", "members" => Any[],
+                                       "base_classes" => Any[Dict{String,Any}("type" => "TObject", "offset" => 0,
+                                                                              "virtual" => false)])))
+        @test _XT_W._graph_subclassed(Any[dep]) == ["TObject"]
+        @test _XT_W._graph_subclassed(Any[Dict{String,Any}("struct_definitions" => Dict{String,Any}())]) == String[]
+    end
 end

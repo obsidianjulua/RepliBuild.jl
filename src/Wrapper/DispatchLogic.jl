@@ -148,8 +148,11 @@ function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
             FG.record_passes_by_reference(s, nothing, record_abi) && return false
             # A name several types share (`FG.conflicted_within`): the Julia
             # struct is one of them, maybe not this function's. The thunk path
-            # is where the trap is emitted.
-            FG.by_value_crossing(s, dwarf_structs, record_abi)[1] === :conflict && return false
+            # is where the trap is emitted. An empty record (`:ignore`,
+            # `:regpad`) is one the convention drops or pads, which a ccall of
+            # its one-byte Julia type does not: the thunk does (2026-11-14,
+            # when every defined record gained an entry).
+            FG.by_value_crossing(s, dwarf_structs, record_abi)[1] in (:conflict, :ignore, :regpad) && return false
         end
     end
 

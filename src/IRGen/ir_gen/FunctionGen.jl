@@ -73,14 +73,41 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi;
     if kind === :enum
         return _conflicted_entry(key, structs) ? (:conflict, key) : (:enum, key)
     elseif kind === :layout
+        # An empty record has an entry too since every defined library record
+        # has one (2026-11-14), and its layout is one byte nothing reads: the
+        # convention's answer for an empty record (dropped, a register pad,
+        # by reference) comes first, as it did while the entry was missing.
+        # Only `record_abi`'s `empty` says so; a memberless derived record
+        # (`P3 : Pair {}`) has bytes, and is laid out from its bases.
+        verdict = _record_facts_verdict(t, record_abi, abi, ret; empty_only = true)
+        verdict === nothing || return verdict[1] === :conflict ? (:conflict, key) : verdict
         held = conflicted_within(key, structs)
         return held === nothing ? (:layout, key) : (:conflict, held)
     end
 
+    verdict = _record_facts_verdict(t, record_abi, abi, ret)
+    verdict === nothing || return verdict
+    return (:opaque, nothing)
+end
+
+# What `record_abi`'s facts say about a by-value `t` with no layout to cross by
+# (or, with `empty_only`, only when they say the record is empty): `:indirect`
+# for DW_CC_pass_by_reference, `:ignore`/`:regpad` for an empty record by the
+# convention, `(:opaque, nothing)` for an empty record a convention passes whole
+# and no layout types; `nothing` when the facts decide nothing. Conflicted facts
+# decide nothing without a layout, and with one (`empty_only`) they say
+# `(:conflict, nothing)`: the caller names the entry.
+function _record_facts_verdict(t::AbstractString, record_abi, abi::Symbol, ret::Bool;
+                               empty_only::Bool = false)
     suffixes = _scope_suffixes(t)
     for cand in suffixes
         facts = get(record_abi, cand, nothing)
-        (facts === nothing || get(facts, "conflict", false) == true) && continue
+        facts === nothing && continue
+        if get(facts, "conflict", false) == true
+            empty_only && return (:conflict, nothing)
+            continue
+        end
+        empty_only && get(facts, "empty", false) != true && return nothing
         pass = get(facts, "pass", nothing)
         pass == "reference" && return (:indirect, nothing)
         if get(facts, "empty", false) == true
@@ -117,12 +144,12 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi;
                 if abi !== :win64 || bs == 0 || pass === nothing
                     return (:ignore, nothing)
                 end
-                return (:opaque, nothing)
+                return empty_only ? nothing : (:opaque, nothing)
             end
         end
         break
     end
-    return (:opaque, nothing)
+    return nothing
 end
 
 _strip_top_cv(c_type) = String(replace(replace(strip(String(c_type)), r"^(?:(?:const|volatile)\s+)+" => ""),
@@ -714,7 +741,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             # of the bytes behind the slot (`Ref(arg)`), so that address is the
             # temporary. Passed in registers, the callee read the object's first
             # eightbyte as its address.
-            by_address = kind === :layout && lookup_key !== nothing &&
+            # `:indirect` with an entry is the same record: an empty class with a
+            # destructor (`Guard`) has had a one-byte entry since 2026-11-14,
+            # and the definition string below must not replace the pointer.
+            by_address = kind in (:layout, :indirect) && lookup_key !== nothing &&
                          !haskey(class_raii, strip(replace(t, r"\bconst\b" => ""))) &&
                          record_passes_by_reference(t, rec_key, record_abi)
             if by_address

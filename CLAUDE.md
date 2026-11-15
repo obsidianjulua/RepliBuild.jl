@@ -600,6 +600,23 @@ the test named when you touch the area.
   `_Atomic`) give `void`. `resolve_type` never answers `unknown` for one; that
   spelling once reached 1257 parameters in llama.cpp's metadata.
   (`test_dwarf_attribution.jl`.)
+- **Every defined library record has a `struct_definitions` entry, members or
+  not** (2026-11-14, `_memberless_record_entry`): `kind`, `byte_size`,
+  `members = []` and its `base_classes`. A derived class adding only methods
+  (Bullet's `btBoxShape`, `btQuaternion`), a stateless functor, an interface.
+  Nothing lays it out in the metadata: GeneratorCpp flattens the non-virtual
+  bases into fields (a non-virtual base is a hard dependency of the struct
+  order, or a memberless record sorts first and its inherited fields come
+  out as bytes), the SysV classifier reads the bases' leaves, StructGen
+  pads the thunk body to `byte_size`; flattening the entry would delete the
+  `base_classes` the upcasts, `has_subclass` and `graph_subclassed` read. An
+  EMPTY class now has a one-byte entry too, so `by_value_crossing` asks
+  `record_abi`'s `empty` before `:layout` (dropped on SysV, a register pad on
+  Win64/AAPCS64) and `is_ccall_safe` sends that crossing to the thunk. Left
+  out: a declaration (no `byte_size`), GNU C's size-0 struct, an anonymous
+  record, a lambda's closure type. A toolchain record keeps the
+  `_laid_out_from_bases` rule. (`test_memberless_records.jl`, devtests
+  `test_memberless_live.jl`.)
 - Anonymous structs/unions get synthesized names (`Parent_u`, `Parent_anonN`), which
   must be pre-sanitized. They are deduplicated across CUs and emitted as aligned
   opaque regions; C11 anonymous members are injected as fields. One named after a
@@ -1614,11 +1631,10 @@ DWARF-resolved destructors — **is** built.)
   siblings use but no common dependency does (each keeps its own, reported);
   imports between Hub packages linking each other (`link_dirs`), which need
   registry dependencies and `use()` through `Base.require`; virtual delete for
-  a `Managed<K>` whose object's dynamic type is a subclass. Also: a class with
-  no members of its own has no `struct_definitions` entry, so it cannot say
-  what it derives from (`graph_subclassed` misses it) and gets a forward
-  declaration; and a header enum B's DWARF lacks is emitted from the header as
-  `Cint` where A's DWARF says `unsigned int` (2026-10-31).
+  a `Managed<K>` whose object's dynamic type is a subclass. Also: a header
+  enum B's DWARF lacks is emitted from the header as `Cint` where A's DWARF
+  says `unsigned int` (2026-10-31). (A class with no members of its own has an
+  entry since 2026-11-14, bases included, so `graph_subclassed` sees it.)
 - Graph mode for CERN ROOT (2026-10-30), measured in `docs/updates/ROOT_RECON.md`.
   Linux only: ROOT on Windows is MSVC, and its CMake refuses MSYS2 CLANG64. Every
   ROOT library's dictionary needs ROOT's own patched LLVM/Clang 20 and cling built

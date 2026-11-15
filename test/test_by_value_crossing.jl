@@ -421,8 +421,12 @@ Contents of the .debug_info section:
         # A declaration has no byte_size, so no facts; `Pair` is only ever a
         # base and `Unused` only a pointee, so neither is recorded.
         @test sort(collect(keys(ra))) == ["Guard", "Handle", "Owner", "P3", "Tag"]
-        # The member tables still describe only records with members.
-        @test sort(collect(keys(sd))) == ["Handle", "Owner", "Pair"]
+        # Every defined record has a member table (2026-11-14), the memberless
+        # ones with `members = []`: `Tag` and `Guard` (empty classes), `P3` (its
+        # bytes are its base's). `Range` and `Unused` are declarations here.
+        @test sort(collect(keys(sd))) == ["Guard", "Handle", "Owner", "P3", "Pair", "Tag"]
+        @test sd["P3"]["members"] == Any[] && [b["type"] for b in sd["P3"]["base_classes"]] == ["Pair"]
+        @test sd["Tag"]["members"] == Any[] && sd["Tag"]["byte_size"] == "0x1"
     end
 
     @testset "_by_value_record_name / _merge_record_facts!" begin
@@ -472,15 +476,17 @@ Contents of the .debug_info section:
         end
         @test k("Tag") == empty_tags[RepliBuild.host_record_abi()]
         @test k("Guard") == (:indirect, nothing)
-        @test k("P3") == (:opaque, nothing)                   # base but no members
+        @test k("P3") == (:layout, "P3")                      # base but no members: laid out from the base
         @test k("Range") == (:opaque, nothing)                # declaration only
         @test k("long double") == (:opaque, nothing)          # no scalar mapping
         @test k("basic_string_view<char, std::char_traits<char> >") == (:opaque, nothing)
-        # Without record_abi (metadata from before it existed) nothing is empty.
-        @test k("Tag"; abi = Dict()) == (:opaque, nothing)
-        # A conflicted name is never trusted.
+        # Without record_abi (metadata from before it existed) nothing is empty:
+        # the entry is all there is to go by.
+        @test k("Tag"; abi = Dict()) == (:layout, "Tag")
+        # A conflicted name is never trusted: with an entry, the crossing is
+        # refused by name (`:conflict`); without one it was `:opaque`.
         @test k("Tag"; abi = Dict("Tag" => Dict{String,Any}("byte_size" => "0x1",
-                   "pass" => "value", "empty" => true, "conflict" => true))) == (:opaque, nothing)
+                   "pass" => "value", "empty" => true, "conflict" => true))) == (:conflict, "Tag")
         # A C record carries no convention; only the GNU size-0 struct is empty.
         @test k("CEmpty"; abi = Dict("CEmpty" => Dict{String,Any}("byte_size" => "0x0",
                    "pass" => nothing, "empty" => true))) == (:ignore, nothing)
@@ -534,7 +540,7 @@ Contents of the .debug_info section:
                        BVF.thunk_crossings(fn("f", ["int"], "pair<int*, bool>"), structs, ra).layout_trap)
         @test occursin("takes `result<ee::Pair &, int>` by value",
                        BVF.thunk_crossings(fn("f", ["result<ee::Pair &, int>"], "int"), structs, ra).layout_trap)
-        @test occursin("takes `P3` by value", BVF.thunk_crossings(fn("f", ["P3"], "int"), structs, ra).trap)
+        @test BVF.thunk_crossings(fn("f", ["P3"], "int"), structs, ra).trap === nothing   # laid out from its base
         # A pass-by-reference record comes back through a hidden pointer the
         # thunk does not pass.
         @test occursin("hidden pointer", BVF.thunk_crossings(fn("f", ["int"], "Guard"), structs, ra).trap)
@@ -577,10 +583,12 @@ Contents of the .debug_info section:
         @test decl(ir, "_ZN2ee10with_guardENS_5GuardEi") ==
               "func.func private @_ZN2ee10with_guardENS_5GuardEi(!llvm.ptr, i32) -> i32"
 
-        # Untypable: no thunk at all, and the .mlir says why.
-        ir = gen(fn("_ZN2ee6p3_sumENS_2P3E", ["P3"], "int"))
-        @test !occursin("func.func", ir)
-        @test occursin("// no thunk for _ZN2ee6p3_sumENS_2P3E: takes `P3` by value", ir)
+        # A derived class with no members of its own: its base's bytes, its
+        # base's class (two ints: one INTEGER eightbyte). It was untypable.
+        ir = gen(fn("_ZN2ee6p3_sumENS_2P3E", ["P3"], "int"); abi = :sysv)
+        @test decl(ir, "_ZN2ee6p3_sumENS_2P3E") == "func.func private @_ZN2ee6p3_sumENS_2P3E(!llvm.struct<\"P3\", (!llvm.array<8 x i8>)>) -> i32"
+        @test occursin("sysv_args = [\"regs:int\"]", ir)
+        @test !occursin("no thunk for _ZN2ee6p3_sumENS_2P3E", ir)
 
         # A reference or pointer return is an address, whatever it points at.
         # `path::native()` returns `const std::wstring&`; the STL fallback measured

@@ -1477,6 +1477,21 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         end
                     end
                 end
+                # A non-virtual base's members are this record's fields too
+                # (`flatten_struct_members`), so the base is a hard dependency:
+                # emitted first, its own dependencies before it. A record with
+                # no member of its own had no dependency at all and sorted
+                # first, so its inherited `btVector3` fields came out as bytes
+                # and its `btConvexPolyhedron*` as `Ptr{Cvoid}` (2026-11-14).
+                for base in get(struct_info, "base_classes", [])
+                    base isa AbstractDict || continue
+                    get(base, "virtual", false) == true && continue   # never flattened
+                    bt = replace(String(get(base, "type", "")), r"^(class|struct)\s+" => "")
+                    isempty(bt) && continue
+                    cpp_dep = haskey(dwarf_structs, bt) ? bt :
+                              get(julia_to_cpp_struct, _sanitize_cpp_type_name(bt), nothing)
+                    (cpp_dep === nothing || cpp_dep == struct_name) || push!(deps, cpp_dep)
+                end
             end
 
             struct_deps[struct_name] = deps
@@ -2504,14 +2519,42 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     field_setters_emitted = true
                     blob_setters_emitted = true
                 else
-                    # Struct found but no members (empty struct or incomplete info)
-                    push!(struct_chunks, """
-                    # Opaque struct: $struct_name (no member info available)
-                    mutable struct $julia_struct_name
-                        data::NTuple{8, UInt8}  # Placeholder
+                    # A record with no member anywhere a field could come from:
+                    # an empty class (a stateless functor, a tag), or one whose
+                    # bases are all virtual. Its bytes, at its DWARF size, so
+                    # `STRUCT_SIZES` and `sizeof` agree and a holder measures it
+                    # right; the 8-byte placeholder stays only for a record whose
+                    # size the metadata does not know.
+                    byte_size = try
+                        s = string(get(struct_info, "byte_size", "0"))
+                        startswith(s, "0x") ? parse(Int, s[3:end], base = 16) : parse(Int, s)
+                    catch
+                        0
                     end
+                    if byte_size > 0
+                        push!(blob_struct_names, julia_struct_name)
+                        jl_layouts[julia_struct_name] = (byte_size, 1)
+                        push!(struct_chunks, """
+                        # C++ struct: $struct_name (no data members, $byte_size byte(s))
+                        struct $julia_struct_name
+                            _data::NTuple{$(byte_size), UInt8}
+                        end
 
-                    """)
+                        # Zero-initializer for $julia_struct_name
+                        function $julia_struct_name()
+                            return $julia_struct_name(ntuple(i -> 0x00, $byte_size))
+                        end
+
+                        """)
+                    else
+                        push!(struct_chunks, """
+                        # Opaque struct: $struct_name (no member info available)
+                        mutable struct $julia_struct_name
+                            data::NTuple{8, UInt8}  # Placeholder
+                        end
+
+                        """)
+                    end
                 end
             else
                 # No DWARF info available - generate opaque struct
