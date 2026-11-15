@@ -21,6 +21,7 @@ import ..BuildBridge
 import ..LLVMEnvironment
 import .._read_json
 import ..stl_container_size, .._scope_suffixes, .._outside_template_args, ..INTERNAL_TYPE_BLOCKLIST
+import ..host_record_abi
 import .._glob_matcher
 
 export compile_to_ir, link_optimize_ir, create_library, create_executable, compile_project,
@@ -2020,6 +2021,20 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     # `-exclude-symbols:` (see _LIBCXX_HIDDEN_DEFINE).
     files = _stl_exportable_ir(config, files)
 
+    # The forced inline constructors (`generate_inline_constructors`) are inline
+    # members, hidden under `-fvisibility=hidden` like any other; they must
+    # reach the dynamic table (ELF) or the export directory (PE). On PE the
+    # export intent is read BEFORE the rewrite adds our own `dllexport`, so a
+    # library that relied on auto-export keeps it (below).
+    forced = _forced_constructor_symbols(config)
+    pe_intent = (Sys.iswindows() && (!isempty(config.wrap.macros) || !isempty(forced))) ?
+                _pe_export_intent(files) : nothing
+    if !isempty(forced)
+        (files, n) = _forced_exportable_ir(files, forced, joinpath(get_build_path(config), "ctors_exported");
+                                           pe = host_record_abi() == :win64)
+        n > 0 && println("  link: $n forced constructor definition(s) made exportable")
+    end
+
     # Determine library name
     if isempty(lib_name)
         lib_name = get_library_name(config)
@@ -2067,11 +2082,12 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     # functions only for macros, so the two cannot disagree about whether a shim
     # exists. Its file with `[wrap] shim_defines` alone exports nothing itself,
     # and the auto-export default publishes the implementation it compiles.
-    if Sys.iswindows() && !isempty(config.wrap.macros)
-        intent = _pe_export_intent(files)
-        if intent.saw_shim && !intent.saw_foreign_export
-            push!(cmd_tail, "-Wl,--export-all-symbols")
-        end
+    #
+    # The forced inline constructors are ours too (`_forced_exportable_ir`
+    # marks them `dllexport` on PE), so they ask for the flag on the same
+    # terms as the shims.
+    if pe_intent !== nothing && (pe_intent.saw_shim || !isempty(forced)) && !pe_intent.saw_foreign_export
+        push!(cmd_tail, "-Wl,--export-all-symbols")
     end
 
     # Add library search paths — AND an rpath for each.
@@ -2520,7 +2536,7 @@ clang 22 ignores `-fkeep-inline-functions`. This is not a per-file flag on
 library sources — it applies only to the file RepliBuild generated.
 """
 function _template_tu_compile_flags(cpp_file::AbstractString)::Vector{String}
-    _is_template_instantiation_tu(cpp_file) ? ["-fno-inline"] : String[]
+    _is_generated_force_tu(cpp_file) ? ["-fno-inline"] : String[]
 end
 
 """
@@ -2530,7 +2546,7 @@ under `Base.hash` a Julia switch recompiled the templates TU.
 """
 function _file_compile_fingerprint(config_fp::String, cpp_file::AbstractString)::String
     isempty(config_fp) && return config_fp
-    if _is_template_instantiation_tu(cpp_file)
+    if _is_generated_force_tu(cpp_file)
         ctx = SHA.SHA256_CTX()
         _key_feed!(ctx, config_fp)
         _key_feed!(ctx, "template-tu-fno-inline-v1")
@@ -2651,6 +2667,567 @@ function generate_template_instantiations(config::RepliBuildConfig, cpp_files::V
 
     return vcat(cpp_files, [dummy_file])
 end
+
+# =============================================================================
+# FORCED INLINE CONSTRUCTORS
+# -----------------------------------------------------------------------------
+# A constructor defined inline in a header and used by no translation unit of
+# the library has no definition in the library: the class DIE declares it
+# (`DW_AT_declaration`, with its linkage name), `nm` has no `C1`/`C2` for it,
+# and the class cannot be built from Julia. Bullet's `btSphereShape(btScalar)`,
+# `btDefaultMotionState(const btTransform&, …)` and
+# `btRigidBody::btRigidBodyConstructionInfo(…)` were that shape (2026-11-15),
+# and the Hub carried a hand-written placement-new shim per class. Consumer
+# compensation is a feature request, so the build now emits those definitions
+# itself, the way the templates TU above makes libc++ emit container members:
+# a generated unit that includes each record's header and odr-uses the
+# constructor through placement new (`replibuild_force::ctor<T, A...>`), so
+# clang emits the real `C1`/`C2` definitions into the library. The constructors
+# are then definitions in the DWARF and in the symbol table, and nothing
+# downstream changes: GeneratorCpp wraps them as any constructor.
+#
+# The set is declared minus defined, both of which the build has after its
+# first link (`_inline_constructor_plan`): every library record's declared
+# constructors (`record_abi[name]["constructors"]`) less the ones the symbol
+# table defines. So the unit is written after the first metadata extraction,
+# and `compile_project` compiles it, relinks, and extracts again. Only a
+# declared constructor (a declaration DIE), never an implicit one; a template
+# constructor, a deleted one, a private or protected one, and one the unit
+# cannot spell are skipped and named. The unit's guard (`is_abstract`,
+# `is_constructible`) emits nothing for an abstract class or a constructor it
+# cannot call, so the unit always compiles for those; a header that does not
+# compile on its own drops its classes with the compiler's first line.
+#
+# The spelling of the class and of each parameter is the compiler's own: the
+# demangled `C4` key (`_demangle`, libstdc++'s `__cxa_demangle` from Julia's
+# own runtime, else `c++filt`). DWARF keys records by bare name and a
+# declaration's formal parameters carry no names, so the DWARF `c_type`s could
+# neither qualify `btRigidBody::btRigidBodyConstructionInfo` nor be relied on
+# for the parameter list; the mangled name is the compiler's full answer.
+#
+# What the pass cannot see: under constructor homing (clang's default `-g`), a
+# class whose constructors are ALL inline and unused is declaration-only in
+# every CU's DWARF, so its constructors are not declared anywhere the parser
+# can read. `-fstandalone-debug` (Bullet, box2d) makes the definition appear
+# and the pass then forces its constructors; see the F4 entry in CLAUDE.md.
+# =============================================================================
+
+"Generated unit defining the library's declared-but-undefined inline constructors."
+_is_inline_ctor_tu(cpp_file::AbstractString)::Bool =
+    basename(cpp_file) == "replibuild_ctors.cpp"
+
+"A unit RepliBuild generated to force definitions (the templates TU, the inline-constructor unit)."
+_is_generated_force_tu(cpp_file::AbstractString)::Bool =
+    _is_template_instantiation_tu(cpp_file) || _is_inline_ctor_tu(cpp_file)
+
+const _CXA_DEMANGLE = Ref{Ptr{Cvoid}}(C_NULL)
+const _CXA_DEMANGLE_LOOKED = Ref(false)
+
+"`__cxa_demangle` from the C++ runtime Julia itself loads, or `C_NULL`. Looked up once."
+function _cxa_demangle_ptr()
+    _CXA_DEMANGLE_LOOKED[] && return _CXA_DEMANGLE[]
+    _CXA_DEMANGLE_LOOKED[] = true
+    for lib in ("libstdc++", "libstdc++-6", "libc++abi")
+        h = Libdl.dlopen_e(lib)
+        h == C_NULL && continue
+        p = Libdl.dlsym_e(h, :__cxa_demangle)
+        p == C_NULL && continue
+        _CXA_DEMANGLE[] = p
+        break
+    end
+    return _CXA_DEMANGLE[]
+end
+
+"""
+    _demangle(symbol) -> Union{String,Nothing}
+
+The Itanium demangling of `symbol`, or `nothing`. In process through the C++
+runtime Julia loads (`__cxa_demangle`), which also reads clang's unified
+`C4`/`D4` keys, else through `c++filt`/`llvm-cxxfilt` on PATH. A `C4` key
+demangles to the constructor as the compiler spelled it, class and parameters
+fully qualified: `btRigidBody::btRigidBodyConstructionInfo::
+btRigidBodyConstructionInfo(float, btMotionState*, btCollisionShape*,
+btVector3 const&)`.
+"""
+function _demangle(symbol::AbstractString)
+    sym = String(symbol)
+    p = _cxa_demangle_ptr()
+    if p != C_NULL
+        status = Ref{Cint}(0)
+        r = ccall(p, Ptr{UInt8}, (Cstring, Ptr{UInt8}, Ptr{Csize_t}, Ref{Cint}),
+                  sym, C_NULL, C_NULL, status)
+        if r != C_NULL
+            s = status[] == 0 ? unsafe_string(r) : nothing
+            # The buffer is the C++ runtime's `malloc`. On Linux that is the one
+            # libc; on Windows Julia's `libstdc++-6.dll` and Julia share msvcrt,
+            # but a few hundred bytes per build are cheaper than being wrong
+            # about which CRT, so they are left to the process there.
+            Sys.iswindows() || Libc.free(r)
+            return s
+        end
+        return nothing
+    end
+    for tool in ("c++filt", "llvm-cxxfilt")
+        Sys.which(tool) === nothing && continue
+        out = try
+            strip(read(pipeline(`$tool`, stdin = IOBuffer(sym * "\n")), String))
+        catch
+            ""
+        end
+        (isempty(out) || out == sym) && continue
+        return String(out)
+    end
+    return nothing
+end
+
+"The symbol-table variants of a unified constructor key: `C1`, `C2`, `C3` for `C4`."
+function _constructor_variants(c4_key::AbstractString)::Vector{String}
+    m = match(r"C4(?=[EI])", c4_key)
+    m === nothing && return String[]
+    i = m.offset
+    return [c4_key[1:prevind(c4_key, i)] * v * c4_key[i+2:end] for v in ("C1", "C2", "C3")]
+end
+
+"Split `s` at depth-0 commas (`<>`, `()`, `[]`, `{}` nest), each part stripped."
+function _split_depth0_commas(s::AbstractString)::Vector{String}
+    out = String[]
+    depth = 0
+    start = firstindex(s)
+    i = start
+    n = lastindex(s)
+    while i <= n
+        c = s[i]
+        if c in ('<', '(', '[', '{')
+            depth += 1
+        elseif c in ('>', ')', ']', '}')
+            depth = max(0, depth - 1)
+        elseif c == ',' && depth == 0
+            push!(out, String(strip(s[start:prevind(s, i)])))
+            start = nextind(s, i)
+        end
+        i = nextind(s, i)
+    end
+    push!(out, String(strip(s[start:end])))
+    return out
+end
+
+"""
+    _constructor_spelling(demangled) -> Union{Nothing,Tuple{String,Vector{String}}}
+
+The qualified class and the parameter spellings of a demangled constructor,
+`("ic::Plain", ["int", "int"])` for `ic::Plain::Plain(int, int)`, or `nothing`
+when the unit could not name it in C++: an anonymous namespace, a lambda or a
+local class (an enclosing `(`), an ABI tag (`[abi:cxx11]`), a variadic list,
+or a name with no class part at all.
+"""
+function _constructor_spelling(demangled::AbstractString)
+    s = String(demangled)
+    (open, local_open) = _param_list_paren(s)
+    (open == 0 || local_open != 0) && return nothing
+    close = _matching_paren(s, open)
+    close == 0 && return nothing
+    parts = _qualified_name_parts(s)
+    length(parts) >= 2 || return nothing
+    qualified = join(parts[1:end-1], "::")
+    inner = strip(s[nextind(s, open):prevind(s, close)])
+    params = isempty(inner) ? String[] : _split_depth0_commas(inner)
+    unspellable(t) = occursin("(anonymous namespace)", t) || occursin("lambda", t) ||
+                     occursin("[abi:", t) || occursin("...", t) || occursin("{", t) ||
+                     occursin("unnamed", t) || isempty(t)
+    (unspellable(qualified) || occursin('(', qualified)) && return nothing
+    any(unspellable, params) && return nothing
+    return (qualified, params)
+end
+
+"A standard-library scope (`std`, `std::__cxx11`, `__gnu_cxx`, `std::__1`)."
+_is_stdlib_scope(scope) = (s = String(something(scope, "")); isempty(s) ? false :
+    (first(split(s, "::")) in ("std", "__gnu_cxx") || startswith(s, "__cxx")))
+
+const _HEADER_EXTENSIONS = (".h", ".hh", ".hpp", ".hxx", ".H", ".inl", ".ipp", ".tcc", ".ixx")
+
+"""
+The headers among a record's `decl_files` the unit includes, sorted. All of
+them, not one: two records of one bare name (`btHeightfieldTerrainShape::Range`,
+`btBatchedConstraints::Range`) merge under it, and a class template's
+specialization is declared where the template is while its arguments live
+elsewhere, so every header the name was seen in is needed to spell it.
+"""
+function _inline_ctor_headers_of(decl_files)::Vector{String}
+    return sort!(unique!(String[String(f) for f in decl_files
+                                if any(e -> endswith(String(f), e), _HEADER_EXTENSIONS) ||
+                                   !occursin('.', basename(String(f)))]))
+end
+
+"""
+    _inline_constructor_plan(struct_defs, record_abi, symbols, exclude_patterns;
+                             demangle = _demangle) -> Dict
+
+Declared minus defined: the constructors the library's own records declare
+(`record_abi[name]["constructors"]`) that no symbol in `symbols` defines, as
+`forced` rows (`class`, `symbol`, `type`, `parameters`, `headers`) the unit
+instantiates, and `skipped` rows (`class`, `symbol`, `reason`) the wrap report
+names. A toolchain record and a standard-library scope are nobody's to force
+and are passed over silently; a library record is skipped with a reason when
+its name has distinct definitions, when no header declares it, and per
+constructor when it is implicit (`artificial`), deleted, not public, a
+constructor template (`C4I…`), dropped by `[wrap] exclude_symbols`, or not
+spellable (`_constructor_spelling`). Sorted by class, then symbol.
+"""
+function _inline_constructor_plan(struct_defs::AbstractDict, record_abi::AbstractDict, symbols,
+                                  exclude_patterns::Vector{String}; demangle = _demangle)
+    defined = Set{String}(String(get(s, "mangled", "")) for s in symbols if s isa AbstractDict)
+    forced = Dict{String,Any}[]
+    skipped = Dict{String,Any}[]
+    skip(cls, sym, why) = push!(skipped, Dict{String,Any}("class" => cls, "symbol" => sym, "reason" => why))
+    for name in sort!(collect(String, keys(struct_defs)))
+        startswith(name, "__enum__") && continue
+        def = struct_defs[name]
+        def isa AbstractDict || continue
+        entry = get(record_abi, name, nothing)
+        entry isa AbstractDict || continue
+        ctors = get(entry, "constructors", nothing)
+        (ctors isa AbstractVector && !isempty(ctors)) || continue
+        get(def, "toolchain", false) == true && continue
+        _is_stdlib_scope(get(def, "scope", "")) && continue
+        decl_files = get(def, "decl_files", String[])
+        headers = _inline_ctor_headers_of(decl_files)
+        record_reason = get(def, "conflict", false) == true ?
+                        "the name has distinct definitions in this library" :
+                        isempty(headers) ?
+                        "declared in no header the unit can include" *
+                        (isempty(decl_files) ? "" : " (" * join(decl_files, ", ") * ")") : nothing
+        for c in ctors
+            c isa AbstractDict || continue
+            sym = String(get(c, "symbol", ""))
+            isempty(sym) && continue
+            variants = _constructor_variants(sym)
+            any(in(defined), variants) && continue         # the library defines it
+            if record_reason !== nothing
+                skip(name, sym, record_reason)
+            elseif get(c, "artificial", false) == true
+                skip(name, sym, "an implicit constructor, never declared")
+            elseif get(c, "deleted", false) == true
+                skip(name, sym, "deleted")
+            elseif get(c, "accessibility", "public") != "public"
+                skip(name, sym, String(c["accessibility"]))
+            elseif occursin(r"C4I", sym)
+                skip(name, sym, "a constructor template")
+            else
+                dm = demangle(sym)
+                if dm === nothing
+                    skip(name, sym, "the symbol does not demangle on this host")
+                    continue
+                end
+                if !isempty(exclude_patterns) && !isempty(variants)
+                    kept = _without_excluded_symbols(Set{String}(variants),
+                                                     [Dict{String,Any}("mangled" => v, "demangled" => dm) for v in variants],
+                                                     exclude_patterns)
+                    if length(kept) < length(variants)
+                        skip(name, sym, "dropped by [wrap] exclude_symbols")
+                        continue
+                    end
+                end
+                spelled = _constructor_spelling(dm)
+                if spelled === nothing
+                    skip(name, sym, "cannot be spelled in C++: $dm")
+                    continue
+                end
+                push!(forced, Dict{String,Any}("class" => name, "symbol" => sym, "type" => spelled[1],
+                                               "parameters" => spelled[2], "headers" => headers))
+            end
+        end
+    end
+    return Dict{String,Any}("forced" => forced, "skipped" => skipped)
+end
+
+"The C++ preamble of the inline-constructor unit: the guarded placement-new helper."
+const _INLINE_CTOR_PREAMBLE = raw"""
+// ── Forced inline constructors (see generate_inline_constructors) ───────────
+// Never called. An explicit instantiation of `ctor<T, A...>` odr-uses T's
+// constructor from (A...) through placement new, so clang emits the real
+// C1/C2 definitions into this unit. The guard emits nothing for an abstract
+// class or a constructor not callable from here (private, protected, deleted,
+// or no constructor taking exactly these arguments), so the unit compiles for
+// those too. C++11; `-fno-inline` on this unit keeps the constructor a
+// definition of its own instead of a body inlined into `go`.
+#include <new>
+#include <type_traits>
+
+namespace replibuild_force {
+
+template <bool ok, class T, class... A> struct ctor_impl {
+    static void go(void* p, A... a) { ::new (p) T(static_cast<A&&>(a)...); }
+};
+template <class T, class... A> struct ctor_impl<false, T, A...> {
+    static void go(void*, A...) {}
+};
+
+template <class T, class... A>
+void ctor(void* p, A... a) {
+    ctor_impl<!std::is_abstract<T>::value && std::is_constructible<T, A...>::value, T, A...>::go(
+        p, static_cast<A&&>(a)...);
+}
+
+}  // namespace replibuild_force
+"""
+
+"""
+    _inline_ctor_unit_text(headers, forced) -> String
+
+The unit: one `#include` per header (a name in `<…>` as is, anything else
+quoted; absolute paths come from the records' `decl_files`), the preamble, and
+one explicit instantiation per forced row, `template void
+replibuild_force::ctor<T, A...>(void*, A...);`, the row's symbol beside it.
+"""
+function _inline_ctor_unit_text(headers::AbstractVector, forced::AbstractVector)::String
+    io = IOBuffer()
+    println(io, "// Auto-generated by RepliBuild: the library's inline constructors that no translation unit of it defined")
+    for h in headers
+        hs = String(h)
+        println(io, startswith(hs, "<") ? "#include $hs" : "#include \"$hs\"")
+    end
+    println(io)
+    print(io, _INLINE_CTOR_PREAMBLE)
+    println(io)
+    for f in forced
+        params = String[String(p) for p in f["parameters"]]
+        args = join(vcat([String(f["type"])], params), ", ")
+        sig = join(vcat(["void*"], params), ", ")
+        println(io, "template void replibuild_force::ctor<$args>($sig);   // $(f["symbol"])")
+    end
+    return String(take!(io))
+end
+
+"The headers the unit includes: `[wrap] shim_headers` first (the library's umbrella, where one is configured), then every forced record's headers."
+_inline_ctor_headers(config::RepliBuildConfig, forced::AbstractVector) =
+    unique(vcat(String[String(h) for h in config.wrap.shim_headers],
+                sort!(unique(String[String(h) for f in forced for h in f["headers"]]))))
+
+"Write `text` to `path` only when it differs, so an unchanged unit keeps its IR cache entry."
+function _write_if_changed(path::String, text::String)
+    (isfile(path) && read(path, String) == text) && return false
+    write(path, text)
+    return true
+end
+
+"Does `text`, written to `path`, compile (`-fsyntax-only`, the project's flags)? `(ok, first error line)`."
+function _unit_compiles(config::RepliBuildConfig, path::String, text::String)
+    write(path, text)
+    (ok, out) = _template_tu_compiles(config, path)
+    lines = split(out, '\n')
+    k = findfirst(l -> occursin("error", l), lines)
+    msg = k === nothing ? strip(first(out, 200)) : strip(lines[k])
+    return (ok, String(msg))
+end
+
+"The sidecar naming the forced definitions' symbols, read at link time (`_forced_constructor_symbols`)."
+_forced_symbols_path(config::RepliBuildConfig) = joinpath(get_cache_path(config), "replibuild_ctors.json")
+
+"""
+    generate_inline_constructors(config, cpp_files, plan) -> (cpp_files, plan)
+
+Write the inline-constructor unit for `plan["forced"]` (`_inline_constructor_plan`)
+under the build cache and append it to `cpp_files`; `plan` comes back with the
+rows the unit could not keep moved to `skipped`. The unit is syntax-checked
+whole; when that fails, each header is checked alone and dropped from every
+row where it does not compile on its own (a row left with no header is
+skipped with the compiler's first line), then each remaining row is checked
+alone against every header that compiles, in parallel, and skipped the same
+way. A C++ package only; nothing forced returns `cpp_files` as given and
+removes a stale unit's sidecar. The symbols of the kept rows are written
+beside the unit for the link (`_forced_exportable_ir`).
+"""
+function generate_inline_constructors(config::RepliBuildConfig, cpp_files::Vector{String}, plan::AbstractDict)
+    forced = Dict{String,Any}[Dict{String,Any}(f) for f in get(plan, "forced", Any[])]
+    skipped = Dict{String,Any}[Dict{String,Any}(s) for s in get(plan, "skipped", Any[])]
+    out_plan = Dict{String,Any}("forced" => forced, "skipped" => skipped)
+    cache_dir = get_cache_path(config)
+    mkpath(cache_dir)
+    unit_path = joinpath(cache_dir, "replibuild_ctors.cpp")
+    rm(_forced_symbols_path(config); force = true)
+    (config.wrap.language == :cpp && !isempty(forced)) || return (cpp_files, out_plan)
+
+    probe = joinpath(cache_dir, "replibuild_ctors_probe.cpp")
+    shim_headers = String[String(h) for h in config.wrap.shim_headers]
+    # Keep the rows `reason_of` answers `nothing` for; skip the rest, named.
+    function drop(rows, reason_of)
+        keep = Dict{String,Any}[]
+        for f in rows
+            r = reason_of(f)
+            if r === nothing
+                push!(keep, f)
+            else
+                push!(skipped, Dict{String,Any}("class" => f["class"], "symbol" => f["symbol"], "reason" => r))
+            end
+        end
+        return keep
+    end
+    text = _inline_ctor_unit_text(_inline_ctor_headers(config, forced), forced)
+    (ok, msg) = _unit_compiles(config, probe, text)
+    if !ok
+        # Each header alone (the umbrella beside it, as in the unit).
+        bad_header = Dict{String,String}()
+        for h in sort!(unique(String[h for f in forced for h in f["headers"]]))
+            (hok, hmsg) = _unit_compiles(config, probe, _inline_ctor_unit_text(vcat(shim_headers, [h]), Any[]))
+            hok || (bad_header[h] = hmsg)
+        end
+        for f in forced
+            f["headers"] = String[h for h in f["headers"] if !haskey(bad_header, h)]
+        end
+        forced = drop(forced, f -> isempty(f["headers"]) ?
+            "its header does not compile on its own: " * first(values(bad_header)) : nothing)
+        # Each row alone, against every header that compiles, in parallel: a
+        # class template's specialization needs its arguments' headers too.
+        all_headers = _inline_ctor_headers(config, forced)
+        bad_row = Vector{Union{Nothing,String}}(nothing, length(forced))
+        Threads.@threads for i in eachindex(forced)
+            path = joinpath(cache_dir, "replibuild_ctors_probe_$(i).cpp")
+            (rok, rmsg) = _unit_compiles(config, path, _inline_ctor_unit_text(all_headers, [forced[i]]))
+            rok || (bad_row[i] = rmsg)
+            rm(path; force = true)
+        end
+        at = Dict{String,String}(String(forced[i]["symbol"]) => bad_row[i] for i in eachindex(forced) if bad_row[i] !== nothing)
+        forced = drop(forced, f -> (r = get(at, String(f["symbol"]), nothing);
+                                    r === nothing ? nothing : "does not compile: $r"))
+        if !isempty(forced)
+            text = _inline_ctor_unit_text(_inline_ctor_headers(config, forced), forced)
+            (ok, msg) = _unit_compiles(config, probe, text)
+            ok || (forced = drop(forced, _ -> "the unit did not compile: $msg"))
+        end
+    end
+    rm(probe; force = true)
+    out_plan["forced"] = forced
+    out_plan["skipped"] = skipped
+    isempty(forced) && return (cpp_files, out_plan)
+
+    _write_if_changed(unit_path, text)
+    symbols = sort!(unique(vcat([_constructor_variants(String(f["symbol"])) for f in forced]...)))
+    open(_forced_symbols_path(config), "w") do io
+        JSON.print(io, symbols)
+    end
+    return (vcat(cpp_files, [unit_path]), out_plan)
+end
+
+"The forced definitions' symbols the current build's unit names, or none."
+function _forced_constructor_symbols(config::RepliBuildConfig)::Set{String}
+    path = _forced_symbols_path(config)
+    isfile(path) || return Set{String}()
+    names = try
+        _read_json(path)
+    catch
+        return Set{String}()
+    end
+    return names isa AbstractVector ? Set{String}(String(n) for n in names) : Set{String}()
+end
+
+# IR keywords that may precede the type on a `define` line or the aliasee on an
+# alias line: linkage, preemption, visibility, DLL storage, thread-local and
+# unnamed_addr. `dllexport` is inserted after the last of them.
+const _IR_GLOBAL_PREFIX_KEYWORDS = Set([
+    "private", "internal", "available_externally", "linkonce", "weak", "common", "appending",
+    "extern_weak", "linkonce_odr", "weak_odr", "external", "dso_local", "dso_preemptable",
+    "default", "hidden", "protected", "dllimport", "dllexport", "thread_local", "localdynamic",
+    "initialexec", "localexec", "unnamed_addr", "local_unnamed_addr"])
+
+"""
+    _export_global_line(line, symbols; pe) -> String
+
+`line` with the definition or alias of a symbol in `symbols` made exportable:
+`hidden` dropped, and on PE (`pe`) `dllexport` (with `dso_local`, which the
+verifier asks of it) inserted after the leading keywords. Any other line, or a
+symbol not in the set, comes back as it was.
+"""
+function _export_global_line(line::AbstractString, symbols::AbstractSet{String}; pe::Bool)
+    s = String(line)
+    is_define = startswith(s, "define ")
+    is_alias = startswith(s, "@") && occursin(" alias ", s)
+    (is_define || is_alias) || return s
+    name = if is_define
+        m = match(r"@((?:[\w\.\$]|\\[0-9a-fA-F]{2})+|\"[^\"]*\")\(", s)
+        m === nothing ? nothing : m.captures[1]
+    else
+        m = match(r"^@((?:[\w\.\$]|\\[0-9a-fA-F]{2})+|\"[^\"]*\") = ", s)
+        m === nothing ? nothing : m.captures[1]
+    end
+    name === nothing && return s
+    strip(name, '"') in symbols || return s
+    head_end = is_define ? 7 : findfirst(" = ", s).stop
+    head = s[1:head_end]
+    rest = s[head_end+1:end]
+    toks = split(rest, ' '; limit = typemax(Int))
+    i = 1
+    while i <= length(toks) && toks[i] in _IR_GLOBAL_PREFIX_KEYWORDS
+        i += 1
+    end
+    lead = String[t for t in toks[1:i-1] if t != "hidden"]
+    if pe
+        # The grammar's order: linkage, preemption, visibility, DLL storage,
+        # thread-local, unnamed_addr. `dso_local` after the linkage keyword,
+        # `dllexport` before anything of the last two groups.
+        linkage_kw = ("private", "internal", "available_externally", "linkonce", "weak", "common",
+                      "appending", "extern_weak", "linkonce_odr", "weak_odr", "external")
+        tail_kw = ("thread_local", "localdynamic", "initialexec", "localexec",
+                   "unnamed_addr", "local_unnamed_addr")
+        if !("dso_local" in lead)
+            k = findfirst(in(linkage_kw), lead)
+            insert!(lead, k === nothing ? 1 : k + 1, "dso_local")
+        end
+        if !("dllexport" in lead)
+            j = findfirst(in(tail_kw), lead)
+            insert!(lead, j === nothing ? length(lead) + 1 : j, "dllexport")
+        end
+    end
+    return head * join(vcat(lead, toks[i:end]), ' ')
+end
+
+"""
+    _forced_exportable_ir(files, symbols, out_dir; pe) -> Vector{String}
+
+Copies of the IR `files` with the forced constructors' definitions
+(`symbols`: the `C1`/`C2`/`C3` names of the unit's rows) made exportable
+(`_export_global_line`), written to `out_dir`; a file naming none is returned
+as itself. Under `-fvisibility=hidden` (or `-fvisibility-inlines-hidden`) the
+unit's definitions are hidden like any inline member, and a hidden definition
+never reaches the dynamic table (`verify_wrap_surface` R2) or, on PE, the
+export directory. The copy is rewritten on every link: its content depends on
+the symbol set, not only on the input's mtime.
+"""
+function _forced_exportable_ir(files::Vector{String}, symbols::AbstractSet{String}, out_dir::String; pe::Bool)
+    isempty(symbols) && return (files, 0)
+    out = String[]
+    total = 0
+    candidate(line) = (startswith(line, "define ") || (startswith(line, "@") && occursin(" alias ", line))) &&
+                      any(s -> occursin("@" * s, line) || occursin("@\"" * s, line), symbols)
+    for f in files
+        # A file whose lines the rewrite would leave as they are is returned
+        # as itself: a default-visibility build has nothing to change.
+        changes = 0
+        open(f) do io
+            for line in eachline(io)
+                candidate(line) && _export_global_line(line, symbols; pe = pe) != line && (changes += 1)
+            end
+        end
+        if changes == 0
+            push!(out, f)
+            continue
+        end
+        mkpath(out_dir)
+        dst = joinpath(out_dir, basename(f))
+        open(f) do src
+            open(dst, "w") do io
+                for line in eachline(src; keep = true)
+                    body = chomp(line)
+                    nl = line[lastindex(body)+1:end]
+                    write(io, candidate(body) ? _export_global_line(body, symbols; pe = pe) : body, nl)
+                end
+            end
+        end
+        total += changes
+        push!(out, dst)
+    end
+    return (out, total)
+end
+
 
 # =============================================================================
 # MACRO-SHIM HEADER-COLLISION GUARD
@@ -3781,6 +4358,10 @@ function compile_project(config::RepliBuildConfig)
     # Generate template instantiations
     cpp_files = generate_template_instantiations(config, cpp_files)
 
+    # The forced-constructor sidecar belongs to THIS build's second link (step
+    # 4b); a stale one must not shape the first.
+    rm(_forced_symbols_path(config); force=true)
+
     # Generate macro shims
     cpp_files = generate_macro_shims(config, cpp_files)
 
@@ -3828,6 +4409,34 @@ function compile_project(config::RepliBuildConfig)
     byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
     metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
                                               nounwind=nounwind, byval=byval)
+
+    # Step 4b: the inline constructors the library declares and no translation
+    # unit of it defined (`inline_constructors` in the metadata, computed from
+    # this first extraction: declared minus defined). A generated unit odr-uses
+    # each through placement new (`generate_inline_constructors`); it is
+    # compiled beside the others (every other IR is a cache hit), the library
+    # is relinked with it and the metadata extracted again, now with those
+    # constructors as definitions. The second extraction carries the plan with
+    # each row's outcome instead of recomputing it.
+    plan = get(_read_json(metadata_path), "inline_constructors", nothing)
+    if config.wrap.language == :cpp && config.binary.type != :executable &&
+       plan isa AbstractDict && !isempty(get(plan, "forced", Any[]))
+        (cpp_files_b, plan) = generate_inline_constructors(config, cpp_files, plan)
+        if length(cpp_files_b) > length(cpp_files)
+            nforced = length(plan["forced"])
+            println("  ctors: $(nforced) inline constructor(s) of $(length(unique(String[f["class"] for f in plan["forced"]]))) class(es) " *
+                    "declared in headers and defined nowhere: compiling their definitions")
+            cpp_files = cpp_files_b
+            ir_files = compile_to_ir(config, cpp_files)
+            linked_ir = link_optimize_ir(config, ir_files, output_name)
+            binary_path = create_library(config, linked_ir; per_tu_ir=ir_files)
+            nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+            byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+            metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
+                                                      nounwind=nounwind, byval=byval,
+                                                      inline_constructors=plan)
+        end
+    end
 
     # Guard: the functions metadata says are wrappable must actually be reachable
     # through the dynamic symbol table the generated wrapper will dlsym against.
@@ -6788,6 +7397,15 @@ function parse_dwarf_dump(output::AbstractString;
     # copy would mark every inline instance method static.
     current_fn_is_inline = false
     current_fn_is_concrete = false
+    # A declaration DIE's own facts, read by the inline-constructor plan
+    # (`_inline_constructor_plan`): `DW_AT_artificial` (an implicit member),
+    # `DW_AT_deleted`, and `DW_AT_accessibility` as written; absent, the
+    # record's default applies (private in a `class`, public in a `struct`),
+    # which `_record_declared_constructors!` fills in from the record's kind.
+    current_fn_is_artificial = false
+    current_fn_is_deleted = false
+    current_fn_accessibility = nothing
+    declaration_facts = Dict{String,Dict{String,Any}}()
 
     # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
     # resolved back to the declaration that owns the mangled name via
@@ -6849,6 +7467,15 @@ function parse_dwarf_dump(output::AbstractString;
                (current_fn_has_code || current_fn_saw_object_pointer || current_fn_is_inline)
                 return_types[function_key]["has_object_pointer"] = current_fn_saw_object_pointer
             end
+
+            # The in-class declaration's facts (one per key; a class declares a
+            # member once). A definition DIE says nothing here.
+            if current_fn_is_declaration
+                declaration_facts[function_key] = Dict{String,Any}(
+                    "artificial" => current_fn_is_artificial,
+                    "deleted" => current_fn_is_deleted,
+                    "accessibility" => current_fn_accessibility)
+            end
         end
 
         current_function_offset = nothing
@@ -6857,6 +7484,9 @@ function parse_dwarf_dump(output::AbstractString;
         current_fn_saw_object_pointer = false
         current_fn_is_inline = false
         current_fn_is_concrete = false
+        current_fn_is_artificial = false
+        current_fn_is_deleted = false
+        current_fn_accessibility = nothing
         current_function_name = nothing
         current_function_linkage = nothing
         current_function_level = nothing
@@ -6994,6 +7624,9 @@ function parse_dwarf_dump(output::AbstractString;
                 current_fn_saw_object_pointer = false
                 current_fn_is_inline = false
                 current_fn_is_concrete = false
+                current_fn_is_artificial = false
+                current_fn_is_deleted = false
+                current_fn_accessibility = nothing
 
                 # RESET VARIABLE CONTEXT to prevent leakage
                 current_variable_offset = nothing
@@ -7140,6 +7773,22 @@ function parse_dwarf_dump(output::AbstractString;
         # it for a static member.
         if in_function_context && contains(line, "DW_AT_declaration")
             current_fn_is_declaration = true
+        end
+        # The subprogram's OWN attributes only: a formal parameter's lines sit a
+        # level deeper, so `this`'s `DW_AT_artificial` is not the function's.
+        if in_function_context && contains(line, "DW_AT_artificial")
+            current_fn_is_artificial = true
+        end
+        if in_function_context && contains(line, "DW_AT_deleted")
+            current_fn_is_deleted = true
+        end
+        if in_function_context && contains(line, "DW_AT_accessibility")
+            # `DW_AT_accessibility: 1	(public)`: 1 public, 2 protected, 3 private.
+            am = match(r"DW_AT_accessibility\s*:\s*(\d+)", line)
+            if am !== nothing
+                current_fn_accessibility = get(("public", "protected", "private"),
+                                               parse(Int, am.captures[1]), nothing)
+            end
         end
         if in_function_context && contains(line, "DW_AT_object_pointer")
             current_fn_saw_object_pointer = true
@@ -7454,6 +8103,7 @@ function parse_dwarf_dump(output::AbstractString;
     record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
     destructor_by_name = Dict{String,String}()       # → record_abi's string_layout
     constructors_by_name = Dict{String,Vector{String}}()
+    record_kind_by_name = Dict{String,String}()      # "class" or "struct": a member's default accessibility
     for offset in die_order
         type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class", "union"]
@@ -7463,7 +8113,10 @@ function parse_dwarf_dump(output::AbstractString;
                     dk === nothing || get!(destructor_by_name, String(struct_name), dk)
                 end
                 let ck = get(constructors_of, offset, nothing)
-                    ck === nothing || append!(get!(() -> String[], constructors_by_name, String(struct_name)), ck)
+                    if ck !== nothing
+                        append!(get!(() -> String[], constructors_by_name, String(struct_name)), ck)
+                        get!(record_kind_by_name, String(struct_name), String(type_info["kind"]))
+                    end
                 end
                 # Every named DEFINITION (a declaration has no byte_size), before
                 # any provenance or member filter: calling a function that takes
@@ -7971,7 +8624,54 @@ function parse_dwarf_dump(output::AbstractString;
         record_abi[name] = entry
     end
 
+    # The constructors each library record declares, with the declaration
+    # DIE's facts, for the inline-constructor plan (`_inline_constructor_plan`).
+    _record_declared_constructors!(record_abi, struct_defs, constructors_by_name,
+                                   record_kind_by_name, declaration_facts)
+
     return (return_types, struct_defs, global_vars, typedef_table, record_abi)
+end
+
+"""
+    _record_declared_constructors!(record_abi, struct_defs, constructors_by_name,
+                                   kind_by_name, declaration_facts)
+
+On each LIBRARY record's `record_abi` entry, `constructors`: one row per
+constructor its definition declares (`symbol`, the unified `C4` DWARF key),
+with the declaration DIE's facts: `artificial` (an implicit member clang
+declared for it), `deleted`, and `accessibility` (`DW_AT_accessibility` as
+written, else the record's default: private in a `class`, public in a
+`struct`). The parameters are not recorded: a declaration's formal parameters
+carry no names, so the parser keeps none, and the symbol spells them anyway
+(`_constructor_spelling`). Toolchain records put back by promotion and enum
+keys get no rows; a record with no `record_abi` entry (a declaration) gets
+one only for this key. Rows are sorted by symbol, so the metadata is stable.
+"""
+function _record_declared_constructors!(record_abi::AbstractDict, struct_defs::AbstractDict,
+                                        constructors_by_name::AbstractDict, kind_by_name::AbstractDict,
+                                        declaration_facts::AbstractDict)
+    for (name, def) in struct_defs
+        startswith(name, "__enum__") && continue
+        get(def, "toolchain", false) == true && continue
+        syms = get(constructors_by_name, name, nothing)
+        syms === nothing && continue
+        default_access = get(kind_by_name, name, "struct") == "class" ? "private" : "public"
+        rows = Dict{String,Any}[]
+        for sym in sort!(unique(String[String(s) for s in syms]))
+            facts = get(declaration_facts, sym, nothing)
+            facts === nothing && continue           # no declaration DIE seen for it
+            push!(rows, Dict{String,Any}(
+                "symbol" => sym,
+                "artificial" => get(facts, "artificial", false) == true,
+                "deleted" => get(facts, "deleted", false) == true,
+                "accessibility" => something(get(facts, "accessibility", nothing), default_access)))
+        end
+        isempty(rows) && continue
+        entry = Dict{String,Any}(get(record_abi, name, Dict{String,Any}()))
+        entry["constructors"] = rows
+        record_abi[name] = entry
+    end
+    return record_abi
 end
 
 """
@@ -8661,7 +9361,8 @@ This is the core of automatic wrapper generation!
 function extract_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
                                       binary_path::String;
                                       nounwind::Union{Nothing,Set{String}}=nothing,
-                                      byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing)::Dict{String,Any}
+                                      byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
+                                      inline_constructors::Union{Nothing,AbstractDict}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
@@ -8772,6 +9473,24 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     _mark_noexcept!(functions, candidates, nounwind)
     _mark_byval_params!(functions, byval)
 
+    # The inline constructors the library declares and does not define, for the
+    # forced unit (`generate_inline_constructors`): computed from THIS binary on
+    # the first extraction, and on the second carried over from the first with
+    # each forced row's outcome (`emitted`: the symbol table now defines it; the
+    # unit's guard declined the rest). A C bucket has none.
+    plan = if inline_constructors !== nothing
+        p = Dict{String,Any}(inline_constructors)
+        defined = Set{String}(String(get(s, "mangled", "")) for s in symbols)
+        p["forced"] = Any[(r = Dict{String,Any}(f);
+                           r["emitted"] = any(in(defined), _constructor_variants(String(r["symbol"])));
+                           r) for f in get(p, "forced", Any[])]
+        p
+    elseif config.wrap.language == :cpp
+        _inline_constructor_plan(struct_defs, record_abi, symbols, config.wrap.exclude_symbols)
+    else
+        Dict{String,Any}("forced" => Any[], "skipped" => Any[])
+    end
+
     # Build type registry (basic types + inferred types)
     type_registry = build_type_registry(functions)
 
@@ -8839,6 +9558,10 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         "struct_definitions" => struct_defs,  # Struct member layout from DWARF
         "record_abi" => record_abi,            # By-value records: size, pass convention, empty
         "typedef_table" => typedef_table,      # Typedef name -> Julia type resolution
+        # Inline constructors declared in headers and defined by no translation
+        # unit: the rows the forced unit defines and the ones it skipped, with
+        # reasons (`_inline_constructor_plan`, `generate_inline_constructors`).
+        "inline_constructors" => plan,
         # Function-pointer c_types list their parameters (`function_ptr(R; P1, P2)*`).
         # Older metadata spells every one `function_ptr(R)*`, so the generators
         # build a callback's `@cfunction` example from it only when this is set.
@@ -9678,10 +10401,12 @@ This enables automatic wrapper generation!
 function save_compilation_metadata(config::RepliBuildConfig, source_files::Vector{String},
                                    binary_path::String;
                                    nounwind::Union{Nothing,Set{String}}=nothing,
-                                   byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing)::String
+                                   byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
+                                   inline_constructors::Union{Nothing,AbstractDict}=nothing)::String
     # Extract metadata
     metadata = extract_compilation_metadata(config, source_files, binary_path;
-                                            nounwind=nounwind, byval=byval)
+                                            nounwind=nounwind, byval=byval,
+                                            inline_constructors=inline_constructors)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their

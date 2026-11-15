@@ -374,6 +374,14 @@ template double hol::biggest<double>(double, double);
 Without the `#pragma`, an `-O2` build inlines the constructors and the
 destructor into `keep_special` and drops them.
 
+The constructor half of this is done for you: a constructor the DWARF declares
+and the library does not define is odr-used by a unit the build generates, so
+`hol::Gauge(int)` would reach the wrapper without `keep_special`. The class's
+definition has to be in the DWARF for that (`-fstandalone-debug`, or
+`-Xclang -fno-use-ctor-homing`; under constructor homing a never-constructed
+class is a declaration everywhere). Methods and free functions still need the
+keep file.
+
 What reaches the wrapper is the library's own code under its own symbols,
 named as every C++ wrapper names things: `hol_twice`, `hol_Counter_inc`,
 `hol_Box_double_get`, `hol_biggest_double`, the constructor `hol_Gauge_Gauge`

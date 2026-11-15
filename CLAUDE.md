@@ -617,6 +617,34 @@ the test named when you touch the area.
   record, a lambda's closure type. A toolchain record keeps the
   `_laid_out_from_bases` rule. (`test_memberless_records.jl`, devtests
   `test_memberless_live.jl`.)
+- **An inline constructor the library declares and defines nowhere is
+  defined by the build** (2026-11-15, `generate_inline_constructors`). After
+  the first link `_inline_constructor_plan` takes declared minus defined:
+  every library record's declared constructors
+  (`record_abi[name]["constructors"]`: the `C4` keys with the declaration
+  DIE's `accessibility`, `deleted` and `artificial`) less those the symbol
+  table has a `C1`/`C2`/`C3` for. A generated unit (`replibuild_ctors.cpp`,
+  `-fno-inline` like the templates TU) includes each record's header and
+  explicitly instantiates `replibuild_force::ctor<T, A...>`, whose placement
+  new odr-uses the constructor; `compile_project` compiles it, relinks and
+  extracts again, and the metadata's `inline_constructors` carries each
+  row's outcome for the wrap report. The class and the parameters are
+  spelled from the demangled `C4` key (`_demangle`: `__cxa_demangle` from
+  Julia's own C++ runtime, else `c++filt`), never from DWARF `c_type`s: a
+  declaration's parameters carry no names, so the parser keeps none, and a
+  bare name cannot qualify `btRigidBody::btRigidBodyConstructionInfo`.
+  Skipped and named: a constructor template, a deleted, private or protected
+  one, an implicit one, a conflicted name, a record with no header, an
+  unspellable name, one `exclude_symbols` drops, a header that does not
+  compile on its own; the unit's guard (`is_abstract`, `is_constructible`)
+  declines an abstract class silently and the report says so. A hidden
+  definition is made exportable at link (`_forced_exportable_ir`: `hidden`
+  dropped on ELF, `dllexport` added on PE with `--export-all-symbols` asked
+  for on the shims' terms). The pass sees only a definition some CU's DWARF
+  carries: under constructor homing a class whose constructors are all
+  inline and unused is declaration-only everywhere, and `-fstandalone-debug`
+  (Bullet, box2d) is what makes it appear. Graph mode does not run it.
+  (`test_inline_constructors.jl`, devtests `test_inline_ctors_live.jl`.)
 - Anonymous structs/unions get synthesized names (`Parent_u`, `Parent_anonN`), which
   must be pre-sanitized. They are deduplicated across CUs and emitted as aligned
   opaque regions; C11 anonymous members are injected as fields. One named after a
@@ -1578,10 +1606,15 @@ A fix that lives in metadata reaches a Hub package only on a **rebuild** (delete
 in-repo regression test, negative-checked by neutering its fix; the harness is no
 longer the only proof. Still open:
 
-- **A by-value type only declared in this binary** (F4, constructor homing) is now an
-  ABI trap instead of a SIGSEGV, but the function is still uncallable until the package
-  builds with `-Xclang -fno-use-ctor-homing` or `-fstandalone-debug`. Neither is a
-  default yet (see Not Yet Built).
+- **A by-value type only declared in this binary** (F4, constructor homing) is an
+  ABI trap instead of a SIGSEGV, and stays uncallable until the package builds
+  with `-fstandalone-debug` (or `-Xclang -fno-use-ctor-homing`). With the
+  definition in the DWARF the build also defines the class's inline
+  constructors since 2026-11-15 (the DWARF-extraction invariant), so the type
+  can then be built from Julia as well as passed. A plain `-g` build cannot
+  see such a class's constructors at all (its DIE is a declaration), so the
+  pass closes F4 only where one of the flags makes the definition appear;
+  neither flag is a default (see Not Yet Built).
 
 Found later, and fixed (2026-11-13): **every pass-by-reference record return in
 Tier 2 was moved bytewise out of a dead frame.** The thunk passed its own alloca
@@ -1618,6 +1651,14 @@ DWARF-resolved destructors — **is** built.)
 - Default `-Xclang -fno-use-ctor-homing` for C++ builds. It restores the definition of
   header-only value types at a fraction of `-fstandalone-debug`'s size, but changes
   every C++ package's metadata, so it needs a Hub-wide measurement first.
+  Narrowed 2026-11-15: once the definition is in the DWARF the build defines
+  the class's inline constructors itself, so the flag's whole payoff is the
+  definition, and a package that wants such a class built from Julia sets
+  one of the two flags today (Bullet and box2d already do).
+- Declared-but-undefined inline METHODS (2026-11-15): the forced unit covers
+  constructors only. A method is the same mechanism with its address taken
+  instead of placement new, if the Hub shows the need. The unit does not run
+  in graph mode either, like the templates TU.
 - Array-view Julia-side accessors for the rank-1 thunks, plus rank ≥ 2 members.
 - `is_struct_packed` over-classifies padding-free structs (wasted work, not wrong).
 - Op verifiers for `ffe_call`, `try_call`, `load/store_array_element`, `ctor_call`,

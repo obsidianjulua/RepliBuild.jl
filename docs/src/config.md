@@ -327,7 +327,10 @@ definition only where its constructor is emitted, so a header-only value type
 whose constructors are all inline is a declaration everywhere. `-Xclang
 -fno-use-ctor-homing` turns just that off, at a fraction of
 `-fstandalone-debug`'s size (which also emits all of the standard library's
-types). Hub boostmath builds its distribution classes this way:
+types). Either flag also lets the build define the class's inline
+constructors itself (declared in the DWARF, defined by no translation unit:
+Bullet's `btSphereShape(btScalar)`), so the class is constructible from Julia
+without a shim. Hub boostmath builds its distribution classes this way:
 
 ```toml
 [compile]
