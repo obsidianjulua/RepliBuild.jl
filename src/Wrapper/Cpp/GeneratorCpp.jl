@@ -277,7 +277,8 @@ imgui's `GetID(const char*)` beside `(const void*)`, 2026-11-13).
 """
 function _integer_width_overloads(functions, struct_types, ccall_param_type;
                                   concrete = _concrete_ctype, bound = _ -> true,
-                                  owners = _ -> String[], is_enum = _ -> false)
+                                  owners = _ -> String[], is_enum = _ -> false,
+                                  string_param = _ -> false)
     groups = Dict{String,Vector{Tuple{String,Vector{String}}}}()
     for func in functions
         get(func, "is_vararg", false) == true && continue
@@ -294,7 +295,11 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
                   (_cpp_this_param(class_name, func_name, struct_types) !== nothing || hop === true)
         ctypes = String[ccall_param_type(String(get(p, "julia_type", "Any")), String(get(p, "c_type", "")))
                         for p in raw]
-        kinds = [_relaxed_param_kind(t, bound) for t in ctypes]
+        # A `std::string` parameter the wrapper builds from a Julia string
+        # (`_string_param_plan`) is spelled `_STD_STRING_PARAM` here as in the
+        # loop, so a `const char*` sibling is another kind and its own method.
+        kinds = [string_param(String(get(raw[i], "c_type", ""))) ? _STD_STRING_PARAM :
+                 _relaxed_param_kind(ctypes[i], bound) for i in eachindex(ctypes)]
         injects && pushfirst!(kinds, "Any")
         # A receiver DWARF supplied is position 1 of `ctypes`; it is never a
         # strict position (below), so it is recorded as such.
@@ -390,6 +395,81 @@ function _string_return_plan(c_ret::AbstractString, record_abi)
     d isa AbstractString ||
         return "std::string `$key` returned as its raw bytes: the DWARF declares no destructor for it"
     return (r, replace(String(d), r"D[24]Ev$" => "D1Ev"))
+end
+
+"""
+The Julia type a `std::string` parameter takes: a string to build from, an
+existing object's address, or the STL wrapper's own `CppString` (a
+`[types] templates` entry's string, which `unsafe_convert`s to its object and
+took the position while it was `::Any`).
+"""
+const _STD_STRING_PARAM = "Union{AbstractString, Ptr{Cvoid}, RepliBuild.STLWrappers.CppString}"
+
+"""
+    _string_param_plan(c_type, record_abi) -> nothing | (key, bytes, ctor, takes_allocator, dtor) | String
+
+What a parameter of C type `c_type` does with a Julia string (2026-11-15).
+`nothing` when it is not a `std::basic_string` taken by `const&` or by value:
+a pointer, a non-`const` reference (an out-parameter the library writes to),
+anything else. A `Tuple` when the wrapper builds the object
+(`StdStrings.string_arg`): the record's key, its size, the complete-object
+constructor (`C1`, from the `C4` the build recorded in `string_layout`, the
+one building from a `const char*` and a length, `Compiler._string_constructor`),
+whether it takes an allocator, and the complete-object destructor. A `String`
+when it cannot, with the reason the wrapper writes beside the call: metadata
+from before the constructor was recorded (rebuild), a wide string, no such
+constructor or destructor declared. The signature then keeps today's spelling.
+"""
+function _string_param_plan(c_type::AbstractString, record_abi)
+    FG = JLCSIRGenerator.FunctionGen
+    t = strip(String(c_type))
+    occursin(r"[*(\[]", FG._outside_template_args(t)) && return nothing
+    byref = endswith(t, "&")
+    byref && endswith(t, "&&") && return nothing
+    core = byref ? strip(t[1:prevind(t, end)]) : t
+    # Only `const T&` builds a temporary; `T&` is written to by the callee.
+    is_const = occursin(r"^const\s", core) || occursin(r"\sconst$", core)
+    byref && !is_const && return nothing
+    core = FG._strip_top_cv(core)
+    key = nothing
+    for cand in FG._scope_suffixes(core)
+        if startswith(cand, "basic_string<") && haskey(record_abi, cand)
+            key = cand
+            break
+        end
+    end
+    key === nothing && return nothing
+    facts = record_abi[key]
+    layout = get(facts, "string_layout", nothing)
+    layout === nothing &&
+        return "std::string `$key` takes its byte stand-in: the metadata predates `string_layout`; " *
+               "rebuild the package (delete .replibuild_cache/project_hash) to record the string's constructor"
+    ct = get(layout, "char_type", nothing)
+    ct == "char" || return "std::string `$key` takes its byte stand-in: its character type is " *
+                          "`$(something(ct, "unknown"))`; only `char` strings are built from a Julia string"
+    haskey(layout, "constructor") ||
+        return "std::string `$key` takes its byte stand-in: the metadata predates the recorded constructor; " *
+               "rebuild the package (delete .replibuild_cache/project_hash)"
+    ctor = get(layout, "constructor", nothing)
+    ctor isa AbstractString ||
+        return "std::string `$key` takes its byte stand-in: the DWARF declares no constructor from a " *
+               "`const char*` and a length for it"
+    d = get(layout, "destructor", nothing)
+    d isa AbstractString ||
+        return "std::string `$key` takes its byte stand-in: the DWARF declares no destructor for it"
+    bytes = try FG._parse_byte_size(string(get(facts, "byte_size", "0"))) catch; 0 end
+    bytes > 0 || return "std::string `$key` takes its byte stand-in: the metadata records no size for it"
+    return (key, bytes, _complete_object_ctor(String(ctor)), get(layout, "constructor_allocator", false) == true,
+            replace(String(d), r"D[24]Ev$" => "D1Ev"))
+end
+
+# The complete-object constructor (`C1`) for a constructor the DWARF spelled
+# unified (`C4`) or as the base-object variant (`C2`): the marker follows the
+# class prefix, which `_dtor_variant_group`'s regex finds the same way.
+function _complete_object_ctor(sym::String)
+    m = match(r"^(.*?)C[24]E", sym)
+    m === nothing && return sym
+    return m.captures[1] * "C1E" * sym[m.offset + length(m.match):end]
 end
 
 _reader_literal(r) = "RepliBuild.StdStrings.Reader($(repr(r.kind)), $(r.ptr), $(r.len), $(r.flag_bit), " *
@@ -3180,7 +3260,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     strict_int_positions = _integer_width_overloads(
         [f for f in functions if !(String(get(f, "mangled", "")) in rvalue_shadowed)],
         struct_types, _ccall_param_type;
-        bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum)
+        bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum,
+        string_param = c -> _string_param_plan(c, record_abi) isa Tuple)
 
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
@@ -3209,8 +3290,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # (Above 16 bytes the record crosses in memory on both ABIs and the
         # bytes are exact. Unions and bitfield records, the `mutable` ones,
         # never reach here: `_record_natural_layout` rejects them.)
+        # A `std::string` the wrapper builds for a parameter (`_string_param_plan`)
+        # is passed by address and ended after the call in the Tier 2 body; a
+        # `noexcept` function taking one goes there too, so the body is one.
         use_mlir_dispatch = !is_ccall_safe(func, dwarf_structs; record_abi=record_abi) ||
-                            _crosses_small_blob(func, dwarf_structs, record_abi, _blob_names)
+                            _crosses_small_blob(func, dwarf_structs, record_abi, _blob_names) ||
+                            any(p -> _string_param_plan(String(get(p, "c_type", "")), record_abi) isa Tuple,
+                                func["parameters"])
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
@@ -3354,6 +3440,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         param_types = String[]  # C types for ccall
         julia_param_types = String[]  # Julia types for function signature (may differ)
         needs_conversion = Bool[]
+        string_plans = Any[]          # per parameter: nothing, a plan Tuple, or a reason String
 
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
@@ -3376,7 +3463,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # the C width, the pointer's target, the enum.
             raw_i = i - (this_injected ? 1 : 0)
             strict = raw_i in get(strict_int_positions, mangled, _NO_POSITIONS)
+            # A `std::string` taken by `const&` or by value: a Julia string, or
+            # the address of an existing object (`_STD_STRING_PARAM`), the
+            # spelling the prediction above used for this position.
+            splan = _string_param_plan(String(get(param, "c_type", "")), record_abi)
+            push!(string_plans, splan)
             push!(julia_param_types,
+                  splan isa Tuple ? _STD_STRING_PARAM :
                   strict ? _strict_param_spelling(actual_c_type; bound = _sig_type_bound,
                                                   owners = _sig_owners, is_enum = _sig_is_enum) :
                            _relaxed_param_kind(actual_c_type, _sig_type_bound))
@@ -3531,7 +3624,29 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             empty_ret = crossings.ret[1] === :ignore || crossings.ret[1] === :regpad
 
             # Build argument list for invoke: every scalar at its C width.
-            invoke_args = join(_tier2_invoke_args(param_names, param_types, needs_conversion,
+            # A `std::string` built for a parameter: `_rb_sN` holds the object
+            # (`StdStrings.string_arg`, before the call), its address is the
+            # argument, and `release!` ends it in a `finally` around the call,
+            # whether the call returns or throws. A reason (old metadata, a
+            # wide string) is written beside the call and the stand-in stays.
+            string_setup = ""
+            string_syms = String[]
+            invoke_names = copy(param_names)
+            for (si, splan) in enumerate(string_plans)
+                if splan isa String
+                    string_setup *= "# $(splan)\n    "
+                elseif splan isa Tuple
+                    sym = "_rb_s$(si)"
+                    push!(string_syms, sym)
+                    string_setup *= "$sym = RepliBuild.StdStrings.string_arg($(param_names[si]), $(splan[2]), LIBRARY_PATH, " *
+                                    "$(repr(splan[3])), $(splan[4]), $(repr(splan[5])), $(repr(julia_name)))\n    "
+                    invoke_names[si] = "RepliBuild.StdStrings.address($sym)"
+                end
+            end
+            _with_strings(call) = isempty(string_syms) ? call :
+                "(try GC.@preserve $(join(string_syms, " ")) $call finally " *
+                join(("RepliBuild.StdStrings.release!($s)" for s in string_syms), "; ") * " end)"
+            invoke_args = join(_tier2_invoke_args(invoke_names, param_types, needs_conversion,
                                                   emitted_enum_base), ", ")
             jit_ret_type = return_type["julia_type"]
             jit_c_ret = get(return_type, "c_type", "void")
@@ -3608,7 +3723,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # record: its singleton when the type is emitted, else `nothing`.
             empty_ret_val = !empty_ret ? "" :
                 (jit_ret_type in defined_struct_names ? "$(jit_ret_type)()" : "nothing")
-            ret_stmt(call) = empty_ret ? "$call\n    return $empty_ret_val" : "return $call"
+            ret_stmt(call) = string_setup * (empty_ret ? "$call\n    return $empty_ret_val" : "return $call")
 
             # A `char*` return gets the same policy here as on the ccall path.
             # The tier decides how the call is MADE; it does not get to decide
@@ -3632,7 +3747,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             string_plan = in_place ? _string_return_plan(jit_c_ret, record_abi) : nothing
             in_place_body(call) =
                 (string_plan isa String ? "    # $(string_plan)\n" : "") *
-                "    _rb_ret = RepliBuild.JITManager.return_slot($jit_ret_type)\n" *
+                "    " * string_setup * "_rb_ret = RepliBuild.JITManager.return_slot($jit_ret_type)\n" *
                 "    GC.@preserve _rb_ret $call\n" *
                 (string_plan isa Tuple ?
                     "    return RepliBuild.StdStrings.take_string!(_rb_ret, $(_reader_literal(string_plan[1])), " *
@@ -3692,11 +3807,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end
                 end
 
+                invoke_call = _with_strings(invoke_call)
                 if is_cstring_ret
-                    _aot_head = "    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)\n"
+                    _aot_head = "    # [Tier 2] Dispatch to MLIR AOT Thunk (Complex ABI / Packed / Union)\n    " * string_setup
                     func_def = _cstring_wrapper_pair(julia_name, param_sig,
-                        _aot_head * "    ptr = " * invoke_call,
-                        _aot_head * "    return " * invoke_call,
+                        _aot_head * "ptr = " * invoke_call,
+                        _aot_head * "return " * invoke_call,
                         cstring_free_sym; doc_comment=doc_comment)
                 elseif in_place
                     func_def = """
@@ -3732,11 +3848,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end
                 end
 
+                invoke_call = _with_strings(invoke_call)
                 if is_cstring_ret
-                    _jit_head = "    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)\n"
+                    _jit_head = "    # [Tier 2] Dispatch to MLIR JIT (Complex ABI / Packed / Union)\n    " * string_setup
                     func_def = _cstring_wrapper_pair(julia_name, param_sig,
-                        _jit_head * "    ptr = " * invoke_call,
-                        _jit_head * "    return " * invoke_call,
+                        _jit_head * "ptr = " * invoke_call,
+                        _jit_head * "return " * invoke_call,
                         cstring_free_sym; doc_comment=doc_comment)
                 elseif in_place
                     func_def = """

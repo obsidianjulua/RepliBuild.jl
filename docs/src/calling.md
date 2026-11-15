@@ -270,9 +270,22 @@ ABI tag (`short_str_abi_cxx11`). When the wrapper cannot decode the string —
 metadata from before the layout was recorded (rebuild), a `std::wstring` or
 other wide string, an unknown standard-library layout — the function returns
 the object's raw bytes instead, and a comment beside the call in the wrapper
-says why. A `std::string` **parameter** is not built yet: it takes the
-object's byte stand-in, which a caller cannot construct, so call an overload
-that takes `const char*` where the library has one.
+says why.
+
+**`std::string` parameters.** A parameter declared `const std::string&` or
+`std::string` (by value) takes a Julia string: the wrapper builds a real
+`std::string` from it in a buffer of its own, passes that object, and ends it
+after the call, whether the call returns or throws. The position is typed
+`Union{AbstractString, Ptr{Cvoid}, RepliBuild.STLWrappers.CppString}`, so a
+pointer to an existing `std::string` (one the library handed back), or the
+`CppString` a `[types] templates` entry gives you, passes through untouched. Beside an overload
+taking `const char*`, a Julia string picks the `std::string` one and a
+`Cstring` or byte pointer the other. What the wrapper cannot build keeps the
+byte stand-in, with the reason beside the call: metadata from before the
+constructor was recorded (rebuild), a wide string, a non-`const` reference
+(an out-parameter the library writes to). On a host whose C++ runtime has no
+such constructor the call raises, naming the function; it never passes bytes
+it did not build.
 
 **Classes returned by value.** A class with a non-trivial copy constructor or
 destructor is returned through a buffer the wrapper owns: C++ constructs it

@@ -137,6 +137,62 @@ probe("stale_call_says_rewrap") do p
         push!(p, "old-name call: " * first(msg, 200))
 end
 
+# A std::string PARAMETER takes a Julia String (2026-11-15): the wrapper builds
+# the object in its own slot, passes its address, and ends it after the call.
+# Short (in the object) and long (heap) strings, by const& and by value.
+probe("std_string_parameter_from_julia_string") do p
+    check(p, "str_size short", M.str_size("hello"), Int32(5))
+    check(p, "str_size long", M.str_size("x"^100), Int32(100))
+    check(p, "str_data_inside short", M.str_data_inside("ab"), Int32(1))
+    check(p, "str_size_v by value", M.str_size_v("by value"), Int32(8))
+    check(p, "str_size_v long by value", M.str_size_v("y"^77), Int32(77))
+    check(p, "two strings", M.str_both("abc", "de"), Int32(302))
+    check(p, "a SubString passes", M.str_size(SubString("hello world", 1, 5)), Int32(5))
+    check(p, "signature", first(methods(M.str_size)).sig.parameters[2], Union{AbstractString, Ptr{Cvoid}, RepliBuild.STLWrappers.CppString})
+    for i in 1:500
+        M.str_size("s"^(i % 60)) == Int32(i % 60) || (push!(p, "call $i"); break)
+    end
+end
+
+# The overload pair: a Julia String picks the std::string one, a Cstring the
+# const char* one; both are methods of one Julia function.
+probe("std_string_overload_beside_const_char") do p
+    check(p, "String → std::string", M.kind_of("abc"), Int32(1))
+    c = Base.cconvert(Cstring, "abc")
+    GC.@preserve c check(p, "Cstring → const char*", M.kind_of(Base.unsafe_convert(Cstring, c)), Int32(2))
+    check(p, "two methods", length(methods(M.kind_of)), 2)
+end
+
+# A pointer to an existing std::string passes through: the one C++ returned
+# into the caller's buffer, untouched and never ended by the parameter path.
+probe("std_string_parameter_pointer_passthrough") do p
+    f = fn("short_str")
+    name = "_mlir_ciface_" * FG.thunk_symbol(f["mangled"], true)
+    buf = Ref{NTuple{32,UInt8}}()
+    GC.@preserve buf begin
+        addr = Base.unsafe_convert(Ptr{Cvoid}, buf)
+        RepliBuild.JITManager.invoke(name, addr, Int32(3))
+        r0 = RepliBuild.StdStrings.RELEASES[]
+        check(p, "str_size through the pointer", M.str_size(addr), Int32(2))
+        check(p, "a pointer is not released", RepliBuild.StdStrings.RELEASES[] - r0, 0)
+    end
+end
+
+# A throw through the call still ends the slot: `release!` runs in a finally.
+probe("std_string_parameter_ended_on_throw") do p
+    r0 = RepliBuild.StdStrings.RELEASES[]
+    check(p, "no throw", M.str_throw("fine"), Int32(4))
+    check(p, "released after a return", RepliBuild.StdStrings.RELEASES[] - r0, 1)
+    threw = try
+        M.str_throw("boom")
+        false
+    catch e
+        occursin("boom", sprint(showerror, e))
+    end
+    check(p, "the C++ exception reached Julia", threw, true)
+    check(p, "released after a throw", RepliBuild.StdStrings.RELEASES[] - r0, 2)
+end
+
 # The control: a trivially copyable record takes the wrapper's own call, as
 # it always did.
 probe("trivial_record_unchanged") do p
