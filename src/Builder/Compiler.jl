@@ -6794,6 +6794,10 @@ function parse_dwarf_dump(output::AbstractString;
     die_at_depth = Dict{Int,Tuple{String,String}}()
     current_function_parent = nothing
     destructor_of = Dict{String,String}()
+    # ...and the constructors declared in it (`constructors_of`, every `C4`/`C1`/
+    # `C2` linkage), for the one `std::string` building from a `const char*`
+    # and a length (`_string_constructor`, 2026-11-15).
+    constructors_of = Dict{String,Vector{String}}()
 
     for line in split(output, '\n')
         line = strip(line)
@@ -7085,9 +7089,11 @@ function parse_dwarf_dump(output::AbstractString;
                 # A destructor declared in a record: `D4` is clang's unified
                 # spelling, `D1`/`D2` a variant's.
                 if current_function_parent !== nothing &&
-                   current_function_parent[2] in ("DW_TAG_class_type", "DW_TAG_structure_type") &&
-                   occursin(r"D[124]Ev$", current_function_linkage)
-                    get!(destructor_of, current_function_parent[1], current_function_linkage)
+                   current_function_parent[2] in ("DW_TAG_class_type", "DW_TAG_structure_type")
+                    occursin(r"D[124]Ev$", current_function_linkage) &&
+                        get!(destructor_of, current_function_parent[1], current_function_linkage)
+                    occursin(r"C[124]E", current_function_linkage) &&
+                        push!(get!(() -> String[], constructors_of, current_function_parent[1]), current_function_linkage)
                 end
             end
         end
@@ -7369,6 +7375,7 @@ function parse_dwarf_dump(output::AbstractString;
     decl_files_of = Dict{String,Vector{String}}()                    # headers, per bare name
     record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
     destructor_by_name = Dict{String,String}()       # → record_abi's string_layout
+    constructors_by_name = Dict{String,Vector{String}}()
     for offset in die_order
         type_info = type_refs[offset]
         if isa(type_info, Dict) && get(type_info, "kind", nothing) in ["struct", "class", "union"]
@@ -7376,6 +7383,9 @@ function parse_dwarf_dump(output::AbstractString;
             if struct_name != "unknown" && struct_name != "unknown_struct" && struct_name != "unknown_class" && struct_name != "unknown_union"
                 let dk = get(destructor_of, offset, nothing)
                     dk === nothing || get!(destructor_by_name, String(struct_name), dk)
+                end
+                let ck = get(constructors_of, offset, nothing)
+                    ck === nothing || append!(get!(() -> String[], constructors_by_name, String(struct_name)), ck)
                 end
                 # Every named DEFINITION (a declaration has no byte_size), before
                 # any provenance or member filter: calling a function that takes
@@ -7875,7 +7885,11 @@ function parse_dwarf_dump(output::AbstractString;
                                                 get(destructor_by_name, name, nothing);
                                                 byte_size_of = t -> (fk = _key_in(String(t), record_facts);
                                                                      fk === nothing ? nothing :
-                                                                     _definition_byte_size(record_facts[fk])))
+                                                                     _definition_byte_size(record_facts[fk])),
+                                                constructors = get(constructors_by_name, name, String[]),
+                                                params_of = sym -> (e = get(return_types, sym, nothing);
+                                                                    e === nothing ? nothing :
+                                                                    [String(get(q, "c_type", "")) for q in get(e, "parameters", [])]))
         record_abi[name] = entry
     end
 
@@ -7890,6 +7904,38 @@ DW_CC_pass_by_value) or `"reference"` (4, DW_CC_pass_by_reference). `nothing`
 when the attribute is absent, which is every C record.
 """
 _record_pass_convention(cc) = cc == 5 ? "value" : cc == 4 ? "reference" : nothing
+
+"""
+    _string_constructor(constructors, params_of) -> Union{Nothing,Tuple{String,Bool}}
+
+Of a `basic_string`'s declared constructors (their `C4`/`C1`/`C2` linkage
+names), the one that builds from a character pointer and a length:
+`(const CharT*, size_type)` (libc++ declares it), else
+`(const CharT*, size_type, const allocator&)` (libstdc++ declares only this;
+the allocator is an empty class, so the caller passes a byte). `params_of`
+gives a linkage name's parameter C types as the DWARF declares them, `this`
+first, or `nothing`. The symbol as declared (`C4`, the unified spelling the
+DWARF carries, or a variant); the wrapper spells the complete-object `C1`.
+`(symbol, takes_allocator)`, or `nothing` when the record declares neither.
+"""
+function _string_constructor(constructors::AbstractVector, params_of)
+    is_char_ptr(t) = (s = strip(replace(String(t), r"\bconst\b" => "")); occursin(r"^(?:char|wchar_t|char(?:8|16|32)_t)\s*\*$", s))
+    is_size(t) = strip(String(t)) in ("size_t", "size_type", "unsigned long", "unsigned long long", "unsigned int",
+                                      "unsigned long int", "unsigned", "uint64_t", "uint32_t", "std::size_t")
+    is_alloc(t) = (s = strip(String(t)); occursin(r"^const\s+allocator<.*>\s*&$", s) || occursin(r"allocator<.*>\s*const\s*&$", s))
+    with_alloc = nothing
+    for sym in constructors
+        ps = params_of(String(sym))
+        ps === nothing && continue
+        args = length(ps) >= 1 ? ps[2:end] : ps          # drop `this`
+        if length(args) == 2 && is_char_ptr(args[1]) && is_size(args[2])
+            return (String(sym), false)
+        elseif length(args) == 3 && is_char_ptr(args[1]) && is_size(args[2]) && is_alloc(args[3])
+            with_alloc === nothing && (with_alloc = (String(sym), true))
+        end
+    end
+    return with_alloc
+end
 
 """
     _string_layout(name, toolchain_defs, struct_defs, destructor) -> Dict
@@ -7910,10 +7956,17 @@ string differently, and a layout this does not recognise must be refused
 there, not guessed here.
 """
 function _string_layout(name::AbstractString, toolchain_defs::AbstractDict, struct_defs::AbstractDict,
-                        destructor::Union{Nothing,AbstractString}; byte_size_of = t -> nothing)
+                        destructor::Union{Nothing,AbstractString}; byte_size_of = t -> nothing,
+                        constructors::AbstractVector = String[], params_of = sym -> nothing)
     lookup(t) = (k = _key_in(String(t), toolchain_defs); k !== nothing ? toolchain_defs[k] :
                  (k2 = _key_in(String(t), struct_defs); k2 === nothing ? nothing : struct_defs[k2]))
     out = Dict{String,Any}("leaves" => Any[], "destructor" => destructor, "char_type" => nothing)
+    # The constructor a Julia `String` is built into a slot with, for a
+    # parameter (`StdStrings.string_arg`); `nothing` when the record declares
+    # none of that shape, and the wrapper then keeps the stand-in.
+    ctor = _string_constructor(constructors, params_of)
+    out["constructor"] = ctor === nothing ? nothing : ctor[1]
+    out["constructor_allocator"] = ctor === nothing ? nothing : ctor[2]
     def = lookup(name)
     if def === nothing
         out["unread"] = "no definition of `$(name)` in the DWARF"

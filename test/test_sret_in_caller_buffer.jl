@@ -59,6 +59,20 @@ if requires("A pass-by-reference return is built in the caller's buffer", :libJL
     @test isfile(wrapper)
     md = RepliBuild._read_json(joinpath(dirname(wrapper), "compilation_metadata.json"))
     @test get(get(md["record_abi"], "SelfRef", Dict()), "pass", nothing) == "reference"
+    # The build recorded the constructor a parameter is built with (2026-11-15).
+    skey = findfirst(startswith("basic_string<char"), collect(keys(md["record_abi"])))
+    @test skey !== nothing
+    if skey !== nothing
+        lay = get(md["record_abi"][collect(keys(md["record_abi"]))[skey]], "string_layout", Dict())
+        @test occursin(r"C4E.*PKc", String(something(get(lay, "constructor", nothing), "")))
+        code = read(wrapper, String)
+        @test occursin("function str_size(s::$(RepliBuild.Wrapper._STD_STRING_PARAM))", code)
+        @test occursin("function str_size_v(s::$(RepliBuild.Wrapper._STD_STRING_PARAM))", code)
+        @test occursin("function kind_of(s::$(RepliBuild.Wrapper._STD_STRING_PARAM))", code)
+        @test occursin("RepliBuild.StdStrings.string_arg(s, 32, LIBRARY_PATH, \"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEC1EPKcmRKS3_\", true", code) ||
+              occursin("RepliBuild.StdStrings.string_arg(s, ", code)    # libc++ spells the constructor otherwise
+        @test occursin("finally RepliBuild.StdStrings.release!(_rb_s1) end", code)
+    end
 
     r = run_isolated(`$(joinpath(SRET_DIR, "probe_sret.jl")) $wrapper`)
     v = probe_verdicts(r.output)
@@ -67,6 +81,8 @@ if requires("A pass-by-reference return is built in the caller's buffer", :libJL
     names = ["built_in_the_callers_buffer", "stl_string_built_in_the_callers_buffer",
              "std_string_is_a_julia_string", "wstring_keeps_its_bytes",
              "wrapper_call_site", "stale_call_says_rewrap",
+             "std_string_parameter_from_julia_string", "std_string_overload_beside_const_char",
+             "std_string_parameter_pointer_passthrough", "std_string_parameter_ended_on_throw",
              "trivial_record_unchanged"]
     for n in names
         @test (n, get(v, n, "no PROBE line")) == (n, "PASS")

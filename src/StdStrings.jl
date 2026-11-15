@@ -192,6 +192,7 @@ const _WARNED = Set{String}()
 The address of the destructor `sym` (a complete-object `D1`), found through
 `lib`'s own handle, else in `cxx_runtime_libraries(abi)`; `C_NULL` when none
 has it. Cached per `(lib, sym)`, so the lookup runs once per host and process.
+The constructor a parameter is built with (`string_arg`) is found the same way.
 """
 function destructor(lib::AbstractString, sym::AbstractString; abi::Symbol = host_record_abi())::Ptr{Cvoid}
     lock(_DTORS_LOCK) do
@@ -238,5 +239,86 @@ function take_string!(slot, r::Reader, lib::AbstractString, sym::AbstractString,
 end
 _slot_address(slot::Base.RefValue) = Base.unsafe_convert(Ptr{Cvoid}, slot)
 _slot_address(slot) = pointer_from_objref(slot)
+
+# ── Parameters: a Julia String where C++ takes std::string (2026-11-15) ──────
+
+"""
+    StringArg
+
+A `std::string` object a wrapper passes where C++ takes one by `const&` or by
+value: either built by `string_arg` from a Julia string into `slot` (the
+record's bytes, owned here and ended by `release!`), or an existing object the
+caller passed (`slot === nothing`: passed through, never ended; `keep` is the
+Julia object that owns it, a `CppString`, held alive across the call).
+"""
+struct StringArg
+    slot::Union{Nothing,Vector{UInt8}}
+    ptr::Ptr{Cvoid}
+    dtor::Ptr{Cvoid}
+    keep::Any
+end
+
+"The address the thunk or ccall receives: the std::string object."
+address(a::StringArg) = a.ptr
+
+"Releases (`release!`) counted, for tests: a throw through the call must end the slot too."
+const RELEASES = Ref(0)
+
+"""
+    string_arg(x, bytes, lib, ctor, takes_allocator, dtor, fname) -> StringArg
+
+The object a wrapper passes for a `std::string` parameter. A pointer passes
+through: it is an existing object the caller owns. So does anything that
+converts to one (`Base.unsafe_convert(Ptr{Cvoid}, x)`: the STL wrapper's
+`CppString`), kept alive in the `StringArg`. A Julia string is built
+into a fresh slot of `bytes` bytes with the constructor `ctor` (the
+complete-object `C1` of `basic_string(const char*, size_type[, const
+allocator&])`, found per host at first use through `lib`'s handle like the
+destructor), under `GC.@preserve` of the string; `takes_allocator` passes a
+byte as the empty allocator. `dtor` ends it in `release!`. With no
+constructor or destructor on this host the string cannot be passed at all:
+an error naming the function and the symbol, never a silent byte stand-in.
+"""
+string_arg(x::Ptr, bytes::Int, lib, ctor, takes_allocator::Bool, dtor, fname) =
+    StringArg(nothing, Ptr{Cvoid}(x), C_NULL, nothing)
+string_arg(x, bytes::Int, lib, ctor, takes_allocator::Bool, dtor, fname) =
+    StringArg(nothing, Base.unsafe_convert(Ptr{Cvoid}, x), C_NULL, x)
+function string_arg(x::AbstractString, bytes::Int, lib::AbstractString, ctor::AbstractString,
+                    takes_allocator::Bool, dtor::AbstractString, fname::AbstractString)
+    c = destructor(lib, ctor)
+    d = destructor(lib, dtor)
+    if c == C_NULL || d == C_NULL
+        sym = c == C_NULL ? ctor : dtor
+        error("$fname: cannot pass a Julia string where C++ takes std::string, because this host " *
+              "has no `$sym` in $lib or the C++ runtime. Pass a pointer to an existing " *
+              "std::string object instead.")
+    end
+    s = String(x)
+    slot = Vector{UInt8}(undef, max(bytes, 1))
+    alloc = Ref{UInt8}(0x00)                   # an empty class: one byte nobody reads
+    GC.@preserve s slot alloc begin
+        if takes_allocator
+            ccall(c, Cvoid, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+                  pointer(slot), pointer(s), sizeof(s), Base.unsafe_convert(Ptr{UInt8}, alloc))
+        else
+            ccall(c, Cvoid, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), pointer(slot), pointer(s), sizeof(s))
+        end
+    end
+    return StringArg(slot, pointer(slot), d, nothing)
+end
+
+"""
+    release!(a::StringArg)
+
+End the object `string_arg` built (its destructor on the slot); nothing for a
+pointer that passed through. Called in a `finally`, so a throw through the
+call ends it too.
+"""
+function release!(a::StringArg)
+    a.slot === nothing && return nothing
+    GC.@preserve a ccall(a.dtor, Cvoid, (Ptr{Cvoid},), a.ptr)
+    RELEASES[] += 1
+    return nothing
+end
 
 end # module StdStrings

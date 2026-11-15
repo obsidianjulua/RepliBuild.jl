@@ -1034,7 +1034,23 @@ the test named when you touch the area.
   leaf: the reader takes that leaf, of that type and spanning exactly a
   pointer (a declaration has no byte_size, so the span is the distance to the
   next leaf), as `_M_p`, and refuses any other span. Never decode by hardcoded
-  offsets or sizes. (`test_std_strings.jl`, devtests
+  offsets or sizes. **A `std::string` PARAMETER (`const&` or by value) takes
+  a Julia string** (2026-11-15): the build records on `string_layout` the
+  declared constructor that builds from `(const char*, size_type[, const
+  allocator&])` (`_string_constructor`, from the record's `C4` declarations,
+  never a hardcoded mangling), GeneratorCpp's `_string_param_plan` types the
+  position `Union{AbstractString, Ptr{Cvoid}, STLWrappers.CppString}`
+  (`_STD_STRING_PARAM`, one spelling, read by the loop
+  and by `_integer_width_overloads`' prediction through its `string_param`
+  predicate, so a `const char*` sibling stays its own method) and the body
+  builds the object in a slot (`StdStrings.string_arg`, the constructor found
+  per host at first use like the destructor), passes its address (the thunk
+  takes both spellings as a pointer; `DW_CC_pass_by_reference` makes by-value
+  the caller's temporary too) and ends it in a `finally` (`release!`). A
+  pointer or a `CppString` passes through unended (stl_test's
+  `string_len(CppString)`). Such a function takes Tier 2 even when
+  `noexcept`. No constructor on the host is an error naming the function,
+  never bytes it did not build. (`test_std_strings.jl`, devtests
   `test_sret_in_caller_buffer.jl`.)
 - **One struct-ABI rule set per convention, chosen by the host, in two places
   that must agree.** `RepliBuild.host_record_abi()` (`:sysv`, `:win64`,
@@ -1665,15 +1681,9 @@ DWARF-resolved destructors — **is** built.)
   section has the recipe). Not built: a `std::string` table without the
   instantiation TU (below). (A `std::string` returned by value is a `String`
   since 2026-11-13, above.)
-- `const std::string&` (and by-value `std::string`) PARAMETERS taking a Julia
-  `String` (2026-11-13, deferred from the return decoder). A parameter needs a
-  real `basic_string` object to point at, which only the C++ side can build:
-  call the string's constructor (`basic_string(const char*, size_t,
-  const allocator&)`, found per host like the destructor, `StdStrings.destructor`)
-  into a slot, pass the slot, then end it. Today such a parameter takes the
-  `NTuple` stand-in a caller cannot build. Wide strings (`wchar_t`, `char16_t`,
-  `char32_t`) are not decoded in either direction: the caller chooses the
-  transcoding.
+- Wide strings (`wchar_t`, `char16_t`, `char32_t`) are not decoded in either
+  direction (2026-11-13): the caller chooses the transcoding. (`std::string`
+  parameters take a Julia string since 2026-11-15, above.)
 - **`long double` by value is a trap on every tier** (scoped 2026-11-03, not
   built). The scalar is x87 extended precision: SysV passes it in memory and
   returns it in `ST0`, which `ccall` cannot reach, so Tier 3 can never carry
