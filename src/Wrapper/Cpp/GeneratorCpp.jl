@@ -251,6 +251,62 @@ function _deleting_destructor_doc(mangled::AbstractString, julia_name::AbstractS
 end
 
 """
+    _report_inline_constructors(plan)
+
+The wrap report's lines for the inline constructors the build defined itself
+(the metadata's `inline_constructors`, from
+`Compiler.generate_inline_constructors`): the classes whose constructors the
+forced unit emitted, the forced rows the unit's guard declined (an abstract
+class, or a constructor not constructible from its declared parameters), and
+the rows skipped before the unit with their reasons. Nothing for metadata
+without the key, or with nothing to report.
+"""
+function _report_inline_constructors(plan)
+    plan isa AbstractDict || return
+    forced = [f for f in get(plan, "forced", Any[]) if f isa AbstractDict]
+    skipped = [s for s in get(plan, "skipped", Any[]) if s isa AbstractDict]
+    # `emitted` is written by the build's second extraction; a row without it
+    # was planned and never forced (a graph build runs no unit).
+    emitted = [f for f in forced if get(f, "emitted", nothing) == true]
+    declined = [f for f in forced if get(f, "emitted", nothing) == false]
+    unforced = [f for f in forced if get(f, "emitted", nothing) === nothing]
+    show(xs) = join(first(xs, 8), ", ") * (length(xs) > 8 ? ", …" : "")
+    if !isempty(emitted)
+        classes = sort!(unique(String[String(f["class"]) for f in emitted]))
+        println("  wrap: $(length(emitted)) inline constructor(s) of $(length(classes)) class(es) ",
+                "declared in headers and defined by the build's forced unit: ", show(classes))
+    end
+    if !isempty(unforced)
+        classes = sort!(unique(String[String(f["class"]) for f in unforced]))
+        println("  wrap: $(length(unforced)) inline constructor(s) of $(length(classes)) class(es) ",
+                "declared in headers and defined by no translation unit; this build ran no forced unit: ",
+                show(classes))
+    end
+    if !isempty(declined)
+        println("  wrap: $(length(declined)) inline constructor(s) the forced unit declined ",
+                "(an abstract class, or not constructible from the declared parameters): ",
+                show(sort!(unique(String[String(f["class"]) for f in declined]))))
+    end
+    if !isempty(skipped)
+        # A compiler's message is one row's own; the report groups those and the
+        # metadata keeps each message.
+        by_reason = Dict{String,Vector{String}}()
+        for s in skipped
+            reason = String(get(s, "reason", "?"))
+            occursin("does not compile", reason) &&
+                (reason = "does not compile in the unit (each compiler message is in the metadata's inline_constructors)")
+            push!(get!(() -> String[], by_reason, reason), String(get(s, "class", "?")))
+        end
+        for reason in sort!(collect(keys(by_reason)))
+            classes = sort!(unique(by_reason[reason]))
+            println("  wrap: $(length(classes)) class(es) with an inline constructor left undefined, $reason: ",
+                    show(classes))
+        end
+    end
+    return
+end
+
+"""
     _integer_width_overloads(functions, struct_types, ccall_param_type; concrete, bound, owners, is_enum)
         -> Dict{String,Set{Int}}
 
@@ -1072,6 +1128,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 "bound as <X>_delete_<X>, which frees the object: ", join(first(names, 8), ", "),
                 length(names) > 8 ? ", …" : "")
     end
+    _report_inline_constructors(get(metadata, "inline_constructors", nothing))
 
     # Helper: sanitize a raw function name to the Julia identifier used in wrappers.
     # Proxies and deleters REFERENCE names the main loop defines, so this must be

@@ -176,14 +176,22 @@ Julia object, or `GC.@preserve`. A class whose only destructor binding is
 `Class_delete_Class` (see [Objects](calling.md#Objects)) frees the storage
 itself, so give it `new`-compatible storage and do not free it again.
 
-**Header-inline default constructors** (`b2BodyDef()`): inline functions have
-no symbol. Write fields at their DWARF offsets — `member_offset`, never a
+**Header-inline constructors** (`b2BodyDef()`, `btSphereShape(btScalar)`): a
+constructor defined in a header and used by none of the library's own
+translation units has no symbol of its own, so the build defines it: a
+generated unit odr-uses every such constructor the DWARF declares, and it
+then wraps like any other (`Class_Class(this, args…)`). The wrap report names
+the classes it did this for and the constructors it skipped (private,
+deleted, a template, an abstract class). It needs the class's definition in
+the DWARF, which under clang's constructor homing means `-fstandalone-debug`
+(or `-Xclang -fno-use-ctor-homing`) in `[compile] flags`; a plain `-g` build
+sees a never-constructed class as a declaration only.
+
+**Header-inline accessors** (`GetPosition()`): inline functions have no
+symbol. Read the member at its DWARF offset — `member_offset`, never a
 literal — so layout drift fails loudly.
 
-**Header-inline accessors** (`GetPosition()`): same, read the member at its
-metadata offset.
-
-If the package's TOML is yours, a keep file can compile both into the library
+If the package's TOML is yours, a keep file can compile those into the library
 instead, and they then wrap like any other method
 ([Header-only libraries](guide.md#Header-only-libraries)).
 

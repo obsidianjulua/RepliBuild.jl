@@ -165,6 +165,9 @@ template's arguments are too (`hol::Box<double>::get` is `hol_Box_double_get`).
 
 A class whose constructor is in the library gets a constructor wrapper, named
 `Class_Class(this, args…)`, and a destructor wrapper, `Class_destroy_Class(this)`.
+A constructor defined only in a header is in the library too: the build
+defines every one the DWARF declares and no translation unit emitted
+([Using wrappers](using-wrappers.md)).
 They work on storage you provide, the way placement `new` and an explicit
 destructor call do in C++:
 
