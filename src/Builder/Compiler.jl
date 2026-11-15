@@ -1093,6 +1093,85 @@ function link_optimize_ir(config::RepliBuildConfig, ir_files::Vector{String}, ou
 end
 
 """
+    _ir_type_end(s, i) -> Union{Int,Nothing}
+
+The byte index just past the LLVM type that starts at `s[i]`: the first space,
+tab or comma at bracket depth 0, counting `[ ] { } < > ( )` and skipping quoted
+names (`%"class.std::pair<int, int>"`). A type spells its elements with spaces
+(`[5 x { i32, [4 x i8], ptr, ptr }]`, `[2 x [3 x i32]]`), so no token or
+fixed list of shapes delimits it. `ptr addrspace(N)` is one type. `nothing`
+when the brackets do not balance before the line ends.
+"""
+function _ir_type_end(s::AbstractString, i::Int)
+    cu = codeunits(s)
+    n = length(cu)
+    depth = 0
+    j = i
+    while j <= n
+        c = cu[j]
+        if c == UInt8('"')
+            q = findnext(==(UInt8('"')), cu, j + 1)
+            q === nothing && return nothing
+            j = q + 1
+            continue
+        elseif c in (UInt8('['), UInt8('{'), UInt8('<'), UInt8('('))
+            depth += 1
+        elseif c in (UInt8(']'), UInt8('}'), UInt8('>'), UInt8(')'))
+            depth -= 1
+            depth < 0 && return nothing
+        elseif depth == 0 && c in (UInt8(' '), UInt8('\t'), UInt8(','))
+            break
+        end
+        j += 1
+    end
+    depth == 0 || return nothing
+    j > i || return nothing
+    as = match(r"^\s+addrspace\(\d+\)", SubString(s, j))
+    as === nothing || (j += ncodeunits(as.match))
+    return j
+end
+
+const _IR_GLOBAL_HEAD = r"^(@[\w][\w.]*\s*=\s*)(.*?)(?<![@%.$])\b(global|constant)\b\s+"
+
+"""
+    _externalize_global_definition(line) -> String
+
+`@g = <linkage…> global|constant <type> <initializer>…` becomes
+`@g = external global|constant <type>`, so a module loaded beside its `.so`
+declares the global instead of defining it twice. A line with nothing after
+the type is a declaration already and passes through, and so does a hidden,
+protected, internal or private definition: the `.so` exports no symbol for it.
+A definition whose type cannot be delimited is kept, with a warning naming the
+global, never rewritten into a truncated declaration (wasm3's
+`@preopen = external global [5`, which no LLVM parses).
+"""
+function _externalize_global_definition(line::AbstractString)
+    gm = match(_IR_GLOBAL_HEAD, line)
+    gm === nothing && return line
+    occursin(r"\b(?:private|internal|hidden|protected)\b", gm[2]) && return line
+    start = gm.offset + ncodeunits(gm.match)
+    stop = _ir_type_end(line, start)
+    if stop === nothing
+        name = strip(rstrip(strip(gm[1]), '='))
+        @warn "IR sanitizer: cannot delimit the type of global $name; keeping its definition" maxlog = 20
+        return line
+    end
+    # A definition carries an initializer after the type.
+    occursin(r"^\s+\S", SubString(line, stop)) || return line
+    type_str = SubString(line, start, prevind(line, stop))
+    # What a declaration must keep to name the same object: thread-local
+    # storage and the address space. Linkage, visibility, dllexport and
+    # unnamed_addr belong to the definition.
+    kept = String[]
+    tl = match(r"\bthread_local(?:\(\w+\))?", gm[2])
+    tl === nothing || push!(kept, tl.match)
+    as = match(r"\baddrspace\(\d+\)", gm[2])
+    as === nothing || push!(kept, as.match)
+    quals = isempty(kept) ? "" : join(kept, " ") * " "
+    return "$(gm[1])external $(quals)$(gm[3]) $(type_str)"
+end
+
+"""
     sanitize_ir_for_julia(ir_text::String) -> String
 
 Sanitize LLVM IR text for compatibility with Julia's internal LLVM (18).
@@ -1199,19 +1278,22 @@ function sanitize_ir_for_julia(ir_text::String)::String
         # bodies survive the Phase-1 strip and need these intrinsics for codegen.
 
         # ── Per-line replacements ──
-        line = replace(line, r"\bnoinline\b" => "")
-        line = replace(line, r"\boptnone\b" => "")
+        # Every keyword strip below is anchored with `(?<![@%.$])` as well as
+        # `\b`: `\b` holds between `@` and a letter, so a C function named
+        # `range` or `captures` lost its name at every call (`call i32 @`).
+        line = replace(line, r"(?<![@%.$])\bnoinline\b" => "")
+        line = replace(line, r"(?<![@%.$])\boptnone\b" => "")
         # LLVM 19–22 instruction-level compatibility
         # GEP flags: nuw (19), nusw (20) — strip any combination
         line = replace(line, r"\bgetelementptr inbounds( nuw| nusw)+" => "getelementptr inbounds")
         line = replace(line, r"\bgetelementptr( nuw| nusw)+\b" => "getelementptr")
-        line = replace(line, r"\binrange\([^)]*\)\s*" => "")
-        line = replace(line, r"\bcaptures\([^)]*\)\s*" => "")
-        line = replace(line, r"\bdead_on_unwind\b\s*" => "")
-        line = replace(line, r"\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
-        line = replace(line, r"\ballocptr\b\s*" => "")
+        line = replace(line, r"(?<![@%.$])\binrange\([^)]*\)\s*" => "")
+        line = replace(line, r"(?<![@%.$])\bcaptures\([^)]*\)\s*" => "")
+        line = replace(line, r"(?<![@%.$])\bdead_on_unwind\b\s*" => "")
+        line = replace(line, r"(?<![@%.$])\binitializes\((?:\([^)]*\),?\s*)+\)\s*" => "")
+        line = replace(line, r"(?<![@%.$])\ballocptr\b\s*" => "")
         line = replace(line, r"\bicmp samesign\b" => "icmp")
-        line = replace(line, r"\brange\([^)]*\)\s*" => "")
+        line = replace(line, r"(?<![@%.$])\brange\([^)]*\)\s*" => "")
         line = replace(line, r"\btrunc (nuw |nsw )+" => "trunc ")
         line = replace(line, r"\b(uitofp|zext) nneg " => s"\1 ")
         # LLVM 20: disjoint flag on or instruction
@@ -1220,7 +1302,7 @@ function sanitize_ir_for_julia(ir_text::String)::String
         line = replace(line, r"\bfptrunc\s+(?:(?:fast|nnan|ninf|nsz|arcp|contract|afn|reassoc)\s+)+" => "fptrunc ")
         line = replace(line, r"\bfpext\s+(?:(?:fast|nnan|ninf|nsz|arcp|contract|afn|reassoc)\s+)+" => "fpext ")
         # LLVM 22: ptrtoaddr (ptrtoint without provenance capture) — downgrade to ptrtoint
-        line = replace(line, r"\bptrtoaddr\b" => "ptrtoint")
+        line = replace(line, r"(?<![@%.$])\bptrtoaddr\b" => "ptrtoint")
         # Strip metadata references (!dbg, !tbaa, !llvm.loop, etc.)
         line = replace(line, r",?\s*![a-zA-Z_.]+\s+![0-9]+" => "")
 
@@ -1231,11 +1313,7 @@ function sanitize_ir_for_julia(ir_text::String)::String
         # (e.g. Lua's LUAI_DDEC marks tables like luaP_opmodes as visibility("internal")),
         # so externalizing them would create unresolvable JIT references. Keep the
         # definition local to the bitcode — there's no .so symbol to clash with.
-        gm = match(r"^(@[\w][\w.]*\s*=\s*)(.*?)\b(global|constant)\b\s+((?:<\{.*?\}>|\{.*?\}|\[\d+\s+x\s+\S+\]|\S+))\s+\S", line)
-        if gm !== nothing && !occursin(r"\b(?:private|internal|hidden|protected)\b", gm[2])
-            type_str = rstrip(gm[4], ',')
-            line = "$(gm[1])external $(gm[3]) $(type_str)"
-        end
+        line = _externalize_global_definition(line)
 
         # ── Write line ──
         if !first_line

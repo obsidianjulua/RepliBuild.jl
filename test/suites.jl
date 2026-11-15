@@ -134,6 +134,7 @@ const TESTS = TestFile[
     T("test_platform_overlay.jl", :unit, [:build]),
     T("test_portable_paths.jl", :unit, [:build]),
     T("test_codegen_flags.jl", :unit, [:build]),
+    T("test_ir_sanitize_globals.jl", :unit, [:build]),
     T("test_response_files.jl", :unit, [:build]),
     T("test_llvm_tool_table.jl", :unit, [:build]),
     T("test_llvm_prefix_search.jl", :unit, [:build]),
