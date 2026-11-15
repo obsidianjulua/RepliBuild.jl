@@ -441,9 +441,14 @@ function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_ab
     ret = by_value_crossing(ret_c, structs, record_abi; abi, ret = true)
     reasons = String[]
     abi_reasons = String[]
+    # A record C++ passes by invisible reference (`DW_CC_pass_by_reference`)
+    # crosses as a pointer on every convention, so it needs no class: asked
+    # anyway, AAPCS64 refused a memberless class with a virtual base (`VB`)
+    # that it passed by address until the record gained an entry (2026-11-14).
+    by_ref(c, key) = record_passes_by_reference(c, key, record_abi)
     for (p, (k, key)) in zip(get(func, "parameters", []), params)
         k === :opaque && push!(reasons, "takes `$(get(p, "c_type", "?"))` by value")
-        if k === :layout
+        if k === :layout && !by_ref(String(get(p, "c_type", "")), key)
             why = sysv_trap_reason(key, structs; ret = false, abi)
             why === nothing || push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $why")
         end
@@ -451,7 +456,7 @@ function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_ab
             push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $(_BARE_VECTOR_PHRASE)")
     end
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
-    if ret[1] === :layout
+    if ret[1] === :layout && !by_ref(ret_c, ret[2])
         why = sysv_trap_reason(ret[2], structs; ret = true, abi)
         why === nothing || push!(abi_reasons, "returns `$ret_c` by value, $why")
     end

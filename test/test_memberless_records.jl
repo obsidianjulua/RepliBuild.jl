@@ -688,9 +688,13 @@ end
         # Metadata with no `record_abi` (from before 2026-10) has no memberless
         # entries either; given one, the layout is all it can say.
         @test _MR_FG.by_value_crossing("P", sd, Dict()) == (:layout, "P")
-        for n in ("dsum", "dmake", "pcall", "vb_first")
-            @test (n, _MR_FG.thunk_crossings(_mr_fn(fns, n), sd, ra).trap) == (n, nothing)
+        for n in ("dsum", "dmake", "pcall", "vb_first"), abi in (:sysv, :win64, :aapcs64)
+            @test (n, abi, _MR_FG.thunk_crossings(_mr_fn(fns, n), sd, ra; abi).trap) == (n, abi, nothing)
         end
+        # `VB` crosses by address (DW_CC_pass_by_reference) on every convention,
+        # so no convention is asked for its class; asked, AAPCS64 cannot read
+        # one past the virtual base, and the first arm64 CI run trapped it.
+        @test occursin("virtual base", something(_MR_FG.sysv_trap_reason("VB", sd; ret = false, abi = :aapcs64), ""))
     end
 
     @testset "is_ccall_safe sends an empty record to the thunk" begin
