@@ -80,6 +80,35 @@ probe("managed_twig_deletes_through_its_own_destructor") do p
     f == d || push!(p, "$d destructor bodies but $f frees")
 end
 
+# Sprout's only destructor is D0. Bound as `Sprout_delete_Sprout`, it runs
+# Leaf's body once and Leaf's operator delete once, and the storage is gone:
+# nothing to free afterwards. Before, it was `Sprout_destroy_Sprout`, named
+# like the non-freeing destructors, and a caller who freed after it double-freed.
+probe("d0_only_class_binds_delete_which_frees_once") do p
+    isdefined(M, :Sprout_destroy_Sprout) && push!(p, "Sprout_destroy_Sprout is defined")
+    isdefined(M, :Sprout_delete_Sprout) || (push!(p, "Sprout_delete_Sprout is not defined"); return)
+    d0, f0 = M.leaf_dtors(), M.leaf_frees()
+    s = M.spawn_sprout(4)
+    M.Sprout_delete_Sprout(s)
+    d, f = M.leaf_dtors() - d0, M.leaf_frees() - f0
+    d == 1 || push!(p, "$d destructor bodies ran")
+    f == 1 || push!(p, "$f frees")
+end
+
+# Leaf has all three variants: `destroy_` ends the object (D2) and leaves the
+# storage, `delete_` (D0) frees it.
+probe("destroy_and_delete_are_two_bindings") do p
+    d0, f0 = M.leaf_dtors(), M.leaf_frees()
+    l = M.spawn_leaf(6)
+    M.Leaf_destroy_Leaf(l)
+    (M.leaf_dtors() - d0, M.leaf_frees() - f0) == (1, 0) || push!(p, "destroy_ freed or did not destroy")
+    M.Leaf_delete_Leaf(M.spawn_leaf(7))
+    (M.leaf_dtors() - d0, M.leaf_frees() - f0) == (2, 1) || push!(p, "delete_ did not free exactly once")
+    # `l` was destroyed but not freed: give its storage back through the
+    # class's operator delete, which counts it, so the library's books balance.
+    ccall((:_ZN4LeafdlEPv, M.LIBRARY_PATH), Cvoid, (Ptr{Cvoid},), l)
+end
+
 probe("nothing_owns_a_plain") do p
     for name in (:ManagedPlain, :make_plain_safe, :spawn_plain_safe)
         isdefined(M, name) && push!(p, "$name is defined")

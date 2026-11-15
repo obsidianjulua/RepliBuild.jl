@@ -86,6 +86,8 @@ const _FZ_STRUCTS = Dict{String,Any}(
     "Leaf"   => _fz_rec("class", 16, _fz_vptr("Leaf"), _fz_mem("v_", "Cint", "int", "0x8", 4)),
     "Node"   => _fz_rec("class", 8, _fz_vptr("Node")),
     "Pooled" => _fz_rec("class", 8, _fz_vptr("Pooled")),
+    # No destructor of its own: the library holds only its D0.
+    "Sprout" => _fz_rec("class", 16, _fz_mem("more_", "Cint", "int", "0xc", 4); base = "Leaf"),
 )
 
 const _FZ_DD = (_fz_p("w", "Cdouble", "double"), _fz_p("h", "Cdouble", "double"))
@@ -127,6 +129,9 @@ const _FZ_FUNCTIONS = Any[
     _fz_row("_ZN6Pooled12DeletePooledEPS_", "Pooled::DeletePooled(Pooled*)";
             params = (_fz_p("p", "Ptr{Pooled}", "Pooled*"),), hop = false),
     _fz_free("_Z12spawn_pooledv", "spawn_pooled()"; ret = _fz_ret("Pooled")),
+    # An implicit virtual destructor at -O2: D0 is the only variant.
+    _fz_dtor("Sprout", 0),
+    _fz_free("_Z12spawn_sprouti", "spawn_sprout(int)", _fz_p("v", "Cint", "int"); ret = _fz_ret("Sprout")),
 ]
 
 @testset "C++ finalizers free what they own" begin
@@ -174,6 +179,59 @@ const _FZ_FUNCTIONS = Any[
         @test !isempty(widget)
         @test occursin("ccall((:_Z14destroy_widgetP6Widget, LIBRARY_PATH), Cvoid, (Ptr{Cvoid},), o.handle)", widget)
         @test !occursin("Widget_destroy_Widget", widget)
+    end
+
+    @testset "a deleting destructor is `delete_`, never `destroy_` (2026-11-14)" begin
+        # Bullet's `btBoxShape`: an implicit virtual destructor at -O2 leaves
+        # only D0 in the library, and bound as `destroy_` it ran `delete` under
+        # the non-freeing name; the Hub's run then freed the box twice.
+        sprout = _fz_chunk(code, "function Sprout_delete_Sprout(", "\nend")
+        @test !isempty(sprout)
+        @test occursin("_ZN6SproutD0Ev", sprout)
+        @test !occursin("function Sprout_destroy_Sprout(", code)   # the docstring names it as absent
+        doc = _fz_chunk(code, "    Sprout_delete_Sprout(this::Any)", "function Sprout_delete_Sprout(")
+        @test occursin("**The deleting destructor.**", doc)
+        @test occursin("must not be freed again", doc)
+        @test occursin("no non-deleting destructor for this class", doc)
+        # A class with every variant has both names: D2 under `destroy_`, D0
+        # under `delete_`, and the latter's docstring points at the former.
+        leaf_destroy = _fz_chunk(code, "function Leaf_destroy_Leaf(", "\nend")
+        leaf_delete = _fz_chunk(code, "function Leaf_delete_Leaf(", "\nend")
+        @test occursin("_ZN4LeafD2Ev", leaf_destroy) && !occursin("D0Ev", leaf_destroy)
+        @test occursin("_ZN4LeafD0Ev", leaf_delete)
+        @test occursin("call `Leaf_destroy_Leaf`", _fz_chunk(code, "    Leaf_delete_Leaf(this::Any)", "function Leaf_delete_Leaf("))
+        # The owning types are unchanged: they call the symbol, not the name.
+        @test occursin("ccall((:_ZN4LeafD0Ev, LIBRARY_PATH), Cvoid", _fz_chunk(code, "mutable struct ManagedLeaf\n", "export ManagedLeaf"))
+        # The wrap report names the class.
+        report = mktemp() do path, io
+            redirect_stdout(io) do
+                _FZ_W.generate_introspective_module_cpp(cfg, _FZ_LIB, deepcopy(meta), "Finalizers",
+                                                        _FZ_W.create_type_registry(cfg), true)
+            end
+            flush(io)
+            read(path, String)
+        end
+        @test occursin("wrap: 1 class(es) whose only destructor is the deleting one (D0), bound as <X>_delete_<X>, which frees the object: Sprout", report)
+        # One derivation, by the symbol: both generators, the prediction and
+        # the references agree, and nothing is renamed without it.
+        F = _FZ_W._julia_function_name
+        @test F("Sprout_~Sprout", "_ZN6SproutD0Ev") == "Sprout_delete_Sprout"
+        @test F("Leaf_~Leaf", "_ZN4LeafD1Ev") == "Leaf_destroy_Leaf"
+        @test F("Leaf_~Leaf", "_ZN4LeafD2Ev") == "Leaf_destroy_Leaf"
+        @test F("Leaf_~Leaf") == "Leaf_destroy_Leaf"
+        @test F("ns::K_~K", "_ZN2ns1KD0Ev") == "ns_K_delete_K"
+        # Negative check: the rule neutered binds D0 as `destroy_` again.
+        @eval _FZ_W _is_deleting_destructor(::AbstractString) = false
+        try
+            r2 = Base.invokelatest(_FZ_W.generate_introspective_module_cpp, cfg, _FZ_LIB, deepcopy(meta),
+                                   "Finalizers", _FZ_W.create_type_registry(cfg), true)
+            code2 = r2 isa Tuple ? String(first(r2)) : String(r2)
+            @test occursin("_ZN6SproutD0Ev", _fz_chunk(code2, "function Sprout_destroy_Sprout(", "\nend"))
+            @test !occursin("function Sprout_delete_Sprout(", code2)
+        finally
+            @eval _FZ_W _is_deleting_destructor(mangled::AbstractString) = occursin(r"D0Ev$", mangled)
+        end
+        @test Base.invokelatest(_FZ_W._is_deleting_destructor, "_ZN6SproutD0Ev")
     end
 
     @testset "a method proxy keeps its owner alive across the call" begin

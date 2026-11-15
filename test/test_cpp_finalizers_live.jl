@@ -89,10 +89,25 @@ if requires("C++ finalizers, live", :libJLCS, :clangxx)
         @test occursin("ccall((:_ZN4TwigD0Ev, LIBRARY_PATH), Cvoid, (Ptr{Twig},), x.handle)", code)
     end
 
+    @testset "a class whose only destructor is D0 binds delete_, which frees (-O2: Sprout)" begin
+        so = joinpath(FINALIZER_DIR, "julia", "libfinalizers.so")
+        nm = read(`nm -gp --defined-only $so`, String)
+        # The shape the fixture is built for: Sprout has a D0 and no D1/D2.
+        @test occursin(r"^\S+ [TW] _ZN6SproutD0Ev$"m, nm)
+        @test !occursin("_ZN6SproutD1Ev", nm) && !occursin("_ZN6SproutD2Ev", nm)
+        @test occursin("_ZN6SproutD0Ev", (m = match(r"function Sprout_delete_Sprout\(.*?\nend"s, code); m === nothing ? "" : m.match))
+        @test !occursin("function Sprout_destroy_Sprout(", code)   # the docstring names it as absent
+        @test occursin("**The deleting destructor.**", code)
+        # Every variant: `destroy_` is D2 (D1 dedups into it), `delete_` is D0.
+        @test occursin("_ZN4LeafD2Ev", (m = match(r"function Leaf_destroy_Leaf\(.*?\nend"s, code); m === nothing ? "" : m.match))
+        @test occursin("_ZN4LeafD0Ev", (m = match(r"function Leaf_delete_Leaf\(.*?\nend"s, code); m === nothing ? "" : m.match))
+    end
+
     @testset "collected objects are freed" begin
         names = ["rect_finalizer_deletes", "widget_finalizer_calls_destroy_widget", "managed_leaf_deletes",
                  "managed_node_deletes", "managed_pooled_calls_its_static_deleter", "nothing_owns_a_plain",
-                 "no_invented_class", "managed_twig_deletes_through_its_own_destructor"]
+                 "no_invented_class", "managed_twig_deletes_through_its_own_destructor",
+                 "d0_only_class_binds_delete_which_frees_once", "destroy_and_delete_are_two_bindings"]
         r = run_isolated(`$FINALIZER_PROBE $wrapper`)
         v = probe_verdicts(r.output)
         @test r.ok

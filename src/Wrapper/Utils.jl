@@ -166,6 +166,9 @@ consumers call these names. What is new is that the function is total:
   All-underscore names become `c__`, the escape both type sanitizers use.
 - A leading character that cannot start an identifier gets a `_` prefix. A
   reserved word gets a `_` suffix (`_JULIA_RESERVED_WORDS`).
+- **A deleting destructor is `delete_`, not `destroy_`** (2026-11-14): `~` is
+  spelled by the symbol's variant (`_is_deleting_destructor`), since D0 frees
+  the object and D1/D2 do not. The curated list is otherwise frozen.
 
 Not injective in general, on purpose. C++ overloads share one name, and Julia
 dispatches on argument types. The `_+` collapse, the trailing-`_` rstrip and
@@ -177,7 +180,18 @@ reported by `_dedup_method_chunks`. Anything keyed per symbol uses `mangled`
 function _julia_function_name(raw::AbstractString, mangled::AbstractString = "";
                               rename::Bool = true)::String
     n = String(raw)
-    n = replace(n, "~"  => "destroy_")   # destructor
+    # A destructor. The deleting variant (Itanium D0) is `delete_`: it runs
+    # `~X()` AND the class's `operator delete`, so a caller who frees the
+    # storage after it double-frees. Named `destroy_` like D1 and D2, a class
+    # whose only destructor in the library is D0 (an implicit virtual
+    # destructor at -O2: 93 of Bullet's 259 destructor wrappers, box2d 20,
+    # msdfgen 3, tinyxml2 2, fmt 1, 2026-11-14) bound it under the non-freeing
+    # name with the same docstring, and the Hub's Bullet run freed the box
+    # twice. The symbol alone decides (`_is_deleting_destructor`), so every
+    # caller that passes `mangled` spells it alike; `destroy_` stays for D1
+    # and D2, and a consumer calling the old name on a D0 fails to load
+    # instead of corrupting the heap.
+    n = replace(n, "~" => _is_deleting_destructor(mangled) ? "delete_" : "destroy_")
     n = replace(n, "::" => "_")
     n = replace(n, "<"  => "_")
     n = replace(n, ">"  => "_")
@@ -2775,7 +2789,8 @@ _sanitize_type_name_for_layout(s::AbstractString) =
 # DUPLICATE-METHOD DEDUPLICATION (package-precompilation safety)
 # -----------------------------------------------------------------------------
 # Distinct C++ symbols can collapse to the SAME Julia function name and
-# argument signature: destructor D1/D2 pairs both become `X_destroy_X(this)`,
+# argument signature: destructor D1/D2 pairs both become `X_destroy_X(this)`
+# (D0 is `X_delete_X`, its own name since 2026-11-14),
 # and overloads whose parameter types all map to `::Any` (e.g. a const char*
 # and a std::string_view overload) become textually identical methods. At
 # script include() that is a benign last-definition-wins warning — but under
@@ -2875,14 +2890,26 @@ The class prefix of an Itanium destructor symbol (`_ZN4ggml3cpu17extra_buffer_ty
 
 D0/D1/D2 are the deleting / complete-object / base-object variants of ONE
 destructor. They are distinct symbols with distinct addresses, so the dedup
-sees them as distinct C++ entry points — but they collapse to one Julia method
-by construction, and dropping the extras is exactly right. Grouping them out
-is what lets the drop report name the cases that are NOT expected.
+sees them as distinct C++ entry points. D1 and D2 collapse to one Julia method
+(`<X>_destroy_<X>`) by construction, and dropping the extra is exactly right;
+D0 has its own name since 2026-11-14 (`<X>_delete_<X>`, `_is_deleting_destructor`)
+and never collides. Grouping them out is what lets the drop report name the
+cases that are NOT expected.
 """
 function _dtor_variant_group(mangled::AbstractString)
     m = match(r"^(.*?)D[0-2]Ev$", mangled)
     m === nothing ? nothing : m.captures[1]
 end
+
+"""
+    _is_deleting_destructor(mangled) -> Bool
+
+Whether `mangled` is an Itanium deleting destructor (`…D0Ev`): the variant the
+vtable holds for `delete p`, which runs `~X()` and then the class's
+`operator delete`. MinGW mangles the same way, so the rule holds on Windows by
+the symbol; MSVC's scalar deleting destructors never reach this code.
+"""
+_is_deleting_destructor(mangled::AbstractString) = occursin(r"D0Ev$", mangled)
 
 """
     _dedup_method_chunks(chunks) -> Vector{String}

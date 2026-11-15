@@ -63,3 +63,8 @@ Twig::~Twig() {}
 int Twig::extra() const { return extra_; }
 
 Twig *spawn_twig(int v) noexcept { return new Twig(v); }
+
+Sprout::Sprout(int v) : Leaf(v), more_(v + 2) {}
+int Sprout::more() const { return more_; }
+
+Sprout *spawn_sprout(int v) noexcept { return new Sprout(v); }
