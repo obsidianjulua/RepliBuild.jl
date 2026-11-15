@@ -172,7 +172,9 @@ Box2d.b2World_destroy_b2World(pointer(mem))          # ~b2World(); the storage s
 ```
 
 Keep `mem` reachable for as long as the object lives: a field of your own
-Julia object, or `GC.@preserve`.
+Julia object, or `GC.@preserve`. A class whose only destructor binding is
+`Class_delete_Class` (see [Objects](calling.md#Objects)) frees the storage
+itself, so give it `new`-compatible storage and do not free it again.
 
 **Header-inline default constructors** (`b2BodyDef()`): inline functions have
 no symbol. Write fields at their DWARF offsets — `member_offset`, never a

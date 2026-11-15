@@ -760,9 +760,15 @@ the test named when you touch the area.
 - **A finalizer frees what it owns.** `Managed<X>` and the struct a factory
   function makes call the class's deleter by mangled symbol: the library's
   deleter function (no receiver by `FunctionGen._has_receiver`, one `X*`, named
-  delete/destroy/free), else D0. D1 and D2 end the lifetime without freeing,
-  and `<X>_destroy_<X>` names all three, so a class with neither gets no owning
-  type. A factory struct's D0 also needs a class nothing in the library derives
+  delete/destroy/free), else D0. D1 and D2 end the lifetime without freeing
+  and are `<X>_destroy_<X>`; D0 is `<X>_delete_<X>` (2026-11-14,
+  `_is_deleting_destructor`, decided in `_julia_function_name` by the symbol
+  alone), with a docstring that says it frees through the class's `operator
+  delete`. Named `destroy_` too, a class whose only destructor is D0 (an
+  implicit virtual destructor at -O2: 93 of Bullet's 259) ran `delete` under
+  the non-freeing name, and the Hub's Bullet run freed the box twice. The wrap
+  report names such classes. A class with neither a deleter nor D0 gets no
+  owning type. A factory struct's D0 also needs a class nothing in the library derives
   from, and a factory makes the class its pointer names, or a subclass its name
   names. **A method proxy keeps `obj` alive across the call** (`GC.@preserve
   obj X_method(obj.handle, …)`): the owner is dead once its handle is read,

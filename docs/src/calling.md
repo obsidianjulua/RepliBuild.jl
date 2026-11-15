@@ -179,6 +179,14 @@ finally
 end
 ```
 
+A class with a virtual destructor also has a *deleting* destructor, bound as
+`Class_delete_Class(this)`: it runs `~Class()` and then the class's
+`operator delete`, so the object must have come from `new` (or the class's own
+allocator), and nothing may free it afterwards. When that is the only
+destructor the library holds (an implicit virtual destructor at `-O2`, as for
+Bullet's `btBoxShape`), there is no `Class_destroy_Class` at all; the wrap
+report names those classes, and the docstring says which case you have.
+
 `Rect()` is not a constructor. It is the zeroed Julia value every struct gets:
 no C++ constructor has run, so a class with virtual methods has a null vtable
 pointer, and calling a method on it crashes. A class a factory makes is the

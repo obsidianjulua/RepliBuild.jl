@@ -230,6 +230,27 @@ function _strict_param_spelling(t::AbstractString; bound = _ -> true, owners = _
 end
 
 """
+    _deleting_destructor_doc(mangled, julia_name, only_one) -> String
+
+The sentences a deleting destructor's (D0) docstring carries after "Wrapper
+for": it frees, so the object must have come from the class's allocator and
+must not be freed again; and whether the library has a non-deleting
+destructor for the class (`<X>_destroy_<X>`), or this is the only one.
+Empty for anything else.
+"""
+function _deleting_destructor_doc(mangled::AbstractString, julia_name::AbstractString, only_one::Bool)
+    _is_deleting_destructor(mangled) || return ""
+    destroy = replace(julia_name, "_delete_" => "_destroy_"; count = 1)
+    tail = only_one ?
+        "The library has no non-deleting destructor for this class (its destructor is implicit), " *
+        "so there is no `$destroy`." :
+        "To end the object without freeing it, call `$destroy`."
+    return "\n\n**The deleting destructor.** Runs the destructor and then frees the object " *
+           "through the class's `operator delete`, so `this` must have come from that " *
+           "allocator (`new`, or the class's own) and must not be freed again. $tail"
+end
+
+"""
     _integer_width_overloads(functions, struct_types, ccall_param_type; concrete, bound, owners, is_enum)
         -> Dict{String,Set{Int}}
 
@@ -946,6 +967,30 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         contains(func["demangled"], "~") && continue  # skip destructors
         safe_cls = _sanitize_cpp_type_name(cls_nm)
         push!(get!(class_methods, safe_cls, Any[]), func)
+    end
+
+    # Classes whose only destructor in the library is the deleting one (D0):
+    # an implicit virtual destructor at -O2 leaves no D1/D2 (Bullet's
+    # `btBoxShape`, 2026-11-14). Their `<X>_delete_<X>` is the only destructor
+    # binding, and its docstring says so; the wrap report names them.
+    d0_only_classes = Set{String}()
+    let variants = Dict{String,Tuple{Set{Char},String}}()
+        for func in functions
+            m = String(get(func, "mangled", ""))
+            g = _dtor_variant_group(m)
+            g === nothing && continue
+            entry = get!(variants, g, (Set{Char}(), String(get(func, "class", ""))))
+            push!(entry[1], m[end - 2])              # the digit of `D0Ev`/`D1Ev`/`D2Ev`
+        end
+        for (_, (seen, cls)) in variants
+            seen == Set(['0']) && !isempty(cls) && push!(d0_only_classes, cls)
+        end
+    end
+    if !isempty(d0_only_classes)
+        names = sort!(collect(d0_only_classes))
+        println("  wrap: $(length(names)) class(es) whose only destructor is the deleting one (D0), ",
+                "bound as <X>_delete_<X>, which frees the object: ", join(first(names, 8), ", "),
+                length(names) > 8 ? ", …" : "")
     end
 
     # Helper: sanitize a raw function name to the Julia identifier used in wrappers.
@@ -3407,7 +3452,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             \"\"\"
                 $julia_name($param_sig) -> $doc_ret
 
-            Wrapper for `$demangled`
+            Wrapper for `$demangled`$(_deleting_destructor_doc(mangled, julia_name, class_name in d0_only_classes))
 
             # Arguments
             $(join(arg_docs, "\n"))

@@ -93,3 +93,16 @@ private:
     int extra_;   // a member of its own, so the class has a DWARF entry
 };
 Twig *spawn_twig(int v) noexcept;
+
+// No destructor of its own, so the only variant in the library is the deleting
+// one the vtable needs (an implicit virtual destructor at -O2: Bullet's
+// `btBoxShape`). Its binding is `Sprout_delete_Sprout`, which frees through
+// Leaf's operator delete; there is no `Sprout_destroy_Sprout`.
+class Sprout : public Leaf {
+public:
+    explicit Sprout(int v);
+    int more() const;
+private:
+    int more_;    // a member of its own, so the class has a DWARF entry
+};
+Sprout *spawn_sprout(int v) noexcept;

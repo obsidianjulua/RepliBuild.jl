@@ -68,7 +68,7 @@ _fmt_lambda(n) = replace(FMT_LAMBDA_NAME, "#1}" => "#$(n)}")
 # the old derivation's answers, byte-for-byte. Hub consumers call these names,
 # so a "better" spelling here is an API break, not a fix.
 const PINNED = [
-    "Foo_~Foo"                 => "Foo_destroy_Foo",
+    "Foo_~Foo"                 => "Foo_destroy_Foo",      # D1/D2, or no symbol; D0 is `delete_` (below)
     "Vec_operator+="           => "Vec_operatorplusassign",
     "Vec_operator=="           => "Vec_operatorassignassign",
     "Vec_operator<="           => "Vec_operator_assign",
@@ -186,6 +186,21 @@ end
             checked += 1
         end
         @test checked == length(PINNED)
+    end
+
+    @testset "a deleting destructor is `delete_`, by the symbol alone (2026-11-14)" begin
+        # D0 runs `~X()` and the class's operator delete; D1 and D2 do not.
+        # Named alike, Bullet's `btBoxShape` (only a D0 in the library) freed
+        # the object under the non-freeing name. The symbol decides, so every
+        # caller that passes it agrees, and without one the name is as pinned.
+        @test F("Foo_~Foo", "_ZN3FooD0Ev") == "Foo_delete_Foo"
+        @test F("Foo_~Foo", "_ZN3FooD1Ev") == "Foo_destroy_Foo"
+        @test F("Foo_~Foo", "_ZN3FooD2Ev") == "Foo_destroy_Foo"
+        @test F("Foo_~Foo") == "Foo_destroy_Foo"
+        @test F("ns::Box<int>_~Box", "_ZN2ns3BoxIiED0Ev") == "ns_Box_int_delete_Box"
+        @test F("Foo_bar", "_ZN3Foo3barEv") == "Foo_bar"                 # no `~`, nothing to spell
+        @test W._is_deleting_destructor("_ZN3FooD0Ev") && !W._is_deleting_destructor("_ZN3FooD1Ev")
+        @test !W._is_deleting_destructor("_ZThn16_N7DiamondD0Evx")        # not a destructor symbol
     end
 
     @testset "operators the list missed get words, not `_`" begin
