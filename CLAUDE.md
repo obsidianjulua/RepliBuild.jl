@@ -566,6 +566,17 @@ the test named when you touch the area.
   with `copy`. Parameters must be **direct children** of the subprogram.
   `check_param_arity!` hard-errors on an over-count, since that would emit a wrong
   ccall. (`test_dwarf_attribution.jl`.)
+- **A later declaration does not erase a definition's fact.** A function's
+  entry is rebuilt by every DIE of its key that has a return type, a later
+  compile unit's in-class declaration included; `has_object_pointer` is
+  carried across that rebuild. It was not: a static member with a non-void
+  return, declared again by a unit after the one defining it, lost its
+  `false` and got a receiver from the class heuristic. Unit order follows
+  the IR files' names (a hash of the directory is in them), so the same
+  source wrapped right on one host and wrong on another, and CI's LLVM 22
+  cells were the ones that showed it (2026-11-15). Any other fact a
+  definition DIE records outside that `Dict(...)` needs the same carry.
+  (`test_dwarf_attribution.jl`, both link orders vendored.)
 - **A type's parts are collected in pass 1, before pass 2 resolves any signature.**
   That includes a subroutine type's parameters (its direct-child formal parameters,
   then `...` for `DW_TAG_unspecified_parameters`): clang emits a type after the

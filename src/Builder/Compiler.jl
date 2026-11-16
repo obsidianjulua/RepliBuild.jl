@@ -8703,6 +8703,18 @@ function parse_dwarf_dump(output::AbstractString;
 
                 # Store if we have a function identifier
                 if !isnothing(function_key)
+                    # This entry is rebuilt by every DIE of the key that has a
+                    # return type, the in-class declaration of a LATER compile
+                    # unit included. `has_object_pointer` is a definition's
+                    # fact, recorded when that DIE closed; a declaration that
+                    # follows must not erase it. It did: a static member with
+                    # a non-void return, declared again by a unit after the
+                    # one defining it, lost its `false` and was wrapped with a
+                    # receiver it does not take. Which unit comes first
+                    # follows the IR files' names, so it showed on some hosts
+                    # only (CI's LLVM 22 cells, 2026-11-15).
+                    kept_object_pointer = haskey(return_types, function_key) ?
+                        get(return_types[function_key], "has_object_pointer", nothing) : nothing
                     return_types[function_key] = Dict(
                         "c_type" => c_type,
                         "julia_type" => julia_type,
@@ -8715,6 +8727,8 @@ function parse_dwarf_dump(output::AbstractString;
                     # A SIMD vector returned by value (`_vector_size`).
                     r_vec = _vector_size(type_ref, type_refs; base_sizes = base_byte_size)
                     r_vec === nothing || (return_types[function_key]["vector_size"] = r_vec)
+                    kept_object_pointer isa Bool &&
+                        (return_types[function_key]["has_object_pointer"] = kept_object_pointer)
                 end
                 function_processed = true  # Mark as processed
             end

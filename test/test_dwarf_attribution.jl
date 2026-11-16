@@ -1140,4 +1140,40 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         end
     end
 
+
+    @testset "a later unit's declaration does not erase a definition's fact" begin
+        # Two units, linked in both orders (readelf of the two libraries):
+        #
+        #   sr.h       namespace sr { struct Tool { static int make(int, int);
+        #              static void reset(int); int get(int) const; int v; };
+        #              int use(const Tool*); }
+        #   a_def.cpp  defines the three members
+        #   b_use.cpp  includes sr.h and defines use(), so its unit declares
+        #              Tool's members again
+        #
+        # The entry of a function with a return type is rebuilt by every DIE
+        # of its key, and with the defining unit FIRST the later declaration
+        # dropped `has_object_pointer`: the static `make` then got a receiver
+        # from the class heuristic. The order follows the IR files' names, so
+        # a host showed it or did not (CI's LLVM 22 cells, 2026-11-15). The
+        # void `reset` was never rebuilt and kept its answer either way.
+        fx(name) = read(joinpath(@__DIR__, "fixtures", "static_redeclared.$name.readelf.txt"), String)
+        want = Dict("_ZN2sr4Tool4makeEii" => false, "_ZN2sr4Tool5resetEi" => false,
+                    "_ZNK2sr4Tool3getEi" => true, "_ZN2sr3useEPKNS_4ToolE" => false)
+        checked = 0
+        for order in ("def_first", "use_first")
+            rt = RepliBuild.Compiler.parse_dwarf_dump(fx(order))[1]
+            for (sym, hop) in want
+                @test (order, sym, haskey(rt, sym)) == (order, sym, true)
+                haskey(rt, sym) || continue
+                @test (order, sym, get(rt[sym], "has_object_pointer", :absent)) == (order, sym, hop)
+                checked += 1
+            end
+            # The rebuilt entry still carries the declaration's own facts.
+            @test rt["_ZN2sr4Tool4makeEii"]["c_type"] == "int"
+            @test length(rt["_ZN2sr4Tool4makeEii"]["parameters"]) == 2
+        end
+        @test checked == 8
+    end
+
 end
