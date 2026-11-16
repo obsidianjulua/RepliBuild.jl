@@ -112,6 +112,14 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test M.apply_op(M.OP_MUL, Int32(3), Int32(4)) == Int32(12)
         @test M.apply_op(M.OP_DIV, Int32(12), Int32(4)) == Int32(3)
 
+        # ── an enumerator into an `int` parameter ───────────────────
+        # C converts one silently, and raylib's whole key API is written for
+        # it (`IsKeyDown(KEY_SPACE)`, `bool IsKeyDown(int key)`). `MathOp` is
+        # an open enum, not an `Integer`, so `::Integer` refused this call.
+        @test !(M.OP_MUL isa Integer)
+        @test M.identity(M.OP_MUL) == 2
+        @test M.identity(7) == 7
+
         # ── long double: no Julia type, no ccall shape ──────────────
         # The return comes back in x87 ST0, which ccall never reads (the
         # `NTuple{2,UInt64}` it was mapped to held garbage); the parameter is

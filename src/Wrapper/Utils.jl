@@ -2855,6 +2855,21 @@ _concrete_sig_type(t::AbstractString) =
     replace(String(t), r"\b[A-Z][A-Za-z0-9_]*\b" => s -> get(_C_ALIAS_CONCRETE, s, s))
 
 """
+    _C_INTEGER_PARAM
+
+The Julia type a C wrapper's integer parameter takes: any `Integer`, and any
+enum. C converts an enumerator to an integer silently and APIs are written
+for that: raylib declares `enum KeyboardKey` and `bool IsKeyDown(int key)`,
+and every raylib program says `IsKeyDown(KEY_SPACE)`. An open enum is not an
+`Integer` (so `KEY_SPACE + 1` stays an error), and `::Integer` refused the
+call before the body's `Cint(key)`, which Base defines for every `Enum`, ran.
+GeneratorC and the C arm of the shared varargs path spell the position
+through this. C++ keeps `Integer`: an overload set can hold `f(int)` beside
+`f(E)`, whose `::Any` method this union would take the enum from.
+"""
+const _C_INTEGER_PARAM = "Union{Integer, Base.Enum}"
+
+"""
     _method_sig_keys(chunk) -> Vector{String}
 
 Dispatch-significant signature keys (`name(argtype,argtype,…)`) for every
