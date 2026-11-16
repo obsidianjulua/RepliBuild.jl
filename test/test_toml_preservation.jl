@@ -28,6 +28,7 @@ const DISC = RepliBuild.Discovery
         [types]
         templates = ["std::vector<int>"]
         template_headers = ["<vector>"]
+        records = ["demo::Unused"]
         strictness = "warn"
 
         [wrap]
@@ -50,6 +51,8 @@ const DISC = RepliBuild.Discovery
         @test kept[("wrap", "rename")] == Dict("demo_pdf_*" => "pdf")
         @test kept[("types", "templates")] == ["std::vector<int>"]
         @test kept[("types", "template_headers")] == ["<vector>"]
+        # A class no source mentions cannot be found again by a scan.
+        @test kept[("types", "records")] == ["demo::Unused"]
         @test kept[("wrap", "shim_headers")] == ["demo.h"]
         # Lost, the next build compiles no implementation and its functions
         # leave the wrapper without an error.

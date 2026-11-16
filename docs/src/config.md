@@ -35,6 +35,7 @@ destroying your intent. The preserved set is:
 |---|---|
 | `[types]` | `templates` |
 | `[types]` | `template_headers` |
+| `[types]` | `records` |
 | `[wrap]` | `varargs` |
 | `[wrap]` | `macros` |
 | `[wrap]` | `shim_headers` |
@@ -74,6 +75,7 @@ things or is wrong.
 | If your library… | You must declare | Symptom if you don't |
 |---|---|---|
 | is C++ and you want STL/template types | `[types] templates` + `template_headers` | The type never appears in DWARF; members typed `Any`, methods missing |
+| has a header-only class its own sources never mention | `[types] records` | No type, no constructor, no method for the class |
 | exposes API through preprocessor macros | `[wrap.macros.*]` + `[wrap] shim_headers` | The macro simply does not exist in the wrapper — no error |
 | is header-only, or keeps API in inline functions | `[wrap] shim_defines`, a file that compiles them, `[wrap.macros.*]` or `[types] templates` ([Header-only libraries](guide.md#Header-only-libraries)) | Header-only: `build` produces no library. Inline functions: absent from the wrapper, no error |
 | has variadic functions worth calling with arguments | `[wrap.varargs]` | Only the zero-variadic base wrapper is generated |
@@ -947,6 +949,7 @@ crossing, not a failure.
 | `custom` | Table{String→String} | `{}` | Custom type mappings, e.g. `MyHandle = "Ptr{Cvoid}"`; merged into the type registry |
 | `templates` | Vector{String} | `[]` | C++ instantiations to force-emit *(preserved)* — §2.1 |
 | `template_headers` | Vector{String} | `[]` | Headers for the instantiation stub *(preserved)* — §2.1 |
+| `records` | Vector{String} | `[]` | C++ classes no source of the library mentions, to make visible *(preserved)*. A header-only class used by nothing the library compiles is in no unit's debug info, so it has no type and no constructor in the wrapper (Bullet's `btDefaultMotionState`). Each entry is a class name as C++ spells it (`ns::Class`); a generated unit includes `[wrap] shim_headers` and `template_headers` and uses each class once, and the build then defines its inline constructors like any other class's. An entry that does not compile against those headers is a build error naming it; one that compiles and still has no definition (plain `-g`: add `-fstandalone-debug`) is a warning. Not for a class template: list a specialization in `templates`. |
 
 Strictness modes: **`strict`** fails on any type that cannot be mapped exactly;
 **`warn`** reports the imperfect mapping and continues (`Ptr{Cvoid}` for complex

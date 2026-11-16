@@ -259,7 +259,9 @@ end
         @test occursin("ccall((:shim_free, LIBRARY_PATH), Cvoid, (Cstring,), ptr)", code)
         # Raw variants exist and are exported
         @test occursin("function get_msg_ptr()::Cstring", code)
-        @test occursin(r"function make_msg_ptr\(n::Integer\)::Cstring", code)
+        # A C integer parameter takes an enum as well (`_C_INTEGER_PARAM`).
+        @test RepliBuild.Wrapper._C_INTEGER_PARAM == "Union{Integer, Base.Enum}"
+        @test occursin("function make_msg_ptr(n::Union{Integer, Base.Enum})::Cstring", code)
         @test occursin(r"export [^\n]*get_msg_ptr", code)
         # Docstring shows what the wrapper returns, not the C-level type
         @test occursin("-> Union{String,Nothing}", code)
