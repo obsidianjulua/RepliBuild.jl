@@ -645,6 +645,22 @@ the test named when you touch the area.
   inline and unused is declaration-only everywhere, and `-fstandalone-debug`
   (Bullet, box2d) is what makes it appear. Graph mode does not run it.
   (`test_inline_constructors.jl`, devtests `test_inline_ctors_live.jl`.)
+- **`[types] records` makes a class no source mentions visible** (2026-11-15,
+  `generate_visible_records`). Debug info describes the types a unit uses, so
+  a header-only class nothing in the library mentions (Bullet's
+  `btDefaultMotionState`) has no DIE, standalone or not, and the
+  inline-constructor pass has nothing to force. Each entry is instantiated
+  as `replibuild_force::record<T>(T*)` in `replibuild_records.cpp`
+  (`[wrap] shim_headers`, then `[types] template_headers`), compiled in the
+  FIRST pass beside the templates TU so the first extraction sees the class.
+  Its body takes `sizeof(T)`: an entry that does not compile (a typo, a
+  declared-only name, a missing header) is a build error naming it, found by
+  compiling each entry alone; one that compiles and has no
+  `struct_definitions` entry (constructor homing under plain `-g`) is a
+  warning naming it (`_report_invisible_records`). Never `template class T;`,
+  which is invalid for a non-template and is why `[types] templates` could
+  not do this. (`test_visible_records.jl`, devtests
+  `test_visible_records_live.jl`.)
 - Anonymous structs/unions get synthesized names (`Parent_u`, `Parent_anonN`), which
   must be pre-sanitized. They are deduplicated across CUs and emitted as aligned
   opaque regions; C11 anonymous members are injected as fields. One named after a
@@ -729,6 +745,14 @@ the test named when you touch the area.
   manifest is the set the FINAL text calls (`_thunks_named_in_text`), so a
   chunk the dedup dropped leaves no thunk; the 87 it left across the Hub
   were compiled for nothing. (`test_tier2_typed_dispatch.jl`.)
+- **A C wrapper's integer parameter takes an enum too** (2026-11-15,
+  `_C_INTEGER_PARAM`, `Union{Integer, Base.Enum}`): C converts an enumerator
+  silently and raylib's `IsKeyDown(int key)` is called with `KEY_SPACE`, an
+  open enum that is not an `Integer`. GeneratorC and the C arm of the varargs
+  path's fixed parameters spell it through that constant; C++ keeps
+  `::Integer`, where `f(int)` may stand beside `f(E)`'s `::Any` method. A
+  fixed-width parameter (`int32_t`, `julia_type` `Int32`) is still typed
+  strictly. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
 - **A Tier 2 argument is converted to its C width in the emitted body.** A
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box

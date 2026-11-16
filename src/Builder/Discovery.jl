@@ -58,6 +58,7 @@ end
 const PRESERVED_TOML_KEYS = [
     ("types", "templates"),
     ("types", "template_headers"),
+    ("types", "records"),
     ("wrap", "varargs"),
     ("wrap", "macros"),
     ("wrap", "shim_headers"),
@@ -695,7 +696,8 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         true,                                    # allow_function_pointers
         Dict{String,String}(),                   # custom_mappings
         String[],                                # templates
-        String[]                                 # template_headers
+        String[],                                # template_headers
+        String[]                                 # records
     )
 
     dependencies_config = ConfigurationManager.DependenciesConfig(
