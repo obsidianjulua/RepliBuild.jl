@@ -2032,7 +2032,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     if !isempty(forced)
         (files, n) = _forced_exportable_ir(files, forced, joinpath(get_build_path(config), "ctors_exported");
                                            pe = host_record_abi() == :win64)
-        n > 0 && println("  link: $n forced constructor definition(s) made exportable")
+        n > 0 && println("  link: $n forced inline definition(s) made exportable")
     end
 
     # Determine library name
@@ -2840,6 +2840,12 @@ end
 # neither qualify `btRigidBody::btRigidBodyConstructionInfo` nor be relied on
 # for the parameter list; the mangled name is the compiler's full answer.
 #
+# The same unit defines the library's other inline member functions
+# (`_inline_method_plan`, 2026-11-15): Bullet's `btRigidBody::applyCentralImpulse`,
+# `setLinearVelocity` and `getLinearVelocity` are defined in the class body and
+# called by nothing in `src/`, so they had no symbol either. A member function
+# has an address, so the unit takes it instead of calling anything.
+#
 # What the pass cannot see: under constructor homing (clang's default `-g`), a
 # class whose constructors are ALL inline and unused is declaration-only in
 # every CU's DWARF, so its constructors are not declared anywhere the parser
@@ -3075,6 +3081,223 @@ function _inline_constructor_plan(struct_defs::AbstractDict, record_abi::Abstrac
     return Dict{String,Any}("forced" => forced, "skipped" => skipped)
 end
 
+"""
+    _method_spelling(demangled) -> Union{Nothing,NamedTuple}
+
+How the forced unit names a demangled member function: `(type, name,
+parameters, isconst, structor)`, `("btRigidBody", "applyCentralImpulse",
+["btVector3 const&"], false, false)` for `btRigidBody::applyCentralImpulse(
+btVector3 const&)`. The parameter list is the LAST paren group, so
+`operator()(int) const` reads as `operator()`; the name is cut at the last
+depth-0 `::`, or at `::operator` for an operator (a conversion operator's
+name holds a type, `operator float*`). `structor` says the name is the
+class's own or starts with `~`.
+
+`nothing` when the unit cannot take its address by that spelling: a member
+function template or anything else whose demangling opens with a return type
+(a depth-0 space before the name), a `volatile` or ref-qualified member, a
+variadic list, an anonymous namespace, a lambda or local class, an ABI tag,
+or a name with no class part.
+"""
+function _method_spelling(demangled::AbstractString)
+    s = String(strip(demangled))
+    isconst = false
+    if endswith(s, " const")
+        isconst = true
+        s = String(strip(s[1:end-6]))
+    end
+    endswith(s, ")") || return nothing              # volatile, `&`, `&&`, `[abi:…]`
+    # The opening paren of the last group.
+    depth = 0
+    open = 0
+    i = lastindex(s)
+    while i >= firstindex(s)
+        c = s[i]
+        if c == ')'
+            depth += 1
+        elseif c == '('
+            depth -= 1
+            if depth == 0
+                open = i
+                break
+            end
+        end
+        i = prevind(s, i)
+    end
+    open <= firstindex(s) && return nothing
+    prefix = s[1:prevind(s, open)]
+    inner = strip(s[nextind(s, open):prevind(s, lastindex(s))])
+    params = isempty(inner) ? String[] : _split_depth0_commas(inner)
+    unspellable(t) = occursin("(anonymous namespace)", t) || occursin("lambda", t) ||
+                     occursin("[abi:", t) || occursin("...", t) || occursin("{", t) ||
+                     occursin("unnamed", t) || isempty(t)
+    any(unspellable, params) && return nothing
+    # Depth-0 positions of `::` and of spaces in the prefix (`<>` and `()` nest).
+    function depth0(str, pred)
+        out = Int[]
+        d = 0
+        for j in eachindex(str)
+            c = str[j]
+            if c in ('<', '(', '[', '{')
+                d += 1
+            elseif c in ('>', ')', ']', '}')
+                d = max(0, d - 1)
+            elseif d == 0 && pred(str, j)
+                push!(out, j)
+            end
+        end
+        return out
+    end
+    op = findlast("::operator", prefix)
+    # An operator's own `<`, `>`, `()` would confuse the depth count, so the
+    # class is cut before it and only the class is measured.
+    if op !== nothing && !occursin(r"^::operator[\w]", SubString(prefix, first(op))) 
+        type = prefix[1:prevind(prefix, first(op))]
+        name = prefix[first(op)+2:end]
+    else
+        cuts = depth0(prefix, (str, j) -> str[j] == ':' && j < lastindex(str) && str[nextind(str, j)] == ':')
+        isempty(cuts) && return nothing
+        type = prefix[1:prevind(prefix, last(cuts))]
+        name = prefix[last(cuts)+2:end]
+        occursin('<', name) && return nothing       # a member function template
+    end
+    (isempty(type) || isempty(name)) && return nothing
+    (unspellable(type) || occursin('(', type) || occursin("[abi:", name)) && return nothing
+    isempty(depth0(type, (str, j) -> str[j] == ' ')) || return nothing   # a return type
+    last_part = let c = depth0(type, (str, j) -> str[j] == ':' && j < lastindex(str) && str[nextind(str, j)] == ':')
+        isempty(c) ? type : type[last(c)+2:end]
+    end
+    bare(t) = (k = findfirst('<', t); k === nothing ? t : t[1:prevind(t, k)])
+    structor = startswith(name, "~") || name == bare(last_part)
+    return (type = String(type), name = String(name), parameters = params,
+            isconst = isconst, structor = structor)
+end
+
+"""
+    _inline_method_plan(struct_defs, record_abi, symbols, exclude_patterns;
+                        demangle = _demangle) -> Dict
+
+Declared minus defined, for member functions: every public, non-virtual
+member function a library record declares (`record_abi[name]["methods"]`)
+that no symbol in `symbols` defines, as `forced` rows (`class`, `symbol`,
+`type`, `name`, `parameters`, `const`, `headers`) whose address the forced
+unit takes, and `skipped` rows (`class`, `symbol`, `reason`).
+
+Passed over silently, because they are not the gap: a constructor or
+destructor (the constructor plan's, by the demangled name), an implicit or
+deleted member, a private or protected one, and a virtual one, which clang
+emits with the class's vtable wherever that is emitted. Skipped with a
+reason: a record whose name has distinct definitions or that no header
+declares, a symbol `[wrap] exclude_symbols` drops, a member the unit
+cannot name (`_method_spelling`), and a member of a class template's
+specialization (`_TEMPLATE_MEMBER_SKIP`). Whether a forced member has a body in its
+header is not known here; `generate_inline_definitions` reads that off the
+unit's IR. Sorted by class, then symbol.
+"""
+# A class template's members are `[types] templates`' to instantiate, all of
+# them, per specialization the recipe names. Forced here they are a
+# container's whole interface once per element type the library happens to
+# use: 2,990 of Bullet's 4,999 undefined inline members were
+# `btAlignedObjectArray<T>` and `btAlignedAllocator<T, 16>` over 216
+# specializations, against 2,009 members of its classes.
+const _TEMPLATE_MEMBER_SKIP = "a member of a class template's specialization (list the specialization in [types] templates to instantiate its members)"
+
+function _inline_method_plan(struct_defs::AbstractDict, record_abi::AbstractDict, symbols,
+                             exclude_patterns::Vector{String}; demangle = _demangle)
+    defined = Set{String}(String(get(s, "mangled", "")) for s in symbols if s isa AbstractDict)
+    forced = Dict{String,Any}[]
+    skipped = Dict{String,Any}[]
+    skip(cls, sym, why) = push!(skipped, Dict{String,Any}("class" => cls, "symbol" => sym, "reason" => why))
+    for name in sort!(collect(String, keys(struct_defs)))
+        startswith(name, "__enum__") && continue
+        def = struct_defs[name]
+        def isa AbstractDict || continue
+        entry = get(record_abi, name, nothing)
+        entry isa AbstractDict || continue
+        methods = get(entry, "methods", nothing)
+        (methods isa AbstractVector && !isempty(methods)) || continue
+        get(def, "toolchain", false) == true && continue
+        _is_stdlib_scope(get(def, "scope", "")) && continue
+        decl_files = get(def, "decl_files", String[])
+        headers = _inline_ctor_headers_of(decl_files)
+        record_reason = get(def, "conflict", false) == true ?
+                        "the name has distinct definitions in this library" :
+                        isempty(headers) ? "declared in no header the unit can include" : nothing
+        for m in methods
+            m isa AbstractDict || continue
+            sym = String(get(m, "symbol", ""))
+            (isempty(sym) || sym in defined) && continue
+            (get(m, "artificial", false) == true || get(m, "deleted", false) == true ||
+             get(m, "virtual", false) == true || get(m, "accessibility", "public") != "public") && continue
+            dm = demangle(sym)
+            if dm === nothing
+                skip(name, sym, "the symbol does not demangle on this host")
+                continue
+            end
+            spelled = _method_spelling(dm)
+            spelled !== nothing && spelled.structor && continue
+            if record_reason !== nothing
+                skip(name, sym, record_reason)
+                continue
+            end
+            if !isempty(exclude_patterns)
+                kept = _without_excluded_symbols(Set{String}([sym]),
+                                                 [Dict{String,Any}("mangled" => sym, "demangled" => dm)],
+                                                 exclude_patterns)
+                if isempty(kept)
+                    skip(name, sym, "dropped by [wrap] exclude_symbols")
+                    continue
+                end
+            end
+            if spelled === nothing
+                skip(name, sym, "cannot be named in C++ (a member template, or a qualifier the unit does not spell)")
+                continue
+            end
+            if occursin('<', spelled.type)
+                skip(name, sym, _TEMPLATE_MEMBER_SKIP)
+                continue
+            end
+            push!(forced, Dict{String,Any}("class" => name, "symbol" => sym, "type" => spelled.type,
+                                           "name" => spelled.name, "parameters" => spelled.parameters,
+                                           "const" => spelled.isconst, "headers" => headers))
+        end
+    end
+    return Dict{String,Any}("forced" => forced, "skipped" => skipped)
+end
+
+"The C++ preamble of the forced unit's member functions: the overload-selecting address helper."
+const _INLINE_METHOD_PREAMBLE = raw"""
+// ── Forced inline member functions (see generate_inline_definitions) ────────
+// Never called. `args<A...>::m(&T::f)` picks, out of `f`'s overload set, the
+// member taking exactly (A...) (a static member through the plain function
+// pointer overload) and `mc` the `const` one, with the return type deduced:
+// a function's mangled name does not carry it. Taking the address odr-uses
+// the member, so clang emits its definition into this unit when the header
+// has a body for it, and the `used` constant holding the address keeps that
+// definition through every optimisation. C++11.
+namespace replibuild_force {
+
+template <class... A> struct args {
+    template <class R, class C>
+    static constexpr auto m(R (C::*f)(A...)) -> R (C::*)(A...) { return f; }
+    template <class R>
+    static constexpr auto m(R (*f)(A...)) -> R (*)(A...) { return f; }
+    template <class R, class C>
+    static constexpr auto mc(R (C::*f)(A...) const) -> R (C::*)(A...) const { return f; }
+};
+
+}  // namespace replibuild_force
+#define RB_FORCE_MEMBER __attribute__((used)) static const auto
+"""
+
+"One forced member function's line in the unit: its address, held by a `used` constant."
+function _inline_method_line(i::Integer, f::AbstractDict)::String
+    params = join(String[String(p) for p in f["parameters"]], ", ")
+    sel = get(f, "const", false) == true ? "mc" : "m"
+    return "RB_FORCE_MEMBER replibuild_member_$(i) = replibuild_force::args<$params>::$sel(" *
+           "&$(f["type"])::$(f["name"]));   // $(f["symbol"])"
+end
+
 "The C++ preamble of the inline-constructor unit: the guarded placement-new helper."
 const _INLINE_CTOR_PREAMBLE = raw"""
 // ── Forced inline constructors (see generate_inline_constructors) ───────────
@@ -3113,10 +3336,15 @@ The unit: one `#include` per header (a name in `<…>` as is, anything else
 quoted; absolute paths come from the records' `decl_files`), the preamble, and
 one explicit instantiation per forced row, `template void
 replibuild_force::ctor<T, A...>(void*, A...);`, the row's symbol beside it.
+With `methods` (the inline-method plan's forced rows), the member preamble
+and one `RB_FORCE_MEMBER` line per row follow. Every row is exactly one line,
+which is how a compiler diagnostic is traced back to its row
+(`_unit_row_of_line`).
 """
-function _inline_ctor_unit_text(headers::AbstractVector, forced::AbstractVector)::String
+function _inline_ctor_unit_text(headers::AbstractVector, forced::AbstractVector,
+                                methods::AbstractVector = Any[])::String
     io = IOBuffer()
-    println(io, "// Auto-generated by RepliBuild: the library's inline constructors that no translation unit of it defined")
+    println(io, "// Auto-generated by RepliBuild: the library's inline constructors and member functions that no translation unit of it defined")
     for h in headers
         hs = String(h)
         println(io, startswith(hs, "<") ? "#include $hs" : "#include \"$hs\"")
@@ -3129,6 +3357,14 @@ function _inline_ctor_unit_text(headers::AbstractVector, forced::AbstractVector)
         args = join(vcat([String(f["type"])], params), ", ")
         sig = join(vcat(["void*"], params), ", ")
         println(io, "template void replibuild_force::ctor<$args>($sig);   // $(f["symbol"])")
+    end
+    if !isempty(methods)
+        println(io)
+        print(io, _INLINE_METHOD_PREAMBLE)
+        println(io)
+        for (i, f) in enumerate(methods)
+            println(io, _inline_method_line(i - 1, f))
+        end
     end
     return String(take!(io))
 end
@@ -3159,88 +3395,249 @@ end
 _forced_symbols_path(config::RepliBuildConfig) = joinpath(get_cache_path(config), "replibuild_ctors.json")
 
 """
-    generate_inline_constructors(config, cpp_files, plan) -> (cpp_files, plan)
+    _unit_probe(config, path, text; ir = nothing) -> (ok, output)
 
-Write the inline-constructor unit for `plan["forced"]` (`_inline_constructor_plan`)
-under the build cache and append it to `cpp_files`; `plan` comes back with the
-rows the unit could not keep moved to `skipped`. The unit is syntax-checked
-whole; when that fails, each header is checked alone and dropped from every
-row where it does not compile on its own (a row left with no header is
-skipped with the compiler's first line), then each remaining row is checked
-alone against every header that compiles, in parallel, and skipped the same
-way. A C++ package only; nothing forced returns `cpp_files` as given and
-removes a stale unit's sidecar. The symbols of the kept rows are written
-beside the unit for the link (`_forced_exportable_ir`).
+Compile `text`, written to `path`, with the project's flags and no error
+limit: `-fsyntax-only`, or to LLVM IR at `ir` (`-O0`, no debug info), which
+is what says whether the unit DEFINES a member or only declares it.
 """
-function generate_inline_constructors(config::RepliBuildConfig, cpp_files::Vector{String}, plan::AbstractDict)
-    forced = Dict{String,Any}[Dict{String,Any}(f) for f in get(plan, "forced", Any[])]
-    skipped = Dict{String,Any}[Dict{String,Any}(s) for s in get(plan, "skipped", Any[])]
-    out_plan = Dict{String,Any}("forced" => forced, "skipped" => skipped)
+function _unit_probe(config::RepliBuildConfig, path::String, text::String; ir::Union{Nothing,String} = nothing)
+    write(path, text)
+    probe = _probe_compiler(:cpp)
+    flags = get_compile_flags(config)
+    incs  = ["-I$dir" for dir in get_include_dirs(config)]
+    defs  = ["-D$(k)=$(v)" for (k, v) in config.compile.defines]
+    mode  = ir === nothing ? ["-fsyntax-only"] : ["-O0", "-g0", "-S", "-emit-llvm", "-o", ir]
+    errbuf = IOBuffer()
+    try
+        p = run(pipeline(ignorestatus(`$probe $flags $incs $defs -ferror-limit=0 $mode $path`),
+                         stdout = devnull, stderr = errbuf))
+        return (p.exitcode == 0, String(take!(errbuf)))
+    catch e
+        return (false, "probe compiler unavailable: $e")
+    end
+end
+
+"""
+    _unit_bad_lines(output, path) -> Dict{Int,String}
+
+The lines of the unit at `path` a compiler's diagnostics name, each with the
+error it belongs to. An error at a line of the unit is that line's; a note
+there (`in instantiation of … requested here`) belongs to the error printed
+before it, which sits in a header.
+"""
+function _unit_bad_lines(output::AbstractString, path::AbstractString)::Dict{Int,String}
+    bad = Dict{Int,String}()
+    last_error = ""
+    unit = basename(path)
+    for line in split(output, '\n')
+        m = match(r"^(.*?):(\d+):\d+: (fatal error|error|note): (.*)$", line)
+        m === nothing && continue
+        kind = m.captures[3]
+        kind == "note" || (last_error = String(strip(m.captures[4])))
+        basename(String(m.captures[1])) == unit || continue
+        get!(bad, parse(Int, m.captures[2]), isempty(last_error) ? String(strip(m.captures[4])) : last_error)
+    end
+    return bad
+end
+
+"The row a line of the unit states: `(:ctor, k)` or `(:method, k)`, 1-based in its list, else `nothing`."
+function _unit_row_of_line(text::AbstractString)
+    rows = Dict{Int,Tuple{Symbol,Int}}()
+    nc = 0
+    nm = 0
+    for (i, line) in enumerate(split(text, '\n'))
+        if startswith(line, "template void replibuild_force::ctor<")
+            rows[i] = (:ctor, nc += 1)
+        elseif startswith(line, "RB_FORCE_MEMBER replibuild_member_")
+            rows[i] = (:method, nm += 1)
+        end
+    end
+    return rows
+end
+
+"The names an IR file defines and the names it only declares."
+function _ir_defined_declared(ir_path::AbstractString)
+    defined = Set{String}()
+    declared = Set{String}()
+    for line in eachline(ir_path)
+        isdef = startswith(line, "define ")
+        (isdef || startswith(line, "declare ")) || continue
+        m = match(r"@((?:[\w\.\$]|\\[0-9a-fA-F]{2})+|\"[^\"]*\")\(", line)
+        m === nothing && continue
+        push!(isdef ? defined : declared, String(strip(m.captures[1], '"')))
+    end
+    return (defined, declared)
+end
+
+"""
+    generate_inline_definitions(config, cpp_files, plan, mplan) -> (cpp_files, plan, mplan)
+
+Write the forced unit for the constructor plan's and the member-function
+plan's `forced` rows (`_inline_constructor_plan`, `_inline_method_plan`)
+under the build cache and append it to `cpp_files`; each plan comes back with
+the rows the unit could not keep moved to `skipped`.
+
+The unit is compiled whole to IR. When that fails, every row a diagnostic
+names (`_unit_bad_lines`: each row is one line) is skipped with the
+compiler's error and the unit is compiled again. When the diagnostics name no
+row, each header is checked alone and dropped from every row where it does
+not compile on its own (a row left with no header is skipped), and each
+remaining constructor is checked alone, in parallel; if that still leaves
+errors naming no row, each member function is. From the IR of the unit
+that compiles, a member function the unit only DECLARES has no body in its
+header (an out-of-line member the library keeps hidden, or one defined in a
+file this build does not compile): taking its address would leave the library
+with an undefined symbol, so the row is skipped. A C++ package only; nothing
+forced returns `cpp_files` as given and removes a stale unit's sidecar. The
+symbols of the kept rows are written beside the unit for the link
+(`_forced_exportable_ir`).
+"""
+function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector{String},
+                                     plan::AbstractDict, mplan::AbstractDict)
+    copyrows(p, k) = Dict{String,Any}[Dict{String,Any}(f) for f in get(p, k, Any[])]
+    forced = copyrows(plan, "forced")
+    skipped = copyrows(plan, "skipped")
+    mforced = copyrows(mplan, "forced")
+    mskipped = copyrows(mplan, "skipped")
+    result() = (Dict{String,Any}("forced" => forced, "skipped" => skipped),
+                Dict{String,Any}("forced" => mforced, "skipped" => mskipped))
     cache_dir = get_cache_path(config)
     mkpath(cache_dir)
     unit_path = joinpath(cache_dir, "replibuild_ctors.cpp")
     rm(_forced_symbols_path(config); force = true)
-    (config.wrap.language == :cpp && !isempty(forced)) || return (cpp_files, out_plan)
+    (config.wrap.language == :cpp && !(isempty(forced) && isempty(mforced))) || return (cpp_files, result()...)
 
     probe = joinpath(cache_dir, "replibuild_ctors_probe.cpp")
+    probe_ir = joinpath(cache_dir, "replibuild_ctors_probe.ll")
     shim_headers = String[String(h) for h in config.wrap.shim_headers]
+    row(f) = Dict{String,Any}("class" => f["class"], "symbol" => f["symbol"])
     # Keep the rows `reason_of` answers `nothing` for; skip the rest, named.
-    function drop(rows, reason_of)
+    function drop!(rows, into, reason_of)
         keep = Dict{String,Any}[]
-        for f in rows
-            r = reason_of(f)
-            if r === nothing
-                push!(keep, f)
-            else
-                push!(skipped, Dict{String,Any}("class" => f["class"], "symbol" => f["symbol"], "reason" => r))
-            end
+        for (k, f) in enumerate(rows)
+            r = reason_of(k, f)
+            r === nothing ? push!(keep, f) : push!(into, merge(row(f), Dict{String,Any}("reason" => r)))
         end
         return keep
     end
-    text = _inline_ctor_unit_text(_inline_ctor_headers(config, forced), forced)
-    (ok, msg) = _unit_compiles(config, probe, text)
-    if !ok
-        # Each header alone (the umbrella beside it, as in the unit).
-        bad_header = Dict{String,String}()
-        for h in sort!(unique(String[h for f in forced for h in f["headers"]]))
-            (hok, hmsg) = _unit_compiles(config, probe, _inline_ctor_unit_text(vcat(shim_headers, [h]), Any[]))
-            hok || (bad_header[h] = hmsg)
-        end
-        for f in forced
-            f["headers"] = String[h for h in f["headers"] if !haskey(bad_header, h)]
-        end
-        forced = drop(forced, f -> isempty(f["headers"]) ?
-            "its header does not compile on its own: " * first(values(bad_header)) : nothing)
-        # Each row alone, against every header that compiles, in parallel: a
-        # class template's specialization needs its arguments' headers too.
-        all_headers = _inline_ctor_headers(config, forced)
-        bad_row = Vector{Union{Nothing,String}}(nothing, length(forced))
-        Threads.@threads for i in eachindex(forced)
-            path = joinpath(cache_dir, "replibuild_ctors_probe_$(i).cpp")
-            (rok, rmsg) = _unit_compiles(config, path, _inline_ctor_unit_text(all_headers, [forced[i]]))
-            rok || (bad_row[i] = rmsg)
+    unit_text() = _inline_ctor_unit_text(_inline_ctor_headers(config, vcat(forced, mforced)), forced, mforced)
+    # Each row of `rows` compiled alone (`-fsyntax-only`), in parallel: the
+    # compiler's first error line per row, or `nothing`.
+    function alone(rows, ctors::Bool)
+        all_headers = _inline_ctor_headers(config, vcat(forced, mforced))
+        bad_row = Vector{Union{Nothing,String}}(nothing, length(rows))
+        Threads.@threads for i in eachindex(rows)
+            path = joinpath(cache_dir, "replibuild_ctors_probe_$(ctors ? "c" : "m")_$(i).cpp")
+            one = ctors ? _inline_ctor_unit_text(all_headers, [rows[i]]) :
+                          _inline_ctor_unit_text(all_headers, Any[], [rows[i]])
+            (rok, rout) = _unit_probe(config, path, one)
+            if !rok
+                lines = split(rout, '\n')
+                k = findfirst(l -> occursin("error", l), lines)
+                bad_row[i] = k === nothing ? String(strip(first(rout, 200))) : String(strip(lines[k]))
+            end
             rm(path; force = true)
         end
-        at = Dict{String,String}(String(forced[i]["symbol"]) => bad_row[i] for i in eachindex(forced) if bad_row[i] !== nothing)
-        forced = drop(forced, f -> (r = get(at, String(f["symbol"]), nothing);
-                                    r === nothing ? nothing : "does not compile: $r"))
-        if !isempty(forced)
-            text = _inline_ctor_unit_text(_inline_ctor_headers(config, forced), forced)
-            (ok, msg) = _unit_compiles(config, probe, text)
-            ok || (forced = drop(forced, _ -> "the unit did not compile: $msg"))
+        return bad_row
+    end
+    text = unit_text()
+    ok = false
+    msg = ""
+    # What was tried once no diagnostic named a row: 0 nothing yet, 1 the
+    # headers and each constructor alone, 2 each member function alone.
+    stage = 0
+    for _ in 1:12
+        (isempty(forced) && isempty(mforced)) && break
+        (ok, out) = _unit_probe(config, probe, text; ir = probe_ir)
+        ok && break
+        bad = _unit_bad_lines(out, probe)
+        rows = _unit_row_of_line(text)
+        bad_ctor = Dict{Int,String}()
+        bad_method = Dict{Int,String}()
+        for (line, why) in bad
+            r = get(rows, line, nothing)
+            r === nothing && continue
+            (r[1] === :ctor ? bad_ctor : bad_method)[r[2]] = why
         end
+        if !(isempty(bad_ctor) && isempty(bad_method))
+            forced = drop!(forced, skipped, (k, _) -> haskey(bad_ctor, k) ? "does not compile: $(bad_ctor[k])" : nothing)
+            mforced = drop!(mforced, mskipped, (k, _) -> haskey(bad_method, k) ? "does not compile: $(bad_method[k])" : nothing)
+        elseif stage == 0
+            stage = 1
+            # No row is named: a header does not compile on its own. Each
+            # header alone (the umbrella beside it, as in the unit)...
+            bad_header = Dict{String,String}()
+            for h in sort!(unique(String[h for f in vcat(forced, mforced) for h in f["headers"]]))
+                (hok, hout) = _unit_probe(config, probe, _inline_ctor_unit_text(vcat(shim_headers, [h]), Any[]))
+                if !hok
+                    lines = split(hout, '\n')
+                    k = findfirst(l -> occursin("error", l), lines)
+                    bad_header[h] = k === nothing ? String(strip(first(hout, 200))) : String(strip(lines[k]))
+                end
+            end
+            for f in vcat(forced, mforced)
+                f["headers"] = String[h for h in f["headers"] if !haskey(bad_header, h)]
+            end
+            no_header(_, f) = isempty(f["headers"]) ?
+                "its header does not compile on its own: " * first(values(bad_header)) : nothing
+            forced = drop!(forced, skipped, no_header)
+            mforced = drop!(mforced, mskipped, no_header)
+            # ...then each remaining constructor alone, against every header
+            # that compiles, in parallel: a class template's specialization
+            # needs its arguments' headers too. A constructor's error sits
+            # inside the placement-new helper and clang prints no note for the
+            # explicit instantiation that asked for it, so no line names its
+            # row; a member function's address is taken ON its row.
+            bc = alone(forced, true)
+            forced = drop!(forced, skipped, (k, _) -> bc[k] === nothing ? nothing : "does not compile: $(bc[k])")
+        elseif stage == 1
+            stage = 2
+            bm = alone(mforced, false)
+            mforced = drop!(mforced, mskipped, (k, _) -> bm[k] === nothing ? nothing : "does not compile: $(bm[k])")
+        else
+            lines = split(out, '\n')
+            k = findfirst(l -> occursin("error", l), lines)
+            msg = k === nothing ? String(strip(first(out, 200))) : String(strip(lines[k]))
+            break
+        end
+        text = unit_text()
+    end
+    if !ok && !(isempty(forced) && isempty(mforced))
+        forced = drop!(forced, skipped, (_, _) -> "the unit did not compile: $msg")
+        mforced = drop!(mforced, mskipped, (_, _) -> "the unit did not compile: $msg")
+    end
+    if ok && !isempty(mforced)
+        # A member the unit only declares has no body in its header.
+        (defined, declared) = _ir_defined_declared(probe_ir)
+        n = length(mforced)
+        mforced = drop!(mforced, mskipped, (_, f) ->
+            (String(f["symbol"]) in declared && !(String(f["symbol"]) in defined)) ?
+            "declared in its header with no body there" : nothing)
+        length(mforced) < n && (text = unit_text())
     end
     rm(probe; force = true)
-    out_plan["forced"] = forced
-    out_plan["skipped"] = skipped
-    isempty(forced) && return (cpp_files, out_plan)
+    rm(probe_ir; force = true)
+    (isempty(forced) && isempty(mforced)) && return (cpp_files, result()...)
 
     _write_if_changed(unit_path, text)
-    symbols = sort!(unique(vcat([_constructor_variants(String(f["symbol"])) for f in forced]...)))
+    symbols = sort!(unique(vcat(String[String(f["symbol"]) for f in mforced],
+                                [_constructor_variants(String(f["symbol"])) for f in forced]...)))
     open(_forced_symbols_path(config), "w") do io
         JSON.print(io, symbols)
     end
-    return (vcat(cpp_files, [unit_path]), out_plan)
+    return (vcat(cpp_files, [unit_path]), result()...)
+end
+
+"""
+    generate_inline_constructors(config, cpp_files, plan) -> (cpp_files, plan)
+
+`generate_inline_definitions` for a constructor plan alone.
+"""
+function generate_inline_constructors(config::RepliBuildConfig, cpp_files::Vector{String}, plan::AbstractDict)
+    (files, p, _) = generate_inline_definitions(config, cpp_files, plan,
+                                                Dict{String,Any}("forced" => Any[], "skipped" => Any[]))
+    return (files, p)
 end
 
 "The forced definitions' symbols the current build's unit names, or none."
@@ -4556,24 +4953,37 @@ function compile_project(config::RepliBuildConfig)
     # is relinked with it and the metadata extracted again, now with those
     # constructors as definitions. The second extraction carries the plan with
     # each row's outcome instead of recomputing it.
-    plan = get(_read_json(metadata_path), "inline_constructors", nothing)
+    first_meta = _read_json(metadata_path)
+    empty_plan() = Dict{String,Any}("forced" => Any[], "skipped" => Any[])
+    plan = something(get(first_meta, "inline_constructors", nothing), empty_plan())
+    # ...and the same for its other inline member functions (`inline_methods`):
+    # the unit takes each one's address.
+    mplan = something(get(first_meta, "inline_methods", nothing), empty_plan())
     if config.wrap.language == :cpp && config.binary.type != :executable &&
-       plan isa AbstractDict && !isempty(get(plan, "forced", Any[]))
-        (cpp_files_b, plan) = generate_inline_constructors(config, cpp_files, plan)
+       plan isa AbstractDict && mplan isa AbstractDict &&
+       !(isempty(get(plan, "forced", Any[])) && isempty(get(mplan, "forced", Any[])))
+        (cpp_files_b, plan, mplan) = generate_inline_definitions(config, cpp_files, plan, mplan)
         if length(cpp_files_b) > length(cpp_files)
             nforced = length(plan["forced"])
-            println("  ctors: $(nforced) inline constructor(s) of $(length(unique(String[f["class"] for f in plan["forced"]]))) class(es) " *
-                    "declared in headers and defined nowhere: compiling their definitions")
+            nforced > 0 &&
+                println("  ctors: $(nforced) inline constructor(s) of $(length(unique(String[f["class"] for f in plan["forced"]]))) class(es) " *
+                        "declared in headers and defined nowhere: compiling their definitions")
+            nmeth = length(mplan["forced"])
+            nmeth > 0 &&
+                println("  methods: $(nmeth) inline member function(s) of $(length(unique(String[f["class"] for f in mplan["forced"]]))) class(es) " *
+                        "declared in headers and defined nowhere: compiling their definitions")
             cpp_files = cpp_files_b
             ir_files = compile_to_ir(config, cpp_files)
             linked_ir = link_optimize_ir(config, ir_files, output_name)
             binary_path = create_library(config, linked_ir; per_tu_ir=ir_files)
             nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
             byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
-            metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
-                                                      nounwind=nounwind, byval=byval,
-                                                      inline_constructors=plan)
         end
+        # Extracted again even when no unit was written: the plans now carry
+        # the rows the unit refused, which the wrap report names.
+        metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
+                                                  nounwind=nounwind, byval=byval,
+                                                  inline_constructors=plan, inline_methods=mplan)
     end
 
     # A `[types] records` entry the DWARF still does not define is named.
@@ -7546,6 +7956,7 @@ function parse_dwarf_dump(output::AbstractString;
     current_fn_is_artificial = false
     current_fn_is_deleted = false
     current_fn_accessibility = nothing
+    current_fn_is_virtual = false
     declaration_facts = Dict{String,Dict{String,Any}}()
 
     # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
@@ -7615,7 +8026,8 @@ function parse_dwarf_dump(output::AbstractString;
                 declaration_facts[function_key] = Dict{String,Any}(
                     "artificial" => current_fn_is_artificial,
                     "deleted" => current_fn_is_deleted,
-                    "accessibility" => current_fn_accessibility)
+                    "accessibility" => current_fn_accessibility,
+                    "virtual" => current_fn_is_virtual)
             end
         end
 
@@ -7628,6 +8040,7 @@ function parse_dwarf_dump(output::AbstractString;
         current_fn_is_artificial = false
         current_fn_is_deleted = false
         current_fn_accessibility = nothing
+        current_fn_is_virtual = false
         current_function_name = nothing
         current_function_linkage = nothing
         current_function_level = nothing
@@ -7647,6 +8060,10 @@ function parse_dwarf_dump(output::AbstractString;
     # `C2` linkage), for the one `std::string` building from a `const char*`
     # and a length (`_string_constructor`, 2026-11-15).
     constructors_of = Dict{String,Vector{String}}()
+    # ...and every member function declared in it (`methods_of`), for the
+    # inline-method plan (`_inline_method_plan`), which tells a constructor or
+    # destructor from a method by the demangled name, not here.
+    methods_of = Dict{String,Vector{String}}()
 
     for line in split(output, '\n')
         line = strip(line)
@@ -7768,6 +8185,7 @@ function parse_dwarf_dump(output::AbstractString;
                 current_fn_is_artificial = false
                 current_fn_is_deleted = false
                 current_fn_accessibility = nothing
+                current_fn_is_virtual = false
 
                 # RESET VARIABLE CONTEXT to prevent leakage
                 current_variable_offset = nothing
@@ -7962,6 +8380,7 @@ function parse_dwarf_dump(output::AbstractString;
                         get!(destructor_of, current_function_parent[1], current_function_linkage)
                     occursin(r"C[124]E", current_function_linkage) &&
                         push!(get!(() -> String[], constructors_of, current_function_parent[1]), current_function_linkage)
+                    push!(get!(() -> String[], methods_of, current_function_parent[1]), current_function_linkage)
                 end
             end
         end
@@ -8009,6 +8428,7 @@ function parse_dwarf_dump(output::AbstractString;
             virt_match = match(r":\s*(\d+)", line)
             if !isnothing(virt_match)
                 is_virtual = parse(Int, virt_match.captures[1]) > 0
+                current_fn_is_virtual = is_virtual
                 
                 # Store this temporarily in type_refs for the current function offset
                 if !isnothing(current_function_offset)
@@ -8244,6 +8664,7 @@ function parse_dwarf_dump(output::AbstractString;
     record_facts = Dict{String,Dict{String,Any}}()   # → record_abi, see below
     destructor_by_name = Dict{String,String}()       # → record_abi's string_layout
     constructors_by_name = Dict{String,Vector{String}}()
+    methods_by_name = Dict{String,Vector{String}}()
     record_kind_by_name = Dict{String,String}()      # "class" or "struct": a member's default accessibility
     for offset in die_order
         type_info = type_refs[offset]
@@ -8256,6 +8677,12 @@ function parse_dwarf_dump(output::AbstractString;
                 let ck = get(constructors_of, offset, nothing)
                     if ck !== nothing
                         append!(get!(() -> String[], constructors_by_name, String(struct_name)), ck)
+                        get!(record_kind_by_name, String(struct_name), String(type_info["kind"]))
+                    end
+                end
+                let mk = get(methods_of, offset, nothing)
+                    if mk !== nothing
+                        append!(get!(() -> String[], methods_by_name, String(struct_name)), mk)
                         get!(record_kind_by_name, String(struct_name), String(type_info["kind"]))
                     end
                 end
@@ -8769,8 +9196,36 @@ function parse_dwarf_dump(output::AbstractString;
     # DIE's facts, for the inline-constructor plan (`_inline_constructor_plan`).
     _record_declared_constructors!(record_abi, struct_defs, constructors_by_name,
                                    record_kind_by_name, declaration_facts)
+    # ...and all its member functions, for the inline-method plan.
+    _record_declared_constructors!(record_abi, struct_defs, methods_by_name,
+                                   record_kind_by_name, declaration_facts; key = "methods")
+
+    _drop_force_helper_records!(struct_defs, record_abi)
 
     return (return_types, struct_defs, global_vars, typedef_table, record_abi)
+end
+
+"""
+    _drop_force_helper_records!(struct_defs, record_abi)
+
+Remove the records of namespace `replibuild_force`: the helpers of the units
+RepliBuild generates (`ctor_impl<true, T, A...>`, `args<A...>`). They exist
+to be instantiated, like the helper functions `extract_symbols_from_binary`
+filters, and are not the library's: as memberless records they had an entry,
+and every wrapper of a package with a forced constructor carried a
+`struct ctor_impl_true_…` per constructor.
+"""
+function _drop_force_helper_records!(struct_defs::AbstractDict, record_abi::AbstractDict)
+    for name in collect(keys(struct_defs))
+        def = struct_defs[name]
+        def isa AbstractDict || continue
+        scope = get(def, "scope", nothing)
+        scope isa AbstractString || continue
+        (scope == "replibuild_force" || startswith(scope, "replibuild_force::")) || continue
+        delete!(struct_defs, name)
+        delete!(record_abi, name)
+    end
+    return struct_defs
 end
 
 """
@@ -8782,7 +9237,9 @@ constructor its definition declares (`symbol`, the unified `C4` DWARF key),
 with the declaration DIE's facts: `artificial` (an implicit member clang
 declared for it), `deleted`, and `accessibility` (`DW_AT_accessibility` as
 written, else the record's default: private in a `class`, public in a
-`struct`). The parameters are not recorded: a declaration's formal parameters
+`struct`). With `key = "methods"` the same rows are written for every member
+function the record declares (`methods`, with `virtual` added; constructors
+and destructors among them, which `_inline_method_plan` passes over). The parameters are not recorded: a declaration's formal parameters
 carry no names, so the parser keeps none, and the symbol spells them anyway
 (`_constructor_spelling`). Toolchain records put back by promotion and enum
 keys get no rows; a record with no `record_abi` entry (a declaration) gets
@@ -8790,7 +9247,7 @@ one only for this key. Rows are sorted by symbol, so the metadata is stable.
 """
 function _record_declared_constructors!(record_abi::AbstractDict, struct_defs::AbstractDict,
                                         constructors_by_name::AbstractDict, kind_by_name::AbstractDict,
-                                        declaration_facts::AbstractDict)
+                                        declaration_facts::AbstractDict; key::String = "constructors")
     for (name, def) in struct_defs
         startswith(name, "__enum__") && continue
         get(def, "toolchain", false) == true && continue
@@ -8806,10 +9263,13 @@ function _record_declared_constructors!(record_abi::AbstractDict, struct_defs::A
                 "artificial" => get(facts, "artificial", false) == true,
                 "deleted" => get(facts, "deleted", false) == true,
                 "accessibility" => something(get(facts, "accessibility", nothing), default_access)))
+            # A member function's row also says whether it is virtual: a
+            # virtual one is emitted with its class's vtable, never forced.
+            key == "methods" && (rows[end]["virtual"] = get(facts, "virtual", false) == true)
         end
         isempty(rows) && continue
         entry = Dict{String,Any}(get(record_abi, name, Dict{String,Any}()))
-        entry["constructors"] = rows
+        entry[key] = rows
         record_abi[name] = entry
     end
     return record_abi
@@ -9503,7 +9963,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                                       binary_path::String;
                                       nounwind::Union{Nothing,Set{String}}=nothing,
                                       byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
-                                      inline_constructors::Union{Nothing,AbstractDict}=nothing)::Dict{String,Any}
+                                      inline_constructors::Union{Nothing,AbstractDict}=nothing,
+                                      inline_methods::Union{Nothing,AbstractDict}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
@@ -9631,6 +10092,19 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     else
         Dict{String,Any}("forced" => Any[], "skipped" => Any[])
     end
+    # The same for the other inline member functions (`_inline_method_plan`):
+    # `emitted` says the symbol table now defines the member.
+    mplan = if inline_methods !== nothing
+        p = Dict{String,Any}(inline_methods)
+        defined = Set{String}(String(get(s, "mangled", "")) for s in symbols)
+        p["forced"] = Any[(r = Dict{String,Any}(f); r["emitted"] = String(r["symbol"]) in defined; r)
+                          for f in get(p, "forced", Any[])]
+        p
+    elseif config.wrap.language == :cpp
+        _inline_method_plan(struct_defs, record_abi, symbols, config.wrap.exclude_symbols)
+    else
+        Dict{String,Any}("forced" => Any[], "skipped" => Any[])
+    end
 
     # Build type registry (basic types + inferred types)
     type_registry = build_type_registry(functions)
@@ -9703,6 +10177,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # unit: the rows the forced unit defines and the ones it skipped, with
         # reasons (`_inline_constructor_plan`, `generate_inline_constructors`).
         "inline_constructors" => plan,
+        # ...and the other inline member functions, the same way
+        # (`_inline_method_plan`, `generate_inline_definitions`).
+        "inline_methods" => mplan,
         # Function-pointer c_types list their parameters (`function_ptr(R; P1, P2)*`).
         # Older metadata spells every one `function_ptr(R)*`, so the generators
         # build a callback's `@cfunction` example from it only when this is set.
@@ -10543,11 +11020,13 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
                                    binary_path::String;
                                    nounwind::Union{Nothing,Set{String}}=nothing,
                                    byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
-                                   inline_constructors::Union{Nothing,AbstractDict}=nothing)::String
+                                   inline_constructors::Union{Nothing,AbstractDict}=nothing,
+                                   inline_methods::Union{Nothing,AbstractDict}=nothing)::String
     # Extract metadata
     metadata = extract_compilation_metadata(config, source_files, binary_path;
                                             nounwind=nounwind, byval=byval,
-                                            inline_constructors=inline_constructors)
+                                            inline_constructors=inline_constructors,
+                                            inline_methods=inline_methods)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their

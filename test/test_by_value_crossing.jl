@@ -412,6 +412,9 @@ Contents of the .debug_info section:
 
     @testset "record_abi: calling convention and emptiness from DWARF" begin
         @test length(rt) == 11                      # the dump parsed at all
+        # The declared member functions are their own key (2026-11-15, the
+        # inline-method plan's rows; test_inline_methods.jl), set aside here.
+        ra = Dict(k => (v isa AbstractDict ? delete!(Dict{String,Any}(v), "methods") : v) for (k, v) in ra)
         @test ra["Tag"]    == Dict("byte_size" => "0x1", "pass" => "value",     "empty" => true)
         @test ra["Guard"]  == Dict("byte_size" => "0x1", "pass" => "reference", "empty" => true)
         @test ra["Owner"]  == Dict("byte_size" => "0x4", "pass" => "reference", "empty" => false)

@@ -645,6 +645,39 @@ the test named when you touch the area.
   inline and unused is declaration-only everywhere, and `-fstandalone-debug`
   (Bullet, box2d) is what makes it appear. Graph mode does not run it.
   (`test_inline_constructors.jl`, devtests `test_inline_ctors_live.jl`.)
+- **An inline member function the library declares and defines nowhere is
+  defined by the same unit** (2026-11-15, `_inline_method_plan`,
+  `generate_inline_definitions`). The parser writes every member function a
+  record declares to `record_abi[name]["methods"]` (the constructor rows'
+  facts plus `virtual`); the plan forces the public, non-virtual ones no
+  symbol defines, spelled from the demangled name (`_method_spelling`: the
+  LAST paren group is the parameter list, the name is cut at the last depth-0
+  `::` or at `::operator`, a depth-0 space before it is a return type and so
+  a member template). The unit takes each address through
+  `replibuild_force::args<A...>::m` / `mc` (the overload taking exactly those
+  parameters, `const` or not, a static through the function-pointer overload,
+  the return type deduced because a mangled name does not carry it) into a
+  `used` constant; the symbols join the sidecar and the export rewrite.
+  - **Every row is one line of the unit**, and a compile failure is traced to
+    rows by the lines its diagnostics name (`_unit_bad_lines`, a note
+    belonging to the error before it). A constructor's error sits in the
+    placement-new helper and names no row, so constructors alone fall back
+    to one compile per row. Keep a new row kind on one line.
+  - **A member the unit's IR only `declare`s is skipped**: it has no body in
+    its header (an out-of-line member kept hidden, or in a file the build
+    does not compile), and its address in a constant is a data relocation
+    the loader resolves eagerly, so the library would not load. The probe
+    compiles to IR for this, not `-fsyntax-only`.
+  - A virtual member comes with the vtable and is never forced. A member of
+    a class template's specialization is `[types] templates`' to
+    instantiate (`_TEMPLATE_MEMBER_SKIP`): forced, Bullet's
+    `btAlignedObjectArray<T>` and allocator members were 2,990 of 4,999.
+    Private, protected, implicit and deleted members are passed over
+    silently; the rest are named in `inline_methods` and the wrap report.
+  - Metadata without `methods` rows plans nothing: a package gets its inline
+    methods on a rebuild, not a re-wrap.
+
+  (`test_inline_methods.jl`, devtests `test_inline_methods_live.jl`.)
 - **`[types] records` makes a class no source mentions visible** (2026-11-15,
   `generate_visible_records`). Debug info describes the types a unit uses, so
   a header-only class nothing in the library mentions (Bullet's
@@ -1691,10 +1724,12 @@ DWARF-resolved destructors — **is** built.)
   the class's inline constructors itself, so the flag's whole payoff is the
   definition, and a package that wants such a class built from Julia sets
   one of the two flags today (Bullet and box2d already do).
-- Declared-but-undefined inline METHODS (2026-11-15): the forced unit covers
-  constructors only. A method is the same mechanism with its address taken
-  instead of placement new, if the Hub shows the need. The unit does not run
-  in graph mode either, like the templates TU.
+- The forced unit (inline constructors and member functions) does not run in
+  graph mode, like the templates TU. Outside it too (2026-11-15): a free
+  inline function or operator, which no class DIE declares; an inline
+  destructor nothing emitted (a destructor has no address to take); a
+  volatile or ref-qualified member; and a second pass for the records the
+  forced definitions themselves make visible.
 - Array-view Julia-side accessors for the rank-1 thunks, plus rank ≥ 2 members.
 - `is_struct_packed` over-classifies padding-free structs (wasted work, not wrong).
 - Op verifiers for `ffe_call`, `try_call`, `load/store_array_element`, `ctor_call`,

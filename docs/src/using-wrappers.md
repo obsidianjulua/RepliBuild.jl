@@ -187,13 +187,25 @@ the DWARF, which under clang's constructor homing means `-fstandalone-debug`
 (or `-Xclang -fno-use-ctor-homing`) in `[compile] flags`; a plain `-g` build
 sees a never-constructed class as a declaration only.
 
-**Header-inline accessors** (`GetPosition()`): inline functions have no
-symbol. Read the member at its DWARF offset — `member_offset`, never a
-literal — so layout drift fails loudly.
+**Header-inline member functions** (`GetPosition()`,
+`btRigidBody::applyCentralImpulse`): a member function defined in a class
+body and called by none of the library's translation units has no symbol
+either, and the build defines those the same way: the generated unit takes
+the address of every public, non-virtual member function a library class
+declares and the library does not define, and each then wraps like any other
+method (`Class_method(this, args…)`). The wrap report counts them and names
+what was skipped and why. Two kinds are left out on purpose. A member of a
+class template's specialization (`btAlignedObjectArray<T>::size`) is
+instantiated by listing the specialization in `[types] templates`, which
+instantiates all of its members. A member declared in the header with no
+body there is the library's own out-of-line function, hidden or not
+compiled. `[wrap] exclude_symbols` drops any of them by pattern. Like the
+constructors, this needs the class's definition in the DWARF.
 
-If the package's TOML is yours, a keep file can compile those into the library
-instead, and they then wrap like any other method
-([Header-only libraries](guide.md#Header-only-libraries)).
+A free inline function (`b2Dot(a, b)`, an `operator+` outside a class) is
+declared in no class, so nothing lists it: compile it in with a keep file
+([Header-only libraries](guide.md#Header-only-libraries)), or read the
+member at its DWARF offset (`member_offset`, never a literal).
 
 **Abstract-class instances the library virtual-calls** (a `b2CircleShape` it
 `Clone()`s): plant the real compiler vtable — `dlsym` the `_ZTV…` symbol, skip

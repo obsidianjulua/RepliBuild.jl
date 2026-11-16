@@ -259,9 +259,10 @@ The wrap report's lines for the inline constructors the build defined itself
 forced unit emitted, the forced rows the unit's guard declined (an abstract
 class, or a constructor not constructible from its declared parameters), and
 the rows skipped before the unit with their reasons. Nothing for metadata
-without the key, or with nothing to report.
+without the key, or with nothing to report. With `what = "member function"`
+the same lines for the metadata's `inline_methods`.
 """
-function _report_inline_constructors(plan)
+function _report_inline_constructors(plan; what::String = "constructor")
     plan isa AbstractDict || return
     forced = [f for f in get(plan, "forced", Any[]) if f isa AbstractDict]
     skipped = [s for s in get(plan, "skipped", Any[]) if s isa AbstractDict]
@@ -273,18 +274,19 @@ function _report_inline_constructors(plan)
     show(xs) = join(first(xs, 8), ", ") * (length(xs) > 8 ? ", …" : "")
     if !isempty(emitted)
         classes = sort!(unique(String[String(f["class"]) for f in emitted]))
-        println("  wrap: $(length(emitted)) inline constructor(s) of $(length(classes)) class(es) ",
+        println("  wrap: $(length(emitted)) inline $(what)(s) of $(length(classes)) class(es) ",
                 "declared in headers and defined by the build's forced unit: ", show(classes))
     end
     if !isempty(unforced)
         classes = sort!(unique(String[String(f["class"]) for f in unforced]))
-        println("  wrap: $(length(unforced)) inline constructor(s) of $(length(classes)) class(es) ",
+        println("  wrap: $(length(unforced)) inline $(what)(s) of $(length(classes)) class(es) ",
                 "declared in headers and defined by no translation unit; this build ran no forced unit: ",
                 show(classes))
     end
     if !isempty(declined)
-        println("  wrap: $(length(declined)) inline constructor(s) the forced unit declined ",
-                "(an abstract class, or not constructible from the declared parameters): ",
+        println("  wrap: $(length(declined)) inline $(what)(s) the forced unit declined ",
+                "(", what == "constructor" ? "an abstract class, or not constructible from the declared parameters" :
+                                             "no definition came out of the unit", "): ",
                 show(sort!(unique(String[String(f["class"]) for f in declined]))))
     end
     if !isempty(skipped)
@@ -294,12 +296,12 @@ function _report_inline_constructors(plan)
         for s in skipped
             reason = String(get(s, "reason", "?"))
             occursin("does not compile", reason) &&
-                (reason = "does not compile in the unit (each compiler message is in the metadata's inline_constructors)")
+                (reason = "does not compile in the unit (each compiler message is in the metadata's $(what == "constructor" ? "inline_constructors" : "inline_methods"))")
             push!(get!(() -> String[], by_reason, reason), String(get(s, "class", "?")))
         end
         for reason in sort!(collect(keys(by_reason)))
             classes = sort!(unique(by_reason[reason]))
-            println("  wrap: $(length(classes)) class(es) with an inline constructor left undefined, $reason: ",
+            println("  wrap: $(length(classes)) class(es) with an inline $(what) left undefined, $reason: ",
                     show(classes))
         end
     end
@@ -1129,6 +1131,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 length(names) > 8 ? ", …" : "")
     end
     _report_inline_constructors(get(metadata, "inline_constructors", nothing))
+    _report_inline_constructors(get(metadata, "inline_methods", nothing); what = "member function")
 
     # Helper: sanitize a raw function name to the Julia identifier used in wrappers.
     # Proxies and deleters REFERENCE names the main loop defines, so this must be
