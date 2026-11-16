@@ -2694,12 +2694,21 @@ underscore. The mismatch failed the `emitted_names` gate and dropped the type
 SILENTLY — 100 of imgui's 262 declared structs, 29 of tinyxml2's 42, i.e.
 precisely the templated types whose size a caller cannot compute any other way.
 """
-function _layout_chunk(dwarf_structs, emitted_names, sanitize)::String
+function _layout_chunk(dwarf_structs, emitted_names, sanitize;
+                       aliases::AbstractVector{<:Pair} = Pair{String,String}[])::String
     _num(v) = v isa Integer ? Int(v) :
         (let s = string(v); startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s) end)
 
     sizes = String[]
     offsets = String[]
+    # A class-nested type's qualified name (`_nested_type_aliases`) keys the
+    # same facts, after the names the tables always had.
+    alias_of = Dict{String,Vector{String}}()
+    for (alias, name) in aliases
+        push!(get!(() -> String[], alias_of, String(name)), String(alias))
+    end
+    alias_sizes = String[]
+    alias_offsets = String[]
     for key in sort(collect(keys(dwarf_structs)))
         info = dwarf_structs[key]
         info isa AbstractDict || continue
@@ -2708,6 +2717,9 @@ function _layout_chunk(dwarf_structs, emitted_names, sanitize)::String
         bs = try _num(get(info, "byte_size", 0)) catch; 0 end
         bs > 0 || continue
         push!(sizes, "    :$(name) => $(bs),")
+        for a in get(alias_of, name, String[])
+            push!(alias_sizes, "    :$(a) => $(bs),")
+        end
 
         members = String[]
         for m in get(info, "members", [])
@@ -2728,8 +2740,15 @@ function _layout_chunk(dwarf_structs, emitted_names, sanitize)::String
             push!(members, ":$(mn) => $(off)")
         end
         isempty(members) || push!(offsets, "    :$(name) => Dict{Symbol,Int}($(join(members, ", "))),")
+        if !isempty(members)
+            for a in get(alias_of, name, String[])
+                push!(alias_offsets, "    :$(a) => Dict{Symbol,Int}($(join(members, ", "))),")
+            end
+        end
     end
     isempty(sizes) && return ""
+    append!(sizes, sort!(alias_sizes))
+    append!(offsets, sort!(alias_offsets))
 
     return """
     # ── Layout facts (from DWARF, as emitted) ────────────────────────────────
@@ -2776,6 +2795,84 @@ function _layout_chunk(dwarf_structs, emitted_names, sanitize)::String
             Base.join(Base.sort(Base.string.(Base.keys(ms))), ", ")))
         return ms[m]
     end
+
+    """
+end
+
+"The innermost component of a `::`-joined scope, template arguments kept: `ns::Outer<a::b>` → `Outer<a::b>`."
+function _innermost_scope_component(scope::AbstractString)::String
+    s = String(scope)
+    depth = 0
+    cut = 0
+    i = firstindex(s)
+    while i <= lastindex(s)
+        c = s[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif depth == 0 && c == ':' && i < lastindex(s) && s[nextind(s, i)] == ':'
+            cut = nextind(s, i)
+        end
+        i = nextind(s, i)
+    end
+    return cut == 0 ? s : String(s[nextind(s, cut):end])
+end
+
+"""
+    _nested_type_aliases(dwarf_structs, emitted_names, sanitize, taken) -> Vector{Pair{String,String}}
+
+`alias => emitted name` for every emitted record declared INSIDE a class, the
+alias being the name its functions already carry: DWARF keys a record by its
+bare name, so `btCollisionWorld::ClosestRayResultCallback` is the struct
+`ClosestRayResultCallback` (and that key in `STRUCT_SIZES`), while its
+functions are `btCollisionWorld_ClosestRayResultCallback_…`. The alias is
+`sanitize(scope::name)`, which is that prefix. Additive: the bare name stays
+what it was, since consumers use it.
+
+A record qualifies when its definition has exactly one known scope, no
+`conflict`, and the scope's innermost component is itself a record of this
+metadata (a namespace is not: `ns::T` stays `T` alone). An alias already
+bound in the module (`taken`: a function `Outer_Inner`, another type, a
+constant) or produced twice is not emitted. Sorted by alias.
+"""
+function _nested_type_aliases(dwarf_structs, emitted_names, sanitize, taken)::Vector{Pair{String,String}}
+    out = Dict{String,String}()
+    dropped = Set{String}()
+    for key in sort(collect(String, keys(dwarf_structs)))
+        startswith(key, "__enum__") && continue
+        info = dwarf_structs[key]
+        info isa AbstractDict || continue
+        get(info, "conflict", false) == true && continue
+        scopes = get(info, "scopes", nothing)
+        scope = scopes isa AbstractVector ? (length(scopes) == 1 ? scopes[1] : nothing) : get(info, "scope", nothing)
+        (scope isa AbstractString && !isempty(scope)) || continue
+        outer = get(dwarf_structs, _innermost_scope_component(scope), nothing)
+        (outer isa AbstractDict && get(outer, "kind", "struct") in ("struct", "class", "union")) || continue
+        name = String(sanitize(key))
+        name in emitted_names || continue
+        alias = String(sanitize(scope * "::" * key))
+        (alias == name || alias in emitted_names || alias in taken || alias in dropped) && continue
+        if haskey(out, alias)
+            delete!(out, alias)
+            push!(dropped, alias)
+            continue
+        end
+        out[alias] = name
+    end
+    return [a => out[a] for a in sort!(collect(keys(out)))]
+end
+
+"The alias section's text, or `\"\"` with nothing to alias."
+function _nested_type_alias_chunk(aliases::AbstractVector{<:Pair})::String
+    isempty(aliases) && return ""
+    return """
+    # ── Class-nested types under their qualified names ───────────────────────
+    # A type declared inside a class is emitted under its own name; its
+    # functions carry the class (`Outer_Inner_method`). Each alias below is
+    # that same type under the name its functions use. `STRUCT_SIZES` and
+    # `STRUCT_OFFSETS` are keyed by both.
+    $(join(("const $(a) = $(n)" for (a, n) in aliases), "\n"))
 
     """
 end

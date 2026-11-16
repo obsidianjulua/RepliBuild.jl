@@ -1024,6 +1024,18 @@ the test named when you touch the area.
   top-level name twice from any emitter: `_assert_no_duplicate_toplevel_names`
   refuses the wrapper (methods overload, one type takes constructors, nothing
   else coexists). (`test_enumerator_collisions.jl`.)
+- **A class-nested type also answers to the name its functions carry**
+  (2026-11-15, `_nested_type_aliases`, GeneratorCpp only). A record is keyed
+  and emitted by its bare name (`ClosestRayResultCallback`) while its
+  functions are `btCollisionWorld_ClosestRayResultCallback_…`; the wrapper
+  adds `const <sanitize(scope::name)> = <name>` after the layout tables and
+  keys `STRUCT_SIZES`/`STRUCT_OFFSETS` by both. Additive only: the bare
+  name never changes, since consumers use it. An alias needs exactly one
+  scope, no `conflict`, and a scope whose innermost component is a record of
+  the metadata (a namespace alone gives none), and is dropped when the
+  module binds the name already (a free function `World_Mark`). It does not
+  disambiguate two same-named types; that is still the open problem below.
+  (`test_nested_type_aliases.jl`, devtests `test_nested_type_aliases_live.jl`.)
 - Emitted introspection (`DISPATCH_TIER`/`dispatch_tier`, `STRUCT_SIZES`/
   `STRUCT_OFFSETS`/`struct_size`/`member_offset`) is derived from the final chunks, is
   unexported, and uses each generator's own sanitizer. `_vptr$X` member names must be
