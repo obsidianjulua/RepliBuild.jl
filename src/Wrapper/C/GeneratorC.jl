@@ -3446,7 +3446,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             push!(param_types, actual_c_type)
 
             # Map C integer types to natural Julia types with range checking
-            if actual_c_type in ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort", "Clonglong", "Culonglong", "Csize_t", "Cssize_t")
+            if actual_c_type in _C_INTEGER_PARAM_CTYPES
                 # An enum passes too (`_C_INTEGER_PARAM`): C converts one to
                 # an integer silently, and `Cint(key)` below is defined for it.
                 push!(julia_param_types, _C_INTEGER_PARAM)

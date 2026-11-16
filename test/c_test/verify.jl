@@ -119,6 +119,11 @@ const PROJECT_ROOT = dirname(dirname(C_TEST_DIR))
         @test !(M.OP_MUL isa Integer)
         @test M.identity(M.OP_MUL) == 2
         @test M.identity(7) == 7
+        # A fixed-width parameter (`int32_t`) takes the same: an `Int` literal
+        # and an enumerator, converted in the body, and out of range is an error.
+        @test M.add_i32(10, 32) == Int32(42)
+        @test M.add_i32(M.OP_DIV, M.OP_SUB) == Int32(4)
+        @test_throws InexactError M.add_i32(typemax(Int64), 1)
 
         # ── long double: no Julia type, no ccall shape ──────────────
         # The return comes back in x87 ST0, which ccall never reads (the
