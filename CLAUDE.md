@@ -645,6 +645,22 @@ the test named when you touch the area.
   inline and unused is declaration-only everywhere, and `-fstandalone-debug`
   (Bullet, box2d) is what makes it appear. Graph mode does not run it.
   (`test_inline_constructors.jl`, devtests `test_inline_ctors_live.jl`.)
+- **`[types] records` makes a class no source mentions visible** (2026-11-15,
+  `generate_visible_records`). Debug info describes the types a unit uses, so
+  a header-only class nothing in the library mentions (Bullet's
+  `btDefaultMotionState`) has no DIE, standalone or not, and the
+  inline-constructor pass has nothing to force. Each entry is instantiated
+  as `replibuild_force::record<T>(T*)` in `replibuild_records.cpp`
+  (`[wrap] shim_headers`, then `[types] template_headers`), compiled in the
+  FIRST pass beside the templates TU so the first extraction sees the class.
+  Its body takes `sizeof(T)`: an entry that does not compile (a typo, a
+  declared-only name, a missing header) is a build error naming it, found by
+  compiling each entry alone; one that compiles and has no
+  `struct_definitions` entry (constructor homing under plain `-g`) is a
+  warning naming it (`_report_invisible_records`). Never `template class T;`,
+  which is invalid for a non-template and is why `[types] templates` could
+  not do this. (`test_visible_records.jl`, devtests
+  `test_visible_records_live.jl`.)
 - Anonymous structs/unions get synthesized names (`Parent_u`, `Parent_anonN`), which
   must be pre-sanitized. They are deduplicated across CUs and emitted as aligned
   opaque regions; C11 anonymous members are injected as fields. One named after a
