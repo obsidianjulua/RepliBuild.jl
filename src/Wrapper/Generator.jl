@@ -1701,7 +1701,7 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
         push!(fixed_param_types, julia_type)
 
         # Ergonomic type mapping (same logic as main wrapper gen)
-        if julia_type in ["Cint", "Clong", "Cshort"]
+        if julia_type in (lang === :c ? _C_INTEGER_PARAM_CTYPES : ("Cint", "Clong", "Cshort"))
             # C's fixed integer parameters take an enum too (`_C_INTEGER_PARAM`,
             # raylib's `TraceLog(LOG_INFO, …)`); a C++ one stays `Integer`,
             # where an enum overload may stand beside it.

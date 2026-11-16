@@ -334,6 +334,13 @@ None of these are exported. Reach for them qualified:
 | `M.dispatch_tier(f)` | Which calling path `f` **actually** uses right now |
 | `M.DISPATCH_TIER` | What the generator **emitted** for each function |
 
+A C++ type declared inside a class is bound under two names: its own
+(`ClosestRayResultCallback`) and the one its functions carry
+(`btCollisionWorld_ClosestRayResultCallback`, as in
+`btCollisionWorld_ClosestRayResultCallback_hasHit`). They are the same type,
+and `struct_size` and `member_offset` take either. The qualified name is
+left out where the module already binds it to something else.
+
 `dispatch_tier` and `DISPATCH_TIER` exist only in a wrapper that mixes tiers, or
 that has Tier 1 kernels. When every function takes the same path, the wrapper
 names that tier in a comment instead, and the two names are `UndefVarError`.

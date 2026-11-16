@@ -818,9 +818,10 @@ the test named when you touch the area.
   silently and raylib's `IsKeyDown(int key)` is called with `KEY_SPACE`, an
   open enum that is not an `Integer`. GeneratorC and the C arm of the varargs
   path's fixed parameters spell it through that constant; C++ keeps
-  `::Integer`, where `f(int)` may stand beside `f(E)`'s `::Any` method. A
-  fixed-width parameter (`int32_t`, `julia_type` `Int32`) is still typed
-  strictly. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
+  `::Integer`, where `f(int)` may stand beside `f(E)`'s `::Any` method. The
+  relaxed types are `_C_INTEGER_PARAM_CTYPES`: the C aliases and the
+  fixed-width types (`int32_t` is `Int32` in the metadata), one list for
+  both paths. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
 - **A Tier 2 argument is converted to its C width in the emitted body.** A
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box
@@ -1058,6 +1059,18 @@ the test named when you touch the area.
   top-level name twice from any emitter: `_assert_no_duplicate_toplevel_names`
   refuses the wrapper (methods overload, one type takes constructors, nothing
   else coexists). (`test_enumerator_collisions.jl`.)
+- **A class-nested type also answers to the name its functions carry**
+  (2026-11-15, `_nested_type_aliases`, GeneratorCpp only). A record is keyed
+  and emitted by its bare name (`ClosestRayResultCallback`) while its
+  functions are `btCollisionWorld_ClosestRayResultCallback_…`; the wrapper
+  adds `const <sanitize(scope::name)> = <name>` after the layout tables and
+  keys `STRUCT_SIZES`/`STRUCT_OFFSETS` by both. Additive only: the bare
+  name never changes, since consumers use it. An alias needs exactly one
+  scope, no `conflict`, and a scope whose innermost component is a record of
+  the metadata (a namespace alone gives none), and is dropped when the
+  module binds the name already (a free function `World_Mark`). It does not
+  disambiguate two same-named types; that is still the open problem below.
+  (`test_nested_type_aliases.jl`, devtests `test_nested_type_aliases_live.jl`.)
 - Emitted introspection (`DISPATCH_TIER`/`dispatch_tier`, `STRUCT_SIZES`/
   `STRUCT_OFFSETS`/`struct_size`/`member_offset`) is derived from the final chunks, is
   unexported, and uses each generator's own sanitizer. `_vptr$X` member names must be
