@@ -3265,6 +3265,162 @@ function _inline_method_plan(struct_defs::AbstractDict, record_abi::AbstractDict
     return Dict{String,Any}("forced" => forced, "skipped" => skipped)
 end
 
+# =============================================================================
+# DEFAULT ARGUMENTS
+# -----------------------------------------------------------------------------
+# A C++ default argument exists only in the header: the mangled name spells
+# every parameter, and clang writes no `DW_AT_default_value`. So
+# `btDefaultMotionState(start)` had to be called with its second transform
+# spelled out, and `btHingeConstraint::setLimit(lo, hi)` with all five
+# arguments (2026-11-15, ObjectSim). The compiler knows the defaults, so the
+# forced unit asks it: for a constructor or member function F of N parameters
+# and each shorter prefix of them, one function in namespace
+# `replibuild_default` makes that call, `self->f(a0, …, ak)`. Where the header
+# gives no default the call is a compile error ON THAT ROW, which the unit's
+# row tracing drops; where it compiles, clang has filled the defaults in and
+# the function is the short call's entry point.
+#
+# The arguments have exactly F's parameter types, so overload resolution takes
+# F or is ambiguous (an error, the row is dropped): F is an identity match on
+# every argument and nothing can beat it. A prefix another member of the class
+# declares in full is not generated at all; that call is that member's.
+#
+# The second extraction gives each surviving function F's identity
+# (`_apply_default_argument_identity!`): its symbol's demangled name becomes
+# `Class::f(prefix)`, its first parameter `this`, so both receiver gates and
+# every name derivation treat it as the method it stands for, with fewer
+# parameters. On the Itanium ABI a function taking `Class*` first is called
+# exactly as a member of `Class` is, by-value returns included (mingw too).
+# =============================================================================
+
+"The mangled-name prefix of default-argument function `id`: `_ZN18replibuild_default2d7E`."
+_default_shim_prefix(id::Integer) = (n = "d$(id)"; "_ZN18replibuild_default$(length(n))$(n)E")
+
+"""
+    _default_argument_plan(struct_defs, record_abi, symbols, exclude_patterns;
+                           demangle = _demangle) -> Dict
+
+`candidates`: for every public constructor and member function a library
+record declares (`record_abi[name]["methods"]`) and every proper prefix of
+its parameters, one row (`id`, `class`, `symbol`, `type`, `name`, `ctor`,
+`const`, `parameters`: the prefix, `omitted`, `headers`, `defined`,
+`demangled`: `Class::f(prefix)`). Whether the header has defaults for the
+omitted parameters is not known here; the unit's compile answers per row.
+
+Left out: an implicit or deleted member, a private or protected one, a
+destructor, an operator, a member the unit cannot name, a class template's
+specialization, a toolchain or standard-library record, one with distinct
+definitions or no header, a symbol `[wrap] exclude_symbols` drops, a prefix
+another member of the record declares in full, and a prefix already listed.
+`defined` says the symbol table defines the member (a constructor: any of its
+variants); the unit keeps an undefined member's rows only when it defines the
+member itself. Sorted by class, then symbol, then longest prefix first.
+"""
+function _default_argument_plan(struct_defs::AbstractDict, record_abi::AbstractDict, symbols,
+                                exclude_patterns::Vector{String}; demangle = _demangle)
+    defined = Set{String}(String(get(s, "mangled", "")) for s in symbols if s isa AbstractDict)
+    rows = Dict{String,Any}[]
+    for name in sort!(collect(String, keys(struct_defs)))
+        startswith(name, "__enum__") && continue
+        def = struct_defs[name]
+        def isa AbstractDict || continue
+        entry = get(record_abi, name, nothing)
+        entry isa AbstractDict || continue
+        methods = get(entry, "methods", nothing)
+        (methods isa AbstractVector && !isempty(methods)) || continue
+        (get(def, "toolchain", false) == true || get(def, "conflict", false) == true) && continue
+        _is_stdlib_scope(get(def, "scope", "")) && continue
+        headers = _inline_ctor_headers_of(get(def, "decl_files", String[]))
+        isempty(headers) && continue
+        # Every member's spelling first: a prefix that IS a sibling's whole
+        # parameter list is that sibling's call.
+        spelled = Tuple{String,Any,Any}[]
+        for m in methods
+            m isa AbstractDict || continue
+            sym = String(get(m, "symbol", ""))
+            isempty(sym) && continue
+            dm = demangle(sym)
+            dm === nothing && continue
+            sp = _method_spelling(dm)
+            sp === nothing && continue
+            push!(spelled, (sym, m, sp))
+        end
+        full = Set{Any}((sp.type, sp.name, sp.isconst, sp.parameters) for (_, _, sp) in spelled)
+        seen = Set{Any}()
+        for (sym, m, sp) in spelled
+            (get(m, "artificial", false) == true || get(m, "deleted", false) == true ||
+             get(m, "accessibility", "public") != "public") && continue
+            (startswith(sp.name, "~") || startswith(sp.name, "operator") || occursin('<', sp.type)) && continue
+            isempty(sp.parameters) && continue
+            ctor = sp.structor
+            is_defined = ctor ? any(in(defined), _constructor_variants(sym)) : sym in defined
+            if !isempty(exclude_patterns)
+                dm = String(demangle(sym))
+                names = ctor ? _constructor_variants(sym) : [sym]
+                kept = _without_excluded_symbols(Set{String}(names),
+                                                 [Dict{String,Any}("mangled" => v, "demangled" => dm) for v in names],
+                                                 exclude_patterns)
+                length(kept) < length(names) && continue
+            end
+            for k in (length(sp.parameters)-1):-1:0
+                prefix = sp.parameters[1:k]
+                key = (sp.type, sp.name, sp.isconst, prefix)
+                (key in full || key in seen) && continue
+                push!(seen, key)
+                push!(rows, Dict{String,Any}(
+                    "class" => name, "symbol" => sym, "type" => sp.type, "name" => sp.name, "ctor" => ctor,
+                    "const" => sp.isconst, "parameters" => prefix, "full" => sp.parameters,
+                    "omitted" => length(sp.parameters) - k,
+                    "headers" => headers, "defined" => is_defined,
+                    "demangled" => "$(sp.type)::$(sp.name)($(join(prefix, ", ")))" * (sp.isconst ? " const" : "")))
+            end
+        end
+    end
+    for (i, r) in enumerate(rows)
+        r["id"] = i - 1
+    end
+    return Dict{String,Any}("candidates" => rows)
+end
+
+"The preamble of the unit's default-argument rows."
+const _DEFAULT_ARGUMENT_PREAMBLE = raw"""
+// ── Default arguments (see _default_argument_plan) ──────────────────────────
+// Each function calls one constructor or member function with a prefix of its
+// parameters, so the compiler fills in the defaults the header declares. A
+// row whose call the header has no defaults for does not compile and is
+// removed before this unit is written. `id<T>` lets any type spelling (a
+// function pointer, an array) stand in a declarator.
+namespace replibuild_force { template <class T> using id = T; }
+// A member function's row also names the member through `nonstatic`, which
+// has no overload for a plain function pointer: a STATIC member's row does
+// not compile, since its function would take an object the member does not.
+// Unevaluated, so naming the member defines nothing.
+namespace replibuild_force {
+template <class... A> struct nonstatic {
+    template <class R, class C> static int m(R (C::*)(A...));
+    template <class R, class C> static int mc(R (C::*)(A...) const);
+};
+}
+"""
+
+"One default-argument row's line in the unit: the function making the short call."
+function _default_argument_line(f::AbstractDict)::String
+    id = Int(f["id"])
+    params = String[String(p) for p in f["parameters"]]
+    decl = join(["replibuild_force::id<$p> a$(i - 1)" for (i, p) in enumerate(params)], ", ")
+    args = join(["static_cast<replibuild_force::id<$p>&&>(a$(i - 1))" for (i, p) in enumerate(params)], ", ")
+    self = (get(f, "const", false) == true ? "const " : "") * String(f["type"]) * "* self"
+    sig = isempty(decl) ? self : "$self, $decl"
+    tail = "   // $(f["symbol"]) less $(f["omitted"])"
+    if get(f, "ctor", false) == true
+        return "namespace replibuild_default { void d$(id)($sig) { ::new (static_cast<void*>(self)) $(f["type"])($args); } }" * tail
+    end
+    call = "self->$(f["name"])($args)"
+    full = join(String[String(p) for p in get(f, "full", params)], ", ")
+    member = "replibuild_force::nonstatic<$full>::$(get(f, "const", false) == true ? "mc" : "m")(&$(f["type"])::$(f["name"]))"
+    return "namespace replibuild_default { auto d$(id)($sig) -> decltype((void)$member, $call) { return $call; } }" * tail
+end
+
 "The C++ preamble of the forced unit's member functions: the overload-selecting address helper."
 const _INLINE_METHOD_PREAMBLE = raw"""
 // ── Forced inline member functions (see generate_inline_definitions) ────────
@@ -3342,7 +3498,7 @@ which is how a compiler diagnostic is traced back to its row
 (`_unit_row_of_line`).
 """
 function _inline_ctor_unit_text(headers::AbstractVector, forced::AbstractVector,
-                                methods::AbstractVector = Any[])::String
+                                methods::AbstractVector = Any[], defaults::AbstractVector = Any[])::String
     io = IOBuffer()
     println(io, "// Auto-generated by RepliBuild: the library's inline constructors and member functions that no translation unit of it defined")
     for h in headers
@@ -3364,6 +3520,14 @@ function _inline_ctor_unit_text(headers::AbstractVector, forced::AbstractVector,
         println(io)
         for (i, f) in enumerate(methods)
             println(io, _inline_method_line(i - 1, f))
+        end
+    end
+    if !isempty(defaults)
+        println(io)
+        print(io, _DEFAULT_ARGUMENT_PREAMBLE)
+        println(io)
+        for f in defaults
+            println(io, _default_argument_line(f))
         end
     end
     return String(take!(io))
@@ -3441,16 +3605,19 @@ function _unit_bad_lines(output::AbstractString, path::AbstractString)::Dict{Int
     return bad
 end
 
-"The row a line of the unit states: `(:ctor, k)` or `(:method, k)`, 1-based in its list, else `nothing`."
+"The row a line of the unit states: `(:ctor, k)`, `(:method, k)` or `(:default, k)`, 1-based in its list, else `nothing`."
 function _unit_row_of_line(text::AbstractString)
     rows = Dict{Int,Tuple{Symbol,Int}}()
     nc = 0
     nm = 0
+    nd = 0
     for (i, line) in enumerate(split(text, '\n'))
         if startswith(line, "template void replibuild_force::ctor<")
             rows[i] = (:ctor, nc += 1)
         elseif startswith(line, "RB_FORCE_MEMBER replibuild_member_")
             rows[i] = (:method, nm += 1)
+        elseif startswith(line, "namespace replibuild_default { ")
+            rows[i] = (:default, nd += 1)
         end
     end
     return rows
@@ -3474,9 +3641,11 @@ end
     generate_inline_definitions(config, cpp_files, plan, mplan) -> (cpp_files, plan, mplan)
 
 Write the forced unit for the constructor plan's and the member-function
-plan's `forced` rows (`_inline_constructor_plan`, `_inline_method_plan`)
-under the build cache and append it to `cpp_files`; each plan comes back with
-the rows the unit could not keep moved to `skipped`.
+plan's `forced` rows (`_inline_constructor_plan`, `_inline_method_plan`) and
+the default-argument candidates (`_default_argument_plan`) under the build
+cache and append it to `cpp_files`; each plan comes back with the rows the
+unit could not keep moved to `skipped`, and the default-argument plan with
+the rows that compiled as `bound`, each with its function's symbol (`shim`).
 
 The unit is compiled whole to IR. When that fails, every row a diagnostic
 names (`_unit_bad_lines`: each row is one line) is skipped with the
@@ -3494,19 +3663,27 @@ symbols of the kept rows are written beside the unit for the link
 (`_forced_exportable_ir`).
 """
 function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector{String},
-                                     plan::AbstractDict, mplan::AbstractDict)
+                                     plan::AbstractDict, mplan::AbstractDict,
+                                     dplan::AbstractDict = Dict{String,Any}("candidates" => Any[]))
     copyrows(p, k) = Dict{String,Any}[Dict{String,Any}(f) for f in get(p, k, Any[])]
     forced = copyrows(plan, "forced")
     skipped = copyrows(plan, "skipped")
     mforced = copyrows(mplan, "forced")
     mskipped = copyrows(mplan, "skipped")
+    # The default-argument rows (`_default_argument_plan`): most of them are
+    # calls the header has no defaults for, dropped below without a word.
+    dforced = copyrows(dplan, "candidates")
     result() = (Dict{String,Any}("forced" => forced, "skipped" => skipped),
-                Dict{String,Any}("forced" => mforced, "skipped" => mskipped))
+                Dict{String,Any}("forced" => mforced, "skipped" => mskipped),
+                Dict{String,Any}("candidates" => Any[], "bound" => dforced))
     cache_dir = get_cache_path(config)
     mkpath(cache_dir)
     unit_path = joinpath(cache_dir, "replibuild_ctors.cpp")
     rm(_forced_symbols_path(config); force = true)
-    (config.wrap.language == :cpp && !(isempty(forced) && isempty(mforced))) || return (cpp_files, result()...)
+    if !(config.wrap.language == :cpp && !(isempty(forced) && isempty(mforced) && isempty(dforced)))
+        empty!(dforced)
+        return (cpp_files, result()...)
+    end
 
     probe = joinpath(cache_dir, "replibuild_ctors_probe.cpp")
     probe_ir = joinpath(cache_dir, "replibuild_ctors_probe.ll")
@@ -3521,7 +3698,8 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
         end
         return keep
     end
-    unit_text() = _inline_ctor_unit_text(_inline_ctor_headers(config, vcat(forced, mforced)), forced, mforced)
+    unit_text() = _inline_ctor_unit_text(_inline_ctor_headers(config, vcat(forced, mforced, dforced)),
+                                         forced, mforced, dforced)
     # Each row of `rows` compiled alone (`-fsyntax-only`), in parallel: the
     # compiler's first error line per row, or `nothing`.
     function alone(rows, ctors::Bool)
@@ -3548,21 +3726,30 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
     # headers and each constructor alone, 2 each member function alone.
     stage = 0
     for _ in 1:12
-        (isempty(forced) && isempty(mforced)) && break
+        (isempty(forced) && isempty(mforced) && isempty(dforced)) && break
         (ok, out) = _unit_probe(config, probe, text; ir = probe_ir)
         ok && break
         bad = _unit_bad_lines(out, probe)
         rows = _unit_row_of_line(text)
         bad_ctor = Dict{Int,String}()
         bad_method = Dict{Int,String}()
+        bad_default = Set{Int}()
         for (line, why) in bad
             r = get(rows, line, nothing)
             r === nothing && continue
-            (r[1] === :ctor ? bad_ctor : bad_method)[r[2]] = why
+            r[1] === :default ? push!(bad_default, r[2]) :
+                ((r[1] === :ctor ? bad_ctor : bad_method)[r[2]] = why)
+        end
+        if !isempty(bad_default)
+            # No default for the omitted parameters (or an ambiguous call):
+            # the expected outcome for most rows, so nothing is recorded.
+            dforced = Dict{String,Any}[f for (k, f) in enumerate(dforced) if !(k in bad_default)]
         end
         if !(isempty(bad_ctor) && isempty(bad_method))
             forced = drop!(forced, skipped, (k, _) -> haskey(bad_ctor, k) ? "does not compile: $(bad_ctor[k])" : nothing)
             mforced = drop!(mforced, mskipped, (k, _) -> haskey(bad_method, k) ? "does not compile: $(bad_method[k])" : nothing)
+        elseif !isempty(bad_default)
+            # Only default-argument rows were named this round.
         elseif stage == 0
             stage = 1
             # No row is named: a header does not compile on its own. Each
@@ -3603,9 +3790,10 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
         end
         text = unit_text()
     end
-    if !ok && !(isempty(forced) && isempty(mforced))
+    if !ok
         forced = drop!(forced, skipped, (_, _) -> "the unit did not compile: $msg")
         mforced = drop!(mforced, mskipped, (_, _) -> "the unit did not compile: $msg")
+        dforced = Dict{String,Any}[]
     end
     if ok && !isempty(mforced)
         # A member the unit only declares has no body in its header.
@@ -3616,12 +3804,38 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
             "declared in its header with no body there" : nothing)
         length(mforced) < n && (text = unit_text())
     end
+    if ok && !isempty(dforced)
+        # A row stays when the member it calls is defined: by the library, or
+        # by this unit (an inline member the call itself made clang emit). A
+        # call to a member defined nowhere would leave an undefined symbol.
+        # Each kept row learns its function's symbol from the unit's IR.
+        (defined, _) = _ir_defined_declared(probe_ir)
+        shim_of = Dict{String,String}()
+        for d in defined
+            m = match(r"^_ZN18replibuild_default\d+d(\d+)E", d)
+            m === nothing || (shim_of[String(m.captures[1])] = d)
+        end
+        n = length(dforced)
+        kept = Dict{String,Any}[]
+        for f in dforced
+            target = String(f["symbol"])
+            names = get(f, "ctor", false) == true ? _constructor_variants(target) : [target]
+            (get(f, "defined", false) == true || any(in(defined), names)) || continue
+            shim = get(shim_of, string(Int(f["id"])), nothing)
+            shim === nothing && continue
+            f["shim"] = shim
+            push!(kept, f)
+        end
+        dforced = kept
+        length(dforced) < n && (text = unit_text())
+    end
     rm(probe; force = true)
     rm(probe_ir; force = true)
-    (isempty(forced) && isempty(mforced)) && return (cpp_files, result()...)
+    (isempty(forced) && isempty(mforced) && isempty(dforced)) && return (cpp_files, result()...)
 
     _write_if_changed(unit_path, text)
     symbols = sort!(unique(vcat(String[String(f["symbol"]) for f in mforced],
+                                String[String(f["shim"]) for f in dforced],
                                 [_constructor_variants(String(f["symbol"])) for f in forced]...)))
     open(_forced_symbols_path(config), "w") do io
         JSON.print(io, symbols)
@@ -3635,8 +3849,8 @@ end
 `generate_inline_definitions` for a constructor plan alone.
 """
 function generate_inline_constructors(config::RepliBuildConfig, cpp_files::Vector{String}, plan::AbstractDict)
-    (files, p, _) = generate_inline_definitions(config, cpp_files, plan,
-                                                Dict{String,Any}("forced" => Any[], "skipped" => Any[]))
+    (files, p, _, _) = generate_inline_definitions(config, cpp_files, plan,
+                                                   Dict{String,Any}("forced" => Any[], "skipped" => Any[]))
     return (files, p)
 end
 
@@ -4959,10 +5173,14 @@ function compile_project(config::RepliBuildConfig)
     # ...and the same for its other inline member functions (`inline_methods`):
     # the unit takes each one's address.
     mplan = something(get(first_meta, "inline_methods", nothing), empty_plan())
+    # ...and the calls that leave default arguments out (`default_arguments`):
+    # one function per call the header has defaults for.
+    dplan = something(get(first_meta, "default_arguments", nothing), Dict{String,Any}("candidates" => Any[]))
     if config.wrap.language == :cpp && config.binary.type != :executable &&
-       plan isa AbstractDict && mplan isa AbstractDict &&
-       !(isempty(get(plan, "forced", Any[])) && isempty(get(mplan, "forced", Any[])))
-        (cpp_files_b, plan, mplan) = generate_inline_definitions(config, cpp_files, plan, mplan)
+       plan isa AbstractDict && mplan isa AbstractDict && dplan isa AbstractDict &&
+       !(isempty(get(plan, "forced", Any[])) && isempty(get(mplan, "forced", Any[])) &&
+         isempty(get(dplan, "candidates", Any[])))
+        (cpp_files_b, plan, mplan, dplan) = generate_inline_definitions(config, cpp_files, plan, mplan, dplan)
         if length(cpp_files_b) > length(cpp_files)
             nforced = length(plan["forced"])
             nforced > 0 &&
@@ -4972,6 +5190,10 @@ function compile_project(config::RepliBuildConfig)
             nmeth > 0 &&
                 println("  methods: $(nmeth) inline member function(s) of $(length(unique(String[f["class"] for f in mplan["forced"]]))) class(es) " *
                         "declared in headers and defined nowhere: compiling their definitions")
+            ndef = length(dplan["bound"])
+            ndef > 0 &&
+                println("  defaults: $(ndef) call(s) of $(length(unique(String[f["symbol"] for f in dplan["bound"]]))) function(s) " *
+                        "with default arguments left out: compiling their entry points")
             cpp_files = cpp_files_b
             ir_files = compile_to_ir(config, cpp_files)
             linked_ir = link_optimize_ir(config, ir_files, output_name)
@@ -4983,7 +5205,8 @@ function compile_project(config::RepliBuildConfig)
         # the rows the unit refused, which the wrap report names.
         metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
                                                   nounwind=nounwind, byval=byval,
-                                                  inline_constructors=plan, inline_methods=mplan)
+                                                  inline_constructors=plan, inline_methods=mplan,
+                                                  default_arguments=dplan)
     end
 
     # A `[types] records` entry the DWARF still does not define is named.
@@ -7958,14 +8181,17 @@ function parse_dwarf_dump(output::AbstractString;
     current_fn_accessibility = nothing
     current_fn_is_virtual = false
     declaration_facts = Dict{String,Dict{String,Any}}()
+    # Keys whose parameters came from a DEFINITION (named, `this` included). A
+    # declaration of the same key that is read afterwards (a later unit's, or
+    # the class's own when it follows the definition) has unnamed parameters
+    # and must not replace them.
+    definition_params = Set{String}()
 
     # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
     # resolved back to the declaration that owns the mangled name via
-    # DW_AT_specification (see the handler below). Declarations precede their
-    # out-of-line definitions within a CU — a class must be complete before its
-    # methods are defined — so a forward reference cannot occur here; an
-    # unresolved target simply leaves the key unchanged, i.e. the pre-existing
-    # behaviour.
+    # DW_AT_specification (see the handler below). It is filled before the
+    # walk (below): a declaration usually precedes its out-of-line definition
+    # in a unit, but not always.
     linkage_by_offset = Dict{String,String}()
 
     # NEW: Track global variables
@@ -8004,12 +8230,15 @@ function parse_dwarf_dump(output::AbstractString;
                     "is_noexcept" => prev_noexcept,
                     "parameters" => params
                 )
-            elseif !isempty(params) || isempty(get(return_types[function_key], "parameters", []))
+            elseif (!isempty(params) || isempty(get(return_types[function_key], "parameters", []))) &&
+                   !(current_fn_is_declaration && function_key in definition_params)
                 # A declaration-only DIE (unnamed parameters, nothing extracted)
                 # must not clobber parameters already recovered from the
-                # definition DIE.
+                # definition DIE, whichever of the two is read first.
                 return_types[function_key]["parameters"] = params
             end
+            (!current_fn_is_declaration && !current_fn_is_concrete && !isempty(params)) &&
+                push!(definition_params, function_key)
 
             # Definition only. A later declaration of the same key must not
             # erase the answer, and a declaration must not invent `false`.
@@ -8064,6 +8293,26 @@ function parse_dwarf_dump(output::AbstractString;
     # inline-method plan (`_inline_method_plan`), which tells a constructor or
     # destructor from a method by the demangled name, not here.
     methods_of = Dict{String,Vector{String}}()
+
+    # Every subprogram's linkage name by DIE offset, BEFORE the walk: a
+    # definition names its declaration by offset (`DW_AT_specification`), and
+    # the declaration can come later in the unit. Clang 22 put a class's DIE
+    # after the out-of-line definitions of its members for one fixture, so
+    # each definition's reference pointed forward, the definition was dropped
+    # whole, and every member of the class kept the declaration's facts
+    # alone: no parameter names, and a static member wrapped with a receiver
+    # (CI's LLVM 22 cells, 2026-11-15; clang 18 and 23 emit the class first).
+    let sub = nothing
+        for line in eachsplit(output, '\n')
+            h = match(r"^\s*<\d+><([0-9a-fA-F]+)>: Abbrev Number", line)
+            if h !== nothing
+                sub = occursin("DW_TAG_subprogram", line) ? "0x" * h.captures[1] : nothing
+            elseif sub !== nothing && occursin("DW_AT_linkage_name", line)
+                m = match(r":\s*([^:\s]+)\s*$", line)
+                m === nothing || (linkage_by_offset[sub] = String(strip(m.captures[1])))
+            end
+        end
+    end
 
     for line in split(output, '\n')
         line = strip(line)
@@ -8480,6 +8729,21 @@ function parse_dwarf_dump(output::AbstractString;
 
                 # Store if we have a function identifier
                 if !isnothing(function_key)
+                    # This entry is rebuilt by every DIE of the key that has a
+                    # return type, the in-class declaration of a LATER compile
+                    # unit included. `has_object_pointer` is a definition's
+                    # fact, recorded when that DIE closed; a declaration that
+                    # follows must not erase it. It did: a static member with
+                    # a non-void return, declared again by a unit after the
+                    # one defining it, lost its `false` and was wrapped with a
+                    # receiver it does not take. Which unit comes first
+                    # follows the IR files' names, so it showed on some hosts
+                    # only (CI's LLVM 22 cells, 2026-11-15).
+                    kept_object_pointer = haskey(return_types, function_key) ?
+                        get(return_types[function_key], "has_object_pointer", nothing) : nothing
+                    # ...and so are a definition's parameters (`definition_params`).
+                    kept_params = (haskey(return_types, function_key) && function_key in definition_params) ?
+                        get(return_types[function_key], "parameters", nothing) : nothing
                     return_types[function_key] = Dict(
                         "c_type" => c_type,
                         "julia_type" => julia_type,
@@ -8492,6 +8756,9 @@ function parse_dwarf_dump(output::AbstractString;
                     # A SIMD vector returned by value (`_vector_size`).
                     r_vec = _vector_size(type_ref, type_refs; base_sizes = base_byte_size)
                     r_vec === nothing || (return_types[function_key]["vector_size"] = r_vec)
+                    kept_object_pointer isa Bool &&
+                        (return_types[function_key]["has_object_pointer"] = kept_object_pointer)
+                    kept_params === nothing || (return_types[function_key]["parameters"] = kept_params)
                 end
                 function_processed = true  # Mark as processed
             end
@@ -9276,6 +9543,58 @@ function _record_declared_constructors!(record_abi::AbstractDict, struct_defs::A
 end
 
 """
+    _apply_default_argument_identity!(functions, bound) -> functions
+
+Finish what the demangled-name rewrite began for each default-argument
+function (`bound`: its symbol → its plan row): the first parameter, the
+object the call is made on, is named `this` and `has_object_pointer` is
+`true`, so both receiver gates see a method with the receiver DWARF supplied;
+the other parameters take the names the member's own definition gives them,
+where it has one; and the entry says what it is (`default_arguments`: the
+member's symbol and how many arguments it leaves out). A static member's
+row does not compile in the unit (`nonstatic`), on any toolchain; a function
+whose member's definition says it is static is removed here as well. The
+DWARF fact alone was not enough: clang 22 does not record it for every
+static member, and the short call of one reached the wrapper (CI, 2026-11-15).
+"""
+function _apply_default_argument_identity!(functions::AbstractVector, bound::AbstractDict)
+    isempty(bound) && return functions
+    by_symbol = Dict{String,Any}(String(get(f, "mangled", "")) => f for f in functions)
+    drop = Set{String}()
+    for f in functions
+        row = get(bound, String(get(f, "mangled", "")), nothing)
+        row === nothing && continue
+        target_sym = String(row["symbol"])
+        names = get(row, "ctor", false) == true ? reverse(_constructor_variants(target_sym)) : [target_sym]
+        k = findfirst(n -> haskey(by_symbol, n), names)
+        target = k === nothing ? nothing : by_symbol[names[k]]
+        params = get(f, "parameters", Any[])
+        # The function's own DWARF must have supplied the object and the
+        # prefix; an inferred list would make `this` out of a real argument.
+        if length(params) != length(row["parameters"]) + 1 || get(f, "parameters_source", "") != "dwarf" ||
+           (target !== nothing && get(target, "has_object_pointer", nothing) === false)
+            push!(drop, String(f["mangled"]))
+            continue
+        end
+        params = Any[Dict{String,Any}(p) for p in params]
+        params[1]["name"] = "this"
+        if target !== nothing
+            tp = [p for p in get(target, "parameters", Any[]) if get(p, "name", "") != "this"]
+            for i in 2:length(params)
+                (i - 1) <= length(tp) || break
+                n = String(get(tp[i-1], "name", ""))
+                isempty(n) || (params[i]["name"] = n)
+            end
+        end
+        f["parameters"] = params
+        f["has_object_pointer"] = true
+        f["default_arguments"] = Dict{String,Any}("of" => target_sym, "omitted" => Int(row["omitted"]))
+    end
+    isempty(drop) || filter!(f -> !(String(get(f, "mangled", "")) in drop), functions)
+    return functions
+end
+
+"""
     _record_pass_convention(cc) -> Union{String,Nothing}
 
 DWARF's `DW_AT_calling_convention` on a record, as `"value"` (5,
@@ -9964,7 +10283,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                                       nounwind::Union{Nothing,Set{String}}=nothing,
                                       byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
                                       inline_constructors::Union{Nothing,AbstractDict}=nothing,
-                                      inline_methods::Union{Nothing,AbstractDict}=nothing)::Dict{String,Any}
+                                      inline_methods::Union{Nothing,AbstractDict}=nothing,
+                                      default_arguments::Union{Nothing,AbstractDict}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
@@ -10003,6 +10323,18 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         else
             push!(sig_struct_names, name)
         end
+    end
+
+    # A default-argument function (`_default_argument_plan`) takes the identity
+    # of the member it calls with fewer arguments: its symbol demangles as
+    # `Class::f(prefix)`, so name, class and every derivation downstream are
+    # the member's own.
+    bound_defaults = default_arguments === nothing ? Dict{String,Any}() :
+        Dict{String,Any}(String(r["shim"]) => r for r in get(default_arguments, "bound", Any[])
+                         if r isa AbstractDict && haskey(r, "shim"))
+    for sym in symbols
+        r = get(bound_defaults, String(get(sym, "mangled", "")), nothing)
+        r === nothing || (sym["demangled"] = String(r["demangled"]))
     end
 
     # Parse function signatures (basic type inference from symbol names)
@@ -10072,6 +10404,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # noexcept, so all C++ goes to Tier 2, the router's documented safe default.
     candidates = config.wrap.language == :c ? Set{String}() :
                  _scan_noexcept_functions(source_files, get_include_dirs(config))
+    _apply_default_argument_identity!(functions, bound_defaults)
     _mark_noexcept!(functions, candidates, nounwind)
     _mark_byval_params!(functions, byval)
 
@@ -10104,6 +10437,20 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         _inline_method_plan(struct_defs, record_abi, symbols, config.wrap.exclude_symbols)
     else
         Dict{String,Any}("forced" => Any[], "skipped" => Any[])
+    end
+
+    # The calls with default arguments left out: on the first extraction the
+    # candidates the unit will try, on the second the ones it compiled, each
+    # with whether its function is in the symbol table and bound.
+    dargs = if default_arguments !== nothing
+        bound_now = Set{String}(String(f["mangled"]) for f in functions if haskey(f, "default_arguments"))
+        Dict{String,Any}("candidates" => Any[],
+                         "bound" => Any[(r = Dict{String,Any}(f); r["emitted"] = String(get(r, "shim", "")) in bound_now; r)
+                                        for f in get(default_arguments, "bound", Any[])])
+    elseif config.wrap.language == :cpp
+        _default_argument_plan(struct_defs, record_abi, symbols, config.wrap.exclude_symbols)
+    else
+        Dict{String,Any}("candidates" => Any[], "bound" => Any[])
     end
 
     # Build type registry (basic types + inferred types)
@@ -10180,6 +10527,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # ...and the other inline member functions, the same way
         # (`_inline_method_plan`, `generate_inline_definitions`).
         "inline_methods" => mplan,
+        # ...and the calls that leave default arguments out
+        # (`_default_argument_plan`): `bound` rows name each function's symbol.
+        "default_arguments" => dargs,
         # Function-pointer c_types list their parameters (`function_ptr(R; P1, P2)*`).
         # Older metadata spells every one `function_ptr(R)*`, so the generators
         # build a callback's `@cfunction` example from it only when this is set.
@@ -11021,12 +11371,14 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
                                    nounwind::Union{Nothing,Set{String}}=nothing,
                                    byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
                                    inline_constructors::Union{Nothing,AbstractDict}=nothing,
-                                   inline_methods::Union{Nothing,AbstractDict}=nothing)::String
+                                   inline_methods::Union{Nothing,AbstractDict}=nothing,
+                                   default_arguments::Union{Nothing,AbstractDict}=nothing)::String
     # Extract metadata
     metadata = extract_compilation_metadata(config, source_files, binary_path;
                                             nounwind=nounwind, byval=byval,
                                             inline_constructors=inline_constructors,
-                                            inline_methods=inline_methods)
+                                            inline_methods=inline_methods,
+                                            default_arguments=default_arguments)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their

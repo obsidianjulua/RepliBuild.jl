@@ -202,6 +202,18 @@ body there is the library's own out-of-line function, hidden or not
 compiled. `[wrap] exclude_symbols` drops any of them by pattern. Like the
 constructors, this needs the class's definition in the DWARF.
 
+**Default arguments** (`btDefaultMotionState(start)`,
+`setLimit(lo, hi)`): a default exists only in the header, so the same
+generated unit asks the compiler for it. For every public constructor and
+member function of a library class, each call that leaves trailing arguments
+out is tried; where the header declares defaults, that call becomes one more
+method of the same Julia function, with fewer arguments
+(`btHingeConstraint_setLimit(h, lo, hi)` beside the five-argument one). The
+omitted arguments take exactly the values C++ gives them. A call C++ itself
+refuses (no default, or ambiguous between two overloads) gets no method. Not
+covered: a static member's short call, a free function's, an operator's, and
+a class template's members.
+
 A free inline function (`b2Dot(a, b)`, an `operator+` outside a class) is
 declared in no class, so nothing lists it: compile it in with a keep file
 ([Header-only libraries](guide.md#Header-only-libraries)), or read the

@@ -566,6 +566,30 @@ the test named when you touch the area.
   with `copy`. Parameters must be **direct children** of the subprogram.
   `check_param_arity!` hard-errors on an over-count, since that would emit a wrong
   ccall. (`test_dwarf_attribution.jl`.)
+- **A definition finds its declaration wherever it is in the dump.** An
+  out-of-line definition has no name, only `DW_AT_specification: <offset>`,
+  and the parser assumed the declaration came first. It need not: clang 22
+  linked `test/default_arg_test` with the class and its declarations in the
+  SECOND unit and the definitions in the first, each naming an offset ahead
+  of it, so every definition was dropped whole (no parameter names, no
+  `has_object_pointer`, a static member wrapped with a receiver). Clang 18
+  and 23 put the class first, so only CI's LLVM 22 cells showed it
+  (2026-11-15). `linkage_by_offset` is now filled by a pass over the dump
+  before the walk, and a definition's parameters (`definition_params`) are
+  kept when its declaration is read afterwards. A parser assumption about
+  DIE ORDER is a toolchain fact: test it with the order reversed.
+  (`test_dwarf_attribution.jl`.)
+- **A later declaration does not erase a definition's fact.** A function's
+  entry is rebuilt by every DIE of its key that has a return type, a later
+  compile unit's in-class declaration included; `has_object_pointer` is
+  carried across that rebuild. It was not: a static member with a non-void
+  return, declared again by a unit after the one defining it, lost its
+  `false` and got a receiver from the class heuristic. Unit order follows
+  the IR files' names (a hash of the directory is in them), so the same
+  source wrapped right on one host and wrong on another, and CI's LLVM 22
+  cells were the ones that showed it (2026-11-15). Any other fact a
+  definition DIE records outside that `Dict(...)` needs the same carry.
+  (`test_dwarf_attribution.jl`, both link orders vendored.)
 - **A type's parts are collected in pass 1, before pass 2 resolves any signature.**
   That includes a subroutine type's parameters (its direct-child formal parameters,
   then `...` for `DW_TAG_unspecified_parameters`): clang emits a type after the
@@ -678,6 +702,41 @@ the test named when you touch the area.
     methods on a rebuild, not a re-wrap.
 
   (`test_inline_methods.jl`, devtests `test_inline_methods_live.jl`.)
+- **A call that leaves default arguments out is a function the forced unit
+  compiles** (2026-11-15, `_default_argument_plan`). A default exists only in
+  the header (no `DW_AT_default_value` from clang, and the mangled name
+  spells every parameter). For each public constructor and member function
+  of a library record and each proper prefix of its parameters, one row in
+  namespace `replibuild_default` makes that call on `Class* self`; a call
+  the header has no defaults for is a compile error on its row and is
+  dropped SILENTLY (most rows; Bullet tries 4,150).
+  - The arguments have exactly the member's parameter types, so C++ takes
+    that member or calls it ambiguous (dropped). A prefix a sibling declares
+    in full is never generated: that call is the sibling's.
+  - A row is kept only when the member it calls is defined, by the library
+    (`defined` in the plan) or by the unit (`_ir_defined_declared`): a call
+    to a member defined nowhere would not load.
+  - **The function takes the member's identity in the metadata, not a
+    clone's.** Its symbol's demangled name is rewritten to `Class::f(prefix)`
+    before `parse_function_signatures`, and
+    `_apply_default_argument_identity!` names its first parameter `this` and
+    sets `has_object_pointer`, so both receiver gates, `_julia_function_name`,
+    `[wrap.rename]` and `exclude_symbols` treat it as the method with fewer
+    parameters; the parameters and return type are the function's own DWARF.
+    An entry carries `default_arguments` (`of`, `omitted`). A function taking
+    `Class*` first is called as a member is on Itanium, mingw included.
+  - **A static member's row is refused in the unit, not from DWARF**: each
+    member row names `&Class::f` through `replibuild_force::nonstatic<full
+    parameters>`, which has no plain-function overload, so a static member's
+    short call does not compile. `has_object_pointer == false` on the
+    member's definition is only a second guard: clang 22 does not record it
+    for every static member, and CI's LLVM 22 cells bound one (the LLVM 23
+    cells and the dev box did not). A check that reads a DWARF fact needs a
+    toolchain-independent twin, or a test on both LLVMs.
+  - `replibuild_default::` must stay OUT of `extract_symbols_from_binary`'s
+    filter (`replibuild_force::` is in it): these are API.
+
+  (`test_default_args.jl`, devtests `test_default_args_live.jl`.)
 - **`[types] records` makes a class no source mentions visible** (2026-11-15,
   `generate_visible_records`). Debug info describes the types a unit uses, so
   a header-only class nothing in the library mentions (Bullet's
@@ -1725,6 +1784,10 @@ DWARF-resolved destructors — **is** built.)
   the class's inline constructors itself, so the flag's whole payoff is the
   definition, and a package that wants such a class built from Julia sets
   one of the two flags today (Bullet and box2d already do).
+- Default arguments outside the forced unit's reach (2026-11-15): a static
+  member's short call (static-ness is not known when the unit is written), a
+  free function's (no class DIE declares it), an operator's, and a class
+  template specialization's members.
 - The forced unit (inline constructors and member functions) does not run in
   graph mode, like the templates TU. Outside it too (2026-11-15): a free
   inline function or operator, which no class DIE declares; an inline
