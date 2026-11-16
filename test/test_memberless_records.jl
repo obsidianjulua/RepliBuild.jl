@@ -640,7 +640,8 @@ end
         @test [m["name"] for m in sd["Quad"]["members"]] == ["m"]
         @test [m["name"] for m in sd["Poly"]["members"]] == ["_vptr\$Poly", "id"]
         # `record_abi` says what it said: emptiness is about bytes a callee reads.
-        @test ra["P"] == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true)
+        # (`P` declares `operator()`, which is its `methods` row; set aside.)
+        @test delete!(Dict{String,Any}(ra["P"]), "methods") == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true)
         @test ra["Derived"] == Dict("byte_size" => "0x10", "pass" => "value", "empty" => false)
         @test ra["VB"]["pass"] == "reference"
     end
