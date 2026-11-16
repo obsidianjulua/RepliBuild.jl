@@ -88,8 +88,11 @@ const _DA = RepliBuild.Compiler
         by(sym, n) = only(r for r in rows if r["symbol"] == sym && length(r["parameters"]) == n)
         m = _DA._default_argument_line(by("_ZN2da5Hinge8setLimitEfffff", 2))
         id = by("_ZN2da5Hinge8setLimitEfffff", 2)["id"]
+        # The row names the member through `nonstatic` with its FULL parameter
+        # list: a static member has no member pointer, so its row does not compile.
         @test m == "namespace replibuild_default { auto d$(id)(da::Hinge* self, replibuild_force::id<float> a0, " *
-                   "replibuild_force::id<float> a1) -> decltype(self->setLimit(static_cast<replibuild_force::id<float>&&>(a0), " *
+                   "replibuild_force::id<float> a1) -> decltype((void)replibuild_force::nonstatic<float, float, float, float, float>::m(" *
+                   "&da::Hinge::setLimit), self->setLimit(static_cast<replibuild_force::id<float>&&>(a0), " *
                    "static_cast<replibuild_force::id<float>&&>(a1))) { return self->setLimit(" *
                    "static_cast<replibuild_force::id<float>&&>(a0), static_cast<replibuild_force::id<float>&&>(a1)); } }" *
                    "   // _ZN2da5Hinge8setLimitEfffff less 3"
@@ -98,7 +101,9 @@ const _DA = RepliBuild.Compiler
                        "{ ::new (static_cast<void*>(self)) da::Hinge(static_cast<replibuild_force::id<da::Vec const&>&&>(a0)); }", c)
         # A const member is called on a const object, so the const overload is the one taken.
         k = _DA._default_argument_line(by("_ZNK2da5Hinge5countEii", 0))
-        @test occursin("(const da::Hinge* self) -> decltype(self->count())", k)
+        @test occursin("(const da::Hinge* self) -> decltype((void)replibuild_force::nonstatic<int, int>::mc(&da::Hinge::count), self->count())", k)
+        # A constructor has no static form and names nothing.
+        @test !occursin("nonstatic", c)
         @test !any(l -> occursin('\n', l), (m, c, k))
         # The symbol prefix a row's function has, whatever its parameters.
         @test _DA._default_shim_prefix(7) == "_ZN18replibuild_default2d7E"
@@ -109,6 +114,8 @@ const _DA = RepliBuild.Compiler
     @testset "the unit: rows after the constructors and members, each traced by its line" begin
         text = _DA._inline_ctor_unit_text(hdr, Any[], Any[], rows)
         @test occursin("namespace replibuild_force { template <class T> using id = T; }\n", text)
+        @test occursin("template <class R, class C> static int m(R (C::*)(A...));", text)
+        @test !occursin("static int m(R (*)(A...))", text)          # no overload a static member matches
         @test occursin("#include <new>", text)                       # placement new in a constructor row
         @test count("\nnamespace replibuild_default { ", text) == length(rows)
         traced = _DA._unit_row_of_line(text)

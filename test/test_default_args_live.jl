@@ -74,11 +74,13 @@ if requires("C++ default arguments, live", :libJLCS, :clangxx)
                  ("da::Hinge::scaled(float) const", 1)])
 
     @testset "the unit keeps exactly the calls the header has defaults for" begin
-        @test occursin(r"defaults: 9 call\(s\) of 6 function\(s\) with default arguments left out", build_log)
+        @test occursin(r"defaults: 8 call\(s\) of 5 function\(s\) with default arguments left out", build_log)
         unit = read(joinpath(DEFAULT_ARG_DIR, ".replibuild_cache", "replibuild_ctors.cpp"), String)
-        # Nine rows compiled: the eight below and the static member's, which
-        # is a valid C++ call and is refused later, in the metadata.
-        @test count("\nnamespace replibuild_default { ", unit) == 9
+        @test count("\nnamespace replibuild_default { ", unit) == 8
+        # The static member's short call is valid C++ (`self->make(a)`), and
+        # its row is refused by the unit itself, not by a DWARF fact a
+        # toolchain may or may not record.
+        @test !occursin("self->make(", unit)
         @test occursin("self->setLimit(static_cast<replibuild_force::id<float>&&>(a0), static_cast<replibuild_force::id<float>&&>(a1))", unit)
         # No default, no row: setLimit(lo), none(a), prot(a), count(a).
         @test !occursin("self->none(", unit) && !occursin("self->prot(", unit) && !occursin("self->count(", unit)
@@ -90,9 +92,8 @@ if requires("C++ default arguments, live", :libJLCS, :clangxx)
         @test isempty(md["default_arguments"]["candidates"])
         emitted = sort([(String(r["demangled"]), Int(r["omitted"])) for r in bound if r["emitted"] == true])
         @test emitted == want
-        # The static member's short call compiled and is not a function of the wrapper.
-        refused = [String(r["demangled"]) for r in bound if r["emitted"] != true]
-        @test refused == ["da::Hinge::make(int)"]
+        @test all(r -> r["emitted"] == true, bound)
+        @test !any(r -> occursin("make", String(r["demangled"])), bound)
         fns = [f for f in md["functions"] if haskey(f, "default_arguments")]
         @test length(fns) == length(want)
         for f in fns

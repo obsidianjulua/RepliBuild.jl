@@ -701,8 +701,14 @@ the test named when you touch the area.
     parameters; the parameters and return type are the function's own DWARF.
     An entry carries `default_arguments` (`of`, `omitted`). A function taking
     `Class*` first is called as a member is on Itanium, mingw included.
-  - A static member's function is removed there (it takes an object the
-    member does not), as is one whose parameters DWARF did not supply.
+  - **A static member's row is refused in the unit, not from DWARF**: each
+    member row names `&Class::f` through `replibuild_force::nonstatic<full
+    parameters>`, which has no plain-function overload, so a static member's
+    short call does not compile. `has_object_pointer == false` on the
+    member's definition is only a second guard: clang 22 does not record it
+    for every static member, and CI's LLVM 22 cells bound one (the LLVM 23
+    cells and the dev box did not). A check that reads a DWARF fact needs a
+    toolchain-independent twin, or a test on both LLVMs.
   - `replibuild_default::` must stay OUT of `extract_symbols_from_binary`'s
     filter (`replibuild_force::` is in it): these are API.
 

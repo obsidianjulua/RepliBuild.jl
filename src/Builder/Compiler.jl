@@ -3369,7 +3369,8 @@ function _default_argument_plan(struct_defs::AbstractDict, record_abi::AbstractD
                 push!(seen, key)
                 push!(rows, Dict{String,Any}(
                     "class" => name, "symbol" => sym, "type" => sp.type, "name" => sp.name, "ctor" => ctor,
-                    "const" => sp.isconst, "parameters" => prefix, "omitted" => length(sp.parameters) - k,
+                    "const" => sp.isconst, "parameters" => prefix, "full" => sp.parameters,
+                    "omitted" => length(sp.parameters) - k,
                     "headers" => headers, "defined" => is_defined,
                     "demangled" => "$(sp.type)::$(sp.name)($(join(prefix, ", ")))" * (sp.isconst ? " const" : "")))
             end
@@ -3390,6 +3391,16 @@ const _DEFAULT_ARGUMENT_PREAMBLE = raw"""
 // removed before this unit is written. `id<T>` lets any type spelling (a
 // function pointer, an array) stand in a declarator.
 namespace replibuild_force { template <class T> using id = T; }
+// A member function's row also names the member through `nonstatic`, which
+// has no overload for a plain function pointer: a STATIC member's row does
+// not compile, since its function would take an object the member does not.
+// Unevaluated, so naming the member defines nothing.
+namespace replibuild_force {
+template <class... A> struct nonstatic {
+    template <class R, class C> static int m(R (C::*)(A...));
+    template <class R, class C> static int mc(R (C::*)(A...) const);
+};
+}
 """
 
 "One default-argument row's line in the unit: the function making the short call."
@@ -3405,7 +3416,9 @@ function _default_argument_line(f::AbstractDict)::String
         return "namespace replibuild_default { void d$(id)($sig) { ::new (static_cast<void*>(self)) $(f["type"])($args); } }" * tail
     end
     call = "self->$(f["name"])($args)"
-    return "namespace replibuild_default { auto d$(id)($sig) -> decltype($call) { return $call; } }" * tail
+    full = join(String[String(p) for p in get(f, "full", params)], ", ")
+    member = "replibuild_force::nonstatic<$full>::$(get(f, "const", false) == true ? "mc" : "m")(&$(f["type"])::$(f["name"]))"
+    return "namespace replibuild_default { auto d$(id)($sig) -> decltype((void)$member, $call) { return $call; } }" * tail
 end
 
 "The C++ preamble of the forced unit's member functions: the overload-selecting address helper."
@@ -9494,9 +9507,11 @@ object the call is made on, is named `this` and `has_object_pointer` is
 `true`, so both receiver gates see a method with the receiver DWARF supplied;
 the other parameters take the names the member's own definition gives them,
 where it has one; and the entry says what it is (`default_arguments`: the
-member's symbol and how many arguments it leaves out). A function whose
-member is static is REMOVED: the function takes an object the static member
-does not, and a static member's short call is not built.
+member's symbol and how many arguments it leaves out). A static member's
+row does not compile in the unit (`nonstatic`), on any toolchain; a function
+whose member's definition says it is static is removed here as well. The
+DWARF fact alone was not enough: clang 22 does not record it for every
+static member, and the short call of one reached the wrapper (CI, 2026-11-15).
 """
 function _apply_default_argument_identity!(functions::AbstractVector, bound::AbstractDict)
     isempty(bound) && return functions
