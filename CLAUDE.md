@@ -734,9 +734,10 @@ the test named when you touch the area.
   silently and raylib's `IsKeyDown(int key)` is called with `KEY_SPACE`, an
   open enum that is not an `Integer`. GeneratorC and the C arm of the varargs
   path's fixed parameters spell it through that constant; C++ keeps
-  `::Integer`, where `f(int)` may stand beside `f(E)`'s `::Any` method. A
-  fixed-width parameter (`int32_t`, `julia_type` `Int32`) is still typed
-  strictly. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
+  `::Integer`, where `f(int)` may stand beside `f(E)`'s `::Any` method. The
+  relaxed types are `_C_INTEGER_PARAM_CTYPES`: the C aliases and the
+  fixed-width types (`int32_t` is `Int32` in the metadata), one list for
+  both paths. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
 - **A Tier 2 argument is converted to its C width in the emitted body.** A
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box

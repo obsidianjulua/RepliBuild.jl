@@ -2870,6 +2870,17 @@ through this. C++ keeps `Integer`: an overload set can hold `f(int)` beside
 const _C_INTEGER_PARAM = "Union{Integer, Base.Enum}"
 
 """
+The ccall types a C wrapper relaxes to `_C_INTEGER_PARAM` and converts in the
+body: the C aliases, and the fixed-width types the metadata spells for
+`int32_t`, `uint8_t` and the rest. Without the second group `add_i32(10, 32)`
+was a MethodError (an `Int` literal is not an `Int32`), and so was an
+enumerator. GeneratorC and the C arm of the varargs path read this one list.
+"""
+const _C_INTEGER_PARAM_CTYPES = ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
+                                 "Clonglong", "Culonglong", "Csize_t", "Cssize_t",
+                                 "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64")
+
+"""
     _method_sig_keys(chunk) -> Vector{String}
 
 Dispatch-significant signature keys (`name(argtype,argtype,…)`) for every
