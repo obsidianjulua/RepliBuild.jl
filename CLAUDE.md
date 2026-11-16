@@ -678,6 +678,35 @@ the test named when you touch the area.
     methods on a rebuild, not a re-wrap.
 
   (`test_inline_methods.jl`, devtests `test_inline_methods_live.jl`.)
+- **A call that leaves default arguments out is a function the forced unit
+  compiles** (2026-11-15, `_default_argument_plan`). A default exists only in
+  the header (no `DW_AT_default_value` from clang, and the mangled name
+  spells every parameter). For each public constructor and member function
+  of a library record and each proper prefix of its parameters, one row in
+  namespace `replibuild_default` makes that call on `Class* self`; a call
+  the header has no defaults for is a compile error on its row and is
+  dropped SILENTLY (most rows; Bullet tries 4,150).
+  - The arguments have exactly the member's parameter types, so C++ takes
+    that member or calls it ambiguous (dropped). A prefix a sibling declares
+    in full is never generated: that call is the sibling's.
+  - A row is kept only when the member it calls is defined, by the library
+    (`defined` in the plan) or by the unit (`_ir_defined_declared`): a call
+    to a member defined nowhere would not load.
+  - **The function takes the member's identity in the metadata, not a
+    clone's.** Its symbol's demangled name is rewritten to `Class::f(prefix)`
+    before `parse_function_signatures`, and
+    `_apply_default_argument_identity!` names its first parameter `this` and
+    sets `has_object_pointer`, so both receiver gates, `_julia_function_name`,
+    `[wrap.rename]` and `exclude_symbols` treat it as the method with fewer
+    parameters; the parameters and return type are the function's own DWARF.
+    An entry carries `default_arguments` (`of`, `omitted`). A function taking
+    `Class*` first is called as a member is on Itanium, mingw included.
+  - A static member's function is removed there (it takes an object the
+    member does not), as is one whose parameters DWARF did not supply.
+  - `replibuild_default::` must stay OUT of `extract_symbols_from_binary`'s
+    filter (`replibuild_force::` is in it): these are API.
+
+  (`test_default_args.jl`, devtests `test_default_args_live.jl`.)
 - **`[types] records` makes a class no source mentions visible** (2026-11-15,
   `generate_visible_records`). Debug info describes the types a unit uses, so
   a header-only class nothing in the library mentions (Bullet's
@@ -1712,6 +1741,10 @@ DWARF-resolved destructors — **is** built.)
   the class's inline constructors itself, so the flag's whole payoff is the
   definition, and a package that wants such a class built from Julia sets
   one of the two flags today (Bullet and box2d already do).
+- Default arguments outside the forced unit's reach (2026-11-15): a static
+  member's short call (static-ness is not known when the unit is written), a
+  free function's (no class DIE declares it), an operator's, and a class
+  template specialization's members.
 - The forced unit (inline constructors and member functions) does not run in
   graph mode, like the templates TU. Outside it too (2026-11-15): a free
   inline function or operator, which no class DIE declares; an inline

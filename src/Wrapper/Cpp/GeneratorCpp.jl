@@ -1132,6 +1132,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     end
     _report_inline_constructors(get(metadata, "inline_constructors", nothing))
     _report_inline_constructors(get(metadata, "inline_methods", nothing); what = "member function")
+    let bound = [r for r in get(get(metadata, "default_arguments", Dict{String,Any}()), "bound", Any[])
+                 if r isa AbstractDict && get(r, "emitted", false) == true]
+        isempty(bound) || println("  wrap: $(length(bound)) call(s) with default arguments left out, of ",
+                                  "$(length(unique(String[String(r["symbol"]) for r in bound]))) function(s), bound under the functions' own names")
+    end
 
     # Helper: sanitize a raw function name to the Julia identifier used in wrappers.
     # Proxies and deleters REFERENCE names the main loop defines, so this must be
