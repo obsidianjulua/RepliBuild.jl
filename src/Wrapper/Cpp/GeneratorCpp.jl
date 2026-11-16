@@ -4762,11 +4762,18 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # were re-parsing out of compilation_metadata.json. The enum section is
     # not text yet; its type names are known.
     (_tiers, _kernels) = _dispatch_facts(func_chunks)
+    _layout_names = setdiff(union(_defined_type_names(_structs), _pending_enum_type_names(enum_chunks)),
+                            imported_jl_names)
+    # A class-nested type also answers to the name its functions carry
+    # (`_nested_type_aliases`), unless the module binds that name already.
+    _nested_aliases = _nested_type_aliases(
+        dwarf_structs, _layout_names, _sanitize_cpp_type_name,
+        union(Set{String}(keys(_toplevel_names(_structs * _funcs))), _pending_enum_type_names(enum_chunks),
+              imported_jl_names))
     introspection = _dispatch_tier_chunk(_tiers, _kernels) *
-                    _layout_chunk(dwarf_structs,
-                                  setdiff(union(_defined_type_names(_structs), _pending_enum_type_names(enum_chunks)),
-                                          imported_jl_names),
-                                  _sanitize_cpp_type_name)
+                    _layout_chunk(dwarf_structs, _layout_names, _sanitize_cpp_type_name;
+                                  aliases = _nested_aliases) *
+                    _nested_type_alias_chunk(_nested_aliases)
 
     # Also derived from the FINAL text: the thunk-address slots the emitted call
     # sites read. Must stay below the dedup for the same reason the tier table
