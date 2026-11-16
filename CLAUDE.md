@@ -566,6 +566,19 @@ the test named when you touch the area.
   with `copy`. Parameters must be **direct children** of the subprogram.
   `check_param_arity!` hard-errors on an over-count, since that would emit a wrong
   ccall. (`test_dwarf_attribution.jl`.)
+- **A definition finds its declaration wherever it is in the dump.** An
+  out-of-line definition has no name, only `DW_AT_specification: <offset>`,
+  and the parser assumed the declaration came first. It need not: clang 22
+  linked `test/default_arg_test` with the class and its declarations in the
+  SECOND unit and the definitions in the first, each naming an offset ahead
+  of it, so every definition was dropped whole (no parameter names, no
+  `has_object_pointer`, a static member wrapped with a receiver). Clang 18
+  and 23 put the class first, so only CI's LLVM 22 cells showed it
+  (2026-11-15). `linkage_by_offset` is now filled by a pass over the dump
+  before the walk, and a definition's parameters (`definition_params`) are
+  kept when its declaration is read afterwards. A parser assumption about
+  DIE ORDER is a toolchain fact: test it with the order reversed.
+  (`test_dwarf_attribution.jl`.)
 - **A later declaration does not erase a definition's fact.** A function's
   entry is rebuilt by every DIE of its key that has a return type, a later
   compile unit's in-class declaration included; `has_object_pointer` is

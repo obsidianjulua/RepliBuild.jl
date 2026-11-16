@@ -1176,4 +1176,88 @@ dwarf_params_of(rt, key) = [(p["name"], p["c_type"]) for p in get(rt[key], "para
         @test checked == 8
     end
 
+
+    @testset "a definition whose declaration comes later in the dump" begin
+        # The shape clang 22 linked for test/default_arg_test (CI, 2026-11-15):
+        # the first unit holds the out-of-line definitions, the class and its
+        # in-class declarations are in the SECOND unit, and each definition
+        # names its declaration by an offset that lies ahead of it. The
+        # definition has no name of its own, so unless that offset resolves it
+        # is dropped whole: the member keeps the declaration's facts alone,
+        # which have no parameter names and no word on whether it is static.
+        dump = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_producer    : clang version 22.1.8
+         <1><20>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <21>   DW_AT_low_pc      : 0x11a0
+            <22>   DW_AT_specification: <0x4d9>
+         <2><30>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <31>   DW_AT_name        : a
+            <32>   DW_AT_type        : <0x60>
+         <2><34>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <35>   DW_AT_name        : b
+            <36>   DW_AT_type        : <0x60>
+         <2><38>: Abbrev Number: 0
+         <1><40>: Abbrev Number: 2 (DW_TAG_subprogram)
+            <41>   DW_AT_low_pc      : 0x11b0
+            <42>   DW_AT_object_pointer: <0x50>
+            <43>   DW_AT_specification: <0x4f0>
+         <2><50>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <51>   DW_AT_name        : this
+            <52>   DW_AT_type        : <0x70>
+            <53>   DW_AT_artificial  : 1
+         <2><54>: Abbrev Number: 3 (DW_TAG_formal_parameter)
+            <55>   DW_AT_name        : k
+            <56>   DW_AT_type        : <0x60>
+         <2><58>: Abbrev Number: 0
+         <1><60>: Abbrev Number: 4 (DW_TAG_base_type)
+            <61>   DW_AT_name        : int
+            <62>   DW_AT_byte_size   : 4
+         <1><70>: Abbrev Number: 5 (DW_TAG_pointer_type)
+            <71>   DW_AT_type        : <0x4c0>
+         <1><78>: Abbrev Number: 0
+         <0><4b0>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <4b1>   DW_AT_producer    : clang version 22.1.8
+         <1><4c0>: Abbrev Number: 6 (DW_TAG_class_type)
+            <4c1>   DW_AT_name        : Hinge
+            <4c2>   DW_AT_byte_size   : 4
+         <2><4d9>: Abbrev Number: 7 (DW_TAG_subprogram)
+            <4da>   DW_AT_linkage_name: _ZN5Hinge4makeEii
+            <4db>   DW_AT_name        : make
+            <4dc>   DW_AT_type        : <0x60>
+            <4dd>   DW_AT_declaration : 1
+            <4de>   DW_AT_external    : 1
+         <3><4e3>: Abbrev Number: 8 (DW_TAG_formal_parameter)
+            <4e4>   DW_AT_type        : <0x60>
+         <3><4e8>: Abbrev Number: 8 (DW_TAG_formal_parameter)
+            <4e9>   DW_AT_type        : <0x60>
+         <3><4ed>: Abbrev Number: 0
+         <2><4f0>: Abbrev Number: 7 (DW_TAG_subprogram)
+            <4f1>   DW_AT_linkage_name: _ZN5Hinge4stepEi
+            <4f2>   DW_AT_name        : step
+            <4f3>   DW_AT_type        : <0x60>
+            <4f4>   DW_AT_declaration : 1
+            <4f5>   DW_AT_external    : 1
+         <3><4f8>: Abbrev Number: 8 (DW_TAG_formal_parameter)
+            <4f9>   DW_AT_type        : <0x70>
+            <4fa>   DW_AT_artificial  : 1
+         <3><4fb>: Abbrev Number: 8 (DW_TAG_formal_parameter)
+            <4fc>   DW_AT_type        : <0x60>
+         <3><4fe>: Abbrev Number: 0
+         <2><4ff>: Abbrev Number: 0
+         <1><500>: Abbrev Number: 0
+        """
+        rt = DWARF_COMPILER.parse_dwarf_dump(dump)[1]
+        @test haskey(rt, "_ZN5Hinge4makeEii") && haskey(rt, "_ZN5Hinge4stepEi")
+        mk = rt["_ZN5Hinge4makeEii"]
+        st = rt["_ZN5Hinge4stepEi"]
+        # The definition's facts reached the member's entry...
+        @test get(mk, "has_object_pointer", :absent) == false           # static
+        @test get(st, "has_object_pointer", :absent) == true
+        @test [p["name"] for p in mk["parameters"]] == ["a", "b"]
+        @test [p["name"] for p in st["parameters"]] == ["this", "k"]
+        # ...and the declaration that followed kept its own (the return type).
+        @test mk["c_type"] == "int" && st["c_type"] == "int"
+    end
+
 end

@@ -8181,14 +8181,17 @@ function parse_dwarf_dump(output::AbstractString;
     current_fn_accessibility = nothing
     current_fn_is_virtual = false
     declaration_facts = Dict{String,Dict{String,Any}}()
+    # Keys whose parameters came from a DEFINITION (named, `this` included). A
+    # declaration of the same key that is read afterwards (a later unit's, or
+    # the class's own when it follows the definition) has unnamed parameters
+    # and must not replace them.
+    definition_params = Set{String}()
 
     # subprogram DIE offset => its DW_AT_linkage_name, so a definition DIE can be
     # resolved back to the declaration that owns the mangled name via
-    # DW_AT_specification (see the handler below). Declarations precede their
-    # out-of-line definitions within a CU — a class must be complete before its
-    # methods are defined — so a forward reference cannot occur here; an
-    # unresolved target simply leaves the key unchanged, i.e. the pre-existing
-    # behaviour.
+    # DW_AT_specification (see the handler below). It is filled before the
+    # walk (below): a declaration usually precedes its out-of-line definition
+    # in a unit, but not always.
     linkage_by_offset = Dict{String,String}()
 
     # NEW: Track global variables
@@ -8227,12 +8230,15 @@ function parse_dwarf_dump(output::AbstractString;
                     "is_noexcept" => prev_noexcept,
                     "parameters" => params
                 )
-            elseif !isempty(params) || isempty(get(return_types[function_key], "parameters", []))
+            elseif (!isempty(params) || isempty(get(return_types[function_key], "parameters", []))) &&
+                   !(current_fn_is_declaration && function_key in definition_params)
                 # A declaration-only DIE (unnamed parameters, nothing extracted)
                 # must not clobber parameters already recovered from the
-                # definition DIE.
+                # definition DIE, whichever of the two is read first.
                 return_types[function_key]["parameters"] = params
             end
+            (!current_fn_is_declaration && !current_fn_is_concrete && !isempty(params)) &&
+                push!(definition_params, function_key)
 
             # Definition only. A later declaration of the same key must not
             # erase the answer, and a declaration must not invent `false`.
@@ -8287,6 +8293,26 @@ function parse_dwarf_dump(output::AbstractString;
     # inline-method plan (`_inline_method_plan`), which tells a constructor or
     # destructor from a method by the demangled name, not here.
     methods_of = Dict{String,Vector{String}}()
+
+    # Every subprogram's linkage name by DIE offset, BEFORE the walk: a
+    # definition names its declaration by offset (`DW_AT_specification`), and
+    # the declaration can come later in the unit. Clang 22 put a class's DIE
+    # after the out-of-line definitions of its members for one fixture, so
+    # each definition's reference pointed forward, the definition was dropped
+    # whole, and every member of the class kept the declaration's facts
+    # alone: no parameter names, and a static member wrapped with a receiver
+    # (CI's LLVM 22 cells, 2026-11-15; clang 18 and 23 emit the class first).
+    let sub = nothing
+        for line in eachsplit(output, '\n')
+            h = match(r"^\s*<\d+><([0-9a-fA-F]+)>: Abbrev Number", line)
+            if h !== nothing
+                sub = occursin("DW_TAG_subprogram", line) ? "0x" * h.captures[1] : nothing
+            elseif sub !== nothing && occursin("DW_AT_linkage_name", line)
+                m = match(r":\s*([^:\s]+)\s*$", line)
+                m === nothing || (linkage_by_offset[sub] = String(strip(m.captures[1])))
+            end
+        end
+    end
 
     for line in split(output, '\n')
         line = strip(line)
@@ -8715,6 +8741,9 @@ function parse_dwarf_dump(output::AbstractString;
                     # only (CI's LLVM 22 cells, 2026-11-15).
                     kept_object_pointer = haskey(return_types, function_key) ?
                         get(return_types[function_key], "has_object_pointer", nothing) : nothing
+                    # ...and so are a definition's parameters (`definition_params`).
+                    kept_params = (haskey(return_types, function_key) && function_key in definition_params) ?
+                        get(return_types[function_key], "parameters", nothing) : nothing
                     return_types[function_key] = Dict(
                         "c_type" => c_type,
                         "julia_type" => julia_type,
@@ -8729,6 +8758,7 @@ function parse_dwarf_dump(output::AbstractString;
                     r_vec === nothing || (return_types[function_key]["vector_size"] = r_vec)
                     kept_object_pointer isa Bool &&
                         (return_types[function_key]["has_object_pointer"] = kept_object_pointer)
+                    kept_params === nothing || (return_types[function_key]["parameters"] = kept_params)
                 end
                 function_processed = true  # Mark as processed
             end
