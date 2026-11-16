@@ -109,6 +109,39 @@ if requires("C++ default arguments, live", :libJLCS, :clangxx)
         @test !any(f -> occursin("replibuild_default", String(get(f, "demangled", ""))), md["functions"])
     end
 
+    @testset "the static member itself has no receiver" begin
+        # `Hinge::make(int, int)` is defined out of line and declared again in
+        # the forced unit's compile unit. Its definition DIE is what says it
+        # takes no object; without that fact the class heuristic gives it one.
+        mk = only(f for f in md["functions"] if f["mangled"] == "_ZN2da5Hinge4makeEii")
+        ok = get(mk, "has_object_pointer", :absent) === false
+        @test (get(mk, "has_object_pointer", :absent), [p["name"] for p in mk["parameters"]]) == (false, ["a", "b"])
+        if !ok
+            # What the dumper printed for every DIE of `make`, so a host that
+            # fails says why (the fact is read from this text).
+            lib = joinpath(DEFAULT_ARG_DIR, "julia", "libdefaultarg.so")
+            dump = try read(`readelf --debug-dump=info $lib`, String) catch e; "readelf failed: $e" end
+            lines = split(dump, '\n')
+            decl = Set{String}()
+            for (i, l) in enumerate(lines)
+                occursin("4makeEii", l) || continue
+                for j in i:-1:max(1, i - 6)
+                    m = match(r"^ <\d+><([0-9a-f]+)>: Abbrev Number", lines[j])
+                    m === nothing || (push!(decl, m.captures[1]); break)
+                end
+            end
+            println("== readelf: producers ==")
+            foreach(println, filter(l -> occursin("DW_AT_producer", l), lines))
+            for (i, l) in enumerate(lines)
+                hit = occursin("4makeEii", l) || any(d -> occursin("DW_AT_specification", l) && occursin("<0x$d>", l), decl) ||
+                      any(d -> occursin("DW_AT_abstract_origin", l) && occursin("<0x$d>", l), decl)
+                hit || continue
+                println("== readelf: around line $i ==")
+                foreach(println, lines[max(1, i - 12):min(length(lines), i + 22)])
+            end
+        end
+    end
+
     @testset "the wrapper binds the short calls under the member's name" begin
         @test occursin(r"\nfunction da_Hinge_setLimit\(this::Any, lo::Cfloat, hi::Cfloat\)\n", code)
         @test occursin(r"\nfunction da_Hinge_setLimit\(this::Any, lo::Cfloat, hi::Cfloat, soft::Cfloat, bias::Cfloat, relax::Cfloat\)\n", code)
