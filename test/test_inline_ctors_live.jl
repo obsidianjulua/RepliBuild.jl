@@ -84,6 +84,10 @@ if requires("forced inline constructors, live", :libJLCS, :clangxx)
             @test (s, s in mangled) == (s, true)
         end
         @test !any(f -> occursin("replibuild_force", String(get(f, "demangled", ""))), md["functions"])
+        # ...nor are its helper records: `ctor_impl<true, ic::Plain, int>` was
+        # emitted as a struct of the wrapper.
+        @test !any(k -> occursin("ctor_impl", k), keys(md["struct_definitions"]))
+        @test !occursin("ctor_impl", code)
         @test !any(s -> occursin("AbsC", s) || occursin("PrivC", s), mangled)
     end
 

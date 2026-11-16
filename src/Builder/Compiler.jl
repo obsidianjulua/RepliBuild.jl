@@ -9059,7 +9059,32 @@ function parse_dwarf_dump(output::AbstractString;
     _record_declared_constructors!(record_abi, struct_defs, methods_by_name,
                                    record_kind_by_name, declaration_facts; key = "methods")
 
+    _drop_force_helper_records!(struct_defs, record_abi)
+
     return (return_types, struct_defs, global_vars, typedef_table, record_abi)
+end
+
+"""
+    _drop_force_helper_records!(struct_defs, record_abi)
+
+Remove the records of namespace `replibuild_force`: the helpers of the units
+RepliBuild generates (`ctor_impl<true, T, A...>`, `args<A...>`). They exist
+to be instantiated, like the helper functions `extract_symbols_from_binary`
+filters, and are not the library's: as memberless records they had an entry,
+and every wrapper of a package with a forced constructor carried a
+`struct ctor_impl_true_…` per constructor.
+"""
+function _drop_force_helper_records!(struct_defs::AbstractDict, record_abi::AbstractDict)
+    for name in collect(keys(struct_defs))
+        def = struct_defs[name]
+        def isa AbstractDict || continue
+        scope = get(def, "scope", nothing)
+        scope isa AbstractString || continue
+        (scope == "replibuild_force" || startswith(scope, "replibuild_force::")) || continue
+        delete!(struct_defs, name)
+        delete!(record_abi, name)
+    end
+    return struct_defs
 end
 
 """

@@ -97,6 +97,9 @@ if requires("forced inline member functions, live", :libJLCS, :clangxx)
         @test missing_syms == String[]
         @test !("_ZN2im4Body12declaredOnlyEi" in mangled)
         @test !any(f -> occursin("replibuild_", String(get(f, "demangled", ""))), md["functions"])
+        # ...nor are the unit's helper records types of the wrapper.
+        @test !any(k -> occursin("ctor_impl", k) || startswith(k, "args<"), keys(md["struct_definitions"]))
+        @test !occursin("ctor_impl", code) && !occursin("struct args", code)
         @test !any(g -> occursin("replibuild_member", String(g)), keys(get(md, "globals", Dict())))
     end
 

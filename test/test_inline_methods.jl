@@ -251,6 +251,26 @@ const IM_DUMP = read(joinpath(@__DIR__, "fixtures", "inline_ctor.readelf.txt"), 
         end
     end
 
+    @testset "the generated units' helper records are not the library's" begin
+        sd = Dict{String,Any}(
+            "ctor_impl<true, ic::Plain, int>" => Dict{String,Any}("scope" => "replibuild_force", "byte_size" => "0x1"),
+            "args<int>" => Dict{String,Any}("scope" => "replibuild_force"),
+            "Inner" => Dict{String,Any}("scope" => "replibuild_force::detail"),
+            "Plain" => Dict{String,Any}("scope" => "ic"),
+            "Mine" => Dict{String,Any}("scope" => "replibuild_forceful"),     # a library's own namespace
+            "NoScope" => Dict{String,Any}(),
+            "__enum__E" => Dict{String,Any}("kind" => "enum"))
+        ra = Dict{String,Any}("ctor_impl<true, ic::Plain, int>" => Dict{String,Any}("empty" => true),
+                              "Plain" => Dict{String,Any}("empty" => false))
+        _IM._drop_force_helper_records!(sd, ra)
+        @test sort(collect(keys(sd))) == ["Mine", "NoScope", "Plain", "__enum__E"]
+        @test collect(keys(ra)) == ["Plain"]
+        # The vendored dump of the constructor fixture was taken before any
+        # unit existed; a parse of it loses nothing.
+        rt, sd2, gv, td, ra2 = _IM.parse_dwarf_dump(IM_DUMP)
+        @test haskey(sd2, "Plain") && haskey(ra2, "Plain")
+    end
+
     @testset "the wrap report names what was forced, by kind" begin
         mplan = Dict{String,Any}(
             "forced" => Any[Dict{String,Any}("class" => "Body", "symbol" => "a", "emitted" => true),
