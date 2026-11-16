@@ -324,6 +324,7 @@ struct TypesConfig
     custom_mappings::Dict{String,String}  # User-defined type mappings
     templates::Vector{String}             # C++ templates to explicitly instantiate
     template_headers::Vector{String}      # Headers required to instantiate the templates
+    records::Vector{String}               # Header-only classes no library source mentions, to make visible
 end
 
 """
@@ -1041,7 +1042,8 @@ function parse_types_config(data::Dict)::TypesConfig
         get(types, "allow_function_pointers", true),
         custom_mappings,
         templates,
-        template_headers
+        template_headers,
+        String[String(r) for r in get(types, "records", String[])]
     )
 end
 
@@ -1319,7 +1321,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         WorkflowConfig([:discover, :compile, :link, :binary, :wrap]),
         CacheConfig(true, ".replibuild_cache"),
         DependenciesConfig(Dict{String, DependencyItem}()),
-        TypesConfig(:warn, true, false, true, Dict{String,String}(), String[], String[]),
+        TypesConfig(:warn, true, false, true, Dict{String,String}(), String[], String[], String[]),
         nothing,  # ingest: source-build mode by default
         nothing,  # graph: one library by default
         toml_path,
@@ -1552,6 +1554,9 @@ function save_config(config::RepliBuildConfig)
     end
     if !isempty(config.types.template_headers)
         types_dict["template_headers"] = config.types.template_headers
+    end
+    if !isempty(config.types.records)
+        types_dict["records"] = config.types.records
     end
     data["types"] = types_dict
 
