@@ -32,15 +32,21 @@ function _tr_expected(name::String, order::Symbol)::Symbol
     return sys ? :system : (jll ? :jll : :missing)
 end
 
-@testset "every tool resolves to a program that starts" begin
+@testset "every tool resolves to the copy the order names, and it starts" begin
     checked = 0
     for r in _TR.report()
-        @test r.source in (:jll, :system)
-        @test isfile(r.path)
-        @test _TR._probe(_TR.tool_cmd(`$(r.name) --version`)) !== nothing
+        @test r.source === _tr_expected(r.name, _TR.order())
+        if r.source === :missing
+            # Neither copy on this host (`ld.lld` where the JLL's does not
+            # start and none is installed): the bare name, to fail by name.
+            @test r.path == r.name
+        else
+            @test isfile(r.path)
+            @test _TR._probe(_TR.tool_cmd(`$(r.name) --version`)) !== nothing
+        end
         checked += 1
     end
-    @test checked == length(_TR.PROVIDERS) == 7
+    @test checked == length(_TR.PROVIDERS) == 8
 end
 
 @testset "the order is REPLIBUILD_TOOLS, and nothing else is accepted" begin

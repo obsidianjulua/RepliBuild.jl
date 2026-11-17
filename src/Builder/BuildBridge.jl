@@ -119,6 +119,20 @@ function execute(command::String, args::Vector{String}=String[]; capture_output:
         end
         return _run_command_impl(Tools.with_env(tool, cmd), capture_output)
     end
+    # A program from a bundled tools directory (LLVM_unified_jll's llvm-link
+    # and opt, for the C bucket's external pipeline): its library path goes
+    # on after the toolchain overlay, for the same reason.
+    if Tools.in_bundled_dir(command)
+        cmd = `$command $args`
+        if use_llvm_env
+            cmd = try
+                LLVMEnvironment.llvm_cmd(cmd)
+            catch
+                cmd
+            end
+        end
+        return _run_command_impl(Tools.with_dir_env(cmd), capture_output)
+    end
 
     # Try to resolve LLVM tool path if it looks like an LLVM tool
     resolved_command = if use_llvm_env && (startswith(command, "clang") || startswith(command, "llvm-"))

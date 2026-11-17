@@ -159,9 +159,18 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   static promotion and bitcode assembly run **in-process on Julia's own libLLVM**,
   which is version-matched to that clang, so there is no DWARF-dropping skew. A
   failure is a hard error. `[link] fallback = true` selects the external
-  `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`.
-  Final `.ll → .so` still shells to clang. Check `DW_AT_producer` (`…jl`) to prove a
-  C artifact came from the JLL. `_clang_for_c_bucket` uses the system clang only
+  `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`:
+  a system install at that major, else LLVM_unified_jll's
+  (`Tools.matched_llvm_bin`, the last entry of `c_toolchain_bin_dir`), so the
+  hatch and its test run on a machine whose only system LLVM is newer.
+  Final `.ll → .so` still shells to clang, which on Linux links with the
+  bundled LLD (`Compiler._bundled_linker`: `ld.lld` from LLD_unified_jll through
+  `--ld-path`, C bucket and JLL clang only; `REPLIBUILD_TOOLS=system` is the
+  driver's own linker; the choice is in `_toolchain_identity`). The start files
+  and libc still come from the system. A new C link site passes
+  `_bundled_linker_flags`. (`test_bundled_linker.jl`, devtests
+  `test_bundled_linker_live.jl`, which builds with an empty PATH.) Check
+  `DW_AT_producer` (`…jl`) to prove a C artifact came from the JLL. `_clang_for_c_bucket` uses the system clang only
   when the JLL cannot be loaded (`_jll_clang()` is `nothing`); a JLL clang that
   does not start is reported as `BuildBridge.SPAWN_FAILED`, never replaced.
 - **C++ / Tier 2 uses system LLVM+MLIR 21+** (23.1.3 under MSYS2 CLANG64 on the
@@ -338,6 +347,23 @@ If you are asked to work on it:
   local dependency's path is a shim-header root (`_shim_allowed_roots`).
   (`test_dep_archive.jl`, `test_dep_cache.jl`.)
 - `Builder/DWARFParser.jl` — llvm-dwarfdump + nm → ClassInfo/VtableInfo.
+- `Builder/LibDW.jl` — DWARF read in-process through elfutils' libdw
+  (Elfutils_jll, ELF only). `info_dump` walks the DIE tree and writes it in GNU
+  readelf's format for everything `parse_dwarf_dump` reads, so the parser, its
+  invariants and its synthetic-dump tests are the same for both readers;
+  `file_tables` is `_dwarf_file_tables`' answer. `REPLIBUILD_DWARF=libdw`
+  selects it (`Compiler._dwarf_reader`); unset is readelf, and libdw asked for
+  where it cannot work is an error, never the other reader. **The two readers
+  give one answer**: the five tables parsed from either are equal, which
+  devtests `test_libdw_dwarf_live.jl` holds on DWARF 4 and 5, C and C++, and
+  `test/tools/dwarf_readers_diff.jl` checks on existing libraries (`--hub
+  <path>`: 41 Hub libraries equal, 2026-11-17). `DumpLines` produces the lines
+  as the parser asks for them, one DIE at a time, and is walked once per
+  parser pass, so the dump text is never held; a library without debug info
+  is an empty dump, as readelf's is. A tag
+  or attribute the parser starts matching must be printable here
+  (`test_libdw_reader.jl` checks the parser's names against `TAGS`/`ATTRS`),
+  and a new value shape the parser reads must be written as readelf writes it.
 - `Builder/Tools.jl` — which program each non-LLVM tool is (readelf, objdump,
   nm, c++filt, git, cmake, ninja): `REPLIBUILD_TOOL_<NAME>`, then the JLL's copy
   (Binutils_jll, Git_jll, CMake_jll, Ninja_jll) and PATH's in the order
@@ -827,6 +853,19 @@ the test named when you touch the area.
   BRANCH 1's trap, and GeneratorC and the shared varargs path trap with
   `_conflict_trap_body`. (`test_conflicted_names.jl`, devtests
   `test_conflict_trap_fixture.jl`.)
+- **A constant GNU readelf prints from four or eight bytes is hex**
+  (`DW_AT_count : 0x10000`; one or two bytes print in decimal). Read it with
+  `_dwarf_count`, never `(\d+)`, which takes the `0`: an array of 65536
+  elements or more had no elements and no size (lz4, miniz, pcre2, box2d,
+  libjpeg-turbo and three more Hub libraries), and a bitfield 8 KiB into its
+  record had offset 0. A fix here reaches a package on a rebuild.
+  (devtests `test_libdw_dwarf_live.jl`.)
+- **A declaration file is an absolute path, whatever the DWARF version.**
+  `_dwarf_file_tables` reads each table by its own column header (DWARF 4 and
+  earlier print `Entry Dir Time Size Name`; read as DWARF 5's shape, every name
+  of a `-gdwarf-4` build came out as `0\t0\t<name>`), and `parse_dwarf_dump`
+  resolves a relative name against the unit's `DW_AT_comp_dir`, which DWARF 4's
+  table does not carry. (devtests `test_libdw_dwarf_live.jl`.)
 - **Two parsers, two dialects.** `Compiler.jl` parses **GNU binutils** output only
   (readelf on Linux, GNU objdump on Windows; byte-identical). `DWARFParser.jl` parses
   llvm-dwarfdump. Never copy a regex between them, and never route the readelf
@@ -1905,6 +1944,11 @@ DWARF-resolved destructors — **is** built.)
   holding a type nothing lays out. libc++'s `tuple` (`__tuple_impl` over
   `__tuple_leaf` bases) has the same shape as libstdc++'s and is not yet
   measured on a libc++ host.
+- libdw as the default DWARF reader (2026-11-17). It is opt-in
+  (`REPLIBUILD_DWARF=libdw`); John's call. Not holding the dump text is not
+  the memory fix by itself: measured peak RSS, readelf against libdw, was
+  1.68 against 1.57 GiB on Jolt and 2.41 against 2.21 GiB on llama.cpp. The
+  rest is the parser's own tables (next entry), which either reader fills.
 - `parse_dwarf_dump` holds the whole `readelf` dump and every DIE as a `Dict`.
   oneDNN's (`libonednn.so`) parse passed a 24 GB cap and was OOM-killed at
   2519a16 (2026-10-29), so a oneDNN build needs most of a 64 GB box. A streaming
@@ -1958,7 +2002,9 @@ DWARF-resolved destructors — **is** built.)
   its lanes is not this case and crosses today.
 - AAPCS64 homogeneous vector aggregates (a record holding a SIMD vector), and
   Windows on ARM (2026-11-09). Both refused by name.
-- Codegen `.ll → .so` still shells to clang; not internalised.
+- Codegen `.ll → .so` still shells to clang; not internalised. (The linker it
+  starts is the bundled LLD for C on Linux since 2026-11-17; C++, Windows and
+  the AOT thunks library still link with the system's.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).

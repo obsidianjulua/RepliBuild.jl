@@ -9,7 +9,8 @@
 # This module is the one answer to "which program is `nm`". Per tool, in order:
 #
 #   1. `REPLIBUILD_TOOL_<NAME>` (a path): used as given, never probed.
-#   2. The JLL's copy (Binutils_jll, Git_jll, CMake_jll, Ninja_jll) and the
+#   2. The JLL's copy (Binutils_jll, Git_jll, CMake_jll, Ninja_jll,
+#      LLD_unified_jll) and the
 #      one on PATH, in the order `REPLIBUILD_TOOLS` names: `jll` (the default
 #      off Windows) or `system` (the default on Windows, where the supported
 #      host is MSYS2 and the JLL copies are unverified).
@@ -27,7 +28,7 @@
 
 module Tools
 
-import Binutils_jll, Git_jll, CMake_jll, Ninja_jll
+import Binutils_jll, Git_jll, CMake_jll, Ninja_jll, LLD_unified_jll, LLVM_unified_jll
 
 export tool_path, tool_source, tool_cmd
 
@@ -51,6 +52,9 @@ const PROVIDERS = Dict{String, Provider}(
     "git"     => Provider(Git_jll, :git_path, "GIT", true),
     "cmake"   => Provider(CMake_jll, :cmake_path, "CMAKE", false),
     "ninja"   => Provider(Ninja_jll, :ninja_path, "NINJA", false),
+    # The C bucket's linker (Compiler._bundled_linker): LLD at the version of
+    # Julia's own LLVM, which is the bundled clang's.
+    "ld.lld"  => Provider(LLD_unified_jll, :ld_lld_path, "LD_LLD", true),
 )
 
 "What a tool resolved to. `source` is `:override`, `:jll`, `:system` or `:missing`."
@@ -285,6 +289,68 @@ function tool_cmd(cmd::Cmd)::Cmd
     out = Cmd(Cmd(vcat(r.path, cmd.exec[2:end])); ignorestatus = cmd.ignorestatus,
               env = cmd.env, dir = cmd.dir)
     return with_env(name, out)
+end
+
+# ── LLVM's own tools at Julia's LLVM ────────────────────────────────────────
+#
+# `llvm-link` and `opt` are not in PROVIDERS: by name they are the C++
+# bucket's, from the system LLVM that compiled the IR. The C bucket's external
+# pipeline (`[link] fallback = true`) needs them at the major of Julia's own
+# libLLVM instead, which is what LLVM_unified_jll ships. They are handed out
+# as a directory (LLVMEnvironment.c_toolchain_bin_dir), and a program run
+# from that directory gets the JLL's library path (`with_dir_env`): it loads
+# Julia's libLLVM, which is not beside it.
+
+const _BUNDLED_DIRS = Dict{String, String}()         # tools directory => library path
+const _MATCHED_LLVM = Ref{Union{Missing, Nothing, String}}(missing)
+
+"""
+    matched_llvm_bin() -> Union{String,Nothing}
+
+The directory of LLVM_unified_jll's tools, when it has an `llvm-link` and an
+`opt` that start and report the major of `Base.libllvm_version`. `nothing`
+where the JLL has no build, or its tools do not start.
+"""
+function matched_llvm_bin()::Union{String, Nothing}
+    lock(_LOCK) do
+        _MATCHED_LLVM[] === missing || return _MATCHED_LLVM[]
+        _MATCHED_LLVM[] = try
+            _find_matched_llvm()
+        catch
+            nothing
+        end
+    end
+end
+
+function _find_matched_llvm()::Union{String, Nothing}
+    LLVM_unified_jll.is_available() || return nothing
+    dir = dirname(String(LLVM_unified_jll.opt_path))
+    exe = Sys.iswindows() ? ".exe" : ""
+    libdirs = String(LLVM_unified_jll.LIBPATH[])
+    cur = _env_get(ENV, LIBPATH_KEY)
+    env = [LIBPATH_KEY => (isempty(cur) ? libdirs : libdirs * _PATHSEP * cur)]
+    for tool in ("llvm-link", "opt")
+        path = joinpath(dir, tool * exe)
+        isfile(path) || return nothing
+        out = read(pipeline(_overlay(`$path --version`, env); stdin = devnull, stderr = devnull), String)
+        m = match(r"LLVM version (\d+)\.", out)
+        (m !== nothing && parse(Int, m.captures[1]) == Base.libllvm_version.major) || return nothing
+    end
+    _BUNDLED_DIRS[dir] = libdirs
+    return dir
+end
+
+"Whether `program` is run from a directory this module handed out."
+in_bundled_dir(program::AbstractString)::Bool =
+    lock(() -> haskey(_BUNDLED_DIRS, dirname(String(program))), _LOCK)
+
+"`cmd` with the library path its program's bundled directory needs, or `cmd`."
+function with_dir_env(cmd::Cmd)::Cmd
+    isempty(cmd.exec) && return cmd
+    libdirs = lock(() -> get(_BUNDLED_DIRS, dirname(cmd.exec[1]), nothing), _LOCK)
+    libdirs === nothing && return cmd
+    cur = _env_get(_env_of(cmd), LIBPATH_KEY)
+    return _overlay(cmd, [LIBPATH_KEY => (isempty(cur) ? libdirs : libdirs * _PATHSEP * cur)])
 end
 
 "Every tool's resolution, sorted by name, for `check_environment`."
