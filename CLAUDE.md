@@ -184,6 +184,15 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   product for C.
 - Julia's bundled libLLVM and system libLLVM coexist in one process. The GDB JIT
   descriptor resolves to Julia's copy; this is correct, do not "fix" it.
+- **The doctor judges the LLVM `build.sh` builds against: the bare
+  `llvm-config` on PATH.** `EnvironmentDoctor._versioned` tries the bare name,
+  then Debian's versioned names newest first, and `_pick_llvm_tool` takes the
+  first that meets the minimum. Probing `<name>-<minimum>` first read a
+  distribution's own LLVM 21 beside the 23 on PATH and failed Tier 2 on a
+  working toolchain (GitHub's Ubuntu 26.04 image, 2026-11-17). A runner image
+  is a toolchain too: when every cell of one OS goes red at "Tier 2 is live",
+  read the `Runner Image` lines of the log before the diff.
+  (`test_doctor_llvm_probe.jl`.)
 - For LLVM/JIT crashes, check `libJLCS.so`'s mtime/SONAME against the installed MLIR,
   and dual-LLVM symbol scope, before theorising.
 - **One LLVM per module.** The C bucket is chosen by `[wrap] language`, never by

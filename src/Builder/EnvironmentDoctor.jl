@@ -134,11 +134,44 @@ _parse_major_version(v::String)::Int =
 # three copies of the same fact across the package (here, LLVMEnvironment's
 # search ladder, and build.sh) that drifted independently — the ladder ended up
 # probing 20 down to 15, entirely below a minimum it did not share.
-import ..LLVMEnvironment: MIN_LLVM_VERSION
+import ..LLVMEnvironment: MIN_LLVM_VERSION, MAX_PROBED_LLVM_VERSION
 
-# One source for the versioned probe names. These used to be string literals
-# ("llvm-config-21") that drifted from MIN_LLVM_VERSION the moment it moved.
-_versioned(base::String) = [base * "-" * string(MIN_LLVM_VERSION), base]
+# One source for the probe names, in the order they are tried: the bare name
+# first, then Debian's versioned names from the newest down to the minimum.
+#
+# The bare name is the one `src/mlir/build.sh` builds libJLCS against
+# (`llvm-config --version`, `--cmakedir`), so it is the one the doctor's
+# "built against X, but llvm-config is Y" has to compare with. The list used to
+# be `<base>-<MIN>` and then the bare name: on a host whose distribution ships
+# LLVM at exactly the minimum beside a newer one on PATH (GitHub's Ubuntu 26.04
+# image has `/usr/bin/llvm-config-21`; apt.llvm.org's 23 was on PATH), the
+# doctor read 21, compared it with a libJLCS built against 23 and reported
+# Tier 2 unavailable on a working toolchain (2026-11-17, every x86-64 cell of
+# tier2-linux). It also named only the minimum, so a host with nothing but
+# `llvm-config-23` had "LLVM 21+ not found".
+_versioned(base::String) =
+    vcat([base], [base * "-" * string(v) for v in MAX_PROBED_LLVM_VERSION:-1:MIN_LLVM_VERSION])
+
+"""
+    _pick_llvm_tool(names; find, version) -> Union{Nothing,Tuple{String,String,Bool}}
+
+Of the tools `names` (in order) that are on PATH, the first whose version
+meets `MIN_LLVM_VERSION`, as `(path, version, true)`. When none does, the
+first one found, as `(path, version, false)`: an install that is too old is
+reported as too old, never as missing. `nothing` when none is on PATH.
+`find` and `version` are `_find_tool` and `_get_version`; a test passes its own.
+"""
+function _pick_llvm_tool(names; find = _find_tool, version = _get_version)
+    too_old = nothing
+    for name in names
+        found, path = find(name)
+        found || continue
+        v = version(path)
+        _parse_major_version(v) >= MIN_LLVM_VERSION && return (path, v, true)
+        too_old === nothing && (too_old = (path, v, false))
+    end
+    return too_old
+end
 
 const SEC_HOST  = "Host"
 const SEC_C     = "C bucket — Tier 3 (ccall)"
@@ -351,31 +384,23 @@ const _LLVM_ADVICE_WINDOWS = [
 const _LLVM_ADVICE = Sys.iswindows() ? _LLVM_ADVICE_WINDOWS : _LLVM_ADVICE_UNIX
 
 function _check_llvm_config()::ToolStatus
-    for name in _versioned("llvm-config")
-        found, path = _find_tool(name)
-        found || continue
-        version = _get_version(path)
-        meets = _parse_major_version(version) >= MIN_LLVM_VERSION
-        msg = meets ? "LLVM $version" : "LLVM $version — need $MIN_LLVM_VERSION+"
-        return ToolStatus("llvm-config", false, true, path, version, meets, msg;
-                          section=SEC_CPP, advice=(meets ? String[] : _LLVM_ADVICE))
-    end
-    ToolStatus("llvm-config", false, false, "", "", false,
+    pick = _pick_llvm_tool(_versioned("llvm-config"))
+    pick === nothing && return ToolStatus("llvm-config", false, false, "", "", false,
         "LLVM $MIN_LLVM_VERSION+ not found"; section=SEC_CPP, advice=_LLVM_ADVICE)
+    (path, version, meets) = pick
+    msg = meets ? "LLVM $version" : "LLVM $version — need $MIN_LLVM_VERSION+"
+    return ToolStatus("llvm-config", false, true, path, version, meets, msg;
+                      section=SEC_CPP, advice=(meets ? String[] : _LLVM_ADVICE))
 end
 
 function _check_clang()::ToolStatus
-    for name in _versioned("clang++")
-        found, path = _find_tool(name)
-        found || continue
-        version = _get_version(path)
-        meets = _parse_major_version(version) >= MIN_LLVM_VERSION
-        msg = meets ? "Clang $version" : "Clang $version — need $MIN_LLVM_VERSION+"
-        return ToolStatus("clang++", false, true, path, version, meets, msg;
-                          section=SEC_CPP, advice=(meets ? String[] : _LLVM_ADVICE))
-    end
-    ToolStatus("clang++", false, false, "", "", false,
+    pick = _pick_llvm_tool(_versioned("clang++"))
+    pick === nothing && return ToolStatus("clang++", false, false, "", "", false,
         "Clang $MIN_LLVM_VERSION+ not found"; section=SEC_CPP, advice=_LLVM_ADVICE)
+    (path, version, meets) = pick
+    msg = meets ? "Clang $version" : "Clang $version — need $MIN_LLVM_VERSION+"
+    return ToolStatus("clang++", false, true, path, version, meets, msg;
+                      section=SEC_CPP, advice=(meets ? String[] : _LLVM_ADVICE))
 end
 
 function _check_mlir_tblgen()::ToolStatus
