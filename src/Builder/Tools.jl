@@ -168,11 +168,37 @@ function _env_get(base, key::String)::String
 end
 
 function _starts(name::String, p::Provider, path::String)::Bool
-    cmd = _overlay(`$path --version`, _jll_env(name, p, ENV))
+    return _probe(_overlay(`$path --version`, _jll_env(name, p, ENV))) !== nothing
+end
+
+"How long a tool gets to answer `--version` before it is taken not to start."
+const PROBE_SECONDS = 20.0
+
+"""
+    _probe(cmd; timeout = PROBE_SECONDS) -> Union{String,Nothing}
+
+Run `cmd` and return what it printed, or `nothing` when it could not be
+started, exited non-zero, or did not finish in `timeout` seconds. The limit is
+the point: a program whose library is missing does not always exit. On a
+Windows machine with nobody at it, the loader's "DLL was not found" box waits
+for a click that never comes, and a probe without a limit waits with it.
+"""
+function _probe(cmd::Cmd; timeout::Real = PROBE_SECONDS)::Union{String, Nothing}
+    out = tempname()
     try
-        return success(pipeline(cmd; stdin = devnull, stdout = devnull, stderr = devnull))
+        proc = open(out, "w") do io
+            run(pipeline(ignorestatus(cmd); stdin = devnull, stdout = io, stderr = devnull); wait = false)
+        end
+        if timedwait(() -> process_exited(proc), float(timeout); pollint = 0.05) === :timed_out
+            kill(proc, Base.SIGKILL)
+            wait(proc)
+            return nothing
+        end
+        return (proc.exitcode == 0 && proc.termsignal == 0) ? read(out, String) : nothing
     catch
-        return false
+        return nothing
+    finally
+        rm(out; force = true)
     end
 end
 

@@ -37,7 +37,7 @@ end
     for r in _TR.report()
         @test r.source in (:jll, :system)
         @test isfile(r.path)
-        @test success(pipeline(_TR.tool_cmd(`$(r.name) --version`); stdout = devnull, stderr = devnull))
+        @test _TR._probe(_TR.tool_cmd(`$(r.name) --version`)) !== nothing
         checked += 1
     end
     @test checked == length(_TR.PROVIDERS) == 7
@@ -136,6 +136,18 @@ end
         end
     end
     @test ENV == before
+end
+
+@testset "a program that never answers is not a tool that starts" begin
+    # A probe waits for the program, and a program can wait forever (a
+    # loader's missing-library dialog on an unattended Windows machine).
+    sleeper = `$(Base.julia_cmd()) --startup-file=no -e "sleep(600)"`
+    t = @elapsed got = _TR._probe(sleeper; timeout = 2.0)
+    @test got === nothing
+    @test t < 30
+    @test _TR._probe(`$(Base.julia_cmd()) --startup-file=no -e "print(41 + 1)"`) == "42"
+    @test _TR._probe(`$(Base.julia_cmd()) --startup-file=no -e "exit(3)"`) === nothing
+    @test _TR._probe(`$(joinpath(mktempdir(), "no-such-program")) --version`) === nothing
 end
 
 @testset "BuildBridge.execute runs the resolved copy" begin
