@@ -1067,6 +1067,13 @@ the test named when you touch the area.
   undeclared one as `E(v)`. A bitmask enum stays an integer alias
   (`_is_bitflag_enum`). Wrappers name `RepliBuild.OpenEnums`, so the header's
   `import RepliBuild` must precede the enum section. (`test_open_enums.jl`.)
+- **The bitflag test is total over any enumerator value** (2026-11-16):
+  `_is_bitflag_enum` works in `Int128`, because a 64-bit unsigned enum holds
+  values `Int64` cannot (Jolt's `EIterationStatus : uint64`,
+  `0xffff000000000000`), and `Int64(v)` on one threw and ended the whole
+  wrap. An enum screen answers `false` for what it cannot judge, never an
+  exception: one enum is not worth the module.
+  (`test_c_generator_policies.jl`, devtests `test_wide_enums_live.jl`.)
 - Enums with identical member sets emit as `const Alias = Canonical`, not a second
   enum type. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
   `""` stays an empty-name sentinel; do not harden it.
@@ -1784,6 +1791,9 @@ DWARF-resolved destructors — **is** built.)
   the class's inline constructors itself, so the flag's whole payoff is the
   definition, and a package that wants such a class built from Julia sets
   one of the two flags today (Bullet and box2d already do).
+- `[wrap] exclude_symbols` does not reach enums or records (2026-11-16): it
+  filters functions and globals. An enum or type a recipe wants out has no
+  key (Jolt tried it on `EIterationStatus`: "matched nothing").
 - Default arguments outside the forced unit's reach (2026-11-15): a static
   member's short call (static-ness is not known when the unit is written), a
   free function's (no class DIE declares it), an operator's, and a class
