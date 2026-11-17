@@ -104,7 +104,7 @@ function _jll_env(name::String, p::Provider, base)::Vector{Pair{String, String}}
     if p.libpath
         dirs = try String(p.jll.LIBPATH[]) catch; "" end
         if !isempty(dirs)
-            cur = get(base, LIBPATH_KEY, "")
+            cur = _env_get(base, LIBPATH_KEY)
             push!(env, LIBPATH_KEY => (isempty(cur) ? dirs : dirs * _PATHSEP * cur))
         end
     end
@@ -125,7 +125,7 @@ function _jll_env(name::String, p::Provider, base)::Vector{Pair{String, String}}
         # `-G Ninja` looks for ninja on PATH. Last, so a system ninja still wins.
         ninja = resolve("ninja")
         if ninja.source === :jll
-            cur = get(base, "PATH", "")
+            cur = _env_get(base, "PATH")
             dir = dirname(ninja.path)
             push!(env, "PATH" => (isempty(cur) ? dir : cur * _PATHSEP * dir))
         end
@@ -136,8 +136,39 @@ end
 _env_of(cmd::Cmd) = cmd.env === nothing ? ENV :
     Dict{String, String}(String(k) => String(v) for (k, v) in (split(e, '='; limit = 2) for e in cmd.env) )
 
+# `cmd` with `pairs` laid over its environment (the process's, if it has none
+# of its own). Windows names are case-insensitive and its own spelling is
+# `Path`: a second entry spelled `PATH` beside it is two variables in the
+# block the child gets, and which one it reads is not ours to choose. So an
+# entry replaces whatever spelling is there (LLVMEnvironment._overlay_env
+# does the same for the toolchain's).
+function _overlay(cmd::Cmd, pairs::Vector{Pair{String, String}})::Cmd
+    isempty(pairs) && return cmd
+    env = Dict{String, String}(String(k) => String(v) for (k, v) in _env_of(cmd))
+    for (k, v) in pairs
+        if Sys.iswindows()
+            for existing in collect(keys(env))
+                uppercase(existing) == uppercase(k) && delete!(env, existing)
+            end
+        end
+        env[k] = v
+    end
+    return setenv(cmd, env)
+end
+
+# One variable of an environment, whatever its case on Windows.
+function _env_get(base, key::String)::String
+    v = get(base, key, nothing)
+    v === nothing || return String(v)
+    Sys.iswindows() || return ""
+    for (k, val) in base
+        uppercase(String(k)) == uppercase(key) && return String(val)
+    end
+    return ""
+end
+
 function _starts(name::String, p::Provider, path::String)::Bool
-    cmd = addenv(`$path --version`, _jll_env(name, p, ENV)...)
+    cmd = _overlay(`$path --version`, _jll_env(name, p, ENV))
     try
         return success(pipeline(cmd; stdin = devnull, stdout = devnull, stderr = devnull))
     catch
@@ -205,8 +236,7 @@ A system copy or an override needs nothing and `cmd` comes back as it is.
 function with_env(name::AbstractString, cmd::Cmd)::Cmd
     r = resolve(name)
     r.source === :jll || return cmd
-    env = _jll_env(r.name, PROVIDERS[r.name], _env_of(cmd))
-    return isempty(env) ? cmd : addenv(cmd, env...)
+    return _overlay(cmd, _jll_env(r.name, PROVIDERS[r.name], _env_of(cmd)))
 end
 
 """

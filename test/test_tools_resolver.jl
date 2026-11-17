@@ -14,6 +14,24 @@ using RepliBuild
 
 const _TR = RepliBuild.Tools
 
+# Whether the JLL's copy of a tool is there and starts on this host, in the
+# environment the question is asked in. It does everywhere this package's
+# dependencies have a working build; where one does not, the resolver's
+# answer is the other copy, and that is what these tests hold it to.
+function _tr_jll_starts(name::String)::Bool
+    p = _TR.PROVIDERS[name]
+    path = _TR._jll_path(p)
+    return path !== nothing && _TR._starts(name, p, path)
+end
+
+# What `resolve` must answer for `name` under `order`, from the two copies.
+function _tr_expected(name::String, order::Symbol)::Symbol
+    jll = _tr_jll_starts(name)
+    sys = Sys.which(name) !== nothing
+    order === :jll && return jll ? :jll : (sys ? :system : :missing)
+    return sys ? :system : (jll ? :jll : :missing)
+end
+
 @testset "every tool resolves to a program that starts" begin
     checked = 0
     for r in _TR.report()
@@ -34,17 +52,25 @@ end
 end
 
 @testset "a copy that is not there is passed over for the other" begin
-    # No PATH: `system` first finds nothing and takes the JLL's.
+    # No PATH: `system` first finds nothing and takes the JLL's, where it starts.
     withenv("REPLIBUILD_TOOLS" => "system", "PATH" => "") do
+        checked = 0
         for name in ("nm", "git", "ninja")
             r = _TR.resolve(name)
-            @test r.source === :jll
-            @test isfile(r.path)
+            @test Sys.which(name) === nothing
+            @test r.source === _tr_expected(name, :system)
+            r.source === :missing ? (@test r.path == name) : (@test isfile(r.path))
+            checked += 1
         end
+        @test checked == 3
     end
     withenv("REPLIBUILD_TOOLS" => "jll") do
-        @test all(r -> r.source === :jll, _TR.report())
+        for r in _TR.report()
+            @test r.source === _tr_expected(r.name, :jll)
+        end
     end
+    jll_first = withenv(() -> [r.name for r in _TR.report() if r.source === :jll], "REPLIBUILD_TOOLS" => "jll")
+    @info "tools whose JLL copy starts on this host" jll_first
 end
 
 @testset "an override is used as given" begin
@@ -70,7 +96,7 @@ end
         # A path this module handed out is still its tool.
         again = _TR.tool_cmd(`$(_TR.tool_path("nm")) --version`)
         @test again.exec[1] == _TR.tool_path("nm")
-        @test again.env !== nothing
+        @test (again.env !== nothing) == (_TR.tool_source("nm") === :jll)
     end
     # Not one of this module's tools: the same object back.
     other = `clang++ --version`
@@ -82,15 +108,24 @@ end
     before = copy(ENV)
     withenv("REPLIBUILD_TOOLS" => "jll") do
         envof(cmd) = Dict(split(e, '='; limit = 2)[1] => split(e, '='; limit = 2)[2] for e in cmd.env)
-        nm = envof(_TR.tool_cmd(`nm --version`))
-        libdirs = String(RepliBuild.Tools.Binutils_jll.LIBPATH[])
-        @test startswith(nm[_TR.LIBPATH_KEY], libdirs)
-        # What the command already had stays, behind the copy's own.
-        kept = envof(_TR.tool_cmd(setenv(`nm --version`, _TR.LIBPATH_KEY => "/kept/dir")))
-        @test endswith(kept[_TR.LIBPATH_KEY], "/kept/dir")
-        @test startswith(kept[_TR.LIBPATH_KEY], libdirs)
-        git = envof(_TR.tool_cmd(`git --version`))
-        @test isdir(git["GIT_EXEC_PATH"])
+        if _TR.tool_source("nm") === :jll
+            nm = envof(_TR.tool_cmd(`nm --version`))
+            libdirs = String(RepliBuild.Tools.Binutils_jll.LIBPATH[])
+            @test startswith(nm[_TR.LIBPATH_KEY], libdirs)
+            # One entry for the loader path, whatever case the host spells it in.
+            @test count(k -> uppercase(k) == uppercase(_TR.LIBPATH_KEY), collect(keys(nm))) == 1
+            # What the command already had stays, behind the copy's own.
+            kept = envof(_TR.tool_cmd(setenv(`nm --version`, _TR.LIBPATH_KEY => "/kept/dir")))
+            @test endswith(kept[_TR.LIBPATH_KEY], "/kept/dir")
+            @test startswith(kept[_TR.LIBPATH_KEY], libdirs)
+        else
+            # No JLL copy that starts here: the command is left as it is.
+            @test _TR.tool_cmd(`nm --version`).env === nothing
+        end
+        if _TR.tool_source("git") === :jll
+            git = envof(_TR.tool_cmd(`git --version`))
+            @test isdir(git["GIT_EXEC_PATH"])
+        end
         # cmake and ninja start the system compiler: no library path of Julia's
         # in front of the system's.
         for name in ("cmake", "ninja")
