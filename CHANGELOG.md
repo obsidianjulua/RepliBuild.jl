@@ -4,6 +4,224 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.5.1 (2026-11-17)
+
+Version 4.5.0 → 4.5.1; Julia compat `1.12` (CI tests 1.12 and 1.13).
+**This is the last release line that supports Julia 1.12.** The work that
+follows it moves RepliBuild's tools and the dialect library into the package,
+at Julia's own LLVM, and Julia 1.12's LLVM 18 is too old for part of that; it
+is planned as 4.6.0 with Julia 1.13 as the floor.
+
+What a package needs to pick this release up:
+
+- **A rebuild** (delete `.replibuild_cache/project_hash`) for what lives in
+  the metadata: memberless records (#101), `std::string` parameters (#103),
+  the forced inline constructors, member functions and default arguments
+  (#105, #108, #111), `[types] records` (#107).
+- **A re-wrap** for the rest: nested-type aliases (#110), the SIMD union
+  classes and narrow integer arguments in the thunks (#114, #115), a C
+  integer parameter taking an enum (#106, #109).
+- **One rename to check for in callers:** a class whose only destructor is the
+  deleting one is bound as `<X>_delete_<X>`, no longer `<X>_destroy_<X>`
+  (#102).
+
+Builds and wraps of large C++ packages are faster with identical output
+(#116), CI's move to Ubuntu 26.04 is handled (#117), and 64-bit unsigned
+enumerators are right under both JSON majors `Project.toml` allows (#118).
+The sections below are compiled from the merged pull requests' `## Changelog`
+headings, newest first.
+
+### 2026-11-17: an enumerator above `typemax(Int64)` survives the metadata read on JSON 0.21 (#118)
+
+JSON 0.21 reads an integer above `typemax(Int64)` as an `Int64` wrapped modulo 2^64; JSON 1.x returns a `BigInt`. A 64-bit unsigned enum's top values therefore reached the generators negative on one of the two majors `Project.toml` allows: `Status(-281474976710656)` on an `OpenEnum{UInt64}` (an `InexactError` at load), and a flag set with bit 63 emitted as an open enum.
+
+- **Shipped:** `Wrapper._enumerator_value`, which both generators read every DWARF enumerator through: a negative value of an 8-byte unsigned enum is the value plus 2^64; a signed enum and every narrower enum are untouched; a value beyond `Int64` is an `Int128` under both majors.
+- **Found:** `test_wide_enums_live.jl` was green or red by which JSON the gitignored Manifest had resolved (a worktree's had 0.21.4, the main checkout's 1.x). Widening the read itself (`inttype`) was rejected: it changes the type of every integer in the metadata on one major only.
+- **Tests:** `test_enumerator_values.jl` (unit, toolchain-free) writes metadata as the build does, reads it as wrap does and runs both generators; with the helper neutered it fails in both on JSON 0.21.
+
+### 2026-11-17: the doctor probes the PATH's own `llvm-config` before a versioned name (#117)
+
+GitHub's Ubuntu 26.04 image ships LLVM 21 as `llvm-config-21` beside whatever is on PATH. The doctor probed `<name>-<minimum>` first, read 21, and judged a libJLCS built against the PATH's LLVM 23 "built against LLVM 23.1.6, but llvm-config is 21.1.8": Tier 2 unavailable on a working toolchain, and every x86-64 cell of `tier2-linux` red before a test ran.
+
+- **Shipped:** `EnvironmentDoctor._versioned` tries the bare name, then versioned names newest first; `_pick_llvm_tool` takes the first that meets the minimum and keeps "too old" for when nothing else is there.
+- **Found:** the doctor, `build.sh` and `find_system_llvm` each answered "which LLVM" their own way; the doctor now agrees with `build.sh`, whose LLVM libJLCS is built against. A runner image is a toolchain: read the log's `Runner Image` lines before the diff.
+- **Tests:** `test_doctor_llvm_probe.jl`.
+
+### 2026-11-17: the forced unit's rows are tried in groups, and two scans become lookups (#116)
+
+Profiling a Jolt build and wrap showed three costs that were RepliBuild's own, each invisible on a fixture and quadratic or near it at library size.
+
+- **Shipped:** `_alone_verdicts` tries the forced unit's rows in groups of `_ALONE_GROUP_SIZE` and halves a failing group, in place of one compile per row. `_forced_exportable_ir` asks the symbol set about each definition's name instead of scanning every symbol against every `define` line. `_strong_member_index` files a library's strongly defined members by class once, for `_type_manifest` and `_resolve_type_imports`.
+- **Measured:** Jolt's build with a warm IR cache 583 s to 237 s, its wrap 35.9 s to 23.2 s; Bullet's build 141 s to 108 s. Outputs byte-identical (library hash, forced unit, metadata apart from `timestamp`, wrappers and manifests of thirteen Hub packages).
+- **Found:** Julia's profiler does not sample a task waiting on a process, so stage time has to come from timestamps on the build's log lines; two directories never compare equal, because output paths are baked into the metadata and the skip reasons. Both are in `CLAUDE.md`'s new Performance section, with the method.
+- **Tests:** `test_inline_constructors.jl` (the verdicts equal one compile per row, with far fewer compiles; a library-sized export rewrite finishes in seconds), `test_cross_library_types.jl` (the index gives the scan's answers).
+
+### 2026-11-16: a thunk passes a narrow integer the way a C caller does (#115)
+
+- **An enum is an integer.** A by-value enum parameter crosses as its underlying integer, sized by the enum's `byte_size` (`_enum_mlir_int`), never as a one-member record and never through `map_cpp_type(julia_type)`, which answered a struct for `Int8` and `UInt16`.
+- **Every integer argument narrower than `int` is extended by the thunk** (`_narrow_int_extension`): `i1`, `i8` and `i16`, enum or plain (`bool`, `char`, `uint8_t`, `short`, …), are loaded at their width, zero- or sign-extended to `i32` by the parameter's or the enum's signedness (plain `char` follows the host's `Cchar`), and the callee is declared taking the `i32`. A plain narrow integer was passed as `i8` with no extension, which happened to work because the value had just been loaded from memory; it is now stated.
+- A real one-member record (`struct { char c; }`) is unchanged: it is a record in C too, and its callee reads only its bytes.
+- The Julia side is unchanged; this is a change to the thunk module only, so a package gets it on a re-wrap.
+
+**Tests**
+- `test_narrow_args_live.jl` (dev, on `test/narrow_arg_test`, callees built by the system compiler and kept out of line): a member function indexing an array with a `uint8` enum (Jolt's shape), `uint8`, `int8` and `uint16` enums, a 32-bit enum, plain `uint8_t`/`int8_t`/`uint16_t`/`short`/`bool`, and all kinds mixed among a `long` and a `double`; 200 rounds each with the stack disturbed between calls. It also reads the thunk module the engine was given: each callee is declared with `i32`, each extension matches the type's signedness, and no enum appears as a record in a declaration or a call. On `main` the child segfaults.
+- `runtests.jl` green, `unit.jl` 5937/5937, full `devtests.jl` 4708 pass with the 1 broken `main` has.
+- `test/tools/abi_fuzz.jl --seeds=1:30`, `main` against this branch: 1386 result rows each, identical apart from timings.
+
+**Jolt** (a copy of the Hub's package as built on `main`, re-wrapped on this branch): its `test_deep.jl` with an added check that calls `JPH_PhysicsSystem_GetNumActiveBodies` and `JPH_BodyManager_GetNumActiveBodies` once per step for 200 steps and compares each with the field `mNumActiveBodies[0]`. With the Hub's current wrapper the process segfaults in that check; re-wrapped, all 400 calls agree and the rest of the test passes.
+
+### 2026-11-16: a 16-byte SIMD vector takes part in the SysV eightbyte merge (#114)
+
+- `SysVRecordABI`: a 16-byte vector member is a `:vec16` leaf, (SSE, SSEUP), merged like any class: SSEUP against SSE is SSE, against INTEGER it is INTEGER, and an SSEUP left with no SSE below it becomes SSE. Only where (SSE, SSEUP) survives the merge (a vector alone, or beside a member covering one eightbyte, e.g. `union { __m128; double; }`) is the record still `:unstated` and trapped.
+- AAPCS64 refuses a `:vec16` leaf exactly as it refused the old `:unstated` one (a record holding a vector is not modelled there); Win64 does not read this classifier.
+- Not built, logged in CLAUDE.md: a record that IS one 16-byte vector by value, which needs a vector-typed call statement in the dialect.
+
+**Tests**
+- `test_sysv_abi_oracle.jl`: five union-with-vector records added to the table diffed against LLVM's ABI library (LLVM 23); four agree as register classes, and the vector-beside-a-double is the refusal it should be. 1961/1961.
+- `test_simd_union_live.jl` (dev, on `test/simd_union_test`, callee built by the system compiler): the float union both ways, among other int/double/float arguments, the integer union, the union one record down, member functions, and the lone vector still refused. Every lane is checked from a child.
+- `runtests.jl` green, `unit.jl` 5930/5930, full `devtests.jl` 4652 pass with the 1 broken `main` has.
+- `test/tools/abi_fuzz.jl --seeds=1:30`, before (`main`) and after: 1386 result rows each, identical apart from timings.
+
+**Jolt** (a copy of the Hub package, built cold on a branch merging this with #112 and #113, with the header override and the CPU-compute exclusion removed from its recipe):
+- A like-for-like re-wrap of one metadata: 413 trap stubs on `main`, 4 with this change, none of them vector types.
+- The full build's wrapper has no vector trap left. What remains: 669 `align_val_t` (aligned `operator new`/`delete` overloads), 52 `Mat44` and a few other 64-byte records, 6 unknown classes, and 3 singles.
+- Jolt's `test_deep.jl`, with its nine shim calls replaced by the direct ones (`JPH_BodyInterface_GetCenterOfMassPosition`, `GetLinearVelocity`, `SetLinearVelocity`, `AddImpulse`, `SetAngularVelocity`, `GetAngularVelocity`, `SetPosition`, `GetPosition`): 145/145, including the HelloWorld trajectory bit for bit against the same scene in C++.
+
+### 2026-11-16: a fragment header no longer takes the forced unit's rows with it (#113)
+
+- `generate_inline_definitions` compiles the unit's include block by itself before any row is judged. When it fails, each header is compiled alone, in parallel (`check_headers!`, the check that used to run serially and only after a round that named no row), and dropped from every row's list; a row left with no header is skipped as "its header does not compile on its own (<header>: <error>)". The default-argument rows follow the same headers.
+- The wrap report groups that reason apart from rows that do not compile themselves.
+- Cost: one extra `-fsyntax-only` compile of the include block per build that has a forced unit; the per-header pass runs only when that fails.
+
+**Tests:** `test_fragment_header_live.jl` (dev, on `test/fragment_header_test`: two ordinary classes and one declared through a begin/end pair; the ordinary rows are forced and run, the fragment's rows are skipped for their header, nothing is blamed on a row). On `main` the same fixture skips an innocent member, `Plain::twice`, as "does not compile: expected '}'". `test_inline_methods.jl` covers the report's grouping. `runtests.jl`, `unit.jl` and `devtests.jl --area=build,dwarf,cpp` green.
+
+Jolt itself was not rebuilt on this branch alone; the Hub can restore `-DJPH_USE_CPU_COMPUTE` and the three excluded paths once this is merged.
+
+### 2026-11-16: an enumerator above typemax(Int64) no longer ends the wrap (#112)
+
+- `_is_bitflag_enum` works in `Int128` and answers `false` for a value beyond that; it never throws. The same function is what `TypeImports` asks, so that path is covered too.
+- Nothing after the check needed changing: an enum over a 64-bit unsigned type is emitted as `OpenEnum{UInt64}` (or `const E = UInt64` for a flag set), and the value is written as a literal that converts.
+- Not changed, logged in CLAUDE.md: `[wrap] exclude_symbols` filters functions and globals and does not reach enums or records, which is why the Hub's attempt to exclude the enum "matched nothing".
+
+**Tests:** `test_c_generator_policies.jl` (the Jolt value set is not a flag set; a mask through bit 63 is; a value beyond any C type is `false`, not an error), `test_wide_enums_live.jl` (dev, on `test/wide_enum_test`: the wrap completes, `0xffff000000000000` round-trips through the library both ways and prints by name, a flag set through bit 63 is an integer alias, an ordinary flag set is unchanged). `runtests.jl`, `unit.jl` (5934/5934) and `devtests.jl --area=dwarf,cpp,c` (1785 pass, 1 broken as on `main`) green.
+
+Jolt itself was not rebuilt here; the Hub can retire `overrides/` once this is merged.
+
+### 2026-11-15: a call that leaves default arguments out is bound (#111)
+
+- `_default_argument_plan`: for every public constructor and member function a library record declares (`record_abi[…]["methods"]`) and every proper prefix of its parameters, one candidate row. The unit writes each as a function in namespace `replibuild_default` that makes the call on `Class* self` (`self->f(a0, …)`, or placement new for a constructor). A call the header has no defaults for is a compile error on its row, which the unit's row tracing drops silently; one that compiles has had its defaults filled in by clang and is the short call's entry point.
+- **Which overload:** the arguments have exactly the member's parameter types, so C++ either takes that member or calls the call ambiguous (dropped). A prefix another member of the class declares in full is never generated; that call is that member's.
+- **No undefined symbols:** a row is kept only when the member it calls is defined by the library or by the unit itself (read off the unit's IR).
+- **Identity in the metadata:** the function's symbol is demangled as `Class::f(prefix)` before the function entries are built, and `_apply_default_argument_identity!` names its first parameter `this`. Both receiver gates, `_julia_function_name`, `[wrap.rename]` and `exclude_symbols` then treat it as the method with fewer parameters, so it becomes one more method of the member's Julia function. Parameter names come from the member's own definition; types and return type are the function's own DWARF. The entry carries `default_arguments` (`of`, `omitted`), and the metadata's `default_arguments.bound` lists every row with its symbol.
+- **Not covered** (logged in CLAUDE.md): a static member's short call (its function is removed, since it takes an object the member does not), a free function's, an operator's, a class template specialization's members, graph mode.
+- A package gets these on a rebuild, not a re-wrap.
+
+**Tests:** `test_default_args.jl` (unit: candidate rows, each row's line, row tracing, the identity rewrite and what it removes), `test_default_args_live.jl` (dev, on `test/default_arg_test`: an out-of-line and a header-only constructor, `setLimit` with two to five arguments, an overload beside a defaulted member, a by-value record returned through the short call, and no binding where there is no default, where the short call is another member's, for a static and for a protected member; values of the omitted arguments read back through the library from a child). `runtests.jl`, `unit.jl` (5895/5895) and `devtests.jl --area=build,dwarf,cpp` (1799 pass, 1 broken as on `main`) green.
+
+**Bullet3** (a copy of the Hub package, built on this branch): 4,150 candidate calls, 181 bound, of 143 functions. Through the wrapper (9/9): `btDefaultMotionState(start)` gives an identity centre-of-mass offset; `btRigidBodyConstructionInfo(mass, ms, shape)` a zero local inertia; `setLimit(lo, hi)` softness 0.9, bias 0.3, relaxation 1.0; `stepSimulation(dt)` one step of 1/60 (the body falls by g·dt²); `btDbvtBroadphase()` builds. `test_deep.jl` 45/45. The build with warm IR took 182 s against 171 s before; `libbullet3.so` 10.2 → 10.3 MB.
+
+### 2026-11-15: a class-nested type also answers to the name its functions carry (#110)
+
+- The C++ wrapper emits `const btCollisionWorld_ClosestRayResultCallback = ClosestRayResultCallback` for every emitted record declared inside a class, after the layout tables, and keys `STRUCT_SIZES` / `STRUCT_OFFSETS` by both names (`Wrapper._nested_type_aliases`). The alias is `sanitize(scope::name)`, which is the prefix `_julia_function_name` gives the type's functions.
+- Additive only. The bare name does not change (consumers use it), and a wrapper with no class-nested type is byte for byte what it was.
+- No alias when: the scope is a namespace alone (`ns::T` stays `T`), the name has distinct definitions (`conflict`) or more than one scope, the enclosing class has no entry in the metadata, or the module already binds the alias (a free function `World_Mark` beside a nested `World::Mark`).
+- This does not disambiguate two classes that each nest a type of the same name: those are still one bare key, marked `conflict` when their layouts differ, and get no alias. That stays the open problem in CLAUDE.md. Nested enums are not aliased. The aliases are not exported.
+- The scope was already in the metadata (`scope` / `scopes`, enclosing records included), so this needs a re-wrap, not a rebuild.
+
+**Tests:** `test_nested_type_aliases.jl` (unit: which records qualify, the section's text, the tables), `test_nested_type_aliases_live.jl` (dev, on `test/nested_type_test`: the alias is the type, both names key the layout, one name through storage, constructor, method and read-back, a taken name not rebound). `runtests.jl`, `unit.jl` (5764/5764) and `devtests.jl --area=dwarf,cpp` (1282/1282) green before `main` was merged in; the merge conflicted only in `test/suites.jl` (adjacent lines), and `runtests.jl` and the unit file are green after it.
+
+**Bullet3** (a copy of the Hub package, re-wrapped): 73 nested types gain a qualified name (`btCollisionWorld_RayResultCallback`, `btCollisionWorld_LocalRayResult`, `btRigidBody_btRigidBodyConstructionInfo`, …); the diff against the previous wrapper is the alias section and the extra table keys only; `test_deep.jl` 45/45.
+
+### 2026-11-15: a fixed-width C integer parameter relaxes like `int` (#109)
+
+- `int32_t` is `Int32` in the metadata, which the relaxed list did not name, so `add_i32(10, 32)` was a MethodError (an `Int` literal is not an `Int32`) and so was an enumerator. GeneratorC and the C arm of the varargs path's fixed parameters now read one list, `_C_INTEGER_PARAM_CTYPES`: the C aliases and `Int8`…`UInt64`. Out of range is an `InexactError` from the body's conversion.
+- C++ is unchanged.
+
+**Tests:** `test/c_test/verify.jl` (`add_i32(10, 32)`, `add_i32(OP_DIV, OP_SUB)`, the out-of-range throw). `unit.jl` (5731/5731) and `devtests.jl --area=c` green on the branch before `main` was merged into it; the merge touched no file this commit does.
+
+### 2026-11-15: the build defines the library's inline member functions (#108)
+
+- The DWARF parser writes every member function a record declares to `record_abi[name]["methods"]` (the constructor rows' facts plus `virtual`).
+- `_inline_method_plan`: declared minus defined, for public, non-virtual members, spelled from the demangled name (`_method_spelling`). The forced unit takes each address through `replibuild_force::args<A...>::m` / `mc`, which picks the overload with exactly those parameters (`const` or not, a static member through the function-pointer overload) and deduces the return type, into a `used` constant. The symbols join the sidecar and the export rewrite. Metadata gains `inline_methods` (forced rows with `emitted`, skipped rows with reasons) and the wrap report names both.
+- `generate_inline_definitions` replaces the body of `generate_inline_constructors` (kept as a wrapper). Every row is one line of the unit, and a failed compile is traced to rows by the lines its diagnostics name, then compiled again; only constructors, whose errors sit in the placement-new helper and name no row, fall back to one compile per row.
+- **A member the unit's IR only declares is skipped** ("declared in its header with no body there"): its address in a constant is a data relocation, and the library would not load. The probe compiles to IR for this. Negative-checked by neutering the read: the fixture's library then fails to load on `_ZN2im4Body12declaredOnlyEi`.
+- **A class template specialization's members are not forced**; listing the specialization in `[types] templates` instantiates them. Forced, 2,990 of Bullet's 4,999 undefined inline members were `btAlignedObjectArray<T>` and `btAlignedAllocator<T, 16>` over 216 specializations. This is the scope question the report left to the engine; it is one constant (`_TEMPLATE_MEMBER_SKIP`) to reverse.
+- Passed over silently: constructors and destructors, virtual members (emitted with the vtable), private, protected, implicit and deleted members. Not covered, logged in CLAUDE.md: free inline functions and operators (no class DIE declares them), inline destructors, volatile or ref-qualified members, graph mode.
+- A package gets its inline methods on a rebuild, not a re-wrap: older metadata has no `methods` rows.
+
+**Tests:** `test_inline_methods.jl` (unit: parser rows, spelling, plan, unit text, diagnostic-to-row tracing, the IR reading, the report), `test_inline_methods_live.jl` (dev, on `test/inline_method_test`: 15 members forced and called from a child, including a const/non-const pair, an overload set, a static, an operator and an `always_inline` member). `test_by_value_crossing.jl` and `test_memberless_records.jl` set the new `methods` key aside where they state an entry whole. `runtests.jl` and `devtests.jl --area=build,dwarf,cpp` green; `unit.jl` ran 5817 pass with those four assertions failing, which the last commit fixes (both files re-run green; the full unit suite was not re-run after it).
+
+**Bullet3** (a copy of the Hub package, built on this branch):
+
+| | before | after |
+|---|---|---|
+| functions in the wrapper | 5,576 | 7,365 |
+| `libbullet3.so` | 8.9 MB | 10.2 MB |
+| `Bullet3.jl` | 4.75 MB | 5.95 MB |
+| `test_deep.jl`, whole process | 24 s | 34 s |
+
+2,009 member functions of 190 classes forced. All 24 methods the report lists are bound, `test_deep.jl` is 45/45, and the report's own checks pass through the wrapper (11/11): `setLinearVelocity` then `getLinearVelocity`, `applyCentralImpulse` on a 2 kg body, `setFriction`/`setRestitution`, `isActive`, `btTransform::getOrigin`, hinge `setLimit` then `getLowerLimit`, `setBreakingImpulseThreshold`, `isEnabled`. A build with warm IR takes about 170 s, most of it #105's per-row constructor fallback. Clipper2 was not rebuilt.
+
+### 2026-11-15: `[types] records` makes a class no source mentions visible (#107)
+
+- New key `[types] records = ["btDefaultMotionState", "ns::Class"]`. A generated unit (`replibuild_records.cpp`, `Compiler.generate_visible_records`) includes `[wrap] shim_headers` then `[types] template_headers` and instantiates `replibuild_force::record<T>(T*)` per entry. It is compiled in the first pass beside the templates TU, so the first extraction sees the class and the inline-constructor pass forces what it declares.
+- An entry that does not compile against those headers (a misspelled name, a declared-only class, a missing header) is a build error naming each bad entry with the compiler's error; the helper takes `sizeof(T)` so a declared-only name cannot pass silently.
+- An entry that compiles and still has no definition in the metadata (constructor homing under plain `-g`) is a warning naming it and the flag to add.
+- The key is in `Discovery.PRESERVED_TOML_KEYS`, round-trips through `save_config`, and is in `docs/src/config.md`.
+- Not for a class template: a specialization goes in `[types] templates`, whose `template class T;` line is invalid for a non-template, which is why that key could not do this.
+- Seen on the way, not changed: #105's helper struct (`replibuild_force::ctor_impl<true, T, A…>`) gets a memberless-record entry and is emitted as a `struct ctor_impl_true_…` in the wrapper.
+
+**Tests:** `test_visible_records.jl` (unit: the key, the unit's text, the name lookup), `test_visible_records_live.jl` (dev, on `test/visible_record_test`: not listed → absent; listed → a type, the inline constructor forced and called from a child; plain `-g` → the warning; a typo and a declared-only name → the build error), `test_toml_preservation.jl`. `runtests.jl`, `unit.jl` (5761/5761) and `devtests.jl --area=build,dwarf,cpp` green.
+
+**Bullet3** (a copy of the Hub package, `shims/visible_records.cpp` dropped, `records = ["btDefaultMotionState"]` added): 502 constructors of 331 classes planned, which is the report's figure with the shim; `btDefaultMotionState_btDefaultMotionState` wraps; `test_deep.jl` 45/45. The Hub recipe itself is not changed here.
+
+### 2026-11-15: a C wrapper's integer parameter takes an enum (#106)
+
+- GeneratorC and the C arm of the shared varargs path's fixed parameters spell a C integer parameter `Union{Integer, Base.Enum}` (`_C_INTEGER_PARAM` in `Wrapper/Utils.jl`). The body's conversion (`Cint(key)`) is Base's for any `Enum`, so nothing else changes. The enum itself is still not an integer: `KEY_SPACE + 1` stays an error.
+- C++ keeps `::Integer`: an overload set can hold `f(int)` beside `f(E)`, whose `::Any` method the union would take the enum from.
+- Not changed, and found on the way: a fixed-width parameter (`int32_t`, metadata `julia_type` `Int32`) is typed strictly as `Int32`, so it takes neither an enum nor an `Int` literal.
+- Every C wrapper's text changes on its next wrap (the parameter annotation), with no change in what it accepted before.
+
+**Tests:** `test_c_generator_policies.jl` (the emitted signature), `test/c_test/verify.jl` (`identity(OP_MUL)` live, with `OP_MUL isa Integer` false). `runtests.jl`, `unit.jl` (5731/5731) and `devtests.jl --area=c` green. A copy of the Hub's raylib re-wrapped on this branch: `IsKeyPressed(KEY_F)`, `IsKeyDown(KEY_SPACE)`, `IsMouseButtonDown(MOUSE_BUTTON_LEFT)` and `TraceLog(LOG_INFO, …)`'s signature all take the enum.
+
+### 2026-11-15 — The build defines a library's declared-but-undefined inline constructors (#105)
+
+A constructor declared in a class and defined by no translation unit of the library (inline in a header, used nowhere in the library's own code) is now defined by the build: after the first link, a generated unit (`replibuild_ctors.cpp`) includes the record's header and odr-uses each such constructor through placement new, the library is relinked with it and the metadata extracted again. The constructors then wrap like any other (`Class_Class(this, args…)`), `Managed`/factory rules included. The class and parameters are spelled from the demangled DWARF key; a constructor template, a deleted, private, protected or implicit one, a conflicted name, a record with no header, an unspellable name, one `exclude_symbols` drops and a header that does not compile alone are skipped and named in the wrap report; an abstract class is declined by the unit's guard and reported. Hidden definitions are made exportable at link on ELF and PE. Found on the Hub's bullet3 (`btSphereShape`, `btDefaultMotionState`, `btRigidBodyConstructionInfo`), where a hand-written shim stood in. Needs the class's definition in the DWARF (`-fstandalone-debug` or `-fno-use-ctor-homing` under constructor homing). Tests: `test_inline_constructors.jl`, devtests `test_inline_ctors_live.jl`.
+
+### 2026-11-15: the IR sanitizer reads a global's type by bracket balance (#104)
+
+The LTO copy of a C library cut any exported global whose type contains a space (arrays of literal structs, nested arrays, packed structs, quoted C++ names) at the first space, so the module failed to assemble and `<lib>_lto.bc` was never written (Hub wasm3, `GENERATOR-lto-global-type-truncated.md`). The type is now read by bracket depth. A declaration keeps `thread_local` and `addrspace`. A type that can't be delimited keeps its definition, with a warning. The keyword strips for LLVM 19 attributes no longer eat a function named `range`, `captures`, … at its definition and calls. Test: `test_ir_sanitize_globals.jl` (unit), which parses the sanitized module in Julia's own libLLVM.
+
+### A std::string parameter takes a Julia string (2026-11-15) (#103)
+
+A function taking `const std::string&` or `std::string` by value took the object's byte stand-in, which a caller cannot build. Now a Julia string is built into a real `std::string` by the wrapper and ended after the call.
+
+- The build records, beside the string's destructor, the declared constructor that builds from a `const char*` and a length (`_string_constructor`, from the record's own DWARF declarations; libstdc++'s allocator-taking form and libc++'s two-argument form both). A package gains it on a rebuild.
+- `StdStrings.string_arg` builds the object in a slot (the constructor found per host at first use, through the library's handle), the wrapper passes its address, and `release!` ends it in a `finally`, so a C++ throw still ends it. A pointer to an existing object passes through unended.
+- The position is typed `Union{AbstractString, Ptr{Cvoid}, STLWrappers.CppString}`, in the loop and the overload prediction alike; a `const char*` overload beside it stays its own method. A function taking one goes to Tier 2 even when `noexcept`.
+- What cannot be built keeps the stand-in with the reason: old metadata (rebuild), a wide string, a non-`const` reference, no such constructor. A host whose runtime lacks the constructor raises, naming the function.
+- Tests: `test_std_strings.jl` (unit), devtests `test_sret_in_caller_buffer.jl`; pugixml rebuilt, `as_wide` takes a `String`.
+
+### A deleting destructor is `<X>_delete_<X>` (2026-11-14) (#102)
+
+D0, D1 and D2 were all `<X>_destroy_<X>`. A class whose only destructor in the library is the deleting one (an implicit virtual destructor at `-O2`: 93 of Bullet's 259, box2d 20, msdfgen 3, tinyxml2 2, fmt 1) bound it under the non-freeing name with an ordinary docstring, and a caller who freed afterwards double-freed.
+
+- `_julia_function_name` spells a D0 as `delete_`, by the symbol alone (`_is_deleting_destructor`); D1 and D2 keep `destroy_`. Every D0 is bound, beside `destroy_` where the class has both.
+- A `delete_` docstring says it frees through the class's `operator delete`, that the object must have come from that allocator and must not be freed again, and whether a `destroy_` exists.
+- The wrap report names each class whose only destructor is D0.
+- A consumer calling the old name on such a class fails to load instead of corrupting the heap. Tests: `test_cpp_finalizers.jl`, devtests `test_cpp_finalizers_live.jl`, `test_function_name_derivation.jl`; bullet3 and box2d rebuilt.
+
+### Every defined library record has an entry (2026-11-14) (#101)
+
+A C++ class that adds methods and no data member (Bullet's `btBoxShape`, `btSphereShape`, `btQuaternion`, `btVector4`: 39 of 603) had no `struct_definitions` entry, so no `STRUCT_SIZES` size, an empty Julia type, a trap for every by-value crossing, and every class deriving from it lost the bases above it.
+
+- The parser gives every defined library record an entry, `members = []` and `base_classes` included (`_memberless_record_entry`: a definition of more than zero bytes, not anonymous, not a lambda's closure). Nothing is flattened in the metadata: GeneratorCpp flattens the non-virtual bases into fields, the SysV classifier reads the bases' leaves, and StructGen pads the thunk body. A non-virtual base is a hard dependency of the struct order.
+- An empty class (a stateless functor) keeps the convention's verdict ahead of its one-byte entry: dropped on SysV, a register pad on Win64 and AArch64; `is_ccall_safe` sends it to the thunk. A record with a virtual base is sized and constructible, and not laid out from that base.
+- A record with no field anywhere is its bytes at its DWARF size, never an 8-byte placeholder.
+- A Hub package gains the entries on a rebuild. Tests: `test_memberless_records.jl` (unit), devtests `test_memberless_live.jl`; bullet3 rebuilt, 24/24.
+
+**CI follow-up (arm64).** The first run's `ubuntu-24.04-arm` runtests failed in `test_memberless_records.jl`: `thunk_crossings` asked the convention for a class on every `:layout` crossing, a `DW_CC_pass_by_reference` record included, and AAPCS64 cannot class a record past a virtual base, so `VB`, which crossed by address while it had no entry, trapped there. A by-reference record is a pointer on every convention and needs no class: the check is skipped for it, parameter and return (second commit), and the test now asserts the three conventions by name.
+
 ## v4.5.0 (2026-11-14)
 
 Version 4.4.0 → 4.5.0; Julia compat `1.12` (CI tests 1.12 and 1.13, nothing
