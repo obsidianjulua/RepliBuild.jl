@@ -119,6 +119,7 @@ const TESTS = TestFile[
     T("test_enum_underscore_name.jl", :unit, [:c, :cpp]),
     T("test_enum_alias_collision.jl", :unit, [:c, :cpp]),
     T("test_open_enums.jl", :unit, [:c, :cpp]),
+    T("test_enumerator_values.jl", :unit, [:c, :cpp]),
     T("test_enumerator_collisions.jl", :unit, [:c, :cpp]),
     T("test_function_name_derivation.jl", :unit, [:c, :cpp]),
     T("test_local_entity_names.jl", :unit, [:dwarf]),

@@ -1289,7 +1289,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     name = _sanitize_cpp_type_name(get(enumerator, "name", "Unknown"))
                     name in seen_names && continue
                     push!(seen_names, name)
-                    push!(members, name => get(enumerator, "value", 0))
+                    push!(members, name => _enumerator_value(get(enumerator, "value", 0), julia_underlying))
                 end
 
                 # Same member set already emitted under another name? Alias it
