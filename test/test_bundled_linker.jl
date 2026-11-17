@@ -43,6 +43,12 @@ end
         # Not an ld.lld that happens to be on PATH: no flag at all.
         @test _BL_C._bundled_linker(:c; jll_clang = _bl_have) === nothing
     end
+    # Nor the JLL's copy, which is what `Tools` resolves to under `system`
+    # on a machine with no ld.lld installed (most of them).
+    withenv("REPLIBUILD_TOOLS" => "system", "REPLIBUILD_TOOL_LD_LLD" => nothing, "PATH" => "") do
+        @test _BL_T.tool_source("ld.lld") in (:jll, :missing)
+        @test _BL_C._bundled_linker(:c; jll_clang = _bl_have) === nothing
+    end
     withenv("REPLIBUILD_TOOLS" => "system", "REPLIBUILD_TOOL_LD_LLD" => "/opt/x/ld.lld") do
         # An explicit override is asked for by name and wins either way.
         @test _BL_C._bundled_linker(:c; jll_clang = _bl_have) == (Sys.islinux() ? "/opt/x/ld.lld" : nothing)

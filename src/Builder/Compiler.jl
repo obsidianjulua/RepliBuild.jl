@@ -204,7 +204,11 @@ function _bundled_linker(language::Symbol; jll_clang::Function = _jll_clang)::Un
     Sys.islinux() || return nothing
     jll_clang() === nothing && return nothing
     r = Tools.resolve("ld.lld")
-    return r.source in (:jll, :override) ? r.path : nothing
+    r.source === :override && return r.path
+    # `system` is the driver's own linker whether or not an ld.lld is
+    # installed: under that order `Tools` falls back to the JLL's copy where
+    # PATH has none, and that fallback is not what was asked for here.
+    return (Tools.order() === :jll && r.source === :jll) ? r.path : nothing
 end
 
 "The driver flag that selects `_bundled_linker`, or nothing."
