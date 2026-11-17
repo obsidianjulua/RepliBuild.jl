@@ -118,10 +118,15 @@ function _jll_env(name::String, p::Provider, base)::Vector{Pair{String, String}}
         # when told where they are.
         root = try String(Git_jll.artifact_dir) catch; "" end
         if !isempty(root)
-            core = joinpath(root, "libexec", "git-core")
-            isdir(core) && push!(env, "GIT_EXEC_PATH" => core)
-            templates = joinpath(root, "share", "git-core", "templates")
-            isdir(templates) && push!(env, "GIT_TEMPLATE_DIR" => templates)
+            # Git for Windows keeps both under `mingw64`.
+            for prefix in (root, joinpath(root, "mingw64"))
+                core = joinpath(prefix, "libexec", "git-core")
+                templates = joinpath(prefix, "share", "git-core", "templates")
+                isdir(core) || continue
+                push!(env, "GIT_EXEC_PATH" => core)
+                isdir(templates) && push!(env, "GIT_TEMPLATE_DIR" => templates)
+                break
+            end
         end
         cert = joinpath(dirname(Sys.BINDIR), "share", "julia", "cert.pem")
         (isfile(cert) && !haskey(base, "GIT_SSL_CAINFO")) && push!(env, "GIT_SSL_CAINFO" => cert)

@@ -130,15 +130,23 @@ end
         end
         if _TR.tool_source("git") === :jll
             git = envof(_TR.tool_cmd(`git --version`))
-            @test isdir(git["GIT_EXEC_PATH"])
+            # Where the artifact has a helper directory, git is told of it.
+            haskey(git, "GIT_EXEC_PATH") && @test isdir(git["GIT_EXEC_PATH"])
+            Sys.islinux() && @test haskey(git, "GIT_EXEC_PATH")
         end
         # cmake and ninja start the system compiler: no library path of Julia's
         # in front of the system's.
         for name in ("cmake", "ninja")
             cmd = _TR.tool_cmd(`$name --version`)
             cmd.env === nothing && continue
-            e = envof(cmd)
-            @test get(e, _TR.LIBPATH_KEY, "") == get(ENV, _TR.LIBPATH_KEY, "")
+            got = _TR._env_get(envof(cmd), _TR.LIBPATH_KEY)
+            base = _TR._env_get(ENV, _TR.LIBPATH_KEY)
+            # Unchanged, or (cmake, where the loader path IS `PATH`) the
+            # process's own with ninja's directory after it. Never a library
+            # directory of the JLL's in front.
+            appended = name == "cmake" && startswith(got, base) &&
+                       isdir(String(last(split(got, _TR._PATHSEP))))
+            @test got == base || appended
         end
     end
     @test ENV == before
