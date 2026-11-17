@@ -1,0 +1,17 @@
+# What a statically linked libJLCS exports (JLCS_STATIC_LLVM=ON, ELF only).
+#
+# With LLVM and MLIR linked in as archives, every one of their symbols would
+# otherwise be in this library's dynamic table, next to Julia's own libLLVM
+# and any system LLVM in the process. Only what is called from outside is
+# kept: the MLIR C API (Julia binds mlirContextCreate and friends from this
+# library), the jlcs C API (Julia, JIT'd thunks and the AOT thunks library),
+# and the dialect's registration entry point. Mangled C++ names start with
+# `_Z` and match none of these patterns.
+{
+  global:
+    mlir*;
+    jlcs*;
+    registerJLCSDialect;
+  local:
+    *;
+};

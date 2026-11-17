@@ -7,6 +7,7 @@ module BuildBridge
 
 # Import modules already loaded by RepliBuild.jl
 import ..LLVMEnvironment
+import ..Tools
 
 export run_command, execute, capture,
        find_executable, command_exists,
@@ -103,6 +104,22 @@ Automatically uses LLVM environment for LLVM/Clang tools
 If command is an LLVM tool name, resolves to full path from toolchain
 """
 function execute(command::String, args::Vector{String}=String[]; capture_output::Bool=true, use_llvm_env::Bool=true)
+    # A non-LLVM tool (nm, readelf, objdump, cmake, ...) is the copy `Tools`
+    # chose. What that copy needs goes on last: the toolchain overlay sets
+    # PATH and the loader path outright, and would drop it.
+    tool = Tools._tool_of(command)
+    if tool !== nothing
+        cmd = `$(Tools.tool_path(tool)) $args`
+        if use_llvm_env
+            cmd = try
+                LLVMEnvironment.llvm_cmd(cmd)
+            catch
+                cmd
+            end
+        end
+        return _run_command_impl(Tools.with_env(tool, cmd), capture_output)
+    end
+
     # Try to resolve LLVM tool path if it looks like an LLVM tool
     resolved_command = if use_llvm_env && (startswith(command, "clang") || startswith(command, "llvm-"))
         tool_path = LLVMEnvironment.get_tool(command)

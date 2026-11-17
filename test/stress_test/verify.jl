@@ -103,7 +103,7 @@ end
 
 const MLIR_AVAILABLE = try
     using RepliBuild
-    isfile(RepliBuild.MLIRNative.libJLCS)
+    isfile(RepliBuild.MLIRNative.libJLCS_path())
 catch
     false
 end
@@ -223,7 +223,7 @@ if MLIR_AVAILABLE
                 # `dlopen(abspath(lib_path))`.
                 cc      = RepliBuild.LLVMEnvironment.get_tool("clang++")
                 lib_dir = joinpath(@__DIR__, "julia")
-                jlcs    = RepliBuild.MLIRNative.libJLCS
+                jlcs    = RepliBuild.MLIRNative.libJLCS_path()
                 thunks_so = joinpath(lib_dir, "libstress_test_thunks." * Libdl.dlext)
                 # Match ThunkBuilder: PE has no RUNPATH, sibling DLLs resolve
                 # from the loading module's directory.

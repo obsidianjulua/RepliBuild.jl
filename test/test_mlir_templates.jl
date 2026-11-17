@@ -815,7 +815,7 @@ end
 
         # JIT-execute against the fixture (libJLCS supplies the EH runtime
         # hooks; libstdc++ personality resolves from the loaded process).
-        jit = create_jit(mod_jit, shared_libs=[LIB_PATH, RepliBuild.MLIRNative.libJLCS])
+        jit = create_jit(mod_jit, shared_libs=[LIB_PATH, RepliBuild.MLIRNative.libJLCS_path()])
         @test jit != C_NULL
 
         buf = zeros(UInt8, 32)

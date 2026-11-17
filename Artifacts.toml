@@ -1,0 +1,22 @@
+[[JLCS]]
+arch = "aarch64"
+cxxstring_abi = "cxx11"
+git-tree-sha1 = "90570ed11c60a8769722a0d87257ed234fe0473c"
+lazy = true
+libc = "glibc"
+os = "linux"
+
+    [[JLCS.download]]
+    sha256 = "93a541e8acc2a65887f7c02f6f37a18779eedb70da0023b8fe459a05dcfdb961"
+    url = "https://github.com/obsidianjulua/RepliBuild.jl/releases/download/jlcs-v4.5.0/JLCS.v4.5.0.aarch64-linux-gnu-cxx11.tar.gz"
+[[JLCS]]
+arch = "x86_64"
+cxxstring_abi = "cxx11"
+git-tree-sha1 = "025ba18dd04526c15701a51a6fef24dc3098a717"
+lazy = true
+libc = "glibc"
+os = "linux"
+
+    [[JLCS.download]]
+    sha256 = "a477368d1a9787221b534412ef2ea329bf476bdfb0c9dcc64823009f1744b01c"
+    url = "https://github.com/obsidianjulua/RepliBuild.jl/releases/download/jlcs-v4.5.0/JLCS.v4.5.0.x86_64-linux-gnu-cxx11.tar.gz"

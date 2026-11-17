@@ -18,6 +18,7 @@ import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_d
                                 get_library_name, get_module_name, is_parallel_enabled,
                                 is_cache_enabled, get_cache_path, with_include_dirs
 import ..BuildBridge
+import ..Tools
 import ..LLVMEnvironment
 import .._read_json
 import ..stl_container_size, .._scope_suffixes, .._outside_template_args, ..INTERNAL_TYPE_BLOCKLIST
@@ -2909,9 +2910,9 @@ function _demangle(symbol::AbstractString)
         return nothing
     end
     for tool in ("c++filt", "llvm-cxxfilt")
-        Sys.which(tool) === nothing && continue
+        (Tools.known(tool) ? Tools.have(tool) : Sys.which(tool) !== nothing) || continue
         out = try
-            strip(read(pipeline(`$tool`, stdin = IOBuffer(sym * "\n")), String))
+            strip(read(pipeline(Tools.tool_cmd(`$tool`), stdin = IOBuffer(sym * "\n")), String))
         catch
             ""
         end
@@ -5685,7 +5686,7 @@ STATUS_HEAP_CORRUPTION. Generated wrappers free through this DLL instead
 function _pe_crt_dll(binary_path::String)
     Sys.iswindows() || return nothing
     out = try
-        readchomp(pipeline(ignorestatus(`$(_gnu_objdump()) -p $binary_path`), stderr = devnull))
+        readchomp(pipeline(ignorestatus(Tools.tool_cmd(`$(_gnu_objdump()) -p $binary_path`)), stderr = devnull))
     catch
         return nothing
     end
@@ -5776,7 +5777,7 @@ function _pe_exported_names(binary_path::String)
     dumper === nothing && return nothing
 
     out = try
-        readchomp(pipeline(ignorestatus(`$(dumper.tool) -p $binary_path`), stderr = devnull))
+        readchomp(pipeline(ignorestatus(Tools.tool_cmd(`$(dumper.tool) -p $binary_path`)), stderr = devnull))
     catch
         return nothing
     end

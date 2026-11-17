@@ -34,8 +34,22 @@ import Libdl
 # convention, and on mingw that is `libJLCS.dll` — the `lib` prefix is kept, only
 # the extension changes — so a hardcoded ".so" pointed at a file that the build
 # had just successfully produced under a different name.
-const libJLCS_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
-const libJLCS = libJLCS_path  # Alias for convenience
+#
+# Where the library is (a local build, or the `JLCS` artifact) is decided when
+# it is first opened, by `JLCSLibrary`: `libJLCS` is what `ccall` names, and
+# `libJLCS_path()` is the same answer as a path, for everything that links
+# against the file, opens it by hand or asks whether it exists.
+import ..JLCSLibrary
+const libJLCS = Libdl.LazyLibrary(Libdl.LazyLibraryPath(JLCSLibrary.LoadPath()))
+
+"""
+    libJLCS_path(; install = true) -> String
+
+The path of the dialect library. When there is none, the local build's path,
+so an `isfile` on the result is the question "is there a libJLCS". With
+`install = false` a prebuilt library that is not on disk yet is not downloaded.
+"""
+libJLCS_path(; install::Bool = true)::String = JLCSLibrary.path(; install)
 
 """
     CXX_PERSONALITY
@@ -58,9 +72,10 @@ const CXX_PERSONALITY = Sys.iswindows() ? "__gxx_personality_seh0" :
 
 # Check if JLCS library exists
 function check_library()
-    if !isfile(libJLCS_path)
+    loc = JLCSLibrary.locate()
+    if loc.source === :missing
         error("""
-        JLCS dialect library not found at: $libJLCS_path
+        JLCS dialect library not found at: $(loc.path)$(isempty(loc.note) ? "" : "\n        (" * loc.note * ")")
 
         $(join(EnvironmentDoctor.jlcs_build_advice(), "\n"))
 

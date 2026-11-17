@@ -24,6 +24,8 @@ module EnvironmentDoctor
 import ..SRC_DIR
 import ..Compiler
 import ..BuildBridge
+import ..Tools
+import ..JLCSLibrary
 using Libdl
 
 export check_environment, ToolchainStatus, ToolStatus
@@ -110,6 +112,11 @@ const DIM    = "\e[2m"
 # =============================================================================
 
 function _find_tool(name::String)::Tuple{Bool, String}
+    # A tool `Tools` resolves is the copy a build will run, not PATH's.
+    if Tools.known(name)
+        r = Tools.resolve(name)
+        return r.source === :missing ? (false, "") : (true, r.path)
+    end
     path = Sys.which(name)
     (path !== nothing && isfile(path)) ? (true, String(path)) : (false, "")
 end
@@ -286,7 +293,7 @@ function _check_dwarf_dumper()::ToolStatus
     catch
         "unknown"
     end
-    path = something(Sys.which(d.tool), d.tool)
+    path = Tools.known(d.tool) ? Tools.tool_path(d.tool) : something(Sys.which(d.tool), d.tool)
     ToolStatus("DWARF dumper", true, true, String(path), ver, true,
         "GNU $(basename(String(d.tool))) $ver $(DIM)($(d.dwarf)info)$(RESET)";
         section=SEC_DWARF)
@@ -425,10 +432,27 @@ end
 # build.sh now stamps the llvm-config it built against; this compares that with
 # today's llvm-config and then asks the loader.
 function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
-    lib_path = joinpath(SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
+    # A probe never downloads: a prebuilt library that is not on disk yet is
+    # reported as available, and Tier 2 fetches it at first use.
+    loc = JLCSLibrary.locate(; install = false)
+    lib_path = loc.path
     rebuild = jlcs_build_advice()
-    isfile(lib_path) || return ToolStatus("libJLCS", false, false, "", "", false,
-        "dialect not built"; section=SEC_CPP, advice=rebuild)
+    if loc.source === :missing
+        pending = JLCSLibrary.artifact_hash() !== nothing && !isempty(loc.note)
+        return ToolStatus("libJLCS", false, false, "", "", false,
+            isempty(loc.note) ? "dialect not built" : "dialect not built; " * loc.note;
+            section=SEC_CPP,
+            advice=pending ? vcat(["The prebuilt library is fetched the first time Tier 2 is used."], rebuild) : rebuild)
+    end
+    if loc.source === :artifact
+        # Self-contained: LLVM and MLIR are linked in, so there is no system
+        # LLVM for it to be stale against.
+        h = Libdl.dlopen(lib_path, Libdl.RTLD_LAZY; throw_error=false)
+        h === nothing && return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", false,
+            "the prebuilt library does not load"; section=SEC_CPP, advice=rebuild)
+        return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", true,
+            "prebuilt (JLCS artifact, LLVM and MLIR linked in)"; section=SEC_CPP)
+    end
     stamp = joinpath(dirname(lib_path), "jlcs_llvm_version")
     built = isfile(stamp) ? String(strip(read(stamp, String))) : ""
     if _jlcs_stale(built, llvm_version)
@@ -603,8 +627,10 @@ function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)::To
     # print "All systems go" on a box that cannot wrap anything.
     dwarf_ok = ok("DWARF dumper") && ok("symbol reader")
     tier3 = dwarf_ok && ok("clang (JLL)") && ok("sysroot")
+    # mlir-tblgen and cmake BUILD the dialect; a prebuilt libJLCS needs neither.
+    prebuilt = any(t -> t.name == "libJLCS" && t.found && t.version == "prebuilt", tools)
     tier2 = tier3 && ok("llvm-config") && ok("clang++") &&
-            ok("mlir-tblgen") && ok("cmake") && ok("llvm-dwarfdump") && ok("libJLCS")
+            (prebuilt || (ok("mlir-tblgen") && ok("cmake"))) && ok("llvm-dwarfdump") && ok("libJLCS")
 
     status = ToolchainStatus(tools, tier3, tier3, tier2)
     verbose && _print_report(status)

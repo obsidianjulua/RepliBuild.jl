@@ -12,6 +12,7 @@ using ..ConfigurationManager
 using ..DependencyResolver
 using ..EnvironmentDoctor
 import ..Compiler
+import ..Tools
 import ..GraphMode
 using TOML
 using SHA
@@ -221,9 +222,9 @@ caching outright.
 function _get_git_dirty_digest(root::String)::String
     try
         paths = collect(_GENERATOR_DIRTY_PATHS)
-        status = read(`git -C $root status --porcelain -- $paths`, String)
+        status = read(Tools.tool_cmd(`git -C $root status --porcelain -- $paths`), String)
         isempty(strip(status)) && return ""
-        diff = read(`git -C $root diff HEAD --no-color -- $paths`, String)
+        diff = read(Tools.tool_cmd(`git -C $root diff HEAD --no-color -- $paths`), String)
         return "+dirty-" * bytes2hex(SHA.sha256(status * diff))[1:12]
     catch
         return ""

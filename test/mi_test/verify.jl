@@ -76,7 +76,7 @@ using .MiTest
         @test occursin("baseOffsets = [0 : i64, 16 : i64]", ir)
 
         # The emitted op must survive the dialect verifier (libJLCS required)
-        if isfile(RepliBuild.MLIRNative.libJLCS)
+        if isfile(RepliBuild.MLIRNative.libJLCS_path())
             ctx = RepliBuild.MLIRNative.create_context()
             try
                 mod = RepliBuild.MLIRNative.parse_module(ctx, "module {\n$(ir)\n}")

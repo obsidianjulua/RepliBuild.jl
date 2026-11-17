@@ -257,7 +257,7 @@ end
 # Every DLL a unit's load can involve: the library itself, and libJLCS for C++.
 unit_dlls(dir, lang) = vcat([joinpath(dir, "julia", f) for f in (isdir(joinpath(dir, "julia")) ?
                              readdir(joinpath(dir, "julia")) : String[]) if endswith(f, ".dll")],
-                            lang === :cpp ? [RepliBuild.MLIRNative.libJLCS] : String[])
+                            lang === :cpp ? [RepliBuild.MLIRNative.libJLCS_path()] : String[])
 
 readlog(dir) = (p = joinpath(dir, "build.log"); isfile(p) ? read(p, String) : "")
 
@@ -742,7 +742,7 @@ struct Job
 end
 
 function libjlcs_loads()
-    p = RepliBuild.MLIRNative.libJLCS
+    p = RepliBuild.MLIRNative.libJLCS_path()
     isfile(p) || return "libJLCS not built ($p)"
     h = Libdl.dlopen(p; throw_error = false)
     h === nothing && return "libJLCS does not load ($p)"

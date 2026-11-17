@@ -266,7 +266,7 @@ end
 # this fails with `undefined symbol: mlir::jlcs::SetFieldOp::build(...)`.
 
 @testset "D. no unresolved symbols (RTLD_NOW)" begin
-    lib = RepliBuild.MLIRNative.libJLCS
+    lib = RepliBuild.MLIRNative.libJLCS_path()
 
     # Fresh subprocess: this process has already dlopened the library lazily,
     # and dlopen on an ALREADY-LOADED handle returns it without upgrading the
