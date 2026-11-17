@@ -35,7 +35,6 @@ end
 @testset "every tool resolves to the copy the order names, and it starts" begin
     checked = 0
     for r in _TR.report()
-<<<<<<< HEAD
         @test r.source === _tr_expected(r.name, _TR.order())
         if r.source === :missing
             # Neither copy on this host (`ld.lld` where the JLL's does not
@@ -43,13 +42,8 @@ end
             @test r.path == r.name
         else
             @test isfile(r.path)
-            @test success(pipeline(_TR.tool_cmd(`$(r.name) --version`); stdout = devnull, stderr = devnull))
+            @test _TR._probe(_TR.tool_cmd(`$(r.name) --version`)) !== nothing
         end
-=======
-        @test r.source in (:jll, :system)
-        @test isfile(r.path)
-        @test _TR._probe(_TR.tool_cmd(`$(r.name) --version`)) !== nothing
->>>>>>> feat/jlcs-jll-recipe
         checked += 1
     end
     @test checked == length(_TR.PROVIDERS) == 8
