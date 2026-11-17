@@ -1068,7 +1068,8 @@ banner (`LLVM version 22.1.8`). One regex covers both.
 """
 function _llvm_tool_major(tool_path::AbstractString)::Int
     out = try
-        read(pipeline(`$tool_path --version`, stderr=devnull), String)
+        # A tool from a bundled directory starts only with its library path.
+        read(pipeline(Tools.with_dir_env(`$tool_path --version`), stderr=devnull), String)
     catch
         return 0
     end
