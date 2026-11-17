@@ -352,7 +352,12 @@ If you are asked to work on it:
   selects it (`Compiler._dwarf_reader`); unset is readelf, and libdw asked for
   where it cannot work is an error, never the other reader. **The two readers
   give one answer**: the five tables parsed from either are equal, which
-  devtests `test_libdw_dwarf_live.jl` holds on DWARF 4 and 5, C and C++. A tag
+  devtests `test_libdw_dwarf_live.jl` holds on DWARF 4 and 5, C and C++, and
+  `test/tools/dwarf_readers_diff.jl` checks on existing libraries (`--hub
+  <path>`: 41 Hub libraries equal, 2026-11-17). `DumpLines` produces the lines
+  as the parser asks for them, one DIE at a time, and is walked once per
+  parser pass, so the dump text is never held; a library without debug info
+  is an empty dump, as readelf's is. A tag
   or attribute the parser starts matching must be printable here
   (`test_libdw_reader.jl` checks the parser's names against `TAGS`/`ATTRS`),
   and a new value shape the parser reads must be written as readelf writes it.
@@ -845,6 +850,13 @@ the test named when you touch the area.
   BRANCH 1's trap, and GeneratorC and the shared varargs path trap with
   `_conflict_trap_body`. (`test_conflicted_names.jl`, devtests
   `test_conflict_trap_fixture.jl`.)
+- **A constant GNU readelf prints from four or eight bytes is hex**
+  (`DW_AT_count : 0x10000`; one or two bytes print in decimal). Read it with
+  `_dwarf_count`, never `(\d+)`, which takes the `0`: an array of 65536
+  elements or more had no elements and no size (lz4, miniz, pcre2, box2d,
+  libjpeg-turbo and three more Hub libraries), and a bitfield 8 KiB into its
+  record had offset 0. A fix here reaches a package on a rebuild.
+  (devtests `test_libdw_dwarf_live.jl`.)
 - **A declaration file is an absolute path, whatever the DWARF version.**
   `_dwarf_file_tables` reads each table by its own column header (DWARF 4 and
   earlier print `Entry Dir Time Size Name`; read as DWARF 5's shape, every name
@@ -1930,10 +1942,10 @@ DWARF-resolved destructors — **is** built.)
   `__tuple_leaf` bases) has the same shape as libstdc++'s and is not yet
   measured on a libc++ host.
 - libdw as the default DWARF reader (2026-11-17). It is opt-in
-  (`REPLIBUILD_DWARF=libdw`) until a Hub-wide comparison of the parsed tables
-  against readelf's has been read; `LibDW` still renders the whole dump as
-  text, so it removes the subprocess and the GNU dumper, not the parser's
-  memory (next entry). Feeding the parser DIE by DIE is the step after.
+  (`REPLIBUILD_DWARF=libdw`); John's call. Not holding the dump text is not
+  the memory fix by itself: measured peak RSS, readelf against libdw, was
+  1.68 against 1.57 GiB on Jolt and 2.41 against 2.21 GiB on llama.cpp. The
+  rest is the parser's own tables (next entry), which either reader fills.
 - `parse_dwarf_dump` holds the whole `readelf` dump and every DIE as a `Dict`.
   oneDNN's (`libonednn.so`) parse passed a 24 GB cap and was OOM-killed at
   2519a16 (2026-10-29), so a oneDNN build needs most of a 64 GB box. A streaming

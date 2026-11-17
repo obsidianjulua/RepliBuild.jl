@@ -111,6 +111,25 @@ elseif requires("libdw and readelf give one answer", :clang, :clangxx)
             end
             @test compared == length(builds)
 
+            @testset "an array of 65536 elements keeps them, from either reader" begin
+                # readelf prints a four-byte constant in hex; read as decimal
+                # it was 0, and `table` was `unsigned short[0]` with no size.
+                lib = joinpath(dir, "librecords5.so")
+                checked = 0
+                for reader in ("readelf", "libdw")
+                    members = Dict(m["name"] => m for m in _ldl_read(lib, reader)[2]["big"]["members"])
+                    @test members["table"]["c_type"] == "unsigned short[65536]"
+                    @test members["table"]["size"] == 131072
+                    @test members["tail"]["c_type"] == "char[70000]"
+                    @test members["after"]["offset"] == "0x31170"      # 201072: past both arrays
+                    checked += 1
+                end
+                @test checked == 2
+                @test _LDL_C._dwarf_count("    <e856>   DW_AT_count       : 0x10000") == 65536
+                @test _LDL_C._dwarf_count("    <e848>   DW_AT_count       : 32768") == 32768
+                @test _LDL_C._dwarf_count("    <e848>   DW_AT_name        : x") === nothing
+            end
+
             @testset "libdw needs no dumper" begin
                 lib = joinpath(dir, "libshapes5.so")
                 gone = joinpath(dir, "no-such-dumper")

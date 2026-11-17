@@ -39,7 +39,10 @@ struct Block
     data::Ptr{UInt8}
 end
 
-const libdw = Elfutils_jll.libdw
+# Elfutils_jll has no build for a host whose objects are not ELF (Windows),
+# and there the binding does not exist: the name below is then never opened,
+# because `available()` is asked first.
+const libdw = Elfutils_jll.is_available() ? Elfutils_jll.libdw : "libdw.so.1"
 
 "Whether libdw can be used on this host."
 available()::Bool = try
@@ -262,27 +265,182 @@ function _value(io::IO, a::Attr)
     end
 end
 
-function _die(io::IO, die::Base.RefValue{Die}, depth::Int, attrs::Vector{Attr}, cb::Ptr{Cvoid})
+# ── the walk, one DIE at a time ─────────────────────────────────────────────
+#
+# Nothing here holds the dump. A `Walker` keeps the open DIE at each depth
+# and the lines of the DIE it last visited; `advance!` moves one step through
+# the tree and replaces those lines. A library whose dump is gigabytes of
+# text (oneDNN's passed 24 GB with the parser's tables) is read in the
+# memory of its deepest nesting.
+
+mutable struct Walker
+    path::String
+    file::IOStream
+    dbg::Ptr{Cvoid}
+    unit::UInt64                          # offset of the next unit to open
+    stack::Vector{Base.RefValue{Die}}     # the open DIE at each depth
+    descend::Bool                         # whether the top DIE's children are still to visit
+    attrs::Vector{Attr}
+    callback::Ptr{Cvoid}
+    line::IOBuffer
+    pending::Vector{String}
+    next::Int
+    started::Bool
+    bytes::Int
+end
+
+function Walker(path::AbstractString)
+    isfile(path) || error("libdw: no such file: $path")
+    file = open(path, "r")
+    dbg = ccall((:dwarf_begin, libdw), Ptr{Cvoid}, (Cint, Cint), fd(file), 0)
+    if dbg == C_NULL
+        why = _errmsg()
+        close(file)
+        # An object built without `-g` is not an error: its dump is empty, as
+        # readelf's is, and the caller says what that means.
+        occursin("no DWARF", why) || error("libdw: cannot read DWARF from $path: $why")
+    end
+    w = Walker(String(path), file, dbg, 0, Base.RefValue{Die}[], true, Attr[],
+               @cfunction(_attr_callback, Cint, (Ptr{Attr}, Ptr{Cvoid})),
+               IOBuffer(), String[], 1, false, 0)
+    finalizer(close, w)        # a loop that stops early still releases the file
+    return w
+end
+
+function Base.close(w::Walker)
+    if w.dbg != C_NULL
+        ccall((:dwarf_end, libdw), Cint, (Ptr{Cvoid},), w.dbg)
+        w.dbg = C_NULL
+        close(w.file)
+    end
+    return nothing
+end
+
+_emit!(w::Walker) = (l = String(take!(w.line)); w.bytes += sizeof(l) + 1; push!(w.pending, l); nothing)
+
+function _die!(w::Walker, die::Base.RefValue{Die}, depth::Int)
+    io = w.line
     off = ccall((:dwarf_dieoffset, libdw), UInt64, (Ref{Die},), die)
     tag = Int(ccall((:dwarf_tag, libdw), Cint, (Ref{Die},), die))
     hex = string(off; base = 16)
     name = get(TAGS, tag, nothing)
     print(io, " <", depth, "><", hex, ">: Abbrev Number: 1 (")
     name === nothing ? print(io, "Unknown TAG value: ", string(tag; base = 16)) : print(io, "DW_TAG_", name)
-    print(io, ")\n")
+    print(io, ")")
+    _emit!(w)
+    attrs = w.attrs
     empty!(attrs)
     GC.@preserve attrs ccall((:dwarf_getattrs, libdw), Cptrdiff_t,
                              (Ref{Die}, Ptr{Cvoid}, Ptr{Cvoid}, Cptrdiff_t),
-                             die, cb, pointer_from_objref(attrs), 0)
+                             die, w.callback, pointer_from_objref(attrs), 0)
     for a in attrs
         aname = get(ATTRS, Int(a.code), nothing)
         label = aname === nothing ? "Unknown AT value: " * string(a.code; base = 16) : "DW_AT_" * aname
         # readelf pads the name to 18 columns and writes ": " after it.
         print(io, "    <", hex, ">   ", rpad(label, 18), ": ")
         _value(io, a)
-        print(io, "\n")
+        _emit!(w)
     end
     return nothing
+end
+
+# Open the next unit: its header lines and its unit DIE. False at the end.
+function _open_unit!(w::Walker)::Bool
+    next = Ref{UInt64}(0); hsize = Ref{Csize_t}(0); version = Ref{UInt16}(0)
+    abbrev = Ref{UInt64}(0); asize = Ref{UInt8}(0); osize = Ref{UInt8}(0)
+    rc = ccall((:dwarf_next_unit, libdw), Cint,
+               (Ptr{Cvoid}, UInt64, Ref{UInt64}, Ref{Csize_t}, Ref{UInt16}, Ref{UInt64},
+                Ref{UInt8}, Ref{UInt8}, Ptr{UInt64}, Ptr{UInt64}),
+               w.dbg, w.unit, next, hsize, version, abbrev, asize, osize, C_NULL, C_NULL)
+    rc < 0 && error("libdw: reading a unit of $(w.path): $(_errmsg())")
+    rc == 0 || return false
+    print(w.line, "  Compilation Unit @ offset 0x", string(w.unit; base = 16), ":"); _emit!(w)
+    print(w.line, "   Version:       ", version[]); _emit!(w)
+    print(w.line, "   Pointer Size:  ", asize[]); _emit!(w)
+    root = Ref(Die())
+    at = w.unit + hsize[]
+    ccall((:dwarf_offdie, libdw), Ptr{Die}, (Ptr{Cvoid}, UInt64, Ref{Die}), w.dbg, at, root) == C_NULL &&
+        error("libdw: no unit DIE at 0x$(string(at; base = 16)) of $(w.path): $(_errmsg())")
+    w.unit = next[]
+    push!(w.stack, root)
+    w.descend = true
+    _die!(w, root, 0)
+    return true
+end
+
+"""
+    advance!(w) -> Bool
+
+Replace `w.pending` with the lines of the next step of the walk: a unit's
+header and unit DIE, a DIE and its attributes, or the terminator that closes
+a list of siblings. Depth first, without recursion: a DIE tree is as deep as
+the source nests. False when the last unit is done.
+"""
+function advance!(w::Walker)::Bool
+    empty!(w.pending)
+    w.next = 1
+    w.dbg == C_NULL && return false
+    if !w.started
+        w.started = true
+        print(w.line, "Contents of the .debug_info section:"); _emit!(w)
+        print(w.line, ""); _emit!(w)
+    end
+    while isempty(w.pending)
+        if isempty(w.stack)
+            _open_unit!(w) || (close(w); return !isempty(w.pending))
+            continue
+        end
+        depth = length(w.stack) - 1
+        cur = w.stack[end]
+        nxt = Ref(Die())
+        if w.descend && ccall((:dwarf_child, libdw), Cint, (Ref{Die}, Ref{Die}), cur, nxt) == 0
+            push!(w.stack, nxt)
+            _die!(w, nxt, depth + 1)
+        elseif depth > 0 && ccall((:dwarf_siblingof, libdw), Cint, (Ref{Die}, Ref{Die}), cur, nxt) == 0
+            # No (more) children here: its sibling.
+            w.stack[end] = nxt
+            w.descend = true
+            _die!(w, nxt, depth)
+        else
+            # The last of its list: close it, and its parent's children are done.
+            pop!(w.stack)
+            w.descend = false
+            if depth > 0
+                print(w.line, " <", depth, "><0>: Abbrev Number: 0"); _emit!(w)
+            end
+        end
+    end
+    return true
+end
+
+"""
+    DumpLines(path)
+
+The lines of `readelf --debug-dump=info` for the ELF file at `path`, for
+everything `parse_dwarf_dump` reads, produced one DIE at a time from libdw as
+they are asked for. It can be iterated any number of times (the parser makes
+three passes); each iteration is its own walk. `bytes` is the size of the
+text the last complete iteration produced.
+"""
+mutable struct DumpLines
+    path::String
+    bytes::Int
+end
+DumpLines(path::AbstractString) = DumpLines(String(path), 0)
+
+Base.IteratorSize(::Type{DumpLines}) = Base.SizeUnknown()
+Base.eltype(::Type{DumpLines}) = String
+
+function Base.iterate(src::DumpLines, w::Walker = Walker(src.path))
+    while w.next > length(w.pending)
+        if !advance!(w)
+            src.bytes = w.bytes
+            return nothing
+        end
+    end
+    line = w.pending[w.next]
+    w.next += 1
+    return (line, w)
 end
 
 """
@@ -290,63 +448,16 @@ end
 
 Write the `.debug_info` of the ELF file at `path` to `io`, as
 `readelf --debug-dump=info` does for everything `parse_dwarf_dump` reads.
+The whole text: for inspection and tests. A build reads `DumpLines`.
 """
 function info_dump(io::IO, path::AbstractString)
-    with_dwarf(path) do dbg
-        cb = @cfunction(_attr_callback, Cint, (Ptr{Attr}, Ptr{Cvoid}))
-        attrs = Attr[]
-        print(io, "Contents of the .debug_info section:\n\n")
-        off = UInt64(0)
-        next = Ref{UInt64}(0); hsize = Ref{Csize_t}(0); version = Ref{UInt16}(0)
-        abbrev = Ref{UInt64}(0); asize = Ref{UInt8}(0); osize = Ref{UInt8}(0)
-        while true
-            rc = ccall((:dwarf_next_unit, libdw), Cint,
-                       (Ptr{Cvoid}, UInt64, Ref{UInt64}, Ref{Csize_t}, Ref{UInt16}, Ref{UInt64},
-                        Ref{UInt8}, Ref{UInt8}, Ptr{UInt64}, Ptr{UInt64}),
-                       dbg, off, next, hsize, version, abbrev, asize, osize, C_NULL, C_NULL)
-            rc == 0 || (rc < 0 && error("libdw: reading a unit of $path: $(_errmsg())"); break)
-            print(io, "  Compilation Unit @ offset 0x", string(off; base = 16), ":\n",
-                  "   Version:       ", version[], "\n",
-                  "   Pointer Size:  ", asize[], "\n")
-            root = Ref(Die())
-            ccall((:dwarf_offdie, libdw), Ptr{Die}, (Ptr{Cvoid}, UInt64, Ref{Die}), dbg, off + hsize[], root) == C_NULL &&
-                error("libdw: no unit DIE at 0x$(string(off + hsize[]; base = 16)) of $path: $(_errmsg())")
-            _walk(io, root, attrs, cb)
-            off = next[]
-        end
+    for line in DumpLines(path)
+        print(io, line, "\n")
     end
     return nothing
 end
 
 info_dump(path::AbstractString)::String = (io = IOBuffer(); info_dump(io, path); String(take!(io)))
-
-# Depth first, without recursion: a DIE tree is as deep as the source nests.
-function _walk(io::IO, root::Base.RefValue{Die}, attrs::Vector{Attr}, cb::Ptr{Cvoid})
-    stack = Base.RefValue{Die}[root]       # the open DIE at each depth
-    _die(io, root, 0, attrs, cb)
-    descend = true
-    while !isempty(stack)
-        depth = length(stack) - 1
-        cur = stack[end]
-        nxt = Ref(Die())
-        if descend && ccall((:dwarf_child, libdw), Cint, (Ref{Die}, Ref{Die}), cur, nxt) == 0
-            push!(stack, nxt)
-            _die(io, nxt, depth + 1, attrs, cb)
-            continue
-        end
-        # No (more) children here: its sibling, or close the list it is in.
-        if depth > 0 && ccall((:dwarf_siblingof, libdw), Cint, (Ref{Die}, Ref{Die}), cur, nxt) == 0
-            stack[end] = nxt
-            _die(io, nxt, depth, attrs, cb)
-            descend = true
-        else
-            pop!(stack)
-            depth > 0 && print(io, " <", depth, "><0>: Abbrev Number: 0\n")
-            descend = false
-        end
-    end
-    return nothing
-end
 
 """
     file_tables(path) -> Vector{Dict{Int,String}}
