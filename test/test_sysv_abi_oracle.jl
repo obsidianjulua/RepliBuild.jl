@@ -156,6 +156,14 @@ const SAO_CURATED = [
     ("c_v2f",      "typedef float sao_v2f __attribute__((vector_size(8)));\ntypedef struct { sao_v2f v; } c_v2f;", :agree, :agree),
     ("c_v2f_i",    "typedef struct { sao_v2f v; int i; } c_v2f_i;", :agree, :agree),
     ("c_v4f",      "typedef float sao_v4f __attribute__((vector_size(16)));\ntypedef struct { sao_v4f v; } c_v4f;", :trap, :trap),
+    # ...but in a union the merge decides (2026-11-16, Jolt's Vec3 and UVec4):
+    # SSEUP against the SSE of the lanes' array is SSE, so (SSE, SSE), two
+    # registers; against INTEGER it is INTEGER. Neither is a trap.
+    ("c_u_v4f_f4", "typedef float sao_u4f __attribute__((vector_size(16)));\ntypedef union { sao_u4f v; float f[4]; } c_u_v4f_f4;", :agree, :agree),
+    ("c_u_v4i_i4", "typedef int sao_u4i __attribute__((vector_size(16)));\ntypedef union { sao_u4i v; unsigned u[4]; } c_u_v4i_i4;", :agree, :agree),
+    ("c_s_u_v4f",  "typedef float sao_s4f __attribute__((vector_size(16)));\ntypedef union { sao_s4f v; float f[4]; } sao_s4f_u;\ntypedef struct { sao_s4f_u in; } c_s_u_v4f;", :agree, :agree),
+    ("c_u_v4f_d",  "typedef float sao_d4f __attribute__((vector_size(16)));\ntypedef union { sao_d4f v; double d; } c_u_v4f_d;", :trap, :trap),   # the double covers one eightbyte: (SSE, SSEUP) survives, one register
+    ("c_u_v4f_i",  "typedef float sao_i4f __attribute__((vector_size(16)));\ntypedef union { sao_i4f v; int i; } c_u_v4f_i;", :agree, :agree),
     # an array aligned to its own size is not a vector (cglm's `vec4`): its lanes
     ("c_al16_arr", "typedef float sao_al4[4] __attribute__((aligned(16)));\ntypedef struct { sao_al4 a; } c_al16_arr;", :agree, :agree),
 ]
@@ -962,7 +970,7 @@ end
         @test checked == 2 * length(SAO_CURATED)
         # The refusals are the ones SAO_CURATED says, and no other.
         @test sort!([n for (n, _, a, r) in SAO_CURATED for (fn, w) in (("take_$n", a), ("make_$n", r)) if w === :trap]) ==
-              ["c_ld", "c_v4f", "c_v4f"]
+              ["c_ld", "c_u_v4f_d", "c_u_v4f_d", "c_v4f", "c_v4f"]
     end
 
     @testset "abi_fuzz records and functions" begin

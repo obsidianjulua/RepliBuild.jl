@@ -1256,6 +1256,20 @@ the test named when you touch the area.
   under AAPCS64 alone (x86-64 IR unchanged; `Ticket` came back as garbage). (`test_aapcs64_record_abi.jl`, devtests
   `test_aapcs64_abi_spec.jl` against clang's aarch64 IR; live only on
   tier2-linux's arm64 cell.)
+- **A 16-byte vector is (SSE, SSEUP) and merges like any class** (2026-11-16,
+  the `:vec16` leaf). The classifier refused any record holding one as "one
+  SSE register no call statement states", which is true of a vector alone.
+  In a union the merge decides, and clang agrees: beside the array of its
+  lanes (Jolt's `Vec3`: `union { __m128; float[4]; }`) SSEUP against SSE is
+  SSE, so (SSE, SSE), two registers, `{ double, double }` in clang's IR;
+  beside integers (`UVec4`) it is (INTEGER, INTEGER). Both are `regs:`
+  statements the dialect already acts on, and about 1,000 Jolt functions
+  were traps for nothing. Only where (SSE, SSEUP) survives the merge (a
+  vector alone, or beside a member covering one eightbyte) is the record one
+  XMM register and `:unstated`. Read what clang emits for the shape before
+  believing a description of it: the Hub's report said "one SSE register".
+  AAPCS64 refuses a `:vec16` leaf as it did `:unstated`.
+  (`test_sysv_abi_oracle.jl`, devtests `test_simd_union_live.jl`.)
 - **A record's SysV class comes from its DWARF facts, never from the body it
   crosses as.** `FunctionGen.sysv_record_abi` (`ir_gen/SysVRecordABI.jl`)
   classifies members at their offsets, bitfields by bit range, nested records
@@ -1812,6 +1826,11 @@ DWARF-resolved destructors — **is** built.)
   departs from AAPCS64 (empty records dropped in C++, variadics on the stack):
   `kHostAbi` `#error`s on `__APPLE__`. Prototype on an Intel Mac runner first;
   x86-64 macOS already has its classifier.
+- A record that IS one 16-byte SIMD vector, by value on SysV (2026-11-16):
+  `struct { __m128 m; }` goes in one XMM register (SSE, SSEUP), which needs a
+  vector-typed `regs` statement the dialect does not have (`<4 x float>`,
+  `<2 x double>`, `<2 x i64>` by the lane type). A vector in a union with
+  its lanes is not this case and crosses today.
 - AAPCS64 homogeneous vector aggregates (a record holding a SIMD vector), and
   Windows on ARM (2026-11-09). Both refused by name.
 - Codegen `.ll → .so` still shells to clang; not internalised.
