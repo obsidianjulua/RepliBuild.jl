@@ -160,8 +160,14 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   which is version-matched to that clang, so there is no DWARF-dropping skew. A
   failure is a hard error. `[link] fallback = true` selects the external
   `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`.
-  Final `.ll → .so` still shells to clang. Check `DW_AT_producer` (`…jl`) to prove a
-  C artifact came from the JLL. `_clang_for_c_bucket` uses the system clang only
+  Final `.ll → .so` still shells to clang, which on Linux links with the
+  bundled LLD (`Compiler._bundled_linker`: `ld.lld` from LLD_unified_jll through
+  `--ld-path`, C bucket and JLL clang only; `REPLIBUILD_TOOLS=system` is the
+  driver's own linker; the choice is in `_toolchain_identity`). The start files
+  and libc still come from the system. A new C link site passes
+  `_bundled_linker_flags`. (`test_bundled_linker.jl`, devtests
+  `test_bundled_linker_live.jl`, which builds with an empty PATH.) Check
+  `DW_AT_producer` (`…jl`) to prove a C artifact came from the JLL. `_clang_for_c_bucket` uses the system clang only
   when the JLL cannot be loaded (`_jll_clang()` is `nothing`); a JLL clang that
   does not start is reported as `BuildBridge.SPAWN_FAILED`, never replaced.
 - **C++ / Tier 2 uses system LLVM+MLIR 21+** (23.1.3 under MSYS2 CLANG64 on the
@@ -1958,7 +1964,9 @@ DWARF-resolved destructors — **is** built.)
   its lanes is not this case and crosses today.
 - AAPCS64 homogeneous vector aggregates (a record holding a SIMD vector), and
   Windows on ARM (2026-11-09). Both refused by name.
-- Codegen `.ll → .so` still shells to clang; not internalised.
+- Codegen `.ll → .so` still shells to clang; not internalised. (The linker it
+  starts is the bundled LLD for C on Linux since 2026-11-17; C++, Windows and
+  the AOT thunks library still link with the system's.)
 - STL factories size containers from `get_stl_container_size`'s table. GeneratorCpp's
   DWARF `byte_size` lookup never matches: STL records are not in
   `struct_definitions` (0 hits across 57 metadata files, 2026-10-02).

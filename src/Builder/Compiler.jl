@@ -175,7 +175,42 @@ function _toolchain_identity(language::Symbol)::String
     compiler = language == :c ?
         "libllvm " * string(Base.libllvm_version) :
         "system " * _system_clang_identity()
-    return compiler * " | " * _detect_target_triple()
+    # Which linker made the library is part of what was built: the bundled
+    # one, or whatever the driver finds on the machine.
+    linker = _bundled_linker(language) === nothing ? "" : " | ld.lld"
+    return compiler * " | " * _detect_target_triple() * linker
+end
+
+"""
+    _bundled_linker(language) -> Union{String,Nothing}
+
+The linker the C bucket's final link runs instead of the system's: `ld.lld`
+from LLD_unified_jll, as `Tools` resolved it, or `nothing` for "whatever the
+clang driver finds" (`ld` on PATH).
+
+Bundled only where the whole of it is: the C bucket (its clang is the JLL's,
+at the same LLVM as this LLD, and the driver starts the linker in the clang's
+own environment, which is what lets LLD find its libLLVM), on Linux, when the
+JLL clang is the compiler and `Tools` took the JLL's copy or an explicit
+`REPLIBUILD_TOOL_LD_LLD`. A C++ build links with the system toolchain it
+compiles with. `REPLIBUILD_TOOLS=system` means the system's default linker,
+not an `ld.lld` that happens to be on PATH.
+
+The driver still supplies the C runtime's start files and libraries from the
+system: a linker is not a sysroot.
+"""
+function _bundled_linker(language::Symbol; jll_clang::Function = _jll_clang)::Union{String,Nothing}
+    language == :c || return nothing
+    Sys.islinux() || return nothing
+    jll_clang() === nothing && return nothing
+    r = Tools.resolve("ld.lld")
+    return r.source in (:jll, :override) ? r.path : nothing
+end
+
+"The driver flag that selects `_bundled_linker`, or nothing."
+function _bundled_linker_flags(config::RepliBuildConfig)::Vector{String}
+    lld = _bundled_linker(config.wrap.language)
+    return lld === nothing ? String[] : ["--ld-path=" * lld]
 end
 
 """
@@ -2058,6 +2093,7 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
         _codegen_opt_flags(config)...,   # codegen at the link level, IR passes off
         _reproducible_link_flags()...,   # same IR, same bytes: no PE link time
         _self_binding_link_flags()...,   # its own symbols are its own, whatever loaded first
+        _bundled_linker_flags(config)...,  # the C bucket links with the bundled LLD
     ]
     cmd_tail = ["-o", lib_path]
 

@@ -22,7 +22,7 @@ const _TR = RepliBuild.Tools
         @test success(pipeline(_TR.tool_cmd(`$(r.name) --version`); stdout = devnull, stderr = devnull))
         checked += 1
     end
-    @test checked == length(_TR.PROVIDERS) == 7
+    @test checked == length(_TR.PROVIDERS) == 8
 end
 
 @testset "the order is REPLIBUILD_TOOLS, and nothing else is accepted" begin

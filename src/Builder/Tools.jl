@@ -9,7 +9,8 @@
 # This module is the one answer to "which program is `nm`". Per tool, in order:
 #
 #   1. `REPLIBUILD_TOOL_<NAME>` (a path): used as given, never probed.
-#   2. The JLL's copy (Binutils_jll, Git_jll, CMake_jll, Ninja_jll) and the
+#   2. The JLL's copy (Binutils_jll, Git_jll, CMake_jll, Ninja_jll,
+#      LLD_unified_jll) and the
 #      one on PATH, in the order `REPLIBUILD_TOOLS` names: `jll` (the default
 #      off Windows) or `system` (the default on Windows, where the supported
 #      host is MSYS2 and the JLL copies are unverified).
@@ -27,7 +28,7 @@
 
 module Tools
 
-import Binutils_jll, Git_jll, CMake_jll, Ninja_jll
+import Binutils_jll, Git_jll, CMake_jll, Ninja_jll, LLD_unified_jll
 
 export tool_path, tool_source, tool_cmd
 
@@ -51,6 +52,9 @@ const PROVIDERS = Dict{String, Provider}(
     "git"     => Provider(Git_jll, :git_path, "GIT", true),
     "cmake"   => Provider(CMake_jll, :cmake_path, "CMAKE", false),
     "ninja"   => Provider(Ninja_jll, :ninja_path, "NINJA", false),
+    # The C bucket's linker (Compiler._bundled_linker): LLD at the version of
+    # Julia's own LLVM, which is the bundled clang's.
+    "ld.lld"  => Provider(LLD_unified_jll, :ld_lld_path, "LD_LLD", true),
 )
 
 "What a tool resolved to. `source` is `:override`, `:jll`, `:system` or `:missing`."
