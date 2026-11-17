@@ -143,6 +143,7 @@ const TESTS = TestFile[
     T("test_response_files.jl", :unit, [:build]),
     T("test_llvm_tool_table.jl", :unit, [:build]),
     T("test_llvm_prefix_search.jl", :unit, [:build]),
+    T("test_doctor_llvm_probe.jl", :unit, [:build]),
     T("test_llvm_env_isolation.jl", :unit, [:build]),
     T("test_toolchain_advice.jl", :unit, [:build]),
     T("test_project_hash.jl", :unit, [:build]),
