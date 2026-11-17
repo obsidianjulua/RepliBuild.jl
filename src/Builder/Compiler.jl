@@ -3649,11 +3649,14 @@ the rows that compiled as `bound`, each with its function's symbol (`shim`).
 
 The unit is compiled whole to IR. When that fails, every row a diagnostic
 names (`_unit_bad_lines`: each row is one line) is skipped with the
-compiler's error and the unit is compiled again. When the diagnostics name no
-row, each header is checked alone and dropped from every row where it does
-not compile on its own (a row left with no header is skipped), and each
-remaining constructor is checked alone, in parallel; if that still leaves
-errors naming no row, each member function is. From the IR of the unit
+compiler's error and the unit is compiled again. Before any of that the
+include block is compiled by itself: when it fails, each header is checked
+alone, in parallel, and dropped from every row where it does not compile on
+its own (a row left with no header is skipped for that reason, never as a
+row that "does not compile"). When the rows' diagnostics name no row, the
+same header check runs if it has not, and each remaining constructor is
+checked alone, in parallel; if that still leaves errors naming no row, each
+member function is. From the IR of the unit
 that compiles, a member function the unit only DECLARES has no body in its
 header (an out-of-line member the library keeps hidden, or one defined in a
 file this build does not compile): taking its address would leave the library
@@ -3719,6 +3722,51 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
         end
         return bad_row
     end
+    first_error(out) = (lines = split(out, '\n'); k = findfirst(l -> occursin("error", l), lines);
+                        k === nothing ? String(strip(first(out, 200))) : String(strip(lines[k])))
+    # Each header alone (the umbrella beside it, as in the unit), in parallel;
+    # one that does not compile on its own leaves every row's list, and a row
+    # left with none is skipped for that reason. Done once.
+    headers_checked = false
+    function check_headers!()
+        headers_checked && return
+        headers_checked = true
+        hs = sort!(unique(String[h for f in vcat(forced, mforced, dforced) for h in f["headers"]]))
+        verdict = Vector{Union{Nothing,String}}(nothing, length(hs))
+        Threads.@threads for i in eachindex(hs)
+            path = joinpath(cache_dir, "replibuild_ctors_probe_h_$(i).cpp")
+            (hok, hout) = _unit_probe(config, path, _inline_ctor_unit_text(vcat(shim_headers, [hs[i]]), Any[]))
+            hok || (verdict[i] = first_error(hout))
+            rm(path; force = true)
+        end
+        bad_header = Dict{String,String}(hs[i] => verdict[i] for i in eachindex(hs) if verdict[i] !== nothing)
+        isempty(bad_header) && return
+        for f in vcat(forced, mforced, dforced)
+            f["was_headers"] = f["headers"]
+            f["headers"] = String[h for h in f["headers"] if !haskey(bad_header, h)]
+        end
+        function no_header(_, f)
+            isempty(f["headers"]) || return nothing
+            h = first(sort!(String[x for x in f["was_headers"] if haskey(bad_header, x)]))
+            return "its header does not compile on its own ($(basename(h)): $(bad_header[h]))"
+        end
+        forced = drop!(forced, skipped, no_header)
+        mforced = drop!(mforced, mskipped, no_header)
+        dforced = Dict{String,Any}[f for f in dforced if !isempty(f["headers"])]
+        foreach(f -> delete!(f, "was_headers"), vcat(forced, mforced, dforced))
+        return
+    end
+    # The include block by itself, before any row is judged: a header that
+    # is half of a pair (Jolt's `WrapShaderBegin.h` opens namespaces its
+    # partner closes) leaves every header after it inside its scope, and the
+    # errors then land on the lines of rows that are fine. Judged first, each
+    # of those rows was skipped as "does not compile" (1,944 of Jolt's
+    # constructors, every one its HelloWorld needs) before the per-header
+    # check, which ran only once no row was named, could see the culprit.
+    let (inc_ok, _) = _unit_probe(config, probe, _inline_ctor_unit_text(
+            _inline_ctor_headers(config, vcat(forced, mforced, dforced)), Any[]))
+        inc_ok || check_headers!()
+    end
     text = unit_text()
     ok = false
     msg = ""
@@ -3752,24 +3800,9 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
             # Only default-argument rows were named this round.
         elseif stage == 0
             stage = 1
-            # No row is named: a header does not compile on its own. Each
-            # header alone (the umbrella beside it, as in the unit)...
-            bad_header = Dict{String,String}()
-            for h in sort!(unique(String[h for f in vcat(forced, mforced) for h in f["headers"]]))
-                (hok, hout) = _unit_probe(config, probe, _inline_ctor_unit_text(vcat(shim_headers, [h]), Any[]))
-                if !hok
-                    lines = split(hout, '\n')
-                    k = findfirst(l -> occursin("error", l), lines)
-                    bad_header[h] = k === nothing ? String(strip(first(hout, 200))) : String(strip(lines[k]))
-                end
-            end
-            for f in vcat(forced, mforced)
-                f["headers"] = String[h for h in f["headers"] if !haskey(bad_header, h)]
-            end
-            no_header(_, f) = isempty(f["headers"]) ?
-                "its header does not compile on its own: " * first(values(bad_header)) : nothing
-            forced = drop!(forced, skipped, no_header)
-            mforced = drop!(mforced, mskipped, no_header)
+            # No row is named: a header does not compile on its own
+            # (`check_headers!`, unless the include block already asked)...
+            check_headers!()
             # ...then each remaining constructor alone, against every header
             # that compiles, in parallel: a class template's specialization
             # needs its arguments' headers too. A constructor's error sits

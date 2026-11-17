@@ -687,6 +687,17 @@ the test named when you touch the area.
     belonging to the error before it). A constructor's error sits in the
     placement-new helper and names no row, so constructors alone fall back
     to one compile per row. Keep a new row kind on one line.
+  - **The include block is compiled by itself before any row is judged**
+    (2026-11-16). A header that is half of a pair (Jolt's
+    `WrapShaderBegin.h` opens namespaces its partner closes; a class
+    declared through the pair has the opening half as its `decl_file`)
+    leaves every header after it inside its scope, so the errors land on
+    rows that are fine: 1,944 of Jolt's constructors were skipped as "does
+    not compile". When the include block fails, each header is compiled
+    alone, in parallel (`check_headers!`), dropped from every row's list,
+    and a row left with none is skipped as "its header does not compile on
+    its own", which the wrap report groups apart. Row tracing is only
+    sound once the includes are.
   - **A member the unit's IR only `declare`s is skipped**: it has no body in
     its header (an out-of-line member kept hidden, or in a file the build
     does not compile), and its address in a constant is a data relocation
@@ -1067,6 +1078,13 @@ the test named when you touch the area.
   undeclared one as `E(v)`. A bitmask enum stays an integer alias
   (`_is_bitflag_enum`). Wrappers name `RepliBuild.OpenEnums`, so the header's
   `import RepliBuild` must precede the enum section. (`test_open_enums.jl`.)
+- **The bitflag test is total over any enumerator value** (2026-11-16):
+  `_is_bitflag_enum` works in `Int128`, because a 64-bit unsigned enum holds
+  values `Int64` cannot (Jolt's `EIterationStatus : uint64`,
+  `0xffff000000000000`), and `Int64(v)` on one threw and ended the whole
+  wrap. An enum screen answers `false` for what it cannot judge, never an
+  exception: one enum is not worth the module.
+  (`test_c_generator_policies.jl`, devtests `test_wide_enums_live.jl`.)
 - Enums with identical member sets emit as `const Alias = Canonical`, not a second
   enum type. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
   `""` stays an empty-name sentinel; do not harden it.
@@ -1798,6 +1816,9 @@ DWARF-resolved destructors — **is** built.)
   the class's inline constructors itself, so the flag's whole payoff is the
   definition, and a package that wants such a class built from Julia sets
   one of the two flags today (Bullet and box2d already do).
+- `[wrap] exclude_symbols` does not reach enums or records (2026-11-16): it
+  filters functions and globals. An enum or type a recipe wants out has no
+  key (Jolt tried it on `EIterationStatus`: "matched nothing").
 - Default arguments outside the forced unit's reach (2026-11-15): a static
   member's short call (static-ness is not known when the unit is written), a
   free function's (no class DIE declares it), an operator's, and a class

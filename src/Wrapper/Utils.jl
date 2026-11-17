@@ -1052,10 +1052,14 @@ start high are fine (`ImGuiTabBarFlagsPrivate` occupies bits 20–22); it is the
 GAPS that disqualify, not the offset.
 """
 function _is_bitflag_enum(values)::Bool
-    vals = Int64[]
+    # Int128: an enumerator of a 64-bit unsigned enum can exceed typemax(Int64)
+    # (Jolt's `EIterationStatus : uint64` has `0xffff000000000000`), and the
+    # test must answer for it, never throw: `Int64(v)` ended the whole wrap.
+    vals = Int128[]
     for v in values
         v isa Integer || return false
-        push!(vals, Int64(v))
+        (typemin(Int128) <= v <= typemax(Int128)) || return false
+        push!(vals, Int128(v))
     end
     uniq = sort!(unique(vals))
     length(uniq) >= 3 || return false
@@ -1067,7 +1071,7 @@ function _is_bitflag_enum(values)::Bool
     singles = filter(v -> v > 0 && count_ones(v) == 1, uniq)
     length(singles) >= 3 || return false
 
-    mask = reduce(|, singles; init=Int64(0))
+    mask = reduce(|, singles; init=Int128(0))
     all(v -> v & ~mask == 0, uniq) || return false
 
     # Declared bits must be dense: at least half the positions between the

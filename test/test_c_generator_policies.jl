@@ -362,6 +362,13 @@ end
         @test !_bf([1, 2, 4, 100])               # bit 6 declared by nothing
         @test !_bf([0, 1, 2, 65536])             # sparse: _Ios_Seekdir
         @test !_bf([-1, 1, 2, 4])                # negative enumerator
+        # Values a 64-bit unsigned enum can hold and Int64 cannot (2026-11-16,
+        # Jolt's `EIterationStatus : uint64`): the test answers, it never
+        # throws. `Int64(v)` on the first of these ended the whole wrap.
+        @test !_bf(Signed[big(0xffff000000000000), 48, 0x0000ffff00000000, 32, 0x00000000ffffffff])
+        @test _bf(Signed[big(1) << 60, big(1) << 61, big(1) << 62, big(1) << 63])   # a mask through bit 63
+        @test _bf(Signed[1, 2, 4, big(typemax(UInt64))]) == false                   # all-ones is not in declared bits
+        @test !_bf(Signed[big(1) << 200, 1, 2, 4])                                  # beyond any C type: no, not an error
         @test !_bf([1, 2])                       # too few
 
         # The C++ generator must reach the SAME decision. It has its own copy of
