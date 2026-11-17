@@ -105,7 +105,9 @@ function aapcs64_record_abi(key::AbstractString, structs; ret::Bool)
     _sysv_record_leaves!(leaves, key, structs, 0, Set{String}([key]); vectors = false)
     scalars = [lf for lf in leaves if lf.kind !== :place]
     for lf in scalars
-        lf.kind in (:unknown, :unstated) && size <= 64 &&
+        # `:vec16` too: a 16-byte vector is SysV's to merge; here any record
+        # holding one is a vector aggregate, which is not modelled.
+        lf.kind in (:unknown, :unstated, :vec16) && size <= 64 &&
             return AAPCS64RecordABI(:unknown, :none, 0, size, align, lf.what)
     end
     hfa = _a64_hfa(scalars, size)

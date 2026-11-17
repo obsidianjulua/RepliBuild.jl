@@ -31,8 +31,14 @@
 #   * a SIMD vector (`vector_size` in the metadata, whose `c_type` spells it as
 #     the array of its lanes) classifies by its size, never lane by lane: up
 #     to 4 bytes it is INTEGER, 8 bytes are SSE except `<1 x double>`, which
-#     is MEMORY, and 16 bytes are one SSE register (SSE, SSEUP), which no
-#     call statement states, so the record is `:unstated`. Over 16 bytes a
+#     is MEMORY, and 16 bytes are (SSE, SSEUP), merged like any class: SSEUP
+#     against SSE is SSE and against INTEGER is INTEGER, so a vector in a
+#     union with the array of its lanes (Jolt's `Vec3`: `union { __m128;
+#     float[4]; }`) is (SSE, SSE), two registers, as clang passes it
+#     (`{ double, double }`), and one in a union with integers is
+#     (INTEGER, INTEGER). Only where (SSE, SSEUP) survives the merge is the
+#     record one SSE register, which no call statement states, so it is
+#     `:unstated`. Over 16 bytes a
 #     record holding one vector of its own size goes in a YMM or ZMM register
 #     when the callee was compiled for AVX, which the metadata does not say;
 #   * merge: equal stays, NO_CLASS yields, MEMORY wins, then INTEGER, then any
@@ -80,7 +86,7 @@ end
 struct _SysVLeaf
     bit::Int          # absolute bit offset in the record
     bits::Int         # width: a bitfield's declared width, else 8 × size
-    kind::Symbol      # :int | :sse | :x87 | :place | :memory | :unknown | :unstated
+    kind::Symbol      # :int | :sse | :vec16 | :x87 | :place | :memory | :unknown | :unstated
     align::Int        # the type's alignment in bytes, for the misalignment check
     bitfield::Bool
     what::String
@@ -393,7 +399,7 @@ The leaves of a member that is a SIMD vector of `vs` bytes, or an array of them
 on Linux, which LLVM's ABI library repeats: a vector of 4 bytes or less is
 INTEGER (`<1 x float>` too, as gcc passes it), one of 8 bytes is SSE
 (`<2 x int>` too) except `<1 x double>`, which is MEMORY, and one of 16 bytes
-is a single SSE register (SSE, SSEUP), `:unstated` here. Each is aligned to its
+is (SSE, SSEUP), a `:vec16` leaf the record's merge decides. Each is aligned to its
 size. `c_type` spells the vector as the array of its lanes, so the lane type
 is what is left when the dimensions are cut.
 """
@@ -411,6 +417,13 @@ function _sysv_vector_leaves!(out::Vector{_SysVLeaf}, c_type::AbstractString, si
             push!(out, _SysVLeaf(at, 8 * vs, :int, vs, false, what))
         elseif vs == 8
             push!(out, _SysVLeaf(at, 64, lane == "double" ? :memory : :sse, 8, false, what))
+        elseif vs == 16
+            # (SSE, SSEUP): a class like any other until the merge is done.
+            # Alone in its record it is one SSE register; beside another
+            # member of the same bytes (a union) the merge decides.
+            push!(out, _SysVLeaf(at, 128, :vec16, 16, false,
+                                 "$what: a 16-byte SIMD vector, which SysV passes in one SSE register " *
+                                 "(SSE, SSEUP) that no call statement states"))
         else
             push!(out, _SysVLeaf(at, 8 * vs, :unstated, vs, false,
                                  "$what: a $vs-byte SIMD vector, which SysV passes in one SSE register " *
@@ -484,7 +497,8 @@ function _sysv_merge(acc::Symbol, field::Symbol)
     acc == :none && return field
     (acc == :int || field == :int) && return :int
     (field in (:x87, :x87up) || acc in (:x87, :x87up)) && return :memory
-    return :sse
+    return :sse                       # SSE against SSEUP included
+
 end
 
 """
@@ -522,6 +536,7 @@ function sysv_record_abi(key::AbstractString, structs; vectors::Bool = true)
     leaves = _SysVLeaf[]
     _sysv_record_leaves!(leaves, key, structs, 0, Set{String}([key]); vectors)
     lo = hi = :none
+    vec_what = ""
     for lf in leaves
         lf.kind === :memory && return SysVRecordABI(:memory, Symbol[], size, align, "")
         lf.kind in (:unknown, :unstated) && return SysVRecordABI(lf.kind, Symbol[], size, align, lf.what)
@@ -532,6 +547,11 @@ function sysv_record_abi(key::AbstractString, structs; vectors::Bool = true)
         if lf.kind === :x87
             lo = _sysv_merge(lo, :x87)
             hi = _sysv_merge(hi, :x87up)
+        elseif lf.kind === :vec16
+            # Aligned to 16 in a record of at most 16 bytes: it is at offset 0.
+            lo = _sysv_merge(lo, :sse)
+            hi = _sysv_merge(hi, :sseup)
+            vec_what = lf.what
         else
             lf.bits == 0 && continue
             c = lf.kind === :sse ? :sse : :int
@@ -547,6 +567,11 @@ function sysv_record_abi(key::AbstractString, structs; vectors::Bool = true)
     # Rule 5: the post-merger cleanup.
     hi === :memory && (lo = :memory)
     hi === :x87up && lo !== :x87 && (lo = :memory)
+    # An SSEUP not above an SSE is an SSE of its own.
+    hi === :sseup && lo !== :sse && (hi = :sse)
+    # (SSE, SSEUP) survived the merge: the record IS one 16-byte vector, in
+    # one SSE register, which no call statement states yet.
+    (hi === :sseup && lo === :sse) && return SysVRecordABI(:unstated, Symbol[], size, align, vec_what)
     lo === :memory && return SysVRecordABI(:memory, Symbol[], size, align, "")
     lo === :x87 && return SysVRecordABI(:x87, Symbol[], size, align, "")
     (lo === :none && hi === :none) && return SysVRecordABI(:ignore, Symbol[], size, align, "")
