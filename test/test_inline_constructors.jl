@@ -196,7 +196,68 @@ _ic_rows(ra, name) = sort([Dict(r) for r in ra[name]["constructors"]]; by = r ->
             # Nothing to change: the file itself comes back.
             @test _IC._forced_exportable_ir([ir], Set(["@nobody"]), joinpath(dir, "exported2"); pe = false) == ([ir], 0)
             @test _IC._forced_exportable_ir([ir], Set{String}(), joinpath(dir, "exported3"); pe = false) == ([ir], 0)
+
+            # A library-sized symbol set against a library-sized file: the
+            # rewrite asks the set about each definition's name, never each
+            # symbol about each line (Jolt's second link, 2026-11-17: 12,000
+            # symbols, 38 s). The same lines move, and only those.
+            many = Set{String}("_ZN2ic5Other$(i)C2Ev" for i in 1:20_000)
+            big = joinpath(dir, "big.ll")
+            open(big, "w") do io
+                for i in 1:20_000
+                    println(io, "define linkonce_odr hidden void @_ZN2ic5Other$(i)C2Ev(ptr %0) unnamed_addr {")
+                    println(io, "  call void @_ZN2ic5Other$(i)C2Ev(ptr %0)")
+                    println(io, "  ret void\n}")
+                    println(io, "define hidden void @_ZN2ic4Kept$(i)Ev(ptr %0) {\n  ret void\n}")
+                end
+            end
+            started = time()
+            (bout, bn) = _IC._forced_exportable_ir([big], many, joinpath(dir, "exported4"); pe = false)
+            @test bn == 20_000
+            @test time() - started < 30      # seconds; the scan took minutes at this size
+            bgot = read(bout[1], String)
+            @test count("define linkonce_odr void @_ZN2ic5Other", bgot) == 20_000
+            @test count("define hidden void @_ZN2ic4Kept", bgot) == 20_000
+            @test !occursin("define linkonce_odr hidden", bgot)
         end
+    end
+
+    @testset "the rows that do not compile are found without one compile per row" begin
+        # `_alone_verdicts` stands in front of the per-row compile: rows are
+        # tried in groups and a failing group is halved. `probe` here is the
+        # compiler: a set of rows compiles when none of them is bad.
+        for (n, bad) in ((100, Int[]), (100, [1]), (100, [100]), (100, [3, 4, 17, 40, 41, 99]),
+                         (37, collect(1:37)), (1, [1]), (1, Int[]), (0, Int[]), (2139, collect(500:572)))
+            badset = Set(bad)
+            calls = Threads.Atomic{Int}(0)
+            singles = Vector{Int}[]
+            lk = ReentrantLock()
+            probe = function (g, round, k)
+                Threads.atomic_add!(calls, 1)
+                length(g) == 1 && lock(() -> push!(singles, g), lk)
+                return any(in(badset), g) ? "row $(first(g)) of $(length(g))" : nothing
+            end
+            got = _IC._alone_verdicts(probe, n)
+            # What one compile per row says, text included: a row is only ever
+            # given the error of its own compile.
+            @test got == Union{Nothing,String}[i in badset ? "row $i of 1" : nothing for i in 1:n]
+            @test Set(first.(singles)) ⊇ badset
+            # Few failures: far fewer compiles than rows. All failing: no more
+            # than the halving costs.
+            isempty(bad) && @test calls[] == cld(n, _IC._ALONE_GROUP_SIZE)
+            (n == 2139) && @test calls[] < n ÷ 4
+            @test calls[] <= 2n
+        end
+        # A group that fails while each of its rows compiles alone blames no
+        # row: the unit compiled whole decides, as it did.
+        @test _IC._alone_verdicts((g, _, _) -> length(g) > 1 ? "together only" : nothing, 40) ==
+              fill(nothing, 40)
+        # The group size is a parameter; 1 is one compile per row.
+        seen = Vector{Int}[]
+        lk1 = ReentrantLock()
+        @test _IC._alone_verdicts((g, _, _) -> (lock(() -> push!(seen, g), lk1); g == [2] ? "no" : nothing), 3; group = 1) ==
+              [nothing, "no", nothing]
+        @test sort(seen) == [[1], [2], [3]]
     end
 
     @testset "negative check: without the defined-symbol subtraction the library's own constructors are forced" begin

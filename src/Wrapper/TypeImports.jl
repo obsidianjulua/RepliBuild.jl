@@ -271,20 +271,40 @@ function _emitted_type_kinds(text::AbstractString)::Dict{String,String}
     return kinds
 end
 
-"The mangled symbols of `metadata` defined strongly (`nm` type `T`) whose demangled class is `key`."
-function _strong_members(metadata, key::AbstractString)::Vector{String}
+"""
+    _strong_member_index(metadata) -> Dict{String,Vector{String}}
+
+The mangled symbols of `metadata` defined strongly (`nm` type `T`), filed under
+every key their demangled class answers to: the class as spelled and its bare
+key (`_bare_class_key`). One pass over the symbols and the functions, for a
+caller that asks about many types: per type, the scan made a wrap's manifest
+quadratic (Jolt: 12 of 43 seconds). Each list is in function order and may
+repeat a symbol; `_strong_members` sorts and dedups.
+"""
+function _strong_member_index(metadata)::Dict{String,Vector{String}}
     strong = Set{String}(String(s["mangled"]) for s in get(metadata, "symbols", Any[])
                          if s isa AbstractDict && get(s, "type", "") == "T" && haskey(s, "mangled"))
-    out = String[]
+    index = Dict{String,Vector{String}}()
     for f in get(metadata, "functions", Any[])
         f isa AbstractDict || continue
         cls = String(get(f, "class", ""))
         isempty(cls) && continue
-        (cls == key || _bare_class_key(cls) == key) || continue
         m = String(get(f, "mangled", ""))
-        m in strong && push!(out, m)
+        m in strong || continue
+        push!(get!(() -> String[], index, cls), m)
+        bare = _bare_class_key(cls)
+        bare == cls || push!(get!(() -> String[], index, bare), m)
     end
-    return sort!(unique!(out))
+    return index
+end
+
+"""
+The mangled symbols of `metadata` defined strongly (`nm` type `T`) whose demangled
+class is `key`. A caller asking about many types passes one `_strong_member_index`.
+"""
+function _strong_members(metadata, key::AbstractString;
+                         index::AbstractDict = _strong_member_index(metadata))::Vector{String}
+    return sort!(unique!(copy(get(index, String(key), String[]))))
 end
 
 "A class spelling's bare key: the last `::` component, template arguments kept."
@@ -336,6 +356,7 @@ function _type_manifest(metadata, text::AbstractString, facts::AbstractDict;
     enumerators = get(facts, "enumerators", Dict{String,Any}())
     types = Dict{String,Any}()
     covered = Set{String}()
+    strong_index = _strong_member_index(metadata)
     for key in sort!(collect(keys(defs)); by = string)
         info = defs[key]
         info isa AbstractDict || continue
@@ -361,7 +382,7 @@ function _type_manifest(metadata, text::AbstractString, facts::AbstractDict;
             # (`_render_enum_chunks`'s collision rule applied), so an importer
             # aliases what exists.
             "enumerators" => kind == "enum" ? get(enumerators, jn, nothing) : nothing,
-            "strong_members" => _strong_members(metadata, String(key)),
+            "strong_members" => _strong_members(metadata, String(key); index = strong_index),
             "entry_sha" => _sha256_hex(_canonical_text(info)))
     end
     for (name, kind) in kinds
@@ -491,6 +512,7 @@ function _resolve_type_imports(metadata, earlier::AbstractVector; pe::Bool = Sys
                               if !haskey(defs, "__enum__" * String(n))]
     candidates = sort!(unique!(vcat(String[String(k) for k in keys(defs)], _referenced_record_names(metadata),
                                     header_enum_keys)))
+    strong_index = nothing      # built at the first type an earlier library also emitted
     for key in candidates
         owners = Any[]
         for e in earlier
@@ -535,7 +557,8 @@ function _resolve_type_imports(metadata, earlier::AbstractVector; pe::Bool = Sys
                       "fix the build rather than wrapping both.")
             end
             if !pe
-                mine = Set(_strong_members(metadata, key))
+                strong_index === nothing && (strong_index = _strong_member_index(metadata))
+                mine = Set(_strong_members(metadata, key; index = strong_index))
                 theirs = Set(String.(get(otype, "strong_members", String[])))
                 both = sort!(collect(intersect(mine, theirs)))
                 isempty(both) || error("graph types: `$key` has members defined strongly in both " *

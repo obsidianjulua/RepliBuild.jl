@@ -695,7 +695,10 @@ the test named when you touch the area.
     rows by the lines its diagnostics name (`_unit_bad_lines`, a note
     belonging to the error before it). A constructor's error sits in the
     placement-new helper and names no row, so constructors alone fall back
-    to one compile per row. Keep a new row kind on one line.
+    to compiles of their own: in groups first, halved where one fails
+    (`_alone_verdicts`), so only a row tried alone is ever given an error,
+    under the file name it always had (the error line can name it). Keep a
+    new row kind on one line.
   - **The include block is compiled by itself before any row is judged**
     (2026-11-16). A header that is half of a pair (Jolt's
     `WrapShaderBegin.h` opens namespaces its partner closes; a class
@@ -1716,6 +1719,42 @@ Verified 2026-08-26 by cloning to a tempdir: `Pkg.instantiate`, `runtests.jl` gr
 `build.sh` builds, `check_environment` reports tiers. `build.sh` gates on LLVM ≥ 21,
 `mlir-tblgen`/`llvm-config` major match, and `lib/cmake/mlir` presence. Redo the clone
 check before claiming portability again; reading `.gitignore` does not settle it.
+
+## Performance
+
+Where the time goes was measured on Jolt, the largest Hub package
+(2026-11-17), and the method is the rule:
+
+- **Measure on a scratch copy, old code and new in the same directory.** A
+  `git archive HEAD` checkout beside the worktree runs the old code. Output
+  paths are baked into the metadata, the wrapper and the forced unit's skip
+  reasons, so two directories never compare equal. Delete
+  `.replibuild_cache/project_hash` between runs; the IR cache stays warm.
+  The proof of an optimization is the same `LIBRARY_SHA`, the same metadata
+  apart from `timestamp`, and the same wrapper and manifests apart from
+  `# Generated:`. An AOT thunks library also embeds the path of libJLCS's
+  directory in its RUNPATH, so its hash follows the checkout.
+- **Julia's profiler does not sample a task waiting on a process**, and its
+  counts are thread snapshots, not seconds. Stage wall time comes from
+  timestamps on the build's own log lines.
+- **A helper asked once per type or per symbol must not scan every function
+  or symbol.** Index once and ask the index (`_strong_member_index`,
+  `children_by_parent`); `_forced_exportable_ir` asks the symbol set about
+  each definition's name. Each of these was quadratic at Jolt's size
+  (13,882 functions, 1,306 types, 12,000 forced symbols) and invisible on a
+  fixture.
+- A compile of the forced unit parses the library's whole include block:
+  count compiles. Rows may be tried together (`_alone_verdicts`); headers
+  may not, since one that fails alone can compile after another.
+- `parse_dwarf_dump` is linear, about 3 µs a line (llama.cpp: 7M lines,
+  21 s). Its cost at oneDNN's size is memory (Not Yet Built), not the scans.
+- The first `build` in a process spends about 25 s compiling RepliBuild's
+  own code and the first `wrap` about as long, whatever the library's size.
+  Nothing is precompiled. `precompile(Compiler.compile_project,
+  (RepliBuildConfig,))` and `precompile(build, (String,))` recover the
+  build's share, at that cost per precompile of the package; a directive on
+  `wrap` recovers nothing (the generators are reached by dynamic dispatch),
+  so wrap would need a workload that runs one. Not done: John's call.
 
 ## Open problems
 
