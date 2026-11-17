@@ -344,6 +344,18 @@ If you are asked to work on it:
   local dependency's path is a shim-header root (`_shim_allowed_roots`).
   (`test_dep_archive.jl`, `test_dep_cache.jl`.)
 - `Builder/DWARFParser.jl` — llvm-dwarfdump + nm → ClassInfo/VtableInfo.
+- `Builder/LibDW.jl` — DWARF read in-process through elfutils' libdw
+  (Elfutils_jll, ELF only). `info_dump` walks the DIE tree and writes it in GNU
+  readelf's format for everything `parse_dwarf_dump` reads, so the parser, its
+  invariants and its synthetic-dump tests are the same for both readers;
+  `file_tables` is `_dwarf_file_tables`' answer. `REPLIBUILD_DWARF=libdw`
+  selects it (`Compiler._dwarf_reader`); unset is readelf, and libdw asked for
+  where it cannot work is an error, never the other reader. **The two readers
+  give one answer**: the five tables parsed from either are equal, which
+  devtests `test_libdw_dwarf_live.jl` holds on DWARF 4 and 5, C and C++. A tag
+  or attribute the parser starts matching must be printable here
+  (`test_libdw_reader.jl` checks the parser's names against `TAGS`/`ATTRS`),
+  and a new value shape the parser reads must be written as readelf writes it.
 - `Builder/Tools.jl` — which program each non-LLVM tool is (readelf, objdump,
   nm, c++filt, git, cmake, ninja): `REPLIBUILD_TOOL_<NAME>`, then the JLL's copy
   (Binutils_jll, Git_jll, CMake_jll, Ninja_jll) and PATH's in the order
@@ -833,6 +845,12 @@ the test named when you touch the area.
   BRANCH 1's trap, and GeneratorC and the shared varargs path trap with
   `_conflict_trap_body`. (`test_conflicted_names.jl`, devtests
   `test_conflict_trap_fixture.jl`.)
+- **A declaration file is an absolute path, whatever the DWARF version.**
+  `_dwarf_file_tables` reads each table by its own column header (DWARF 4 and
+  earlier print `Entry Dir Time Size Name`; read as DWARF 5's shape, every name
+  of a `-gdwarf-4` build came out as `0\t0\t<name>`), and `parse_dwarf_dump`
+  resolves a relative name against the unit's `DW_AT_comp_dir`, which DWARF 4's
+  table does not carry. (devtests `test_libdw_dwarf_live.jl`.)
 - **Two parsers, two dialects.** `Compiler.jl` parses **GNU binutils** output only
   (readelf on Linux, GNU objdump on Windows; byte-identical). `DWARFParser.jl` parses
   llvm-dwarfdump. Never copy a regex between them, and never route the readelf
@@ -1911,6 +1929,11 @@ DWARF-resolved destructors — **is** built.)
   holding a type nothing lays out. libc++'s `tuple` (`__tuple_impl` over
   `__tuple_leaf` bases) has the same shape as libstdc++'s and is not yet
   measured on a libc++ host.
+- libdw as the default DWARF reader (2026-11-17). It is opt-in
+  (`REPLIBUILD_DWARF=libdw`) until a Hub-wide comparison of the parsed tables
+  against readelf's has been read; `LibDW` still renders the whole dump as
+  text, so it removes the subprocess and the GNU dumper, not the parser's
+  memory (next entry). Feeding the parser DIE by DIE is the step after.
 - `parse_dwarf_dump` holds the whole `readelf` dump and every DIE as a `Dict`.
   oneDNN's (`libonednn.so`) parse passed a 24 GB cap and was OOM-killed at
   2519a16 (2026-10-29), so a oneDNN build needs most of a 64 GB box. A streaming
