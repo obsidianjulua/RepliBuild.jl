@@ -295,6 +295,10 @@ function _report_inline_constructors(plan; what::String = "constructor")
         by_reason = Dict{String,Vector{String}}()
         for s in skipped
             reason = String(get(s, "reason", "?"))
+            # A header's failure is its own group: the row is not at fault.
+            startswith(reason, "its header does not compile on its own") ?
+                (reason = "its header does not compile on its own (a fragment, or one that needs another included first; " *
+                          "each compiler message is in the metadata's $(what == "constructor" ? "inline_constructors" : "inline_methods"))") :
             occursin("does not compile", reason) &&
                 (reason = "does not compile in the unit (each compiler message is in the metadata's $(what == "constructor" ? "inline_constructors" : "inline_methods"))")
             push!(get!(() -> String[], by_reason, reason), String(get(s, "class", "?")))

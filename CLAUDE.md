@@ -687,6 +687,17 @@ the test named when you touch the area.
     belonging to the error before it). A constructor's error sits in the
     placement-new helper and names no row, so constructors alone fall back
     to one compile per row. Keep a new row kind on one line.
+  - **The include block is compiled by itself before any row is judged**
+    (2026-11-16). A header that is half of a pair (Jolt's
+    `WrapShaderBegin.h` opens namespaces its partner closes; a class
+    declared through the pair has the opening half as its `decl_file`)
+    leaves every header after it inside its scope, so the errors land on
+    rows that are fine: 1,944 of Jolt's constructors were skipped as "does
+    not compile". When the include block fails, each header is compiled
+    alone, in parallel (`check_headers!`), dropped from every row's list,
+    and a row left with none is skipped as "its header does not compile on
+    its own", which the wrap report groups apart. Row tracing is only
+    sound once the includes are.
   - **A member the unit's IR only `declare`s is skipped**: it has no body in
     its header (an out-of-line member kept hidden, or in a file the build
     does not compile), and its address in a constant is a data relocation

@@ -287,5 +287,21 @@ const IM_DUMP = read(joinpath(@__DIR__, "fixtures", "inline_ctor.readelf.txt"), 
         @test occursin("wrap: 2 inline member function(s) of 1 class(es) declared in headers and defined by the build's forced unit: Body", out)
         @test occursin("wrap: 1 class(es) with an inline member function left undefined, declared in its header with no body there: Body", out)
         @test !occursin("constructor", out)
+        # A header's failure is reported as the header's, apart from rows
+        # that do not compile themselves.
+        hplan = Dict{String,Any}("forced" => Any[], "skipped" => Any[
+            Dict{String,Any}("class" => "Wrapper", "symbol" => "w",
+                             "reason" => "its header does not compile on its own (wrap_begin.h: x.h:4:1: error: expected '}')"),
+            Dict{String,Any}("class" => "Odd", "symbol" => "o", "reason" => "does not compile: no member named 'q'")])
+        hout = mktemp() do path, io
+            redirect_stdout(io) do
+                RepliBuild.Wrapper._report_inline_constructors(hplan)
+            end
+            close(io)
+            read(path, String)
+        end
+        @test occursin("left undefined, its header does not compile on its own (a fragment", hout)
+        @test occursin(r"its header does not compile on its own[^\n]*: Wrapper\n", hout)
+        @test occursin(r"does not compile in the unit[^\n]*: Odd\n", hout)
     end
 end

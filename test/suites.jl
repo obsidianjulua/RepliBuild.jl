@@ -209,6 +209,7 @@ const TESTS = TestFile[
     T("test_inline_ctors_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["inline_ctor_test"]),
     T("test_nested_type_aliases_live.jl", :dev, [:dwarf, :cpp], locks = ["nested_type_test"]),
     T("test_inline_methods_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["inline_method_test"]),
+    T("test_fragment_header_live.jl", :dev, [:build, :cpp], locks = ["fragment_header_test"]),
     T("test_default_args_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["default_arg_test"]),
     T("test_visible_records_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["visible_record_test"]),
     T("test_sret_in_caller_buffer.jl", :dev, [:dialect, :cpp], locks = ["sret_inplace_test"]),
