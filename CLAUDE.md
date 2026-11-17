@@ -1112,6 +1112,19 @@ the test named when you touch the area.
   wrap. An enum screen answers `false` for what it cannot judge, never an
   exception: one enum is not worth the module.
   (`test_c_generator_policies.jl`, devtests `test_wide_enums_live.jl`.)
+- **An enumerator's value is read through `_enumerator_value`** (2026-11-17,
+  both generators). `Project.toml` allows two JSON majors and they read an
+  integer above `typemax(Int64)` differently: 1.x gives a `BigInt`, 0.21 an
+  `Int64` wrapped modulo 2^64, with no error. The metadata on disk was right
+  and the wrapper bound `Status(-281474976710656)` on an `OpenEnum{UInt64}`,
+  so the live test above was green or red by which JSON the gitignored
+  Manifest had resolved. The repair is made where the width and signedness
+  are known: a negative value of an 8-byte unsigned enum is the value plus
+  2^64, and nothing else moves (a signed enum's negative enumerator is a
+  value). `_read_json` itself stays lossy on 0.21 for such integers, so a new
+  metadata integer that can exceed `Int64` needs the same kind of repair at
+  its reader, or to be written as a string; and a test that reads metadata
+  back must pass on both majors. (`test_enumerator_values.jl`.)
 - Enums with identical member sets emit as `const Alias = Canonical`, not a second
   enum type. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
   `""` stays an empty-name sentinel; do not harden it.
