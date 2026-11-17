@@ -208,6 +208,7 @@ const TESTS = TestFile[
     T("test_memberless_live.jl", :dev, [:dwarf, :cpp], locks = ["memberless_test"]),
     T("test_inline_ctors_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["inline_ctor_test"]),
     T("test_simd_union_live.jl", :dev, [:dialect, :cpp], locks = ["simd_union_test"]),
+    T("test_narrow_args_live.jl", :dev, [:dialect, :cpp], locks = ["narrow_arg_test"]),
     T("test_wide_enums_live.jl", :dev, [:dwarf, :cpp], locks = ["wide_enum_test"]),
     T("test_nested_type_aliases_live.jl", :dev, [:dwarf, :cpp], locks = ["nested_type_test"]),
     T("test_inline_methods_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["inline_method_test"]),
