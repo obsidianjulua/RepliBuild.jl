@@ -49,6 +49,7 @@ module GraphGenerators
 
 using ..BuildGraph
 import ..BuildBridge
+import ..Tools
 
 export NinjaEdge, GeneratorStep, NeededTarget, GeneratorPlan, GeneratorRun,
        GeneratorNeedsCompile, GeneratedSourceUnwritten, GeneratorStepFailed,
@@ -832,7 +833,7 @@ function ninja_program(build_dir::String)::String
     isfile(joinpath(build_dir, "build.ninja")) ||
         error("GraphGenerators: $build_dir has no build.ninja; cmake's generate step did not finish")
     prog = get(c, "CMAKE_MAKE_PROGRAM", "")
-    return isempty(prog) ? "ninja" : prog
+    return isempty(prog) ? Tools.tool_path("ninja") : prog
 end
 
 # The outputs ninja's build log records, as keys.

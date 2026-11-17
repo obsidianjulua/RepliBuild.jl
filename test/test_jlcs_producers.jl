@@ -208,7 +208,7 @@ const IR = JLCSIRGenerator.generate_jlcs_ir(EMPTY_VT, METADATA)
             # libJLCS must be resolvable: try_call lowering references
             # jlcs_set_pending_exception, which lives there (same pairing the
             # production JITManager uses: [binary, libJLCS])
-            jit = create_jit(mod_jit, shared_libs=[FIXTURE, RepliBuild.MLIRNative.libJLCS])
+            jit = create_jit(mod_jit, shared_libs=[FIXTURE, RepliBuild.MLIRNative.libJLCS_path()])
             @test jit != C_NULL
 
             # ── scope-RAII end-to-end ────────────────────────────────────────

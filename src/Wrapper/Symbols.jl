@@ -138,8 +138,8 @@ function extract_symbols_nm(binary_path::String, registry::TypeRegistry; demangl
     # TYPE, and this function needs T/W/D to tell a function from a global.
     pe_exports = _pe_exported_names(binary_path)
     nm_flags = pe_exports === nothing ? "-D" : "-g"
-    nm_cmd = demangle ? `nm $nm_flags --defined-only --demangle $binary_path` :
-                        `nm $nm_flags --defined-only $binary_path`
+    nm_args = demangle ? [nm_flags, "--defined-only", "--demangle"] : [nm_flags, "--defined-only"]
+    nm_cmd = Tools.tool_cmd(`nm $nm_args $binary_path`)
 
     try
         output = read(nm_cmd, String)

@@ -17,6 +17,7 @@ import ..Slicer
 import ..host_record_abi
 import ..ClangJLBridge
 import ..BuildBridge
+import ..Tools
 import ..MLIRNative
 import ..DWARFParser
 import ..JLCSIRGenerator

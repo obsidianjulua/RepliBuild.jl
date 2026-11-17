@@ -36,7 +36,8 @@ julia --project=. test/devtests.jl --changed    # only what the diff against ori
 julia --project=. test/devtests.jl --area=c     # one area: build, dwarf, c, cpp, dialect, graph
 julia --project=. test/run.jl dev --files=test_c_sret_abi.jl --processes --tail   # a child per job, logs printed
 julia --project=. test/test_<name>.jl           # single file
-cd src/mlir && ./build.sh               # build the JLCS dialect (Tier 2 only)
+cd src/mlir && ./build.sh               # build the JLCS dialect locally (wins over the prebuilt artifact)
+julia --project=<env with BinaryBuilder> deps/jlcs_jll/build_tarballs.jl   # the prebuilt libJLCS tarballs (Julia 1.12)
 julia --project=. -e 'using RepliBuild; RepliBuild.check_environment()'
 julia --project=docs docs/make.jl       # docs build
 ```
@@ -177,7 +178,12 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   than `JLCSAbiOracle.cpp` fails `test_sysv_abi_oracle.jl` well beyond the new
   code (76 of 1915 at 048ca6f, unions and packed records included); rebuild it
   before reading that test. `deps/build.jl` builds it at install time when
-  possible and never throws. On Windows it runs build.sh through MSYS2's
+  possible and never throws; on Linux it fetches the prebuilt `JLCS` artifact
+  first (static LLVM/MLIR 23 from `LLVM_full_jll`, `-DJLCS_STATIC_LLVM=ON`, C API
+  exports only through `jlcs_exports.map`, x86-64 and AArch64 glibc), which
+  needs no system MLIR. Build the static library with GCC: `LLVM_full_jll`'s
+  archives are GCC's, and clang asks them for a constructor variant they do not
+  define (`-z defs` makes that a link error). On Windows it runs build.sh through MSYS2's
   `bash.exe -l` with `MSYSTEM=CLANG64`, which is a CLANG64 shell from any
   process; `src/mlir/windows_build.jl` is that command's one copy (the doctor's
   advice uses it too). Tier 3 alone is the whole
@@ -332,6 +338,28 @@ If you are asked to work on it:
   local dependency's path is a shim-header root (`_shim_allowed_roots`).
   (`test_dep_archive.jl`, `test_dep_cache.jl`.)
 - `Builder/DWARFParser.jl` — llvm-dwarfdump + nm → ClassInfo/VtableInfo.
+- `Builder/Tools.jl` — which program each non-LLVM tool is (readelf, objdump,
+  nm, c++filt, git, cmake, ninja): `REPLIBUILD_TOOL_<NAME>`, then the JLL's copy
+  (Binutils_jll, Git_jll, CMake_jll, Ninja_jll) and PATH's in the order
+  `REPLIBUILD_TOOLS` names (`jll` off Windows, `system` on Windows, where the JLL
+  copies are unverified), then the bare name. A JLL copy counts only if it
+  starts. **A command literal naming one of these tools goes through
+  `Tools.tool_cmd`** (`BuildBridge.execute` resolves a name itself);
+  `test_tools_resolver.jl` walks the parsed source for one that does not. The
+  copy's environment rides on the `Cmd`, after the LLVM overlay, which sets PATH
+  and the loader path outright. cmake and ninja get no library path: they start
+  the system compiler, and Julia's libstdc++ must not come first for it. A new
+  tool is one `PROVIDERS` row.
+- `Builder/JLCSLibrary.jl` — where libJLCS is: a local build
+  (`src/mlir/build/`) wins, else the lazy `JLCS` artifact in `Artifacts.toml`
+  (LLVM and MLIR linked in; built by `deps/jlcs_jll/build_tarballs.jl`, entries
+  written by `write_artifacts_toml.jl`); `REPLIBUILD_JLCS` is `local`,
+  `artifact` or a path. Decided when the library is first needed, never at
+  precompile: `MLIRNative.libJLCS` is a `Libdl.LazyLibrary` for `ccall`, and
+  **anything that needs the file as a path calls `MLIRNative.libJLCS_path()`**
+  (`install = false` in a probe, which must not download). Splice the library
+  into generated `ccall`s as `GlobalRef(MLIRNative, :libJLCS)`, never as a path.
+  (`test_jlcs_library.jl`, devtests `test_jlcs_artifact_live.jl`.)
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
 - `Builder/BuildGraph.jl` — the build-graph contract: a `TargetGraph` of targets

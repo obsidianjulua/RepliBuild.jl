@@ -44,7 +44,7 @@ than `false`, because a misspelt prerequisite would otherwise skip its file
 forever and look like a machine without the tool.
 """
 function have(need::Symbol)
-    need === :libJLCS && return isfile(RepliBuild.MLIRNative.libJLCS)
+    need === :libJLCS && return isfile(RepliBuild.MLIRNative.libJLCS_path(; install = false))
     need === :llvm_abi && return have(:libJLCS) && _libjlcs_exports(:jlcs_abi_oracle_sysv)
     need === :llvm && return _system_llvm_found()
     need === :llvm_link && return _system_llvm_found() &&
@@ -52,13 +52,15 @@ function have(need::Symbol)
     haskey(_TOOLS, need) ||
         error("TestSupport.have: unknown prerequisite :$need " *
               "(known: :libJLCS, :llvm_abi, :llvm, :llvm_link, $(join(sort!([":$k" for k in keys(_TOOLS)]), ", ")))")
-    return Sys.which(_TOOLS[need]) !== nothing
+    name = _TOOLS[need]
+    RepliBuild.Tools.known(name) && return RepliBuild.Tools.have(name)
+    return Sys.which(name) !== nothing
 end
 
 # Whether libJLCS loads and exports `sym`. Optional parts of the library are
 # compiled in or left out at build time, and only the export says which.
 function _libjlcs_exports(sym::Symbol)
-    h = Libdl.dlopen(RepliBuild.MLIRNative.libJLCS; throw_error = false)
+    h = Libdl.dlopen(RepliBuild.MLIRNative.libJLCS_path(); throw_error = false)
     h === nothing && return false
     return Libdl.dlsym(h, sym; throw_error = false) !== nothing
 end

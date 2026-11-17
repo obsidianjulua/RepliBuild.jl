@@ -67,7 +67,7 @@ using .ViTest
         @test occursin("vbaseVtableOffsets = [-24 : i64]", ir)
         @test !occursin("baseNames", split(ir, "vbase")[1])  # not in the static table
 
-        if isfile(RepliBuild.MLIRNative.libJLCS)
+        if isfile(RepliBuild.MLIRNative.libJLCS_path())
             ctx = RepliBuild.MLIRNative.create_context()
             try
                 @test RepliBuild.MLIRNative.parse_module(ctx, "module {\n$(ir)\n}") != C_NULL

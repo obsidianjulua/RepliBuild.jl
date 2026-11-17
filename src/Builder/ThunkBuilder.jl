@@ -141,7 +141,7 @@ function build_aot_thunks(config, library_path;
         link_args = ["-shared", "-fPIC", "-o", thunks_so, thunks_obj,
                      "-L", lib_dir, "-l:$lib_name",
                      Compiler._reproducible_link_flags()...]
-        jlcs = MLIRNative.libJLCS
+        jlcs = MLIRNative.libJLCS_path()
         isfile(jlcs) && push!(link_args, jlcs)
         if !Sys.iswindows()
             # `$ORIGIN` FIRST, build directory second — see the RUNPATH

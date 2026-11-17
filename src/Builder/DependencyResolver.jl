@@ -5,6 +5,7 @@ module DependencyResolver
 
 using ..ConfigurationManager
 using ..BuildBridge
+import ..Tools
 import Pkg   # PlatformEngines: download, verify and unpack archive dependencies
 import ProgressMeter
 
@@ -198,7 +199,7 @@ end
 # empty result as "unknown", never as "matches".
 function _git_head_commit(dep_path::AbstractString)
     try
-        return lowercase(String(strip(read(`git -C $dep_path rev-parse HEAD`, String))))
+        return lowercase(String(strip(read(Tools.tool_cmd(`git -C $dep_path rev-parse HEAD`), String))))
     catch
         return ""
     end
@@ -255,7 +256,7 @@ _dep_subpath(dep_path::AbstractString, sub::AbstractString) = joinpath(dep_path,
 # absent is missing from the result. `-z` keeps paths unquoted.
 function _recorded_submodule_commits(dep_path::AbstractString, paths::AbstractVector)
     recorded = Dict{String,String}()
-    out = read(`git -C $dep_path ls-tree -z HEAD -- $paths`, String)
+    out = read(Tools.tool_cmd(`git -C $dep_path ls-tree -z HEAD -- $paths`), String)
     for entry in split(out, '\0'; keepempty=false)
         meta, path = split(entry, '\t'; limit=2)
         mode, type, sha = split(meta)
@@ -289,8 +290,8 @@ function _fetch_dep_submodules(name::AbstractString, dep, dep_path::AbstractStri
     isempty(subs) && return nothing
     _require_recorded_submodules(name, dep, dep_path)
     println("    $name: fetching submodules $(_subsdisp(subs))")
-    _run_git(`git -C $dep_path submodule --quiet update --init --checkout --force --depth 1 -- $subs`,
-             `git -C $dep_path submodule update --progress --init --checkout --force --depth 1 -- $subs`)
+    _run_git(Tools.tool_cmd(`git -C $dep_path submodule --quiet update --init --checkout --force --depth 1 -- $subs`),
+             Tools.tool_cmd(`git -C $dep_path submodule update --progress --init --checkout --force --depth 1 -- $subs`))
     return nothing
 end
 
@@ -325,7 +326,7 @@ end
 # Best-effort origin URL for a legacy clone that predates the marker.
 function _git_origin_url(dep_path::AbstractString)
     try
-        return String(strip(read(`git -C $dep_path remote get-url origin`, String)))
+        return String(strip(read(Tools.tool_cmd(`git -C $dep_path remote get-url origin`), String)))
     catch
         return ""
     end
@@ -352,14 +353,14 @@ function _clone_dep(name::AbstractString, dep, dep_path::AbstractString, marker_
     cloned = false
     try
         # Use '--' to separate options from positional arguments
-        _run_git(`git clone --quiet -- $(dep.url) $dep_path`,
-                 `git clone --progress -- $(dep.url) $dep_path`)
+        _run_git(Tools.tool_cmd(`git clone --quiet -- $(dep.url) $dep_path`),
+                 Tools.tool_cmd(`git clone --progress -- $(dep.url) $dep_path`))
         cloned = true
         if !isempty(dep.tag)
             cd(dep_path) do
                 # Tag is validated by the caller (no '-' prefix), so safe to pass directly.
                 # Do NOT use '--' here — it tells git to treat the arg as a file path.
-                run(`git checkout --quiet $(dep.tag)`)
+                run(Tools.tool_cmd(`git checkout --quiet $(dep.tag)`))
             end
         end
         # Verify BEFORE the marker is written: a failed pin must not leave a record
@@ -390,7 +391,7 @@ function _recheckout_dep(name::AbstractString, dep, dep_path::AbstractString, ma
         cd(dep_path) do
             # Fetch is best-effort: an offline switch to an already-local tag must still work.
             try
-                _run_git(`git fetch --quiet --tags origin`, `git fetch --progress --tags origin`)
+                _run_git(Tools.tool_cmd(`git fetch --quiet --tags origin`), Tools.tool_cmd(`git fetch --progress --tags origin`))
             catch e
                 @warn "git fetch failed for $name; checking out against local refs" exception=e
             end
@@ -399,7 +400,7 @@ function _recheckout_dep(name::AbstractString, dep, dep_path::AbstractString, ma
                 # ref locally; without it git reports "already on" and silently keeps
                 # the stale tree. The clone is a cache we own, so discarding local
                 # state here is correct.
-                run(`git checkout --quiet --force $(dep.tag)`)
+                run(Tools.tool_cmd(`git checkout --quiet --force $(dep.tag)`))
             end
         end
         # A checkout moves the gitlinks, not the submodules' working trees: they

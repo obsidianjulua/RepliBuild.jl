@@ -100,7 +100,7 @@ ENV["REPLIBUILD_JULIA_ENV"] = "none"
 
     @testset "MLIR native library" begin
         mlir = RepliBuild.MLIRNative
-        if isfile(mlir.libJLCS)
+        if isfile(mlir.libJLCS_path(; install = false))
             ctx = mlir.create_context()
             @test ctx != C_NULL
 

@@ -6,6 +6,7 @@ module DWARFParser
 
 using JSON
 import ..Compiler: _pe_exported_names
+import ..Tools
 
 export parse_vtables, VirtualMethod, MemberInfo, ClassInfo, VtableInfo,
        export_vtable_json,
@@ -427,7 +428,7 @@ Read actual vtable function pointers from binary at given address.
 """
 function read_vtable_data(binary_path::String, vtable_addr::UInt64, num_entries::Int)
     # Use objdump to read the .data.rel.ro section
-    cmd = `objdump -s --section=.data.rel.ro $binary_path`
+    cmd = Tools.tool_cmd(`objdump -s --section=.data.rel.ro $binary_path`)
     output = read(cmd, String)
 
     # Parse the hex dump to find our vtable
@@ -474,7 +475,7 @@ function parse_vtables(binary_path::String)
     dwarf_output = read(dwarf_cmd, String)
 
     # Extract symbol table
-    nm_cmd = `nm $binary_path`
+    nm_cmd = Tools.tool_cmd(`nm $binary_path`)
     nm_output = read(nm_cmd, String)
 
     # Parse both

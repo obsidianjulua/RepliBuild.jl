@@ -90,6 +90,29 @@ end
 
 haveit(prog) = Sys.which(prog) !== nothing
 
+# The prebuilt library: the `JLCS` artifact in Artifacts.toml, a libJLCS with
+# LLVM and MLIR linked in (deps/jlcs_jll/build_tarballs.jl). True when it is
+# on disk for this host after this call. It is lazy, so nothing fetched it at
+# `Pkg.add`; fetching it here means the first Tier 2 call does not stop to
+# download. Any failure (no entry for this platform, no network, the stdlibs
+# not loadable here) is `false`, and the local build below is tried instead.
+function prebuilt_library()
+    try
+        toml = joinpath(@__DIR__, "..", "Artifacts.toml")
+        isfile(toml) || return false
+        Artifacts = Base.require(Base.PkgId(Base.UUID("56f22d72-fd6d-98f1-02f0-08ddc0907c33"), "Artifacts"))
+        Lazy = Base.require(Base.PkgId(Base.UUID("4af54fe1-eca0-43a8-85a7-787d91b784e3"), "LazyArtifacts"))
+        hash = Base.invokelatest(Artifacts.artifact_hash, "JLCS", toml)
+        hash === nothing && return false
+        Base.invokelatest(Artifacts.artifact_exists, hash) && return true
+        Base.invokelatest(Lazy.ensure_artifact_installed, "JLCS", toml)
+        return Base.invokelatest(Artifacts.artifact_exists, hash)
+    catch e
+        @info "RepliBuild: the prebuilt JLCS dialect could not be fetched ($(first(split(sprint(showerror, e), '\n')))); trying a local build."
+        return false
+    end
+end
+
 # Run build.sh with its output in the log. True when it exited 0.
 function run_logged(cmd::Cmd)
     try
@@ -162,6 +185,12 @@ function main()
     Sys.islinux() || advise("This platform is not supported; RepliBuild runs on Linux and Windows.")
 
     usable_library() && return println("RepliBuild: JLCS dialect already built and loadable.")
+
+    # A prebuilt library needs no system LLVM or MLIR. `REPLIBUILD_JLCS=local`
+    # asks for the local build instead (the choice RepliBuild itself reads).
+    if lowercase(get(ENV, "REPLIBUILD_JLCS", "")) != "local" && prebuilt_library()
+        return println("RepliBuild: using the prebuilt JLCS dialect (no system LLVM/MLIR needed).")
+    end
 
     missing = filter(!haveit, ["cmake", "mlir-tblgen", "llvm-config"])
     isempty(missing) ||

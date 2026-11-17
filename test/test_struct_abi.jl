@@ -58,7 +58,7 @@ const ABI_LIB = joinpath(ABI_DIR, "libabi_fixture." * Libdl.dlext)
 if !isfile(ABI_LIB) || mtime(ABI_SRC) > mtime(ABI_LIB)
     run(`$CLANGXX -shared -fPIC -O1 -o $ABI_LIB $ABI_SRC`)
 end
-const JLCS = RepliBuild.MLIRNative.libJLCS
+const JLCS = RepliBuild.MLIRNative.libJLCS_path()
 
 @testset "struct ABI traces" begin
 

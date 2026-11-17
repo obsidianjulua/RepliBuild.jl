@@ -41,6 +41,7 @@ export debug_root, object_path, mlir_sources, has_object,
 # in core, and this does not change that: it borrows one tool-discovery answer
 # rather than any build state.
 import ..Compiler
+import ..Tools
 
 """
     DebugText <: AbstractString
@@ -291,7 +292,7 @@ function disassemble(path::AbstractString; symbol::AbstractString="", source::Bo
     isempty(symbol) || push!(args, "--disassemble=$symbol")
     push!(args, obj)
     out = try
-        read(`$(_objdump()) $args`, String)
+        read(Tools.tool_cmd(`$(_objdump()) $args`), String)
     catch e
         error("`$(_objdump())` failed on $obj: $e")
     end

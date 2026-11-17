@@ -5,8 +5,65 @@ project(JLCS_Dialect LANGUAGES C CXX)
 find_package(MLIR REQUIRED CONFIG)
 find_package(LLVM REQUIRED CONFIG)
 
+# A cross build cannot run the mlir-tblgen its MLIR install names: that one is
+# a target binary. JLCS_MLIR_TABLEGEN names one that runs on the build machine.
+set(JLCS_MLIR_TABLEGEN "" CACHE FILEPATH "mlir-tblgen to run instead of the MLIR install's (cross builds)")
+if(JLCS_MLIR_TABLEGEN)
+  set(MLIR_TABLEGEN_EXE "${JLCS_MLIR_TABLEGEN}")
+  set(MLIR_TABLEGEN_TARGET "")
+endif()
+
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
+
+# A self-contained libJLCS: LLVM and MLIR linked in as archives, and only the
+# C API exported (jlcs_exports.map). This is what the BinaryBuilder recipe
+# (deps/jlcs_jll/build_tarballs.jl) builds, so the library needs no LLVM or
+# MLIR on the machine that loads it. OFF, the default and what build.sh
+# builds, links whatever the install offers, usually its shared libraries.
+#
+# An install built with LLVM_LINK_LLVM_DYLIB (LLVM_full_jll, most distros)
+# exports MLIR's archives with the LLVM shared library as their dependency,
+# so asking for the archives by name is not enough: every imported MLIR
+# target is pointed at LLVM's component archives instead. The linker takes
+# only the members something references.
+option(JLCS_STATIC_LLVM "Link LLVM and MLIR statically and export only the C API" OFF)
+if(JLCS_STATIC_LLVM)
+  if(WIN32 OR APPLE)
+    message(FATAL_ERROR "JLCS_STATIC_LLVM is ELF only: the export list is a GNU version script")
+  endif()
+  set(LLVM_LINK_LLVM_DYLIB OFF)
+  set(_jlcs_llvm_archives "")
+  foreach(_lib ${LLVM_AVAILABLE_LIBS})
+    if(TARGET ${_lib})
+      get_target_property(_type ${_lib} TYPE)
+      # A few tool-support archives (LLVMOptDriver, LLVMDebuginfod, ...) are
+      # themselves exported against the shared library; nothing here needs
+      # them, and one on the link line would bring it back.
+      get_target_property(_lib_deps ${_lib} INTERFACE_LINK_LIBRARIES)
+      if(_type STREQUAL "STATIC_LIBRARY" AND NOT "LLVM" IN_LIST _lib_deps)
+        list(APPEND _jlcs_llvm_archives ${_lib})
+      endif()
+    endif()
+  endforeach()
+  if(NOT _jlcs_llvm_archives)
+    message(FATAL_ERROR "JLCS_STATIC_LLVM: this LLVM install ships no component archives")
+  endif()
+  add_library(JLCSStaticLLVM INTERFACE)
+  target_link_libraries(JLCSStaticLLVM INTERFACE ${_jlcs_llvm_archives})
+  get_directory_property(_jlcs_imported IMPORTED_TARGETS)
+  foreach(_t ${_jlcs_imported})
+    if(_t MATCHES "^MLIR")
+      get_target_property(_deps ${_t} INTERFACE_LINK_LIBRARIES)
+      if(_deps)
+        list(TRANSFORM _deps REPLACE "^LLVM$" "JLCSStaticLLVM")
+        list(TRANSFORM _deps REPLACE "^\\$<LINK_ONLY:LLVM>$" "$<LINK_ONLY:JLCSStaticLLVM>")
+        set_target_properties(${_t} PROPERTIES INTERFACE_LINK_LIBRARIES "${_deps}")
+      endif()
+    endif()
+  endforeach()
+  message(STATUS "JLCS: static LLVM/MLIR, C API exports only")
+endif()
 
 # Add LLVM/MLIR CMake modules
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
@@ -86,6 +143,19 @@ add_llvm_library(JLCS SHARED
 
 # Enable C++ exceptions for our code (must come after LLVM's -fno-exceptions)
 target_compile_options(JLCS PRIVATE -fexceptions)
+
+if(JLCS_STATIC_LLVM)
+  target_link_libraries(JLCS PRIVATE JLCSStaticLLVM)
+  target_link_options(JLCS PRIVATE
+    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/jlcs_exports.map"
+    # Nothing LLVM or MLIR may be left to the loader. A compiler other than
+    # the one that built the archives can ask for a symbol they do not define
+    # (clang calls the C2 constructor where GCC's archives carry only C1),
+    # and without this that is a library that fails only under RTLD_NOW.
+    "-Wl,-z,defs")
+  set_target_properties(JLCS PROPERTIES
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/jlcs_exports.map")
+endif()
 
 # Another host's struct ABI rules, built into THIS host's libJLCS for
 # inspection: the result cannot run anything (the JIT would emit that

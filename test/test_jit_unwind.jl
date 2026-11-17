@@ -56,7 +56,7 @@ function make_engine(ir)
     mod = parse_module(ctx, ir)
     @assert lower_to_llvm(mod)
     jit = create_jit(mod, opt_level=0,
-                     shared_libs=[FIXTURE_LIB, RepliBuild.MLIRNative.libJLCS])
+                     shared_libs=[FIXTURE_LIB, RepliBuild.MLIRNative.libJLCS_path()])
     return ctx, jit
 end
 

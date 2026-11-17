@@ -281,7 +281,7 @@ at compile time (ccall requires a concrete type, not a TypeVar).
                       "guard of this width to JLCSCAPIWrappers.cpp."
                 return :(error($msg))
             end
-            lib = MLIRNative.libJLCS
+            lib = GlobalRef(MLIRNative, :libJLCS)
             return :(ccall(($(QuoteNode(g)), $lib), $T,
                            (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, inner_ptrs))
         end
@@ -302,7 +302,7 @@ at compile time (ccall requires a concrete type, not a TypeVar).
             end
             n = sizeof(T)
             call = if Sys.iswindows()
-                lib = MLIRNative.libJLCS
+                lib = GlobalRef(MLIRNative, :libJLCS)
                 :(ccall((:jlcs_guard_sret, $lib), Cvoid,
                         (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, p, inner_ptrs))
             else
@@ -319,7 +319,7 @@ at compile time (ccall requires a concrete type, not a TypeVar).
             end
         end
         if Sys.iswindows()
-            lib = MLIRNative.libJLCS
+            lib = GlobalRef(MLIRNative, :libJLCS)
             return quote
                 ret_buf = Ref{$T}()
                 GC.@preserve ret_buf begin
@@ -358,7 +358,7 @@ throw (`test_aot_thunks.jl`, probe `throw_void`).
 """
 @generated function _invoke_void(fptr::Ptr{Cvoid}, inner_ptrs::Vector{Ptr{Cvoid}})
     if Sys.iswindows()
-        lib = MLIRNative.libJLCS
+        lib = GlobalRef(MLIRNative, :libJLCS)
         return :(ccall((:jlcs_guard_void, $lib), Cvoid,
                        (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}), fptr, inner_ptrs))
     end
@@ -662,7 +662,7 @@ the import against an already-loaded module by name, and that module is the one
 RUNPATH already resolved to.
 """
 function open_thunks_library(thunks_path::AbstractString)
-    jlcs = MLIRNative.libJLCS
+    jlcs = MLIRNative.libJLCS_path()
     jlcs_state = if !isfile(jlcs)
         "MISSING — build the dialect with src/mlir/build.sh"
     else
@@ -970,7 +970,7 @@ function initialize_global_jit(binary_path::String)
             # 2b. Register exception handling helper symbols for JIT'd code
             for sym in (:jlcs_set_pending_exception, :jlcs_catch_current_exception,
                         :jlcs_has_pending_exception, :jlcs_clear_pending_exception)
-                ptr = something(Libdl.dlsym(Libdl.dlopen(MLIRNative.libJLCS), sym, throw_error=false), C_NULL)
+                ptr = something(Libdl.dlsym(Libdl.dlopen(MLIRNative.libJLCS_path()), sym, throw_error=false), C_NULL)
                 if ptr != C_NULL
                     MLIRNative.register_symbol_global(string(sym), ptr)
                 end
@@ -1102,7 +1102,7 @@ function initialize_global_jit(binary_path::String)
             # Must precede the FIRST engine: LLVM's perf listener is a process
             # singleton, so JITDUMPDIR is read once and the earliest setting wins.
             configure_jit_dump_session!()
-            jlcs_lib_path = MLIRNative.libJLCS
+            jlcs_lib_path = MLIRNative.libJLCS_path()
 
             # The object cache has to be requested HERE — it cannot be enabled
             # on a live engine — so the decision is read from the environment
