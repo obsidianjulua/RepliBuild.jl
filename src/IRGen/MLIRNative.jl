@@ -83,6 +83,9 @@ function check_library()
         checks the toolchain; the manual's Install page ("The JLCS dialect") has the steps.
         """)
     end
+    # There, and this RepliBuild's dialect: a library from another release
+    # would be called with IR and arguments it does not expect.
+    JLCSLibrary.verify_abi!(loc)
 end
 
 # MLIR C API opaque types

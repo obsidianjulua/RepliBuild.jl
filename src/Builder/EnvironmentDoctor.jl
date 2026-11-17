@@ -475,6 +475,9 @@ function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
         h = Libdl.dlopen(lib_path, Libdl.RTLD_LAZY; throw_error=false)
         h === nothing && return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", false,
             "the prebuilt library does not load"; section=SEC_CPP, advice=rebuild)
+        mismatch = JLCSLibrary.abi_problem(loc)
+        mismatch === nothing || return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", false,
+            "the prebuilt library is for another dialect ABI"; section=SEC_CPP, advice=[mismatch])
         return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", true,
             "prebuilt (JLCS artifact, LLVM and MLIR linked in)"; section=SEC_CPP)
     end
@@ -497,6 +500,11 @@ function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
             section=SEC_CPP, advice=rebuild)
     end
     Libdl.dlclose(h)
+    # A build left over from an older checkout loads and is not this
+    # RepliBuild's dialect: it must be rebuilt, like one against a gone LLVM.
+    mismatch = JLCSLibrary.abi_problem(loc)
+    mismatch === nothing || return ToolStatus("libJLCS", false, true, lib_path, built, false,
+        "built for another dialect ABI"; section=SEC_CPP, advice=vcat([mismatch], rebuild))
     ToolStatus("libJLCS", false, true, lib_path, built, true,
         isempty(built) ? "dialect compiled" : "dialect compiled against LLVM $built"; section=SEC_CPP)
 end
