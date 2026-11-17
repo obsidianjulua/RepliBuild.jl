@@ -42,7 +42,14 @@ end
             @test r.path == r.name
         else
             @test isfile(r.path)
-            @test _TR._probe(_TR.tool_cmd(`$(r.name) --version`)) !== nothing
+            # Whether the copy starts, not how fast, and with the tool named
+            # when it does not. The probe's own limit (`PROBE_SECONDS`) is for
+            # a program that never exits; a first start on a loaded Windows
+            # runner has outlasted it (main, 2026-11-17: one job of six, the
+            # first tool probed, 20 s to the second, and the same commit's
+            # other runs passed), and the failure said only `nothing`.
+            started = _TR._probe(_TR.tool_cmd(`$(r.name) --version`); timeout = 180) !== nothing
+            @test (r.name, r.source, started) == (r.name, r.source, true)
         end
         checked += 1
     end
