@@ -19,6 +19,7 @@ import ..ConfigurationManager: RepliBuildConfig, get_source_files, get_include_d
                                 is_cache_enabled, get_cache_path, with_include_dirs
 import ..BuildBridge
 import ..Tools
+import ..LibDW
 import ..LLVMEnvironment
 import .._read_json
 import ..stl_container_size, .._scope_suffixes, .._outside_template_args, ..INTERNAL_TYPE_BLOCKLIST
@@ -6763,6 +6764,11 @@ function _dwarf_file_tables(dumper, binary_path::AbstractString)::Vector{Dict{In
     tables = Vector{Dict{Int,String}}()
     dirs = Dict{Int,String}()
     mode = :none
+    # DWARF 4 and earlier print `Entry Dir Time Size Name`; DWARF 5 prints
+    # `Entry Dir [MD5] Name`. Read off each table's own column header: taken
+    # as the DWARF 5 shape, a DWARF 4 row's name came out as `0\t0\t<name>`
+    # and no declaration file of a `-gdwarf-4` build matched anything.
+    legacy_columns = false
     # readelf renders a string-table indirection as `(indirect line string,
     # offset: 0x..): <value>` — the value is everything after the last `): `.
     strip_indirect(s) = begin
@@ -6775,9 +6781,11 @@ function _dwarf_file_tables(dumper, binary_path::AbstractString)::Vector{Dict{In
         if occursin("The Directory Table", l)
             dirs = Dict{Int,String}(); mode = :dirs; continue
         elseif occursin("The File Name Table", l)
-            push!(tables, Dict{Int,String}()); mode = :files; continue
+            push!(tables, Dict{Int,String}()); mode = :files; legacy_columns = false; continue
         elseif isempty(l) || startswith(l, "Entry") || occursin("Offset:", l)
             mode == :files && isempty(l) && (mode = :none)
+            mode == :files && startswith(l, "Entry") &&
+                (legacy_columns = occursin("Time", l) && occursin("Size", l))
             continue
         end
 
@@ -6787,7 +6795,8 @@ function _dwarf_file_tables(dumper, binary_path::AbstractString)::Vector{Dict{In
             dirs[parse(Int, m.captures[1])] = strip_indirect(String(m.captures[2]))
         elseif mode == :files && !isempty(tables)
             # Entry, Dir, [MD5,] Name — MD5 is present only when the producer emitted it.
-            m = match(r"^(\d+)\s+(\d+)\s+(?:0x[0-9a-fA-F]+\s+)?(.*)$", l)
+            m = legacy_columns ? match(r"^(\d+)\s+(\d+)\s+\d+\s+\d+\s+(.*)$", l) :
+                                 match(r"^(\d+)\s+(\d+)\s+(?:0x[0-9a-fA-F]+\s+)?(.*)$", l)
             m === nothing && continue
             idx = parse(Int, m.captures[1]); dir = parse(Int, m.captures[2])
             name = strip_indirect(String(m.captures[3]))
@@ -6865,21 +6874,36 @@ function extract_dwarf_return_types(binary_path::String;
     # objdump (PE). Both print from binutils' dwarf.c; llvm-dwarfdump is a
     # different dialect and is rejected there. A fallback that returns empty
     # ships guessed signatures, so: no fallback.
-    dumper = _dwarf_dumper()
-    dumper === nothing && error(_no_dwarf_dumper_error())
+    dumper = nothing
+    if _dwarf_reader() === :libdw
+        # In process: libdw walks the DIE tree and LibDW writes it in the
+        # dumper's format, so the parser below is the same one either way.
+        # `DumpLines` produces the lines as the parser asks for them, so
+        # the dump is never in memory.
+        output = LibDW.DumpLines(binary_path)
+        file_tables = try
+            LibDW.file_tables(binary_path)
+        catch e
+            @debug "DWARF file tables unavailable; system-header filter disabled" exception=e
+            Vector{Dict{Int,String}}()
+        end
+    else
+        dumper = _dwarf_dumper()
+        dumper === nothing && error(_no_dwarf_dumper_error())
 
-    (output, exitcode) = BuildBridge.execute(dumper.tool, [dumper.dwarf * "info", binary_path])
-    exitcode == 0 || error("$(dumper.tool) $(dumper.dwarf)info failed on $binary_path:\n$output")
+        (output, exitcode) = BuildBridge.execute(dumper.tool, [dumper.dwarf * "info", binary_path])
+        exitcode == 0 || error("$(dumper.tool) $(dumper.dwarf)info failed on $binary_path:\n$output")
 
-    # DW_AT_decl_file is a per-CU INDEX in readelf's output (llvm-dwarfdump
-    # resolves it to a path; readelf does not), so the line-program file tables
-    # are a second, separate dump. Failure here is non-fatal: without tables the
-    # provenance filter simply does not run and extraction behaves as before.
-    file_tables = try
-        _dwarf_file_tables(dumper, binary_path)
-    catch e
-        @debug "DWARF file tables unavailable; system-header filter disabled" exception=e
-        Vector{Dict{Int,String}}()
+        # DW_AT_decl_file is a per-CU INDEX in readelf's output (llvm-dwarfdump
+        # resolves it to a path; readelf does not), so the line-program file tables
+        # are a second, separate dump. Failure here is non-fatal: without tables the
+        # provenance filter simply does not run and extraction behaves as before.
+        file_tables = try
+            _dwarf_file_tables(dumper, binary_path)
+        catch e
+            @debug "DWARF file tables unavailable; system-header filter disabled" exception=e
+            Vector{Dict{Int,String}}()
+        end
     end
 
     (return_types, struct_defs, global_vars, typedefs, record_abi) = parse_dwarf_dump(output; file_tables=file_tables,
@@ -6889,11 +6913,35 @@ function extract_dwarf_return_types(binary_path::String;
     # a library without debug info — and it is indistinguishable downstream from
     # "this library has no functions", which is how the dead fallback above went
     # unnoticed. Fail here instead of emitting a wrapper of guesses.
-    if isempty(return_types) && length(output) > 4096
-        error(_dwarf_format_mismatch_error(dumper, binary_path, length(output)))
+    dump_bytes = output isa LibDW.DumpLines ? output.bytes : length(output)
+    if isempty(return_types) && dump_bytes > 4096
+        dumper === nothing &&
+            error("libdw read $dump_bytes bytes of DWARF from $binary_path and the parser " *
+                  "found no function in it. Set REPLIBUILD_DWARF=readelf to read it with the " *
+                  "GNU dumper instead, and report the library.")
+        error(_dwarf_format_mismatch_error(dumper, binary_path, dump_bytes))
     end
 
     return (return_types, struct_defs, global_vars, typedefs, record_abi)
+end
+
+"""
+    _dwarf_reader() -> Symbol
+
+What reads a library's DWARF: `:readelf` (the GNU dumper `_dwarf_dumper`
+finds, as a subprocess) or `:libdw` (elfutils' libdw, in this process, through
+`LibDW`). `REPLIBUILD_DWARF` chooses; unset, it is `:readelf`. libdw reads ELF
+only, so asking for it anywhere else, or where it cannot be loaded, is an
+error and never a silent fall back to the other reader: the two are meant to
+give one answer, and a difference must be seen.
+"""
+function _dwarf_reader()::Symbol
+    v = lowercase(strip(get(ENV, "REPLIBUILD_DWARF", "")))
+    (isempty(v) || v == "readelf") && return :readelf
+    v == "libdw" || error("REPLIBUILD_DWARF is $(repr(v)); it takes `readelf` or `libdw`")
+    Sys.islinux() || error("REPLIBUILD_DWARF=libdw: libdw reads ELF, and this host's libraries are not ELF")
+    LibDW.available() || error("REPLIBUILD_DWARF=libdw: libdw (Elfutils_jll) cannot be loaded on this host")
+    return :libdw
 end
 
 """
@@ -6963,6 +7011,29 @@ function check_param_arity!(return_types::Dict{String,Dict{String,Any}}, die_par
 end
 
 """
+    _dwarf_count(line) -> Union{Int,Nothing}
+
+The unsigned constant of an attribute line, `: 19` or `: 0x10000`. GNU readelf
+prints a constant by the size it is stored in: one or two bytes in decimal,
+four or eight in hex. An array bound read as decimal only took the `0` of
+`0x10000`, and every array of 65536 elements or more (lz4's hash tables,
+miniz's dictionaries, pcre2's frames) had no elements and no size.
+"""
+function _dwarf_count(line::AbstractString)::Union{Int,Nothing}
+    m = match(r":\s*(0x[0-9a-fA-F]+|\d+)", line)
+    m === nothing && return nothing
+    v = m.captures[1]
+    return startswith(v, "0x") ? parse(Int, v[3:end]; base = 16) : parse(Int, v)
+end
+
+# The lines of a dump, one at a time: of a dumper's text without a vector of
+# them, or straight off libdw's walk (`LibDW.DumpLines`), which never holds
+# the text at all. The parser makes three passes, so a source is iterated
+# three times.
+_dump_lines(output::AbstractString) = eachsplit(output, '\n')
+_dump_lines(output::LibDW.DumpLines) = output
+
+"""
     parse_dwarf_dump(output) -> (return_types, struct_defs, global_vars, typedef_table, record_abi)
 
 Parse a GNU `readelf --debug-dump=info` dump into the type/signature tables.
@@ -6976,13 +7047,14 @@ enables the system-header provenance filter: a type declared in a toolchain
 header is dropped instead of emitted. Omitted — as every synthetic-dump test
 does — the filter simply does not run, and parsing behaves exactly as before.
 """
-function parse_dwarf_dump(output::AbstractString;
+function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                           file_tables::Vector{Dict{Int,String}}=Vector{Dict{Int,String}}(),
                           exported::Union{Nothing,AbstractSet{String}}=nothing
                          )::Tuple{Dict{String,Dict{String,Any}}, Dict{String,Dict{String,Any}}, Dict{String,Any}, Dict{String,String}, Dict{String,Dict{String,Any}}}
     # Which CU we are inside, 1-based; readelf emits line programs and DIEs in the
     # same section order, so the Nth "Compilation Unit @ offset" uses the Nth table.
     cu_index = 0
+    cu_comp_dir = ""
     return_types = Dict{String,Dict{String,Any}}()
 
     # Parse DWARF output to extract type information
@@ -7090,13 +7162,21 @@ function parse_dwarf_dump(output::AbstractString;
         delete!(type_refs, "_pending_member_offset")
     end
 
-    for line in split(output, '\n')
+    for line in _dump_lines(output)
         line = strip(line)
 
         # CU boundary — DW_AT_decl_file indices are CU-relative, so the table must
         # advance with them.
         if startswith(line, "Compilation Unit @")
             cu_index += 1
+            cu_comp_dir = ""
+        end
+        # The unit's compilation directory: what a relative file name in its
+        # line table is relative to. DWARF 5 puts that directory in the table
+        # (entry 0) and the names come out absolute; DWARF 4 does not.
+        if contains(line, "DW_AT_comp_dir")
+            cm = match(r"DW_AT_comp_dir\s*:\s*(?:\([^)]*\):\s*)?(.*)$", line)
+            cm === nothing || (cu_comp_dir = String(strip(cm.captures[1])))
         end
 
         # Track ANY tag to avoid attribute pollution
@@ -7153,6 +7233,8 @@ function parse_dwarf_dump(output::AbstractString;
                 tgt = type_refs["last_tag_offset"]
                 if haskey(type_refs, tgt) && isa(type_refs[tgt], Dict)
                     path = get(file_tables[cu_index], parse(Int, fm.captures[1]), "")
+                    (!isempty(path) && !isabspath(path) && !isempty(cu_comp_dir)) &&
+                        (path = joinpath(cu_comp_dir, path))
                     isempty(path) || (type_refs[tgt]["decl_file_path"] = path)
                 end
             end
@@ -7742,8 +7824,12 @@ function parse_dwarf_dump(output::AbstractString;
         if contains(line, "DW_AT_upper_bound") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
             if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :subrange
-                # Upper bound can be decimal or hex
-                bound_match = match(r":\s*(\d+)", line)
+                # Upper bound can be decimal or hex: readelf prints a constant
+                # stored in four or eight bytes as `0x10000`, and read as
+                # decimal that was 0, so an array of 65536 elements or more
+                # had none (`_dwarf_count`).
+                bound = _dwarf_count(line)
+                bound_match = bound === nothing ? nothing : (captures = (string(bound),),)
                 if !isnothing(bound_match)
                     if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
                         # Upper bound is size-1, so actual size is upper_bound + 1
@@ -7765,12 +7851,12 @@ function parse_dwarf_dump(output::AbstractString;
         if contains(line, "DW_AT_count") && haskey(type_refs, "last_tag_offset")
             tag_offset = type_refs["last_tag_offset"]
             if haskey(offset_to_kind, tag_offset) && offset_to_kind[tag_offset] == :subrange
-                # Count is the actual array size
-                count_match = match(r":\s*(\d+)", line)
-                if !isnothing(count_match)
+                # Count is the actual array size, decimal or hex (`_dwarf_count`).
+                count_value = _dwarf_count(line)
+                if !isnothing(count_value)
                     if haskey(type_refs, tag_offset) && isa(type_refs[tag_offset], Dict)
                         # Count is the actual size
-                        size = parse(Int, count_match.captures[1])
+                        size = count_value
                         type_refs[tag_offset]["count"] = size
 
                         # Add dimension to parent array
@@ -7853,10 +7939,10 @@ function parse_dwarf_dump(output::AbstractString;
 
                 # Bitfield: DW_AT_data_bit_offset (DWARF 4+ — absolute bit offset from struct start)
                 if contains(line, "DW_AT_data_bit_offset")
-                    dbo_match = match(r"DW_AT_data_bit_offset\s*:\s*(\d+)", line)
-                    if !isnothing(dbo_match)
-                        member_info["data_bit_offset"] = parse(Int, dbo_match.captures[1])
-                    end
+                    # Hex past 65535 (a bitfield 8 KiB into its record), like any
+                    # constant readelf prints from four bytes (`_dwarf_count`).
+                    dbo = _dwarf_count(line)
+                    isnothing(dbo) || (member_info["data_bit_offset"] = dbo)
                 end
 
                 # Bitfield: DW_AT_bit_offset (DWARF 2/3 — offset from MSB of containing unit)
@@ -8431,7 +8517,7 @@ function parse_dwarf_dump(output::AbstractString;
     # alone: no parameter names, and a static member wrapped with a receiver
     # (CI's LLVM 22 cells, 2026-11-15; clang 18 and 23 emit the class first).
     let sub = nothing
-        for line in eachsplit(output, '\n')
+        for line in _dump_lines(output)
             h = match(r"^\s*<\d+><([0-9a-fA-F]+)>: Abbrev Number", line)
             if h !== nothing
                 sub = occursin("DW_TAG_subprogram", line) ? "0x" * h.captures[1] : nothing
@@ -8442,7 +8528,7 @@ function parse_dwarf_dump(output::AbstractString;
         end
     end
 
-    for line in split(output, '\n')
+    for line in _dump_lines(output)
         line = strip(line)
 
         # Extract nesting level from DWARF format: <level><offset>
