@@ -13,7 +13,9 @@
 #      LLD_unified_jll) and the
 #      one on PATH, in the order `REPLIBUILD_TOOLS` names: `jll` (the default
 #      off Windows) or `system` (the default on Windows, where the supported
-#      host is MSYS2 and the JLL copies are unverified).
+#      host is MSYS2 and the JLL copies are unverified). `llvm-dwarfdump` is
+#      the one exception to that default: the system's first on every host,
+#      LLVM_unified_jll's only where there is none (see PROVIDERS).
 #   3. The bare name, so a machine with neither fails by naming the tool.
 #
 # A JLL copy counts only if it STARTS (`--version` exits 0): its shared
@@ -42,7 +44,20 @@ struct Provider
     product::Symbol
     override::String
     libpath::Bool
+    # A program the JLL ships without declaring it as a product, named by the
+    # file beside `product`'s (LLVM_unified_jll declares `opt` and `llc`; its
+    # `llvm-dwarfdump` sits in the same directory). Empty: the product itself.
+    sibling::String
+    # The lowest LLVM major whose copy is this tool (0: any). A copy that
+    # starts and reports an older one is not a copy, like one that does not
+    # start.
+    min_llvm::Int
+    # The system's copy is tried first unless `REPLIBUILD_TOOLS` says which.
+    system_first::Bool
 end
+Provider(jll::Module, product::Symbol, override::String, libpath::Bool;
+         sibling::String = "", min_llvm::Int = 0, system_first::Bool = false) =
+    Provider(jll, product, override, libpath, sibling, min_llvm, system_first)
 
 const PROVIDERS = Dict{String, Provider}(
     "readelf" => Provider(Binutils_jll, :readelf_path, "READELF", true),
@@ -55,6 +70,22 @@ const PROVIDERS = Dict{String, Provider}(
     # The C bucket's linker (Compiler._bundled_linker): LLD at the version of
     # Julia's own LLVM, which is the bundled clang's.
     "ld.lld"  => Provider(LLD_unified_jll, :ld_lld_path, "LD_LLD", true),
+    # What reads a C++ library's classes and vtables (DWARFParser.parse_vtables)
+    # at wrap and again every time a JIT wrapper loads, so it is the one tool a
+    # machine that only USES a wrapper needs.
+    #
+    # The system's copy first: it is the dumper of the LLVM that compiled the
+    # library, and the one every wrapper has been read with. LLVM_unified_jll's
+    # (Julia's LLVM) is what a machine with no LLVM has, and only from LLVM 20:
+    # `DWARFParser` reads the type NAMES the dumper prints, and LLVM 18 prints
+    # a typedef without its scope (`__to_type` for `std::ctype_base::__to_type`,
+    # `allocator_type` for a base class). Over the Hub's 42 libraries the
+    # LLVM 20 copy gave the classes a system LLVM 23 gives, all 7,477; the
+    # LLVM 18 copy differed on 11 libraries, and the thunk IR built from its
+    # classes differed for 9 of 10 C++ packages (2026-11-17). So on a Julia
+    # whose LLVM is older there is no bundled copy, as there was none before.
+    "llvm-dwarfdump" => Provider(LLVM_unified_jll, :opt_path, "LLVM_DWARFDUMP", true;
+                                 sibling = "llvm-dwarfdump", min_llvm = 20, system_first = true),
 )
 
 "What a tool resolved to. `source` is `:override`, `:jll`, `:system` or `:missing`."
@@ -88,6 +119,20 @@ function order()::Symbol
     error("REPLIBUILD_TOOLS is $(repr(v)); it takes `jll` or `system`")
 end
 
+"""
+    order(name) -> Symbol
+
+The order for one tool: `REPLIBUILD_TOOLS` when it is set, else the tool's own
+default, which is `:system` for a tool whose provider is `system_first`
+(`llvm-dwarfdump`) and `order()` for the rest.
+"""
+function order(name::AbstractString)::Symbol
+    ord = order()                     # validates the variable
+    isempty(strip(get(ENV, "REPLIBUILD_TOOLS", ""))) || return ord
+    p = get(PROVIDERS, String(name), nothing)
+    return (p !== nothing && p.system_first) ? :system : ord
+end
+
 "Whether `name` is a tool this module resolves."
 known(name::AbstractString) = haskey(PROVIDERS, name)
 
@@ -95,7 +140,10 @@ function _jll_path(p::Provider)::Union{String, Nothing}
     try
         p.jll.is_available() || return nothing
         path = getfield(p.jll, p.product)
-        return (path isa AbstractString && isfile(path)) ? String(path) : nothing
+        path isa AbstractString || return nothing
+        isempty(p.sibling) ||
+            (path = joinpath(dirname(String(path)), p.sibling * (Sys.iswindows() ? ".exe" : "")))
+        return isfile(path) ? String(path) : nothing
     catch
         return nothing
     end
@@ -177,7 +225,11 @@ function _env_get(base, key::String)::String
 end
 
 function _starts(name::String, p::Provider, path::String)::Bool
-    return _probe(_overlay(`$path --version`, _jll_env(name, p, ENV))) !== nothing
+    out = _probe(_overlay(`$path --version`, _jll_env(name, p, ENV)))
+    out === nothing && return false
+    p.min_llvm == 0 && return true
+    m = match(r"LLVM version (\d+)\.", out)
+    return m !== nothing && parse(Int, m.captures[1]) >= p.min_llvm
 end
 
 "How long a tool gets to answer `--version` before it is taken not to start."
@@ -224,7 +276,7 @@ function resolve(name::AbstractString)::Resolved
     p === nothing && error("Tools.resolve: $(repr(name)) is not a tool this module resolves " *
                            "(known: $(join(sort!(collect(keys(PROVIDERS))), ", ")))")
     override = get(ENV, "REPLIBUILD_TOOL_" * p.override, "")
-    ord = order()
+    ord = order(name)
     key = (name, override, String(ord), get(ENV, "PATH", ""))
     return lock(_LOCK) do
         get!(_CACHE, key) do

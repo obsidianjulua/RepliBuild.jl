@@ -1576,6 +1576,21 @@ the test named when you touch the area.
   child must get it empty, not inherit the parent's value. On Windows the merge is
   case-insensitive (`_overlay_env`). (`test_llvm_env_isolation.jl`.)
 
+- **`llvm-dwarfdump` is the system's first, and a bundled copy only from
+  LLVM 20** (2026-11-17, `Tools.PROVIDERS`: `system_first`, `min_llvm`).
+  `DWARFParser` reads the type NAMES the dumper prints, and they reach the
+  thunk IR (`jlcs.type_info` bodies and base names). LLVM 18 prints a typedef
+  without its scope (`__to_type` for `std::ctype_base::__to_type`): on the
+  Hub's 42 libraries Julia 1.13's bundled LLVM 20 dumper gave a system LLVM
+  23's classes exactly, and Julia 1.12's LLVM 18 differed on 11, with
+  different IR for 9 of 10 C++ packages. So the dumper of the LLVM that
+  compiled the library wins wherever it is on PATH, the bundled one is what a
+  machine with no LLVM has, and on a Julia whose LLVM is older there is none.
+  A tool that reads DWARF is not version-free because DWARF is: check what it
+  PRINTS at each bundled LLVM, on both supported Julias, before making a
+  bundled copy the default. (`test_tools_resolver.jl`, devtests
+  `test_bundled_dwarfdump_live.jl`.)
+
 ### Caching
 
 1. Per-file IR cache (`.replibuild_cache/`), keyed on a compile-fingerprint `.key`
@@ -1726,8 +1741,8 @@ changes:
   by `MSYSTEM`: Julia usually runs outside any MSYS2 shell, and Git Bash sets
   `MSYSTEM=MINGW64`. A `libJLCS.dll` that will not load is a missing
   `clang64\bin` PATH entry as often as a gone LLVM (`_clang64_bin_off_path`).
-  JIT C++ wrappers run `llvm-dwarfdump` by its bare name at load
-  (`DWARFParser.parse_vtables`), so the doctor probes that name.
+  JIT C++ wrappers run `llvm-dwarfdump` at load (`DWARFParser.parse_vtables`),
+  resolved by `Tools` (below, under Subprocesses); the doctor reports that copy.
 - DWARF dumper: GNU `objdump` on Windows. `_is_gnu_binutils` must reject llvm-objdump
   (on PATH in CLANG64), which otherwise parses **zero functions** silently. Use
   `Compiler._gnu_objdump()` wherever GNU objdump specifically is needed. The

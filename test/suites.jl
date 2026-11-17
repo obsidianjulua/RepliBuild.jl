@@ -207,6 +207,7 @@ const TESTS = TestFile[
     T("test_reproducible_link.jl", :dev, [:build]),
     T("test_bundled_linker_live.jl", :dev, [:build, :c]),
     T("test_libdw_dwarf_live.jl", :dev, [:dwarf], locks = ["libdw_test"]),
+    T("test_bundled_dwarfdump_live.jl", :dev, [:dwarf, :cpp]),
     T("test_dwarf_attribution.jl", :dev, [:dwarf]),
     T("test_sysconfiggen.jl", :dev, [:build]),
     T("test_link_cmdline_limit.jl", :dev, [:build]),
