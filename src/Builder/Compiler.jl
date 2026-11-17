@@ -3556,6 +3556,55 @@ function _unit_compiles(config::RepliBuildConfig, path::String, text::String)
     return (ok, String(msg))
 end
 
+"How many rows `generate_inline_definitions` first tries together when it must find the ones that do not compile."
+const _ALONE_GROUP_SIZE = 16
+
+"""
+    _alone_verdicts(probe, n; group = _ALONE_GROUP_SIZE) -> Vector{Union{Nothing,String}}
+
+For each of `n` rows, what `probe` says of the row tried alone: `nothing` when
+it compiles, else its error. `probe(rows, round, k)` compiles the rows whose
+indices it is given together (`round` and `k` number the call, for a file
+name) and returns `nothing` or an error.
+
+Every compile of the forced unit parses the whole include block, and few rows
+fail: 73 of Jolt's 2,139 constructors, which one compile per row turned into
+2,139 compiles and most of a ten-minute build (2026-11-17). So the rows are
+tried `group` at a time, each round in parallel: a group that compiles clears
+every row in it, and one that does not is halved and tried again, down to
+single rows. Only a row tried alone is ever given an error, so the verdicts
+are those of one compile per row wherever rows that compile together also
+compile apart, which holds for explicit instantiations and address-of
+initialisers: adding one cannot make another's errors go away. Where it does
+not hold, the row is kept, and the unit compiled whole is what decides.
+"""
+function _alone_verdicts(probe, n::Int; group::Int = _ALONE_GROUP_SIZE)
+    bad = Vector{Union{Nothing,String}}(nothing, n)
+    groups = Vector{Int}[collect(g) for g in Iterators.partition(1:n, max(group, 1))]
+    round = 0
+    while !isempty(groups)
+        round += 1
+        verdicts = Vector{Union{Nothing,String}}(nothing, length(groups))
+        let groups = groups, round = round
+            Threads.@threads for k in eachindex(groups)
+                verdicts[k] = probe(groups[k], round, k)
+            end
+        end
+        next = Vector{Int}[]
+        for (k, g) in enumerate(groups)
+            verdicts[k] === nothing && continue
+            if length(g) == 1
+                bad[g[1]] = verdicts[k]
+            else
+                h = length(g) ÷ 2
+                push!(next, g[1:h], g[h+1:end])
+            end
+        end
+        groups = next
+    end
+    return bad
+end
+
 "The sidecar naming the forced definitions' symbols, read at link time (`_forced_constructor_symbols`)."
 _forced_symbols_path(config::RepliBuildConfig) = joinpath(get_cache_path(config), "replibuild_ctors.json")
 
@@ -3656,8 +3705,9 @@ alone, in parallel, and dropped from every row where it does not compile on
 its own (a row left with no header is skipped for that reason, never as a
 row that "does not compile"). When the rows' diagnostics name no row, the
 same header check runs if it has not, and each remaining constructor is
-checked alone, in parallel; if that still leaves errors naming no row, each
-member function is. From the IR of the unit
+checked alone, in parallel (in groups first, halved where one fails, so a
+row that compiles rarely costs a compile of its own); if that still leaves
+errors naming no row, each member function is. From the IR of the unit
 that compiles, a member function the unit only DECLARES has no body in its
 header (an out-of-line member the library keeps hidden, or one defined in a
 file this build does not compile): taking its address would leave the library
@@ -3704,24 +3754,25 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
     end
     unit_text() = _inline_ctor_unit_text(_inline_ctor_headers(config, vcat(forced, mforced, dforced)),
                                          forced, mforced, dforced)
-    # Each row of `rows` compiled alone (`-fsyntax-only`), in parallel: the
-    # compiler's first error line per row, or `nothing`.
+    # Each row of `rows` compiled alone (`-fsyntax-only`): the compiler's first
+    # error line per row, or `nothing`. The rows are tried in groups first
+    # (`_alone_verdicts`); a row's verdict and its text are still its own
+    # compile's, from the same file name (the error line can name it).
     function alone(rows, ctors::Bool)
         all_headers = _inline_ctor_headers(config, vcat(forced, mforced))
-        bad_row = Vector{Union{Nothing,String}}(nothing, length(rows))
-        Threads.@threads for i in eachindex(rows)
-            path = joinpath(cache_dir, "replibuild_ctors_probe_$(ctors ? "c" : "m")_$(i).cpp")
-            one = ctors ? _inline_ctor_unit_text(all_headers, [rows[i]]) :
-                          _inline_ctor_unit_text(all_headers, Any[], [rows[i]])
-            (rok, rout) = _unit_probe(config, path, one)
-            if !rok
-                lines = split(rout, '\n')
-                k = findfirst(l -> occursin("error", l), lines)
-                bad_row[i] = k === nothing ? String(strip(first(rout, 200))) : String(strip(lines[k]))
-            end
+        kind = ctors ? "c" : "m"
+        return _alone_verdicts(length(rows)) do g, round, k
+            path = joinpath(cache_dir, length(g) == 1 ? "replibuild_ctors_probe_$(kind)_$(g[1]).cpp" :
+                                                        "replibuild_ctors_probe_$(kind)_g$(round)_$(k).cpp")
+            text = ctors ? _inline_ctor_unit_text(all_headers, rows[g]) :
+                           _inline_ctor_unit_text(all_headers, Any[], rows[g])
+            (rok, rout) = _unit_probe(config, path, text)
             rm(path; force = true)
+            rok && return nothing
+            lines = split(rout, '\n')
+            e = findfirst(l -> occursin("error", l), lines)
+            return e === nothing ? String(strip(first(rout, 200))) : String(strip(lines[e]))
         end
-        return bad_row
     end
     first_error(out) = (lines = split(out, '\n'); k = findfirst(l -> occursin("error", l), lines);
                         k === nothing ? String(strip(first(out, 200))) : String(strip(lines[k])))
@@ -3976,15 +4027,18 @@ function _forced_exportable_ir(files::Vector{String}, symbols::AbstractSet{Strin
     isempty(symbols) && return (files, 0)
     out = String[]
     total = 0
-    candidate(line) = (startswith(line, "define ") || (startswith(line, "@") && occursin(" alias ", line))) &&
-                      any(s -> occursin("@" * s, line) || occursin("@\"" * s, line), symbols)
+    # `_export_global_line` returns any line that is not the definition or alias
+    # of a symbol in the set as it was, and finds the name with one set lookup.
+    # (A scan of every symbol against every `define` line stood in front of it
+    # as a filter and could only agree with it: 38 of the 80 seconds of Jolt's
+    # second link, 2026-11-17.)
     for f in files
         # A file whose lines the rewrite would leave as they are is returned
         # as itself: a default-visibility build has nothing to change.
         changes = 0
         open(f) do io
             for line in eachline(io)
-                candidate(line) && _export_global_line(line, symbols; pe = pe) != line && (changes += 1)
+                _export_global_line(line, symbols; pe = pe) != line && (changes += 1)
             end
         end
         if changes == 0
@@ -3998,7 +4052,7 @@ function _forced_exportable_ir(files::Vector{String}, symbols::AbstractSet{Strin
                 for line in eachline(src; keep = true)
                     body = chomp(line)
                     nl = line[lastindex(body)+1:end]
-                    write(io, candidate(body) ? _export_global_line(body, symbols; pe = pe) : body, nl)
+                    write(io, _export_global_line(body, symbols; pe = pe), nl)
                 end
             end
         end

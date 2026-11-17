@@ -504,4 +504,44 @@ const _XT_CLIB = _xt_meta(_XT_C_FUNCTIONS, _XT_C_STRUCTS)
         @test _XT_W._graph_subclassed(Any[dep]) == ["TObject"]
         @test _XT_W._graph_subclassed(Any[Dict{String,Any}("struct_definitions" => Dict{String,Any}())]) == String[]
     end
+
+    @testset "strong members: one index answers what a scan per type did" begin
+        # `_type_manifest` asks for every emitted type's strongly defined
+        # members. Each answer used to scan every symbol and every function
+        # (Jolt: 12 of a 43-second wrap); `_strong_member_index` files them
+        # once. The answers must be the scan's, for a class as spelled and
+        # for its bare key, template arguments kept.
+        fn(m, cls) = Dict{String,Any}("mangled" => m, "class" => cls)
+        md = Dict{String,Any}(
+            "symbols" => Any[Dict{String,Any}("mangled" => m, "type" => t) for (m, t) in
+                             (("a1", "T"), ("a2", "T"), ("a3", "W"), ("n1", "T"), ("i1", "T"), ("i2", "T"),
+                              ("t1", "T"), ("free", "T"), ("dup", "T"))],
+            "functions" => Any[fn("a2", "A"), fn("a1", "A"), fn("a3", "A"), fn("n1", "ns::A"),
+                               fn("i1", "Outer<ns::T>::Inner"), fn("i2", "other::Inner"),
+                               fn("t1", "ns::Vec<ns::T, 3>"), fn("free", ""), fn("dup", "D"), fn("dup", "D"),
+                               fn("gone", "A"), "not a row"])
+        scan(key) = sort!(unique!(String[f["mangled"] for f in md["functions"]
+                                         if f isa AbstractDict && !isempty(f["class"]) &&
+                                            (f["class"] == key || _XT_W._bare_class_key(f["class"]) == key) &&
+                                            any(s -> s["mangled"] == f["mangled"] && s["type"] == "T", md["symbols"])]))
+        index = _XT_W._strong_member_index(md)
+        keys_asked = ["A", "ns::A", "Inner", "Outer<ns::T>::Inner", "other::Inner", "Vec<ns::T, 3>",
+                      "ns::Vec<ns::T, 3>", "D", "", "Nobody", "T"]
+        for key in keys_asked
+            @test _XT_W._strong_members(md, key) == scan(key)
+            @test _XT_W._strong_members(md, key; index = index) == scan(key)
+        end
+        @test _XT_W._strong_members(md, "A") == ["a1", "a2", "n1"]          # weak `a3` and unlisted `gone` are out
+        @test _XT_W._strong_members(md, "Inner") == ["i1", "i2"]
+        @test _XT_W._strong_members(md, "D") == ["dup"]
+        # Asking does not disturb the index: the same answer twice.
+        @test _XT_W._strong_members(md, "A"; index = index) == _XT_W._strong_members(md, "A"; index = index)
+        @test _XT_W._strong_member_index(Dict{String,Any}()) == Dict{String,Vector{String}}()
+        # The manifest carries them per type, as before.
+        owned = [(key, row) for (key, row) in core_manifest["types"] if haskey(row, "strong_members")]
+        @test !isempty(owned)
+        for (key, row) in owned
+            @test row["strong_members"] == _XT_W._strong_members(_XT_CORE, key)
+        end
+    end
 end

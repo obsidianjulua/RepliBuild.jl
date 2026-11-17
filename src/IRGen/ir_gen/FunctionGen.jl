@@ -473,6 +473,53 @@ function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_ab
             conflict_trap = isempty(conflicts) ? nothing : join(conflicts, "; "))
 end
 
+
+const _UNSIGNED_JULIA_INTS = ("Bool", "UInt8", "UInt16", "Cuchar", "Cushort", "Cwchar_t")
+
+"""
+    _enum_mlir_int(entry) -> String
+
+The integer an enum crosses a thunk as: `i8`, `i16`, `i32` or `i64`, by the
+entry's `byte_size`, else by its `julia_type`, else `i32`. Never a struct:
+`map_cpp_type` answers `!llvm.struct<"Int8">` for a Julia type name it does not
+know, and a record is passed by another rule than an integer is.
+"""
+function _enum_mlir_int(entry)::String
+    n = try _parse_byte_size(get(entry, "byte_size", "0")) catch; 0 end
+    if !(n in (1, 2, 4, 8))
+        jt = String(get(entry, "julia_type", "Cint"))
+        n = jt in ("Int8", "UInt8", "Cchar", "Cuchar", "Bool") ? 1 :
+            jt in ("Int16", "UInt16", "Cshort", "Cushort") ? 2 :
+            jt in ("Int64", "UInt64", "Clonglong", "Culonglong") ? 8 :
+            jt in ("Clong", "Culong") ? sizeof(Clong) : 4
+    end
+    return "i$(8 * n)"
+end
+
+"""
+    _narrow_int_extension(mlir_t, desc) -> Union{Nothing,String}
+
+`"zext"` or `"sext"` for an integer argument narrower than `int` (`i1`, `i8`,
+`i16`), `nothing` for anything else. `desc` is the parameter (its `julia_type`
+and `c_type`) or an enum's entry (`julia_type`, `underlying_type`). Unsigned
+types, `bool` and the unsigned character types zero-extend; plain `char`
+follows the host (`Cchar`); everything else sign-extends.
+"""
+function _narrow_int_extension(mlir_t::AbstractString, desc)
+    mlir_t in ("i1", "i8", "i16") || return nothing
+    mlir_t == "i1" && return "zext"
+    jt = String(get(desc, "julia_type", ""))
+    jt in _UNSIGNED_JULIA_INTS && return "zext"
+    jt in ("Int8", "Int16", "Cshort") && return "sext"
+    jt == "Cchar" && return Cchar <: Signed ? "sext" : "zext"
+    ct = _sysv_norm(String(get(desc, "underlying_type", get(desc, "c_type", ""))))
+    ct = replace(ct, r"^const " => "")
+    (startswith(ct, "unsigned") || startswith(ct, "uint") || ct in ("bool", "_Bool", "char8_t", "char16_t") ||
+     endswith(ct, " unsigned int") || endswith(ct, " unsigned")) && return "zext"
+    ct == "char" && return Cchar <: Signed ? "sext" : "zext"
+    return "sext"
+end
+
 """
     _has_receiver(func, structs) -> Bool
 
@@ -724,8 +771,19 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             lookup_key = nothing
             is_packed_param = false
 
+            # An enum is an integer in C, never a record: it crosses as its
+            # underlying integer (`_enum_mlir_int`). Named like a record it
+            # took the struct path below, as `!llvm.struct<"E", (i8)>`, and a
+            # one-byte record is coerced to a whole register read from one
+            # byte of storage: the seven bytes above were stack garbage, and a
+            # callee compiled from `enum class E : uint8` reads the argument
+            # as `i8 zeroext`, 32 bits wide (Jolt's
+            # `BodyManager::GetNumActiveBodies(EBodyType)` indexed an array
+            # with it, 2026-11-16).
+            if kind === :enum && rec_key !== nothing && haskey(structs, rec_key)
+                mlir_t = _enum_mlir_int(structs[rec_key])
             # Resolve full struct type if available
-            if startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
+            elseif startswith(mlir_t, "!llvm.struct<\"") && endswith(mlir_t, "\">")
                 s_name = something(mlir_struct_name(mlir_t), mlir_t[15:end-2])
                 lookup_key = haskey(structs, s_name) ? s_name : (haskey(structs, "__enum__$(s_name)") ? "__enum__$(s_name)" : nothing)
             end
@@ -735,9 +793,9 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 # fell to `!llvm.ptr`: the record's bytes loaded as a pointer.
                 s_name = lookup_key = rec_key
             elseif lookup_key === nothing && kind === :enum
-                ju = String(get(structs[rec_key], "julia_type", "Cint"))
-                mlir_t = map_cpp_type(ju == "Any" ? "int" : ju)
-                mlir_t == "" && (mlir_t = "i32")
+                # (Set above. This branch used to spell the enum through
+                # `map_cpp_type(julia_type)`, which answers a struct for
+                # `Int8` and `UInt16`.)
             elseif kind === :indirect
                 mlir_t = "!llvm.ptr"   # Itanium: the callee takes the object's address
             end
@@ -792,10 +850,17 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 end
             end
 
+            # An integer narrower than `int` is extended to 32 bits by the
+            # CALLER, by its signedness, and the callee is declared taking the
+            # `i32` (`_narrow_int_extension`): clang's callees read such an
+            # argument 32 bits wide (`i8 zeroext`), and an `i8` operand with no
+            # extension leaves the register's upper bits to chance.
+            ext = lookup_key === nothing ?
+                  _narrow_int_extension(mlir_t, kind === :enum ? structs[rec_key] : p) : nothing
             param_load[pi] = (type = mlir_t, packed = is_packed_param,
                               info = lookup_key === nothing ? nothing : structs[lookup_key],
-                              address = false, sysv = sysv_fact)
-            push!(arg_types, mlir_t)
+                              address = false, sysv = sysv_fact, ext = ext)
+            push!(arg_types, ext === nothing ? mlir_t : "i32")
         end
         has_raii = any(!isnothing, raii_specs)
 
@@ -1078,6 +1143,11 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             else
                 println(io, "  %val_$(i) = llvm.load %val_ptr_$(i) : !llvm.ptr -> $(mlir_t)")
                 arg_value_name = "%val_$(i)"
+                ext = get(load, :ext, nothing)
+                if ext !== nothing
+                    println(io, "  %ext_$(i) = llvm.$(ext) %val_$(i) : $(mlir_t) to i32")
+                    arg_value_name = "%ext_$(i)"
+                end
             end
 
             push!(call_args, arg_value_name)

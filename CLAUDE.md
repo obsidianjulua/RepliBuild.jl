@@ -190,6 +190,15 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   product for C.
 - Julia's bundled libLLVM and system libLLVM coexist in one process. The GDB JIT
   descriptor resolves to Julia's copy; this is correct, do not "fix" it.
+- **The doctor judges the LLVM `build.sh` builds against: the bare
+  `llvm-config` on PATH.** `EnvironmentDoctor._versioned` tries the bare name,
+  then Debian's versioned names newest first, and `_pick_llvm_tool` takes the
+  first that meets the minimum. Probing `<name>-<minimum>` first read a
+  distribution's own LLVM 21 beside the 23 on PATH and failed Tier 2 on a
+  working toolchain (GitHub's Ubuntu 26.04 image, 2026-11-17). A runner image
+  is a toolchain too: when every cell of one OS goes red at "Tier 2 is live",
+  read the `Runner Image` lines of the log before the diff.
+  (`test_doctor_llvm_probe.jl`.)
 - For LLVM/JIT crashes, check `libJLCS.so`'s mtime/SONAME against the installed MLIR,
   and dual-LLVM symbol scope, before theorising.
 - **One LLVM per module.** The C bucket is chosen by `[wrap] language`, never by
@@ -714,7 +723,10 @@ the test named when you touch the area.
     rows by the lines its diagnostics name (`_unit_bad_lines`, a note
     belonging to the error before it). A constructor's error sits in the
     placement-new helper and names no row, so constructors alone fall back
-    to one compile per row. Keep a new row kind on one line.
+    to compiles of their own: in groups first, halved where one fails
+    (`_alone_verdicts`), so only a row tried alone is ever given an error,
+    under the file name it always had (the error line can name it). Keep a
+    new row kind on one line.
   - **The include block is compiled by itself before any row is judged**
     (2026-11-16). A header that is half of a pair (Jolt's
     `WrapShaderBegin.h` opens namespaces its partner closes; a class
@@ -885,6 +897,21 @@ the test named when you touch the area.
   relaxed types are `_C_INTEGER_PARAM_CTYPES`: the C aliases and the
   fixed-width types (`int32_t` is `Int32` in the metadata), one list for
   both paths. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
+- **A thunk extends an integer narrower than `int` to 32 bits, and an enum is
+  an integer** (2026-11-16, `_enum_mlir_int`, `_narrow_int_extension`). The
+  x86-64 convention as compilers implement it has the CALLER extend such an
+  argument, and clang's callees read it 32 bits wide (`i8 zeroext`). A
+  by-value enum took the record path, `!llvm.struct<"E", (i8)>`, which is
+  coerced to a whole register read from one byte of storage, so the bytes
+  above were stack garbage: Jolt's `GetNumActiveBodies(EBodyType)` (`enum
+  class : uint8`) indexed an array with it. An enum now crosses as its
+  underlying integer by `byte_size`, never through `map_cpp_type(julia_type)`
+  (a struct for `Int8`, `UInt16`), and any `i1`/`i8`/`i16` argument is loaded
+  at its width, extended (`llvm.zext`/`llvm.sext` by the parameter's or the
+  enum's signedness; plain `char` follows `Cchar`) and passed to a callee
+  declared `i32`. A real one-member record is still a record: its callee
+  reads only its bytes. (devtests `test_narrow_args_live.jl`, whose child
+  segfaults on the old lowering.)
 - **A Tier 2 argument is converted to its C width in the emitted body.** A
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box
@@ -1113,6 +1140,19 @@ the test named when you touch the area.
   wrap. An enum screen answers `false` for what it cannot judge, never an
   exception: one enum is not worth the module.
   (`test_c_generator_policies.jl`, devtests `test_wide_enums_live.jl`.)
+- **An enumerator's value is read through `_enumerator_value`** (2026-11-17,
+  both generators). `Project.toml` allows two JSON majors and they read an
+  integer above `typemax(Int64)` differently: 1.x gives a `BigInt`, 0.21 an
+  `Int64` wrapped modulo 2^64, with no error. The metadata on disk was right
+  and the wrapper bound `Status(-281474976710656)` on an `OpenEnum{UInt64}`,
+  so the live test above was green or red by which JSON the gitignored
+  Manifest had resolved. The repair is made where the width and signedness
+  are known: a negative value of an 8-byte unsigned enum is the value plus
+  2^64, and nothing else moves (a signed enum's negative enumerator is a
+  value). `_read_json` itself stays lossy on 0.21 for such integers, so a new
+  metadata integer that can exceed `Int64` needs the same kind of repair at
+  its reader, or to be written as a string; and a test that reads metadata
+  back must pass on both majors. (`test_enumerator_values.jl`.)
 - Enums with identical member sets emit as `const Alias = Canonical`, not a second
   enum type. An all-underscore name sanitizes to `c__` in **both** sanitizers. C++
   `""` stays an empty-name sentinel; do not harden it.
@@ -1720,6 +1760,42 @@ Verified 2026-08-26 by cloning to a tempdir: `Pkg.instantiate`, `runtests.jl` gr
 `build.sh` builds, `check_environment` reports tiers. `build.sh` gates on LLVM ≥ 21,
 `mlir-tblgen`/`llvm-config` major match, and `lib/cmake/mlir` presence. Redo the clone
 check before claiming portability again; reading `.gitignore` does not settle it.
+
+## Performance
+
+Where the time goes was measured on Jolt, the largest Hub package
+(2026-11-17), and the method is the rule:
+
+- **Measure on a scratch copy, old code and new in the same directory.** A
+  `git archive HEAD` checkout beside the worktree runs the old code. Output
+  paths are baked into the metadata, the wrapper and the forced unit's skip
+  reasons, so two directories never compare equal. Delete
+  `.replibuild_cache/project_hash` between runs; the IR cache stays warm.
+  The proof of an optimization is the same `LIBRARY_SHA`, the same metadata
+  apart from `timestamp`, and the same wrapper and manifests apart from
+  `# Generated:`. An AOT thunks library also embeds the path of libJLCS's
+  directory in its RUNPATH, so its hash follows the checkout.
+- **Julia's profiler does not sample a task waiting on a process**, and its
+  counts are thread snapshots, not seconds. Stage wall time comes from
+  timestamps on the build's own log lines.
+- **A helper asked once per type or per symbol must not scan every function
+  or symbol.** Index once and ask the index (`_strong_member_index`,
+  `children_by_parent`); `_forced_exportable_ir` asks the symbol set about
+  each definition's name. Each of these was quadratic at Jolt's size
+  (13,882 functions, 1,306 types, 12,000 forced symbols) and invisible on a
+  fixture.
+- A compile of the forced unit parses the library's whole include block:
+  count compiles. Rows may be tried together (`_alone_verdicts`); headers
+  may not, since one that fails alone can compile after another.
+- `parse_dwarf_dump` is linear, about 3 µs a line (llama.cpp: 7M lines,
+  21 s). Its cost at oneDNN's size is memory (Not Yet Built), not the scans.
+- The first `build` in a process spends about 25 s compiling RepliBuild's
+  own code and the first `wrap` about as long, whatever the library's size.
+  Nothing is precompiled. `precompile(Compiler.compile_project,
+  (RepliBuildConfig,))` and `precompile(build, (String,))` recover the
+  build's share, at that cost per precompile of the package; a directive on
+  `wrap` recovers nothing (the generators are reached by dynamic dispatch),
+  so wrap would need a workload that runs one. Not done: John's call.
 
 ## Open problems
 

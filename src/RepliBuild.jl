@@ -364,6 +364,14 @@ majors need opposite things:
   `dicttype=Dict{String,Any}` gives the same types under 0.21 and 1.x, nested
   objects included.
 
+The two majors also disagree on an integer above `typemax(Int64)`: 1.x returns a
+`BigInt`, 0.21 an `Int64` that wrapped modulo 2^64, silently. Every other
+integer in the metadata (sizes, offsets, positions) is an `Int` under both, and
+widening the read (`inttype`) would change that type for every consumer on one
+major only. So the read stays as it is and a value that can exceed `Int64` is
+repaired by its reader, where its width and signedness are known: enumerators
+through `Wrapper._enumerator_value` (`test/test_enumerator_values.jl`).
+
 Defined at package level because Builder, IRGen, Wrapper and ThunkBuilder all
 read metadata.
 """

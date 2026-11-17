@@ -1014,6 +1014,47 @@ function _assert_no_bound_name_rejected(rejected, what::AbstractString)
 end
 
 """
+    _enumerator_value(value, underlying) -> value
+
+An enumerator's value as its enum's underlying type holds it, from the value
+the metadata read gave. `underlying` is the enum's `julia_type` (`"UInt64"`,
+`"Culong"`, `"Cint"`), the type the wrapper gives the enum. Both generators
+read every DWARF enumerator through this.
+
+The build writes `0xffff000000000000` as `18446462598732840960`, and the read
+is lossy on one of the two JSON majors `Project.toml` allows: JSON 1.x returns
+a `BigInt`, JSON 0.21 an `Int64` that wrapped to `-281474976710656`. The
+wrapper then bound `Status(-281474976710656)` on an `OpenEnum{UInt64}`, an
+`InexactError` at load, and a flag set whose top bit is 63 stopped being a
+flag set, since a negative member refuses the bitflag test (2026-11-17, Jolt's
+`EIterationStatus : uint64`).
+
+The wrap is exact to undo here, where the underlying type is known: an
+unsigned 64-bit enum has no negative value, and an `Int64` that wrapped is the
+original value modulo 2^64. So a negative value of an 8-byte unsigned enum is
+that value plus 2^64. Nothing else is touched: a signed enum's negative
+enumerator is a real value, and only a 64-bit unsigned enum has values the
+read can lose (a narrower enum's negative value under an unsigned type is some
+other producer's error and still fails at load, loudly).
+
+A value beyond `Int64` comes back as `Int128` under both majors, so the
+generators see one type whichever JSON read the file.
+"""
+function _enumerator_value(value, underlying::AbstractString)
+    value isa Integer || return value
+    value isa Bool && return value
+    T = try getfield(Base, Symbol(underlying)) catch; nothing end
+    v = value
+    if v < 0 && T isa DataType && T <: Unsigned && isprimitivetype(T) && sizeof(T) == 8 &&
+       v >= typemin(Int64)
+        v = Int128(v) + (Int128(1) << 64)
+    end
+    typemin(Int64) <= v <= typemax(Int64) && return Int64(v)
+    typemin(Int128) <= v <= typemax(Int128) && return Int128(v)
+    return v
+end
+
+"""
     _is_bitflag_enum(values) -> Bool
 
 Whether a C enum's enumerators are a BITMASK rather than an enumeration.
