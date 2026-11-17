@@ -857,6 +857,21 @@ the test named when you touch the area.
   relaxed types are `_C_INTEGER_PARAM_CTYPES`: the C aliases and the
   fixed-width types (`int32_t` is `Int32` in the metadata), one list for
   both paths. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
+- **A thunk extends an integer narrower than `int` to 32 bits, and an enum is
+  an integer** (2026-11-16, `_enum_mlir_int`, `_narrow_int_extension`). The
+  x86-64 convention as compilers implement it has the CALLER extend such an
+  argument, and clang's callees read it 32 bits wide (`i8 zeroext`). A
+  by-value enum took the record path, `!llvm.struct<"E", (i8)>`, which is
+  coerced to a whole register read from one byte of storage, so the bytes
+  above were stack garbage: Jolt's `GetNumActiveBodies(EBodyType)` (`enum
+  class : uint8`) indexed an array with it. An enum now crosses as its
+  underlying integer by `byte_size`, never through `map_cpp_type(julia_type)`
+  (a struct for `Int8`, `UInt16`), and any `i1`/`i8`/`i16` argument is loaded
+  at its width, extended (`llvm.zext`/`llvm.sext` by the parameter's or the
+  enum's signedness; plain `char` follows `Cchar`) and passed to a callee
+  declared `i32`. A real one-member record is still a record: its callee
+  reads only its bytes. (devtests `test_narrow_args_live.jl`, whose child
+  segfaults on the old lowering.)
 - **A Tier 2 argument is converted to its C width in the emitted body.** A
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box
