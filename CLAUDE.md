@@ -159,7 +159,10 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   static promotion and bitcode assembly run **in-process on Julia's own libLLVM**,
   which is version-matched to that clang, so there is no DWARF-dropping skew. A
   failure is a hard error. `[link] fallback = true` selects the external
-  `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`.
+  `llvm-link`/`opt`, accepted only at the same major as `Base.libllvm_version`:
+  a system install at that major, else LLVM_unified_jll's
+  (`Tools.matched_llvm_bin`, the last entry of `c_toolchain_bin_dir`), so the
+  hatch and its test run on a machine whose only system LLVM is newer.
   Final `.ll → .so` still shells to clang, which on Linux links with the
   bundled LLD (`Compiler._bundled_linker`: `ld.lld` from LLD_unified_jll through
   `--ld-path`, C bucket and JLL clang only; `REPLIBUILD_TOOLS=system` is the

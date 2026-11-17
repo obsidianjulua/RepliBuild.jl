@@ -6,6 +6,7 @@
 module LLVMEnvironment
 
 import ..PROJECT_ROOT
+import ..Tools
 using Pkg
 
 # Conditional import - will try to use LLVM_full_assert_jll if available
@@ -1097,7 +1098,10 @@ Search order:
 3. `Sys.which("llvm-link")` only if that binary's major equals
    `Base.libllvm_version.major` — a PATH hit of a *newer* toolchain is
    not a match, it is the defect.
-4. `nothing` (no version-matched bin; caller must not use PATH)
+4. LLVM_unified_jll's tools (`Tools.matched_llvm_bin`): the same LLVM as
+   Julia's by construction, so the hatch works on a machine whose only
+   system LLVM is a newer one.
+5. `nothing` (no version-matched bin; caller must not use PATH)
 """
 function c_toolchain_bin_dir()
     env_override = get(ENV, "REPLIBUILD_LLVM_C_BIN", "")
@@ -1112,7 +1116,7 @@ function c_toolchain_bin_dir()
     if which_link !== nothing && _llvm_tool_major(which_link) == major
         return dirname(which_link)
     end
-    return nothing
+    return Tools.matched_llvm_bin()
 end
 
 """

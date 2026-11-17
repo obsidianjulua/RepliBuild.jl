@@ -65,3 +65,32 @@ end
     end
     @test !occursin("ld.lld", cxx)
 end
+
+@testset "the C fallback's llvm-link and opt are at Julia's LLVM, from the package" begin
+    # `[link] fallback = true` runs external llvm-link and opt, and for C they
+    # must be at the major of Julia's libLLVM. A machine whose only system
+    # LLVM is newer had none; LLVM_unified_jll's are the last place looked.
+    dir = _BL_T.matched_llvm_bin()
+    @test dir === nothing || isdir(dir)
+    if dir !== nothing
+        exe = Sys.iswindows() ? ".exe" : ""
+        checked = 0
+        for tool in ("llvm-link", "opt")
+            path = joinpath(dir, tool * exe)
+            @test isfile(path)
+            @test _BL_T.in_bundled_dir(path)
+            out, code = RepliBuild.BuildBridge.execute(path, ["--version"])
+            @test code == 0
+            m = match(r"LLVM version (\d+)\.", out)
+            @test m !== nothing && parse(Int, m.captures[1]) == Base.libllvm_version.major
+            checked += 1
+        end
+        @test checked == 2
+        # So the hatch has a toolchain wherever the JLL has a build.
+        @test RepliBuild.LLVMEnvironment.c_toolchain_bin_dir() !== nothing
+        # A program from anywhere else is left alone.
+        @test !_BL_T.in_bundled_dir("/usr/bin/opt")
+        other = `/usr/bin/opt --version`
+        @test _BL_T.with_dir_env(other) === other
+    end
+end
