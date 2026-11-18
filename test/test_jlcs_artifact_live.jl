@@ -36,6 +36,9 @@ else
         println("PROBE path: ", p == $(repr(_JAL_LOC.path)) ? "PASS" : "FAIL \$p")
         h = Libdl.dlopen(p, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL; throw_error = false)
         println("PROBE rtld_now: ", h === nothing ? "FAIL does not load" : "PASS")
+        J = RepliBuild.JLCSLibrary
+        v = J.library_abi_version(p)
+        println("PROBE abi: ", v == J.ABI_VERSION ? "PASS" : "FAIL library \$v, RepliBuild \$(J.ABI_VERSION)")
         ok = try
             redirect_stdout(devnull) do
                 M.test_dialect()
@@ -59,7 +62,7 @@ else
         v = probe_verdicts(r.output)
         @test r.ok
         @test haskey(v, "PROBE_DONE")
-        for name in ("source", "path", "rtld_now", "dialect", "selftest", "no_system_llvm")
+        for name in ("source", "path", "rtld_now", "abi", "dialect", "selftest", "no_system_llvm")
             @test startswith(get(v, name, "no PROBE line"), "PASS")
         end
     end

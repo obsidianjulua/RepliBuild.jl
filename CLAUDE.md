@@ -386,6 +386,20 @@ If you are asked to work on it:
   (`install = false` in a probe, which must not download). Splice the library
   into generated `ccall`s as `GlobalRef(MLIRNative, :libJLCS)`, never as a path.
   (`test_jlcs_library.jl`, devtests `test_jlcs_artifact_live.jl`.)
+  **The dialect has an ABI version, one integer in `src/mlir/ABI_VERSION`**:
+  CMake compiles it into `jlcs_abi_version()` and `JLCSLibrary.ABI_VERSION`
+  reads the same file, so a build from this checkout always agrees, and a
+  library from anywhere else that reports another (or none: `0`) is an error
+  before it is opened for a call (`verify_abi!`, in `path()` and
+  `check_library`; the doctor reports it). **Bump it with any change to what
+  Julia generates for the dialect or calls in it** (an op, an attribute or
+  statement, a thunk convention, a C API signature), together with
+  `src/mlir/VERSION` (the binary's own version, a new major), a rebuilt and
+  republished artifact and `Artifacts.toml`: a published library of the old
+  number is refused from that commit on. `deps/jlcs_jll/README.md` has the
+  publishing and Yggdrasil steps; `yggdrasil/build_tarballs.jl` is the same
+  build as the local recipe from a pinned commit. (`test_jlcs_abi_version.jl`,
+  devtests `test_jlcs_abi_live.jl`.)
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
 - `Builder/BuildGraph.jl` — the build-graph contract: a `TargetGraph` of targets

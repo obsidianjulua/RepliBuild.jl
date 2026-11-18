@@ -1,60 +1,52 @@
-# BinaryBuilder recipe for the JLCS MLIR dialect (libJLCS).
+# The JLCS dialect's BinaryBuilder recipe, run from this checkout.
 #
-# Builds a self-contained libJLCS: LLVM and MLIR come from LLVM_full_jll as
-# archives and are linked in (`-DJLCS_STATIC_LLVM=ON`), and only the C API is
-# exported (src/mlir/jlcs_exports.map). The result needs no LLVM or MLIR on
-# the machine that loads it, and it shares no LLVM symbol with Julia's own
-# libLLVM.
+# It is yggdrasil/build_tarballs.jl (the recipe that goes to
+# JuliaPackaging/Yggdrasil as J/JLCS/build_tarballs.jl, where it builds from a
+# pinned commit of this repository) with one difference: the source is this
+# working tree, so a change to src/mlir can be built before it is committed.
+# The script, platforms, products and dependencies are the same text, and
+# test_jlcs_recipes.jl holds them equal. See README.md beside this file.
 #
-# Run it from an environment that has BinaryBuilder (it is not a dependency
-# of RepliBuild):
+# Run it from an environment that has BinaryBuilder (not a dependency of
+# RepliBuild), on a Julia BinaryBuilder supports:
 #
-#     julia --project=<env with BinaryBuilder> deps/jlcs_jll/build_tarballs.jl --verbose
+#     julia +1.12 --project=<env with BinaryBuilder> deps/jlcs_jll/build_tarballs.jl --verbose
 #     julia ... deps/jlcs_jll/build_tarballs.jl --verbose x86_64-linux-gnu-cxx11
 #
-# Tarballs land in ./products. `--deploy=local` also writes a JLCS_jll
-# package to ~/.julia/dev/JLCS_jll.
-#
-# The source is this checkout's src/mlir less what git ignores (tracked files
-# and new ones not yet added), staged into a temporary directory: a
-# DirectorySource of src/mlir itself would ship the gitignored build/ tree,
-# CMake cache and all.
-#
-# Linux only. Windows (PE has no version script, and BinaryBuilder's mingw is
-# GCC's runtime where the supported host is MSYS2 CLANG64's libc++) and macOS
-# are not built here.
+# Tarballs land in ./products; write_artifacts_toml.jl turns them into the
+# package's Artifacts.toml entries.
 
-using BinaryBuilder, Pkg, TOML
+using BinaryBuilder, Pkg
 
 const REPO = normpath(joinpath(@__DIR__, "..", ".."))
 
 name = "JLCS"
-version = VersionNumber(TOML.parsefile(joinpath(REPO, "Project.toml"))["version"])
+# The dialect's own version: src/mlir/VERSION, not RepliBuild's.
+version = VersionNumber(strip(read(joinpath(REPO, "src", "mlir", "VERSION"), String)))
 
-# The LLVM the dialect is built from. The SysV ABI oracle (test only) needs 23.
-# The build number is part of the version: Pkg resolves a JLL exactly.
-llvm_version = v"23.1.4+1"
-
-function staged_dialect_source()
-    files = split(read(`git -C $REPO ls-files -z -co --exclude-standard -- src/mlir`, String), '\0'; keepempty = false)
-    isempty(files) && error("no source files under src/mlir in $REPO")
+# src/mlir less what git ignores (tracked files and new ones not yet added),
+# and the licence, staged where a clone of the repository would have them: a
+# DirectorySource of src/mlir itself would ship the gitignored build/ tree.
+function staged_source()
+    files = split(read(`git -C $REPO ls-files -z -co --exclude-standard -- src/mlir LICENSE`, String),
+                  '\0'; keepempty = false)
+    any(f -> startswith(f, "src/mlir/"), files) || error("no source files under src/mlir in $REPO")
     stage = mktempdir()
     for f in files
-        dest = joinpath(stage, "mlir", relpath(f, joinpath("src", "mlir")))
+        dest = joinpath(stage, "RepliBuild.jl", f)
         mkpath(dirname(dest))
         cp(joinpath(REPO, f), dest)
     end
     return stage
 end
 
-sources = [DirectorySource(staged_dialect_source())]
+sources = [DirectorySource(staged_source())]
 
 script = raw"""
-cd ${WORKSPACE}/srcdir/mlir
+cd ${WORKSPACE}/srcdir/RepliBuild.jl/src/mlir
 
 # The target's MLIR names its own mlir-tblgen as the generator, and that is a
 # target binary; JLCS_MLIR_TABLEGEN names the host's, which runs here.
-
 cmake -S . -B ${WORKSPACE}/jlcs-build -GNinja \
     -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TARGET_TOOLCHAIN} \
     -DCMAKE_BUILD_TYPE=Release \
@@ -65,8 +57,12 @@ cmake -S . -B ${WORKSPACE}/jlcs-build -GNinja \
     -DJLCS_STATIC_LLVM=ON
 cmake --build ${WORKSPACE}/jlcs-build -j${nproc}
 cmake --install ${WORKSPACE}/jlcs-build
+
+install_license ${WORKSPACE}/srcdir/RepliBuild.jl/LICENSE
 """
 
+# Linux only. The export list is a GNU version script, and RepliBuild's Windows
+# host (MSYS2 CLANG64, libc++) is not BinaryBuilder's mingw (GCC's runtime).
 platforms = expand_cxxstring_abis([
     Platform("x86_64", "linux"; libc = "glibc"),
     Platform("aarch64", "linux"; libc = "glibc"),
@@ -75,6 +71,11 @@ platforms = expand_cxxstring_abis([
 products = [
     LibraryProduct("libJLCS", :libJLCS),
 ]
+
+# The LLVM the dialect is built from; its archives are linked in, so it is a
+# build dependency only. The build number is part of the version: Pkg resolves
+# a JLL exactly.
+llvm_version = v"23.1.4+1"
 
 dependencies = [
     HostBuildDependency(PackageSpec(name = "LLVM_full_jll", version = llvm_version)),
@@ -85,5 +86,7 @@ dependencies = [
     Dependency("Zstd_jll"),
 ]
 
+# GCC, like LLVM_full_jll's own build: its archives define the constructor
+# variants GCC asks for, not the ones clang does.
 build_tarballs(ARGS, name, version, sources, script, platforms, products, dependencies;
-               julia_compat = "1.12", preferred_gcc_version = v"13")
+               julia_compat = "1.10", preferred_gcc_version = v"13")

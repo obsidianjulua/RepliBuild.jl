@@ -25,6 +25,14 @@ import Artifacts, LazyArtifacts, Libdl
 import Zlib_jll, Zstd_jll
 
 const LOCAL_PATH = joinpath(SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
+
+# The dialect ABI this RepliBuild generates for and calls: the same file
+# libJLCS is compiled with (src/mlir/CMakeLists.txt), so a local build from
+# this checkout always agrees. A library from anywhere else (the artifact, a
+# JLL, a build left over from an older checkout) is asked before it is used.
+const ABI_VERSION_FILE = joinpath(SRC_DIR, "mlir", "ABI_VERSION")
+include_dependency(ABI_VERSION_FILE)
+const ABI_VERSION = parse(Int, strip(read(ABI_VERSION_FILE, String)))
 const ARTIFACTS_TOML = joinpath(dirname(SRC_DIR), "Artifacts.toml")
 const ARTIFACT_NAME = "JLCS"
 
@@ -133,8 +141,74 @@ function locate(; install::Bool = true)::Location
     end
 end
 
-"The path of libJLCS, or of the local build when there is none anywhere."
-path(; install::Bool = true)::String = locate(; install).path
+"""
+    path(; install = true) -> String
+
+The path of libJLCS, or of the local build when there is none anywhere. With
+`install = true` (a caller about to use the library) one that speaks another
+dialect ABI is an error here, before anything opens it; a probe
+(`install = false`) gets the path and asks `abi_problem` itself.
+"""
+function path(; install::Bool = true)::String
+    loc = locate(; install)
+    install && verify_abi!(loc)
+    return loc.path
+end
+
+"""
+    library_abi_version(path) -> Union{Int,Nothing}
+
+What the libJLCS at `path` reports as its dialect ABI version: `0` for one
+that loads and has no `jlcs_abi_version` (built before the check existed),
+`nothing` for one that does not load at all, which is the loader's story to
+tell and not a version.
+"""
+function library_abi_version(path::AbstractString)::Union{Int, Nothing}
+    # The flags the `ccall`s' own open uses: the first open of a library
+    # decides how its symbols bind.
+    h = Libdl.dlopen(path, Libdl.RTLD_LAZY | Libdl.RTLD_DEEPBIND; throw_error = false)
+    h === nothing && return nothing
+    f = Libdl.dlsym(h, :jlcs_abi_version; throw_error = false)
+    return f === nothing ? 0 : Int(ccall(f, Cint, ()))
+end
+
+"""
+    abi_problem(loc) -> Union{String,Nothing}
+
+Why the library at `loc` must not be used, or `nothing`. The generator's IR
+and the calls into the C API are for dialect ABI `ABI_VERSION` exactly; with
+any other, the failure is a wrong call at run time, not an error.
+"""
+function abi_problem(loc::Location; expected::Int = ABI_VERSION,
+                     got::Union{Int, Nothing} = loc.source === :missing ? nothing :
+                                                library_abi_version(loc.path))::Union{String, Nothing}
+    loc.source === :missing && return nothing
+    (got === nothing || got == expected) && return nothing
+    said = got == 0 ? "has no dialect ABI version (it was built before RepliBuild checked one)" :
+                      "speaks dialect ABI $got"
+    fix = if loc.source === :local
+        "Rebuild it from this checkout: cd \"$(dirname(dirname(loc.path)))\" && ./build.sh " *
+        "(or Pkg.build(\"RepliBuild\")). Or set REPLIBUILD_JLCS=artifact to use the prebuilt library."
+    elseif loc.source === :artifact
+        "The prebuilt library and this RepliBuild are from different releases: update RepliBuild, " *
+        "or build the dialect locally (src/mlir/build.sh), which takes precedence."
+    else
+        "REPLIBUILD_JLCS names it: point it at a library built from this RepliBuild's src/mlir, or unset it."
+    end
+    return "libJLCS at $(loc.path) $said; this RepliBuild speaks dialect ABI $expected. $fix"
+end
+
+const _ABI_VERDICTS = Dict{String, Union{String, Nothing}}()
+
+"Throw `abi_problem`'s reason for `loc`, asked once per library per process."
+function verify_abi!(loc::Location)
+    loc.source === :missing && return nothing
+    problem = lock(_LOCK) do
+        get!(() -> abi_problem(loc), _ABI_VERDICTS, loc.path)
+    end
+    problem === nothing || error(problem)
+    return nothing
+end
 
 "Whether a libJLCS is on disk now (never downloads)."
 available()::Bool = locate(; install = false).source !== :missing
@@ -159,7 +233,9 @@ library is first opened, which is when the location is decided (and the
 artifact downloaded if that is the source).
 """
 struct LoadPath end
-Base.string(::LoadPath) = locate().path
+# `path()` verifies the dialect ABI, so a `ccall` never opens a library that
+# speaks another one: the error is raised here, every time, until it is fixed.
+Base.string(::LoadPath) = path()
 Base.print(io::IO, p::LoadPath) = print(io, string(p))
 
 end # module JLCSLibrary
