@@ -82,6 +82,7 @@ const TESTS = TestFile[
     T("test_toml_preservation.jl", :unit, [:build]),
     T("test_compile_visibility.jl", :unit, [:build]),
     T("test_c_generator_policies.jl", :unit, [:c]),
+    T("test_cstring_params.jl", :unit, [:c, :cpp]),
     T("test_c_sret_classification.jl", :unit, [:c]),
     T("test_record_natural_layout.jl", :unit, [:c, :cpp]),
     T("test_cpp_mutable_records.jl", :unit, [:cpp]),
@@ -252,6 +253,8 @@ const TESTS = TestFile[
     # Which functions a call may reach at all: C linkage that may throw, and
     # symbols with no debug information.
     T("test_c_linkage_unwind_live.jl", :dev, [:build, :cpp, :dialect], locks = ["c_linkage_unwind_test"]),
+    T("test_cstring_params_live.jl", :dev, [:build, :c, :cpp, :dialect],
+      locks = ["cstring_param_c_test", "cstring_param_cpp_test"]),
     T("test_alias_signatures_live.jl", :dev, [:build, :c, :cpp],
       locks = ["alias_signature_test", "alias_signature_cpp_test"]),
     T("test_convenience_overloads.jl", :dev, [:cpp], locks = ["convenience_overload_test"]),

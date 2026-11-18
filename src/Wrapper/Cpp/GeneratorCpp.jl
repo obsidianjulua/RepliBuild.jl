@@ -223,7 +223,7 @@ function _pointer_arg_type(ctype::AbstractString, c_type::AbstractString; resolv
     pointee = endswith(t, "&&") ? FG._strip_top_cv(chop(t; tail = 2)) :
               (is_pointer || endswith(t, "&")) ? FG._strip_top_cv(chop(t)) : ""
     inner in ("UInt8", "Int8", "Cchar", "Cuchar") &&
-        return (is_pointer && pointee == "char") ? "Cstring" : "Ptr{$inner}"
+        return _points_to_plain_char(c) ? "Cstring" : "Ptr{$inner}"
     if inner == "Cvoid"
         pointee == "void" && return "Ptr{Cvoid}"
         mapped = JLCSIRGenerator.TypeUtils.map_cpp_type(pointee)
@@ -3915,6 +3915,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         needs_conversion = Bool[]
         string_plans = Any[]          # per parameter: nothing, a plan Tuple, or a reason String
         pointer_types = Union{Nothing,String}[]   # per parameter: what `pointer_arg` is told (`_pointer_arg_type`)
+        cstring_args = Union{Nothing,String}[]    # per parameter: the `ccall` path's string conversion (`_cstring_param_arg`)
 
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
@@ -3951,6 +3952,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                                   owners = _sig_owners, is_enum = _sig_is_enum) :
                            _relaxed_param_kind(sig_c_type, _sig_type_bound))
             push!(needs_conversion, actual_c_type in _INTEGER_CTYPES)
+            push!(cstring_args, _cstring_param_arg(safe_name, String(get(param, "c_type", "")), actual_c_type))
             # What the Tier 2 body converts a pointer argument to. A `std::string`
             # the wrapper builds is passed by the address `string_arg` gives.
             push!(pointer_types, splan isa Tuple ? nothing :
@@ -4399,6 +4401,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
                 # Generate range-checked conversion
                 conversion_code *= "    $converted_name = $c_type($name)\n"
+            elseif cstring_args[i] !== nothing
+                # A string with `Cstring` semantics (`_cstring_param_arg`).
+                converted_name = "$(name)_c"
+                push!(ccall_param_names, converted_name)
+                conversion_code *= "    $converted_name = $(cstring_args[i])\n"
             else
                 push!(ccall_param_names, name)
             end

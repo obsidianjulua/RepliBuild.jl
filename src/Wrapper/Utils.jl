@@ -2256,6 +2256,70 @@ function _cstring_policy_lines(free_sym::String; indent::String="    ")::String
 end
 
 """
+    _points_to_plain_char(c_type) -> Bool
+
+Whether the C spelling `c_type` is a pointer to plain `char`, cv-qualifiers
+off on both levels: the one type C writes text with. Only such a pointer is a
+C string, in a parameter (every `ccall` path converts an `AbstractString`
+there with `JITManager.cstring_arg`, Tier 2 tells `pointer_arg` `Cstring`) and
+in a return (`_signed_char_returns!`). `signed char*`, `unsigned char*`,
+`int8_t*`, `char**` and a `char&` are data. A spelling this cannot read (a
+typedef of `char*`) answers `false`, so it keeps what it had before.
+"""
+function _points_to_plain_char(c_type::AbstractString)::Bool
+    FG = JLCSIRGenerator.FunctionGen
+    t = FG._strip_top_cv(c_type)
+    endswith(t, "*") || return false
+    return FG._strip_top_cv(chop(t)) == "char"
+end
+
+"""
+    _cstring_param_arg(name, c_type, ccall_type) -> Union{String,Nothing}
+
+The expression a `ccall` path binds a parameter's argument to before the call,
+or `nothing` for the name itself: `RepliBuild.JITManager.cstring_arg(name)`
+for a pointer to plain `char` (`_points_to_plain_char`) whose ccall type is a
+byte pointer, so a string there has Julia's `Cstring` semantics (a `SubString`
+copied and NUL-terminated, an embedded NUL refused) while a `Ptr`, a `Ref`, a
+byte vector pass as before. The ccall type stays the byte pointer: as `Cstring`
+it would refuse those. GeneratorC, GeneratorCpp's `ccall` path and the
+`[wrap.varargs]` fixed parameters all ask this.
+"""
+function _cstring_param_arg(name::AbstractString, c_type::AbstractString,
+                            ccall_type::AbstractString)::Union{String,Nothing}
+    ccall_type in ("Ptr{UInt8}", "Ptr{Int8}", "Ptr{Cchar}", "Cstring") || return nothing
+    _points_to_plain_char(c_type) || return nothing
+    return "RepliBuild.JITManager.cstring_arg($name)"
+end
+
+"""
+    _signed_char_returns!(metadata) -> Int
+
+Give a function that returns a pointer to `signed char` the return type
+`Ptr{Int8}`: bytes, not text. The build has mapped it so since 2026-11-18
+(`Compiler.dwarf_type_to_julia`); metadata written before says `Cstring`, and
+then the wrapper copied `{-1, -2, 0}` into the `String` `"\\xff\\xfe"`. The
+return's `c_type` is what tells the two apart (`const signed char*` against
+`const char*`), and only a spelling that names `signed char` is rewritten, so
+a `char*` return, or one spelled through a typedef, keeps the Cstring policy.
+Run before either generator, so every tier sees one answer. Returns the count.
+"""
+function _signed_char_returns!(metadata::AbstractDict)::Int
+    FG = JLCSIRGenerator.FunctionGen
+    n = 0
+    for f in get(metadata, "functions", Any[])
+        f isa AbstractDict || continue
+        rt = get(f, "return_type", nothing)
+        rt isa AbstractDict && get(rt, "julia_type", "") == "Cstring" || continue
+        t = FG._strip_top_cv(String(get(rt, "c_type", "")))
+        (endswith(t, "*") && FG._strip_top_cv(chop(t)) == "signed char") || continue
+        rt["julia_type"] = "Ptr{Int8}"
+        n += 1
+    end
+    return n
+end
+
+"""
     _cstring_wrapper_pair(julia_name, param_sig, raw_bind, raw_return, free_sym;
                           doc_comment="") -> String
 
