@@ -184,9 +184,20 @@ const LE = RepliBuild.LLVMEnvironment
     @testset "environment doctor looks for libJLCS with host dlext" begin
         status = RepliBuild.check_environment(verbose=false)
         jlcs = only(t for t in status.tools if t.name == "libJLCS")
-        expected = joinpath(RepliBuild.SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
-        @test jlcs.path == (isfile(expected) ? expected : "")
-        @test jlcs.found == isfile(expected)
+        # The doctor reports the library RepliBuild would load: a local build,
+        # else the prebuilt artifact when it is already in the depot (it is on
+        # a CI runner whose cache holds it). A probe downloads nothing.
+        loc = RepliBuild.JLCSLibrary.locate(; install = false)
+        # A missing library has no path in the report (`locate` names where a
+        # local build would be).
+        @test jlcs.path == (loc.source === :missing ? "" : loc.path)
+        @test jlcs.found == (loc.source !== :missing)
+        @test jlcs.found == isfile(jlcs.path)
+        jlcs.found && @test basename(jlcs.path) == "libJLCS." * Libdl.dlext
+        local_build = joinpath(RepliBuild.SRC_DIR, "mlir", "build", "libJLCS." * Libdl.dlext)
+        if isfile(local_build) && get(ENV, "REPLIBUILD_JLCS", "") in ("", "local")
+            @test jlcs.path == local_build
+        end
     end
 
     @testset "PE link flags do not emit rpath" begin

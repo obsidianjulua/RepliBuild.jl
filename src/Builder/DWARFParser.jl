@@ -471,7 +471,7 @@ function parse_vtables(binary_path::String)
     @debug "Parsing DWARF debug info from: $binary_path"
 
     # Extract DWARF info
-    dwarf_cmd = `llvm-dwarfdump --debug-info $binary_path`
+    dwarf_cmd = Tools.tool_cmd(`llvm-dwarfdump --debug-info $binary_path`)
     dwarf_output = read(dwarf_cmd, String)
 
     # Extract symbol table
