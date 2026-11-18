@@ -8444,6 +8444,13 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
 
     # NEW: Track global variables
     current_variable_offset = nothing
+    # A static data member's in-class declaration as DWARF 4 writes it: a
+    # `DW_TAG_member` with `DW_AT_external` (DWARF 5 writes a
+    # `DW_TAG_variable`, which the variable handler reads). Filed under its
+    # offset only once `DW_AT_external` shows it is not a field, for the
+    # definition DIE that names it through `DW_AT_specification`.
+    current_static_member = nothing
+    static_member_decls = Dict{String,Dict{String,Any}}()
 
     last_seen_level = nothing  # Track last level for attribute lines
 
@@ -8702,23 +8709,35 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         end
         
         # NEW: Detect global variable (DW_TAG_variable)
-        if contains(line, "DW_TAG_variable")
+        # Its parent DIE (`die_at_depth` one level up) is where it was declared:
+        # a namespace or a record gives its scope (`_scope_of`), a record makes
+        # it a static data member, the unit is the global scope.
+        contains(line, "DW_TAG_") && (current_static_member = nothing)
+        if contains(line, "DW_TAG_variable") || contains(line, "DW_TAG_member")
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
-                current_variable_offset = "0x" * offset_match.captures[1]
-                
-                type_refs[current_variable_offset] = Dict{String,Any}(
+                var_offset = "0x" * offset_match.captures[1]
+                var_parent = isnothing(current_level) ? nothing : get(die_at_depth, current_level - 1, nothing)
+                var_info = Dict{String,Any}(
                     "kind" => "variable",
                     "name" => nothing,
                     "type" => nothing,
                     "external" => false,
-                    "declaration" => false
+                    "declaration" => false,
+                    "parent" => var_parent === nothing ? nothing : var_parent[1],
+                    "parent_tag" => var_parent === nothing ? nothing : var_parent[2]
                 )
-                offset_to_kind[current_variable_offset] = :variable
+                if contains(line, "DW_TAG_member")
+                    current_static_member = (var_offset, var_info)
+                else
+                    current_variable_offset = var_offset
+                    type_refs[current_variable_offset] = var_info
+                    offset_to_kind[current_variable_offset] = :variable
 
-                # Ensure we don't leak param context
-                current_param_offset = nothing
-                current_param_level = nothing
+                    # Ensure we don't leak param context
+                    current_param_offset = nothing
+                    current_param_level = nothing
+                end
             end
         end
         
@@ -8784,11 +8803,34 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         end
         
         # Process Global Variable Attributes
+        var_info = nothing
         if !isnothing(current_variable_offset) && haskey(type_refs, current_variable_offset) &&
            haskey(offset_to_kind, current_variable_offset) && offset_to_kind[current_variable_offset] == :variable
-           
-           var_info = type_refs[current_variable_offset]
-           
+            var_info = type_refs[current_variable_offset]
+        elseif current_static_member !== nothing
+            var_info = current_static_member[2]
+            contains(line, "DW_AT_external") &&
+                (static_member_decls[current_static_member[1]] = var_info)
+        end
+        if var_info !== nothing
+           # The symbol the loader binds (a namespace member's, a static data
+           # member's, an ABI-tagged name's), the declaration a definition
+           # completes, a member's access as written, and a value with no
+           # storage (`constexpr`, an in-class initialised `static const`).
+           if contains(line, "DW_AT_linkage_name")
+               lm = match(r":\s*([^:\s]+)\s*$", line)
+               lm === nothing || (var_info["linkage"] = String(lm.captures[1]))
+           elseif contains(line, "DW_AT_specification")
+               sm = match(r"<(0x[^>]+)>", line)
+               sm === nothing || (var_info["specification"] = String(sm.captures[1]))
+           elseif contains(line, "DW_AT_accessibility")
+               am = match(r"DW_AT_accessibility\s*:\s*(\d+)", line)
+               am === nothing || (var_info["accessibility"] =
+                   get(("public", "protected", "private"), parse(Int, am.captures[1]), nothing))
+           elseif contains(line, "DW_AT_const_value")
+               var_info["const_value"] = true
+           end
+
            if contains(line, "DW_AT_name")
                name_match = match(r":\s*([^:]+)\s*$", line)
                if !isnothing(name_match)
@@ -9606,14 +9648,14 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             push!(toolchain_seeds, String(get(p, "c_type", "")))
         end
     end
-    for offset in die_order
-        info = type_refs[offset]
-        if isa(info, Dict) && get(info, "kind", nothing) == "variable" &&
-           get(info, "external", false) == true && !get(info, "declaration", false) &&
-           !_is_system_decl_file(get(info, "decl_file_path", "")) &&
-           (exported === nothing || String(get(info, "name", "")) in exported)
-            type_ref = get(info, "type", nothing)
-            isnothing(type_ref) || push!(toolchain_seeds, resolve_type(type_ref, type_refs))
+    # Every exported variable the library defines, under the symbol the loader
+    # binds (`_library_variables`), which is what `exported` lists.
+    library_variables = _library_variables(die_order, type_refs, static_member_decls)
+    for v in library_variables
+        get(v, "constant", false) && continue
+        if !_is_system_decl_file(v["decl_file_path"]) &&
+           (exported === nothing || v["symbol"] in exported)
+            push!(toolchain_seeds, resolve_type(v["type"], type_refs))
         end
     end
     # The 1-byte empty records, the rule the empty-base marking above uses: a
@@ -9690,30 +9732,33 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         end
     end
     
-    # Process extracted variables into a clean dictionary. A C++17 inline
-    # variable is defined in every compile unit that uses it, and C and C++
-    # spell a type differently, so the entry is chosen like a record's.
+    # Process extracted variables into a clean dictionary, keyed by the symbol
+    # the loader binds: `cfg::depth` is `_ZN3cfg5depthE`, and two `x`s in two
+    # namespaces are two globals. A C++17 inline variable is defined in every
+    # compile unit that uses it, and C and C++ spell a type differently, so the
+    # entry is chosen like a record's. A static member with a value and no
+    # storage (`constexpr`) has no symbol: it is keyed by its qualified name,
+    # marked `constant`, and only counted (`extract_compilation_metadata`
+    # sets it apart as `global_constants`),
+    # and only for a record of the library's own.
     global_vars = Dict{String,Any}()
     global_candidates = Dict{String,Vector{Dict{String,Any}}}()
-    for offset in die_order
-        info = type_refs[offset]
-        if isa(info, Dict) && get(info, "kind", nothing) == "variable" &&
-           get(info, "external", false) == true && !get(info, "declaration", false)
-
-           name = get(info, "name", "unknown")
-           type_ref = get(info, "type", nothing)
-
-           if name != "unknown" && !isnothing(type_ref)
-               c_type = resolve_type(type_ref, type_refs)
-               julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
-
-               push!(get!(() -> Dict{String,Any}[], global_candidates, name), Dict{String,Any}(
-                   "name" => name,
-                   "c_type" => c_type,
-                   "julia_type" => julia_type
-               ))
-           end
-        end
+    for v in library_variables
+        constant = get(v, "constant", false)
+        constant && !haskey(struct_defs, String(something(get(v, "record", nothing), ""))) && continue
+        c_type = resolve_type(v["type"], type_refs)
+        julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+        entry = Dict{String,Any}(
+            "name" => v["name"],
+            "c_type" => c_type,
+            "julia_type" => julia_type,
+            "symbol" => v["symbol"],
+            "scope" => v["scope"]
+        )
+        v["accessibility"] == "public" || (entry["accessibility"] = v["accessibility"])
+        constant && (entry["constant"] = true)
+        key = constant ? (isempty(v["scope"]) ? v["name"] : v["scope"] * "::" * v["name"]) : v["symbol"]
+        push!(get!(() -> Dict{String,Any}[], global_candidates, key), entry)
     end
     for (name, defs) in global_candidates
         global_vars[name] = _canonical_definition(defs)
@@ -10231,6 +10276,90 @@ function _scope_of(parent, type_refs::AbstractDict)
         p = get(die, "scope_parent", missing)
     end
     return join(parts, "::")
+end
+
+const _RECORD_TAGS = ("DW_TAG_structure_type", "DW_TAG_class_type", "DW_TAG_union_type")
+
+# The scope a variable DIE was declared in, from its parent DIE: `""` at the
+# unit's level, the `_scope_of` chain under a namespace or a record, and
+# `nothing` anywhere else (a function's local) or where the chain is unknown.
+function _variable_scope(die::AbstractDict, type_refs::AbstractDict)
+    tag = get(die, "parent_tag", nothing)
+    (tag === nothing || tag == "DW_TAG_compile_unit" || tag == "DW_TAG_partial_unit") && return ""
+    (tag == "DW_TAG_namespace" || tag in _RECORD_TAGS) || return nothing
+    return _scope_of(get(die, "parent", missing), type_refs)
+end
+
+"""
+    _library_variables(die_order, type_refs, static_member_decls) -> Vector{Dict}
+
+Every external variable the dump defines, as the loader binds it: `symbol`
+(the DIE's `DW_AT_linkage_name`, else its declaration's, else its DWARF
+name, which is a C variable's symbol), `name`, `type` (a DIE offset),
+`scope` (`_variable_scope`: `""`, `"cfg"`, `"geo::Vec3"`), `accessibility`
+and `decl_file_path`. A definition that names its declaration through
+`DW_AT_specification` takes the name, type, scope and access from it: a
+static data member is declared in its class (a `DW_TAG_variable` there in
+DWARF 5, a `DW_TAG_member` with `DW_AT_external` in DWARF 4,
+`static_member_decls`) and defined at namespace or unit level with no name
+of its own. An undeclared access is the record's default: private in a
+`class`, public in a `struct` or `union`.
+
+Also every static member declared with a value and never defined
+(`constexpr`, an in-class initialised `static const`), marked `constant`
+with its `record`'s name and no `symbol`: there is nothing to bind, only
+something to count. Left out: a variable in a function, one whose scope
+chain is unknown, and the standard library's own (`_is_stdlib_internal` on
+the symbol, the screen exported functions pass).
+"""
+function _library_variables(die_order, type_refs::AbstractDict,
+                            static_member_decls::AbstractDict)::Vector{Dict{String,Any}}
+    out = Dict{String,Any}[]
+    defined = Set{String}()          # declarations some definition completes
+    declared = String[]              # declaration DIEs, in dump order
+    access_of(die) = something(get(die, "accessibility", nothing),
+                               get(die, "parent_tag", nothing) == "DW_TAG_class_type" ? "private" : "public")
+    for offset in die_order
+        info = type_refs[offset]
+        (isa(info, Dict) && get(info, "kind", nothing) == "variable") || continue
+        if get(info, "declaration", false) == true
+            push!(declared, offset)
+            continue
+        end
+        spec = get(info, "specification", nothing)
+        decl = spec === nothing ? nothing : get(static_member_decls, spec, get(type_refs, spec, nothing))
+        (decl isa AbstractDict && get(decl, "kind", nothing) == "variable") || (decl = nothing)
+        spec === nothing || push!(defined, spec)
+        at = decl === nothing ? info : decl
+        (get(info, "external", false) == true || get(at, "external", false) == true) || continue
+        name = something(get(info, "name", nothing), get(at, "name", nothing), Some(nothing))
+        type = something(get(info, "type", nothing), get(at, "type", nothing), Some(nothing))
+        (name === nothing || type === nothing) && continue
+        symbol = String(something(get(info, "linkage", nothing), get(at, "linkage", nothing), name))
+        _is_stdlib_internal(symbol, "") && continue
+        scope = _variable_scope(at, type_refs)
+        scope === nothing && continue
+        push!(out, Dict{String,Any}("symbol" => symbol, "name" => String(name), "type" => type,
+                                    "scope" => scope, "accessibility" => access_of(at),
+                                    "decl_file_path" => String(get(info, "decl_file_path", ""))))
+    end
+    # A member another unit defines out of line is no constant here either.
+    qualified = Set{String}(isempty(v["scope"]) ? v["name"] : v["scope"] * "::" * v["name"] for v in out)
+    declarations = Any[(o, type_refs[o]) for o in declared]
+    append!(declarations, sort!(collect(static_member_decls); by = first))
+    for (offset, die) in declarations
+        (offset in defined || get(die, "const_value", false) != true ||
+         get(die, "external", false) != true || !(get(die, "parent_tag", nothing) in _RECORD_TAGS)) && continue
+        name = get(die, "name", nothing)
+        record = get(get(type_refs, get(die, "parent", ""), Dict()), "name", nothing)
+        scope = _variable_scope(die, type_refs)
+        (name === nothing || get(die, "type", nothing) === nothing || record === nothing || scope === nothing) && continue
+        (isempty(scope) ? String(name) : scope * "::" * String(name)) in qualified && continue
+        push!(out, Dict{String,Any}("symbol" => nothing, "name" => String(name), "type" => die["type"],
+                                    "scope" => scope, "accessibility" => access_of(die),
+                                    "decl_file_path" => "", "constant" => true, "record" => String(record)))
+    end
+    return out
 end
 
 """
@@ -10877,6 +11006,11 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         end
     end
 
+    # A constant (a static member with a value and no storage) has nothing to
+    # bind: it is named for the wrap report, never given an accessor.
+    global_constants = sort!([k for (k, g) in global_vars if get(g, "constant", false) == true])
+    foreach(k -> delete!(global_vars, k), global_constants)
+
     metadata = Dict{String,Any}(
         "timestamp" => string(now()),
         "project" => config.project.name,
@@ -10892,6 +11026,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         "symbols" => symbols,
         "functions" => functions,
         "globals" => global_vars,  # NEW: Global variables
+        "global_constants" => global_constants,
         "function_count" => length(functions),
 
         # Type mappings
