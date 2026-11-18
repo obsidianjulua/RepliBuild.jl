@@ -1208,6 +1208,10 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
                 "$(filt.globals_dropped) global(s) via $(length(config.wrap.exclude_symbols)) pattern(s)")
     end
 
+    # A `signed char*` return is bytes on every tier; metadata written before
+    # the build mapped it so still says `Cstring` (`_signed_char_returns!`).
+    _signed_char_returns!(metadata)
+
     # What the loader can actually resolve in this library. Shared by the two
     # filters below; `nothing` means "could not look" and both fail safe on it.
     runtime_defined = _runtime_defined_names(library_path)
@@ -1742,7 +1746,9 @@ function generate_vararg_wrappers(func_name::String, mangled::String, julia_name
             push!(fixed_convert, "$julia_type($safe_name)")
         elseif startswith(julia_type, "Ptr{")
             push!(fixed_julia_sig_types, "Any")
-            push!(fixed_convert, nothing)
+            # A pointer to plain `char` (a format string): `Cstring` semantics
+            # for a string, as on the plain path (`_cstring_param_arg`).
+            push!(fixed_convert, _cstring_param_arg(safe_name, String(get(param, "c_type", "")), julia_type))
         else
             push!(fixed_julia_sig_types, julia_type)
             push!(fixed_convert, nothing)

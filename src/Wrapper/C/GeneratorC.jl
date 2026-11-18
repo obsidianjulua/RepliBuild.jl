@@ -3456,6 +3456,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         param_types = String[]  # C types for ccall
         julia_param_types = String[]  # Julia types for function signature (may differ)
         needs_conversion = Bool[]
+        # Per parameter: the expression a pointer to plain `char` is bound to
+        # (`_cstring_param_arg`: a string with `Cstring` semantics), or nothing.
+        cstring_args = Union{Nothing,String}[]
 
         # A PARAMETER NAMED AFTER A TYPE IN THE CCALL TUPLE SHADOWS THAT TYPE.
         # `struct bufq *bufq` is ordinary C — the parameter and its struct share
@@ -3495,6 +3498,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             push!(param_names, safe_name)
             actual_c_type = _ccall_param_type(param["julia_type"], get(param, "c_type", ""))
             push!(param_types, actual_c_type)
+            push!(cstring_args, _cstring_param_arg(safe_name, String(get(param, "c_type", "")), actual_c_type))
 
             # Map C integer types to natural Julia types with range checking
             if actual_c_type in _C_INTEGER_PARAM_CTYPES
@@ -3610,7 +3614,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # The ccall's parameter types and argument expressions, each
         # over-aligned record inside its carrier (`_rb_byval16`).
         ccall_param_types = [get(carriers, i, t) for (i, t) in enumerate(param_types)]
-        ccall_arg_exprs = [haskey(carriers, i) ? "_rb_byval16($n, $(carriers[i]))" : n
+        ccall_arg_exprs = [haskey(carriers, i) ? "_rb_byval16($n, $(carriers[i]))" :
+                           something(cstring_args[i], n)
                            for (i, n) in enumerate(param_names)]
 
         # A record whose name several types share in this library (two `.c`
@@ -3725,6 +3730,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
                 # Generate range-checked conversion
                 conversion_code *= "    $converted_name = $c_type($name)\n"
+            elseif cstring_args[i] !== nothing
+                # A string with `Cstring` semantics, bound to a name: the
+                # llvmcall paths below derive their own names from these.
+                converted_name = "$(name)_c"
+                push!(ccall_param_names, converted_name)
+                conversion_code *= "    $converted_name = $(cstring_args[i])\n"
             else
                 # The name, or the record inside its carrier (`carriers`).
                 push!(ccall_param_names, ccall_arg_exprs[i])

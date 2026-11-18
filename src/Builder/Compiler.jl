@@ -6358,10 +6358,16 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         base_type = replace(base_type, r"\bvolatile\b" => "")
         base_type = strip(base_type)
 
-        # Special case: char* / signed char* / i8* → Cstring (null-terminated C strings)
-        if base_type == "char" || base_type == "signed char" || base_type == "i8"
+        # Special case: char* / i8* → Cstring (null-terminated C strings). Only
+        # plain `char` is text: `signed char*` is bytes, `Ptr{Int8}` on every
+        # host (`Cchar` is `UInt8` on AArch64), as `int8_t*` and `unsigned
+        # char*` already are; a `Cstring` return copied {-1, -2, 0} into a
+        # `String`. Metadata written before says `Cstring`, which the wrap
+        # corrects from the return's `c_type` (`Wrapper._signed_char_returns!`).
+        if base_type == "char" || base_type == "i8"
             return "Cstring"
         end
+        base_type == "signed char" && return "Ptr{Int8}"
 
         # void* → Ptr{Cvoid}
         if base_type == "void" || isempty(base_type)
