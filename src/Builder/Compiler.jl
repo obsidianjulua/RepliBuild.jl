@@ -3308,6 +3308,249 @@ function _inline_method_plan(struct_defs::AbstractDict, record_abi::AbstractDict
 end
 
 # =============================================================================
+# PURE VIRTUAL MEMBER FUNCTIONS
+# -----------------------------------------------------------------------------
+# `virtual const char *name() const = 0;` has no definition, so no symbol, and
+# the wrap surface is built from the symbol table: an interface's own methods
+# had no wrapper, and `Animal_name(p)` did not exist for the `Animal*` a
+# factory returned (2026-11-17). What reaches such a member is the object's
+# vtable, and the declaration DIE says where: its linkage name, its signature
+# and its slot (`DW_AT_vtable_elem_location`). So the build gives each one a
+# function row marked `vtable_only` (`_vtable_only_plan`,
+# `_vtable_only_function_rows`), the thunk generator a thunk that is only a
+# `jlcs.vcall` at that slot, with no callee to declare, and GeneratorCpp a
+# Tier 2 wrapper. Such a row's `mangled` names no symbol: every reader that
+# takes a row's name for one asks `_is_vtable_only` first.
+# =============================================================================
+
+"""
+    _is_vtable_only(func) -> Bool
+
+Whether a `functions` row of the metadata is a pure virtual member function:
+declared, never defined, reached only through its object's vtable at
+`vtable_slot`. Its `mangled` is the declaration's linkage name, which is no
+symbol of the library: nothing may `dlsym` it, declare it as a callee, or
+name it in a `ccall`.
+"""
+_is_vtable_only(func) = func isa AbstractDict && get(func, "vtable_only", false) == true
+
+# A demangled member function without its class: what an overrider has to
+# match (name, parameter list, cv- and ref-qualifiers). A virtual function is
+# never a template, so its demangling opens with the class and carries no
+# return type. `nothing` when the class cannot be cut off.
+function _member_signature(demangled::AbstractString)
+    dm = String(demangled)
+    cls = extract_class_name(dm)
+    (isempty(cls) || !startswith(dm, cls * "::")) && return nothing
+    return String(dm[ncodeunits(cls)+3:end])
+end
+
+"""
+    _mark_abstract_records!(record_abi, struct_defs; demangle = _demangle) -> record_abi
+
+On each library record an object of which would still have a pure virtual
+member function, `pure_virtuals`: those functions, demangled and sorted. They
+are the record's own pure declarations (a pure virtual destructor among
+them) and the ones it inherits and does not declare again.
+
+C++ refuses to construct such a class. A wrapper could: its base-object
+constructor is a symbol like any other, and run on storage of its own it
+leaves an object whose vtable holds `__cxa_pure_virtual` in those slots, which
+ends the process when anything calls one. GeneratorCpp reads this key and
+refuses the constructor.
+
+Only what the DWARF settles is claimed, so a class that is not abstract is
+never called one. An inherited pure virtual counts when the path to its
+declarer has no virtual base on it (through one, another branch of the
+hierarchy can supply the overrider) and when every virtual member the class
+declares has a readable signature; a base with no entry here, a toolchain
+record, or a name with several definitions or scopes says nothing. A destructor is
+never inherited as pure: every class has its own.
+"""
+function _mark_abstract_records!(record_abi::AbstractDict, struct_defs::AbstractDict; demangle = _demangle)
+    spelled = Dict{String,Any}()             # symbol => (demangled, signature), or nothing
+    spell(sym) = get!(spelled, sym) do
+        dm = demangle(sym)
+        dm === nothing && return nothing
+        sig = _member_signature(dm)
+        sig === nothing ? nothing : (String(dm), sig)
+    end
+    memo = Dict{String,Any}()                # record => [(signature, demangled)], or nothing: cannot say
+    function unimplemented(name::String, stack::Vector{String})
+        haskey(memo, name) && return memo[name]
+        name in stack && return nothing
+        def = get(struct_defs, name, nothing)
+        if !(def isa AbstractDict) || get(def, "conflict", false) == true || get(def, "toolchain", false) == true
+            return memo[name] = nothing
+        end
+        # Records are keyed by bare name: one defined in several scopes
+        # (`a::Node`, `b::Node`) has the member rows of all of them under
+        # this key, and which class a pure virtual is left in cannot be said.
+        scopes = get(def, "scopes", nothing)
+        (scopes isa AbstractVector && length(unique(scopes)) > 1) && return memo[name] = nothing
+        entry = get(record_abi, name, nothing)
+        rows = entry isa AbstractDict ? get(entry, "methods", Any[]) : Any[]
+        declared = Set{String}()             # the signatures this record declares itself
+        unreadable = false
+        left = Dict{String,String}()         # signature => demangled declaration
+        for m in rows
+            m isa AbstractDict || continue
+            # Only a virtual member can be pure or override one.
+            get(m, "virtual", false) == true || continue
+            s = spell(String(get(m, "symbol", "")))
+            if s === nothing
+                unreadable = true
+                continue
+            end
+            push!(declared, s[2])
+            get(m, "pure", false) == true && (left[s[2]] = s[1])
+        end
+        push!(stack, name)
+        for base in get(def, "base_classes", Any[])
+            base isa AbstractDict || continue
+            get(base, "virtual", false) == true && continue
+            key = replace(String(get(base, "type", "")), r"^(?:class|struct)\s+" => "")
+            inherited = unimplemented(key, stack)
+            inherited === nothing && continue
+            for (sig, dm) in inherited
+                (startswith(sig, "~") || sig in declared || unreadable) && continue
+                get!(left, sig, dm)
+            end
+        end
+        pop!(stack)
+        return memo[name] = sort!([(sig, dm) for (sig, dm) in left])
+    end
+    for name in sort!(collect(String, keys(struct_defs)))
+        startswith(name, "__enum__") && continue
+        left = unimplemented(name, String[])
+        (left === nothing || isempty(left)) && continue
+        entry = Dict{String,Any}(get(record_abi, name, Dict{String,Any}()))
+        entry["pure_virtuals"] = sort!(String[dm for (_, dm) in left])
+        record_abi[name] = entry
+    end
+    return record_abi
+end
+
+"""
+    _vtable_only_plan(struct_defs, record_abi, symbols, dwarf_functions;
+                      demangle = _demangle) -> Dict
+
+Declared minus defined, for pure virtual member functions: every pure
+virtual a library record declares (`record_abi[name]["methods"]` rows with
+`pure`) that no symbol in `symbols` defines, as `bound` rows (`class`,
+`symbol`, `demangled`, `slot`) that `_vtable_only_function_rows` turns into
+function rows, and `skipped` rows (`class`, `symbol`, `reason`) the wrap
+report names. A pure virtual the library also defines (`void A::f() {}` after
+`= 0`) has a symbol and a row already, and is neither.
+
+Skipped, each with its reason: a destructor (a wrapper calls a class's
+destructors by symbol, the exact class's, and never through the vtable); a
+private or protected member, which C++ would not let a caller name; a member
+of a class with internal linkage (an unnamed namespace, a local class); a
+variadic one, whose `...` a vtable call cannot forward; one whose declaration
+records no slot or no object parameter, or that `dwarf_functions` (the
+parser's function table) has no signature for; a symbol that does not
+demangle. Toolchain records and standard-library scopes are passed over
+silently. Sorted by class, then symbol.
+"""
+function _vtable_only_plan(struct_defs::AbstractDict, record_abi::AbstractDict, symbols,
+                           dwarf_functions::AbstractDict; demangle = _demangle)
+    defined = Set{String}(String(get(s, "mangled", "")) for s in symbols if s isa AbstractDict)
+    bound = Dict{String,Any}[]
+    skipped = Dict{String,Any}[]
+    seen = Set{String}()
+    skip(cls, sym, why) = push!(skipped, Dict{String,Any}("class" => cls, "symbol" => sym, "reason" => why))
+    for name in sort!(collect(String, keys(struct_defs)))
+        startswith(name, "__enum__") && continue
+        def = struct_defs[name]
+        def isa AbstractDict || continue
+        get(def, "toolchain", false) == true && continue
+        _is_stdlib_scope(get(def, "scope", "")) && continue
+        entry = get(record_abi, name, nothing)
+        entry isa AbstractDict || continue
+        for m in get(entry, "methods", Any[])
+            m isa AbstractDict || continue
+            get(m, "pure", false) == true || continue
+            sym = String(get(m, "symbol", ""))
+            (isempty(sym) || sym in defined || sym in seen) && continue
+            push!(seen, sym)
+            dm = demangle(sym)
+            if dm === nothing
+                skip(name, sym, "the symbol does not demangle on this host")
+                continue
+            end
+            sig = _member_signature(dm)
+            info = get(dwarf_functions, sym, nothing)
+            params = info isa AbstractDict ? get(info, "parameters", Any[]) : Any[]
+            slot = get(m, "vtable_slot", nothing)
+            if sig !== nothing && startswith(sig, "~")
+                skip(name, sym, "a destructor: a class's destructors are called by symbol, never through the vtable")
+            elseif get(m, "accessibility", "public") != "public"
+                skip(name, sym, "$(m["accessibility"]): not a member a caller of the class can name")
+            elseif sig === nothing
+                skip(name, sym, "its class cannot be read from its name: $dm")
+            elseif occursin('(', _outside_template_args(extract_class_name(String(dm))))
+                # `(anonymous namespace)::Step`, `run()::Local`: a class of one
+                # translation unit, like its member functions, which are
+                # local symbols and have no row either. (A `(` inside template
+                # arguments is a function type: `Slot<void (int)>`.)
+                skip(name, sym, "its class has internal linkage (an unnamed namespace or a local class)")
+            elseif !(info isa AbstractDict)
+                skip(name, sym, "the debug information has no signature for it")
+            elseif get(info, "is_vararg", false) == true
+                skip(name, sym, "variadic: a call through the vtable cannot forward `...`")
+            elseif !(slot isa Integer)
+                skip(name, sym, "its declaration records no vtable slot")
+            elseif isempty(params) || String(get(params[1], "name", "")) != "this"
+                skip(name, sym, "its declaration records no object parameter")
+            else
+                push!(bound, Dict{String,Any}("class" => name, "symbol" => sym, "demangled" => String(dm),
+                                              "slot" => Int(slot)))
+            end
+        end
+    end
+    return Dict{String,Any}("bound" => bound, "skipped" => skipped)
+end
+
+"""
+    _vtable_only_function_rows(plan, dwarf_functions) -> Vector{Dict{String,Any}}
+
+One `functions` row per `bound` row of `_vtable_only_plan`: name, class and
+`demangled` from the declaration's linkage name (`mangled`, which is no
+symbol), the return type and the parameters the declaration DIE gives (`this`
+first, the others named `arg<n>`: a declaration's parameters carry no names),
+`has_object_pointer` (a virtual member is never static), and `vtable_only`
+with its `vtable_slot`.
+"""
+function _vtable_only_function_rows(plan::AbstractDict, dwarf_functions::AbstractDict)
+    rows = Dict{String,Any}[]
+    for r in get(plan, "bound", Any[])
+        sym = String(r["symbol"])
+        dm = String(r["demangled"])
+        info = dwarf_functions[sym]
+        ret = Dict{String,Any}("c_type" => get(info, "c_type", "void"),
+                               "julia_type" => get(info, "julia_type", "Cvoid"),
+                               "size" => get(info, "size", 0))
+        haskey(info, "vector_size") && (ret["vector_size"] = info["vector_size"])
+        push!(rows, Dict{String,Any}(
+            "name" => extract_function_name(dm),
+            "mangled" => sym,
+            "demangled" => dm,
+            "return_type" => ret,
+            "return_type_source" => "dwarf",
+            "parameters" => Any[Dict{String,Any}(p) for p in get(info, "parameters", Any[])],
+            "parameters_source" => "dwarf",
+            "is_method" => true,
+            "class" => extract_class_name(dm),
+            "is_vararg" => false,
+            "has_object_pointer" => true,
+            "vtable_only" => true,
+            "vtable_slot" => Int(r["slot"])))
+    end
+    return rows
+end
+
+# =============================================================================
 # DEFAULT ARGUMENTS
 # -----------------------------------------------------------------------------
 # A C++ default argument exists only in the header: the mangled name spells
@@ -4361,7 +4604,10 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     # surface there, and an empty table is the empty surface again.
     stl_table = get(metadata, "stl_methods", nothing)
     stl_bound = stl_table isa Dict && any(v -> v isa Vector && !isempty(v), values(stl_table))
-    if isempty(functions) && !stl_bound
+    # A pure virtual's row (`_is_vtable_only`) names no symbol of the library.
+    # It does not make a surface (a library whose whole API is hidden must not
+    # pass on its interfaces' declarations alone), and R2 has no name to find.
+    if all(_is_vtable_only, functions) && !stl_bound
         cause = promoted_count > 0 ? """
         $(promoted_count) of those symbols are `__rb_*` promoted internals, so the
         API was RENAMED away: `-fvisibility=hidden` made every unannotated function
@@ -4412,6 +4658,7 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     offenders = String[]
     for f in functions
         f isa Dict || continue
+        _is_vtable_only(f) && continue
         sym = get(f, "mangled", "")
         isempty(sym) && (sym = get(f, "name", ""))
         isempty(sym) && continue
@@ -8414,6 +8661,12 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
     current_fn_is_deleted = false
     current_fn_accessibility = nothing
     current_fn_is_virtual = false
+    # ...and for a virtual member: whether it is pure (`DW_AT_virtuality: 2`)
+    # and its slot in the declaring class's vtable
+    # (`DW_AT_vtable_elem_location`), which is all that reaches a pure
+    # virtual: it has no definition, so no symbol (`_vtable_only_plan`).
+    current_fn_is_pure = false
+    current_fn_vtable_slot = nothing
     declaration_facts = Dict{String,Dict{String,Any}}()
     # The DIE's own `DW_AT_linkage_name`, before `DW_AT_specification` replaces
     # it with the declaration's. Clang gives each emitted constructor and
@@ -8514,7 +8767,9 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                     "artificial" => current_fn_is_artificial,
                     "deleted" => current_fn_is_deleted,
                     "accessibility" => current_fn_accessibility,
-                    "virtual" => current_fn_is_virtual)
+                    "virtual" => current_fn_is_virtual,
+                    "pure" => current_fn_is_pure,
+                    "vtable_slot" => current_fn_vtable_slot)
             end
         end
 
@@ -8528,6 +8783,8 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         current_fn_is_deleted = false
         current_fn_accessibility = nothing
         current_fn_is_virtual = false
+        current_fn_is_pure = false
+        current_fn_vtable_slot = nothing
         current_function_name = nothing
         current_function_linkage = nothing
         current_function_own_linkage = nothing
@@ -8695,6 +8952,8 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                 current_fn_is_deleted = false
                 current_fn_accessibility = nothing
                 current_fn_is_virtual = false
+                current_fn_is_pure = false
+                current_fn_vtable_slot = nothing
 
                 # RESET VARIABLE CONTEXT to prevent leakage
                 current_variable_offset = nothing
@@ -8939,6 +9198,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             if !isnothing(virt_match)
                 is_virtual = parse(Int, virt_match.captures[1]) > 0
                 current_fn_is_virtual = is_virtual
+                current_fn_is_pure = parse(Int, virt_match.captures[1]) == 2
                 
                 # Store this temporarily in type_refs for the current function offset
                 if !isnothing(current_function_offset)
@@ -8950,6 +9210,14 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                     end
                 end
             end
+        end
+
+        # The member's slot in its class's vtable, an index from the address
+        # point: `DW_AT_vtable_elem_location: 2 byte block: 10 2 (DW_OP_constu: 2)`
+        # (clang and GCC write `DW_OP_constu`; a `DW_OP_lit<n>` says the same).
+        if in_function_context && contains(line, "DW_AT_vtable_elem_location")
+            slot_match = match(r"\(DW_OP_(?:constu: |lit)(\d+)\)\s*$", line)
+            slot_match === nothing || (current_fn_vtable_slot = parse(Int, slot_match.captures[1]))
         end
 
         # Extract function return type reference
@@ -9821,7 +10089,8 @@ with the declaration DIE's facts: `artificial` (an implicit member clang
 declared for it), `deleted`, and `accessibility` (`DW_AT_accessibility` as
 written, else the record's default: private in a `class`, public in a
 `struct`). With `key = "methods"` the same rows are written for every member
-function the record declares (`methods`, with `virtual` added; constructors
+function the record declares (`methods`, with `virtual` added, `pure` for a
+pure virtual and `vtable_slot` where the DIE gives one; constructors
 and destructors among them, which `_inline_method_plan` passes over). The parameters are not recorded: a declaration's formal parameters
 carry no names, so the parser keeps none, and the symbol spells them anyway
 (`_constructor_spelling`). Toolchain records put back by promotion and enum
@@ -9849,6 +10118,12 @@ function _record_declared_constructors!(record_abi::AbstractDict, struct_defs::A
             # A member function's row also says whether it is virtual: a
             # virtual one is emitted with its class's vtable, never forced.
             key == "methods" && (rows[end]["virtual"] = get(facts, "virtual", false) == true)
+            # ...whether it is pure, and its vtable slot where the DIE gives one.
+            if key == "methods"
+                rows[end]["pure"] = get(facts, "pure", false) == true
+                slot = get(facts, "vtable_slot", nothing)
+                slot isa Integer && (rows[end]["vtable_slot"] = Int(slot))
+            end
         end
         isempty(rows) && continue
         entry = Dict{String,Any}(get(record_abi, name, Dict{String,Any}()))
@@ -10783,6 +11058,17 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # is where those already were, so that only narrows.
     candidates = config.wrap.language == :c ? Set{String}() :
                  _scan_noexcept_functions(source_files, get_include_dirs(config))
+    # The pure virtual member functions: no symbol defines one, so each gets
+    # its row here, from its declaration (`_vtable_only_plan`). In front of
+    # the symbols' rows, so where one Julia signature stands for a pure
+    # virtual and a defined function, the defined one is still the one kept.
+    # And the records such a function leaves abstract (`pure_virtuals`).
+    vplan = Dict{String,Any}("bound" => Any[], "skipped" => Any[])
+    if config.wrap.language == :cpp
+        _mark_abstract_records!(record_abi, struct_defs)
+        vplan = _vtable_only_plan(struct_defs, record_abi, symbols, dwarf_return_types)
+        prepend!(functions, _vtable_only_function_rows(vplan, dwarf_return_types))
+    end
     _apply_default_argument_identity!(functions, bound_defaults)
     _mark_noexcept!(functions, candidates, nounwind)
     _mark_byval_params!(functions, byval)
@@ -10909,6 +11195,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # ...and the calls that leave default arguments out
         # (`_default_argument_plan`): `bound` rows name each function's symbol.
         "default_arguments" => dargs,
+        # The pure virtual member functions: `bound` rows have a `vtable_only`
+        # function row each, `skipped` rows a reason (`_vtable_only_plan`).
+        "vtable_methods" => vplan,
         # Function-pointer c_types list their parameters (`function_ptr(R; P1, P2)*`).
         # Older metadata spells every one `function_ptr(R)*`, so the generators
         # build a callback's `@cfunction` example from it only when this is set.

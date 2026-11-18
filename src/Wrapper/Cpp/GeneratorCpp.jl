@@ -502,7 +502,7 @@ function _rvalue_shadowed(functions)::Set{String}
     return out
 end
 
-import ..Compiler: _demangle, _param_list_paren, _matching_paren, _split_depth0_commas
+import ..Compiler: _demangle, _param_list_paren, _matching_paren, _split_depth0_commas, _is_vtable_only
 
 """
     _structor_variant(func) -> Union{Nothing,Tuple{Symbol,Char}}
@@ -614,7 +614,8 @@ maps a symbol to why its wrapper is a refusal.
 For a class with no virtual base, `C1` and `C2` (and `D1` and `D2`) are one
 function, and clang often emits only the base-object one (an abstract class's
 constructor, an inline destructor); either is bound, `C1`/`D1` when the
-library has both. For a class WITH a virtual base they are two: the
+library has both. (An abstract class's constructor is refused afterwards, for
+another reason: `_abstract_constructor_refusals!`.) For a class WITH a virtual base they are two: the
 base-object variant takes a VTT after `this` and leaves the virtual base
 alone, so a wrapper on it built half an object from a null VTT and crashed
 (`VBottom_VBottom(p)`), and `<X>_destroy_<X>` was `(this, vtt)`. Until
@@ -669,6 +670,80 @@ function _structor_bindings(functions, dwarf_structs)
         end
     end
     return (skipped, refused)
+end
+
+"""
+    _abstract_constructor_refusals!(refused, functions, skipped, record_abi) -> Vector{String}
+
+Refuse every constructor of an abstract class, adding to `refused` (symbol →
+reason) what `_structor_bindings` left bindable; returns the classes, sorted.
+A class is abstract here when the build recorded pure virtual member
+functions an object of it would still have (`record_abi`'s `pure_virtuals`,
+`Compiler._mark_abstract_records!`).
+
+C++ builds no object of such a class except as the base of one that defines
+those functions, and clang emits only its base-object constructor (`C2`).
+Bound like any constructor, `Animal_Animal(p, 4)` left at `p` an object whose
+vtable holds `__cxa_pure_virtual` in the pure slots: the first call of one,
+through `Animal_name(p)` or from inside the library (`Animal::describe()`
+calls `name()`), ends the process. Metadata without the key refuses nothing.
+"""
+function _abstract_constructor_refusals!(refused::AbstractDict, functions, skipped, record_abi)
+    FG = JLCSIRGenerator.FunctionGen
+    classes = Set{String}()
+    for f in functions
+        v = _structor_variant(f)
+        (v === nothing || v[1] !== :ctor) && continue
+        m = String(get(f, "mangled", ""))
+        (m in skipped || haskey(refused, m)) && continue
+        cls = String(get(f, "class", ""))
+        suffixes = FG._scope_suffixes(cls)
+        k = findfirst(c -> haskey(record_abi, c), suffixes)
+        k === nothing && continue
+        left = get(record_abi[suffixes[k]], "pure_virtuals", nothing)
+        (left isa AbstractVector && !isempty(left)) || continue
+        refused[m] = "`$cls` is an abstract class: " * join(("`$x`" for x in first(left, 3)), ", ") *
+            (length(left) > 3 ? " and $(length(left) - 3) more" : "") *
+            (length(left) == 1 ? " is" : " are") * " pure virtual in it, so C++ builds no object of `$cls` except " *
+            "as the base of a class that defines " * (length(left) == 1 ? "it" : "them") * ". This constructor, run " *
+            "on storage of its own, would leave an object whose vtable ends the process when a pure virtual " *
+            "is called. Construct a derived class, or call a function of the library that returns one."
+        push!(classes, cls)
+    end
+    return sort!(collect(classes))
+end
+
+"The sentences a pure virtual member function's docstring carries after \"Wrapper for\"."
+const _PURE_VIRTUAL_DOC = "\n\n**Pure virtual.** The class declares this function and defines no body for it: " *
+    "the call goes through the vtable of the object `this` points at, to the override of that object's own class."
+
+"""
+    _report_vtable_methods(plan)
+
+The wrap report's lines for the pure virtual member functions (the
+metadata's `vtable_methods`, `Compiler._vtable_only_plan`): how many are
+bound through the vtable, of which classes, and the ones passed over, by
+reason. Nothing for metadata without the key or with nothing to report.
+"""
+function _report_vtable_methods(plan)
+    plan isa AbstractDict || return
+    show(xs) = join(first(xs, 8), ", ") * (length(xs) > 8 ? ", …" : "")
+    bound = [r for r in get(plan, "bound", Any[]) if r isa AbstractDict]
+    if !isempty(bound)
+        classes = sort!(unique(String[String(r["class"]) for r in bound]))
+        println("  wrap: $(length(bound)) pure virtual member function(s) of $(length(classes)) class(es) have no ",
+                "symbol and are called through the object's vtable: ", show(classes))
+    end
+    by_reason = Dict{String,Vector{String}}()
+    for r in get(plan, "skipped", Any[])
+        r isa AbstractDict || continue
+        push!(get!(() -> String[], by_reason, String(get(r, "reason", "?"))), String(get(r, "class", "?")))
+    end
+    for reason in sort!(collect(keys(by_reason)))
+        println("  wrap: $(length(by_reason[reason])) pure virtual member function(s) passed over, $reason: ",
+                show(sort!(unique(by_reason[reason]))))
+    end
+    return
 end
 
 """
@@ -1422,6 +1497,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     end
     _report_inline_constructors(get(metadata, "inline_constructors", nothing))
     _report_inline_constructors(get(metadata, "inline_methods", nothing); what = "member function")
+    _report_vtable_methods(get(metadata, "vtable_methods", nothing))
     let bound = [r for r in get(get(metadata, "default_arguments", Dict{String,Any}()), "bound", Any[])
                  if r isa AbstractDict && get(r, "emitted", false) == true]
         isempty(bound) || println("  wrap: $(length(bound)) call(s) with default arguments left out, of ",
@@ -3659,6 +3735,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     "whose complete-object variant the library lacks, or metadata to rebuild): ",
                                     join(first(classes, 8), ", "), length(classes) > 8 ? ", …" : "")
     end
+    # ...and no constructor of an abstract class is bound at all
+    # (`_abstract_constructor_refusals!`).
+    let classes = _abstract_constructor_refusals!(structor_refused, functions, structor_skipped, record_abi)
+        isempty(classes) || println("  wrap: the constructor wrapper(s) of $(length(classes)) abstract class(es) are ",
+                                    "refusals (C++ builds no object of a class with a pure virtual left): ",
+                                    join(first(classes, 8), ", "), length(classes) > 8 ? ", …" : "")
+    end
+    # The pure virtual member functions refused at emission, for the report.
+    vtable_refusals = String[]
     strict_int_positions = _integer_width_overloads(
         Any[_declared_structor(f) for f in functions
             if !(String(get(f, "mangled", "")) in rvalue_shadowed) &&
@@ -3711,6 +3796,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # symbol, which is `p->Class::f()`: a `noexcept` virtual was routed
         # there, and `Base_g(derived)` ran `Base::g`.
         use_mlir_dispatch = use_mlir_dispatch || mangled in virtual_symbols
+        # A pure virtual member function has no symbol at all
+        # (`Compiler._is_vtable_only`): its thunk is a `jlcs.vcall` and there
+        # is nothing a `ccall` could name.
+        vtable_only = _is_vtable_only(func)
+        use_mlir_dispatch = use_mlir_dispatch || vtable_only
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
@@ -3836,7 +3926,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # =========================================================
         # VARARGS INTERCEPTION
         # =========================================================
-        if is_vararg
+        # Never for a pure virtual: the interception is a `@ccall` by name,
+        # and the build makes no variadic row for one. BRANCH 1 refuses it.
+        if is_vararg && !vtable_only
             # Sanitize function name for Julia (same logic as below)
             va_julia_name = func_name
             if is_method && !isempty(class_name)
@@ -3988,7 +4080,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             \"\"\"
                 $julia_name($param_sig) -> $doc_ret
 
-            Wrapper for `$demangled`$(_deleting_destructor_doc(mangled, julia_name, class_name in d0_only_classes))
+            Wrapper for `$demangled`$(_deleting_destructor_doc(mangled, julia_name, class_name in d0_only_classes))$(vtable_only ? _PURE_VIRTUAL_DOC : "")
 
             # Arguments
             $(join(arg_docs, "\n"))
@@ -4071,6 +4163,26 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 """)
                 push!(exports, julia_name)
                 continue
+            end
+            # A pure virtual member function is bound only where the thunk
+            # generator will write its vtable call: with no thunk there is no
+            # symbol to fall back on, so the generator is asked
+            # (`vtable_only_refusal`) and its reason is the refusal.
+            if vtable_only
+                why = JLCSIRGenerator.vtable_only_refusal(func, dwarf_structs, record_abi; class_raii)
+                if why !== nothing
+                    push!(vtable_refusals, String(demangled))
+                    push!(func_chunks, """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        Base.error($(repr("ABI Safety Trap: cannot call '$julia_name' ($demangled). " *
+                                          uppercasefirst(why) * ". Call the override through its own class's " *
+                                          "wrapper, or keep the function out with [wrap] exclude_symbols.")))
+                    end
+                    """)
+                    push!(exports, julia_name)
+                    continue
+                end
             end
             # An empty record returned by value. The thunk is void on both
             # ABIs (SysV's callee is void; Win64's returns iN and the thunk
@@ -4348,6 +4460,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # =========================================================
         # BRANCH 2: CCALL (Fast Path) - Existing Logic
         # =========================================================
+        # Every path of BRANCH 1 ends the iteration, and a pure virtual
+        # always takes it. Held here because a `ccall` of its name would bind
+        # nothing, or another library's function of that name.
+        vtable_only && Base.error("internal error: the pure virtual `$demangled` reached the ccall path")
 
         # Build conversion logic for parameters
         conversion_code = ""
@@ -4803,6 +4919,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(func_chunks, convenience_func)
         end
     end
+    isempty(vtable_refusals) ||
+        println("  wrap: $(length(vtable_refusals)) pure virtual member function(s) are refusals (a record by value: ",
+                "a call through the vtable carries scalars and pointers only): ",
+                join(first(sort!(vtable_refusals), 6), ", "), length(vtable_refusals) > 6 ? ", …" : "")
 
     # =================================================================
     # STL CONTAINER FACTORY FUNCTIONS

@@ -5,7 +5,8 @@
 # would have printed. The claim is that the parser cannot tell the difference,
 # and this file holds it to that on libraries built here from
 # test/libdw_test: a C++ unit (namespaces, an enum class, a virtual base
-# pointer, bitfields, a function pointer member, a template, a union) and a C
+# pointer, bitfields, a function pointer member, a template, a union, an
+# interface with pure virtual members) and a C
 # unit (an over-aligned record, `_Complex`, `__int128`, a SIMD vector,
 # variadics), each at DWARF 5 and DWARF 4. The five tables the parser returns
 # must be equal, key for key, and so must the per-unit file tables.
@@ -88,6 +89,17 @@ elseif requires("libdw and readelf give one answer", :clang, :clangxx)
                     end
                     @test isempty(diffs)
                     foreach(d -> println("  ", first(d, 240)), diffs)
+                    if source == "shapes.cpp"
+                        # A pure virtual's flag and its vtable slot, from either reader.
+                        for tables in (r, l)
+                            rows = Dict(String(x["symbol"]) => x
+                                        for x in get(get(tables[5], "Iface", Dict{String,Any}()), "methods", Any[]))
+                            for (sym, slot) in (("_ZNK3geo5Iface3tagEv", 2), ("_ZN3geo5Iface4pokeEi", 3))
+                                row = get(rows, sym, Dict{String,Any}())
+                                @test (sym, get(row, "pure", false), get(row, "vtable_slot", nothing)) == (sym, true, slot)
+                            end
+                        end
+                    end
 
                     # The provenance filter's input, read two ways.
                     dumper = _LDL_C._dwarf_dumper()

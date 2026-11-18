@@ -963,12 +963,34 @@ function _parse_byte_size(s::AbstractString)
     startswith(s, "0x") ? parse(Int, s[3:end], base=16) : parse(Int, s)
 end
 
+"""
+    _vtable_only_refusal(has_slot, vcall_ok, is_method, has_raii, record_return, arg_types)
+        -> Union{Nothing,String}
+
+Why a pure virtual member function gets no thunk, or `nothing` when its
+thunk is a `jlcs.vcall`: the row brought no slot, or its signature is one the
+op's lowering does not carry (a record by value in either direction, a class
+with a destructor by value). A virtual with a definition falls back to a call
+by symbol there; a pure one has nothing to fall back to.
+"""
+function _vtable_only_refusal(has_slot::Bool, vcall_ok::Bool, is_method::Bool, has_raii::Bool,
+                              record_return::Bool, arg_types)
+    has_slot || return "its row records no vtable slot"
+    vcall_ok && return nothing
+    what = (!is_method || isempty(arg_types)) ? "has no object to dispatch on" :
+           has_raii ? "takes a class with a destructor by value" :
+           record_return ? "returns a record by value" : "takes a record by value"
+    return "it is pure virtual and $what; a call through the vtable carries scalars and pointers only, " *
+           "and a pure virtual has no symbol to call instead"
+end
+
 function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_throw::Bool=false,
                                   class_raii::Dict{String,Dict{Symbol,String}}=Dict{String,Dict{Symbol,String}}(),
                                   vcall_info::AbstractDict=Dict{String,Any}(),
                                   record_abi::AbstractDict=Dict{String,Any}(),
                                   abi::Symbol=host_record_abi(),
-                                  predeclared=())
+                                  predeclared=(),
+                                  refused::Union{Nothing,AbstractDict}=nothing)
     # The convention the thunks are generated for: the host's, since they run
     # in this process. Every record crossing is refused or stated under it
     # (`thunk_crossings`, `record_statement`); a test passes another to see
@@ -1015,6 +1037,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         if crossings.trap !== nothing
             println(io, "// no thunk for $(mangled): $(replace(crossings.trap, '\n' => ' '))")
             println(io, "")
+            refused === nothing || (refused[String(mangled)] = String(crossings.trap))
             continue
         end
 
@@ -1340,10 +1363,37 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             println(io, "  return")
         end
 
-        # 1. External Declaration (Real C++ Symbol)
-        # Use real mangled name so JIT can link to it
-        println(io, "func.func private @$(mangled)($(join(arg_types, ", "))) $ext_mlir_ret")
-        push!(declared, String(mangled))
+        # Whether the call can be a `jlcs.vcall`. Its lowering does no
+        # sret/packed ABI coercion, so only scalar/pointer signatures are
+        # eligible (`arg_types` has one entry per call operand, so it is
+        # empty exactly when the call has none).
+        vcall_ok = is_method && !has_raii && !is_packed_ret && !ret_sret &&
+                   !isempty(arg_types) &&
+                   !occursin("struct", func_ret) &&
+                   !any(t -> occursin("struct", t) || occursin("array", t), arg_types)
+
+        # A pure virtual member function (`Compiler._is_vtable_only`) has no
+        # symbol: nothing to declare, and no direct call to fall back to where
+        # a virtual with a definition keeps one. Its thunk is the `jlcs.vcall`
+        # alone, or there is none and the line says why. GeneratorCpp asks the
+        # same question of the same code (`JLCSIRGenerator.vtable_only_refusal`)
+        # and emits a refusal.
+        vtable_only = Compiler._is_vtable_only(func)
+        if vtable_only
+            why = _vtable_only_refusal(haskey(vcall_info, mangled), vcall_ok, is_method, has_raii,
+                                       is_packed_ret || ret_sret || occursin("struct", func_ret), arg_types)
+            if why !== nothing
+                println(io, "// no thunk for $(mangled): $(why)")
+                println(io, "")
+                refused === nothing || (refused[String(mangled)] = why)
+                continue
+            end
+        else
+            # 1. External Declaration (Real C++ Symbol)
+            # Use real mangled name so JIT can link to it
+            println(io, "func.func private @$(mangled)($(join(arg_types, ", "))) $ext_mlir_ret")
+            push!(declared, String(mangled))
+        end
 
         # 2. Thunk (Exposed to JIT)
         # Append _thunk suffix to avoid collision
@@ -1513,10 +1563,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # picks the invoke+landing-pad lowering (same sentinel-continue EH
         # model as try_call).
         vc = get(vcall_info, mangled, nothing)
-        use_vcall = vc !== nothing && is_method && !has_raii && !is_packed_ret && !ret_sret &&
-                    !isempty(call_args) &&
-                    !occursin("struct", func_ret) &&
-                    !any(t -> occursin("struct", t) || occursin("array", t), arg_types)
+        use_vcall = vc !== nothing && vcall_ok
         if use_vcall
             vcall_attrs = "class_name = @$(vc.class), vtable_offset = $(vc.vtable_offset) : i64, " *
                           "slot = $(vc.slot) : i64, this_offset = 0 : i64"

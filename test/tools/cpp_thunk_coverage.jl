@@ -27,6 +27,9 @@
 #             functions an earlier library's wrapper already binds (its
 #             `type_manifest.json` `bound_symbols`; the generator drops them
 #             before wrapping, and they are callable through that module).
+#             A pure virtual member function is in it too: its row
+#             (`vtable_only`) names no symbol of the library, and it is bound
+#             when the code invokes its thunk, which calls through the vtable.
 #   tier 3    surface symbols that are a `ccall`/`@ccall` target somewhere in
 #             the wrapper's PARSED code, as the C tool counts them: a
 #             docstring never counts, a trap stub calls nothing.
@@ -45,6 +48,7 @@
 #               unresolved return type             "…no Julia type was resolved for that return"
 #               long double by value               `_x87_trap_body`
 #               unmapped type (FFI trap)           BRANCH 0's "FFI Safety Trap"
+#               pure virtual, record by value     "It is pure virtual and …": no vtable call carries a record
 #             and, for the record traps, which record blocks how many functions.
 #   expected  in the surface, not bound, and meant: several C++ entry points a
 #             Julia caller cannot tell apart stand behind one Julia method, so
@@ -58,6 +62,8 @@
 #               rvalue twin              a `T&&` overload beside its `const T&` twin,
 #                                        which the generator does not emit
 #               one width, two spellings `set_value(long)` beside `(long long)` on LP64
+#               abstract class           the constructor of a class with a pure virtual left,
+#                                        which the generator refuses: C++ builds no such object
 #   dropped   in the surface, neither bound, trapped nor expected: a distinct
 #             entry point lost, by what the generator did:
 #               overload set collapsed   another overload of the C++ name is bound and
@@ -246,6 +252,10 @@ end
 
 # ─── trap and type classification ────────────────────────────────────────────
 
+# Not a miss: C++ itself builds no object of an abstract class, and the
+# generator refuses its constructor (`_abstract_constructor_refusals!`).
+const ABSTRACT_CONSTRUCTOR = "constructor of an abstract class (C++ builds no object of one)"
+
 "The cause a refusal message names, in the order the generator appends them."
 function trap_cause(msg::AbstractString)
     occursin("FFI Safety Trap", msg) && return "unmapped type (FFI trap)"
@@ -259,6 +269,9 @@ function trap_cause(msg::AbstractString)
         return "SysV refusal: " * (m === nothing ? "?" : String(m.captures[1]))
     end
     occursin("keys types by their bare DWARF name", msg) && return "conflicted type name"
+    # A pure virtual has no symbol to fall back on where no vtable call is written.
+    occursin(". It is pure virtual and ", msg) && return "pure virtual with a record by value (no vtable call carries one)"
+    occursin("is an abstract class", msg) && return ABSTRACT_CONSTRUCTOR
     # `_structor_bindings`' two refusals.
     occursin("defines only the base-object", msg) && return "base-object variant only (a class with a virtual base)"
     occursin("predates per-variant parameter lists", msg) && return "constructor/destructor metadata to rebuild"
@@ -454,6 +467,10 @@ function measure(lib)
             push!(tier2, m)
         elseif haskey(trap_by_m, m) || haskey(trap_by_dem, String(get(f, "demangled", "")))
             msg = get(trap_by_m, m, get(trap_by_dem, String(get(f, "demangled", "")), ""))
+            if trap_cause(msg) == ABSTRACT_CONSTRUCTOR
+                push!(get!(expected, ABSTRACT_CONSTRUCTOR, String[]), m)
+                continue
+            end
             push!(get!(traps, trap_cause(msg), String[]), m)
             for r in trap_records(msg)
                 r == "long double" && continue      # a scalar, counted by its cause
@@ -509,7 +526,10 @@ function measure(lib)
             ntrap = sum(length, values(traps); init = 0), ndrop = sum(length, values(dropped); init = 0),
             nexpected = sum(length, values(expected); init = 0),
             traps, dropped, expected, blocked, kinds, imported, excluded, unexported, earlier, unused_thunks,
-            foreign_thunks, byman, generator = gen === nothing ? "?" : gen.captures[1], indexed = lib.indexed)
+            foreign_thunks, byman, generator = gen === nothing ? "?" : gen.captures[1], indexed = lib.indexed,
+            # The pure virtuals: in the surface with no symbol, bound through the vtable.
+            vtable_only = count(m -> get(byman[m], "vtable_only", false) == true, surface),
+            vtable_bound = count(m -> get(byman[m], "vtable_only", false) == true, tier2))
 end
 
 # ─── report ──────────────────────────────────────────────────────────────────
@@ -554,6 +574,8 @@ println("expected drops (several C++ entry points behind one Julia method, by de
 println("callable (surface less expected): $callable")
 println("bound:   $bound/$callable = $(pct(bound, callable))%  (tier 3: $tier3, tier 2: $tier2)")
 println("traps:   $ntrap   dropped: $ndrop   unexported: $(sum(r -> r.unexported, ok; init = 0))")
+println("pure virtuals (no symbol, called through the vtable): $(sum(r -> r.vtable_bound, ok; init = 0)) bound of " *
+        "$(sum(r -> r.vtable_only, ok; init = 0)) in the surface")
 println("thunks in a manifest nothing invokes: $(sum(r -> r.unused_thunks, ok; init = 0))" *
         "   thunks invoked outside the surface (STL members): $(sum(r -> r.foreign_thunks, ok; init = 0))")
 k = Dict(x => sum(r -> r.kinds[x], ok; init = 0) for x in (:fields, :blob, :byte_record, :opaque, :owner))

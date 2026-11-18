@@ -46,7 +46,8 @@ struct Solid : Sketch {
 };
 
 // An abstract class with NO virtual base: the library has its base-object
-// constructor only too, and there it is the constructor.
+// constructor only too, and there it is the constructor. A wrapper refuses it
+// for the other reason: the class is abstract.
 struct Plain {
     int v;
     explicit Plain(int v_);
