@@ -171,6 +171,13 @@ consumers call these names. What is new is that the function is total:
 - **A deleting destructor is `delete_`, not `destroy_`** (2026-11-14): `~` is
   spelled by the symbol's variant (`_is_deleting_destructor`), since D0 frees
   the object and D1/D2 do not. The curated list is otherwise frozen.
+- **Every operator's name is a function of the operator alone** (2026-11-18):
+  one whose curated spelling was shared or made from its parameter list
+  (`<`, `>`, `<=`, `>=`, shifts, `->`, `->*`, `()`, `[]`, `,`, `new[]`,
+  `delete[]`) is spelled with its word (`_OPERATOR_WORDS`, decided by the
+  symbol: `_operator_spelling`); every other keeps its curated name.
+  `operator()`, `operator[]` and `operator,` also keep their old shared
+  `Class_operator` (`_operator_legacy_aliases`).
 
 Not injective in general, on purpose. C++ overloads share one name, and Julia
 dispatches on argument types. The `_+` collapse, the trailing-`_` rstrip and
