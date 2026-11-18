@@ -6243,6 +6243,7 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
     "signed char" => "Cchar",
     "unsigned char" => "Cuchar",
     "wchar_t" => "Cwchar_t",
+    "char8_t" => "UInt8",
     "char16_t" => "UInt16",
     "char32_t" => "UInt32",
 
@@ -6299,8 +6300,12 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
     # Time types
     "time_t" => "Ctime_t",
 
-    # Special types
+    # Special types. DWARF names the unsigned one `unsigned __int128` (clang)
+    # or `__int128 unsigned` (GCC); `__uint128_t` is a typedef of it.
     "__int128" => "Int128",
+    "__int128_t" => "Int128",
+    "unsigned __int128" => "UInt128",
+    "__int128 unsigned" => "UInt128",
     "__uint128_t" => "UInt128",
 
     # C11 _Complex types
@@ -6457,7 +6462,9 @@ const _C_TYPE_SIZE_MAP = Dict{String,Int}(
     "ptrdiff_t" => 8,
     "intptr_t" => 8, "uintptr_t" => 8,
     "wchar_t" => _C_WCHAR_BYTES, "Cwchar_t" => _C_WCHAR_BYTES,
+    "char8_t" => 1, "char16_t" => 2, "char32_t" => 4,
     "__int128" => 16, "__uint128_t" => 16,
+    "__int128_t" => 16, "unsigned __int128" => 16, "__int128 unsigned" => 16,
 )
 
 """
@@ -7748,6 +7755,18 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                         end
                     end
                 end
+            end
+        end
+
+        # DW_AT_declaration on an enum DIE: an opaque declaration (`enum class E
+        # : int;`), which has a size and no enumerators. An enum DEFINED with
+        # none (`enum class byte : unsigned char {};`) has no such attribute,
+        # and only that one gets an entry (see the enum definitions below).
+        if contains(line, "DW_AT_declaration") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) === :enum &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                type_refs[tag_offset]["declaration"] = true
             end
         end
 
@@ -9420,6 +9439,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
     # name several enums.
     enum_defs = Dict{String,Dict{String,Any}}()
     enum_candidates = Dict{String,Vector{Dict{String,Any}}}()
+    toolchain_enum_candidates = Dict{String,Vector{Dict{String,Any}}}()   # by `__enum__<name>`
     enum_scopes_of = Dict{String,Vector{String}}()
     enum_decl_files_of = Dict{String,Vector{String}}()
     for offset in die_order
@@ -9438,8 +9458,24 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                 # Get enumerators
                 enumerators = get(type_info, "enumerators", [])
 
-                if !isempty(enumerators)
-                    push!(get!(() -> Dict{String,Any}[], enum_candidates, enum_name), Dict{String,Any}(
+                # An enum DEFINED with no enumerators is a type too: C++'s
+                # `enum class byte : unsigned char {};` (`std::byte`), a
+                # library's `enum class Handle : uint32_t {};`. It crosses a
+                # call as its underlying integer like any enum, and without an
+                # entry it was a record with no layout: `struct byte end` and
+                # an ABI trap. An opaque declaration (`enum class E : int;`)
+                # says neither what it is an integer of nor what it holds, and
+                # gets none. One a toolchain header declares is set aside like
+                # a toolchain record, and comes back only where the library
+                # names it (`_promote_toolchain_records!`).
+                empty_definition = isempty(enumerators) && !isnothing(underlying_type_ref) &&
+                                   get(type_info, "declaration", false) != true &&
+                                   !isnothing(get(type_info, "byte_size", nothing))
+                set_aside = empty_definition && drops_type(type_info)
+                if !isempty(enumerators) || empty_definition
+                    enum_key = set_aside ? "__enum__" * enum_name : enum_name
+                    push!(get!(() -> Dict{String,Any}[], set_aside ? toolchain_enum_candidates : enum_candidates,
+                               enum_key), Dict{String,Any}(
                         "kind" => "enum",
                         "underlying_type" => underlying_c_type,
                         "julia_type" => underlying_julia_type,
@@ -9449,10 +9485,10 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                     # Scope and header beside the definition (see the records above).
                     let sp = get(type_info, "scope_parent", missing)
                         sc = sp === missing ? nothing : _scope_of(sp, type_refs)
-                        sc === nothing || push!(get!(() -> String[], enum_scopes_of, enum_name), sc)
+                        sc === nothing || push!(get!(() -> String[], enum_scopes_of, enum_key), sc)
                     end
                     let p = String(get(type_info, "decl_file_path", ""))
-                        isempty(p) || push!(get!(() -> String[], enum_decl_files_of, enum_name), replace(p, '\\' => '/'))
+                        isempty(p) || push!(get!(() -> String[], enum_decl_files_of, enum_key), replace(p, '\\' => '/'))
                     end
                 end
             end
@@ -9462,6 +9498,13 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         enum_defs[enum_name] = _canonical_definition(defs)
         _record_provenance!(enum_defs[enum_name], get(enum_scopes_of, enum_name, String[]),
                             get(enum_decl_files_of, enum_name, String[]))
+    end
+    # The toolchain's enumerator-less enums wait beside its records, under the
+    # key they will have in `struct_defs`.
+    for (enum_key, defs) in toolchain_enum_candidates
+        toolchain_defs[enum_key] = _canonical_definition(defs)
+        _record_provenance!(toolchain_defs[enum_key], get(enum_scopes_of, enum_key, String[]),
+                            get(enum_decl_files_of, enum_key, String[]))
     end
 
 
@@ -10384,6 +10427,16 @@ whose type is a 1-byte empty record (`empty_records`; `_Storage`'s
 `_Empty_byte` beside a `std::optional`'s value): it overlaps the others and
 holds no bytes they do not.
 
+**A toolchain enum with no enumerators** (`std::byte`, `std::align_val_t`;
+`toolchain_defs["__enum__<name>"]`) comes back the same way, as
+`struct_defs["__enum__<name>"]` marked `"toolchain"`: reached by value it is
+the integer the call crosses, and a member of that type is complete. It is
+also put back where a seed or a walked record names it behind a pointer or
+reference, which a record is not: the enum is the type that pointer is typed
+with (`std::byte*` is `Ptr{byte}`), and it holds nothing whose layout could be
+missing. One no exported function, exported global or reached record names
+stays out. (A toolchain enum WITH enumerators was never set aside.)
+
 Never promoted: an STL container, which keeps its own path (pointer in, byte blob
 out; `stl_container_size`), and a name on `INTERNAL_TYPE_BLOCKLIST`, which no
 generator emits. A library record of the same name keeps its entry.
@@ -10437,7 +10490,7 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         # `_complex_base_name`'s spellings, which only a sized base type gets.
         e in ("complex float", "complex double", "complex long double") && return true
         cuts = _scope_suffixes(e)
-        any(c -> haskey(struct_defs, "__enum__" * c), cuts) && return true
+        any(c -> haskey(struct_defs, "__enum__" * c) || haskey(toolchain_defs, "__enum__" * c), cuts) && return true
         stl_container_size(e) > 0 && return true
         _key_in(e, struct_defs) !== nothing && return true
         tk = _key_in(e, toolchain_defs)
@@ -10464,13 +10517,38 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
             reach(String(get(b, "type", "")))
         end
     end
+    # A toolchain enum with no enumerators that `e` names (`std::byte`): put
+    # back whole, since an enum holds nothing. `true` when `e` is an enum.
+    function reach_enum(e::AbstractString)
+        for c in _scope_suffixes(e)
+            ek = "__enum__" * c
+            haskey(struct_defs, ek) && return true
+            (haskey(toolchain_defs, ek) && !(c in INTERNAL_TYPE_BLOCKLIST)) || continue
+            def = Dict{String,Any}(toolchain_defs[ek])
+            def["toolchain"] = true
+            struct_defs[ek] = def
+            push!(promoted, ek)
+            return true
+        end
+        return false
+    end
     function reach(t::AbstractString)
         e = held(t)
-        (e === nothing || isempty(e)) && return
+        if e === nothing
+            # An address. A record behind it is not held, and stays out; an
+            # enum is the type the pointer is typed with (`std::byte*` is
+            # `Ptr{byte}`), which the wrapper can only spell if it emits it.
+            s = replace(String(t), r"\b(?:const|volatile)\b" => "")
+            s = replace(s, r"(?:\[\d*\])+\s*$" => "")
+            occursin('(', s) || reach_enum(strip(replace(s, r"[*&\s]+$" => "")))
+            return
+        end
+        isempty(e) && return
         stl_container_size(e) > 0 && return
         lk = _key_in(e, struct_defs)
         lk === nothing || return walk(lk)                # the library's own, or done
         tk = _key_in(e, toolchain_defs)
+        tk === nothing && reach_enum(e) && return
         (tk === nothing || !promotable(tk) || !complete(tk, String[])) && return
         def = _laid_out_from_bases(toolchain_defs[tk], k -> begin
                   bk = _key_in(k, toolchain_defs)
@@ -10522,7 +10600,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                                    "$(length(conflicted)) type names have", " distinct definitions, ",
                                    "one kept for each: ", join(first(conflicted, 8), ", "),
                                    length(conflicted) > 8 ? ", …" : "")
-    toolchain = sort!([k for (k, v) in struct_defs if get(v, "toolchain", false) == true])
+    toolchain = sort!([replace(k, r"^__enum__" => "enum ") for (k, v) in struct_defs
+                       if get(v, "toolchain", false) == true])
     isempty(toolchain) || println("  metadata: ", length(toolchain), " toolchain record(s) held or passed ",
                                   "by value, layout kept: ", join(first(toolchain, 6), ", "),
                                   length(toolchain) > 6 ? ", …" : "")
@@ -11373,15 +11452,21 @@ const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
     "signed long long int" => "Clonglong",
     "unsigned long long int" => "Culonglong",
     "wchar_t" => "Cwchar_t",
+    "char8_t" => "UInt8",
     "char16_t" => "UInt16",
     "char32_t" => "UInt32",
     "time_t" => "Ctime_t",
 
-    # `__int128` / `__uint128_t` are INTEGER class and pass in a register pair,
-    # so `Int128`/`UInt128` are right. Only fmt uses them (4 params) and fmt has
-    # no build artifacts, so this is unexercised — correct by the ABI rules, not
-    # by a live test.
+    # `__int128` and `unsigned __int128` (GCC's DWARF: `__int128 unsigned`;
+    # `__int128_t`/`__uint128_t` are typedefs of them) are INTEGER class in
+    # both eightbytes. `Int128`/`UInt128` are the Julia types, and `ccall`
+    # passes one as C does only while both halves fit in registers; the C
+    # generator refuses the positions where it does not
+    # (`Wrapper._c_int128_misplaced`), and a thunk passes `i128`.
     "__int128" => "Int128",
+    "__int128_t" => "Int128",
+    "unsigned __int128" => "UInt128",
+    "__int128 unsigned" => "UInt128",
     "__uint128_t" => "UInt128",
 
     # `long double` is DELIBERATELY ABSENT. It is x87 80-bit, SysV class X87,
@@ -11502,10 +11587,14 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         end
     end
 
-    # Check for enums
-    if base_type in enum_names
-        # Enums are used directly by name (will be @enum in Julia)
-        return base_type
+    # An enum BY VALUE is used by name (the type the wrapper emits for it). A
+    # pointer or reference to one is an address, typed by the branches below
+    # like a pointer to any scalar: `E*` is `Ptr{E}`, `E**` `Ptr{Ptr{E}}`,
+    # `E&` and `const E&` `Ref{E}`. Returning the name for those too wrapped
+    # `void out(enum E *)` as taking the enum's VALUE, and C wrote through it
+    # as an address.
+    if cpp_type in enum_names
+        return String(cpp_type)
     end
 
     # Handle pointers (for non-struct types)
@@ -11513,8 +11602,9 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         # Map the base type first, then wrap in Ptr{}
         base = strip(cpp_type[1:end-1])
         base_julia = cpp_to_julia_type(base, struct_names, enum_names)
-        # If base mapped to a specific type, use it; otherwise fall back to Ptr{Cvoid}
-        if base_julia != "Any" && base_julia != base
+        # If base mapped to a specific type, use it; otherwise fall back to Ptr{Cvoid}.
+        # An enum maps to its own name.
+        if base_julia != "Any" && (base_julia != base || base in enum_names)
             return "Ptr{$base_julia}"
         else
             return "Ptr{Cvoid}"
