@@ -151,14 +151,87 @@ holds one byte, and an `int` parameter reads three more past it (pugixml's
 2026-11-03). `ccall` converts to the declared C type itself; a thunk cannot,
 so the emitted body does — `Cint(def)` for a parameter in `_INTEGER_CTYPES`
 (the ones declared `::Integer`), and the `@enum`'s base type for an emitted
-enum, which the enum value and any Integer both convert to. Pointers,
-references, strings, `Bool`, floats (declared at their exact type) and records
-cross as they are.
+enum, which the enum value and any Integer both convert to. `Bool`, floats
+(declared at their exact type) and records by value cross as they are.
+
+A pointer position (`pointer_types[i]`, from `_pointer_arg_type`: a pointer, a
+reference, a `this`, a `char*`, a container the thunk takes by address) is
+converted too, with `JITManager.pointer_arg(<declared type>, x)`: the thunk
+dereferences what its slot holds, and `invoke` cannot tell a pointer position
+from a value's, so the body says which it is and the conversion refuses what
+is not a pointer to it.
 """
-function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base)
+function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base,
+                            pointer_types = fill(nothing, length(names)))
     [needs_conversion[i] ? "$(ctypes[i])($(names[i]))" :
-     haskey(enum_base, ctypes[i]) ? "$(enum_base[ctypes[i]])($(names[i]))" : names[i]
+     haskey(enum_base, ctypes[i]) ? "$(enum_base[ctypes[i]])($(names[i]))" :
+     pointer_types[i] !== nothing ? "RepliBuild.JITManager.pointer_arg($(pointer_types[i]), $(names[i]))" :
+     names[i]
      for i in eachindex(names)]
+end
+
+"""
+    _by_address_ctype(ctype, c_type) -> String
+
+The ccall type a parameter's SIGNATURE is spelled from. A container C++ takes
+by value and the thunk takes by address (`FunctionGen._stl_by_value`) is
+spelled as a pointer, so it relaxes to `::Any` like one, whatever its own name
+is bound to: the value such a container is returned as, a `Ref` and a `Ptr`
+all pass (`_pointer_arg_type`). Any other parameter keeps `ctype`. The
+function loop and the overload prediction both spell a position through this.
+"""
+_by_address_ctype(ctype::AbstractString, c_type::AbstractString) =
+    JLCSIRGenerator.FunctionGen._stl_by_value(c_type) ? "Ptr{Cvoid}" : String(ctype)
+
+"""
+    _pointer_arg_type(ctype, c_type; resolves) -> Union{String,Nothing}
+
+What a Tier 2 body tells `JITManager.pointer_arg` a parameter is, or `nothing`
+for a parameter that takes a value. `ctype` is the parameter's ccall type
+(`_ccall_param_type`), `c_type` its C spelling, and `resolves(name)` whether a
+Julia type name is bound in the wrapper. One derivation for every pointer
+position, `this` included:
+
+  * a container C++ takes by value and the thunk by address
+    (`FunctionGen._stl_by_value`): `ByValue{NTuple{N, UInt8}}`, the bytes the
+    wrapper returns one as;
+  * a function pointer: `Ptr{Code}`;
+  * a pointer to plain `char`: `Cstring`. Any other byte pointer (`unsigned
+    char*`, `int8_t*`) and a reference to a `char` are data: `Ptr{UInt8}`,
+    `Ptr{Int8}`;
+  * `void*`, and a pointer to a scalar Julia has no type for (`long double&`,
+    which the metadata spells `Ptr{Cvoid}`: the address of a caller's
+    buffer): `Ptr{Cvoid}`;
+  * a pointer or reference to a type the wrapper binds: `Ptr{T}`;
+  * a pointer or reference to anything else (an STL container, a class only
+    declared): `Ptr{Opaque}`.
+"""
+function _pointer_arg_type(ctype::AbstractString, c_type::AbstractString; resolves = _ -> true)
+    FG = JLCSIRGenerator.FunctionGen
+    jm = "RepliBuild.JITManager"
+    c = String(strip(c_type))
+    FG._stl_by_value(c) &&
+        return "$jm.ByValue{NTuple{$(get_stl_container_size(FG._strip_top_cv(c))), UInt8}}"
+    ctype == "Cstring" && return "Cstring"
+    m = match(r"^(?:Ptr|Ref)\{(.+)\}$", ctype)
+    m === nothing && return nothing
+    inner = String(m.captures[1])
+    (startswith(c, "function_ptr") || occursin("(*", c)) && inner == "Cvoid" && return "Ptr{$jm.Code}"
+    # What the C spelling points at: one declarator off, cv-qualifiers off.
+    t = FG._strip_top_cv(c)
+    is_pointer = endswith(t, "*")
+    pointee = endswith(t, "&&") ? FG._strip_top_cv(chop(t; tail = 2)) :
+              (is_pointer || endswith(t, "&")) ? FG._strip_top_cv(chop(t)) : ""
+    inner in ("UInt8", "Int8", "Cchar", "Cuchar") &&
+        return (is_pointer && pointee == "char") ? "Cstring" : "Ptr{$inner}"
+    if inner == "Cvoid"
+        pointee == "void" && return "Ptr{Cvoid}"
+        mapped = JLCSIRGenerator.TypeUtils.map_cpp_type(pointee)
+        scalar = !isempty(pointee) && mapped != "" && mapped != "!llvm.ptr" && !startswith(mapped, "!llvm.struct<\"")
+        return scalar ? "Ptr{Cvoid}" : "Ptr{$jm.Opaque}"
+    end
+    names = (String(tok.match) for tok in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", inner))
+    return all(resolves, names) ? "Ptr{$inner}" : "Ptr{$jm.Opaque}"
 end
 
 """
@@ -355,7 +428,11 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
         has_this = !isempty(raw) && get(raw[1], "name", "") == "this"
         injects = is_method && !isempty(class_name) && hop !== false && !has_this &&
                   (_cpp_this_param(class_name, func_name, struct_types) !== nothing || hop === true)
-        ctypes = String[ccall_param_type(String(get(p, "julia_type", "Any")), String(get(p, "c_type", "")))
+        # A container taken by value crosses by address and is spelled as a
+        # pointer, here as in the loop (`_by_address_ctype`).
+        ctypes = String[_by_address_ctype(ccall_param_type(String(get(p, "julia_type", "Any")),
+                                                           String(get(p, "c_type", ""))),
+                                          String(get(p, "c_type", "")))
                         for p in raw]
         # A `std::string` parameter the wrapper builds from a Julia string
         # (`_string_param_plan`) is spelled `_STD_STRING_PARAM` here as in the
@@ -3215,6 +3292,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             # Allow passing Managed object to ccall expecting Ptr
             unsafe_convert(::Type{Ptr{$safe_s_name}}, obj::$managed_name) = obj.handle
+            # ... and to a call through a thunk, which asks an owning object for an
+            # untyped pointer (`JITManager.pointer_arg`): a base class's `this` takes it too
+            unsafe_convert(::Type{Ptr{Cvoid}}, obj::$managed_name) = Ptr{Cvoid}(obj.handle)
             
             export $managed_name
 
@@ -3747,6 +3827,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         julia_param_types = String[]  # Julia types for function signature (may differ)
         needs_conversion = Bool[]
         string_plans = Any[]          # per parameter: nothing, a plan Tuple, or a reason String
+        pointer_types = Union{Nothing,String}[]   # per parameter: what `pointer_arg` is told (`_pointer_arg_type`)
 
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
@@ -3774,12 +3855,20 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # spelling the prediction above used for this position.
             splan = _string_param_plan(String(get(param, "c_type", "")), record_abi)
             push!(string_plans, splan)
+            # A container taken by value crosses by address: spelled as a
+            # pointer (`_by_address_ctype`), as the prediction spelled it.
+            sig_c_type = _by_address_ctype(actual_c_type, String(get(param, "c_type", "")))
             push!(julia_param_types,
                   splan isa Tuple ? _STD_STRING_PARAM :
-                  strict ? _strict_param_spelling(actual_c_type; bound = _sig_type_bound,
+                  strict ? _strict_param_spelling(sig_c_type; bound = _sig_type_bound,
                                                   owners = _sig_owners, is_enum = _sig_is_enum) :
-                           _relaxed_param_kind(actual_c_type, _sig_type_bound))
+                           _relaxed_param_kind(sig_c_type, _sig_type_bound))
             push!(needs_conversion, actual_c_type in _INTEGER_CTYPES)
+            # What the Tier 2 body converts a pointer argument to. A `std::string`
+            # the wrapper builds is passed by the address `string_arg` gives.
+            push!(pointer_types, splan isa Tuple ? nothing :
+                  _pointer_arg_type(actual_c_type, String(get(param, "c_type", ""));
+                                    resolves = t -> _sig_type_bound(t) || _sig_is_enum(t)))
         end
 
         # Julia function name (avoid conflicts and sanitize)
@@ -3964,7 +4053,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 "(try GC.@preserve $(join(string_syms, " ")) $call finally " *
                 join(("RepliBuild.StdStrings.release!($s)" for s in string_syms), "; ") * " end)"
             invoke_args = join(_tier2_invoke_args(invoke_names, param_types, needs_conversion,
-                                                  emitted_enum_base), ", ")
+                                                  emitted_enum_base, pointer_types), ", ")
             jit_ret_type = return_type["julia_type"]
             jit_c_ret = get(return_type, "c_type", "void")
 
