@@ -604,6 +604,25 @@ the test named when you touch the area.
   (`test_surface_types.jl`.)
 - `_drop_unresolvable_globals!` removes globals absent from dynsym before either
   generator runs, unconditionally.
+- **A global is keyed by the symbol the loader binds** (2026-11-18,
+  `Compiler._library_variables`): `DW_AT_linkage_name`, else the DWARF name.
+  Keyed by the bare name, `cfg::depth` and `Stat::count` were looked up in
+  dynsym as `depth` and `count` and dropped. A static member's definition has
+  no name of its own: it takes name, type, scope and access from the
+  declaration its `DW_AT_specification` names (`DW_TAG_variable` in DWARF 5,
+  an external `DW_TAG_member` in DWARF 4, kept in `static_member_decls`
+  because pass 1 files a member as a field). An entry carries `symbol`, `name`,
+  `scope` and, when not public, `accessibility`; anything that asks the symbol
+  table about a global reads `_global_symbol` (the key, for older metadata),
+  never the bare name. GeneratorCpp names the accessor by the qualified name
+  (`cfg_depth`, `geo_Vec3_live_count`; an unscoped global keeps its name byte
+  for byte) and emits a value accessor only for a type the module can hold
+  (`std::string` gets `_ptr` alone). A private or protected static member gets
+  no accessor (`_drop_nonpublic_globals!`); a `constexpr` member has no symbol
+  and is listed in the metadata's `global_constants`, bound nowhere. A
+  variable whose scope chain is unknown is skipped, never bound by its bare
+  name. C keys are already the symbol and C wrappers are unchanged. Needs a
+  rebuild. (`test_cpp_globals.jl`, devtests `test_cpp_globals_live.jl`.)
 - `extract_symbols_from_binary` filters `__rb_*`, Itanium adjustor thunks
   (`_is_itanium_thunk`: `_ZTh`/`_ZTv`/`_ZTc`, while keeping `_ZTV`/`_ZTI`/`_ZTS`/`_ZTT`)
   and the templates TU's own `replibuild_force::` helpers (`ref<T>`, `tag<T, N>`),
@@ -976,6 +995,29 @@ the test named when you touch the area.
   relaxed types are `_C_INTEGER_PARAM_CTYPES`: the C aliases and the
   fixed-width types (`int32_t` is `Int32` in the metadata), one list for
   both paths. (`test_c_generator_policies.jl`, `c_test/verify.jl`.)
+  **The converse holds too** (2026-11-18): a C wrapper's by-value open-enum
+  parameter is `Union{E, Integer}`, converted with `E(x)`
+  (`_open_enum_type_names`; the varargs path reads the parameter's
+  `open_enum` mark). Bitmask aliases, pointers to enums and graph-imported
+  enums are unchanged, and C++ keeps the enum strict inside an overload set.
+- **A by-value `char` is the host's `char`, and a bitfield has its declared
+  type's sign** (2026-11-18). The metadata spells `char` as `UInt8` (pointer
+  positions rely on it), so a by-value `char` parameter was `zeroext` and a
+  `Cchar` argument a `MethodError`; `_char_param_ctype` respells it `Cchar`
+  (and `signed char` as `Int8`, since `Cchar` is `UInt8` on AArch64) inside
+  both generators' `_ccall_param_type`, so a re-wrap fixes old metadata.
+  Every integer argument is converted through `_integer_arg_conversion`
+  (both generators' ccall bodies, the C varargs arm, `_tier2_invoke_args`),
+  which takes -128..255 for a `char`. `FunctionGen._narrow_int_extension`
+  reads the C spelling before `julia_type` for the same reason. Inside a C++
+  overload set a `char` position is `::Cchar`, so a `UInt8` reaches it only on
+  a host whose `char` is unsigned. A signed bitfield reads sign-extended as
+  the type `_bitfield_signed_type` gives (the declared type, an enum's
+  underlying type, `Cchar` for plain `char`) and its setter takes exactly the
+  field's range (`_bitfield_sign_extend`, `_bitfield_signed_store`); unsigned
+  and `bool` fields emit what they did. A test here states its expectation
+  through `Cchar`, never `Int8`. (`test_char_bitfield_emission.jl`, devtests
+  `test_char_bitfield_live.jl`.)
 - **A thunk extends an integer narrower than `int` to 32 bits, and an enum is
   an integer** (2026-11-16, `_enum_mlir_int`, `_narrow_int_extension`). The
   x86-64 convention as compilers implement it has the CALLER extend such an
@@ -995,8 +1037,9 @@ the test named when you touch the area.
   thunk loads the C parameter's width from the argument's storage, so a
   Julia integer narrower than the C type was read past its box
   (`as_int(attr, Int8(-1))`: garbage, pugixml 2026-11-03). `_tier2_invoke_args`
-  spells every `::Integer` parameter as `Ctype(name)` and an emitted enum as
-  its `@enum` base type; a new scalar kind in a Tier 2 signature must go
+  spells every `::Integer` parameter through `_integer_arg_conversion`
+  (`Ctype(name)`, with `char`'s wider range) and an emitted enum as its base
+  type; a new scalar kind in a Tier 2 signature must go
   through it. (`test_tier2_scalar_widths.jl`, devtests
   `test_cpp_record_routing.jl`'s `scalar_widths`.)
 - **Two generators, one answer.** C and C++ duplicate type sets by design, for
@@ -1184,6 +1227,22 @@ the test named when you touch the area.
 - **Cstring policy has one derivation**, `_cstring_wrapper_pair`. Each tier supplies
   only the call body. `char*` returns become `Union{String,Nothing}` plus a `_ptr`
   sibling on every tier. (`test_cstring_policy.jl`.)
+- **Only a pointer to plain `char` is a C string** (2026-11-18), in a
+  parameter and in a return; `_points_to_plain_char` decides, for every tier
+  (Tier 2's `_pointer_arg_type` asks it too). Every `ccall` path (GeneratorC,
+  GeneratorCpp's `ccall` path, the `[wrap.varargs]` fixed parameters) binds
+  such an argument through `JITManager.cstring_arg` (`_cstring_param_arg`) and
+  KEEPS the byte-pointer `ccall` type: a string then has `Cstring` semantics
+  (a `SubString` is copied and NUL-terminated, where it was read to its
+  parent's end; an embedded NUL is an `ArgumentError`, where it truncated),
+  while a `Ptr`, a `Ref` and a byte buffer still pass, which a `Cstring`
+  ccall type would refuse. The conversion is bound to a name (`<p>_c`), which
+  the llvmcall path derives its own temporaries from. A `signed char*` return
+  is `Ptr{Int8}` with no `_ptr` sibling: the build maps it so, and
+  `_signed_char_returns!` corrects older metadata at wrap from the return's
+  `c_type`, rewriting only a spelling that names `signed char`. A typedef of
+  `char*` the metadata records under its own name keeps what it had.
+  (`test_cstring_params.jl`, devtests `test_cstring_params_live.jl`.)
 - Blob structs get `setproperty`/`setproperties` built in the same loop as the getters.
   `with()` forwards to them. C++ field structs get `setproperty` too
   (`_field_setter_chunk`), so a record keeps its setters when it stops being a blob.
@@ -1201,6 +1260,51 @@ the test named when you touch the area.
   with `rename = false`). `_check_renames` then refuses an unmatched key and
   a chosen name another function derives or the wrapper binds otherwise. The
   old name is bound nowhere. (`test_function_name_derivation.jl`.)
+- **An operator's name is a function of the operator alone** (2026-11-18).
+  Which operator a function is comes from its symbol (`_operator_spelling`,
+  demangled in-process), never from `Class_name` text: `Cls_foo_operator` is
+  `Cls::foo_operator` or `Cls_foo::operator()`. An operator whose curated
+  spelling was shared or made from its parameters takes its word from
+  `_OPERATOR_WORDS` (`operatorless`, `operatorlessless`, `operatorcall`,
+  `operatorindex`, `operatorminusgreater`, `operator_new_array`, …); every
+  other keeps its curated name, `<=>` (`operator_assign`) and `~`
+  (`operatordestroy`) included. `()`, `[]` and `,` stay bound under the old
+  shared `Class_operator` as well, as copies placed before the dedup
+  (`_operator_legacy_aliases`), and a `[wrap.rename]` key on the old name
+  still matches; the factory proxy's bare `operator` is not kept. **Any scan
+  of demangled text that tracks `<>` depth steps over an operator's token**
+  (`Compiler._operator_token_at`): the `<` of `operator<` read as a template
+  bracket is what left the parameter list in the name, and an operator
+  template's return type in its class. Names reach a package on a re-wrap,
+  an operator template's class on a rebuild.
+  (`test_function_name_derivation.jl` "operators", `test_local_entity_names.jl`.)
+- **A pure virtual member function has a row and no symbol** (2026-11-18,
+  `Compiler._is_vtable_only`). The build writes a `vtable_only` function row
+  for every public pure virtual a library record declares and no symbol
+  defines (`_vtable_only_plan`: linkage name, DWARF signature and
+  `vtable_slot` from the declaration DIE's `DW_AT_vtable_elem_location`, in
+  front of the symbols' rows so a defined function still wins the dedup;
+  the metadata's `vtable_methods` names what was passed over: a destructor,
+  a private or protected member, a variadic one, a class with internal
+  linkage). Its `mangled` names no symbol, so **every reader that takes a
+  row's name for a symbol asks the predicate first**: `verify_wrap_surface`
+  (R2 skips the row, and R1 does not count it as a surface),
+  `JITManager._module_callees`, `VisibilityProbe`. Its thunk is one
+  `jlcs.vcall` with no callee declared, JIT or AOT; GeneratorCpp never sends
+  it to `ccall` or the varargs interception. Where the op cannot carry the
+  signature (a record by value), both sides take
+  `JLCSIRGenerator.vtable_only_refusal`'s verdict, which runs the thunk
+  generator on the one row, and the wrapper is a refusal. Only PURE virtuals
+  get a row: a non-pure virtual with no exported symbol may be hidden on
+  purpose. **The constructor of a class with a pure virtual left is a
+  refusal** (`record_abi[class]["pure_virtuals"]`, `_mark_abstract_records!`,
+  `_abstract_constructor_refusals!`): the base-object constructor on storage
+  of its own leaves an object whose pure slots hold `__cxa_pure_virtual`, and
+  a library method that calls one ends the process. Abstractness is claimed
+  only where the DWARF settles it (not behind a virtual base, which the VTT
+  rule refuses already, nor for a declared-only base or a bare name two
+  scopes define). Needs a rebuild. (`test_pure_virtual_methods.jl`, devtests
+  `test_pure_virtual_live.jl`, `test_virtual_classes_live.jl`.)
 - **A C enum is open: any value of its underlying type is a value of the enum**
   (2026-11-08). Never emit `@enum`, which refuses undeclared values: libvterm's
   `VTERM_KEY_FUNCTION(n)` is `VTERM_KEY_FUNCTION_0 + n`, and `VTermKey(257)` was an
@@ -2009,8 +2113,8 @@ Where the time goes was measured on Jolt, the largest Hub package
   6 traps, 21 drops, 60 expected. The drops left: 11 imgui and msdfgen
   overload sets the generator now separates and their next wrap recovers;
   pugixml's `operator<`/`operator>` and `<=`/`>=`, which
-  `_julia_function_name` spells alike (`operator_`, `operator_assign`; the
-  curated names are frozen); tinyxml2's `~XMLComment`/`~XMLUnknown`/
+  `_julia_function_name` spelled alike and its next wrap separates (the
+  operator invariant, 2026-11-18); tinyxml2's `~XMLComment`/`~XMLUnknown`/
   `~XMLDeclaration` entries whose metadata carries `XMLNode`'s D2 symbol
   (attribution to check in the DWARF parser); imgui's two undeclared
   varargs. The 6 traps are fmt's `long double` and `allocator<char>` and
@@ -2081,31 +2185,31 @@ destructor, enum pointers and references passed by value, Tier 2 pointer
 positions that dereferenced anything, base-object constructors bound for
 virtual-base classes, static calls for virtual methods, identifiers that broke
 the module or added methods to Base, `unsigned __int128`, the `char8/16/32_t`
-traps, `extern "C"` functions that throw, alias symbols. Still open:
+traps, `extern "C"` functions that throw, alias symbols; then signed
+bitfields, by-value `char`, `signed char*` returns, C strings on the `ccall`
+paths, C++ globals outside the global namespace, pure virtual methods and
+operator names. Still open:
 
-- **Signed bitfields read as unsigned**: `int c:7 = -3` reads 125, and the
-  setter rejects a negative. The metadata has the member's `c_type`.
-- **`char` parameters are `UInt8`** in both generators while `char` returns are
-  `Cchar`: a negative `char` is an `InexactError`, a `Cchar` a `MethodError`.
 - **Same-named enums in two scopes collapse** (`Mode`, `ns::Mode`): one's
   enumerators are bound nowhere and its functions return the other type. The
   bare-name problem above, with constants lost.
-- **`signed char*` returns become `String`** (`int8_t*` is right).
-- **C++ globals outside the global namespace are dropped**, static data
-  members and ABI-tagged globals included: `_drop_unresolvable_globals!` looks
-  the bare DWARF name up in dynsym, where the name is mangled.
-- **A pure virtual method has no wrapper**: no symbol, so no function row. It
-  needs rows for declared virtuals, a Tier-2-only emission exempt from R2, and
-  a thunk that is only a `jlcs.vcall`. No dialect change.
-- **Operator names**: `operator<` derives from its parameter list, and
-  `operator()` and `operator[]` are both `operator`.
 - **A value moved into a by-value parameter is stale afterwards.** The thunk
   moves as C++ does, but the caller's Julia value is an immutable bits copy,
   so using it again is a use-after-free. What owns a move-only object on the
   Julia side is John's call.
-- **The `ccall` paths pass `const char*` as `Ptr{UInt8}`**, not `Cstring`: a
-  `SubString` is read past its end and an embedded NUL truncates, in a C
-  wrapper and on a C++ wrapper's `ccall` path.
+- **A record holding a pointer to a class that has a factory struct fails to
+  load** (found 2026-11-18): `struct Cage { Animal *pet; int n; };` beside
+  `Animal *make_animal(); void free_animal(Animal*);` emits `pet::Ptr{Animal}`
+  before `mutable struct Animal`, and `using` is `UndefVarError: Animal`.
+- **A thread-local global gets a `cglobal` accessor** (found 2026-11-18).
+  `cglobal` resolves once, in whichever thread calls the accessor first, so
+  every other thread reads and writes that thread's instance (`tls_addr()`
+  and `tls_counter_ptr()` differ on the main thread after another thread
+  called it). C and C++; a task that migrates is wrong the same way.
+- **A `String` passed at a non-const `char*` the library writes into is
+  written in place**: Julia's immutable `String`, possibly a shared literal.
+  DWARF cannot tell an input `char*` from an output buffer, so refusing it is
+  John's call.
 
 ## Not Yet Built (roadmap, not bugs)
 
@@ -2159,7 +2263,21 @@ DWARF-resolved destructors — **is** built.)
 - Op verifiers for `ffe_call`, `try_call`, `load/store_array_element`, `ctor_call`,
   `yield`, `marshal_ret`. A computed verifier-coverage guard would also help.
 - In-IR virtual-base upcast op (no producer needs one yet).
-- vcall for struct-shaped virtual signatures (these keep static dispatch).
+- vcall for struct-shaped virtual signatures (these keep static dispatch; a
+  PURE virtual with one has no symbol to call instead and is a refusal).
+  Carrying it needs `VirtualCallOp`'s lowering to go through
+  `buildCallShape` with the `sysv_args`/`sysv_ret` statements, as `try_call`
+  does: a dialect and ABI change.
+- A non-pure inline virtual no translation unit emitted has no function row
+  (2026-11-18): only pure virtuals get a `vtable_only` row.
+- A value for a `constexpr` or in-class `static const` member with no symbol
+  (2026-11-18): the metadata lists it in `global_constants`; decoding
+  `DW_AT_const_value` is not built.
+- `[wrap.rename]` does not reach a global's accessor, and a scoped accessor
+  name that equals another top-level binding (`cfg_depth()` beside
+  `cfg::depth`) refuses the wrapper (2026-11-18).
+- Julia operator methods (`Base.:<`, `getindex`, call syntax) for C++
+  operators (2026-11-18): operators are named functions only.
 - **macOS** (2026-11-09; the classifier was never the whole of it). Mach-O
   keeps DWARF out of the dylib (a `.dSYM` from `dsymutil`: the extractor must
   run it and point the dumper there), GNU readelf does not read Mach-O (so
