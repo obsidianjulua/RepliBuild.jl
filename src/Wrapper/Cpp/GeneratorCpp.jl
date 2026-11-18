@@ -1085,6 +1085,47 @@ function _managed_safe_wrapper(julia_name::AbstractString, param_sig::AbstractSt
     """, safe_func_name)
 end
 
+# The argument a factory class's one inner constructor takes before the handle,
+# when its type is defined apart from its constructors (`_idiomatic_early_type`).
+# `Base.`-qualified: the module's namespace is the library's, and a C++ class
+# named `Val` would otherwise be the one called.
+const _IDIOMATIC_ADOPT = "Base.Val(:_rb_adopt)"
+
+"""
+    _idiomatic_early_type(cls_nm, deleter_doc) -> String
+
+The type of a factory class (the idiomatic wrapper) that a record's field
+names, without its constructors. `struct Cage { Animal *pet; }` emits
+`pet::Ptr{Animal}`, which Julia resolves when `Cage` is defined, while the
+factory class's type came after every record: the module failed to load
+(`UndefVarError: Animal`). The type's one field is `handle::Ptr{Cvoid}`, so it
+names nothing and can precede every record. Its constructors cannot: their
+argument types are evaluated where they are defined, and a factory may take a
+record by value or by pointer, the holder included, or another factory class.
+So they are outer constructors in the idiomatic section, after every type, and
+reach `new` through the one inner constructor here, which only stores the
+handle; they attach the finalizer as the inner ones do. A class no field names
+keeps its inner constructors, so its text does not change.
+"""
+function _idiomatic_early_type(cls_nm::AbstractString, deleter_doc::AbstractString)::String
+    return """
+    \"\"\"
+        $cls_nm
+
+    Idiomatic Julia wrapper for C++ class `$cls_nm`.
+    Memory is automatically managed: when Julia's GC collects this object,
+    its finalizer $deleter_doc.
+    \"\"\"
+    mutable struct $cls_nm
+        handle::Ptr{Cvoid}
+        # Stores the handle and nothing else: the constructors, in the
+        # idiomatic section, call the factory and attach the finalizer.
+        $cls_nm(::Base.Val{:_rb_adopt}, handle::Ptr{Cvoid}) = new(handle)
+    end
+
+    """
+end
+
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
@@ -1964,7 +2005,20 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         push!(struct_chunks, "\n")
     end
 
+    # A factory class's Julia type (the idiomatic section) is defined after
+    # every record, but a record's field can name it: `struct Cage { Animal
+    # *pet; }` gives `pet::Ptr{Animal}`, which Julia resolves when `Cage` is
+    # defined. The types of the classes a field names go in this slot, ahead of
+    # every record; their constructors stay in the idiomatic section
+    # (`_idiomatic_early_type`). Filled there, from `idiomatic_named_early`,
+    # which the field emitter fills with what it wrote. Empty otherwise, so a
+    # wrapper no field of which names a factory class is unchanged.
+    idiomatic_early_slot = 0
+    idiomatic_named_early = Set{String}()
+
     if !isempty(struct_types)
+        push!(struct_chunks, "")
+        idiomatic_early_slot = length(struct_chunks)
         push!(struct_chunks, """
         # =============================================================================
         # Struct Definitions (from DWARF debug info)
@@ -2228,6 +2282,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 end
             end
         end
+        # A factory class is defined wherever a field names it (the slot above),
+        # so a record sorted ahead of its DWARF entry (a pointer cycle broken in
+        # the record's favour) keeps `Ptr{Class}` too, instead of `Ptr{Cvoid}`.
+        union!(defined_struct_names, keys(idiomatic_classes))
         blob_struct_names = Set{String}()  # Track which structs became byte-blobs
         # Field-emitted structs with bytes over a float or double (see the
         # dispatch decision), and what `_type_has_sse` resolves names with.
@@ -3069,6 +3127,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         sanitized_name = make_cpp_identifier(sanitized_name)
 
                         sanitized_type = _member_field_type(member)
+                        # A factory class this field names must be defined
+                        # before this record (`idiomatic_early_slot`).
+                        for tm in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", sanitized_type)
+                            haskey(idiomatic_classes, tm.match) && push!(idiomatic_named_early, tm.match)
+                        end
 
                         push!(struct_chunks, "    $sanitized_name::$sanitized_type\n")
                         
@@ -3487,11 +3550,18 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
 
+        early_types = String[]
         for cls_nm in sort(collect(keys(idiomatic_classes)))
             cls_info    = idiomatic_classes[cls_nm]
             deleter_sym = cls_info["deleter"]
             deleter_doc = escape_string(cls_info["deleter_doc"], '$')
             factories   = cls_info["factories"]
+            # A record's field names this class: its type goes ahead of every
+            # record and its constructors become outer ones here
+            # (`_idiomatic_early_type`). They cannot go with it: a constructor's
+            # argument types are evaluated where it is defined, and a factory
+            # may take a record, even the one holding the pointer.
+            early = cls_nm in idiomatic_named_early
 
             # Build one inner constructor block per factory function.
             ctor_blocks = String[]
@@ -3522,7 +3592,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 param_sig in seen_ctor_sigs && continue
                 push!(seen_ctor_sigs, param_sig)
 
-                push!(ctor_blocks, """
+                push!(ctor_blocks, early ? """
+                function $cls_nm($param_sig)
+                    handle = $fac_jl($call_sig)
+                    Ptr{Cvoid}(handle) == C_NULL && Base.error("$cls_nm: constructor returned NULL (allocation failed)")
+                    obj = $cls_nm($_IDIOMATIC_ADOPT, Ptr{Cvoid}(handle))
+                    finalizer(obj) do o
+                        ccall((:$deleter_sym, LIBRARY_PATH), Cvoid, (Ptr{Cvoid},), o.handle)
+                    end
+                    return obj
+                end""" : """
                     function $cls_nm($param_sig)
                         handle = $fac_jl($call_sig)
                         Ptr{Cvoid}(handle) == C_NULL && Base.error("$cls_nm: constructor returned NULL (allocation failed)")
@@ -3534,9 +3613,26 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end""")
             end
 
-            isempty(ctor_blocks) && continue  # no usable constructors found
+            # No usable constructors: no type, unless a field names it.
+            isempty(ctor_blocks) && !early && continue
 
             ctors_str = join(ctor_blocks, "\n")
+
+            if early
+                push!(early_types, _idiomatic_early_type(cls_nm, deleter_doc))
+                push!(struct_chunks, """
+                # Constructors of $cls_nm. Its type is defined ahead of the records,
+                # since a record's field names it (Idiomatic Class Types).
+                $ctors_str
+
+                # Allow passing a $cls_nm directly to raw FFI functions expecting a pointer.
+                Base.unsafe_convert(::Type{Ptr{Cvoid}}, obj::$cls_nm) = obj.handle
+                Base.unsafe_convert(::Type{Ptr{$cls_nm}}, obj::$cls_nm) = Ptr{$cls_nm}(obj.handle)
+
+                """)
+                push!(exports, cls_nm)
+                continue
+            end
 
             push!(struct_chunks, """
             \"\"\"
@@ -3558,6 +3654,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             """)
 
             push!(exports, cls_nm)
+        end
+        if !isempty(early_types)
+            idiomatic_early_slot > 0 ||
+                Base.error("a record names a factory class, but the struct section has no slot for its type")
+            struct_chunks[idiomatic_early_slot] = """
+            # =============================================================================
+            # Idiomatic Class Types (ahead of the records whose fields name them)
+            # =============================================================================
+
+            """ * join(early_types)
         end
     end
 
