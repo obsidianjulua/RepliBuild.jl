@@ -1,887 +1,71 @@
-# Edit the TOML
-
-`replibuild.toml` is the interface. Every piece of library-specific knowledge
-lives in this file — not in a generator fork, not in a patch, not in a
-hand-written shim. `discover()` writes what it can see by scanning. The rest is
-what **you** tell it, and [§2](#2.-What-discovery-cannot-know) is the list of
-exactly that.
-
-What the file is for, and a map of what it can do: [The recipe](toml.md).
-Where sources come from: [Dependencies](dependencies.md). A CMake project of
-several libraries: [Graph mode](graph.md). How to get to a file you can edit:
-[Wrap a library](guide.md). Symptom → key:
-[Troubleshooting](troubleshooting.md). The tables below are what the parser
-actually does — including keys it validates loudly, keys it warns about, and the
-handful it currently accepts and ignores.
-
----
-
-## 1. How the file is created and maintained
-
-```julia
-toml = RepliBuild.discover("path/to/project")      # writes replibuild.toml
-RepliBuild.discover("path/to/project", force=true) # rescan, preserving intent keys
-```
-
-Discovery scans sources, walks the `#include` graph, picks `wrap.language` from
-the file extensions it found, and writes a config that compiles. It cannot infer
-anything that is not visible in the source tree's *shape* — see §2.
-
-**Forced re-discovery preserves hand-curated keys.** `discover(force=true)`
-regenerates the file, and without carry-over it would emit these empty, silently
-destroying your intent. The preserved set is:
-
-| Section | Key |
-|---|---|
-| `[types]` | `templates` |
-| `[types]` | `template_headers` |
-| `[types]` | `records` |
-| `[wrap]` | `varargs` |
-| `[wrap]` | `macros` |
-| `[wrap]` | `shim_headers` |
-| `[wrap]` | `shim_defines` |
-| `[wrap]` | `cstring_owned` |
-| `[wrap]` | `exclude_symbols` |
-| `[wrap]` | `rename` |
-| `[wrap]` | `surface_types_only` |
-| `[wrap]` | `surface_types_extra` |
-| `[wrap]` | `headers` |
-| `[wrap]` | `tier1` |
-| `[link]` | `promote_statics` |
-| `[compile]` | `visibility` |
-| `[platform]` | `linux`, `windows`, `macos` |
-| `[dependencies]` | every `<name>` entry, whole |
-| `[graph]` | the whole section (`dependency` included) |
-
-A regenerated *non-empty* value wins; an empty or absent one gets the preserved
-value. A hand-edited key **not** in that table is wiped by `force=true`.
-`[compile] flags` and `include_dirs` are not preserved — keep a hand-written
-config in version control rather than relying on `force=true` to round-trip it.
-
-`save_config` only writes keys with non-default or non-empty values, so a
-round-tripped file is smaller than the full schema. Absent keys take the
-parse-time defaults in §3, which are **not always the same as what `discover()`
-writes** — the divergences are flagged in the tables.
-
----
-
-## 2. What discovery cannot know
-
-This is the important section. Everything here is information that exists only in
-a human's head or in the upstream build system, and that RepliBuild will not
-guess. Omit it and you get a build that *succeeds* and a wrapper that is missing
-things or is wrong.
-
-| If your library… | You must declare | Symptom if you don't |
-|---|---|---|
-| is C++ and you want STL/template types | `[types] templates` + `template_headers` | The type never appears in DWARF; members typed `Any`, methods missing |
-| has a header-only class its own sources never mention | `[types] records` | No type, no constructor, no method for the class |
-| exposes API through preprocessor macros | `[wrap.macros.*]` + `[wrap] shim_headers` | The macro simply does not exist in the wrapper — no error |
-| is header-only, or keeps API in inline functions | `[wrap] shim_defines`, a file that compiles them, `[wrap.macros.*]` or `[types] templates` ([Header-only libraries](guide.md#Header-only-libraries)) | Header-only: `build` produces no library. Inline functions: absent from the wrapper, no error |
-| has variadic functions worth calling with arguments | `[wrap.varargs]` | Only the zero-variadic base wrapper is generated |
-| returns malloc'd `char*` | `[wrap.cstring_owned]` | Every call leaks the C buffer |
-| links generated or vendored C++ you don't want wrapped | `[wrap] exclude_symbols` | Thousands of non-API symbols wrap; reaching for `-fvisibility=hidden` instead can erase the whole API |
-| compiles vendored internals whose TYPES land in DWARF | `[wrap] surface_types_only` | Every internal type is emitted; onednn's 2900 unreachable ones shadow `Base.Integer` and emit duplicate fields, so the module fails at `include` |
-| defines its public "def" structs header-only | `-fstandalone-debug` in `[compile] flags` | Structs wrap to **empty** Julia structs |
-| ships tests/examples/backends in the same repo | `exclude` on the dependency | Unrelated sources compile in and pollute the DWARF |
-| keeps headers somewhere other than `<root>`, `<root>/include`, `<root>/src` | `[compile] include_dirs` | Compile failure, or a TU silently missing declarations |
-| needs `-lm`, `-lpthread`, `-ldl` | `[link] link_libraries` | Loads fine; Tier-1 slices demote, or a symbol is missing at first use |
-| is configured by its build system through `-D` | `[compile] flags` / `[compile] defines` | One TU fails to compile, or a feature is silently off |
-| annotates its exports and you want internals out of the wrapper | `[compile] visibility = "hidden"` — **after** running the probe (§2.12) | Without it the wrapper carries every internal symbol as public API |
-| is C and you want cross-language inlining | `[wrap.tier1] enable = true` | Everything stays Tier 3 `ccall` (correct, just not inlined) |
-| must be reproducible | `commit` on the dependency | A moved tag silently changes what you compiled |
-
-### 2.1 C++ templates and the STL — "STL needs STL in the TOML"
-
-**A template that is never instantiated does not exist in the binary.** The
-compiler emits DWARF for code it generated; an uninstantiated `std::vector<int>`
-generated nothing, so there is nothing to read. No amount of header scanning
-changes this — the information is not missing, it was never created.
-
-So you name the instantiations you want, and RepliBuild writes a stub `.cpp` that
-forces them:
-
-```toml
-[types]
-templates        = ["std::vector<int>", "std::string", "std::map<int, int>"]
-template_headers = ["<vector>", "<string>", "<map>"]
-```
-
-- `templates` entries are **C++ type spellings**, exactly as you would write them
-  in `template class X;`.
-- Common STL headers are auto-detected from the type name (`std::vector` →
-  `<vector>`, `std::map` → `<map>`, and the same for `unordered_map`, `set`,
-  `unordered_set`, `deque`, `list`, `basic_string`/`string`). `template_headers`
-  is for everything else — your own headers, or a library's:
-  ```toml
-  templates        = ["fmt::basic_memory_buffer<char>"]
-  template_headers = ["<fmt/format.h>"]
-  ```
-- Typedef spellings are expanded for you where an explicit instantiation would
-  otherwise be invalid C++: `std::string` → `std::basic_string<char>`, and the
-  same for `wstring` / `u16string` / `u32string`.
-- Entries starting with `<` are emitted as `#include <…>`; anything else becomes
-  `#include "…"`.
-- With no other source, the stub is the whole build, so a header-only template
-  library needs nothing more. A function template cannot be named here:
-  instantiate it in a file of your own
-  ([Header-only libraries](guide.md#Header-only-libraries)).
-
-Once instantiated, the STL method symbols are extracted
-(`extract_stl_method_symbols`) and become container accessor thunks behind a
-`create_<container>()` factory (`CppVector`, `CppString`, `CppMap`). That table
-knows `std::vector`, `std::string`, `std::map` and `std::unordered_map`; any
-other template you list (`fmt::basic_memory_buffer<char>`) is instantiated so
-its DWARF exists, which is all `[types] templates` does for it, and the build
-says so: an entry that yields no table is a **warning naming the entry and
-why**, never silence. An entry may be spelled with a typedef
-(`std::vector<Clipper2Lib::Point64>`): the stub tags each entry with the
-compiler's own spelling of it, so its members (`std::vector<Clipper2Lib::Point<long>,
-…>` in the symbol table) still find it, and the factory is named after the
-entry as you wrote it (`create_std_vector_Clipper2Lib_Point64`). A `std::vector`
-of a record gets a factory only when the wrapper emits that record's struct;
-otherwise the warning names the element. A C++ library whose *public* API is
-STL-free needs none of this — box2d 2.4 reports `stl_methods = 0` and declares
-no templates.
-
-!!! warning "This section is preserved but not derived"
-    `[types].templates` is one of the preserved keys precisely because a rescan
-    would otherwise wipe it. If your C++ types come back as `Any` or your struct
-    collapses to an opaque blob, this is the first key to check.
-
-### 2.2 Preprocessor macros
-
-Macros do not survive compilation, so they are absent from both the symbol table
-and DWARF. RepliBuild generates a typed C/C++ shim function per declared macro,
-compiles it into the library, and wraps the resulting real symbol.
-
-```toml
-[wrap]
-shim_headers = ["lua.h", "lauxlib.h"]     # what the shim TU #includes
-
-# Function-like macro: `args` present → emits MACRO(arg0, arg1)
-[wrap.macros.lua_pop]
-ret  = "void"
-args = ["lua_State*", "int"]
-
-# Value macro: `args` ABSENT → emits the bare MACRO expression
-[wrap.macros.LUA_REGISTRYINDEX]
-ret = "int"
-```
-
-- `ret` and `args` are **C type strings**, pasted verbatim into generated C. They
-  are not Julia types. (Contrast §2.3, which *is* Julia types — this asymmetry is
-  the single easiest mistake to make in this file.)
-- **The presence of the `args` key is the switch**, not its contents:
-  `args = []` means a zero-argument function-like macro (`MACRO()`), while
-  omitting `args` entirely means a value macro (`MACRO`).
-- Shims are emitted with `__attribute__((used, visibility("default")))` so they
-  survive `-fvisibility=hidden` builds and LTO internalization — without that,
-  projects like box2d3 would silently lose every macro.
-- In Julia the `replibuild_shim_` prefix is stripped: you call `lua_pop(L, 1)`.
-  A value macro is a function of no arguments: `LUA_REGISTRYINDEX()`.
-- The shim calls the name the way C calls a function, so an entry works for a
-  `static inline` function too, which never becomes a symbol of the library
-  ([Header-only libraries](guide.md#Header-only-libraries)).
-- `shim_headers` does nothing without entries here or in `shim_defines` (below):
-  no shim file is written.
-
-!!! warning "The shim's `#include` must resolve inside your tree"
-    The shim TU is generated under the build cache, not inside the source tree,
-    so a bare `#include "blake3.h"` can fall through the `-I` path to a
-    **system-installed** copy of the header at a different version — and bake
-    wrong values into every macro, with no other symptom. A guard checks each
-    direct shim include and hard-errors if it resolved outside the
-    project/dependency tree. The fix is either a more specific subpath
-    (`shim_headers = ["c/blake3.h"]`) or an explicit `-I<dir>` in `[compile] flags`.
-
-**An implementation section, from the TOML alone.** A single-header library in
-the stb style compiles its implementation only where a macro is defined.
-`shim_defines` writes those `#define`s at the top of the shim file, before its
-`#include`s, and in no other file:
-
-```toml
-[wrap]
-shim_headers = ["stb_image.h"]
-shim_defines = ["STB_IMAGE_IMPLEMENTATION"]
-```
-
-The first `build` compiles the implementation into the library, and the first
-`wrap` binds it. No source file of your own is needed, and no `[wrap.macros]`
-entry: the shim file is written when either key has entries. Each entry is what
-you would write after `-D`: `NAME`, defined as `1`, or `NAME=VALUE`. A `-D` in
-`[compile] flags` would reach every file the build compiles, so a library
-source that includes the same header would get its own copy of every function
-and the link would fail; `shim_defines` reaches only the shim file, and
-`discover(force=true)` keeps it. An entry that is not one macro definition on
-one line is an error, and so is `shim_defines` without `shim_headers`.
-
-### 2.3 Variadic functions
-
-DWARF records that a function is variadic. It cannot record what you intend to
-pass. Declare one entry per concrete overload:
-
-```toml
-[wrap.varargs]
-lua_pushfstring = [
-    ["Cstring"],
-    ["Cint"],
-    ["Cstring", "Cint"],
-]
-```
-
-Three rules, each of which has bitten someone:
-
-1. **List only the variadic arguments.** The fixed parameters (`lua_State*`,
-   the `const char* fmt`) come from DWARF and are prepended automatically.
-2. **The names are Julia types, not C types.** Allowed: `Any`, `Bool`, `Cstring`,
-   `Cwstring`, `Cchar`, `Cuchar`, `Cshort`, `Cushort`, `Cint`, `Cuint`, `Clong`,
-   `Culong`, `Clonglong`, `Culonglong`, `Cintmax_t`, `Cuintmax_t`, `Csize_t`,
-   `Cssize_t`, `Cptrdiff_t`, `Cwchar_t`, `Cfloat`, `Cdouble`, `Cintptr_t`,
-   `Cuintptr_t`, the sized `Int*`/`UInt*`/`Float*` types, and `Ptr{Name}`.
-   Anything else is a hard error naming the entry.
-3. **It is a list of lists.** `f = ["Cint"]` is one overload taking… nothing
-   coherent; the parser rejects it and tells you to write `f = [["Cint"]]`.
-
-Each overload is a function of its own, named after its variadic types:
-`lua_pushfstring_Cstring(L, fmt, s)`, `lua_pushfstring_Cstring_Cint(L, fmt, s, i)`.
-The plain `lua_pushfstring(L, fmt)` takes the fixed parameters only. A
-`Ptr{X}` type sanitizes to `_PtrX` in the name.
-
-Vararg wrappers lower as **true variadic calls** (the `@ccall` semicolon form), so
-the x86-64 SysV variadic protocol — including the `AL` register-count setup that
-gates the callee's `va_start` — is formally correct, float varargs included.
-
-**`proven_at`.** The overloads are a reading of upstream's API that no rebuild
-can check, so `wrap` warns on every run (`[wrap.varargs] … is unversioned`)
-until the table names the upstream commit they were checked against:
-
-```toml
-[wrap.varargs]
-proven_at       = "1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3"
-lua_pushfstring = [["Cstring"], ["Cint"], ["Cstring", "Cint"]]
-```
-
-It is compared with the `commit` of the `[dependencies]` entry named like
-`[project] name`, or else of the only entry that has a `commit`; a prefix of
-either matches. A different commit is a hard error: check the overloads against
-the new sources, then update `proven_at`. So is a `proven_at` with no commit to
-compare against, or with several and none named like the project: a project
-with no pinned dependency cannot set it, and keeps the warning.
-
-### 2.4 `char*` return ownership
-
-Whether a returned `char*` must be freed, and by what, is not in DWARF and not
-reliably in the name. Declare it:
-
-```toml
-[wrap.cstring_owned]
-cJSON_Print     = "cJSON_free"
-sqlite3_mprintf = "sqlite3_free"
-```
-
-The wrapper copies the string into Julia and then frees the C buffer through the
-named symbol. Undeclared functions get the default policy —
-`Union{String,Nothing}`, where NULL is a value rather than an exception, and the
-buffer is left alone. Every `Cstring`-returning function additionally gets a raw
-`<name>_ptr` variant that returns the pointer unchanged for lifetime-sensitive
-callers. The value must be a non-empty string; anything else is warned about and
-ignored.
-
-`"free"` names the C runtime's `free`, and is routed through the wrapper's
-`libc_free` rather than looked up in the library: a Windows DLL does not export
-what it imports. Every wrapper defines `libc_free(ptr)` for the same reason a
-caller needs it by hand — to release any buffer the library `malloc`'d (mpack's
-growable writer hands one over). Use it, not `Libc.free`: on Windows Julia links
-`msvcrt.dll`, a RepliBuild-built DLL allocates from the UCRT, and freeing into the
-wrong heap kills the process with `STATUS_HEAP_CORRUPTION`. On Linux the two are
-the same.
-
-!!! note "The policy does not depend on the dispatch tier"
-    A `char*` return is presented the same way whether the function is called
-    through `ccall`, a Tier-1 slice, or a Tier-2 MLIR thunk — the tier decides
-    how the call is *made*, never how the result is presented. That was not
-    always true: until 2026-08-12 the C++ generator's Tier-2 path skipped the
-    policy entirely, so 75 functions across five Hub packages returned a bare
-    `Cstring` and any `cstring_owned` declaration on one of them was silently
-    discarded. Both halves now come from one derivation, and a guard on the
-    write path refuses any wrapper in which a `char*` return escapes as a bare
-    `Cstring` without a `_ptr` sibling.
-
-### 2.5 Header-only aggregates need `-fstandalone-debug`
-
-Clang's default "limited" debug info emits a header-only aggregate that no TU
-instantiates as a `DW_AT_declaration`-only stub. Those are exactly the "def"
-structs a caller is supposed to *fill in* — `b2BodyDef`, `b2FixtureDef`,
-`llama_model_params`, `llama_context_params` — so they wrap to **empty Julia
-structs** and the API becomes uncallable.
-
-```toml
-[compile]
-flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
-```
-
-DWARF is RepliBuild's input format, so this flag is load-bearing, not bloat. Reach
-for it whenever a struct you can see in the header comes out with no fields.
-
-In C++ the usual cause is *constructor homing*: clang writes a class's full
-definition only where its constructor is emitted, so a header-only value type
-whose constructors are all inline is a declaration everywhere. `-Xclang
--fno-use-ctor-homing` turns just that off, at a fraction of
-`-fstandalone-debug`'s size (which also emits all of the standard library's
-types). Either flag also lets the build define the class's inline
-constructors itself (declared in the DWARF, defined by no translation unit:
-Bullet's `btSphereShape(btScalar)`), so the class is constructible from Julia
-without a shim. Hub boostmath builds its distribution classes this way:
-
-```toml
-[compile]
-flags = ["-O2", "-fPIC", "-std=c++17", "-Xclang", "-fno-use-ctor-homing"]
-```
-
-### 2.6 Excluding what is not the library
-
-A repository is usually more than the library: tests, examples, GUI testbeds,
-vendored third-party trees, alternative backends, other CPU architectures. The
-dependency resolver walks the whole tree, so anything compilable gets compiled and
-lands in the DWARF the wrapper is generated from.
-
-```toml
-[dependencies.box2d]
-type = "git"
-url  = "https://github.com/erincatto/box2d.git"
-tag  = "v2.4.1"
-exclude = ["testbed", "unit-test", "extern", "docs"]
-```
-
-`exclude` applies to every dependency type (git, archive and local alike; a
-local dependency ignored it until 2026-11-07). Entries are matched against the
-path **relative to the dependency
-root**, and the match is deliberately generous — an entry hits if it equals the
-filename, or is a prefix, suffix, **or any substring** of the relative path.
-That is why `"ggml-cuda/"` and `"tools/"` work as directory filters and
-`"xmltest.cpp"` works as a file filter, and also why a very short entry can
-over-match: prefer `"tests"` over `"t"`, and keep a trailing `/` on directory
-entries. Excluding aggressively is normal — llama.cpp's config excludes roughly
-thirty paths, each with a comment explaining why.
-
-The walker additionally drops directories named `test`, `tests`, `testes`,
-`example`, `examples`, `fuzzing`, `build`, `.git`, `doc`, and `docs` on its own,
-so those need no entry (several Hub configs list them anyway, harmlessly).
-
-### 2.7 Include roots
-
-The resolver adds `<clone>`, `<clone>/include` and `<clone>/src` automatically,
-and the same three for each submodule a git dependency lists in `submodules`.
-Anything at a different depth must be named:
-
-```toml
-[compile]
-include_dirs = [
-    ".replibuild_cache/deps/llamacpp/ggml/include",
-    ".replibuild_cache/deps/llamacpp/ggml/src",
-]
-```
-
-Entries are passed through verbatim as `-I<dir>`. Relative paths resolve against
-the directory containing `replibuild.toml`, because `build()` runs there.
-
-### 2.8 Link libraries
-
-```toml
-[link]
-link_libraries = ["m", "pthread", "dl"]   # → -lm -lpthread -ldl
-link_dirs      = ["/opt/thing/lib"]       # → -L/opt/thing/lib, plus an rpath
-```
-
-A `link_dirs` entry also becomes an rpath (`$ORIGIN` first, then the directory),
-so at run time the library loads the copy it was linked against, not a
-distribution's. Windows has no rpath: there the wrapper opens the
-`link_libraries` DLLs it finds in `link_dirs` before the library, looking next
-to the wrapper first.
-
-A shared library links happily with `sin` left undefined, so omitting `-lm` is not
-a build error — it is a `.so` whose `DT_NEEDED` chain is short. That matters
-beyond the obvious runtime failure: the Tier-1 slice pre-flight scopes symbol
-lookup to the library **plus its `DT_NEEDED` chain**, so on miniaudio a missing
-`-lm` demoted all 51 slices that declare `sin`/`pow`/`log` back to `ccall` with no
-other sign.
-
-`dl` and `rt` exist only on Linux, and `pthread` / `m` mean something different
-under mingw. A list that is right for one host goes under that host's overlay
-(§2.15), e.g. `[platform.windows.link] link_libraries = []`.
-
-!!! warning "`link_libraries` vs `extra_link_libs`"
-    `[link] link_libraries` is the source-build key. `[ingest] extra_link_libs` is
-    the ingest-mode key. Putting `extra_link_libs` in a source-build config is
-    **silently ignored** — it is not part of `[link]` and nothing reads it there.
-
-### 2.9 Defines the build system would have supplied
-
-Upstream's CMake or Makefile often injects defines that no header declares. Without
-them a TU fails to compile, or a subsystem is silently absent:
-
-```toml
-[compile]
-flags = [
-    "-O2", "-fPIC",
-    "-DGGML_USE_CPU",                 # else the backend registry is empty
-    '-DGGML_VERSION="0.18.1"',        # else ggml.c is the one TU that won't build
-]
-
-[compile.defines]                     # equivalent, emitted as -Dkey=value
-SQLITE_THREADSAFE = "1"
-```
-
-`[compile.defines]` always emits `-Dkey=value`; for a bare `-DFOO` with no value,
-use `[compile] flags`. Both feed the compile fingerprint, so changing either
-correctly invalidates the per-file IR cache.
-
-### 2.10 Tier 1 (C only) — leave off
-
-```toml
-[wrap.tier1]
-enable = false
-```
-
-!!! warning "Experimental — off by default, not a supported path"
-
-    `enable` defaults to `false`. Leaving it off costs you nothing but
-    inlining: every function stays on `ccall`, which is correct. The mechanism
-    lives under [Developer: Tier 1](tier1.md).
-
-### 2.11 Pinning content, not just a name
-
-A git tag is a mutable ref. `commit` is the only check that survives a cache wipe:
-
-```toml
-[dependencies.lua]
-type   = "git"
-url    = "https://github.com/lua/lua.git"
-tag    = "v5.4.7"
-commit = "1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3"
-```
-
-It must be a full 40-hex object name — abbreviated SHAs are rejected at config
-load, because they are ambiguous against future history. A mismatch after
-clone/checkout is a **hard error**, not a warning.
-
-### 2.12 Export visibility — what the wrapper's API *is*
-
-By default RepliBuild wraps every function that reaches the library's dynamic
-symbol table. For most C libraries that is far more than the API: internal
-helpers linked across translation units are externally visible too, and the
-generated module exports them beside the functions you meant to call. pcre2 ships
-27 `_pcre2_*` internals that way; zstd, 201.
-
-A library can already tell you which is which. Most annotate their public
-functions — `__attribute__((visibility("default")))`, usually behind an export
-macro like `PCRE2_EXPORT` or `B2_API` — precisely so a `-fvisibility=hidden`
-build exports the API and hides the rest. Turning that on gives you the author's
-own answer, computed by the compiler:
-
-```toml
-[compile]
-visibility = "hidden"     # default: "default"
-```
-
-!!! danger "Probe before you set this. On a library that does not annotate, it erases the API."
-
-    `-fvisibility=hidden` hides every definition the library did not annotate —
-    **including public API whose export macro is a bare `extern`**, which is what
-    lua's `LUA_API` is. `[link] promote_statics` then reads hidden as "internal"
-    and renames the whole surface to `__rb_*`, and the wrapper generates nothing.
-
-    Measured on cjson: adding the flag takes it from 92 wrapped functions to
-    `dwarf: 0 functions`, with all 118 dynamic symbols renamed.
-
-    RepliBuild refuses that build rather than shipping it (§5), but a refusal is
-    a late and expensive way to learn a fact about a library. Ask first:
-
-    ```julia
-    julia> RepliBuild.VisibilityProbe.visibility_probe("packages/pcre2/replibuild.toml")
-    VisibilityReport: pcre2
-      sources compiled   : 29/29
-      external defs      : 105
-      library annotated  : 78  (74.3%)
-      macro shims        : 14  (always annotated — excluded from the verdict)
-      verdict            : annotated
-      wrapped today      : 119
-        retained         : 92
-        DROPPED          : 27
-    ```
-
-    The probe compiles your sources under your flags with the flag added and reads
-    visibility off the IR — no header parsing, no guessing. **Read the dropped list
-    before setting the key**: those are functions the wrapper carries today, and the
-    probe cannot tell an internal you are glad to lose from a public function
-    upstream forgot to annotate.
-
-**The verdict belongs to the configuration, not to the library.** Export macros are
-routinely gated behind a define — cJSON's `CJSON_PUBLIC` expands to the visibility
-attribute only when `CJSON_API_VISIBILITY` is defined, and to a bare `type`
-otherwise. cjson measures 0 of 92 annotated purely because its `flags` omit that
-`-D`. Adding it flips the answer. Re-run the probe on a version bump and after any
-change to `flags` or `defines`.
-
-Two mechanical notes:
-
-- The key is honoured through `get_compile_flags`, which is what the compile
-  fingerprint hashes, so flipping it correctly invalidates the per-file IR cache.
-- A raw `-fvisibility=hidden` in `[compile] flags` is the older spelling and still
-  works — it is just undocumented and unvalidated. Setting *both* is fine when they
-  agree (you get one flag); setting the key to `"hidden"` while `flags` asks for a
-  different visibility is a **hard error**, because which one decides the library's
-  API is not something RepliBuild should guess.
-
-### 2.13 `exclude_symbols` — trimming a surface without touching visibility
-
-§2.12 narrows the API with the compiler. That works when upstream annotates its
-exports, and it is all-or-nothing when it doesn't. `[wrap] exclude_symbols` is
-the other lever: name the symbols that should not reach the wrapper, and leave
-visibility alone.
-
-```toml
-[wrap]
-exclude_symbols = ["matmul_*", "vk::*"]
-```
-
-Reach for it when the library links code that is **compiled in but is not API** —
-generated translation units, vendored C++, an embedded resource blob. The case
-this was built for is Hub llamacpp with ggml's Vulkan backend enabled: 136
-generated TUs whose entire contents are SPIR-V byte arrays (1,958
-`matmul_*_data`/`_len` globals in the largest one alone), plus the `vk::*Error`
-class hierarchy out of `vulkan.hpp` — vtables and thunks included. None of it is
-callable API, and the generator has no opinion about that: it wraps what `nm`
-reports.
-
-**Entries are anchored globs, not regexes.** `*` and `?` are the wildcards;
-every other metacharacter is a literal. That is deliberate — you write these
-against `nm` output, where `(`, `)`, `+`, `.`, `<` and `[` are ordinary symbol
-text (`operator+`, `f(int const&)`, `std::vector<int>`) and a literal `*` never
-appears. Under regex rules `operator+` would mean "one or more `operator`" and
-match nothing, silently.
-
-Anchoring means a pattern matches a **whole** symbol name, so use a trailing `*`
-for a prefix. `vk` will not take out `vkontakte_init`, and on llamacpp
-`ggml_backend_vk_*` drops seven functions while correctly leaving
-`ggml_backend_is_vk` alone.
-
-A function matches on any of its `name`, `demangled` or `mangled` spelling —
-which one you can actually see depends on the symbol. Globals match on name.
-
-**A pattern that matches nothing is a hard error.** It means the symbol was
-renamed or dropped upstream, or the glob is mistyped; either way the filter is
-not doing what its author thinks, and a wrapper that quietly regrows a surface
-someone deliberately cut is the failure this is meant to prevent. Same reasoning
-as `proven_at` in `[wrap.varargs]`. Filtering away *every* function is refused
-too.
-
-Applied at **wrap** time: changing the filter and re-running `wrap()` costs no
-recompile, and `compilation_metadata.json` keeps the full unfiltered picture that
-RepliBuildTooling's `api_surface` reads.
-
-> **Prefer this to `-fvisibility=hidden` when the goal is "hide these symbols"
-> rather than "adopt upstream's export policy".** The flag is conditional on an
-> export macro being *active*, not merely present — see §2.12 and the llamacpp
-> note: `GGML_API` expands to a visibility attribute only under `-DGGML_SHARED`,
-> and without it the flag hid `llama_decode` along with the shader blobs.
-
-### 2.14 `surface_types_only` — the same question, asked about types
-
-§2.13 bounds which **functions** the wrapper binds. This bounds which **types**
-it defines, and the two diverge badly for any C++ library that compiles vendored
-internals into the same `.so`.
-
-```toml
-[wrap]
-surface_types_only = true
-surface_types_extra = ["MD_*_DETAIL", "ErrCodes"]   # see the hatch below
-```
-
-On, the generator emits only the types **reachable from the wrap surface** —
-every exported function's return type, parameter types and receiver `class`, the
-type of every bindable global, then their members transitively. Off (the
-default), it emits every type DWARF carries.
-
-Hub onednn measures the gap: **2974 types recorded, 79 reachable (2.7%)**. The
-other ~2900 are `dnnl::impl` and nGEN GPU-JIT internals the C API never names.
-
-**This is not a size optimisation.** Those internals are what *break* the module:
-an nGEN enumerator spelled `Integer` emits `const Integer = Pipe(3)`, which
-shadows `Base.Integer` and invalidates 522 generated `v::Integer` signatures, and
-nGEN instruction structs emit duplicate `_` fields. The wrapper parses and then
-dies at `include`. A 13 MB module became 596 KB — and went from not loading to
-loading.
-
-**Globals are gated on the dynamic symbol table, not on metadata.** A global is a
-legitimate seed — Hub box2d binds all 16 of its `b2_defaultFilter`-style globals
-and would lose `b2Filter` without it — but only when the loader can actually
-resolve the name. onednn records 332 globals and **zero** are in its `.so`'s
-dynsym; they are internals hidden by `-fvisibility=hidden`. Seeding from those
-pulled in 58 extra types, `Pipe` among them, which is to say it preserved the
-very bug this is meant to fix. When the symbol table cannot be read at all
-(no library on disk, PE without an export directory), the walk **fails safe** and
-seeds from every global: over-inclusion costs unused types, while guessing
-"unbindable" would drop types the wrapper still emits.
-
-**`surface_types_extra` is the hatch for what reachability structurally cannot
-see**, and it is why this key is opt-in rather than the default. Two blind spots:
-
-- **Callback-only structs.** A callback's parameter types are reached through its
-  signature, but a struct it receives only as `void *` is named nowhere, so a
-  struct a user needs in order to *write* the callback can be invisible. md4c is
-  entirely this shape: every SAX callback gets its `MD_*_DETAIL` struct as
-  `void *`. Measured before callback signatures had parameters, its reachable
-  set was **2** of 36 types, and it ships 231/231 tests against the other 34.
-- **Constant-only enums.** A function returning plain `int` never names its error
-  enum, so `argon2`'s `Argon2_ErrorCodes` is unreachable by construction.
-
-A record is reached in whatever dress a signature gives it: `const T&`, `T*`,
-`Ref{T}`, `Ptr{T}`, `NTuple{N, T}`, or `ns::T` as a method's receiver, including
-a template instantiation keyed with its arguments
-(`normal_distribution<double, policies::policy<…> >`), which no identifier
-inside the spelling equals.
-
-Patterns are the same anchored globs as `exclude_symbols`, matched against both
-the raw key and the bare name, so `ErrCodes` catches a record keyed
-`__enum__ErrCodes`. **A keep-pattern that matches nothing is a hard error** —
-sharper than the `exclude_symbols` rule, because this list exists to *retain*
-types, so a silent miss is dropping API right now.
-
-> **Turn this on when the module fails to `include`, not because the wrapper
-> feels large.** The default is off deliberately: measured across every Hub
-> package, the filter keeps 95% of box2d and 2.7% of onednn, and would gut md4c.
-
-**Related, and not configurable: globals absent from the dynamic symbol table
-never get an accessor.** That one is unconditional, because an accessor for a
-symbol which is not in the library is a guaranteed failure at the call site
-rather than a question of how much surface to expose. It is why onednn's wrapper
-went from 1006 functions to 342 while keeping all 217 of its C API: 656 of those
-functions were accessors for internals hidden by `-fvisibility=hidden`, failing
-as `could not load symbol` or — where the type had also been filtered out —
-`UndefVarError`. llamacpp is the same shape at larger scale (0 of 4099 globals
-resolvable), while box2d, curl and pcre2 lose nothing. When the symbol table
-cannot be read the drop is skipped entirely, same fail-safe as above.
-
-### 2.15 One config, two hosts — `[platform.<host>]`
-
-Linux and Windows disagree about link libraries, platform defines and which
-platform sources a dependency must exclude. A `[platform.linux]` or
-`[platform.windows]` table holds the keys that differ, and is merged over the rest
-of the file on that host only:
-
-```toml
-[compile]
-flags = ["-O1", "-fPIC", "-DLUA_USE_LINUX"]
-
-[link]
-link_libraries = ["m", "dl"]
-
-[platform.windows.compile]
-flags = ["-O1"]                     # replaces the base list outright
-
-[platform.windows.link]
-link_libraries = []                 # empty really means empty
-
-[platform.windows.dependencies.glfw]
-exclude = ["x11_", "glx_", "posix_", "linux_"]   # merges into [dependencies.glfw]
-```
-
-Tables merge key by key at any depth; every other value (string, number, array)
-replaces the base. Keep the base correct for one host and override only on the
-other: a RepliBuild older than this table ignores it and sees the base. Platform
-names are `linux`, `windows` and `macos`; any other name is a hard error, since a
-misspelled overlay would otherwise vanish on the one host it was written for.
-`discover(force=true)` preserves the tables, and `register` reads the project's
-root through the overlay of the host it runs on.
-
-### 2.16 Paths are relative to the project
-
-Relative `source_files` and `include_dirs` are resolved against `[project] root`
-at load, and a relative `root` against the TOML's own directory, so a config builds
-from any working directory and in any checkout. `discover()` writes paths under the
-project that way, with `/` separators; paths outside the project stay absolute.
-A config with absolute paths into one machine's tree (`/home/…`) builds nowhere
-else.
-
-### 2.17 `rename` — a name of your own
-
-A function's Julia name is derived from its C++ spelling, template arguments
-included, and the derivation is frozen because consumers call its names. For a
-template instantiation that is the whole instantiation: Boost.Math's
-`pdf<double, policy<…>>` binds as a 503-character
-`boost_math_pdf_double_boost_math_policies_policy_…`, and a consumer finds it by
-regex. `[wrap.rename]` is the one place a name is chosen by hand.
-
-```toml
-[wrap.rename]
-"boost_math_pdf_*" = "pdf"
-"boost_math_cdf_*" = "cdf"
-_ZN8stl_test6scaledIlEET_S1_i = "scaled_long"
-```
-
-**Keys** name the function by its mangled symbol (`nm -D --defined-only <lib>`)
-or by the Julia name the wrapper binds without the rename (read it off the
-wrapper, or derive it from `nm | c++filt`). They are the anchored globs of
-`exclude_symbols`: `*` and `?`, every other character literal, a trailing `*`
-for a prefix. **Values** are the Julia identifier to bind; anything else is a
-load error, since the wrapper would not parse.
-
-The rename is applied inside the one name derivation, so every emitter sees it:
-the function definition, its export, the dispatch-tier table, a method proxy's
-reference to it, and the overload prediction that decides which parameters
-carry a C type. Several keys, or one glob, may give several functions one name:
-that is an overload set, and the parameters the set disagrees on are typed so
-Julia dispatches between them (the five `pdf` instantiations above become
-`pdf(dist::Ref{normal_distribution_…}, x)`, `pdf(dist::Ref{poisson_distribution_…}, k)`, …).
-
-**The old name is bound nowhere.** No alias, no deprecation stub: a consumer
-opts into the rename by changing the recipe and calls the new name.
-
-**What fails.** A key that matches no function is a hard error, like an
-`exclude_symbols` pattern that matches nothing: the author believes a function
-is reachable under a name it is not. A chosen name that another function would
-bind under the derivation, or that the wrapper binds as a type, constant,
-global or enumerator, is a hard error naming both sides; nothing is prefixed
-silently. Two keys giving one function two names is an error at that function.
-A symbol `exclude_symbols` drops cannot be renamed, and a wrap without
-`compilation_metadata.json` (the symbol-only generator) refuses a table.
-
-Types have no rename key yet: a type's name reaches struct definitions, every
-signature that spells it, the layout tables and the thunk side through
-several derivations, so renaming one is not a one-place change. In your own
-module, `const Normal = M.normal_distribution_double_…` gives a type a short
-name without touching the wrapper.
-
-## 3. Section reference
-
-Types are TOML types. "Default" is what the parser uses when the key is
-**absent**; where `discover()` writes something different, that is called out.
-
-### `[project]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `name` | String | directory basename | Drives `lib<name>.so` and the module name |
-| `root` | String | directory containing the TOML | Absolute or relative |
-| `uuid` | String | freshly generated | An unparseable UUID warns and is regenerated. Keep the one `discover()` wrote — an absent `uuid` means a new one on every load |
-| `version` | String | — | **Not part of the schema.** Every Hub config carries one and it is useful documentation (it should match the pinned `tag`), but RepliBuild parses and drops it; the Hub's own `index.toml` is what publishes a version |
-
-### `[paths]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `output` | String | `"julia"` | Wrapper + `.so` + `compilation_metadata.json` land here |
-| `build` | String | `"build"` | Intermediate IR and objects |
-| `source` | String | `"src"` | **Parsed, not consulted** — sources come from discovery or `[compile] source_files` |
-| `include` | String | `"include"` | **Parsed, not consulted** — include roots come from discovery or `[compile] include_dirs` |
-| `cache` | String | `".replibuild_cache"` | **Parsed, not consulted** — the cache directory is `[cache] directory` |
-
-### `[discovery]`
-
-| Key | Type | Default |
-|---|---|---|
-| `enabled` | Bool | `true` |
-| `walk_dependencies` | Bool | `true` |
-| `max_depth` | Int | `10` |
-| `ignore_patterns` | Vector{String} | `["build", ".git", ".cache"]` |
-| `parse_ast` | Bool | `true` |
-
-!!! note
-    This whole section is currently **parsed and stored but not consulted** by the
-    scanner. It round-trips faithfully; it does not change behaviour. Do not
-    reach for `ignore_patterns` to trim a dependency — use `exclude` on the
-    dependency (§2.6).
-
-### `[compile]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `flags` | Vector{String} | `["-std=c++17", "-fPIC"]` | `discover()` writes `["-fPIC"]` for a C-only scan |
-| `defines` | Table{String→String} | `{}` | Emitted as `-Dkey=value` |
-| `parallel` | Bool | `true` | Multi-threaded per-file compilation |
-| `source_files` | Vector{String} | `[]` (auto-discovered) | Explicit list; relative entries resolve against `root` (§2.16); validated to exist at load |
-| `include_dirs` | Vector{String} | `[]` (auto-discovered) | Passed as `-I`; relative entries resolve against `root` (§2.16) |
-| `aot_thunks` | Bool | `false` | Pre-compile Tier-2 thunks into `<name>_thunks.so`. `wrap` does it as its last step, for exactly the thunks the wrapper binds; if it fails, the wrapper uses the JIT. The JLCS dialect library is needed for that, and wherever the wrapper runs ([Ship a package](using-wrappers.md#Load-time)) |
-| `visibility` | `"default"` \| `"hidden"` *(preserved)* | `"default"` | `"hidden"` narrows the wrapper's API to what the library annotates. **Probe first — §2.12.** Any other value is a hard error |
-
-Changing `flags`, `defines`, `include_dirs` or `visibility` correctly invalidates
-the per-file IR cache — it is keyed on a compile fingerprint as well as source
-`mtime`.
-
-### `[link]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `optimization_level` | String | `"0"` | `"0"`–`"3"`, `"s"`, `"z"`; a leading `O`/`o` is stripped, so `"O2"` works. `discover()` writes `"0"`; Hub configs use `"2"` |
-| `enable_lto` | Bool | `true` for `language = "c"`, else `false` | Whole-module `llvmcall` payload — see the warning below |
-| `link_libraries` | Vector{String} | `[]` | `-l` entries |
-| `link_dirs` | Vector{String} | `[]` | `-L` entries, each also an rpath (`$ORIGIN` first). On Windows the wrapper opens the `link_libraries` DLLs found there before the library — §2.8 |
-| `fallback` | Bool | `false` | **C only.** `false` = link/optimize/assemble in-process on Julia's resident libLLVM, and a failure is a hard error. `true` = external `llvm-link`/`opt`. C++ always uses the external pipeline |
-| `promote_statics` | Bool | `true` | **C in-process bucket only.** Rename anything a slice may bind by `declare` but that cannot reach the `.so` dynamic symbol table to an exported `__rb_<lib>_<name>`. With `[wrap.tier1] enable`, also give every exported definition the exported alias `__rb_<lib>_<name>` (`exported_aliases` in the metadata), the name its slices bind it by, so a slice never takes a same-named export of a library loaded earlier. Required by `[wrap.tier1]`, harmless otherwise |
-
-!!! warning "Leave `enable_lto = false`"
-    `enable_lto` embeds the **entire linked module** at every `llvmcall` site. At
-    whole-library scale that can crash Julia's JIT, and it duplicates file-local
-    `static` state between the embedded bitcode and the `.so`. Every Hub config
-    sets `enable_lto = false`. The experimental per-function path is
-    `[wrap.tier1]`, also off by default — [Tier 1](tier1.md).
-
-### `[binary]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `type` | String | `"shared"` | `"shared"`, `"static"`, `"executable"`; anything else warns and falls back to `"shared"` |
-| `output_name` | String | `""` → `lib<project>.so` (`.a` when static) | In ingest mode this is forced to the ingested `.so`'s basename |
-| `strip_symbols` | Bool | `false` | **Parsed, not consulted** |
-
-### `[wrap]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `language` | String | `"cpp"` | `"c"` or `"cpp"`. Selects generator, toolchain, and the `enable_lto` default. `discover()` sets it from the scanned extensions. **Not checked**: any other value, `"C"` included, is treated as `"cpp"` |
-| `enabled` | Bool | `true` | |
-| `module_name` | String | `""` → CamelCase of the project name | |
-| `use_clang_jl` | Bool | `true` | `false` skips AST extraction (DWARF-only path) |
-| `headers` | Vector{String} | `[]` (every header at the top of each include dir) | The headers the Clang.jl walk starts from. The walk reads enums (including constant-only enums, which DWARF lacks) and callback typedefs, not macros: a macro reaches the wrapper only through `[wrap.macros]`. `#include`s are still followed. Spelled as in an `#include`: tried as an absolute path, then against the project root and each include dir. An entry that resolves to no file is a hard error at `wrap` *(preserved)* |
-| `shim_headers` | Vector{String} | `[]` | Headers the macro-shim TU includes. Does nothing without `[wrap.macros]` entries or `shim_defines`: no shim TU is written *(preserved)* |
-| `exclude_symbols` | Vector{String} | `[]` | Anchored globs for symbols to keep out of the wrapper; see §2.13 *(preserved)* |
-| `rename` | Table{String→String} | `{}` | `[wrap.rename]`: the Julia name to bind for a function, keyed by its mangled symbol or by the name the wrapper derives (anchored globs); see §2.17 *(preserved)* |
-| `shim_defines` | Vector{String} | `[]` | `#define`s at the top of the shim file, before its includes, and in no other file: `NAME` (defined as `1`) or `NAME=VALUE`. Builds a single-header library's implementation section from the TOML (§2.2). Needs `shim_headers` *(preserved)* |
-| `surface_types_only` | Bool | `false` | Emit only types reachable from the wrap surface instead of every type in DWARF; see §2.14 *(preserved)* |
-| `surface_types_extra` | Vector{String} | `[]` | Anchored globs for types to keep even when unreachable — callback-only structs, constant-only enums. A pattern matching nothing is an error *(preserved)* |
-| `style` | String | `"clang"` | `"clang"`, `"basic"`, `"none"`; validated, but **not currently dispatched on** — the basic symbol-only generator is selected by *missing* `compilation_metadata.json`, not by this key |
-
-### `[wrap.varargs]` *(preserved)*
-
-Typed overloads for variadic functions. Julia type names, variadic arguments
-only, list-of-lists, one generated function per overload. `proven_at` names the
-upstream commit they were checked against. See §2.3 for the full rules and the
-allowed type names.
-
-```toml
-[wrap.varargs]
-proven_at       = "<upstream commit>"
-lua_pushfstring = [["Cstring"], ["Cint"], ["Cstring", "Cint"]]
-```
-
-### `[wrap.rename]` *(preserved)*
-
-`key = "julia_name"`, one per function (or per overload set, through a glob).
-The key is the function's mangled symbol or the Julia name the wrapper binds
-without the rename; the value must be a Julia identifier. See §2.17.
-
-```toml
-[wrap.rename]
-"boost_math_pdf_*" = "pdf"
-_ZN3fmt3v126vprintEPKcNS0_17basic_format_argsINS0_7contextEEE = "vprint"
-```
-
-### `[wrap.macros]` *(preserved)*
-
-One sub-table per macro. `ret` and `args` are **C type strings**; the presence of
-`args` selects function-like vs value macro. See §2.2.
+# Every key
+
+The lookup table for `replibuild.toml`. To decide *which* keys your library
+needs, read [What goes in the TOML](toml.md) first.
+
+"Default" is the value used when the key is absent. Paths are relative to the
+folder holding `replibuild.toml` unless they are absolute.
+
+!!! warning "A misspelled key is ignored without a warning"
+    The file is read for the keys below and everything else is dropped. When a
+    setting seems to do nothing, check its spelling and its section here.
+
+## `[project]`
+
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `name` | the folder's name | Names the library file (`lib<name>.so`), the Julia module (CamelCase of the name) and the name you `use` it by. |
+| `root` | the TOML's folder | The project folder. |
+
+`version` and `uuid` may be present (the Hub's recipes carry a `version`, and
+`discover` writes a `uuid`). Neither is used.
+
+## `[compile]`
+
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `flags` | `["-std=c++17", "-fPIC"]` | Compiler flags for every file. `discover` writes `["-fPIC"]` for C. Add `-O2`; neither default optimizes. |
+| `defines` | none | A table: `NAME = "value"` becomes `-DNAME=value`. For a define with no value, put `-DNAME` in `flags`. |
+| `include_dirs` | written by `discover` | Folders to search for headers. Added automatically: a git or archive dependency's top folder, `include/` and `src/`; a local dependency's folder and `include/`. |
+| `source_files` | written by `discover` | The project's own files to compile, one by one. `build` does not search the project folder: a file not listed is not compiled. A dependency's files are **added** to these. Each listed file must exist. |
+| `visibility` | `"default"` | `"hidden"` wraps only the functions the library marks as public. Check with the probe first: [Leaving things out](toml.md#Leaving-things-out). Any other value is an error. |
+| `parallel` | `true` | Compile files in parallel. |
+| `aot_thunks` | `false` | C++: have `wrap` compile the wrapper's C++ call stubs into a second library, `lib<name>_thunks.so`, instead of compiling them each time the wrapper loads. Faster loading; one more file to ship. |
+
+## `[link]`
+
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `optimization_level` | `"0"` | `"0"`, `"1"`, `"2"`, `"3"`, `"s"` or `"z"`. Use `"2"`. |
+| `link_libraries` | none | Libraries to link: `["m", "dl"]` is `-lm -ldl`. |
+| `link_dirs` | none | Folders to search for those libraries. The library found there is also the one loaded at run time. |
+| `enable_lto` | `true` for C, `false` for C++ | **Set to `false`.** `true` is an experimental calling mode ([Experimental keys](#Experimental-keys)). |
+
+## `[wrap]`
+
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `language` | `"cpp"` | `"c"` or `"cpp"`, in lower case. Chooses the compiler. Anything other than `"c"` is treated as C++. |
+| `module_name` | CamelCase of the project name | The Julia module's name, and the wrapper file's (`julia/<module_name>.jl`). |
+| `shim_headers` | none | Headers that define the macros in `[wrap.macros]`, written as in an `#include`. Used only together with `[wrap.macros]` or `shim_defines`. |
+| `shim_defines` | none | `#define`s placed before those headers, in that one generated file: `"NAME"` or `"NAME=VALUE"`. Compiles a single-header library's implementation. Needs `shim_headers`. |
+| `exclude_symbols` | none | Patterns for functions and globals to leave out of the wrapper. One that matches nothing is an error. |
+| `surface_types_only` | `false` | Emit only the types that wrapped functions and globals use. |
+| `surface_types_extra` | none | Patterns for types to keep when `surface_types_only` is on. One that matches nothing is an error. |
+| `headers` | every header at the top of each include folder | The headers read for enums and callback types that the compiled library does not record. An entry that is not found is an error. |
+| `use_clang_jl` | `true` | `false` skips that header reading. |
+
+Patterns use `*` for any text and `?` for one character, and must match the
+whole name.
+
+### `[wrap.macros.<NAME>]`
+
+One table per macro, or per `static inline` function.
+
+| Key | Meaning |
+|:----|:--------|
+| `ret` | The result's **C type**: `"int"`, `"const char*"`, `"lua_State*"`. |
+| `args` | The arguments' C types. Present: a function-like macro, called as `NAME(a, b)`. Absent: a constant, called as `NAME()`. `args = []` is a function-like macro with no arguments. |
 
 ```toml
 [wrap.macros.deflateInit]
@@ -892,452 +76,186 @@ args = ["z_stream*", "int"]
 ret = "const char*"
 ```
 
-### `[wrap.cstring_owned]` *(preserved)*
+### `[wrap.varargs]`
 
-`function name = "deallocator symbol"`. `"free"` goes through the wrapper's
-`libc_free`, the library's own C runtime. See §2.4.
+`function = [[types…], [types…]]`: one inner list per combination of extra
+arguments, in **Julia's** names for C types. Fixed arguments are not listed.
 
-### `[platform.<host>]` *(preserved)*
+| Key | Meaning |
+|:----|:--------|
+| `<function name>` | The list of combinations. Not a list of lists: error. |
+| `proven_at` | The dependency commit the combinations were checked against. Absent: `wrap` warns. Different from the dependency's `commit`: error. |
 
-`linux`, `windows` or `macos`. Any section of this file, merged over the base on
-that host: tables key by key, everything else replaced. Unknown names are a hard
-error. See §2.15.
-
-### `[wrap.tier1]` *(preserved)*
-
-**C projects only.** Routes eligible functions through `Base.llvmcall` on a
-per-function bitcode slice instead of `ccall`.
-
-```toml
-[wrap.tier1]
-enable       = true
-max_slice_kb = 64
-allow_setjmp = false
-exclude      = ["lua_error"]
-```
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `enable` | Bool | `false` | Run the slicer over every Tier-1 candidate and emit `Base.llvmcall` for the accepted ones |
-| `max_slice_kb` | Int | `64` | A tripwire, not a tuning knob — declarations-only slices are kilobyte-sized regardless of function size, so a hit means something unexpected got embedded |
-| `allow_setjmp` | Bool | `false` | Allow slices whose **own body** calls `setjmp`/`longjmp` or a `returns_twice` callee. Direct-reach only: `setjmp` buried in a `.so`-side callee never trips the gate, and does not need to — `longjmp` *across* the calling Julia frame is identical exposure for `ccall` and `llvmcall`. **Ignored on Windows**, with a warning: a `longjmp` back into a JIT'd slice frame ends the process there (STATUS_BAD_STACK) |
-| `exclude` | Vector{String} | `[]` | Names (mangled or plain) that stay on `ccall` unconditionally |
-
-Requires `[link] promote_statics = true` (the default) and the in-process C
-pipeline. On a `fallback` or ingest build there is no promoted module, so Tier 1
-disables itself for the whole wrap with a warning rather than shipping unverified
-slices. It does the same if the Slicer fails on the promoted module as a whole.
-If the Slicer throws while slicing one function, only that function stays on
-`ccall`, and a warning names it: that is a Slicer bug, never a failed wrap.
-Every non-accepted function emits exactly the `ccall` it would have
-emitted with Tier 1 off, and the module exports `TIER1_FUNCTIONS::Set{String}`.
-
-The wrap prints two counts — `N slices accepted` then `N slices emitted
-(M functions)`. The first comes with a breakdown of the rest: refused (by policy),
-errored (the Slicer threw), hazard-gated, oversize, and unresolved-symbol. A gap
-between the two counts is the ABI shape gate refusing a `Cstring` or struct
-crossing, not a failure.
-
-### `[types]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `strictness` | String | `"warn"` | `"strict"`, `"warn"`, `"permissive"`; any unrecognised value silently becomes `"warn"` |
-| `allow_unknown_structs` | Bool | `true` | Opaque pointers for unknown structs instead of failing |
-| `allow_unknown_enums` | Bool | `false` | Map unknown enums to `Int32` |
-| `allow_function_pointers` | Bool | `true` | `Ptr{Cvoid}` for function pointers |
-| `custom` | Table{String→String} | `{}` | Custom type mappings, e.g. `MyHandle = "Ptr{Cvoid}"`; merged into the type registry |
-| `templates` | Vector{String} | `[]` | C++ instantiations to force-emit *(preserved)* — §2.1 |
-| `template_headers` | Vector{String} | `[]` | Headers for the instantiation stub *(preserved)* — §2.1 |
-| `records` | Vector{String} | `[]` | C++ classes no source of the library mentions, to make visible *(preserved)*. A header-only class used by nothing the library compiles is in no unit's debug info, so it has no type and no constructor in the wrapper (Bullet's `btDefaultMotionState`). Each entry is a class name as C++ spells it (`ns::Class`); a generated unit includes `[wrap] shim_headers` and `template_headers` and uses each class once, and the build then defines its inline constructors like any other class's. An entry that does not compile against those headers is a build error naming it; one that compiles and still has no definition (plain `-g`: add `-fstandalone-debug`) is a warning. Not for a class template: list a specialization in `templates`. |
-
-Strictness modes: **`strict`** fails on any type that cannot be mapped exactly;
-**`warn`** reports the imperfect mapping and continues (`Ptr{Cvoid}` for complex
-pointers); **`permissive`** falls back silently. This governs *type mapping*; it
-does not relax the exact-or-opaque rule for struct layouts, which is
-unconditional.
-
-### `[dependencies]`
-
-Each dependency is a named sub-table. Both spellings work:
+Allowed type names: `Cstring`, `Cwstring`, `Cchar`, `Cuchar`, `Cshort`,
+`Cushort`, `Cint`, `Cuint`, `Clong`, `Culong`, `Clonglong`, `Culonglong`,
+`Cintmax_t`, `Cuintmax_t`, `Csize_t`, `Cssize_t`, `Cptrdiff_t`, `Cwchar_t`,
+`Cfloat`, `Cdouble`, `Cintptr_t`, `Cuintptr_t`, `Bool`, `Any`, the sized
+`Int8`…`Int64`, `UInt8`…`UInt64`, `Float32`, `Float64`, and `Ptr{Name}`.
+Anything else is an error naming the entry.
 
 ```toml
-[dependencies.cjson]
-type    = "git"
-url     = "https://github.com/DaveGamble/cJSON.git"
-tag     = "v1.7.18"
-commit  = "acc76239bee01d8e9c858ae2cab296704e52d916"
-exclude = ["test", "fuzzing"]
-
-[dependencies]
-pugixml = { type = "git", url = "https://github.com/zeux/pugixml.git", tag = "v1.15" }
-```
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `type` | String | `"local"` | `"git"`, `"archive"`, `"local"`, `"system"` — **note the default is `local`, not `git`**; a `[dependencies.x]` with a `url` but no `type` will not clone |
-| `url` | String | `""` | Required for `type = "git"` and `type = "archive"`. For an archive, a plain path is a local tarball |
-| `sha256` | String | `""` | **Required for `type = "archive"`**: the tarball's SHA-256, 64 hex digits. Checked before unpacking; a mismatch is a hard error |
-| `subdir` | String | `""` | `type = "archive"` only. The directory inside the unpacked archive that is the dependency root. Absent, a tarball whose top level is one directory has that directory as its root |
-| `tag` | String | `""` (default branch) | Tag or branch, checked out after a full clone |
-| `commit` | String | `""` | Expected 40-hex object name. Validated at load; mismatch after checkout is a hard error — §2.11 |
-| `path` | String | `""` | Required for `type = "local"`; scanned in place, never copied |
-| `pkg_config` | String | `""` | For `type = "system"`; runs `pkg-config --cflags` |
-| `exclude` | Vector{String} | `[]` | Paths to skip during source injection, for every dependency type — §2.6 |
-| `submodules` | Vector{String} | `[]` (none) | `type = "git"` only. Submodule paths of the superproject to fetch; see below |
-
-Git and archive dependencies land in `.replibuild_cache/deps/<name>/`; a local
-one is used in place. Every dependency's sources merge into the one library
-the recipe builds, compiled with the project's toolchain and flags. How a
-dependency is walked, pinned and cleaned, archives, and how `submodules`
-resolve a superproject's libraries (Boost) are on
-[Dependencies](dependencies.md).
-
-```toml
-[dependencies.boost]
-type       = "git"
-url        = "https://github.com/boostorg/boost.git"
-tag        = "boost-1.86.0"
-commit     = "<40-hex>"
-submodules = ["libs/filesystem", "libs/config", "libs/core"]   # exactly these, shallow, at their gitlinks
-exclude    = ["libs/config/checks"]
-```
-
-`submodules` entries are validated at load: a relative `/`-separated path of
-letters, digits, `.`, `_`, `+` and `-`, with no `.` or `..` component, no empty
-component and no leading `-`, on a `git` dependency only.
-
-### `[ingest]`
-
-**Experimental, C only.** The *presence* of this section is the mode switch: no
-compilation happens, only DWARF extraction and wrapper generation over a `.so`
-you built yourself (with `-g`). Ingested libraries dispatch through Tier 3
-(`ccall`) exclusively — no LTO bitcode, no Tier-1 slices, no Tier-2 thunks, and
-the C++ API surface of an ingested binary is unsupported.
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `library` | String | — (required) | Path to the pre-built `.so`; relative paths resolve against the TOML's directory. Missing → the section is **ignored with a warning** and you silently get source-build mode |
-| `headers` | Vector{String} | `[]` | Header search dirs for type extraction and the `noexcept` scan; merged into the include dirs |
-| `extra_link_libs` | Vector{String} | `[]` | Libraries the wrapper opens before the main one, for symbols the `.so` needs but does not record. A bare name follows the `-l` convention (`"m"` → libm); prefer a full soname or a path. On glibc ≥ 2.34 `m`, `pthread`, `dl` and `rt` are part of libc, there is nothing to open, and the wrapper warns. **Ingest-only** — in a source build use `[link] link_libraries` |
-
-Generate it with `RepliBuild.ingest("/path/to/libfoo.so", headers=[...])` rather
-than by hand.
-
-### `[graph]` *(preserved)*
-
-The *presence* of this section selects **graph mode**: the project is a CMake
-project of several libraries, and RepliBuild takes its build graph from CMake's
-File API (configure only), never from the build files. `build` configures it,
-runs the build-time steps that write its generated sources, compiles and links
-every library with RepliBuild's own toolchain, and extracts each library's
-metadata; `wrap` writes one wrapper per library and a **graph module** that
-includes them. Needs `cmake` and `ninja` (the configure uses the Ninja
-generator).
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `source` | String | `"."` | The CMake project directory (the one holding `CMakeLists.txt`), relative to the project root; with `dependency`, relative to that dependency's checkout |
-| `dependency` | String | `""` | The `[dependencies.<name>]` entry whose checkout is the CMake project: a `git`, `archive` or `local` dependency. `build` resolves it first (clone, pin, submodules), then configures the checkout. See *A dependency as the source* below |
-| `targets` | Vector{String} | `[]` | Library targets to build and wrap, by CMake target name or File API id. The shared libraries they link come too. Empty: every library target. An executable or utility target is an error |
-| `options` | Vector{String} | `[]` | Extra arguments for the configure step (`-DFOO=ON`), after RepliBuild's own `-G Ninja -DCMAKE_BUILD_TYPE=… -DCMAKE_POLICY_VERSION_MINIMUM=3.5` |
-| `build_type` | String | `"Release"` | `CMAKE_BUILD_TYPE` of the configure; `""` omits it |
-
-An unknown key or a value of the wrong type in `[graph]` is an error naming it.
-`[graph]` and `[ingest]` together are an error.
-
-Where things go (`[paths]` relative to the project root):
-
-| Path | Holds |
-|---|---|
-| `<paths.build>/cmake/` | The CMake build tree; generated sources land here |
-| `<paths.output>/<target>/lib/` | One library, its `compilation_metadata.json`, its wrapper `<Module>.jl`, its `type_manifest.json` (the types the wrapper defined as its own) and, when it imported types, `type_imports.json` (the owners' definitions, for the thunks) |
-| `<paths.output>/<target>/{ir,build}/` | Its IR and link intermediates; never vendored |
-| `<paths.output>/<Graph>.jl` | The graph module: `module <Graph>` including every library's wrapper in load order |
-| `<paths.output>/graph.toml` | The graph manifest: each library, its module and what it links |
-
-With `dependency`, `source` is a directory inside that checkout,
-`/`-separated and relative (`"."` for the checkout itself); an absolute path,
-or one leaving the checkout, is an error, as is a `dependency` naming no
-`[dependencies]` entry or a `system` one. The dependency's `exclude` does not
-apply: CMake lists the sources.
-
-How the graph is built, how targets pull in the libraries they link, module
-names, load order, one Julia type per C++ type across libraries, caching and
-the registry: [Graph mode](graph.md).
-
-**Not applied per library yet.** The other `[wrap]` keys, `[compile]` and
-`[types]`: each library is wrapped with defaults (a non-empty
-`[compile] source_files` warns). `[link] optimization_level` and `fallback`
-apply to every library.
-
-### `[llvm]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `toolchain` | String | `"auto"` | `"auto"`, `"system"`, `"jll"`; anything else warns and falls back to `"auto"` |
-| `version` | String | `""` (auto-detect) | Relevant to the C++ bucket; the C bucket uses the bundled JLL clang and Julia's own libLLVM |
-
-### `[cache]`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `enabled` | Bool | `true` | Skip recompiling unchanged files |
-| `directory` | String | `".replibuild_cache"` | The real cache path — this key, not `[paths] cache` |
-
-### `[workflow]`
-
-| Key | Type | Default |
-|---|---|---|
-| `stages` | Vector{String} | `["discover", "compile", "link", "binary", "wrap"]` |
-
-Validated against the five known stage names (an unknown one is a config
-validation error), but **not currently consulted** — the pipeline runs its fixed
-order. Do not use it to skip a stage; call the individual verbs instead.
-
----
-
-## 4. Interactions and precedence
-
-- **`wrap.language` decides more than the generator.** It selects the toolchain
-  (JLL `clang` + in-process libLLVM for `c`; system `clang++` + the external
-  pipeline for `cpp`) and the default value of `[link] enable_lto`. Setting it
-  wrong produces a build that works and a wrapper that is missing the whole
-  reason you chose the other one.
-- **`[wrap.tier1]` requires `[link] promote_statics` and the in-process C path.**
-  `fallback = true`, ingest mode, or a C++ project all disable Tier 1 for the
-  whole wrap, loudly.
-- **`enable_lto` and `[wrap.tier1]` are independent knobs** and both can emit.
-  Slicing did not replace the whole-module call-site path.
-- **`[ingest]` wins over source-build keys.** A config with both gets warnings
-  naming `[compile] source_files` and any `git`/`local` dependency, and proceeds
-  in ingest mode.
-- **`[graph]` takes its sources and flags from the CMake project.** `[compile]`
-  keys do not apply (a non-empty `source_files` warns), `[graph]` with
-  `[ingest]` is an error, and `[wrap] module_name` names the graph module, not
-  a library. With `[graph] dependency`, the named `[dependencies]` entry is
-  the CMake project: its checkout is resolved first and configured, and its
-  `exclude` does not apply.
-- **`[binary] output_name` is overridden in ingest mode** when left empty, so
-  `wrap()` finds the library where it expects it.
-- **`[cache] directory` is the cache path; `[paths] cache` is inert.** Likewise
-  `[paths] source` and `[paths] include`.
-
----
-
-## 5. What fails loudly, what warns, what is ignored
-
-Knowing which is which is the difference between a five-minute fix and an
-afternoon.
-
-**Hard error at config load**
-
-- `[dependencies.<n>] commit` that is not a full 40-hex object name.
-- `[dependencies.<n>] submodules` that is not a list of relative paths (absolute,
-  `..`, a leading `-`, or a character outside letters, digits, `.`, `_`, `+`, `-`
-  and `/`), or that is set on a dependency whose `type` is not `"git"`.
-- `[wrap.varargs.<f>]` that is not a list, or whose entries are not lists — with a
-  message showing the correct shape.
-- `validate_config!`: empty `project.name`; non-existent `project.root`; a
-  `[compile] source_files` entry that does not exist on disk; an
-  `optimization_level` outside `0/1/2/3/s/z`; an unknown `[workflow] stages`
-  entry; an invalid `binary.type` / `wrap.style` / `llvm.toolchain` /
-  `types.strictness` value reaching validation.
-- `[compile] visibility` set to anything but `"default"` or `"hidden"`, or set to
-  `"hidden"` while `[compile] flags` carries a `-fvisibility=` asking for something
-  else — which of the two decides the library's API is not guessable (§2.12).
-- A `[wrap] shim_defines` entry that is not `NAME` or `NAME=VALUE` on one line,
-  or `shim_defines` with no `shim_headers` — a dropped define would build the
-  library without its implementation (§2.2).
-
-**Hard error later in the pipeline**
-
-- A resolved dependency HEAD that disagrees with the declared `commit`.
-- A listed dependency submodule that is not at the commit its superproject
-  records, or a listed path where the superproject records no submodule.
-- A built library whose wrappable functions are not reachable in its dynamic
-  symbol table, or whose wrappable surface is empty — the `visibility = "hidden"`
-  hazard in §2.12. Checked before the build's cache marker is written, so a
-  refused build does not read as cached-and-fine on the next run.
-- A macro shim `#include` that resolved outside the project/dependency tree.
-- A vararg overload naming a type outside the allowed set (§2.3).
-- A `[wrap.varargs] proven_at` that differs from the dependency's `commit`, or
-  that has no single `commit` to compare against (§2.3).
-- A `[wrap] headers` entry that resolves to no file.
-- A wrapper whose `ccall` signatures would name an undeclared type — refused
-  before it is written.
-- A generated wrapper containing an unqualified `error("…")` call — refused,
-  because a library that defines its own `error` symbol would rebind it and take
-  out every failure path in the module.
-
-**Warning, then proceeds**
-
-- Missing `[project]` section or `project.name`.
-- An unparseable `uuid` (a new one is generated).
-- `[ingest]` without `library` → the section is dropped and you are in
-  source-build mode.
-- `[ingest]` alongside `source_files` or fetchable dependencies.
-- Invalid `binary.type` / `wrap.style` / `llvm.toolchain` → default substituted.
-- A `[wrap.cstring_owned]` value that is not a non-empty string → entry ignored.
-- A `[wrap.varargs]` table without `proven_at`, on every `wrap` (§2.3).
-- A struct whose layout cannot be modelled consistently → degrades to a
-  correctly-sized opaque region (capped at ten warnings plus a summary).
-
-**Accepted and ignored**
-
-- `[discovery]` (whole section), `[workflow] stages`, `[wrap] style`,
-  `[binary] strip_symbols`, `[paths] source` / `include` / `cache`.
-  `discover()` writes all of them.
-- `extra_link_libs` outside `[ingest]`.
-- A `[wrap] language` other than `"c"` or `"cpp"`: it is not checked, and
-  anything but `"c"` builds as C++.
-- Any key not in the schema — TOML parses it, the config drops it. **There is no
-  unknown-key warning**, so a typo'd key name is silent. Check your spelling
-  against §3 when a setting appears to have no effect.
-
----
-
-## 6. Worked configurations
-
-### A C library from git
-
-```toml
-[project]
-name    = "lua"
-version = "5.4.7"
-root    = "."
-
-[dependencies.lua]
-type    = "git"
-url     = "https://github.com/lua/lua.git"
-tag     = "v5.4.7"
-commit  = "1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3"
-exclude = ["onelua.c", "lua.c", "luac.c", "ltests.c"]   # the interpreter, not the library
-
-[compile]
-flags = ["-O1", "-fPIC", "-DLUA_USE_LINUX"]
-
-[link]
-enable_lto         = false      # whole-module payload stays off
-optimization_level = "2"
-
-[binary]
-type = "shared"
-
-[wrap]
-language     = "c"
-shim_headers = ["lua.h", "lauxlib.h", "lualib.h"]
-
-[wrap.tier1]
-enable = false
-
 [wrap.varargs]
-lua_pushfstring = [["Cstring"], ["Cint"], ["Cdouble"], ["Cstring", "Cint"]]
-
-[wrap.macros.lua_pop]
-ret  = "void"
-args = ["lua_State*", "int"]
-
-[wrap.macros.LUA_REGISTRYINDEX]
-ret = "int"
-
-[types]
-strictness              = "warn"
-allow_unknown_structs   = true
-allow_function_pointers = true
-
-[cache]
-enabled = true
+proven_at       = "1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3"
+lua_pushfstring = [["Cstring"], ["Cint"], ["Cstring", "Cint"]]
 ```
 
-### A C++ library with templates
+### `[wrap.cstring_owned]`
 
-```toml
-[project]
-name    = "fmt"
-version = "12.1.0"
-root    = "."
+`function = "release function"`. The wrapper copies the returned `char*` into
+a `String`, then frees the buffer with the named function. `"free"` means the
+C library's `free`.
 
-[dependencies.fmt]
-type    = "git"
-url     = "https://github.com/fmtlib/fmt.git"
-tag     = "12.1.0"
-commit  = "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f"
-exclude = ["test", "doc", "support", "benchmark"]
+### `[wrap.rename]`
 
-[compile]
-flags = ["-O2", "-fPIC", "-std=c++20"]
+`"pattern" = "julia_name"`. The pattern names a function by the name the
+wrapper would give it, or by its symbol name in the library. The value must be
+a valid Julia name. A pattern that matches nothing, or a name already in use,
+is an error.
 
-[link]
-enable_lto         = false      # C++ default; Tier 2/3
-optimization_level = "2"
+## `[types]`
 
-[wrap]
-language = "cpp"
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `templates` | none | C++ template instantiations to compile in: `"std::vector<double>"`. |
+| `template_headers` | none | Headers those need, beyond the standard ones found automatically. `"<fmt/format.h>"` for a system-style include, `"mylib.h"` for a quoted one. |
+| `records` | none | C++ classes that no source file of the library uses, to make them appear in the wrapper. Spelled as in C++ (`ns::Class`). Not for templates. |
+| `custom` | none | A table mapping a C type name to a Julia type, for a type the wrapper cannot map: `MyHandle = "Ptr{Cvoid}"`. |
+| `strictness` | `"warn"` | What to do with a type that has no exact Julia equivalent: `"strict"` fails, `"warn"` reports and continues, `"permissive"` continues silently. |
+| `allow_unknown_structs` | `true` | Treat an unknown struct as an opaque pointer instead of failing. |
+| `allow_unknown_enums` | `false` | Treat an unknown enum as a 32-bit integer. |
+| `allow_function_pointers` | `true` | Wrap function-pointer arguments as `Ptr{Cvoid}`. |
 
-[types]
-strictness       = "warn"
-templates        = ["fmt::basic_memory_buffer<char>"]
-template_headers = ["<fmt/format.h>"]
+## `[dependencies.<name>]`
 
-[cache]
-enabled = true
-```
+Source that is compiled into the library. [Where the source comes from](dependencies.md)
+explains each type.
 
-### A CMake project of several libraries (graph mode)
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `type` | `"local"` | `"git"`, `"archive"`, `"local"` or `"system"`. **Not `"git"` by default**: an entry with a `url` and no `type` fetches nothing. |
+| `url` | | `git`: the repository. `archive`: the tarball's URL, or a path to one on disk. |
+| `tag` | the default branch | `git`: the tag or branch to check out. |
+| `commit` | | `git`: the full 40-character commit the tag must be at. A shorter value is an error; a checkout at another commit stops the build. |
+| `sha256` | | `archive`: the tarball's SHA-256. Required. |
+| `subdir` | | `archive`: the folder inside the tarball that holds the source. Not needed when the tarball has one top folder. |
+| `path` | | `local`: the folder. Used in place, never copied, searched on every build. A `.a` or `.so` found inside it is linked. |
+| `pkg_config` | | `system`: a package name. Its include and link flags are taken from `pkg-config`. Nothing is compiled. |
+| `exclude` | none | Files and folders not to compile: an entry matches a file's name or any part of its path inside the dependency. Skipped without an entry: for `git` and `archive`, folders named `test`, `tests`, `testes`, `example`, `examples`, `fuzzing`, `build`, `doc`, `docs`; for `local`, only `build`, `.git`, `.cache`. |
+| `submodules` | none | `git`: the submodule paths to fetch. Only these, at the commits the repository records. |
 
-```toml
-[project]
-name = "mygraph"                 # the graph module: julia/Mygraph.jl
+## `[platform.<system>]`
 
-[graph]
-source  = "upstream"             # holds CMakeLists.txt
-targets = ["hist"]               # hist and the shared libraries it links
-options = ["-DBUILD_TESTING=OFF"]
-```
+`<system>` is `linux`, `windows` or `macos`. Any section of the file may
+appear under it, and is laid over the rest on that system:
+`[platform.windows.link]`, `[platform.windows.dependencies.glfw]`. A value
+replaces the one outside the platform table; a list is replaced whole. Any
+other system name is an error.
 
-```julia
-RepliBuild.build("replibuild.toml")
-G = include(RepliBuild.wrap("replibuild.toml"))   # or RepliBuild.register + use
-G.Hist.some_function(1)
-```
+## `[graph]`
 
-A pinned upstream as the CMake project (`[graph] dependency`) is the Hub's
-libwebp recipe, on [Graph mode](graph.md#A-recipe).
+Present: the project is a [CMake project](graph.md) and the build is taken
+from CMake.
 
-### A pre-built C binary (ingest)
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `source` | `"."` | The folder holding `CMakeLists.txt`. With `dependency`, a folder inside that dependency. |
+| `dependency` | | The `[dependencies]` entry whose source is the CMake project. |
+| `targets` | every library | The CMake library targets to build and wrap. The libraries they link are included. Naming a program is an error. |
+| `options` | none | Arguments for CMake's configure step: `["-DBUILD_TESTING=OFF"]`. |
+| `build_type` | `"Release"` | `CMAKE_BUILD_TYPE`. |
 
-```toml
-[project]
-name = "foo"
+An unknown key or a wrong type in `[graph]` is an error. In a graph project
+`[compile]`, `[types]` and the `[wrap]` keys other than `module_name` do not
+apply: flags come from CMake.
 
-[ingest]
-library         = "/path/to/libfoo.so"      # must have been built with -g
-headers         = ["/path/to/include"]
-extra_link_libs = ["libbar.so.2"]           # a dependency libfoo.so does not record
+## `[paths]`, `[binary]`, `[cache]`
 
-[wrap]
-language = "c"
-```
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `[paths] output` | `"julia"` | Where the library and the wrapper are written. |
+| `[paths] build` | `"build"` | Where intermediate files are written. |
+| `[binary] type` | `"shared"` | Leave as is. A wrapper needs a shared library. |
+| `[binary] output_name` | `lib<name>.so` | The library's file name. |
+| `[cache] enabled` | `true` | Reuse compiled files between builds. |
+| `[cache] directory` | `".replibuild_cache"` | Where they, and fetched dependencies, are kept. |
 
----
+## Keys that do nothing
 
-## 7. Troubleshooting
+`discover` writes these and nothing reads them. Leave them or delete them:
 
-Symptom → key, including build and cache failures, lives on
-[Troubleshooting](troubleshooting.md). The rows that point at this file:
+`[discovery]` (the whole section), `[workflow] stages`, `[wrap] enabled`,
+`[wrap] style`, `[binary] strip_symbols`, `[paths] source`, `[paths] include`,
+`[paths] cache`, `[project] uuid`, `[llvm]`.
 
-| What you see | Section on this page |
-|---|---|
-| Template type missing / members `Any` | §2.1 |
-| Header struct has no fields | §2.5 |
-| Macro API absent, or wrong values | §2.2 |
-| Variadic function only takes fixed args | §2.3 |
-| Memory grows on string-returning calls | §2.4 |
-| Tests/examples leaked into the wrapper | §2.6 |
-| Wrapper exports the library's internal helpers | §2.12 |
-| Build refused: "wrappable surface … is EMPTY" / "NOT reachable" | §2.12 — `visibility = "hidden"` on a library that does not annotate |
-| Missing header / missing `-D` | §2.7, §2.9 |
-| Setting does nothing | §5 — typos are silent |
-| A dependency's submodule headers not found | [Dependencies](dependencies.md#Which-submodules-a-library-needs) |
-| Function name is hundreds of characters long | §2.17 |
+In particular `[discovery] ignore_patterns` does not keep files out of a
+build. Use `exclude` on the dependency.
+
+## Experimental keys
+
+These belong to features that are not part of the supported workflow. A
+recipe does not need them.
+
+| Key | Leave it at | What it is |
+|:----|:------------|:-----------|
+| `[link] enable_lto` | `false` | Calls C functions through the library's compiled code embedded in the wrapper, instead of through the library file. Fails on large libraries. |
+| `[wrap.tier1]` | absent | A per-function version of the same idea. Described under [Tier 1](tier1.md). |
+| `[link] promote_statics`, `[link] fallback` | absent | Support for the two keys above. |
+| `[ingest]` | absent | Wraps a C library you compiled yourself, without its source. Written by [`RepliBuild.ingest`](api.md#Ingest). |
+
+## What a forced discover keeps
+
+`discover` on a project that already has a `replibuild.toml` leaves the file
+alone. `discover(path; force = true)` scans again and rewrites it, keeping
+these keys from the old file:
+
+- `[dependencies]`, `[graph]` and `[platform.*]`, whole;
+- `[types] templates`, `template_headers`, `records`;
+- `[wrap] macros`, `varargs`, `cstring_owned`, `rename`, `shim_headers`,
+  `shim_defines`, `exclude_symbols`, `surface_types_only`,
+  `surface_types_extra`, `headers`, `tier1`;
+- `[compile] visibility`, `[link] promote_statics`.
+
+**Everything else is rewritten from the scan**, including `[compile] flags`,
+`include_dirs` and `[link] link_libraries`. Do not use `force = true` on a
+recipe you have tuned by hand; keep the file in version control.
+
+## What stops, what warns
+
+**Errors when the file is read**
+
+- `commit` that is not 40 hexadecimal characters.
+- `[wrap.varargs]` entry that is not a list of lists.
+- `[compile] visibility` other than `"default"` or `"hidden"`, or `"hidden"`
+  together with a different `-fvisibility=` in `flags`.
+- `shim_defines` without `shim_headers`, or an entry that is not `NAME` or
+  `NAME=VALUE`.
+- `submodules` on a dependency that is not `git`, or an entry that is not a
+  plain relative path.
+- An unknown `[platform.<system>]` name.
+- An empty `[project] name`, a `root` that does not exist, a `source_files`
+  entry that does not exist, an `optimization_level` outside the list.
+
+**Errors during `build` or `wrap`**
+
+- The checked-out dependency is not at `commit`, or a tarball does not match
+  `sha256`.
+- A `shim_headers` entry resolved to a file outside the project and its
+  dependencies.
+- A `[wrap.varargs]` type name outside the allowed list, or a `proven_at` that
+  differs from the dependency's `commit`.
+- An `exclude_symbols`, `surface_types_extra` or `[wrap.rename]` pattern that
+  matches nothing.
+- A `[wrap] headers` entry that is not found.
+- The built library exports none of its functions: `visibility = "hidden"` on
+  a library that does not mark its public functions.
+
+**Warnings**
+
+- A variadic function with no `[wrap.varargs]` entry, and a `[wrap.varargs]`
+  table with no `proven_at`.
+- A `[types] templates` entry that produced nothing usable.
+- A struct that could not be given named fields and is wrapped as raw bytes
+  with accessor functions.
+- A git dependency that could not be fetched. The build continues and then
+  fails on the missing files, so look for `Failed to clone dependency` above
+  the first compile error.

@@ -13,8 +13,8 @@ not maintain generated bindings.
 It wraps a library from its source, on your machine. It is not a replacement for
 BinaryBuilder and JLL packages, which ship prebuilt binaries for every platform.
 
-**[User manual](https://obsidianjulua.github.io/RepliBuild.jl/stable/)** — install,
-wrap a library, edit the TOML, call the result.
+**[User manual](https://obsidianjulua.github.io/RepliBuild.jl/stable/)**: set up,
+write the recipe, use the wrapper.
 
 ## First wrap
 
@@ -40,6 +40,20 @@ Julia package around it to your Julia environment, so `RepliBuild.use("myproject
 or `using MyProject` loads it in any session; the one-shot `discover` above ends
 by registering. A fresh install has an empty registry: `use("cjson")` is not a
 first-run command.
+
+## What you get
+
+The wrapper is generated for one build of one library and checked against it.
+Layouts, signatures and enum values come from the compiled library. C
+functions are called directly, at the cost of a hand-written call. C++ works
+in full: methods, virtual dispatch, overloads, default arguments, classes by
+value, `std::string`, containers, exceptions. C++ call stubs can be compiled
+ahead of time, the module precompiles in a package, and the package can go
+into a system image
+([Make it fast](https://obsidianjulua.github.io/RepliBuild.jl/stable/performance/)).
+And it can be debugged all the way down: a debugger stops in the library's own
+source and steps through the generated C++ call stubs
+([Debug it](https://obsidianjulua.github.io/RepliBuild.jl/stable/debugging/)).
 
 ## What you edit
 
@@ -76,80 +90,70 @@ ret = "int"
 # fmt_fn = [["Cint"], ["Cstring", "Cint"]]
 
 [types]
-templates = ["std::vector<int>"]    # C++: force DWARF for these instantiations
+templates = ["std::vector<int>"]    # C++: template types to compile in
 ```
 
-[The recipe](https://obsidianjulua.github.io/RepliBuild.jl/stable/toml/) explains
-what the file is for and maps everything it can do; the
-[configuration page](https://obsidianjulua.github.io/RepliBuild.jl/stable/config/)
-lists every key, what discovery cannot infer, and a symptom → key index.
+[What goes in the TOML](https://obsidianjulua.github.io/RepliBuild.jl/stable/toml/)
+is the checklist of what to look for in a library and the entry each thing
+needs; [Every key](https://obsidianjulua.github.io/RepliBuild.jl/stable/config/)
+is the reference.
 
-A CMake project of several libraries that link each other is one recipe too:
-a `[graph]` section takes the build graph from CMake's own File API, builds
-every library, and wraps them as one Julia module with a submodule per library
-and one Julia type per C++ type across them
-([Graph mode](https://obsidianjulua.github.io/RepliBuild.jl/stable/graph/)).
+A CMake project that builds several libraries is one recipe too: a `[graph]`
+section takes the build from CMake, builds every library, and wraps them as one
+Julia module with a submodule per library
+([CMake projects](https://obsidianjulua.github.io/RepliBuild.jl/stable/graph/)).
 
 ## Requirements
 
-- **Linux (x86-64 or AArch64) or Windows (x86-64).** Linux is ELF `.so`;
-  Windows is PE `.dll` under `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64) —
-  not MSVC. Both read DWARF through GNU binutils. macOS is refused at load: its
-  Mach-O plumbing (DWARF in a `.dSYM`, no dynamic symbol table, no GNU dumper)
-  and Apple's arm64 calling convention are not built.
-- **Julia 1.12 or 1.13**, the versions CI tests, and what `Project.toml`
-  admits (`julia = "1.12"`).
-- **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every
-  distribution has. Clang ships as a JLL, and link/optimize/assemble run on
-  Julia's own libLLVM. On Windows, MSYS2 CLANG64 and GNU `objdump` (below).
-- **C++ libraries:** system LLVM/MLIR 21+, and the JLCS dialect library built
-  against it. `Pkg.build("RepliBuild")` builds it when the LLVM/MLIR tools are
-  installed (on Windows, in MSYS2 CLANG64).
-  [Install](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/)
-  has the steps. Every machine that *runs* a C++ wrapper needs them too, not
-  only the one that generated it
-  ([Ship a package](https://obsidianjulua.github.io/RepliBuild.jl/stable/using-wrappers/#Deployment)).
-- **git**, for a `[dependencies]` entry of `type = "git"`: RepliBuild runs the
-  `git` command, and `check_environment()` does not check for it.
+- **Linux (x86-64 or AArch64) or Windows (x86-64, with MSYS2 CLANG64).** macOS
+  is not supported.
+- **Julia 1.12 or newer.**
+- **C libraries:** on Linux, nothing but the C library's development files
+  (`libc6-dev`, `glibc-devel`), which a machine with `gcc` already has. The
+  C compiler, the linker, `readelf`, `nm`, `git`, `cmake` and `ninja` come with
+  the package; the system's copies are used when those cannot start, or first
+  with `REPLIBUILD_TOOLS=system`.
+- **C++ libraries:** `clang++` and LLVM 21 or newer on `PATH`. RepliBuild's
+  C++ support library, `libJLCS`, is downloaded ready-made on Linux and built
+  by `Pkg.build("RepliBuild")` on Windows.
 
-`RepliBuild.check_environment()` reports which of the others this machine has.
+`RepliBuild.check_environment()` checks all of it and prints the command that
+installs whatever is missing.
+[Set up](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/) has the
+steps for each system, including
+[Windows](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/#Windows).
 
-### Windows
+A machine that only runs a wrapper needs less than one that builds it:
+[Deployment](https://obsidianjulua.github.io/RepliBuild.jl/stable/using-wrappers/#Deployment).
 
-Use the **MSYS2 CLANG64** environment specifically — it is the
-`x86_64-w64-windows-gnu` target that matches Julia's own mingw build, and the
-only MSYS2 repo shipping MLIR. In a CLANG64 shell:
-
-```
-pacman -S --needed mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-mlir \
-                   mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja git \
-                   mingw-w64-x86_64-binutils
-```
-
-(`mingw-w64-x86_64-binutils` supplies GNU `objdump` for DWARF extraction; CLANG64's
-own "binutils" is llvm-objdump, which is rejected.) Then add
-`C:\msys64\clang64\bin` to the Windows `PATH`.
-
-The C bucket compiles through the Clang JLL, which carries no headers or CRT of
-its own, so it borrows the CLANG64 sysroot. That is found automatically;
-`REPLIBUILD_C_SYSROOT` overrides it.
-
-[Install](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/#Windows)
-has the full setup. [WINDOWS_PORT.md](docs/updates/WINDOWS_PORT.md) records what
-the port found.
+Releases up to 4.5.0 use the system's `readelf`, `nm` and `git`, and build
+`libJLCS` against a system LLVM/MLIR; the Set up page says how.
 
 ## Documentation
 
-- [User manual](https://obsidianjulua.github.io/RepliBuild.jl/stable/) — the complete index
-- [Wrap a library](https://obsidianjulua.github.io/RepliBuild.jl/stable/guide/) ·
-  [The recipe](https://obsidianjulua.github.io/RepliBuild.jl/stable/toml/) ·
-  [Edit the TOML](https://obsidianjulua.github.io/RepliBuild.jl/stable/config/) ·
-  [Dependencies](https://obsidianjulua.github.io/RepliBuild.jl/stable/dependencies/) ·
-  [Graph mode](https://obsidianjulua.github.io/RepliBuild.jl/stable/graph/) ·
-  [Call a wrapper](https://obsidianjulua.github.io/RepliBuild.jl/stable/calling/) ·
-  [API](https://obsidianjulua.github.io/RepliBuild.jl/stable/api/)
-- [Developer](https://obsidianjulua.github.io/RepliBuild.jl/stable/developer/) — architecture (JLCS, inheritance ABI, internals)
-- [CHANGELOG](CHANGELOG.md)
+The [user manual](https://obsidianjulua.github.io/RepliBuild.jl/stable/) follows
+the three things you do:
+
+1. [Set up](https://obsidianjulua.github.io/RepliBuild.jl/stable/install/)
+2. Write the recipe:
+   [Wrap your first library](https://obsidianjulua.github.io/RepliBuild.jl/stable/guide/) ·
+   [What goes in the TOML](https://obsidianjulua.github.io/RepliBuild.jl/stable/toml/) ·
+   [Every key](https://obsidianjulua.github.io/RepliBuild.jl/stable/config/) ·
+   [Where the source comes from](https://obsidianjulua.github.io/RepliBuild.jl/stable/dependencies/) ·
+   [Several libraries](https://obsidianjulua.github.io/RepliBuild.jl/stable/libraries/) ·
+   [CMake projects](https://obsidianjulua.github.io/RepliBuild.jl/stable/graph/) ·
+   [Header-only libraries](https://obsidianjulua.github.io/RepliBuild.jl/stable/header-only/)
+3. Use the wrapper:
+   [Call the wrapper](https://obsidianjulua.github.io/RepliBuild.jl/stable/calling/) ·
+   [Load it anywhere](https://obsidianjulua.github.io/RepliBuild.jl/stable/use/) ·
+   [Build a package on it](https://obsidianjulua.github.io/RepliBuild.jl/stable/using-wrappers/) ·
+   [Make it fast](https://obsidianjulua.github.io/RepliBuild.jl/stable/performance/) ·
+   [Debug it](https://obsidianjulua.github.io/RepliBuild.jl/stable/debugging/)
+
+Also: [Troubleshooting](https://obsidianjulua.github.io/RepliBuild.jl/stable/troubleshooting/) ·
+[API](https://obsidianjulua.github.io/RepliBuild.jl/stable/api/) ·
+[Internals](https://obsidianjulua.github.io/RepliBuild.jl/stable/developer/), for contributors ·
+[CHANGELOG](CHANGELOG.md)
 
 ## License
 

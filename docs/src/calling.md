@@ -1,373 +1,452 @@
-# Call a wrapper
+# Call the wrapper
 
-A generated wrapper is an ordinary Julia module sitting next to its `.so`.
-Load it, call the C API, do not edit the file.
+`wrap` writes an ordinary Julia module beside the library it calls. This page
+is how the library's functions, types and objects look from Julia.
 
-```julia
-include("path/to/project/julia/MyProject.jl")   # module name = CamelCase of [project].name
-using .MyProject
-
-MyProject.some_function(...)     # everything exported; docs on each symbol
-```
-
-Once the project is registered (`register(toml)`), `RepliBuild.use("myproject")`
-returns the loaded module, and `using MyProject` loads it from your Julia
-environment, so you can skip `include`. [Registry](use.md).
-
-Load a wrapper at top level. `include` and `use` define the module while your
-code runs, so a function that loads one and then calls into it in the same call
-fails with `method too new to be called from this world context`. If you must
-do both in one function, call through `Base.@invokelatest M.f(x)`.
-
-Never hand-edit `julia/MyProject.jl`. Regenerate with `wrap()`. Put Julia-shaped
-API in your own module — [Ship a package](using-wrappers.md).
-
-A name that would shadow one of Base's or Core's is defined but not exported: a
-C union called `Number` is `MyProject.Number`, never plain `Number`. `wrap`
-prints those names, and the wrapper lists them in a "Withheld from `export`"
-comment.
-
-## Types
-
-**Structs.** Named fields when Julia's layout reproduces every DWARF offset and
-the total size. Otherwise an opaque byte blob with typed getters/setters. Padding
-fields are explicit. Circular references are ordered so the module loads.
-Structs are values, because they cross the ABI by value: `x.f = v` is an error,
-and `T()` returns one with every byte zero. To change a field, make a new value:
-`Vec2(9.0, v.y)`, or `setproperty(x, :f, v)` / `setproperties(x; f = v)` where
-the wrapper defines them, which return a copy. A C++ wrapper defines them for
-every struct, a C wrapper for its byte-blob structs.
-
-**Enums.** A type of the enum's underlying width (`Cint`, `UInt8`, …) whose
-values are any value of that type, declared or not, as in C:
-`VTermKey(Int(VTERM_KEY_FUNCTION_0) + 1)` is libvterm's F1 though only
-`VTERM_KEY_FUNCTION_0` and `VTERM_KEY_FUNCTION_MAX` are declared. It behaves as a
-Julia `@enum`: `Int(x)`, `x == NAME`, `x isa Enum`, `instances(E)`, and a
-declared value prints by name; an undeclared one prints as `E(257)`. Values of
-one enum combine with `|`, `&` and `xor` (imgui's `ImGuiMod_Ctrl | ImGuiKey_S`),
-and an `Int` converts where a field or argument wants the enum. A C enum whose
-members are bit flags is an integer alias plus named constants instead.
-Enumerators are bound at module scope, under their own names.
-One whose name is also a struct, a function, a global, an enum type or an
-enumerator of another enum in the same wrapper is bound as `<enum>_<name>`,
-the way C++ spells `kind::object`: Boost.JSON's `kind::object` is
-`BoostJson.kind_object`, since `BoostJson.object` is the record, and
-`kind::null` and `literals::null` are `kind_null` and `literals_null`. A
-comment above the enum names each such collision.
-
-**Unions.** A `mutable struct` holding the union's bytes
-(`data::NTuple{N,UInt8}`), with `U()` for a zeroed one and, for each member, a
-getter and a setter that writes into the union: `get_U_m(u)` / `set_U_m!(u, v)`
-in a C wrapper, `get_m(u)` / `set_m!(u, v)` in a C++ wrapper.
-
-**Bitfields.** A getter and a setter for each field, which read and write only
-its bits: `get_f(s)`, and in a C wrapper `set_f(s, v)`, which returns a new
-struct; in a C++ wrapper the record is a `mutable struct` and `set_f!(s, v)`
-writes into it.
-
-**Macros** declared in `[wrap.macros]` are functions: `lua_pop(L, 1)`. A value
-macro takes no arguments: `LUA_REGISTRYINDEX()`.
-
-**Function pointers.** `Ptr{Cvoid}`, which a `@cfunction` converts to. The
-docstring shows the `@cfunction` call for the callback's signature: the header's
-when the parameter is declared with a typedef the headers spell
-(`typedef int (*progress_cb)(int done, void *user);`), and otherwise the one DWARF
-records, with each type spelled as the wrapper spells its own parameters. A
-variadic callback, or a pointer to one, has no example; its docstring shows the
-DWARF signature instead, such as `function_ptr(int; const char*, ...)*`.
-
-**Globals.** A value accessor plus a `_ptr` accessor. Unprovable types get the
-pointer only.
-
-**`char*` returns.** Default is `Union{String,Nothing}` — NULL is `nothing`,
-anything else is copied into a Julia `String`. Declare malloc'd returns in
-`[wrap.cstring_owned]` so the wrapper frees the C buffer through the library's
-own deallocator after the copy. Every such function also has a raw `<name>_ptr`
-variant: no copy, no NULL check, never freed.
-
-```toml
-[wrap.cstring_owned]
-cJSON_Print = "cJSON_free"
-```
-
-A `<name>_ptr` result is a `Cstring`. To free it yourself, pass the library's
-free function a `Ptr{Cvoid}` (`M.cJSON_free(Ptr{Cvoid}(p))`; the `Cstring` itself
-is a `MethodError`), or give a buffer the library got from `malloc` to
-`M.libc_free(p)`.
-
-**Pointers and references.** A pointer or reference **return** is typed from
-its declaration: `T*`, `const T*` and `T&` return `Ptr{T}`, `T**` returns
-`Ptr{Ptr{T}}`, when the wrapper emits `T` (an opaque `struct T end` handle
-included). `void*`, function pointers, types the wrapper does not emit, and
-records that are `mutable struct`s in Julia (unions, bitfield records) return
-`Ptr{Cvoid}`. Typing is not ownership: a typed pointer gets no finalizer, and
-memory the library owns (`GetIO()`) stays the library's. A pointer
-**parameter** takes a `Ptr{T}` or a `Ref{T}`, and in a C++ wrapper also a
-`Managed` object, a `String` for a `char*`, or anything else Julia converts
-with `Base.unsafe_convert`.
-
-**ABI traps.** A function the wrapper cannot call correctly on this host — a
-`long double` by value, a record whose layout DWARF does not settle — is still
-defined, and calling it throws an error that starts `ABI Safety Trap` and
-names the reason. The rest of the module is unaffected.
-
-## Arguments
-
-A parameter declared as a struct, `f(Vec2 v)`, takes the struct value:
-`f(Vec2(1.0, 2.0))`. A parameter declared as a pointer, `g(const Point *p)`,
-takes a `Ref{Point}` or a `Ptr{Point}`, never the bare value. Before v3.0 an
-overload accepted the value and passed the callee a pointer to a temporary
-copy, so whatever it wrote or freed went to the copy; it was removed.
-
-Most parameters accept any value Julia can convert: an `int` takes any
-`Integer`, checked for range, and in a C wrapper a `double` takes any `Real`.
-Some take exactly one Julia type — fixed-width integers such as `int32_t`
-(`Int32`), and floating point in a C++ wrapper (`Cdouble`): write `2.0`, not
-`2`. Each function's signature says which. C++ overloads that differ only in
-an integer parameter's width keep that width on the parameter they differ
-on, so they stay distinct methods: `to_chars(…, int, int)` takes an `Int32`
-value and `to_chars(…, long long, int)` an `Int64`, while the `base` they
-agree on takes any `Integer`. Two C types that are one width on the host
-(`int` and `long` on Windows, `long` and `long long` on Linux) are one
-method, taking any `Integer`.
-
-**C++ overloads** of one name are one Julia function with several methods, and
-the positions the overloads disagree on are typed so Julia dispatches between
-them; every other position stays loose. A pointer where one overload takes
-`const char*` and another `const void*` takes `Union{AbstractString, Cstring,
-Ptr{UInt8}, Ptr{Int8}, AbstractVector{UInt8}}` in the first method, so a
-`String` selects it; a pointer to a record takes `Ptr{T}`, `Ref{T}`, an
-`AbstractVector{T}` or the record's owning types; an enum position takes that
-enum, never a plain integer (which belongs to an integer overload). An argument
-that fits none of the methods is a `MethodError`, never a call to the wrong
-overload. An rvalue overload (`f(T&&)`) beside its `f(const T&)` twin is not
-emitted: Julia has no moves, and the copy is what a caller means.
-
-**Variadic functions** have one function per overload declared in
-`[wrap.varargs]`, named after its variadic types: `lua_pushfstring_Cstring(L,
-fmt, s)`. The plain name takes the fixed parameters only
-([Edit the TOML](config.md#2.3-Variadic-functions)).
-
-**Memory the library allocated** is freed by the library: through its own free
-function, or `M.libc_free(ptr)` for memory it got from `malloc`. Never
-`Libc.free` it. On Windows Julia's `Libc` is a different C runtime from the
-library's, and freeing across them corrupts the heap. `Libc.free` is for
-memory you allocated with `Libc.malloc`.
-
-## C++
-
-**Methods** are `Class_method(this, …)` and expect `this` to already point at
-the **`Class` subobject**. A namespace is part of the name:
-`tinyxml2::XMLComment::ParseDeep` is `tinyxml2_XMLComment_ParseDeep`, and a
-template's arguments are too (`hol::Box<double>::get` is `hol_Box_double_get`).
-
-### Objects
-
-A class whose constructor is in the library gets a constructor wrapper, named
-`Class_Class(this, args…)`, and a destructor wrapper, `Class_destroy_Class(this)`.
-A constructor defined only in a header is in the library too: the build
-defines every one the DWARF declares and no translation unit emitted
-([Using wrappers](using-wrappers.md)).
-They work on storage you provide, the way placement `new` and an explicit
-destructor call do in C++:
+## Load it
 
 ```julia
-p = Ptr{M.Rect}(Libc.malloc(M.struct_size(:Rect)))
-try
-    M.Rect_Rect(p, 1, 2.0, 3.0)      # Rect::Rect(int, double, double), in place
-    M.Rect_area(p)                    # methods take the pointer
-    M.Rect_destroy_Rect(p)            # Rect::~Rect(); does not free the storage
-finally
-    Libc.free(p)
+include("path/to/project/julia/Mathlib.jl")
+using .Mathlib
+
+ml_dot(ml_vec2(1.0, 2.0), ml_vec2(3.0, 4.0))
+```
+
+After [`register`](use.md), load it by name instead, from any session:
+
+```julia
+M = RepliBuild.use("mathlib")       # or:  using Mathlib
+```
+
+Three rules:
+
+- **Never edit the generated file.** `wrap` overwrites it. Change the TOML, or
+  write your own code in your own module.
+- **Keep the files in `julia/` together.** The module finds its library beside
+  itself.
+- **Load a wrapper at the top level** of a script or the REPL, not inside a
+  function that then calls into it. That fails with `method too new to be
+  called from this world context`; if you must, call through
+  `Base.@invokelatest M.f(x)`.
+
+## Find your way around
+
+```julia
+names(Mathlib)            # everything the module exports
+?ml_normalize             # a function's Julia signature and its C argument types
+methods(ml_dot)           # the argument types it accepts
+```
+
+Everything is exported, with one exception: a name that Julia itself already
+uses. A C type called `Number` is `Mathlib.Number`, never plain `Number`.
+`wrap` prints those names when it writes the module.
+
+A function the wrapper cannot call safely is still defined. Calling it raises
+an error that starts with `ABI Safety Trap` and gives the reason; the rest of
+the module is unaffected. To list them:
+
+```julia
+filter(l -> occursin("Safety Trap", l), readlines("julia/Mathlib.jl"))
+```
+
+## How C types appear
+
+| C | Julia |
+|:--|:------|
+| `int`, `long`, `size_t`, … | Pass any `Integer`. It is converted, and checked for range. |
+| `int32_t`, `uint8_t`, … | `Int32`, `UInt8`, … |
+| `double`, `float` | Pass any `Real` in a C wrapper. In a C++ wrapper pass a `Float64` or `Float32`: write `2.0`, not `2`. |
+| `bool` | `Bool` |
+| `const char*` argument | A `String` |
+| `char*` result | A `String`, or `nothing` for NULL |
+| `struct S` by value | The struct `S` |
+| `S*` | `Ref(s)`, or a `Ptr{S}` |
+| `void*` | `Ptr{Cvoid}` |
+| An enum | Its own type, with its values as constants |
+| A function pointer | `Ptr{Cvoid}`; make one with `@cfunction` |
+| A macro from `[wrap.macros]` | A function: `ML_VERSION()`, `lua_pop(L, 1)` |
+
+Each function's docstring states exactly what it takes.
+
+## Structs
+
+A struct is a Julia struct with the same fields:
+
+```julia
+v = ml_vec2(3.0, 4.0)
+v.x                        # 3.0
+ml_vec2()                  # every field zero
+```
+
+Structs are **immutable values**, because C passes them by value. `v.x = 9.0`
+is an error. Make a new one instead: `ml_vec2(9.0, v.y)`. Where the wrapper
+defines them, `setproperties(v; x = 9.0)` and `setproperty(v, :x, 9.0)` return
+a changed copy.
+
+**A struct argument takes the struct. A pointer argument takes a `Ref`.**
+
+```julia
+ml_dot(v, v)               # double ml_dot(ml_vec2 a, ml_vec2 b)
+
+r = Ref(v)                 # ml_status ml_normalize(ml_vec2 *v)
+ml_normalize(r)
+r[]                        # the value the function wrote: ml_vec2(0.6, 0.8)
+```
+
+Passing a bare struct where a pointer is expected is a `MethodError`.
+
+**A struct whose layout Julia cannot reproduce** (unusual packing, some
+bitfields) has no named fields. It holds the raw bytes, and the wrapper gives
+it a getter and a setter per field. `wrap` warns when it does this, and
+`names(M)` shows the accessors.
+
+**Unions** hold their bytes and have a getter and a setter per member:
+`get_U_m(u)` and `set_U_m!(u, v)` in a C wrapper, `get_m(u)` and
+`set_m!(u, v)` in a C++ wrapper. `U()` makes a zeroed one.
+
+**Bitfields** have a getter and a setter per field: `get_f(s)`, and
+`set_f(s, v)`, which returns a new struct, in a C wrapper; `set_f!(s, v)`,
+which changes it, in a C++ wrapper.
+
+## Enums
+
+```julia
+ml_normalize(Ref(ml_vec2(0.0, 0.0))) == ML_EDOM     # true
+Int(ML_EDOM)                                         # 1
+ml_status(1)                                         # ML_EDOM
+```
+
+An enum is its own type, and its values are constants in the module. As in C,
+any integer of the right size is a valid value: `ml_status(7)` works, and
+prints as `ml_status(0x00000007)` because it has no name. Values combine with
+`|`, `&` and `xor`, and an `Int` is accepted where a field or argument wants
+the enum.
+
+An enum whose values are bit flags is a plain integer type with named
+constants.
+
+When a value's name is also the name of a type, a function or another enum's
+value in the same module, it gets its enum's name in front: with a C++ class
+`Rect` and an `enum class Kind { Circle, Rect }`, the values are `Circle` and
+`Kind_Rect`. A comment above the enum in the wrapper lists these.
+
+## Strings
+
+- A `const char*` argument takes a Julia `String`.
+- A `char*` result is copied into a `String`. A NULL result is `nothing`.
+- If the caller must free the result, say so in
+  [`[wrap.cstring_owned]`](toml.md#Strings-the-caller-must-free), and the
+  wrapper frees it after copying.
+- Every such function also has a `<name>_ptr` version that returns the raw
+  pointer and frees nothing, for when you need the pointer itself.
+
+## Variadic functions
+
+Each combination listed in [`[wrap.varargs]`](toml.md#Variadic-functions) is
+its own function, named after its extra argument types:
+
+```julia
+ml_log("hello\n")                                 # fixed arguments only
+ml_log_Cint("n=%d\n", 7)
+ml_log_Cstring_Cdouble("%s=%g\n", "pi", 3.14)
+```
+
+## Callbacks
+
+A function-pointer parameter takes a `Ptr{Cvoid}`. Create it with
+`@cfunction`; the wrapper function's docstring shows the exact call for that
+callback's signature.
+
+```julia
+function on_progress(done::Cint, user::Ptr{Cvoid})::Cint
+    println("done: ", done)
+    return 0
 end
+
+cb = @cfunction(on_progress, Cint, (Cint, Ptr{Cvoid}))
+run_with_progress(cb, C_NULL)
 ```
 
-A class with a virtual destructor also has a *deleting* destructor, bound as
-`Class_delete_Class(this)`: it runs `~Class()` and then the class's
-`operator delete`, so the object must have come from `new` (or the class's own
-allocator), and nothing may free it afterwards. When that is the only
-destructor the library holds (an implicit virtual destructor at `-O2`, as for
-Bullet's `btBoxShape`), there is no `Class_destroy_Class` at all; the wrap
-report names those classes, and the docstring says which case you have.
+The Julia function must be a named top-level function, not a closure.
 
-`Rect()` is not a constructor. It is the zeroed Julia value every struct gets:
-no C++ constructor has run, so a class with virtual methods has a null vtable
-pointer, and calling a method on it crashes. A class a factory makes is the
-exception (below).
+## Memory the library allocated
 
-**`Managed*` types** own a heap pointer the library allocated. Their finalizer
-calls the library's deleter function for the class if it has one (a free or
-static function taking `Thing*` whose name says delete, destroy or free), and
-otherwise the class's deleting destructor, which is C++ `delete`. A class with
-neither, which is any class without a virtual destructor and without a deleter
-function, gets no `ManagedThing`. Give `ManagedThing(ptr)` only a pointer that
-deleter may free: never storage from `Libc.malloc` or a Julia array. The
-deleting destructor is called directly, so the object must be a `Thing`, not an
-object of a subclass. When a function the wrapper calls through `ccall` (in
-C++, a `noexcept` one) returns `Thing*` and there is a `ManagedThing`, the
-wrapper also emits `<function>_safe(…) -> ManagedThing`. Keep a raw pointer when
-the library retains ownership (a `b2Body*` owned by its world).
+Free it with the library's own function. For a buffer the library got from
+`malloc`, use the wrapper's `M.libc_free(ptr)`.
 
-**Factories.** A free function named `create_`, `new_`, `make_`, `alloc_`,
-`init_` or `build_` that returns a pointer to a class makes that class a
-`mutable struct` holding the pointer, in place of its layout struct:
-`M.Rect(2.0, 3.0)` calls `make_rect`, and each method has a proxy
-(`M.area(r)`). The class is the one the returned pointer names, or one the
-function's name names that derives from it (`create_circle()` returning
-`Shape*`). Its GC finalizer is the library's deleter function for the class or
-for the returned type, or else the class's deleting destructor when nothing in
-the library derives from the class. A class with neither keeps its raw
-bindings.
+Do not use Julia's `Libc.free` on memory the library allocated. On Windows the
+library and Julia use different C runtimes, and freeing across them crashes.
+`Libc.free` is for memory you got from `Libc.malloc`.
 
-**Upcasts.** When a base subobject does not start where the object does, the
-wrapper emits `<Derived>_as_<Base>(p)`: a constant offset for a non-virtual base
-(multiple inheritance), an offset read from the object's vtable for a virtual
-base. To call a `Base` method on a `Derived`, pass `Derived_as_Base(obj)` as the
-handle. Where there is no such helper, as in plain single inheritance, the base
-starts at the object: pass the derived pointer itself (`Shape_id(p)` for a
-`p::Ptr{Rect}`).
+## Pointers
 
-MI base *members* are flattened onto the derived type. Virtual-base members are
-not — upcast, then use the base's accessors.
+A function that returns `T*` returns a `Ptr{T}` when the wrapper has the type
+`T`, and a `Ptr{Cvoid}` otherwise. A typed pointer says what it points at, not
+who owns it: memory the library owns stays the library's.
 
-**By-value handles as `this`.** Small handle structs returned by value (an
-8-byte `xml_node`) need a pointer to call a method on them:
+## Global variables
+
+A global variable has an accessor function that returns its value, and a
+`<name>_ptr` accessor that returns its address.
+
+## Sizes and offsets
 
 ```julia
-withptr(f, h) = (r = Ref(h); GC.@preserve r f(Base.unsafe_convert(Ptr{typeof(h)}, r)))
-name = withptr(node -> pugi_xml_node_name(node), root)
+M.struct_size(:ml_vec2)              # 16
+M.member_offset(:ml_vec2, :y)        # 8
 ```
 
-### Values that cross by value
+These are not exported; call them with the module's name. They take the
+numbers from the compiled library, so use them rather than writing a size or
+offset into your code. An unknown name raises an error; `M.STRUCT_SIZES` and
+`M.STRUCT_OFFSETS` hold every name they know.
 
-A C++ function that takes or returns a record **by value** gets that record's
-Julia struct, built from its DWARF layout, whoever declared it — the library,
-or the C++ standard library:
+`M.LIBRARY_PATH` is the library file the wrapper calls, and
+`M.BUILD_GENERATOR` the RepliBuild version that wrote it.
+
+---
+
+# C++
+
+## Names
+
+A function is named after its namespace, class and name, joined with `_`:
 
 | C++ | Julia |
 |:----|:------|
-| `std::pair<double, double>` | `pair_double_double` with fields `first`, `second` |
-| `std::array<double, 2>` | `array_double_2UL`, the elements in `_M_elems` |
-| `std::tuple<int, double>`, `std::optional<double>` | a struct laid out from the standard library's bases (libstdc++ stores a tuple's elements in reverse) |
-| `std::complex<double>` / `<float>` | `complex_double` / `complex_float`, one `ComplexF64` / `ComplexF32` field |
-| `std::string_view` | its pointer and length |
-| `std::string` **returned** | a Julia `String` |
-| a library record holding any of these | its fields, the standard-library ones included |
+| `shapes::midpoint(a, b)` | `shapes_midpoint(a, b)` |
+| `shapes::Rect::area()` | `shapes_Rect_area(rect)` |
+| `shapes::Rect::Rect(w, h)` | `shapes_Rect_Rect(storage, w, h)` |
+| `shapes::Rect::~Rect()` | `shapes_Rect_destroy_Rect(rect)` |
+| `hol::Box<double>::get()` | `hol_Box_double_get(box)` |
+
+**A method takes the object first**, as a pointer. To choose your own names,
+use [`[wrap.rename]`](toml.md#Names).
+
+## Objects
+
+Most C++ libraries hand you objects through functions that return a pointer.
+Use that pointer as the first argument of the class's methods, and give it
+back to the library's own function when you are done:
 
 ```julia
-r = M.minmax_pair(3.0, 1.5)                 # std::pair<double, double>
-(r.first, r.second)                         # (1.5, 3.0)
-M.pair_sum(M.pair_double_double(1.25, 2.5)) # a pair passed by value
+r = shapes_make_rect(2.0, 3.0)        # Shape* make_rect(double, double)
+
+shapes_Rect_area(r)                   # 6.0
+shapes_Shape_rename(r, "door")
+shapes_Shape_name_abi_cxx11(r)        # "door"
+shapes_Rect_scale(r, 0.5)
+
+shapes_destroy_shape(r)               # the library's own release function
 ```
 
-Standard-library types appear in the wrapper only when an exported function
-or global reaches them by value, so the wrapper stays the library's API, not a
-binding of the standard library. A record that cannot be laid out (one with a
-virtual base, or one holding a type nothing lays out) keeps its functions as
-ABI traps.
+A method of a base class takes a pointer to a derived object as it is.
 
-**`std::string` returns.** A function returning `std::string` by value
-returns a `String`: the wrapper reads the characters where C++ built the
-object, then runs the string's destructor there. The name keeps libstdc++'s
-ABI tag (`short_str_abi_cxx11`). When the wrapper cannot decode the string —
-metadata from before the layout was recorded (rebuild), a `std::wstring` or
-other wide string, an unknown standard-library layout — the function returns
-the object's raw bytes instead, and a comment beside the call in the wrapper
-says why.
+### Let Julia free the object
 
-**`std::string` parameters.** A parameter declared `const std::string&` or
-`std::string` (by value) takes a Julia string: the wrapper builds a real
-`std::string` from it in a buffer of its own, passes that object, and ends it
-after the call, whether the call returns or throws. The position is typed
-`Union{AbstractString, Ptr{Cvoid}, RepliBuild.STLWrappers.CppString}`, so a
-pointer to an existing `std::string` (one the library handed back), or the
-`CppString` a `[types] templates` entry gives you, passes through untouched. Beside an overload
-taking `const char*`, a Julia string picks the `std::string` one and a
-`Cstring` or byte pointer the other. What the wrapper cannot build keeps the
-byte stand-in, with the reason beside the call: metadata from before the
-constructor was recorded (rebuild), a wide string, a non-`const` reference
-(an out-parameter the library writes to). On a host whose C++ runtime has no
-such constructor the call raises, naming the function; it never passes bytes
-it did not build.
+For a class the library can delete, the wrapper defines an owning type,
+`Managed<Class>`. Wrap the pointer in it and Julia's garbage collector deletes
+the object when nothing refers to it any more:
 
-**Classes returned by value.** A class with a non-trivial copy constructor or
-destructor is returned through a buffer the wrapper owns: C++ constructs it
-there, as C++ itself would, and the function returns its bytes as the Julia
-value. Its destructor is not run (a `std::string` is the exception), so a
-class that owns resources is better reached through a factory or `Managed`
-type, and the Julia copy of a class that points into itself still points at
-the buffer it was built in.
+```julia
+s = ManagedShape(shapes_make_rect(2.0, 3.0))
+shapes_Rect_area(s)                   # pass it wherever the pointer goes
+```
 
-**Exceptions.** A C++ exception that escapes the callee arrives as
-`RepliBuild.JITManager.CxxException` with the original `what()` string. Catch it
-like any Julia exception.
+Wrap a pointer only if you own the object and it came from the library's
+allocator. Do not wrap an object the library still owns (a body that belongs
+to a physics world, for example), and do not also free it yourself.
 
-## A graph module
+For some functions that return a new object the wrapper adds
+`<function>_safe`, which returns the `Managed` type directly.
 
-A [graph](graph.md) wrapper is one module holding one submodule per library:
-`Libwebp.Webp`, `Libwebp.Libwebpmux`. Call each library through its submodule.
-A type several libraries use is one type, so values move between them with no
-conversion:
+A class has a `Managed` type when the library has a release function for it (a
+function taking a pointer to the class whose name contains delete, destroy or
+free), or when the class has a virtual destructor.
+
+### Construct an object yourself
+
+A constructor wrapper builds the object in memory you provide, like placement
+`new` in C++:
+
+```julia
+p = Ptr{Counter}(Libc.malloc(Shapes.struct_size(:Counter)))
+
+shapes_Counter_Counter(p, 3)          # Counter::Counter(int)
+shapes_Counter_next(p)                # 3
+shapes_Counter_next(p)                # 4
+
+shapes_Counter_destroy_Counter(p)     # Counter::~Counter(): runs the destructor, keeps the memory
+Libc.free(p)                          # the memory was yours
+```
+
+Two destructor wrappers exist, and they do different things:
+
+| Name | Does | Use it on |
+|:-----|:-----|:----------|
+| `Class_destroy_Class(p)` | Runs the destructor. Does not free the memory. | An object you constructed in your own memory. |
+| `Class_delete_Class(p)` | Runs the destructor **and frees the object** (C++ `delete`). | An object that came from `new`. Never free it again afterwards. |
+
+A class may have only one of the two: a class with a virtual destructor often
+has only `delete`. `wrap` names those classes, and each function's docstring
+says which kind it is.
+
+!!! warning "`Rect()` is not a constructor"
+    Every struct type has a zero-argument form that returns a value with all
+    bytes zero. For a C++ class that is not a constructed object: no
+    constructor has run, and calling a virtual method on it crashes. Construct
+    objects with the constructor wrapper or a library function.
+
+### Factory functions
+
+When the library has a free function named `create_…`, `new_…`, `make_…`,
+`alloc_…`, `init_…` or `build_…` that returns a pointer to a class, the
+wrapper may turn that class into a Julia type you construct directly:
+`M.Rect(2.0, 3.0)` calls the factory, the class's methods get short forms
+(`M.area(r)`), and the object is deleted by the garbage collector.
+`methods(M.Rect)` shows whether your wrapper has this.
+
+## Overloads and default arguments
+
+C++ overloads of one name are one Julia function with several methods. Julia
+picks the method from your argument types, so where two overloads differ you
+must pass the right type:
+
+- an overload taking `const char*` takes a `String`; one taking `const void*`
+  at the same position takes a pointer;
+- an overload taking an enum takes the enum value, not an integer;
+- overloads that differ in integer width take that exact type (`Int32(1)` or
+  `Int64(1)`).
+
+An argument that fits no overload is a `MethodError`. It is never a call to
+the wrong overload.
+
+A function with default arguments has a shorter method for each argument you
+may leave out, with the values C++ would use:
+
+```julia
+shapes_Rect_scale(r)          # void scale(double f = 2.0)
+shapes_Rect_scale(r, 0.5)
+```
+
+This needs [`-fstandalone-debug`](toml.md#Types-declared-only-in-headers), and
+covers constructors and member functions.
+
+## std::string
+
+- A function returning `std::string` returns a Julia `String`.
+- A parameter declared `std::string` or `const std::string&` takes a Julia
+  `String`.
+
+No TOML entry is needed for either. Functions returning a string carry a
+suffix on Linux: `shapes_Shape_name_abi_cxx11`. Rename them if you like.
+
+Wide strings (`std::wstring` and the like) are not converted. A non-`const`
+`std::string&`, which the function writes into, is not converted either: pass
+a pointer to a string object the library gave you.
+
+## Containers
+
+List the containers you want to create in
+[`[types] templates`](toml.md#C-templates-and-containers). Each gets a
+constructor function, and behaves like a Julia collection:
+
+```julia
+v = create_std_vector_double()        # std::vector<double>
+push!(v, 1.0)
+push!(v, 2.0)
+length(v)                             # 2
+v[1]                                  # 1.0
+
+shapes_total_area(v)                  # double total_area(const std::vector<double>&)
+```
+
+`std::vector`, `std::string`, `std::map` and `std::unordered_map` are
+supported this way.
+
+## Standard types passed by value
+
+When a function takes or returns one of these by value, the wrapper has a
+struct for it:
+
+| C++ | Julia |
+|:----|:------|
+| `std::pair<double, double>` | `pair_double_double`, with fields `first` and `second` |
+| `std::array<double, 2>` | `array_double_2UL` |
+| `std::tuple<…>`, `std::optional<…>` | A struct of their contents |
+| `std::complex<double>` | `complex_double`, holding one `ComplexF64` |
+| `std::string_view` | Its pointer and length |
+
+```julia
+r = M.minmax_pair(3.0, 1.5)           # std::pair<double, double>
+(r.first, r.second)                   # (1.5, 3.0)
+```
+
+A library class returned by value comes back as a Julia struct holding its
+bytes. Its destructor is not run. For a class that owns resources, prefer the
+pointer-returning functions.
+
+## Exceptions
+
+A C++ exception becomes a Julia exception carrying the C++ message:
+
+```julia
+try
+    shapes_checked_sqrt(-1.0)
+catch e
+    e isa RepliBuild.JITManager.CxxException      # true
+    showerror(stdout, e)                           # C++ exception: negative input
+end
+```
+
+## Inheritance
+
+Pass a pointer to a derived object wherever a base-class method wants its
+object. That works as is for ordinary single inheritance.
+
+With multiple or virtual inheritance a base class may not start at the
+beginning of the object. For those the wrapper defines
+`<Derived>_as_<Base>(p)`. Call the base's methods on its result:
+
+```julia
+b = Derived_as_Base2(d)
+Base2_method(b)
+```
+
+If the wrapper has such a function for a pair of classes, use it. If it has
+none, pass the pointer directly.
+
+## Small objects returned by value
+
+Some libraries return small handle objects by value (pugixml's `xml_node`).
+Methods want a pointer to them. A helper does the conversion:
+
+```julia
+withptr(f, h) = (r = Ref(h); GC.@preserve r f(Base.unsafe_convert(Ptr{typeof(h)}, r)))
+
+name = withptr(node -> pugi_xml_node_name(node), root)
+```
+
+## Types declared inside a class
+
+A type declared inside a C++ class has two names in the wrapper, its own and
+one with the class in front: `ClosestRayResultCallback` and
+`btCollisionWorld_ClosestRayResultCallback`. They are the same type.
+
+---
+
+# A CMake project's module
+
+A [CMake project](graph.md) is one module with a submodule per library. Call
+each library through its submodule. A type that several libraries share is
+one type, so values pass between them:
 
 ```julia
 include("julia/HelloWorld.jl")
 H, W = HelloWorld.Hello, HelloWorld.World
-W.Vec2 === H.Vec2            # true: World imports Hello's type
-W.Happy === H.Happy          # an imported enum brings its values
-W.hw_travel(H.hw_vec2(0f0, 0f0), H.hw_vec2(3f0, 4f0))   # Hello's values into World: 5.0f0
+
+W.Vec2 === H.Vec2                                        # true
+W.hw_travel(H.hw_vec2(0f0, 0f0), H.hw_vec2(3f0, 4f0))    # 5.0f0
 ```
 
-Load the graph module, never one library's wrapper on its own: a wrapper that
-imports types reaches its owners through the graph module.
-
-## Introspection
-
-None of these are exported. Reach for them qualified:
-
-| Name | What it answers |
-|------|-----------------|
-| `M.struct_size(:Type)` | Byte size, from DWARF (a `String` works too) |
-| `M.member_offset(:Type, :field)` | Byte offset of a member |
-| `M.STRUCT_SIZES`, `M.STRUCT_OFFSETS` | Every size and member offset those two read, as `Dict`s |
-| `M.BUILD_GENERATOR` | RepliBuild version that wrote this wrapper |
-| `M.LIBRARY_SHA` | SHA-256 of the library the wrapper was generated against |
-| `M.dispatch_tier(f)` | Which calling path `f` **actually** uses right now |
-| `M.DISPATCH_TIER` | What the generator **emitted** for each function |
-
-A C++ type declared inside a class is bound under two names: its own
-(`ClosestRayResultCallback`) and the one its functions carry
-(`btCollisionWorld_ClosestRayResultCallback`, as in
-`btCollisionWorld_ClosestRayResultCallback_hasHit`). They are the same type,
-and `struct_size` and `member_offset` take either. The qualified name is
-left out where the module already binds it to something else.
-
-`dispatch_tier` and `DISPATCH_TIER` exist only in a wrapper that mixes tiers, or
-that has Tier 1 kernels. When every function takes the same path, the wrapper
-names that tier in a comment instead, and the two names are `UndefVarError`.
-
-```julia
-Lua.dispatch_tier(Lua.lua_gettop)                 # :tier1 | :tier2 | :tier3 | …
-buf = zeros(UInt8, Box2d.struct_size(:b2BodyDef)) # in-place constructor space
-off = Imgui.member_offset(:ImGuiIO, :MousePos)
-```
-
-`dispatch_tier` and `DISPATCH_TIER` disagree when a generated kernel demoted at
-load (missing `slices/` directory, unresolvable symbol). Ask `dispatch_tier` in
-tests; it is what will run. Do not call it during precompilation — it forces
-code generation and will refuse with `:deferred`.
-
-Sizes and offsets throw with named alternatives rather than returning zero.
-
-## Layout facts in your own code
-
-When you must poke a field the type system cannot name (header-inline
-accessors, in-place construction), read the offset from the wrapper, never
-hardcode it:
-
-```julia
-off = M.member_offset(:ImGuiIO, :MousePos)
-```
-
-Those numbers come from the same DWARF the wrapper was generated from, so a
-layout change fails loudly on the next wrap instead of silently writing the
-wrong byte.
+Load the top module, never one library's file by itself.

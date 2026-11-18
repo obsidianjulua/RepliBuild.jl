@@ -1,38 +1,35 @@
-# Ship a package
+# Build a package on it
 
-The generated wrapper is enough for a script (`include` + `using .Module`).
-This page is the next step: a real Julia package that precompiles, owns C++
-lifetimes, and does not fork the generated file.
+For a script, `include` the wrapper and call it. This page is the next step: a
+Julia package of your own that contains a wrapper, loads fast, and gives your
+users a Julia-style API.
 
-The working reference is
-[`examples/BoxWorld`](https://github.com/obsidianjulua/RepliBuild-Hub/tree/main/examples/BoxWorld)
-in RepliBuild-Hub — a physics sandbox on the Box2D wrapper.
-
-How to *call* the generated API is [Call a wrapper](calling.md). This page is
-layout, precompilation, and the ergonomic layer you write once.
+A complete example is
+[BoxWorld](https://github.com/obsidianjulua/RepliBuild-Hub/tree/main/examples/BoxWorld)
+in RepliBuild-Hub, a physics sandbox built on the Box2D wrapper.
 
 ## Two layers
 
-- **ABI layer** — RepliBuild output (`<Name>.jl`, the `.so`,
-  `compilation_metadata.json`, `thunk_manifest.json`). Vendor it unmodified.
-  Regenerate with `wrap()`. Never edit it.
-- **Ergonomic layer** — your package. Julia-idiomatic types, lifecycles,
-  defaults, naming. Every C++-ism the wrapper cannot hide (ctor-only classes,
-  header-inline defaults, abstract-class vtables) is wrapped **once**, here.
+- **The generated wrapper**: everything in the project's `julia/` folder. Copy
+  it into your package unchanged. Never edit it; regenerate it with `wrap`.
+- **Your code**: the types, defaults, names and lifetimes you want your users
+  to see, written against the wrapper.
 
-Library-specific niceties belong in your package, not in hand-edits to the
-generated file. That is what keeps the wrapper regenerable.
+Anything specific to how you want the library to feel in Julia goes in your
+code. That is what lets you regenerate the wrapper when the library is
+upgraded.
 
-## Layout: vendor the wrapper
+## Layout
+
+Copy the whole `julia/` folder into your package, here as `lib/`:
 
 ```
 MyPkg/
-├── Project.toml            # [deps] must include RepliBuild
-├── lib/                    # verbatim from julia/
+├── Project.toml            # RepliBuild and Libdl listed under [deps]
+├── lib/                    # the project's julia/ folder, unchanged
 │   ├── Box2d.jl
 │   ├── libbox2d.so
-│   ├── compilation_metadata.json
-│   └── thunk_manifest.json
+│   └── …                   # the .json files beside them
 ├── src/MyPkg.jl
 └── test/runtests.jl
 ```
@@ -40,229 +37,182 @@ MyPkg/
 ```julia
 module MyPkg
 
-using RepliBuild        # C++ wrappers dispatch thunks through RepliBuild
+using RepliBuild
 
 include(joinpath(@__DIR__, "..", "lib", "Box2d.jl"))
 using .Box2d
 
-# … your ergonomic layer …
+# your API here
+
 end
 ```
 
-The copy in `lib/` is self-contained:
-
-1. The wrapper resolves its `.so` next to itself first (build-time absolute path
-   is the fallback), so the vendored pair stays bound wherever the package lives.
-2. Metadata is read from the wrapper's own directory at load.
-3. The only Julia dependency is `RepliBuild`: every wrapper imports it for its
-   build-identity check, and C++ wrappers dispatch through it. A C wrapper needs
-   nothing more. A wrapper with Tier 2 functions — most C++ wrappers — also
-   needs the JLCS dialect library loadable on the machine that runs it, in that
-   machine's RepliBuild install. That means a system LLVM/MLIR 21+ there, and the
-   dialect built against it ([Install](install.md#The-JLCS-dialect)).
-
-A [graph](graph.md) wrapper vendors the same way, as a tree: copy `julia/`
-whole (the graph module, `graph.toml`, and each library's `<target>/lib/`
-directory), include the graph module, and leave each library's wrapper where
-the graph module expects it. The graph module opens the libraries
-dependencies first, and each binds the copies opened before it (by soname on
-Linux, by a path relative to its wrapper on Windows), so a moved graph keeps
-using its own libraries.
-
-Alternatives:
-- `RepliBuild.use("box2d")` at runtime, once that name is registered (scripts,
-  not precompiled packages).
-- `using Box2d` after `register`: the package it adds to your Julia environment
-  precompiles like any other, but it points at the build vendored in
-  `~/.replibuild/`, so it is for this machine, not for shipping.
-- `RepliBuild.scaffold_package`, for a skeleton that *builds* the library on the
-  consumer's machine instead of shipping a binary ([below](#A-package-that-builds-its-library)).
-
-## A package that builds its library
+The generated module loads two packages, `RepliBuild` and `Libdl`, and your
+package must declare both, or it fails to precompile with `package MyPkg does
+not have Libdl in its dependencies`:
 
 ```julia
-RepliBuild.scaffold_package("MyLibWrapper")   # CamelCase; writes ./MyLibWrapper/
+using Pkg
+Pkg.activate("MyPkg")
+Pkg.add(["RepliBuild", "Libdl"])
 ```
 
-That writes a package whose `Pkg.build` compiles and wraps the library on the
-machine that installs it:
+The wrapper finds its library beside itself, so the copy works wherever the
+package is installed. Keep every file from `julia/` together; the module reads
+the `.json` files when it loads.
 
-| File | What it is |
-|------|------------|
-| `Project.toml` | Depends on RepliBuild, with a compat entry that admits the version that wrote it |
-| `replibuild.toml` | The TOML of a registered project named `MyLibWrapper` or `MyLib` (in any case), if there is one; otherwise a C++ template with no sources |
-| `deps/build.jl` | On `Pkg.build`: `check_environment()`, which stops it if C builds cannot work, then `build` and `wrap` |
-| `src/MyLibWrapper.jl` | Includes `julia/<Module>.jl` once it exists; warns until then |
-| `test/runtests.jl`, `.gitignore` | A test stub; `build/`, `julia/`, the cache and every binary are ignored |
-
-Edit the template before the first `Pkg.build`: name the sources
-(`[compile] source_files`, or a `[dependencies]` entry), set
-`[wrap] language = "c"` for a C library (the template means C++), and set
-`[link] enable_lto = false`, which the template turns on. The wrapper's module
-sits inside the package's, and with the template both are named after the
-package: call `MyLibWrapper.MyLibWrapper.f`, or `using` and re-export what you
-want in `src/MyLibWrapper.jl`. Every machine that installs the package needs
-the toolchain the library needs ([Install](install.md)).
-
-## Precompilation
-
-The generated module is precompilation-safe:
-
-- `dlopen`, JIT setup, and C stdout unbuffering live in the wrapper's
-  `__init__`, which Julia runs at **load**, never during precompilation.
-- Duplicate method signatures are deduplicated at generation time. Method
-  overwriting is a hard error during package precompilation.
-
-!!! warning "Wrappers generated before v3.0.2 do not precompile"
-    Older files fail with `Method overwriting is not permitted`. Regenerate
-    with a current `RepliBuild.wrap(toml)`. `use()`-managed packages rebuild
-    automatically — the cache fingerprints the generator.
-
-Your layer must follow the same two rules:
-
-- **Never bake process addresses at top level.** A `const` from `dlsym`,
-  `cglobal`, or a JIT lookup is evaluated during precompilation and baked stale.
-  Use a `Ref` filled in your package's `__init__`.
-- **Baking pure data is good.** Parsing `compilation_metadata.json` into `const`
-  offset tables at top level is safe — the metadata ships inside the package
-  and cannot drift from the vendored `.so`.
-
-`dispatch_tier` is not a read-only lookup; do not call it at module scope. Ask
-at runtime. See [Call a wrapper](calling.md#Introspection).
-
-## Load time
-
-Loading a C++ wrapper stands up a per-binary engine and compiles the thunks
-that wrapper dispatches to. That costs on the order of a second for a mid-sized
-library, once per process, in `__init__`.
-
-Multiple wrapped libraries compose: one engine per `.so`. One library's
-initialization failure disables the hard ABI path for *that* library only —
-its `ccall` wrappers and every other library keep working. The failure does not
-throw: the wrapper logs `Failed to initialize JIT for lib….so` with the reason,
-`using MyPkg` succeeds, and calling one of that library's Tier 2 functions then
-raises. To degrade features instead, check the engine in your `__init__`:
-`RepliBuild.JITManager.GLOBAL_JIT.engines` holds one entry per library, with
-`binary_path` and `init_error` (`nothing` when it worked).
-
-With `[compile] aot_thunks = true`, `wrap` compiles the thunks the wrapper binds
-into a companion `_thunks.so` instead of leaving them to be compiled at load:
-faster startup, a second binary, and no JIT compilation in the consumer. It
-does not remove the dialect library: the AOT
-thunks still need `libJLCS` when they run. On Linux they import
-`jlcs_catch_current_exception` from it, and on Windows every thunk call goes
-through its `jlcs_guard_*` frame, which is what catches a C++ exception there.
-An AOT wrapper whose thunks library will not open fails in `__init__`, naming
-the state of `libJLCS`.
-
-## C++-isms to wrap once
-
-The wrapper gives you the raw material. Your layer hides each of these behind
-ordinary Julia functions:
-
-**Ctor-only classes** (no factory, e.g. `b2World`): allocate `struct_size`
-bytes, run the constructor wrapper on that storage, and the destructor wrapper
-at teardown ([Call a wrapper](calling.md#Objects)).
-
-```julia
-mem = zeros(UInt8, Box2d.struct_size(:b2World))
-Box2d.b2World_b2World(pointer(mem), Ref(gravity))   # b2World::b2World(const b2Vec2&)
-# … use pointer(mem) as the world …
-Box2d.b2World_destroy_b2World(pointer(mem))          # ~b2World(); the storage stays yours
-```
-
-Keep `mem` reachable for as long as the object lives: a field of your own
-Julia object, or `GC.@preserve`. A class whose only destructor binding is
-`Class_delete_Class` (see [Objects](calling.md#Objects)) frees the storage
-itself, so give it `new`-compatible storage and do not free it again.
-
-**Header-inline constructors** (`b2BodyDef()`, `btSphereShape(btScalar)`): a
-constructor defined in a header and used by none of the library's own
-translation units has no symbol of its own, so the build defines it: a
-generated unit odr-uses every such constructor the DWARF declares, and it
-then wraps like any other (`Class_Class(this, args…)`). The wrap report names
-the classes it did this for and the constructors it skipped (private,
-deleted, a template, an abstract class). It needs the class's definition in
-the DWARF, which under clang's constructor homing means `-fstandalone-debug`
-(or `-Xclang -fno-use-ctor-homing`) in `[compile] flags`; a plain `-g` build
-sees a never-constructed class as a declaration only.
-
-**Header-inline member functions** (`GetPosition()`,
-`btRigidBody::applyCentralImpulse`): a member function defined in a class
-body and called by none of the library's translation units has no symbol
-either, and the build defines those the same way: the generated unit takes
-the address of every public, non-virtual member function a library class
-declares and the library does not define, and each then wraps like any other
-method (`Class_method(this, args…)`). The wrap report counts them and names
-what was skipped and why. Two kinds are left out on purpose. A member of a
-class template's specialization (`btAlignedObjectArray<T>::size`) is
-instantiated by listing the specialization in `[types] templates`, which
-instantiates all of its members. A member declared in the header with no
-body there is the library's own out-of-line function, hidden or not
-compiled. `[wrap] exclude_symbols` drops any of them by pattern. Like the
-constructors, this needs the class's definition in the DWARF.
-
-**Default arguments** (`btDefaultMotionState(start)`,
-`setLimit(lo, hi)`): a default exists only in the header, so the same
-generated unit asks the compiler for it. For every public constructor and
-member function of a library class, each call that leaves trailing arguments
-out is tried; where the header declares defaults, that call becomes one more
-method of the same Julia function, with fewer arguments
-(`btHingeConstraint_setLimit(h, lo, hi)` beside the five-argument one). The
-omitted arguments take exactly the values C++ gives them. A call C++ itself
-refuses (no default, or ambiguous between two overloads) gets no method. Not
-covered: a static member's short call, a free function's, an operator's, and
-a class template's members.
-
-A free inline function (`b2Dot(a, b)`, an `operator+` outside a class) is
-declared in no class, so nothing lists it: compile it in with a keep file
-([Header-only libraries](guide.md#Header-only-libraries)), or read the
-member at its DWARF offset (`member_offset`, never a literal).
-
-**Abstract-class instances the library virtual-calls** (a `b2CircleShape` it
-`Clone()`s): plant the real compiler vtable — `dlsym` the `_ZTV…` symbol, skip
-16 bytes (offset-to-top + RTTI) to the address point, store it at offset 0.
-Resolve that address in `__init__` (it is a process address).
-
-**Finalizers that call a C++ destructor:** in a JIT wrapper a destructor
-wrapper is usually a Tier 2 thunk, and its first call looks the thunk up in the
-JIT, which may compile it. Do that once in `__init__`, so the first GC pass is
-not where it happens. There is no public call for it yet: BoxWorld uses the
-internal `RepliBuild.JITManager._lookup_cached(name)`, with the thunk name the
-destructor wrapper passes to `JITManager.invoke`
-(`"_mlir_ciface__ZN7b2WorldD2Ev_thunk"`). Offer `destroy!(x)` for deterministic
-teardown; keep the finalizer as the safety net. Make destruction idempotent.
-
-Every layout fact your layer uses should come from the wrapper's own
-`struct_size` / `member_offset` (or `compilation_metadata.json`).
-
-## Testing
-
-Treat the wrapper boundary as RepliBuild's job. Test *your* claims:
-create/use/destroy/idempotent-destroy, library behavior through your API, the
-finalizer path (`GC.gc()` after dropping a live object), and that the C++
-engine registered if you depend on it:
-
-```julia
-@test any(e -> occursin("libbox2d", e.binary_path) && e.init_error === nothing,
-          RepliBuild.JITManager.GLOBAL_JIT.engines)
-```
-
-That holds for a JIT wrapper. An AOT wrapper creates no engine; for it, call
-one of its Tier 2 functions in the test instead.
+A [CMake project](graph.md)'s wrapper is copied the same way, as a tree: the
+whole `julia/` folder, with its per-library folders left where they are.
+Include the top module.
 
 ## Deployment
 
-- The vendored `.so` is platform-specific. Multi-platform: per-platform
-  artifacts, or `scaffold_package` so the consumer builds locally. The `.jl` is
-  platform-independent apart from the binary it binds.
-- Strip nothing. The DWARF in the `.so` is read at load.
-- Linux and Windows, same as RepliBuild. The vendored binary is `.so` or
-  `.dll`; the `.jl` is the same either way.
-- On Windows, a C wrapper's `.dll` imports only the Windows C runtime and
-  whatever `[link] link_libraries` adds. A C++ wrapper also needs
-  `C:\msys64\clang64\bin` on the consumer's `PATH`: `libJLCS.dll` imports
-  `libLLVM-<N>.dll` and `libc++.dll` from there, and a library that uses the
-  standard library imports `libc++.dll` itself.
-- A JIT wrapper also runs `llvm-dwarfdump` at load, so the consumer needs it on
-  `PATH` too.
+The library file is built for one system. A package that ships it works on
+that operating system and processor only. For several systems, either ship one
+build per system, or have the package build the library when it is installed
+([below](#A-package-that-builds-the-library)).
+
+What a machine needs to **run** a wrapper it did not build:
+
+| Wrapper | Linux | Windows |
+|:--------|:------|:--------|
+| C | RepliBuild, as a Julia dependency | The same |
+| C++ | The same, plus `llvm-dwarfdump` on `PATH` (part of LLVM) unless the wrapper was built with `aot_thunks = true` | MSYS2 CLANG64 with the MLIR package, `C:\msys64\clang64\bin` on `PATH`, and `Pkg.build("RepliBuild")` ([Set up](install.md#Windows)) |
+
+On Linux, RepliBuild downloads its C++ support library by itself. On Windows
+it is built on each machine.
+
+Do not strip the library. A C++ wrapper reads information from it when it
+loads.
+
+### Ship C++ wrappers with their stubs compiled
+
+By default a C++ wrapper compiles its call stubs each time it loads. For a
+package you distribute, have `wrap` compile them once:
+
+```toml
+[compile]
+aot_thunks = true
+```
+
+`wrap` then writes a second library, `lib<name>_thunks.so`, into `julia/`.
+Ship it with the rest. Loading is many times faster, calls are faster, and the
+user's machine does not need `llvm-dwarfdump`. [Make it fast](performance.md)
+has the measurements, and how to go further with a system image.
+
+## A package that builds the library
+
+```julia
+RepliBuild.scaffold_package("MyLibWrapper")     # writes ./MyLibWrapper/
+```
+
+That creates a package whose installation (`Pkg.build`) compiles and wraps the
+library on the user's machine:
+
+| File | What it is |
+|:-----|:-----------|
+| `Project.toml` | Depends on RepliBuild and `Libdl`, the two packages a wrapper loads. |
+| `replibuild.toml` | The recipe. If a project named `MyLibWrapper` or `MyLib` is registered, its recipe; otherwise a template to fill in. |
+| `deps/build.jl` | Runs `check_environment`, then `build` and `wrap`. |
+| `src/MyLibWrapper.jl` | Includes the generated wrapper once it exists. |
+| `test/runtests.jl`, `.gitignore` | A test stub. Built files are ignored by git. |
+
+Before the first build, edit the template recipe: name the sources
+(`[dependencies]` or `[compile] source_files`), set `[wrap] language`, and set
+`[link] enable_lto = false`.
+
+A package scaffolded by RepliBuild 4.5.0 or older has a `Project.toml` that
+lists only RepliBuild, and fails to load once its wrapper exists. Add the
+missing dependency: `Pkg.activate("MyLibWrapper"); Pkg.add("Libdl")`.
+
+Every machine that installs such a package needs the full
+[setup](install.md) for the library's language.
+
+## Precompilation
+
+The generated module precompiles as part of your package, and the package can
+be compiled into a system image
+([Make it fast](performance.md#Compile-it-into-a-system-image)). Two rules for
+your own code:
+
+- **Do not store addresses in constants.** A `const` computed from `dlsym`,
+  `cglobal` or a pointer the library returned is evaluated when the package is
+  precompiled, and is wrong in the next session. Use a `Ref` and fill it in
+  your module's `__init__`.
+- **Plain data is fine.** Sizes and offsets from `M.struct_size` and
+  `M.member_offset` can be constants.
+
+## If a C++ library fails to start
+
+When a C++ wrapper cannot prepare its calls at load (the support library is
+missing, or `llvm-dwarfdump` is not found), loading your package still
+succeeds. The wrapper logs `Failed to initialize JIT for lib….so` with the
+reason, and its C++ functions raise when called. Other wrapped libraries in the
+same session are not affected.
+
+`RepliBuild.check_environment()` on that machine says what is missing.
+
+## Things to wrap once
+
+The wrapper is a faithful copy of a C or C++ API. Your package hides the
+awkward parts behind ordinary Julia functions.
+
+**Objects.** Give each C++ object a Julia type that holds the pointer, creates
+the object in its constructor, and releases it in a finalizer:
+
+```julia
+mutable struct World
+    mem::Vector{UInt8}            # the object's memory; kept alive by this field
+
+    function World(gravity)
+        mem = zeros(UInt8, Box2d.struct_size(:b2World))
+        Box2d.b2World_b2World(pointer(mem), Ref(gravity))     # construct in place
+        w = new(mem)
+        finalizer(destroy!, w)
+        return w
+    end
+end
+
+handle(w::World) = pointer(w.mem)
+
+function destroy!(w::World)
+    isempty(w.mem) && return                                  # already destroyed
+    Box2d.b2World_destroy_b2World(handle(w))                  # run the destructor
+    empty!(w.mem)
+    return
+end
+```
+
+- Keep the memory reachable for as long as the object lives. Here the field
+  does that.
+- Make destruction safe to call twice, and offer it as a function, so users
+  can release resources at a known point. The finalizer is the safety net.
+- Without `aot_thunks`, the first call of each C++ function does some one-time
+  preparation, and a finalizer is a poor place for that. Either build with
+  `aot_thunks = true`, or create and destroy one object in your module's
+  `__init__` so the destructor has been called once before any finalizer runs.
+- A class whose only destructor wrapper is `Class_delete_Class` frees its own
+  memory. It must come from the library (`new`), not from memory you
+  allocated ([Call the wrapper](calling.md#Construct-an-object-yourself)).
+- Where the wrapper has a `Managed<Class>` type, it already does all of this:
+  use it.
+
+**Sizes and offsets.** Take every one from `M.struct_size` and
+`M.member_offset`. They follow the library when it is upgraded; a number
+written in your code does not.
+
+**Missing inline functions.** A small function defined in a header outside any
+class (`b2Dot(a, b)`) may not be in the wrapper. Either get it compiled in
+([Header-only libraries](header-only.md#C:-a-keep-file)) or write it in Julia
+against the struct's fields.
+
+## Testing
+
+RepliBuild tests that calls reach the library correctly. Test what your
+package adds:
+
+- create, use, destroy, and destroy again;
+- the library's behaviour through your API;
+- the finalizer: drop an object, then `GC.gc()`;
+- for a C++ library, at least one call that reaches C++, so that a library
+  that failed to start fails the test.
