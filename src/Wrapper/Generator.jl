@@ -168,6 +168,7 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     _assert_base_calls_qualified(wrapper_content, module_name)
     _assert_exports_defined(wrapper_content, module_name)
     _assert_no_duplicate_toplevel_names(wrapper_content, module_name)
+    _assert_no_duplicate_methods(wrapper_content, module_name)
     _assert_types_defined_before_use(wrapper_content, module_name)
     _assert_cstring_policy(wrapper_content, module_name)
     _assert_no_shadowed_ccall_types(wrapper_content, module_name)
@@ -713,6 +714,117 @@ function _assert_no_duplicate_toplevel_names(wrapper_content::AbstractString,
     enumerator that collides is renamed `<enum>_<name>` by `_render_enum_chunks`; \
     a collision from any other emitter is a generator bug — give the later \
     binding a name of its own, never a second definition.
+    """)
+end
+
+"""
+    _method_definitions(wrapper_content) -> Vector{Tuple{String,Int}}
+
+Every method the module text defines, as `(signature, line)`: top-level
+`function` and short-form definitions, a docstring's and a macro's included,
+and a struct's inner constructors, keyed by the struct's name like an outer
+one. The signature is the name as written and each positional argument's type
+(`Any` for an untyped one), every C alias spelled as the type it names on this
+host (`_concrete_sig_type`, as `_method_sig_keys` keys), then the `where`
+clauses as written; keyword arguments do not dispatch. A definition with
+optional positional arguments defines one method per arity, and each is
+listed. Nothing under an `if`, a `let` or a function body is read: those
+definitions are conditional or local.
+"""
+function _method_definitions(wrapper_content::AbstractString)::Vector{Tuple{String,Int}}
+    out = Tuple{String,Int}[]
+    ex = try
+        Meta.parseall(wrapper_content)
+    catch
+        return out
+    end
+    line = Ref(0)
+    argtype(a) = a isa Expr && a.head === :(::) ?
+        _concrete_sig_type(string(a.args[end])) : "Any"
+    function signature!(sig, where_txt, struct_name)
+        sig isa Expr || return
+        if sig.head === :where
+            return signature!(sig.args[1], where_txt * " where {" * join(string.(sig.args[2:end]), ", ") * "}",
+                              struct_name)
+        end
+        sig.head === :(::) && length(sig.args) == 2 && sig.args[1] isa Expr && sig.args[1].head === :call &&
+            return signature!(sig.args[1], where_txt, struct_name)
+        sig.head === :call || return
+        name = string(sig.args[1])
+        req = String[]
+        opt = String[]
+        for a in sig.args[2:end]
+            a isa Expr && a.head === :parameters && continue           # keywords
+            if a isa Expr && a.head === :kw
+                push!(opt, argtype(a.args[1]))
+            elseif a isa Expr && a.head === :...
+                push!(isempty(opt) ? req : opt, "Vararg{" * argtype(a.args[1]) * "}")
+            else
+                push!(isempty(opt) ? req : opt, argtype(a))
+            end
+        end
+        for k in 0:length(opt)
+            push!(out, (string(name, "(", join(vcat(req, opt[1:k]), ","), ")", where_txt), line[]))
+        end
+    end
+    function definition!(x, struct_name)
+        x isa LineNumberNode && (line[] = x.line; return)
+        x isa Expr || return
+        h = x.head
+        if h === :function && !isempty(x.args)
+            signature!(x.args[1], "", struct_name)
+        elseif h === :(=) && _is_method_target(x.args[1])
+            signature!(x.args[1], "", struct_name)
+        elseif h === :macrocall && !(length(x.args) >= 1 && x.args[1] === Symbol("@enum"))
+            foreach(a -> definition!(a, struct_name), x.args)
+        elseif h in (:toplevel, :module, :block) && struct_name === nothing
+            foreach(a -> definition!(a, nothing), x.args)
+        elseif h === :struct && struct_name === nothing
+            head = x.args[2]
+            head isa Expr && head.head === :(<:) && (head = head.args[1])
+            for f in x.args[3].args
+                definition!(f, string(head))
+            end
+        end
+    end
+    definition!(ex, nothing)
+    return out
+end
+
+"""
+    _assert_no_duplicate_methods(wrapper_content, module_name)
+
+Refuse a wrapper that defines one method twice: one name, one dispatch
+signature (`_method_definitions`). Included as a file, Julia replaces the
+first definition with the second and says nothing, so whatever the first
+called is unreachable; inside a precompiled package it refuses the overwrite
+("Method overwriting is not permitted during Module precompilation") and the
+package does not load. Found on a factory class whose two factories took one
+`int` each: `Animal(legs::Cint)` and `Animal(half::Cint)` were one method,
+and the second factory made every `Animal` (2026-11-18). Free functions are
+deduplicated before this (`_dedup_method_chunks`), so a hit here is an
+emitter that keyed a signature by its text, parameter names included.
+"""
+function _assert_no_duplicate_methods(wrapper_content::AbstractString, module_name::AbstractString)
+    lines = Dict{String,Vector{Int}}()
+    for (sig, line) in _method_definitions(wrapper_content)
+        push!(get!(lines, sig, Int[]), line)
+    end
+    offenders = ["  `$sig` at lines " * join(lines[sig], ", ")
+                 for sig in sort!(collect(keys(lines))) if length(lines[sig]) > 1]
+    isempty(offenders) && return nothing
+    shown = join(first(offenders, 15), "\n")
+    more = length(offenders) > 15 ? "\n  … and $(length(offenders) - 15) more" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(offenders)) method \
+    signature(s) are defined more than once.
+
+    $shown$more
+
+    The later definition replaces the earlier one silently when the file is \
+    included, and a precompiled package refuses to load. Key the emitter's dedup \
+    on the dispatch signature, and when two different functions share one, give \
+    each a signature of its own (see `_factory_ctor_plan`), never a silent pick.
     """)
 end
 

@@ -277,7 +277,12 @@ the library retains ownership (a `b2Body*` owned by its world).
 `M.Rect(2.0, 3.0)` calls `make_rect`, and each method has a proxy
 (`M.area(r)`). The class is the one the returned pointer names, or one the
 function's name names that derives from it (`create_circle()` returning
-`Shape*`). Its GC finalizer is the library's deleter function for the class or
+`Shape*`). Factories that take the same argument types are called by name: with
+`make_animal(int)` and `make_animal_doubled(int)`, `M.Animal(Cint(4))` is a
+`MethodError`, and `M.Animal(Val(:make_animal), Cint(4))` and
+`M.Animal(Val(:make_animal_doubled), Cint(4))` call each one. The struct's
+docstring lists them, and so does the wrap's output. The struct's GC finalizer
+is the library's deleter function for the class or
 for the returned type, or else the class's deleting destructor when nothing in
 the library derives from the class. A class with neither keeps its raw
 bindings.
