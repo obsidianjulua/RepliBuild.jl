@@ -359,7 +359,8 @@ to a temporary the caller makes and destroys, so the thunk has to make one:
     no copy or move constructor and holds nothing with a copy of its own
     (`_bitwise_copyable`), or it declares a copy constructor the forced unit
     was asked to define and had nothing to emit for (`unemitted`:
-    `X(const X&) = default` over such members).
+    `X(const X&) = default` over such members), or, its copy deleted, a move
+    constructor of that kind.
   * `"none"` — no temporary can be made, and `why` says so. The function is
     an ABI trap on both sides (`by_value_crossing` says `:uncopyable`).
 
@@ -424,6 +425,11 @@ function value_temporary(entry::AbstractDict, key::AbstractString, structs, reco
             return cant("the library does not define its copy constructor")
         end
     elseif !recorded
+        # A toolchain record's declarations are never recorded; a library
+        # record's are by any build since they were (2026-11-15).
+        info isa AbstractDict && get(info, "toolchain", false) == true &&
+            return cant("it is declared in a toolchain header, and the metadata does not record " *
+                        "which constructors such a class declares")
         return cant("this metadata does not say which constructors it declares " *
                     "(rebuild the library to record them)")
     elseif unread
@@ -440,6 +446,12 @@ function value_temporary(entry::AbstractDict, key::AbstractString, structs, reco
     end
     if !isempty(move_sym) && (move_row === nothing || open_to_callers(move_row))
         return ("move", move_sym, "")
+    end
+    # A declared move the forced unit had nothing to emit for is trivial: C++
+    # moves such an object by its bytes too.
+    if move_row !== nothing && open_to_callers(move_row) &&
+       String(get(move_row, "symbol", "")) in unemitted && _bitwise_copyable(name, structs, record_abi)
+        return ("bits", "", "")
     end
     no_move = move_row === nothing ? "it has no move constructor" :
               get(move_row, "deleted", false) == true ? "its move constructor is deleted" :

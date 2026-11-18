@@ -63,7 +63,8 @@ _bvt_take(sym, name, bare) = _bvt_fn(sym, "$name($bare)"; name = name, params = 
 const _BVT_STRUCTS = Dict{String,Any}(
     "Res" => _bvt_owner(), "Uniq" => _bvt_owner(), "Pinned" => _bvt_owner(), "Guarded" => _bvt_owner(),
     "Dflt" => _bvt_owner(), "Undefined" => _bvt_owner(), "Legacy" => _bvt_owner(), "OldCopy" => _bvt_owner(),
-    "Virt" => _bvt_owner(), "Assigned" => _bvt_owner(),
+    "Virt" => _bvt_owner(), "Assigned" => _bvt_owner(), "Tok" => _bvt_owner(), "TokGraph" => _bvt_owner(),
+    "Tool" => merge(_bvt_owner(), Dict{String,Any}("toolchain" => true)),
     "Plain" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x4", "scope" => "", "scopes" => [""],
         "members" => Any[Dict{String,Any}("name" => "v", "c_type" => "int", "offset" => "0x0", "size" => 4)]),
     "Holder" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x10", "scope" => "", "scopes" => [""],
@@ -102,7 +103,13 @@ const _BVT_ABI = Dict{String,Any}(
     "Box<int>" => _bvt_facts(ctors = [_bvt_row("_ZN2ns3BoxIiEC4ERKS1_"), _bvt_row("_ZN2ns3BoxIiEC4Ei")]),
     "Inner" => _bvt_facts(ctors = [_bvt_row("_ZN5Outer5InnerC4ERKS0_"), _bvt_row("_ZN5Outer5InnerC4Ei")]),
     "Twin" => _bvt_facts(ctors = [_bvt_row("_ZN3one4TwinC4ERKS0_")]),
+    # The copy deleted and `Tok(Tok&&) = default`: a move that is the bytes
+    # (`Tok`, which the forced unit was asked for; `TokGraph`, which it was not).
+    "Tok" => _bvt_facts(ctors = [_bvt_row("_ZN3TokC4EOS_"), _bvt_row("_ZN3TokC4ERKS_"; deleted = true)]),
+    "TokGraph" => _bvt_facts(ctors = [_bvt_row("_ZN8TokGraphC4EOS_"), _bvt_row("_ZN8TokGraphC4ERKS_"; deleted = true)]),
     # Metadata from before declarations were recorded: only the convention.
+    # A toolchain record's never are.
+    "Tool" => Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false),
     "Legacy" => Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false),
     "OldCopy" => Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false))
 
@@ -118,6 +125,9 @@ const _BVT_FUNCTIONS = vcat(
     _bvt_lifetime("Poly", "Poly", "_ZN4Poly", "S_"; copy = true),
     _bvt_lifetime("Virt", "Virt", "_ZN4Virt", "S_"; d0_only = true),
     _bvt_lifetime("Assigned", "Assigned", "_ZN8Assigned", "S_"),
+    _bvt_lifetime("Tok", "Tok", "_ZN3Tok", "S_"),
+    _bvt_lifetime("TokGraph", "TokGraph", "_ZN8TokGraph", "S_"),
+    _bvt_lifetime("Tool", "Tool", "_ZN4Tool", "S_"),
     _bvt_lifetime("Legacy", "Legacy", "_ZN6Legacy", "S_"; move = true),
     _bvt_lifetime("OldCopy", "OldCopy", "_ZN7OldCopy", "S_"; copy = true),
     _bvt_lifetime("ns::NRes", "NRes", "_ZN2ns4NRes", "S0_"; copy = true),
@@ -148,7 +158,8 @@ const _BVT_METADATA = Dict{String,Any}(
     "language" => "cpp", "functions" => _BVT_FUNCTIONS, "struct_definitions" => _BVT_STRUCTS,
     "record_abi" => _BVT_ABI,
     "inline_constructors" => Dict{String,Any}(
-        "forced" => Any[Dict{String,Any}("class" => "Dflt", "symbol" => "_ZN4DfltC4ERKS_", "emitted" => false)],
+        "forced" => Any[Dict{String,Any}("class" => "Dflt", "symbol" => "_ZN4DfltC4ERKS_", "emitted" => false),
+                        Dict{String,Any}("class" => "Tok", "symbol" => "_ZN3TokC4EOS_", "emitted" => false)],
         "skipped" => Any[]))
 
 const _BVT_EMPTY_VT = RepliBuild.DWARFParser.VtableInfo(Dict{String,RepliBuild.DWARFParser.ClassInfo}(),
@@ -173,8 +184,8 @@ end
 
     @testset "a class is keyed as a parameter names it, namespace or not" begin
         @test Set(keys(raii)) == Set(["Res", "Uniq", "Pinned", "Guarded", "Plain", "Holder", "Dflt", "Undefined",
-                                      "Poly", "Virt", "Assigned", "Legacy", "OldCopy", "NRes", "NUniq",
-                                      "Box<int>", "Inner", "Twin"])
+                                      "Poly", "Virt", "Assigned", "Tok", "TokGraph", "Tool", "Legacy", "OldCopy",
+                                      "NRes", "NUniq", "Box<int>", "Inner", "Twin"])
         @test raii["NRes"][:class] == "ns::NRes"
         @test raii["Inner"][:class] == "Outer::Inner"
         @test raii["Box<int>"][:class] == "ns::Box<int>"
@@ -211,12 +222,14 @@ end
         # declared and the forced unit had nothing to emit for it.
         @test how("Plain") == ("bits", "")
         @test how("Dflt") == ("bits", "")
+        @test how("Tok") == ("bits", "")                  # the copy deleted, the move trivial
         # Everything else is no temporary, and says why.
         why(k) = (raii[k][:temp] == "none" ? raii[k][:why] : "not refused: $(raii[k][:temp])")
         @test why("Pinned") == "its copy constructor is deleted and it has no move constructor"
         @test why("Guarded") == "its copy constructor is private and it has no move constructor"
         @test occursin("implicit and not trivial", why("Holder"))
         @test why("Undefined") == "the library does not define its copy constructor"
+        @test why("TokGraph") == "its copy constructor is deleted and the library does not define its move constructor"
         @test occursin("move assignment operator", why("Assigned")) && occursin("no move constructor", why("Assigned"))
         @test occursin("deleting destructor", why("Virt"))
         @test occursin("named `Twin`", why("Twin")) && occursin("one::Twin; two::Twin", why("Twin"))
@@ -225,10 +238,11 @@ end
         # not deleted, although a move constructor is there.
         @test how("OldCopy") == ("copy", "_ZN7OldCopyC1ERKS_")
         @test haskey(raii["Legacy"], :move_ctor) && occursin("rebuild", why("Legacy"))
+        @test occursin("toolchain header", why("Tool")) && !occursin("rebuild", why("Tool"))
         # A symbol's absence decides nothing: every class refused or moved
         # here has no copy-constructor symbol, which used to mean "its bytes".
         @test sort!([k for k in keys(raii) if !haskey(raii[k], :copy_ctor) && raii[k][:temp] != "bits"]) ==
-              ["Assigned", "Holder", "Legacy", "NUniq", "Pinned", "Undefined", "Uniq", "Virt"]
+              ["Assigned", "Holder", "Legacy", "NUniq", "Pinned", "TokGraph", "Tool", "Undefined", "Uniq", "Virt"]
     end
 
     @testset "the copy is its bytes only over members that are" begin

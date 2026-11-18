@@ -426,7 +426,16 @@ const _XT_CLIB = _xt_meta(_XT_C_FUNCTIONS, _XT_C_STRUCTS)
         @test without == _XT_IR.generate_jlcs_ir(vt, deepcopy(plain))
         @test !occursin("@_Z4take7TObject_thunk", without)                 # TObject by value: opaque, no thunk
         d = mktempdir()
-        _XT_W._write_type_imports(d, hist_imports)
+        # The owner's copy constructor among its rows, as `_raii_rows` lists
+        # one the owner defines: a by-value TObject is a temporary the thunk
+        # copy-constructs, and with only a destructor none can be made
+        # (test_byvalue_class_temporaries.jl).
+        imports = deepcopy(hist_imports)
+        push!(imports["TObject"]["raii"],
+              _xt_row("_ZN7TObjectC1ERKS_", "TObject::TObject(TObject const&)";
+                      params = (_xt_p("this", "Ptr{TObject}", "TObject*"), _xt_p("o", "Ref{TObject}", "const TObject&")),
+                      hop = true))
+        _XT_W._write_type_imports(d, imports)
         @test isfile(joinpath(d, _XT_W.TYPE_IMPORTS))
         merged = _XT_IR.apply_type_imports!(deepcopy(plain), d)
         @test haskey(merged["struct_definitions"], "TObject")
@@ -434,6 +443,16 @@ const _XT_CLIB = _xt_meta(_XT_C_FUNCTIONS, _XT_C_STRUCTS)
         with = _XT_IR.generate_jlcs_ir(vt, merged)
         @test occursin("@_Z4take7TObject_thunk", with)
         @test !occursin("@_ZN7TObjectD1Ev_thunk", with)                      # the owner's destructor gets no thunk
+        # The temporary is made and ended with the owner's constructor and
+        # destructor, which the module declares although neither has a thunk.
+        @test occursin("jlcs.ctor_call @_ZN7TObjectC1ERKS_(%raii_tmp_1, %val_ptr_1)", with)
+        @test occursin("dtors([@_ZN7TObjectD1Ev])", with)
+        @test _XT_IR.undeclared_callees(with) == String[]
+        # With the owner's destructor alone the function has no thunk.
+        d0 = mktempdir()
+        _XT_W._write_type_imports(d0, hist_imports)
+        bare = _XT_IR.generate_jlcs_ir(vt, _XT_IR.apply_type_imports!(deepcopy(plain), d0))
+        @test !occursin("@_Z4take7TObject_thunk", bare) && occursin("`TObject` cannot be passed by value", bare)
         # No sidecar: the metadata is untouched.
         @test _XT_IR.apply_type_imports!(deepcopy(plain), mktempdir()) == plain
     end

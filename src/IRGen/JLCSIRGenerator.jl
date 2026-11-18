@@ -266,17 +266,17 @@ function lifetime_callees(metadata, needed_symbols)::Set{String}
     out = Set{String}()
     class_raii = _collect_class_raii(metadata)
     isempty(class_raii) && return out
+    structs = get(metadata, "struct_definitions", Dict{String,Any}())
     for f in get(metadata, "functions", [])
         needed_symbols !== nothing && !(String(get(f, "mangled", "")) in needed_symbols) && continue
         for p in get(f, "parameters", [])
             t = FunctionGen._strip_top_cv(String(get(p, "c_type", "")))
             (isempty(t) || occursin(r"[*&(\[]", _outside_template_args(t))) && continue
-            for cand in _scope_suffixes(t)
-                life = get(class_raii, cand, nothing)
-                life === nothing && continue
-                union!(out, String.(split(get(life, :symbols, ""), ' '; keepempty = false)))
-                break
-            end
+            # The class as the thunk generator finds it for this parameter.
+            (kind, key) = FunctionGen._table_entry(t, structs)
+            life = kind === :layout ? get(class_raii, key, nothing) : nothing
+            life === nothing && continue
+            union!(out, String.(split(get(life, :symbols, ""), ' '; keepempty = false)))
         end
     end
     return out
