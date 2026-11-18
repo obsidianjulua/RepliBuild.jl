@@ -168,6 +168,7 @@ function _assert_wrapper_loadable(wrapper_content::AbstractString, module_name::
     _assert_base_calls_qualified(wrapper_content, module_name)
     _assert_exports_defined(wrapper_content, module_name)
     _assert_no_duplicate_toplevel_names(wrapper_content, module_name)
+    _assert_types_defined_before_use(wrapper_content, module_name)
     _assert_cstring_policy(wrapper_content, module_name)
     _assert_no_shadowed_ccall_types(wrapper_content, module_name)
     _assert_no_any_ccall_return(wrapper_content, module_name)
@@ -712,6 +713,154 @@ function _assert_no_duplicate_toplevel_names(wrapper_content::AbstractString,
     enumerator that collides is renamed `<enum>_<name>` by `_render_enum_chunks`; \
     a collision from any other emitter is a generator bug — give the later \
     binding a name of its own, never a second definition.
+    """)
+end
+
+"""
+    _assert_types_defined_before_use(wrapper_content, module_name)
+
+Refuse a wrapper that names a type in an eagerly evaluated position before
+the module defines it.
+
+Julia evaluates a struct's field types and type-parameter bounds when the
+struct is defined, and a method's argument types (an inner constructor's too)
+when the method is defined. A name the module binds only further down is an
+`UndefVarError` at include, and the whole module is gone. Found on a record
+holding a pointer to a factory class: `struct Cage { Animal *pet; }` emitted
+`pet::Ptr{Animal}` above the factory struct `Animal` (2026-11-18).
+
+Only that class is refused: a name in such a position that the module binds
+LATER and not before. A name the module never binds is left alone (it comes
+from Base, Core or an imported module, or `_assert_wrapper_loadable`'s ccall
+check owns it), and so are bodies and return types, which run at call time.
+A struct may name itself, and a `where` or struct type parameter is local.
+Read off the parsed TEXT, like the other guards.
+"""
+function _assert_types_defined_before_use(wrapper_content::AbstractString, module_name::AbstractString)
+    ex = try
+        Meta.parseall(wrapper_content)
+    catch
+        return nothing                      # `_assert_wrapper_parses` owns this
+    end
+    all_names = Set{Symbol}(Symbol(n) for (n, _, _) in _defined_bindings(wrapper_content))
+    defined = Set{Symbol}()
+    offenders = String[]
+    line = Ref(0)
+
+    # Every name a type expression evaluates, but a qualified one only by its root.
+    function names_in!(acc, t, locals)
+        if t isa Symbol
+            t in locals || push!(acc, t)
+        elseif t isa Expr
+            if t.head === :.
+                names_in!(acc, t.args[1], locals)
+            else
+                foreach(a -> names_in!(acc, a, locals), t.args)
+            end
+        end
+        return acc
+    end
+    function check!(t, locals, what)
+        for s in names_in!(Symbol[], t, locals)
+            (s in defined || !(s in all_names)) && continue
+            push!(offenders, "  line $(line[]): `$s` in $what, defined further down")
+        end
+    end
+    # `T`, `T <: B`: the parameter is local, its bound is evaluated.
+    function type_param!(locals, p)
+        if p isa Symbol
+            push!(locals, p)
+        elseif p isa Expr && p.head in (:(<:), :(>:)) && p.args[1] isa Symbol
+            push!(locals, p.args[1])
+            check!(p.args[2], locals, "a type parameter's bound")
+        end
+    end
+    function signature!(sig, locals, what)
+        sig isa Expr || return
+        if sig.head === :where
+            locals = copy(locals)
+            foreach(p -> type_param!(locals, p), sig.args[2:end])
+            return signature!(sig.args[1], locals, what)
+        end
+        sig.head === :(::) && length(sig.args) == 2 && sig.args[1] isa Expr && sig.args[1].head === :call &&
+            return signature!(sig.args[1], locals, what)      # `f(x)::R`: R runs at call time
+        sig.head === :call || return
+        for a in sig.args[2:end]
+            argument!(a, locals, what)
+        end
+    end
+    function argument!(a, locals, what)
+        a isa Expr || return
+        if a.head === :(::)
+            check!(a.args[end], locals, what)
+        elseif a.head in (:kw, :..., :parameters)
+            foreach(x -> argument!(x, locals, what), a.args)
+        end
+    end
+    function method!(x, locals)
+        x isa Expr || return
+        if x.head === :function && !isempty(x.args)
+            signature!(x.args[1], locals, "a method signature")
+        elseif x.head === :(=) && _is_method_target(x.args[1])
+            signature!(x.args[1], locals, "a method signature")
+        elseif x.head === :macrocall
+            foreach(a -> method!(a, locals), x.args)
+        end
+    end
+    function statement!(x)
+        x isa LineNumberNode && (line[] = x.line; return)
+        x isa Expr || return
+        h = x.head
+        if h in (:toplevel, :module, :block)
+            foreach(statement!, x.args)
+            return
+        elseif h === :macrocall && !(length(x.args) >= 1 && x.args[1] === Symbol("@enum"))
+            foreach(statement!, x.args)
+            return
+        elseif h === :struct
+            locals = Set{Symbol}()
+            head = x.args[2]
+            head isa Expr && head.head === :(<:) && (check!(head.args[2], locals, "a supertype"); head = head.args[1])
+            if head isa Expr && head.head === :curly
+                foreach(p -> type_param!(locals, p), head.args[2:end])
+                head = head.args[1]
+            end
+            head isa Symbol && push!(defined, head)       # a struct may name itself
+            for f in x.args[3].args
+                f isa LineNumberNode && (line[] = f.line; continue)
+                g = f isa Expr && f.head === :const ? f.args[1] : f
+                if g isa Expr && g.head === :(::) && length(g.args) == 2 && g.args[1] isa Symbol
+                    check!(g.args[2], locals, "a field of `$(head)`")
+                else
+                    method!(g, locals)
+                end
+            end
+        elseif h in (:function, :(=), :macrocall)
+            method!(x, Set{Symbol}())
+        end
+        tmp = Tuple{String,Symbol,Int}[]
+        _collect_defined!(tmp, x, 0, false)
+        for (n, _, _) in tmp
+            push!(defined, Symbol(n))
+        end
+    end
+    statement!(ex)
+
+    isempty(offenders) && return nothing
+    shown = join(first(offenders, 15), "\n")
+    more = length(offenders) > 15 ? "\n  … and $(length(offenders) - 15) more" : ""
+    error("""
+    Refusing to write wrapper '$module_name': $(length(offenders)) type name(s) are \
+    used where Julia evaluates them at definition, above the module's definition \
+    of them.
+
+    $shown$more
+
+    A field type, a type parameter's bound and a method's argument types are \
+    resolved when the struct or method is defined, so including the module would \
+    raise UndefVarError and take every function with it. Emit the definition \
+    first; a type whose constructors need later types can be defined apart from \
+    them (see `_idiomatic_early_type`).
     """)
 end
 
