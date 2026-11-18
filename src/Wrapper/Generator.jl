@@ -1216,6 +1216,18 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     # surface_types_only — an accessor for a symbol that is not there is a
     # guaranteed failure at the call site, never a policy choice. See
     # `_drop_unresolvable_globals!`.
+    # A private or protected static member gets no accessor, and a constant
+    # with no storage has none to get; say how many of each were passed over.
+    let g_private = _drop_nonpublic_globals!(metadata),
+        constants = get(metadata, "global_constants", nothing)
+        g_private > 0 &&
+            println("  wrap: $g_private private or protected static data member(s) get no accessor")
+        if constants isa AbstractVector && !isempty(constants)
+            println("  wrap: $(length(constants)) static member constant(s) have a value and no ",
+                    "symbol, and get no accessor: ", join(first(constants, 6), ", "),
+                    length(constants) > 6 ? ", …" : "")
+        end
+    end
     let g_dropped = _drop_unresolvable_globals!(metadata, runtime_defined)
         if g_dropped > 0
             remaining = length(get(metadata, "globals", Dict()))

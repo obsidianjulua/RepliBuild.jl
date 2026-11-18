@@ -592,7 +592,12 @@ function _apply_symbol_filter!(metadata::Dict{String,Any}, patterns::Vector{Stri
     gdropped = 0
     if globals isa Dict
         for k in collect(keys(globals))
-            if _matches(k)
+            # The key is the symbol; a C++ global also answers to its
+            # qualified name (`cfg::depth`).
+            g = globals[k]
+            q = g isa AbstractDict && !isempty(String(something(get(g, "scope", ""), ""))) &&
+                get(g, "name", nothing) isa AbstractString ? string(g["scope"], "::", g["name"]) : nothing
+            if _matches(k) || _matches(q)
                 delete!(globals, k)
                 gdropped += 1
             end
@@ -741,7 +746,7 @@ function _surface_type_keys_impl(metadata::Dict{String,Any},
     if globals isa Dict
         for (gname, g) in globals
             g isa Dict || continue
-            if runtime_defined !== nothing && !(string(gname) in runtime_defined)
+            if runtime_defined !== nothing && !(_global_symbol(gname, g) in runtime_defined)
                 continue
             end
             for k in ("julia_type", "c_type", "type"), r in resolve(get(g, k, nothing))
@@ -808,7 +813,40 @@ function _drop_unresolvable_globals!(metadata::Dict{String,Any},
     globals isa Dict || return 0
     dropped = 0
     for k in collect(keys(globals))
-        if !(string(k) in runtime_defined)
+        if !(_global_symbol(k, globals[k]) in runtime_defined)
+            delete!(globals, k)
+            dropped += 1
+        end
+    end
+    return dropped
+end
+
+"""
+    _global_symbol(key, entry) -> String
+
+The symbol the loader binds for a `globals` entry: its `symbol`
+(`cfg::depth` is `_ZN3cfg5depthE`), else the key, which is the symbol in
+metadata older than the field and the DWARF name of a C global.
+"""
+_global_symbol(key, entry) =
+    (s = entry isa AbstractDict ? get(entry, "symbol", nothing) : nothing; s isa AbstractString ? String(s) : string(key))
+
+"""
+    _drop_nonpublic_globals!(metadata) -> Int
+
+Remove every private or protected static data member from `globals` and
+return how many: the class keeps it to itself, and an accessor would hand it
+out. The parser records the access as written or, undeclared, as the
+record's default (`Compiler._library_variables`); an entry without
+`accessibility` is public, as every global of older metadata is.
+"""
+function _drop_nonpublic_globals!(metadata::Dict{String,Any})::Int
+    globals = get(metadata, "globals", nothing)
+    globals isa Dict || return 0
+    dropped = 0
+    for k in collect(keys(globals))
+        g = globals[k]
+        if g isa AbstractDict && get(g, "accessibility", "public") in ("private", "protected")
             delete!(globals, k)
             dropped += 1
         end

@@ -3087,12 +3087,31 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
         
+        # The types a value accessor may load: what Julia binds itself, and the
+        # records and enums this module emits other than a mutable one, which
+        # `unsafe_load` would read as an object reference (abi_fuzz X5).
+        holdable = _typed_return_names(join(struct_chunks))
+        union!(holdable, _imported_value_type_names(dwarf_structs, _sanitize_cpp_type_name))
+        union!(holdable, _pending_enum_type_names(enum_chunks))
+        union!(holdable, _defined_type_names(join(c for c in enum_chunks if c isa String)))
+        union!(holdable, setdiff(_BUILTIN_JULIA_SPELLINGS, ("Any", "Nothing", "Ref")), ("NTuple",))
+
         # Sorted: `globals` is a metadata Dict, iterated in hash order.
         for var_name in sort!(collect(keys(global_vars)); by = string)
             var_info = global_vars[var_name]
             julia_type = get(var_info, "julia_type", "Any")
-            # Sanitize name
-            safe_name = _screened_function_name(make_cpp_identifier(var_name), var_name)
+            # The key is the symbol the loader binds (`_ZN3cfg5depthE`); the
+            # accessor is named for the qualified name, scope first, the way a
+            # method is (`cfg_depth`, `geo_Vec3_live_count`). Metadata older
+            # than `symbol` and `scope` keys a global by its name.
+            symbol = _global_symbol(var_name, var_info)
+            scope = String(something(get(var_info, "scope", ""), ""))
+            bare = String(get(var_info, "name", var_name))
+            qualified = isempty(scope) ? bare : scope * "::" * bare
+            safe_name = isempty(scope) ?
+                _screened_function_name(make_cpp_identifier(bare), var_name) :
+                _screened_function_name(make_cpp_identifier(replace(qualified, "::" => "_")), symbol)
+            sym_expr = Base.isidentifier(symbol) ? ":$symbol" : "Symbol($(repr(symbol)))"
 
             # ...and the TYPE too. Only the name was sanitized here, so a global
             # whose type is a C++ template kept its raw spelling and was emitted
@@ -3109,33 +3128,53 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             if !_is_julia_type_spelling(julia_type)
                 julia_type = _sanitize_cpp_type_name(julia_type)
             end
-            
+
+            # A type the wrapper cannot hold by value (`std::string`, a type
+            # this module does not emit, `Any`) gets the raw pointer only: a
+            # value accessor typed with it threw on the call, or read the
+            # bytes as a Julia object.
+            if !all(m -> m.match in holdable, eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", julia_type))
+                push!(func_chunks, """
+                \"""
+                    $(safe_name)_ptr()
+
+                Get pointer to global variable `$qualified` (no Julia value type: raw pointer only).
+                \"""
+                function $(safe_name)_ptr()::Ptr{Cvoid}
+                    return cglobal(($sym_expr, LIBRARY_PATH))
+                end
+
+                """)
+                push!(exports, "$(safe_name)_ptr")
+                continue
+            end
+
             # 1. Accessor for the value (read-only)
             # Only for simple types or pointers, struct values might be tricky
             # We use unsafe_load on the pointer
-            
+
             push!(func_chunks, """
             \"""
                 $safe_name()
 
-            Get value of global variable `$var_name`.
+            Get value of global variable `$qualified`.
             \"""
             function $safe_name()::$julia_type
-                ptr = cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+                ptr = cglobal(($sym_expr, LIBRARY_PATH), $julia_type)
                 return unsafe_load(ptr)
             end
 
             \"""
                 $(safe_name)_ptr()
 
-            Get pointer to global variable `$var_name`.
+            Get pointer to global variable `$qualified`.
             \"""
             function $(safe_name)_ptr()::Ptr{$julia_type}
-                return cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+                return cglobal(($sym_expr, LIBRARY_PATH), $julia_type)
             end
 
             """)
-            
+
             push!(exports, safe_name)
             push!(exports, "$(safe_name)_ptr")
         end
