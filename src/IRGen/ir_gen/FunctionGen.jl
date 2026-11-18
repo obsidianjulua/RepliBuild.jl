@@ -807,12 +807,17 @@ follows the host (`Cchar`); everything else sign-extends.
 function _narrow_int_extension(mlir_t::AbstractString, desc)
     mlir_t in ("i1", "i8", "i16") || return nothing
     mlir_t == "i1" && return "zext"
+    ct = _sysv_norm(String(get(desc, "underlying_type", get(desc, "c_type", ""))))
+    ct = replace(ct, r"^const " => "")
+    # The character types by their C spelling first: the metadata spells a
+    # plain `char` parameter `UInt8` and a `signed char` one `Cchar`, and the
+    # wrapper passes the host's `char` (`Wrapper._char_param_ctype`).
+    ct == "char" && return Cchar <: Signed ? "sext" : "zext"
+    ct == "signed char" && return "sext"
     jt = String(get(desc, "julia_type", ""))
     jt in _UNSIGNED_JULIA_INTS && return "zext"
     jt in ("Int8", "Int16", "Cshort") && return "sext"
     jt == "Cchar" && return Cchar <: Signed ? "sext" : "zext"
-    ct = _sysv_norm(String(get(desc, "underlying_type", get(desc, "c_type", ""))))
-    ct = replace(ct, r"^const " => "")
     (startswith(ct, "unsigned") || startswith(ct, "uint") || ct in ("bool", "_Bool", "char8_t", "char16_t") ||
      endswith(ct, " unsigned int") || endswith(ct, " unsigned")) && return "zext"
     ct == "char" && return Cchar <: Signed ? "sext" : "zext"

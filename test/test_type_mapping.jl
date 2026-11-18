@@ -303,8 +303,8 @@ end
         @test occursin("ccall((:smalls_sum, LIBRARY_PATH), Cint, (Ptr{Small}, Cint,), xs, n_c)", code)
         @test occursin("ccall((:small_swap, LIBRARY_PATH), Cint, (Ptr{Small}, Ptr{Small},), a, b)", code)
         @test occursin("ccall((:out_perm, LIBRARY_PATH), Cvoid, (Ptr{Perm},), out)", code)
-        # By value it is the enum, as before.
-        @test occursin("ccall((:next_small, LIBRARY_PATH), Small, (Small,), s)", code)
+        # By value it is the enum, as before (an integer converts to it first).
+        @test occursin("ccall((:next_small, LIBRARY_PATH), Small, (Small,), s_c)", code)
         # A return, through `_typed_pointer_return`; the bitmask alias too.
         @test occursin(r"^function smalls_static\(\)::Ptr\{Small\}"m, code)
         @test occursin(r"^function smalls_handle\(\)::Ptr\{Ptr\{Small\}\}"m, code)

@@ -137,7 +137,7 @@ undeclared spelling if it ever reached a ccall tuple).
 Must agree with `FunctionGen._has_receiver` on every input.
 """
 const _INTEGER_CTYPES = ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
-                         "Clonglong", "Culonglong", "Csize_t", "Cssize_t")
+                         "Clonglong", "Culonglong", "Csize_t", "Cssize_t", "Cchar")
 const _NO_POSITIONS = Set{Int}()
 
 """
@@ -163,7 +163,7 @@ is not a pointer to it.
 """
 function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base,
                             pointer_types = fill(nothing, length(names)))
-    [needs_conversion[i] ? "$(ctypes[i])($(names[i]))" :
+    [needs_conversion[i] ? _integer_arg_conversion(ctypes[i], names[i]) :
      haskey(enum_base, ctypes[i]) ? "$(enum_base[ctypes[i]])($(names[i]))" :
      pointer_types[i] !== nothing ? "RepliBuild.JITManager.pointer_arg($(pointer_types[i]), $(names[i]))" :
      names[i]
@@ -2449,19 +2449,27 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                 byte_pos = bit_offset >> 3
                                 bit_within_byte = bit_offset & 7
                                 mask = (1 << bit_size) - 1
+                                # A signed field reads sign-extended as its declared
+                                # type and its setter takes that type's range
+                                # (`_bitfield_signed_type`); an unsigned one is as it was.
+                                signed_t = _bitfield_signed_type(member, dwarf_structs)
+                                signed_store = signed_t === nothing ? "" :
+                                    _bitfield_signed_store("set_$(safe_member)!", bit_size, signed_t)
 
                                 # Getter with bit extraction
                                 if bit_size <= 8 && bit_within_byte + bit_size <= 8
                                     # Single byte access
+                                    getter_raw = "(s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask)"
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::UInt32
-                                        return UInt32((s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask))
+                                    function get_$(safe_member)(s::$julia_struct_name)::$(something(signed_t, "UInt32"))
+                                        return $(signed_t === nothing ? "UInt32($getter_raw)" :
+                                                 _bitfield_sign_extend(getter_raw, bit_size, signed_t))
                                     end
 
                                     \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name`.\"\"\"
                                     function set_$(safe_member)!(s::$julia_struct_name, v::Integer)
-                                        data = collect(s._data)
+                                    $(signed_store)    data = collect(s._data)
                                         cleared = data[$(byte_pos + 1)] & ~UInt8($(mask) << $bit_within_byte)
                                         data[$(byte_pos + 1)] = cleared | UInt8((UInt32(v) & $(mask)) << $bit_within_byte)
                                         s._data = NTuple{$byte_size, UInt8}(data)
@@ -2486,14 +2494,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                                     for k in 0:nbytes-1], "\n")
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::$ret_t
+                                    function get_$(safe_member)(s::$julia_struct_name)::$(something(signed_t, ret_t))
                                         raw = $(gather("s._data"))
-                                        return $ret_t((raw >> $bit_within_byte) & $mask_lit)
+                                        return $(signed_t === nothing ? "$ret_t((raw >> $bit_within_byte) & $mask_lit)" :
+                                                 _bitfield_sign_extend("(raw >> $bit_within_byte) & $mask_lit", bit_size, signed_t))
                                     end
 
                                     \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name`.\"\"\"
                                     function set_$(safe_member)!(s::$julia_struct_name, v::Integer)
-                                        data = collect(s._data)
+                                    $(signed_store)    data = collect(s._data)
                                         raw = $(gather("data"))
                                         m = $mask_lit << $bit_within_byte
                                         raw = (raw & ~m) | (((v % $raw_t) & $mask_lit) << $bit_within_byte)
@@ -3599,6 +3608,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # address of a caller's buffer (`_pointee_safe_type`; Boost.Charconv's
         # `long double` from_chars, 33 signatures in that wrapper, 2026-11-01).
         julia_type = _pointee_safe_type(julia_type)
+        # A `char` by value is the host's `char` (`_char_param_ctype`).
+        julia_type = _char_param_ctype(julia_type, c_type_name)
         # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
         let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
             if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
@@ -4400,7 +4411,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 push!(ccall_param_names, converted_name)
 
                 # Generate range-checked conversion
-                conversion_code *= "    $converted_name = $c_type($name)\n"
+                conversion_code *= "    $converted_name = $(_integer_arg_conversion(c_type, name))\n"
             elseif cstring_args[i] !== nothing
                 # A string with `Cstring` semantics (`_cstring_param_arg`).
                 converted_name = "$(name)_c"
