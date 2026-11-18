@@ -98,8 +98,10 @@ if requires("C++ finalizers, live", :libJLCS, :clangxx)
         @test occursin("_ZN6SproutD0Ev", (m = match(r"function Sprout_delete_Sprout\(.*?\nend"s, code); m === nothing ? "" : m.match))
         @test !occursin("function Sprout_destroy_Sprout(", code)   # the docstring names it as absent
         @test occursin("**The deleting destructor.**", code)
-        # Every variant: `destroy_` is D2 (D1 dedups into it), `delete_` is D0.
-        @test occursin("_ZN4LeafD2Ev", (m = match(r"function Leaf_destroy_Leaf\(.*?\nend"s, code); m === nothing ? "" : m.match))
+        # Every variant: `destroy_` is D1, the complete-object destructor (D2,
+        # the base-object one, is not emitted beside it), `delete_` is D0.
+        @test occursin("_ZN4LeafD1Ev", (m = match(r"function Leaf_destroy_Leaf\(.*?\nend"s, code); m === nothing ? "" : m.match))
+        @test !occursin("_mlir_ciface__ZN4LeafD2Ev_thunk", code)
         @test occursin("_ZN4LeafD0Ev", (m = match(r"function Leaf_delete_Leaf\(.*?\nend"s, code); m === nothing ? "" : m.match))
     end
 

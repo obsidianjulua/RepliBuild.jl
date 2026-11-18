@@ -425,6 +425,175 @@ function _rvalue_shadowed(functions)::Set{String}
     return out
 end
 
+import ..Compiler: _demangle, _param_list_paren, _matching_paren, _split_depth0_commas
+
+"""
+    _structor_variant(func) -> Union{Nothing,Tuple{Symbol,Char}}
+
+`(:ctor, v)` or `(:dtor, v)` for a constructor or destructor row of the
+metadata, `v` the Itanium variant its symbol names: a constructor's `C1`
+(complete object) or `C2` (base object), a destructor's `D0` (deleting), `D1`
+(complete object) or `D2` (base object). `nothing` for any other function, for
+a default-argument function standing under a constructor's name (its symbol is
+`replibuild_default::`'s), and for a symbol the marker cannot be read from.
+
+A destructor takes no parameters, so its marker closes the symbol (`…D1Ev`,
+as `_is_deleting_destructor` reads it). A constructor's is the one `C<digit>`
+before an `E`, `I` or `B`; where an identifier holds another (`C1Engine`), the
+marker is the one whose digit can change without changing what the symbol
+demangles to, which is what a variant is.
+"""
+function _structor_variant(func)
+    name = String(get(func, "name", ""))
+    _is_ctor_or_dtor_cpp(String(get(func, "class", "")), name) || return nothing
+    haskey(func, "default_arguments") && return nothing
+    sym = String(get(func, "mangled", ""))
+    if startswith(name, "~")
+        m = match(r"D([012])Ev$", sym)
+        return m === nothing ? nothing : (:dtor, m.captures[1][1])
+    end
+    cands = collect(eachmatch(r"C([123])(?=[EIB])", sym))
+    if length(cands) > 1
+        spelled = _demangle(sym)
+        cands = spelled === nothing ? empty(cands) : filter(cands) do c
+            other = c.captures[1] == "1" ? "2" : "1"
+            _demangle(sym[1:c.offset] * other * sym[c.offset + 2:end]) == spelled
+        end
+    end
+    return length(cands) == 1 ? (:ctor, cands[1].captures[1][1]) : nothing
+end
+
+"""
+    _has_virtual_base(class, dwarf_structs) -> Union{Bool,Nothing}
+
+Whether `class` has a virtual base, its own or one a base of it has: the
+classes whose base-object constructor and destructor take a VTT. `nothing`
+when the metadata cannot say: no `struct_definitions` entry for the class, or
+for a base on the way and no virtual base found elsewhere.
+"""
+function _has_virtual_base(class::AbstractString, dwarf_structs, seen = Set{String}())
+    FG = JLCSIRGenerator.FunctionGen
+    key = nothing
+    for cand in FG._scope_suffixes(String(class))
+        key = FG._fuzzy_struct_lookup(cand, dwarf_structs)
+        key === nothing || break
+    end
+    key === nothing && return nothing
+    key in seen && return false
+    push!(seen, key)
+    unknown = false
+    for base in get(dwarf_structs[key], "base_classes", Any[])
+        base isa AbstractDict || continue
+        get(base, "virtual", false) == true && return true
+        r = _has_virtual_base(replace(String(get(base, "type", "")), r"^(class|struct)\s+" => ""),
+                              dwarf_structs, seen)
+        r === true && return true
+        r === nothing && (unknown = true)
+    end
+    return unknown ? nothing : false
+end
+
+"""
+    _structor_parameters(func, kind) -> (declared, implicit)
+
+A constructor's or destructor's metadata parameters, split: the ones the
+declaration has (`this` and the written ones), and the implicit one a
+base-object variant of a class with a virtual base takes after `this`, the
+VTT. Metadata built since 2026-11-17 marks it `artificial`, and only a
+base-object variant's row has one. Before that every variant of a member
+shared the list of whichever definition the build read last, so in such
+metadata the VTT is what a destructor's list holds after `this`, and in a
+constructor's a `void**` named `vtt` there when the list is one longer than
+the demangled name's.
+"""
+function _structor_parameters(func, kind::Symbol)
+    params = collect(Any, get(func, "parameters", Any[]))
+    marked = findall(p -> get(p, "artificial", false) == true, params)
+    isempty(marked) || return (params[setdiff(eachindex(params), marked)], params[marked])
+    # Unmarked: only a list that names its receiver and goes on past it.
+    (length(params) >= 2 && get(params[1], "name", "") == "this") || return (params, Any[])
+    kind === :dtor && return (params[1:1], params[2:end])
+    (String(get(params[2], "name", "")) == "vtt" &&
+     replace(String(get(params[2], "c_type", "")), r"\s+" => "") == "void**") || return (params, Any[])
+    demangled = String(get(func, "demangled", ""))
+    (open, _) = _param_list_paren(demangled)
+    close = open == 0 ? 0 : _matching_paren(demangled, open)
+    close == 0 && return (params, Any[])
+    inner = strip(demangled[nextind(demangled, open):prevind(demangled, close)])
+    written = isempty(inner) ? 0 : length(_split_depth0_commas(inner))
+    length(params) - 1 == written + 1 || return (params, Any[])
+    return (params[setdiff(eachindex(params), 2)], params[2:2])
+end
+
+"""
+    _structor_bindings(functions, dwarf_structs) -> (skipped, refused)
+
+Which symbol stands behind `<Class>_<Class>(this, …)` and
+`<Class>_destroy_<Class>(this)`: the COMPLETE-object constructor (`C1`) and
+destructor (`D1`), the ones `T x;` and `x.~T()` run. `skipped` is the set of
+symbols not emitted because another variant of the same member is; `refused`
+maps a symbol to why its wrapper is a refusal.
+
+For a class with no virtual base, `C1` and `C2` (and `D1` and `D2`) are one
+function, and clang often emits only the base-object one (an abstract class's
+constructor, an inline destructor); either is bound, `C1`/`D1` when the
+library has both. For a class WITH a virtual base they are two: the
+base-object variant takes a VTT after `this` and leaves the virtual base
+alone, so a wrapper on it built half an object from a null VTT and crashed
+(`VBottom_VBottom(p)`), and `<X>_destroy_<X>` was `(this, vtt)`. Until
+2026-11-17 the two became one Julia method and `_dedup_method_chunks` kept
+the last in the metadata's order, which was `C2` and `D2` for every class.
+Such a class's base-object variant is never bound: with no complete-object
+variant in the library the wrapper says so. Whether the class has a virtual
+base is `_has_virtual_base`; where the metadata cannot say, a VTT in the
+variant's own parameters does (`_structor_parameters`).
+
+`D0` (deleting) is its own Julia function, `<X>_delete_<X>`, and never part
+of the choice. A complete-object or deleting variant whose list still holds
+a VTT is metadata from before each variant had its own list: refused, with
+the rebuild that fixes it, since the thunk would be built from the same list.
+"""
+function _structor_bindings(functions, dwarf_structs)
+    groups = Dict{Tuple{String,String,Symbol},Dict{Char,Any}}()
+    for f in functions
+        v = _structor_variant(f)
+        v === nothing && continue
+        g = get!(() -> Dict{Char,Any}(), groups,
+                 (String(get(f, "class", "")), String(get(f, "demangled", "")), v[1]))
+        get!(g, v[2], f)
+    end
+    skipped = Set{String}()
+    refused = Dict{String,String}()
+    virtual_base = Dict{String,Union{Bool,Nothing}}()      # asked once per class
+    for ((cls, demangled, kind), g) in groups
+        what = kind === :ctor ? "constructor" : "destructor"
+        complete = get(g, '1', nothing)
+        base = get(g, '2', nothing)
+        vbase = get!(() -> _has_virtual_base(cls, dwarf_structs), virtual_base, cls)
+        if complete !== nothing && base !== nothing
+            push!(skipped, String(base["mangled"]))
+        elseif base !== nothing &&
+               (vbase === true || (vbase === nothing && !isempty(_structor_parameters(base, kind)[2])))
+            refused[String(base["mangled"])] =
+                "The library defines only the base-object $what of `$cls` (`$(base["mangled"])`), and `$cls` " *
+                "has a virtual base: that variant takes a VTT and leaves the virtual base " *
+                (kind === :ctor ? "unconstructed, so it cannot build" : "alive, so it cannot end") *
+                " a whole object. The complete-object $what is not in the library (" *
+                (kind === :ctor ? "an abstract class, or " : "") *
+                "an inline $what nothing in the library runs on a whole object)."
+        end
+        vbase === false && continue
+        for f in (complete, get(g, '0', nothing))
+            (f === nothing || isempty(_structor_parameters(f, kind)[2])) && continue
+            refused[String(f["mangled"])] =
+                "The metadata lists a VTT among the parameters of `$demangled` (`$(f["mangled"])`), which " *
+                "only the base-object $what takes: it predates per-variant parameter lists. Rebuild the " *
+                "package (delete .replibuild_cache/project_hash) and wrap again."
+        end
+    end
+    return (skipped, refused)
+end
+
 """
     _string_return_plan(c_ret, record_abi) -> nothing | (reader, dtor) | String
 
@@ -3326,8 +3495,33 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # An rvalue-reference overload beside its lvalue twin is not emitted at
     # all (`_rvalue_shadowed`), so it takes no part in the prediction either.
     rvalue_shadowed = _rvalue_shadowed(functions)
+    # The member functions with a vtable slot, by symbol: the `virtual` rows
+    # the build writes for every member a library record declares
+    # (`record_abi`'s `methods`). Metadata without the rows has none, and a
+    # `noexcept` virtual keeps its `ccall` until a rebuild.
+    virtual_symbols = Set{String}(String(get(row, "symbol", ""))
+                                  for facts in values(record_abi) if facts isa AbstractDict
+                                  for row in get(facts, "methods", Any[])
+                                  if row isa AbstractDict && get(row, "virtual", false) == true)
+    # One constructor and one destructor binding per class, the complete-object
+    # variant (`_structor_bindings`): the other variant of a member is not
+    # emitted, and one the library cannot back is a refusal with its declared
+    # parameters, which is how the prediction sees it too.
+    (structor_skipped, structor_refused) = _structor_bindings(functions, dwarf_structs)
+    _declared_structor(f) = !haskey(structor_refused, String(get(f, "mangled", ""))) ? f :
+        merge(f, Dict{String,Any}("parameters" => _structor_parameters(
+            f, startswith(String(get(f, "name", "")), "~") ? :dtor : :ctor)[1]))
+    let classes = sort!(unique(String[String(get(f, "class", "")) for f in functions
+                                      if haskey(structor_refused, String(get(f, "mangled", "")))]))
+        isempty(classes) || println("  wrap: $(length(structor_refused)) constructor/destructor wrapper(s) of ",
+                                    "$(length(classes)) class(es) are refusals (a class with a virtual base ",
+                                    "whose complete-object variant the library lacks, or metadata to rebuild): ",
+                                    join(first(classes, 8), ", "), length(classes) > 8 ? ", …" : "")
+    end
     strict_int_positions = _integer_width_overloads(
-        [f for f in functions if !(String(get(f, "mangled", "")) in rvalue_shadowed)],
+        Any[_declared_structor(f) for f in functions
+            if !(String(get(f, "mangled", "")) in rvalue_shadowed) &&
+               !(String(get(f, "mangled", "")) in structor_skipped)],
         struct_types, _ccall_param_type;
         bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum,
         string_param = c -> _string_param_plan(c, record_abi) isa Tuple)
@@ -3344,6 +3538,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # A move overload beside its copy overload: one Julia signature, and
         # the lvalue one is what a Julia caller means (`_rvalue_shadowed`).
         mangled in rvalue_shadowed && continue
+        # The base-object constructor or destructor beside the complete-object
+        # one: the same Julia name, and never the one a caller means.
+        mangled in structor_skipped && continue
 
         # =========================================================
         # TIERED DISPATCH DECISION
@@ -3366,11 +3563,20 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             _crosses_small_blob(func, dwarf_structs, record_abi, _blob_names) ||
                             any(p -> _string_param_plan(String(get(p, "c_type", "")), record_abi) isa Tuple,
                                 func["parameters"])
+        # A virtual member function is reached through the object's vtable,
+        # and only a thunk does that (`jlcs.vcall`). A `ccall` names the
+        # symbol, which is `p->Class::f()`: a `noexcept` virtual was routed
+        # there, and `Base_g(derived)` ran `Base::g`.
+        use_mlir_dispatch = use_mlir_dispatch || mangled in virtual_symbols
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
         return_type = copy(func["return_type"])
-        
+        # A refused constructor or destructor keeps its name and its declared
+        # parameters (no VTT), and raises the reason (`_structor_bindings`).
+        structor_refusal = get(structor_refused, mangled, nothing)
+        structor_refusal === nothing || (params = _declared_structor(func)["parameters"])
+
         is_method = get(func, "is_method", false)
         is_vararg = get(func, "is_vararg", false)
         class_name = get(func, "class", "")
@@ -3640,6 +3846,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # GeneratorC.jl. A blank line between the docstring and `function`
             # detaches it, silently, and the function ships undocumented.
             doc_comment = chomp(doc_parts)
+        end
+
+        if structor_refusal !== nothing
+            push!(func_chunks, """
+            $doc_comment
+            function $julia_name($param_sig)
+                Base.error($(repr("ABI Safety Trap: cannot call '$julia_name' ($demangled). " * structor_refusal)))
+            end
+            """)
+            push!(exports, julia_name)
+            continue
         end
 
         # =========================================================

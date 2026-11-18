@@ -84,6 +84,31 @@ function parse_dwarf_output(dwarf_text::String)
     return parse_dwarf_output_robust(dwarf_text)
 end
 
+"""
+    _merge_class_dies(seen, info) -> ClassInfo
+
+One entry for a class from two of its DIEs. A class has a DIE in every compile
+unit that names it, and under clang's default debug info only the unit that
+homes it (a constructor's, or its key function's) DEFINES it there: the others
+hold a declaration with no size, no members and no bases, listing just the
+member functions that unit defines. Classes are keyed by name and the last DIE
+replaced the others, so a declaration in a later unit erased the definition:
+the class had no size, got no `jlcs.type_info`, and every virtual method it
+has was called by symbol (2026-11-17; which unit is later follows the object
+files' names). The entry keeps the definition's layout, the later one of two
+definitions as before, and every virtual method either DIE lists.
+"""
+function _merge_class_dies(seen::Union{Nothing,ClassInfo}, info::ClassInfo)::ClassInfo
+    seen === nothing && return info
+    (layout, other) = (info.size != 0 || seen.size == 0) ? (info, seen) : (seen, info)
+    methods = copy(layout.virtual_methods)
+    for m in other.virtual_methods
+        any(x -> x.name == m.name && x.mangled_name == m.mangled_name, methods) || push!(methods, m)
+    end
+    return ClassInfo(layout.name, layout.vtable_ptr_offset, layout.base_classes, methods, layout.members,
+                     layout.size, layout.base_offsets, layout.virtual_bases, layout.vbase_vtable_offsets)
+end
+
 function parse_dwarf_output_robust(dwarf_text::String)
     classes = Dict{String, ClassInfo}()
 
@@ -118,7 +143,7 @@ function parse_dwarf_output_robust(dwarf_text::String)
     
     function commit_class()
         if !isempty(current_class_name)
-            classes[current_class_name] = ClassInfo(
+            classes[current_class_name] = _merge_class_dies(get(classes, current_class_name, nothing), ClassInfo(
                 current_class_name,
                 current_vptr_offset,
                 copy(base_classes),
@@ -128,7 +153,7 @@ function parse_dwarf_output_robust(dwarf_text::String)
                 copy(base_offsets),
                 copy(virtual_bases),
                 copy(vbase_vtable_offsets)
-            )
+            ))
         end
         current_class_name = ""
         current_vptr_offset = 0

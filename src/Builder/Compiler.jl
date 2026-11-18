@@ -5998,10 +5998,11 @@ demangled listing (`nm -gC --defined-only`, no `-p`): the order the metadata's
 nm collates by the locale (`en_US.UTF-8` folds case and skips punctuation),
 so nothing here reproduces it. Each sorted line takes the next pair with its
 address, type and demangled name; among aliases of one demangled name (D1 and
-D2, C1 and C2 at one address) the smaller mangled name comes first, so
-`_dedup_method_chunks`' last definition is the D2 and C2 the address map used
-to give both lines. A pair no sorted line claims is appended, sorted the same
-way, with a warning.
+D2, C1 and C2 at one address) the smaller mangled name comes first, which is
+the order the address map gave them. It only places them: which variant a
+wrapper binds is decided by the variant (GeneratorCpp's `_structor_bindings`),
+no longer by `_dedup_method_chunks` keeping the last one, which was D2 and C2.
+A pair no sorted line claims is appended, sorted the same way, with a warning.
 """
 function _order_like_listing(pairs::AbstractVector{NTuple{4,String}}, sorted_output::AbstractString)
     queues = Dict{NTuple{3,String},Vector{NTuple{4,String}}}()
@@ -8395,6 +8396,20 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
     current_fn_accessibility = nothing
     current_fn_is_virtual = false
     declaration_facts = Dict{String,Dict{String,Any}}()
+    # The DIE's own `DW_AT_linkage_name`, before `DW_AT_specification` replaces
+    # it with the declaration's. Clang gives each emitted constructor and
+    # destructor VARIANT a definition DIE of its own, named for the variant
+    # (`C1`, `C2`, `D0`, `D1`, `D2`) and specifying the one declaration, whose
+    # name is the unified `C4`/`D4`. The base-object variants (`C2`, `D2`) of a
+    # class with a virtual base take one parameter more than the declaration
+    # has, the VTT, right after `this`; no other variant does.
+    current_function_own_linkage = nothing
+    # variant symbol => (key, params, count), and declaration key => its
+    # parameter count: read after the walk, where a variant with one parameter
+    # more than its declaration gets an entry of its own and the unified key
+    # keeps the declared list.
+    variant_definitions = Dict{String,Any}()
+    declared_param_counts = Dict{String,Int}()
     # Keys whose parameters came from a DEFINITION (named, `this` included). A
     # declaration of the same key that is read afterwards (a later unit's, or
     # the class's own when it follows the definition) has unnamed parameters
@@ -8428,6 +8443,16 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             # already-finished function (that is how a struct member landed on
             # free_opaque as a phantom second parameter).
             params = copy(params_for_this_function)
+
+            # What the post-pass needs to tell a base-object variant's VTT
+            # from a declared parameter (`variant_definitions`): how many
+            # parameters the declaration has, and each variant's own list.
+            if current_fn_is_declaration
+                declared_param_counts[function_key] = formal_params_in_die
+            elseif current_function_own_linkage !== nothing && current_function_own_linkage != function_key
+                variant_definitions[current_function_own_linkage] =
+                    (key = function_key, params = params, count = formal_params_in_die)
+            end
 
             die_param_counts[function_key] = max(get(die_param_counts, function_key, 0), formal_params_in_die)
 
@@ -8486,6 +8511,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         current_fn_is_virtual = false
         current_function_name = nothing
         current_function_linkage = nothing
+        current_function_own_linkage = nothing
         current_function_level = nothing
         function_processed = false
         params_for_this_function = []
@@ -8637,6 +8663,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                                           get(die_at_depth, current_level - 1, nothing)
                 current_function_name = nothing
                 current_function_linkage = nothing
+                current_function_own_linkage = nothing
                 function_processed = false  # Reset flag for new function
                 params_for_this_function = []  # Reset for the new function
                 formal_params_in_die = 0
@@ -8832,6 +8859,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
             if !isnothing(linkage_match)
                 current_function_linkage = String(strip(linkage_match.captures[1]))  # Convert SubString to String
+                current_function_own_linkage = current_function_linkage
                 if !isnothing(current_function_offset)
                     linkage_by_offset[current_function_offset] = current_function_linkage
                 end
@@ -9084,6 +9112,37 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
 
     if isempty(return_types)
         @warn "No DWARF return type info found (compile with -g flag)"
+    end
+
+    # A constructor's or destructor's variants share one declaration and so
+    # one key, and every definition's parameters were merged into it: the last
+    # variant read decided what all of them took. A base-object variant of a
+    # class with a virtual base takes the VTT after `this`, so by the order
+    # clang emitted them in, a complete-object destructor that takes one
+    # argument was `(this, vtt)`, or a base-object constructor that takes two
+    # was `(this)`. Such a variant is the definition with exactly one
+    # parameter more than its declaration. It gets an entry under its own
+    # symbol, the declaration's facts with its own list and the VTT marked
+    # `artificial`, and the unified key keeps (or gets back) the declared
+    # list. After the walk, because a declaration may follow its definitions.
+    for own in sort!(collect(keys(variant_definitions)))
+        v = variant_definitions[own]
+        declared = get(declared_param_counts, v.key, nothing)
+        unified = get(return_types, v.key, nothing)
+        (declared === nothing || unified === nothing || haskey(return_types, own)) && continue
+        (v.count == declared + 1 && length(v.params) == v.count && v.count >= 2 &&
+         get(v.params[1], "name", "") == "this") || continue
+        vtt = copy(v.params[2])
+        vtt["artificial"] = true
+        entry = copy(unified)
+        entry["parameters"] = Any[v.params[1], vtt, v.params[3:end]...]
+        return_types[own] = entry
+        die_param_counts[own] = v.count
+        if length(get(unified, "parameters", [])) == v.count
+            unified["parameters"] = Any[(q = copy(p); q["position"] = i - 1; q) for (i, p) in
+                                        enumerate(p for (j, p) in enumerate(v.params) if j != 2)]
+        end
+        die_param_counts[v.key] = declared
     end
 
     # Every extracted signature must match the DIE tree it came from.
