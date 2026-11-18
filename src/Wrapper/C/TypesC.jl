@@ -59,6 +59,138 @@ end
 
 
 
+# =============================================================================
+# A SCALAR THE TYPE MAP DOES NOT KNOW, AND 128-BIT INTEGERS
+# =============================================================================
+
+"""
+    _unmapped_crossings(params, param_types) -> Vector{String}
+
+The parameters a function takes BY VALUE that the type map has no Julia type
+for, one phrase each naming the C type; empty when every one is mapped.
+
+`params` are the function's parameters and `param_types` their `ccall` types in
+the same order (`_ccall_param_type`): a parameter still `Any` there is a C
+scalar the map does not know (`_Float16`, `__float128`, a spelling a compiler
+added since). A return the map does not know is said the same way
+(`_unmapped_return`) by the path that would have emitted it.
+
+`Any` is never a foreign-call type, and the C generator used to write it
+anyway: a parameter as `(Any,)`, which `_assert_no_any_ccall_argument` refuses
+by refusing the whole wrapper, and a return by its C spelling, which for
+`unsigned __int128` is not even Julia syntax. One such function then cost the
+library every other one. Each is a trap stub instead (`_unmapped_trap_body`).
+`long double` has its own (`_x87_crossings`), asked first.
+"""
+function _unmapped_crossings(params, param_types)::Vector{String}
+    out = String[]
+    for (p, t) in zip(params, param_types)
+        t == "Any" || continue
+        push!(out, "takes `$(get(p, "c_type", "?"))` $(get(p, "name", "")) by value")
+    end
+    return out
+end
+
+"The phrase for a return the type map does not know; see `_unmapped_crossings`."
+_unmapped_return(c_type::AbstractString) = "returns `$c_type`"
+
+"The body of the trap `_unmapped_crossings` calls for."
+_unmapped_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name'. It $(join(crossings, " and ")). " *
+        "RepliBuild maps that C type to no Julia type, so no ccall could pass or return it. " *
+        "Keep the function out with [wrap] exclude_symbols, or wrap a shim that takes and " *
+        "returns the value through a pointer.") * ")\n"
+
+const _C_INT128_TYPES = ("Int128", "UInt128")
+
+# The `ccall` types that take no general-purpose register on x86-64 SysV.
+const _C_SSE_SCALARS = ("Cfloat", "Cdouble", "Float32", "Float64", "ComplexF32", "ComplexF64")
+# ...and the ones that take exactly one: every integer of 8 bytes or less.
+const _C_GPR_SCALARS = ("Bool", "Cchar", "Cuchar", "Int8", "UInt8", "Cshort", "Cushort", "Int16", "UInt16",
+                        "Cint", "Cuint", "Int32", "UInt32", "Cwchar_t", "Clong", "Culong", "Clonglong",
+                        "Culonglong", "Int64", "UInt64", "Csize_t", "Cssize_t", "Cptrdiff_t", "Cintptr_t",
+                        "Cuintptr_t", "Ctime_t", "Cstring", "Cwstring")
+
+"""
+    _c_gpr_upper(ccall_type) -> Int
+
+The most general-purpose registers an x86-64 SysV argument of this `ccall`
+type takes: 0 for a float or `_Complex`, 1 for a pointer or an integer of 8
+bytes or less, and 2 for anything else (a 128-bit integer; a record, which a
+caller that knows its class can count exactly). An upper bound is what
+`_c_int128_misplaced` needs: it only ever refuses more.
+"""
+_c_gpr_upper(t::AbstractString)::Int =
+    t in _C_SSE_SCALARS ? 0 :
+    (t in _C_GPR_SCALARS || startswith(t, "Ptr{") || startswith(t, "Ref{")) ? 1 : 2
+
+"""
+    _c_int128_misplaced(param_types, gpr_words, return_type, return_in_memory; abi) -> Vector{String}
+
+The by-value 128-bit integers (`__int128`, `unsigned __int128`: `Int128` and
+`UInt128` among the `ccall` types `param_types`, or as `return_type`) that
+`ccall` would not pass or return as C does, one phrase each; empty when the
+call is right. `gpr_words[i]` is the most general-purpose registers parameter
+`i` can take (0 for a float, 1 for an integer or pointer, up to 2 for a small
+record), and `return_in_memory` whether the return may take the hidden-pointer
+register.
+
+  * **x86-64 SysV.** C passes a 128-bit integer whole: in two general
+    registers, or, when fewer than two are left, on the stack at a 16-byte
+    boundary, leaving the last register for a later argument. Julia lowers
+    `Int128` to `{ i64, i64 }` and LLVM places each half by itself: with one
+    register left the low half takes it and the high half goes to the stack,
+    and on the stack the pair sits at the next 8-byte slot. So the call is
+    right exactly while both halves get registers, which is asked of an upper
+    bound: the registers the return's hidden pointer and every parameter
+    before it can take, plus two, must not exceed six. Measured against clang
+    (`test_type_mapping_live.jl`): five `long`s and then an `unsigned
+    __int128` read a wrong value, and so did seven. The return (RAX:RDX on
+    both sides) is always right.
+  * **Win64.** C takes one by reference, as `ccall` passes it, and returns it
+    in XMM0 (clang and GCC for MinGW: `<2 x i64>`), where `ccall` expects a
+    hidden pointer: a return is refused, a parameter is not.
+  * **AAPCS64.** Julia passes `i128` itself, as clang does, and LLVM places it
+    (an even register pair, or the stack): nothing is refused.
+
+The C generator, which has no thunk, emits a trap for each. The C++ generator
+sends a function crossing one to its thunk (`is_ccall_safe`), which passes
+`i128`: LLVM places that as clang's callee reads it on SysV and AAPCS64, and
+`FunctionGen.thunk_crossings` refuses it under Win64.
+"""
+function _c_int128_misplaced(param_types, gpr_words, return_type::AbstractString,
+                             return_in_memory::Bool; abi::Symbol)::Vector{String}
+    out = String[]
+    if abi === :win64
+        return_type in _C_INT128_TYPES &&
+            push!(out, "returns a 128-bit integer, which C returns in XMM0 on Win64 where ccall " *
+                       "expects a hidden pointer")
+        return out
+    end
+    abi === :sysv || return out
+    used = return_in_memory ? 1 : 0
+    for (i, t) in enumerate(param_types)
+        if t in _C_INT128_TYPES
+            used + 2 > 6 &&
+                push!(out, "takes a 128-bit integer by value as parameter $i, after arguments that " *
+                           "can fill $(min(used, 6)) of the 6 integer registers: C passes it whole, on " *
+                           "the stack at a 16-byte boundary, and ccall passes its two halves separately")
+            used += 2
+        else
+            used += gpr_words[i]
+        end
+    end
+    return out
+end
+
+"The body of the trap `_c_int128_misplaced` calls for."
+_c_int128_trap_body(julia_name::AbstractString, crossings::Vector{String}) =
+    "    Base.error(" * repr(
+        "ABI Safety Trap: cannot call '$julia_name' through ccall. It $(join(crossings, "; ")). " *
+        "The callee would read the value from, or return it to, a place ccall does not use. " *
+        "Use a variant of this C function that takes or returns the value through a pointer.") * ")\n"
+
 """
     handle_unknown_c_type(registry::TypeRegistry, c_type::String, context::String)::String
 

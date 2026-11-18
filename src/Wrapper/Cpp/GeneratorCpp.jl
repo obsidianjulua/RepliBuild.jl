@@ -1327,6 +1327,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 push!(enum_chunks, _PendingEnum(enum_name,
                     "C++ enum: $enum_name (underlying type: $underlying_type)",
                     julia_underlying, members))
+            else
+                # Defined with no enumerators (`enum class byte : unsigned char
+                # {};`, `std::byte`): an integer type of its own. Never an
+                # alias of another empty enum, which the member-set dedup
+                # above would make it.
+                emitted_enum_base[enum_name] = julia_underlying
+                haskey(_C_PRIM_FIELD_LAYOUT, julia_underlying) &&
+                    (emitted_enum_layout[enum_name] = _C_PRIM_FIELD_LAYOUT[julia_underlying])
+                push!(enum_chunks, _PendingEnum(enum_name,
+                    "C++ enum: $enum_name (underlying type: $underlying_type, no enumerators)",
+                    julia_underlying, Pair{String,Any}[]))
             end
         end
 
@@ -1872,7 +1883,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # `_prove_julia_layout`: proven-exact structs, blobs, anonymous unions and
         # enums. Named unions are `mutable` and embed as a pointer.
         # Enums as emitted: an alias has its canonical's layout, not its own
-        # DWARF one, and an enum with no enumerators is not emitted at all.
+        # DWARF one.
         jl_layouts = Dict{String,Tuple{Int,Int}}(emitted_enum_layout)
         jl_mutable = Set{String}()
         # Every record emitted as a `mutable struct` of its C bytes (a named
@@ -2331,6 +2342,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         # will be filtered out during struct generation, the member
                         # becomes bytes so the embedding struct remains valid Julia syntax.
                         sanitized_type == julia_type && _stl_internal(julia_type) && return nothing
+                    end
+
+                    # A pointer to an enum this module emitted keeps its type,
+                    # under the enum's emitted name: enums precede structs in
+                    # the file, so the name is defined.
+                    let pm = match(r"^((?:Ptr\{)+)([A-Za-z_][A-Za-z0-9_]*)(\}+)$", sanitized_type)
+                        if pm !== nothing && _is_enum_name(String(pm.captures[2]))
+                            en = _sanitize_cpp_type_name(String(pm.captures[2]))
+                            haskey(emitted_enum_base, en) && return pm.captures[1] * en * pm.captures[3]
+                        end
                     end
 
                     # If the field is Ptr{X} and X hasn't been defined yet,
@@ -3335,6 +3356,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
     union!(typed_return_names, _imported_value_type_names(dwarf_structs, _sanitize_cpp_type_name))
+    # ...and with an enum this module emits: `Color*` and `Color&` are `Ptr{Color}`.
+    union!(typed_return_names, _pending_enum_type_names(enum_chunks))
 
     for func in functions
         func_name = func["name"]
@@ -3491,13 +3514,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # A `long double` crossing is the same trap the plain path emits
             # below; this branch used to `continue` past it.
             va_x87 = _x87_crossings(func)
+            # ...and so is a fixed parameter the type map does not know.
+            va_fixed = [p for p in params if get(p, "name", "") != "varargs..."]
+            va_unmapped = _unmapped_crossings(va_fixed, String[String(get(p, "julia_type", "Any")) for p in va_fixed])
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 params, return_type, overloads,
                 generate_docs, demangled, :cpp,
                 cstring_free=get(config.wrap.cstring_owned, func_name, ""),
                 conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs),
-                trap=isempty(va_x87) ? nothing : (n -> _x87_trap_body(n, va_x87))
+                trap=!isempty(va_x87) ? (n -> _x87_trap_body(n, va_x87)) :
+                     !isempty(va_unmapped) ? (n -> _unmapped_trap_body(n, va_unmapped)) : nothing
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -4095,11 +4122,22 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             is_unnameable_agg_return
 
         x87 = _x87_crossings(func)
+        # A parameter the type map has no Julia type for is still `Any` here,
+        # and a ccall declaring it would cost the whole wrapper
+        # (`_unmapped_crossings`, as in the C generator).
+        unmapped = _unmapped_crossings(params, param_types)
         if !isempty(x87)
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
             $(_x87_trap_body(julia_name, x87))end
+
+            """
+        elseif !isempty(unmapped)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_unmapped_trap_body(julia_name, unmapped))end
 
             """
         elseif has_unknown_param || is_unknown_return

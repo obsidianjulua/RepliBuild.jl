@@ -1417,6 +1417,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 push!(enum_chunks, _PendingEnum(enum_name,
                     "C enum: $enum_name (underlying type: $underlying_type)",
                     julia_underlying, members))
+            else
+                # Defined with no enumerators (`enum class byte : unsigned char
+                # {};`): an integer type of its own. Never an alias of another
+                # empty enum, which the member-set dedup above would make it.
+                push!(enum_chunks, _PendingEnum(enum_name,
+                    "C enum: $enum_name (underlying type: $underlying_type, no enumerators)",
+                    julia_underlying, Pair{String,Any}[]))
             end
         end
 
@@ -1829,6 +1836,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
 
         seen_struct_defs = Set{String}()
         defined_struct_names = Set{String}()
+        # The enums land before every struct in the file, so a field typed
+        # `Ptr{E}` (`enum E *kinds`) names something already defined.
+        union!(defined_struct_names, _pending_enum_type_names(enum_chunks))
         if @isdefined(seen_forward_decls)
             # Only seed with forward decls that were actually emitted (not DWARF-defined skips)
             for s in seen_forward_decls
@@ -2755,9 +2765,14 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     # `Ptr{Cvoid}` is ABI-identical and keeps the function callable.
     emitted_type_names = _defined_type_names(join(enum_chunks) * join(struct_chunks))
     union!(emitted_type_names, imported_jl_names)     # the import `const` binds X
+    # The enums are held back as pending records (`_PendingEnum`), which the
+    # text scan above does not see: without their names a `Ptr{E}` was degraded
+    # to `Ptr{Cvoid}` as if `E` were never declared.
+    union!(emitted_type_names, _pending_enum_type_names(enum_chunks))
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(enum_chunks) * join(struct_chunks))
     union!(typed_return_names, _imported_value_type_names(dwarf_structs, _sanitize_c_type_name))
+    union!(typed_return_names, _pending_enum_type_names(enum_chunks))
 
     # Union accessors were built during struct emission and screened against the
     # INTENDED struct set (`known_struct_names`). A type that was planned but
@@ -3245,15 +3260,38 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # and `_assert_no_any_ccall_argument` would then refuse the whole
         # wrapper instead of one function (abi_fuzz C2).
         x87 = _x87_crossings(func)
+        # A parameter the type map has no Julia type for (`_unmapped_crossings`)
+        # and a 128-bit integer ccall would not place as C does
+        # (`_c_int128_misplaced`): trap stubs, like `long double`'s. The
+        # registers each parameter can take are an upper bound, exact for a
+        # scalar and for a record whose SysV classes are known.
+        fixed_params = [p for p in get(func, "parameters", []) if get(p, "name", "") != "varargs..."]
+        unmapped = _unmapped_crossings(fixed_params, param_types)
+        _gpr_upper = function (t::String)
+            haskey(enum_layouts, t) && return 1               # an enum by value: its integer
+            raw = get(_unaligned_bdk, t, t)
+            info = get(dwarf_structs, raw, nothing)
+            (info isa AbstractDict && haskey(info, "members")) || return _c_gpr_upper(t)
+            classes = _rec_sysv_classes(raw)
+            classes === nothing || return count(==(:int), classes)
+            return _parse_dwarf_size(info) > 16 ? 0 : 2     # MEMORY, or a class not known
+        end
+        ret_jt = String(get(return_type, "julia_type", "Cvoid"))
+        int128 = (ret_jt in _C_INT128_TYPES || any(in(_C_INT128_TYPES), param_types)) ?
+            _c_int128_misplaced(param_types, Int[_gpr_upper(t) for t in param_types], ret_jt,
+                                ret_struct_info !== nothing && _ret_in_memory(rs_size, ret_struct_info) !== false;
+                                abi) : String[]
         sret_align = (ret_struct_info !== nothing && isempty(x87) &&
                       _ret_in_memory(rs_size, ret_struct_info) === true) ?
             _c_sret_buffer_align(_rec_align(ret_struct_info), _stand_in_align(sret_ret_type)) : 0
         needs_sret = isempty(x87) && (sret_align > 0 || (ret_struct_info !== nothing &&
             _c_explicit_sret(rs_size, _rec_unaligned(ret_struct_info); abi)))
         emit_sret = needs_sret && (!c_safe || rs_size <= 16 || sret_align > 0) &&
-                    isempty(blob_abi_offenders) && isempty(vector_offenders) && isempty(slot_traps)
+                    isempty(blob_abi_offenders) && isempty(vector_offenders) && isempty(slot_traps) &&
+                    isempty(unmapped) && isempty(int128)
         sret = emit_sret ? (; type = String(sret_ret_type), size = rs_size, align = sret_align) : nothing
-        return (; blob_abi_offenders, vector_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret)
+        return (; blob_abi_offenders, vector_offenders, slot_traps, carriers, x87, unmapped, int128, sret,
+                c_safe, cleaned_c_ret)
     end
 
     for func in functions
@@ -3386,7 +3424,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             va_trap = !isempty(vd.x87) ? (n -> _x87_trap_body(n, vd.x87)) :
                       !isempty(vd.blob_abi_offenders) ? (n -> _c_blob_trap_body(n, vd.blob_abi_offenders; abi)) :
                       !isempty(vd.vector_offenders) ? (n -> _c_vector_trap_body(n, vd.vector_offenders)) :
-                      !isempty(vd.slot_traps) ? (n -> _c_slot_trap_body(n, vd.slot_traps; abi)) : nothing
+                      !isempty(vd.slot_traps) ? (n -> _c_slot_trap_body(n, vd.slot_traps; abi)) :
+                      !isempty(vd.int128) ? (n -> _c_int128_trap_body(n, vd.int128)) :
+                      !isempty(vd.unmapped) ? (n -> _unmapped_trap_body(n, vd.unmapped)) : nothing
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 va_params, va_return, overloads,
@@ -3554,8 +3594,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # varargs path (`_c_byvalue_verdict` above): the SysV register-window
         # refusals, the over-aligned stack slots and their carriers, `long
         # double`, and BRANCH 0's return shape.
-        (; blob_abi_offenders, vector_offenders, slot_traps, carriers, x87, sret, c_safe, cleaned_c_ret) =
-            _c_byvalue_verdict(func, param_types, return_type)
+        (; blob_abi_offenders, vector_offenders, slot_traps, carriers, x87, unmapped, int128, sret, c_safe,
+           cleaned_c_ret) = _c_byvalue_verdict(func, param_types, return_type)
         # The ccall's parameter types and argument expressions, each
         # over-aligned record inside its carrier (`_rb_byval16`).
         ccall_param_types = [get(carriers, i, t) for (i, t) in enumerate(param_types)]
@@ -3816,6 +3856,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         has_unknown_param = any(t -> t == "_UnsafeUnknown", param_types)
         is_unknown_return = julia_return_type == "_UnsafeUnknown"
 
+        # A return the type map has no Julia type for: still `Any`, and not the
+        # by-value record the struct-return branch below names (whose name the
+        # module binds). That branch would write its C spelling as a type. The
+        # refusals that say more (a vector, `long double`) are asked first.
+        if julia_return_type == "Any" &&
+           !(is_struct_return && (occursin(r"[<>]", c_return_type) ? _sanitize_c_type_name(c_return_type) :
+                                                                      c_return_type) in emitted_type_names)
+            unmapped = vcat(unmapped, _unmapped_return(c_return_type))
+        end
+
         if !isempty(x87)
             func_def = """
             $doc_comment
@@ -3845,6 +3895,20 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             $doc_comment
             function $julia_name($param_sig)
             $(_c_slot_trap_body(julia_name, slot_traps; abi))end
+
+            """
+        elseif !isempty(int128)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_c_int128_trap_body(julia_name, int128))end
+
+            """
+        elseif !isempty(unmapped)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_unmapped_trap_body(julia_name, unmapped))end
 
             """
         elseif has_unknown_param || is_unknown_return

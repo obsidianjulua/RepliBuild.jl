@@ -414,6 +414,18 @@ end
 # C passes one vector register (SysV) or a pointer (Win64).
 const _BARE_VECTOR_PHRASE = "a SIMD vector, which a thunk would pass lane by lane as an array"
 
+# A 128-bit integer by value under Win64. The thunk declares its callee taking
+# and returning `i128`, which LLVM places as clang's callee reads it on SysV
+# (two registers, or the stack at a 16-byte boundary) and on AAPCS64. For
+# MinGW clang's callee takes a POINTER to the value and returns it in XMM0
+# (`<2 x i64>`), while LLVM passes an `i128` operand's two halves in RCX and
+# RDX and reads the result from RAX: the callee would read the low half as an
+# address. (`clang --target=x86_64-w64-windows-gnu -S -emit-llvm` on both
+# sides; no Windows host has run it.) Refused until the thunk states that shape.
+const _WIN64_INT128_PHRASE = "a 128-bit integer, which Win64 passes by reference and returns in XMM0 " *
+                             "where a thunk would pass its two halves in registers"
+_is_int128(c_type) = map_cpp_type(_strip_top_cv(String(c_type))) == "i128"
+
 """
     thunk_crossings(func, structs, record_abi) -> NamedTuple
 
@@ -424,7 +436,8 @@ the return is `:indirect` (an sret the thunk does not model), or when a
 `:layout` record is one this host's convention refuses (`sysv_trap_reason`:
 a SysV class DWARF does not settle or no statement states, or a `long double`
 record returned in st0), or when a bare SIMD vector crosses by value
-(`_BARE_VECTOR_PHRASE`, on every host), else `nothing`. `layout_trap`, `abi_trap` and `conflict_trap` split
+(`_BARE_VECTOR_PHRASE`, on every host) or a 128-bit integer does under Win64
+(`_WIN64_INT128_PHRASE`), else `nothing`. `layout_trap`, `abi_trap` and `conflict_trap` split
 `trap` by cause, because the Julia stub explains them differently:
 `layout_trap` holds the reasons it has always explained as a layout missing
 from DWARF, which a build flag can recover; `abi_trap` the convention's own
@@ -454,7 +467,11 @@ function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_ab
         end
         crosses_as_vector(p) &&
             push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $(_BARE_VECTOR_PHRASE)")
+        abi === :win64 && _is_int128(get(p, "c_type", "")) &&
+            push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $(_WIN64_INT128_PHRASE)")
     end
+    abi === :win64 && _is_int128(ret_c) &&
+        push!(abi_reasons, "returns `$ret_c` by value, $(_WIN64_INT128_PHRASE)")
     ret[1] === :opaque && push!(reasons, "returns `$ret_c` by value")
     if ret[1] === :layout && !by_ref(ret_c, ret[2])
         why = sysv_trap_reason(ret[2], structs; ret = true, abi)

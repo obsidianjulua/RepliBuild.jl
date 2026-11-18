@@ -177,6 +177,15 @@ function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
         end
     end
 
+    # ── -0.2. 128-bit integers by value ───────────────────────────────────
+    # `ccall` passes an `Int128` as two separate halves, which is where C
+    # puts one only while both halves get registers (`_c_int128_misplaced`);
+    # a thunk passes `i128`. `__int128` always took the thunk, as an
+    # identifier the primitive set below does not hold; `unsigned __int128`,
+    # which is no identifier, did not.
+    any(e -> String(get(e, "julia_type", "")) in _C_INT128_TYPES,
+        Iterators.flatten(((func_info["return_type"],), func_info["parameters"]))) && return false
+
     # ── 0. STL containers (never ccall-safe by value) ───────────────────
     ret_type_str = String(get(func_info["return_type"], "c_type", ""))
     if is_stl_container_type(ret_type_str)
