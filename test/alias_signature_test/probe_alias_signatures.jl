@@ -66,15 +66,18 @@ else
         end
         true
     end
-    probe("alias_of_a_static_function") do
-        (M.ax_via_static(6, 7) == 42 && M.ax_via_static(-3, 5) == -15) || (M.ax_via_static(6, 7), M.ax_via_static(-3, 5))
-    end
     probe("mangled_alias") do
         (M.ax_mangled(1.5, 4) == 6.0 && M.ax_mangled_real(1.5, 4) == 6.0) || M.ax_mangled(1.5, 4)
     end
     probe("no_debug_information_is_refused") do
         for f in (M.ax_undescribed, M.ax_undescribed_cxx), args in ((), (1,))
             (r = refused(f, args...)) === true || return r
+        end
+        true
+    end
+    probe("alias_of_a_static_function_is_refused") do
+        for args in ((), (6, 7))
+            (r = refused(M.ax_via_static, args...)) === true || return r
         end
         true
     end

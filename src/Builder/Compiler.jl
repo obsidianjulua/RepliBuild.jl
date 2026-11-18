@@ -10556,7 +10556,10 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
 
     # Merge DWARF return types and parameters into function metadata (overrides inference)
     address_of = Dict{String,String}(String(s["mangled"]) => String(get(s, "address", "")) for s in symbols)
-    by_address = nothing      # every code symbol by address, read when a symbol has no DIE
+    by_address = Dict{String,Vector{String}}()      # the exported functions at each address
+    for (name, address) in address_of
+        push!(get!(() -> String[], by_address, address), name)
+    end
     for func in functions
         mangled = func["mangled"]
         # Constructors and destructors are keyed differently on the two sides:
@@ -10569,7 +10572,6 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # (`_alias_signature_key`). Any other stays `inferred`, which both
         # generators refuse to call (`Wrapper._lacks_debug_info`).
         if dwarf_key === nothing
-            by_address === nothing && (by_address = _code_symbols_by_address(binary_path))
             twin = _alias_signature_key(mangled, get(address_of, mangled, ""), by_address, dwarf_return_types)
             twin === nothing || ((func["alias_of"], dwarf_key) = twin)
         end
@@ -10830,29 +10832,13 @@ function _structor_dwarf_key(mangled::AbstractString, dwarf_table::AbstractDict)
 end
 
 """
-    _code_symbols_by_address(binary_path) -> Dict{String,Vector{String}}
-
-The name of every code symbol in `binary_path` under its address, mangled and
-with the local symbols (`nm -p --defined-only`, no `-g`): an alias is often the
-one exported name of a `static` or hidden function. Empty when `nm` fails.
-"""
-function _code_symbols_by_address(binary_path::String)::Dict{String,Vector{String}}
-    out = Dict{String,Vector{String}}()
-    (listing, rc) = BuildBridge.execute("nm", ["-p", "--defined-only", binary_path])
-    rc == 0 || return out
-    for (address, _, name) in _nm_code_lines(listing)
-        push!(get!(() -> String[], out, address), name)
-    end
-    return out
-end
-
-"""
     _alias_signature_key(mangled, address, by_address, dwarf_table)
         -> Union{Nothing,Tuple{String,String}}
 
 For a symbol no DIE describes: `(aliasee, key)`, a function at the same
 `address` that `dwarf_table` describes and its key there; `nothing` when no
-symbol at the address is described.
+symbol at the address is described. `by_address` holds the library's exported
+functions (`extract_symbols_from_binary`).
 
 `int aliased_name(int) __attribute__((alias("aliased_real")))` is a second name
 for `aliased_real`'s code and clang writes no DIE for it. Its signature was
@@ -10866,6 +10852,14 @@ names at one address (constructor variants, identical functions a linker
 folded) are the same code too, and the smallest name is taken so the answer
 does not move. A constructor or destructor name is looked up as the merge
 does (`_structor_dwarf_key`).
+
+Only an exported name is a key into `dwarf_table`. A local symbol's is not:
+two files may each define a `static int impl`, with different signatures, and
+the table keeps one entry per name. So an alias whose aliasee is `static` (or
+hidden, or a static the in-process C build promoted to `__rb_<lib>_<name>`)
+finds nothing here and is refused, not given a namesake's signature. Matching
+those needs the DIE's own address (`DW_AT_low_pc`), which the parser does not
+read.
 """
 function _alias_signature_key(mangled::AbstractString, address::AbstractString,
                               by_address::AbstractDict, dwarf_table::AbstractDict)

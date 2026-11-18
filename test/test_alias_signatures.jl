@@ -50,13 +50,13 @@ _als_fn(name, mangled; params = Any[], ret = ("int", "Cint"), rsrc = "dwarf", ps
             "3000" => ["lonely"],
             "3100" => ["zeta_real", "alpha_real", "twin_of_two"],
             "3200" => ["__rb_lib_impl", "via_promoted"],
-            "3300" => ["_ZN3BoxC1Ei", "_ZN3BoxC2Ei", "box_make"],
-            "3400" => ["impl_local", "via_static"])
+            "3300" => ["_ZN3BoxC1Ei", "_ZN3BoxC2Ei", "box_make"])
         dwarf = Dict{String,Any}("aliased_real" => 1, "zeta_real" => 1, "alpha_real" => 1,
-                                 "_ZN3BoxC4Ei" => 1, "impl_local" => 1, "impl" => 1)
+                                 "_ZN3BoxC4Ei" => 1, "impl" => 1)
         key(m, a) = ALS_C._alias_signature_key(m, a, by, dwarf)
         @test key("aliased_name", "2dc0") == ("aliased_real", "aliased_real")
-        # Nothing else at the address, or nothing there that a DIE describes.
+        # Nothing else at the address, or nothing there that a DIE describes:
+        # a promoted static's exported name is not its DIE's (`impl`).
         @test key("lonely", "3000") === nothing
         @test key("via_promoted", "3200") === nothing
         # Several described names at one address are one piece of code: the
@@ -64,8 +64,6 @@ _als_fn(name, mangled; params = Any[], ret = ("int", "Cint"), rsrc = "dwarf", ps
         @test key("twin_of_two", "3100") == ("alpha_real", "alpha_real")
         # A constructor variant is described under the unified C4 key.
         @test key("box_make", "3300") == ("_ZN3BoxC1Ei", "_ZN3BoxC4Ei")
-        # A local (`static`) function's name is in the table too.
-        @test key("via_static", "3400") == ("impl_local", "impl_local")
         # An address the table does not have, or none.
         @test key("aliased_name", "ffff") === nothing
         @test key("aliased_name", "") === nothing

@@ -121,7 +121,7 @@ end
 
 Whether no DIE describes this symbol: its return type was not read from DWARF
 (`return_type_source == "inferred"`, set by `extract_compilation_metadata` when
-neither the symbol nor a function sharing its address has one). What the
+neither the symbol nor an exported function sharing its address has one). What the
 metadata holds for it then is a guess from its name, which for a C symbol is no
 parameters and `Cint`. Both generators emit `_no_debug_info_stub` for it
 instead of a call. A function with a DIE and no prototype (K&R `int f()`) has
@@ -140,8 +140,8 @@ signature a call could match instead.
 function _no_debug_info_stub(julia_name::AbstractString, mangled::AbstractString,
                              demangled::AbstractString, metadata, generate_docs::Bool)::String
     msg = "ABI Safety Trap: cannot call '$julia_name'. The library exports `$mangled` and has no " *
-          "debug information for it: no DWARF entry describes that symbol, or a function at its " *
-          "address, so its parameters and return type are unknown and no call could pass them " *
+          "debug information for it: no DWARF entry describes that symbol, or an exported function " *
+          "at its address, so its parameters and return type are unknown and no call could pass them " *
           "correctly. Compile the file that defines it with `-g`, or keep it out with " *
           "[wrap] exclude_symbols."
     get(metadata, "alias_signatures", false) === true ||

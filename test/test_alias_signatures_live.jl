@@ -11,9 +11,11 @@
 # test/alias_signature_test (C, the in-process toolchain) has an alias, a weak
 # alias, an alias returning a record and one taking a stack argument, a K&R
 # function, and a `nodebug` function. test/alias_signature_cpp_test (C++, the
-# system compiler) has a C-linkage alias, a mangled one, one whose aliasee is
-# `static`, and two `nodebug` functions. Each is built, wrapped and called from
-# a child. The pieces: test_alias_signatures.jl.
+# system compiler) has a C-linkage alias, a mangled one, two `nodebug`
+# functions, and an alias whose aliasee is `static`, which is refused too: a
+# local name need not be one function's, so it is no key into the DWARF table.
+# Each is built, wrapped and called from a child. The pieces:
+# test_alias_signatures.jl.
 # =============================================================================
 
 using Test
@@ -143,21 +145,20 @@ if requires("symbols no DIE describes, C++", :libJLCS, :clangxx)
 
     @testset "the metadata: an alias has its aliasee's signature" begin
         checked = 0
-        for (alias, real) in (("ax_name", "ax_real"), ("ax_via_static", "_ZL9local_mulii"),
-                              ("_Z10ax_mangleddi", "_Z15ax_mangled_realdi"))
+        for (alias, real) in (("ax_name", "ax_real"), ("_Z10ax_mangleddi", "_Z15ax_mangled_realdi"))
             a = fns[alias]
             @test (alias, get(a, "alias_of", nothing)) == (alias, real)
             @test (alias, a["return_type_source"], a["parameters_source"]) == (alias, "dwarf", "dwarf")
             @test (alias, length(a["parameters"])) == (alias, alias == "ax_name" ? 1 : 2)
             checked += 1
         end
-        @test checked == 3
+        @test checked == 2
         @test fns["_Z10ax_mangleddi"]["return_type"]["c_type"] == "double"
-        # The aliasee's definition is the alias's: `ax_real` and the static
-        # cannot throw, so their C-linkage aliases keep a plain ccall.
+        # The aliasee's definition is the alias's: `ax_real` cannot throw, so
+        # its C-linkage alias keeps a plain ccall.
         @test fns["ax_name"]["nounwind"] === true
-        @test fns["ax_via_static"]["nounwind"] === true
-        for m in ("ax_undescribed", "_Z18ax_undescribed_cxxi")
+        # `ax_via_static`'s aliasee is a local symbol: not looked up by name.
+        for m in ("ax_undescribed", "_Z18ax_undescribed_cxxi", "ax_via_static")
             @test (m, fns[m]["return_type_source"]) == (m, "inferred")
             @test !haskey(fns[m], "alias_of")
         end
@@ -165,21 +166,20 @@ if requires("symbols no DIE describes, C++", :libJLCS, :clangxx)
 
     @testset "the wrapper: a typed call for each alias, a refusal for the rest" begin
         @test occursin("ccall((:ax_name, LIBRARY_PATH), Cint, (Cint,), x_c)", _alias_sig_body(code, "ax_name"))
-        @test occursin("ccall((:ax_via_static, LIBRARY_PATH), Cint, (Cint, Cint,)", _alias_sig_body(code, "ax_via_static"))
         # A mangled function that is not `noexcept` takes its thunk, under its own symbol.
         @test occursin("JITManager.invoke(\"_mlir_ciface__Z10ax_mangleddi_thunk\", Cdouble,", _alias_sig_body(code, "ax_mangled"))
-        for f in ("ax_undescribed", "ax_undescribed_cxx")
+        for f in ("ax_undescribed", "ax_undescribed_cxx", "ax_via_static")
             u = _alias_sig_body(code, f)
             @test (f, startswith(u, "function $f(args...)\n")) == (f, true)
             @test (f, occursin("has no debug information for it", u)) == (f, true)
         end
-        @test !occursin("ccall((:ax_undescribed", code)
+        @test !occursin("ccall((:ax_undescribed", code) && !occursin("ccall((:ax_via_static", code)
         @test !occursin("ax_undescribed_cxxi_thunk", code)
     end
 
     @testset "every function, live" begin
-        _alias_sig_live(wrapper, "cpp", ["c_linkage_alias", "alias_of_a_static_function", "mangled_alias",
-                                         "no_debug_information_is_refused"])
+        _alias_sig_live(wrapper, "cpp", ["c_linkage_alias", "mangled_alias", "no_debug_information_is_refused",
+                                         "alias_of_a_static_function_is_refused"])
     end
 end
 end # requires
