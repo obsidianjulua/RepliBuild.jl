@@ -24,6 +24,8 @@ are a missing TOML entry. This page is symptom → what to edit.
 | `[wrap.varargs] … is unversioned` on every `wrap` | Name the upstream commit the overloads were checked against: `proven_at` in `[wrap.varargs]` ([Edit the TOML §2.3](config.md#2.3-Variadic-functions)). A project with no dependency `commit` cannot, and keeps the warning |
 | A variadic function rejects its extra arguments | Each `[wrap.varargs]` overload is its own function, named after its types: `f_Cint(…)`, not `f(…)` |
 | `UndefVarError` for a type or function the library defines | Its name would shadow a Base or Core name, so it is not exported. Qualify it: `MyProject.Number` |
+| A function or struct of the library is missing under its own name | The wrapper needs that name itself and bound it under another: read the `names:` lines `wrap` printed (`String` is `String_`, `Integer` is `c_Integer`). [Call the wrapper](calling.md) |
+| `wrap` fails with `The wrapper module would be named …` | The project's name, in CamelCase, is a name the wrapper uses (`String`, `Ptr`). Set `module_name` under `[wrap]` |
 | An edit to a source file does not reach the library | The per-file IR cache compares modification times. If the system clock went back, the old IR looks newer than your edit: `build(toml; clean=true)` |
 | `using MyProject` loads an old build after you edited the project | The package loads the build vendored last. `use("myproject")`, or `register` again, vendors the new one; then start a new session ([Registry](use.md)) |
 | `use()` keeps building an old copy of the sources | The project was registered by an earlier RepliBuild, which copied its sources into the registry. Register it again from the project |

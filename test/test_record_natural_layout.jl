@@ -135,8 +135,10 @@ const _NATURAL_STRUCTS = Dict{String,Any}(
         @test checked == length(expect)
     end
 
-    # extern "C" functions (unmangled): no exception routing, so the record decides.
+    # extern "C" functions (unmangled) proven `nounwind`: the exception routing
+    # lets them through, so the record decides.
     fn(name, ret, params...) = Dict{String,Any}("name" => name, "mangled" => name, "demangled" => name,
+        "nounwind" => true,
         "parameters" => Any[Dict{String,Any}("name" => "p$i", "julia_type" => t, "c_type" => t)
                             for (i, t) in enumerate(params)],
         "return_type" => Dict{String,Any}("julia_type" => ret == "void" ? "Cvoid" : ret, "c_type" => ret))

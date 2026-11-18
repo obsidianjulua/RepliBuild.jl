@@ -89,6 +89,15 @@ function build_aot_thunks(config, library_path;
     linked = false
     ctx = MLIRNative.create_context()
     try
+        # A callee the module never declares would end the process when the
+        # module is translated for `emit_object`, as it would in `create_jit`
+        # (`JLCSIRGenerator.undeclared_callees`). Refused by name, it is a
+        # failed AOT stage and a JIT wrapper.
+        undeclared = JLCSIRGenerator.undeclared_callees(ir_source)
+        isempty(undeclared) ||
+            error("the thunk module for $(lib_name) calls $(length(undeclared)) symbol(s) it never declares: " *
+                  join(undeclared, ", "))
+
         # debug_base puts the generated MLIR beside the wrapper it describes, so
         # gdb can open it when you break in a thunk — the same reason the JIT path
         # passes it (JITManager.jl). Omitting it here sent every AOT package's

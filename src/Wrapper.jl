@@ -31,6 +31,7 @@ export is_struct_like, is_enum_like, is_function_pointer_like
 
 # Sub-modules
 include("Wrapper/Utils.jl")
+include("Wrapper/NameScreen.jl")
 include("Wrapper/C/UtilsC.jl")
 include("Wrapper/Cpp/UtilsCpp.jl")
 include("Wrapper/TypeRegistry.jl")

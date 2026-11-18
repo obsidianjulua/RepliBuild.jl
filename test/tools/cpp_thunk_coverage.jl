@@ -51,6 +51,9 @@
 #             these are set aside, not missed:
 #               destructor variant       D0/D1/D2 of a class another variant of which
 #                                        is bound: one Julia method by construction
+#               constructor variant      C1/C2 of a constructor the other variant of
+#                                        which is bound (the complete-object one where
+#                                        the library has it; `_structor_bindings`)
 #               const/non-const pair     same parameters, receiver constness only
 #               rvalue twin              a `T&&` overload beside its `const T&` twin,
 #                                        which the generator does not emit
@@ -256,6 +259,9 @@ function trap_cause(msg::AbstractString)
         return "SysV refusal: " * (m === nothing ? "?" : String(m.captures[1]))
     end
     occursin("keys types by their bare DWARF name", msg) && return "conflicted type name"
+    # `_structor_bindings`' two refusals.
+    occursin("defines only the base-object", msg) && return "base-object variant only (a class with a virtual base)"
+    occursin("predates per-variant parameter lists", msg) && return "constructor/destructor metadata to rebuild"
     return "other refusal"
 end
 
@@ -287,6 +293,17 @@ function type_kind(s::StructDef)
 end
 
 _dtor_group(m) = (x = match(r"^(.*?)D[0-2]Ev$", m); x === nothing ? nothing : String(x.captures[1]))
+
+"""
+The constructor a metadata row is a variant of (its class and demangled
+spelling), or `nothing` for anything but a constructor: C1 and C2 of one
+constructor are one Julia method, and the generator emits one of them.
+"""
+function _ctor_group(f)
+    v = RepliBuild.Wrapper._structor_variant(f)
+    (v === nothing || v[1] !== :ctor) && return nothing
+    return (String(get(f, "class", "")), String(get(f, "demangled", "")))
+end
 
 # ─── one library ─────────────────────────────────────────────────────────────
 
@@ -406,6 +423,7 @@ function measure(lib)
     _cxx_name(m) = (d = String(get(byman[m], "demangled", "")); i = findfirst('(', d);
                     i === nothing ? d : d[1:prevind(d, i)])
     bound_names = Set(_cxx_name(m) for m in bound)
+    bound_ctors = Set{Any}(filter!(!isnothing, Any[_ctor_group(byman[b]) for b in bound]))
     # The generator's own name for a function (`_julia_function_name`), so a
     # drop can be told from a name two C++ functions share once spelled.
     _jl_name(f) = begin
@@ -450,8 +468,11 @@ function measure(lib)
             # Expected: what the generator drops on purpose, one Julia method
             # standing for several C++ entry points a Julia caller cannot tell
             # apart. Dropped: a distinct, callable entry point lost.
+            cg = _ctor_group(f)
             if g !== nothing && any(b -> _dtor_group(b) == g, bound)
                 push!(get!(expected, "destructor variant (D0/D1/D2: one Julia method per class)", String[]), m)
+            elseif cg !== nothing && cg in bound_ctors
+                push!(get!(expected, "constructor variant (C1/C2: one Julia method per constructor)", String[]), m)
             elseif twin !== nothing && twin in bound
                 push!(get!(expected, "const/non-const method pair (receiver constness; one kept)", String[]), m)
             elseif _has_rvalue(f) && any(b -> !_has_rvalue(byman[b]) && _lv_shape(byman[b]) == _lv_shape(f), siblings)

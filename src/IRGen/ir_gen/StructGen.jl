@@ -173,7 +173,7 @@ Function signatures do not come through here. FunctionGen finds a template
 record through `_table_entry`, and a bare ref in a signature is a parse error
 for a record the table does not have.
 """
-function _member_mlir_type(c_type::AbstractString)::String
+function _member_mlir_type(c_type::AbstractString, records = nothing)::String
     t = String(strip(replace(replace(String(c_type), r"^(?:(?:const|volatile)\s+)+" => ""),
                              r"(?:\s+(?:const|volatile))+$" => "")))
     outer = _outside_template_args(t)
@@ -190,7 +190,9 @@ function _member_mlir_type(c_type::AbstractString)::String
             return r
         end
     end
-    return map_cpp_type(String(c_type))
+    # A member named like a record of the library is that record
+    # (`map_cpp_type(t, records)`).
+    return map_cpp_type(String(c_type), records)
 end
 
 """
@@ -331,7 +333,7 @@ function _packed_literal_string(name::String, info::Any, all_structs, seen::Set{
         catch
             0
         end
-        resolved = _resolve_struct_member_type(_member_mlir_type(t), all_structs, seen;
+        resolved = _resolve_struct_member_type(_member_mlir_type(t, all_structs), all_structs, seen;
                                                alias_form=false, fallback_size=m_size)
         # INVARIANT: a packed literal body contains no bare named struct refs.
         # `_resolve_struct_member_type(alias_form=false)` deliberately passes a
@@ -488,7 +490,7 @@ function _dwarf_struct_align(info, all_structs, depth::Int)
     kind == "union" && return 1   # unions are emitted as !llvm.array<N x i8>
     a = 1
     for m in get(info, "members", [])
-        l = _mlir_layout(_member_mlir_type(String(get(m, "c_type", "void*"))), all_structs, depth + 1)
+        l = _mlir_layout(_member_mlir_type(String(get(m, "c_type", "void*")), all_structs), all_structs, depth + 1)
         l === nothing || (a = max(a, l[2]))
     end
     return a
@@ -614,7 +616,7 @@ function _sized_member_types(name::String, info::Any, all_structs; alias_form::B
     for m in get(info, "members", [])
         t = get(m, "c_type", "void*")
         m_size = something(_parse_num(get(m, "size", 0)), 0)
-        mapped = _member_mlir_type(t)
+        mapped = _member_mlir_type(t, all_structs)
         push!(emit, _resolve_struct_member_type(mapped, all_structs, Set{String}([name]);
                                                 alias_form=alias_form, fallback_size=m_size))
         # Measure what is emitted. The alias `!Struct_X` stands for X's own body,
@@ -907,7 +909,7 @@ function generate_struct_definitions(structs::Any)
             t = get(m, "c_type", "void*")
             # A pointer member maps to `!llvm.ptr` and names no dependency. A
             # `*` inside template arguments (`Box<int*>`) does not make one.
-            mlir_t = _member_mlir_type(t)
+            mlir_t = _member_mlir_type(t, structs)
             # The member may be an array of the record; the name is read back
             # through `mlir_struct_name`, which undoes the literal's escaping.
             m_match = match(r"!llvm\.struct<\"(?:[^\"\\]|\\.)*\">", mlir_t)

@@ -224,7 +224,9 @@ function _sysv_type_leaves!(out::Vector{_SysVLeaf}, c_type::AbstractString, juli
         return al
     end
 
-    sc = _sysv_scalar(t, size)
+    # A record of the library is that record, whatever its name spells
+    # (`map_cpp_type(t, records)`).
+    sc = (haskey(structs, t) || haskey(structs, "__enum__" * t)) ? nothing : _sysv_scalar(t, size)
     if sc !== nothing
         kind, n, al = sc
         push!(out, _SysVLeaf(bit, 8 * n, kind, al, false, what))

@@ -246,7 +246,7 @@ const MEMBER_SIZE_DUMP = raw"""
             "0x8" => Dict{String,Any}("kind" => "volatile", "target" => "0x7"),
             "0x9" => Dict{String,Any}("kind" => "typedef", "name" => "Loop", "target" => "0x9"),
             "0xa" => Dict{String,Any}("kind" => "array", "element_type" => "0x3", "dimensions" => []),
-            "0xb" => "char16_t")
+            "0xb" => "_Float16")
         sz(ref; kw...) = _MSZ._die_byte_size(ref, refs; kw...)
         @test sz("0x1") == 4
         @test sz("0x2") == 4

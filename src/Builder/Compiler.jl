@@ -5998,10 +5998,11 @@ demangled listing (`nm -gC --defined-only`, no `-p`): the order the metadata's
 nm collates by the locale (`en_US.UTF-8` folds case and skips punctuation),
 so nothing here reproduces it. Each sorted line takes the next pair with its
 address, type and demangled name; among aliases of one demangled name (D1 and
-D2, C1 and C2 at one address) the smaller mangled name comes first, so
-`_dedup_method_chunks`' last definition is the D2 and C2 the address map used
-to give both lines. A pair no sorted line claims is appended, sorted the same
-way, with a warning.
+D2, C1 and C2 at one address) the smaller mangled name comes first, which is
+the order the address map gave them. It only places them: which variant a
+wrapper binds is decided by the variant (GeneratorCpp's `_structor_bindings`),
+no longer by `_dedup_method_chunks` keeping the last one, which was D2 and C2.
+A pair no sorted line claims is appended, sorted the same way, with a warning.
 """
 function _order_like_listing(pairs::AbstractVector{NTuple{4,String}}, sorted_output::AbstractString)
     queues = Dict{NTuple{3,String},Vector{NTuple{4,String}}}()
@@ -6243,6 +6244,7 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
     "signed char" => "Cchar",
     "unsigned char" => "Cuchar",
     "wchar_t" => "Cwchar_t",
+    "char8_t" => "UInt8",
     "char16_t" => "UInt16",
     "char32_t" => "UInt32",
 
@@ -6299,8 +6301,12 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
     # Time types
     "time_t" => "Ctime_t",
 
-    # Special types
+    # Special types. DWARF names the unsigned one `unsigned __int128` (clang)
+    # or `__int128 unsigned` (GCC); `__uint128_t` is a typedef of it.
     "__int128" => "Int128",
+    "__int128_t" => "Int128",
+    "unsigned __int128" => "UInt128",
+    "__int128 unsigned" => "UInt128",
     "__uint128_t" => "UInt128",
 
     # C11 _Complex types
@@ -6457,7 +6463,9 @@ const _C_TYPE_SIZE_MAP = Dict{String,Int}(
     "ptrdiff_t" => 8,
     "intptr_t" => 8, "uintptr_t" => 8,
     "wchar_t" => _C_WCHAR_BYTES, "Cwchar_t" => _C_WCHAR_BYTES,
+    "char8_t" => 1, "char16_t" => 2, "char32_t" => 4,
     "__int128" => 16, "__uint128_t" => 16,
+    "__int128_t" => 16, "unsigned __int128" => 16, "__int128 unsigned" => 16,
 )
 
 """
@@ -7751,6 +7759,18 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             end
         end
 
+        # DW_AT_declaration on an enum DIE: an opaque declaration (`enum class E
+        # : int;`), which has a size and no enumerators. An enum DEFINED with
+        # none (`enum class byte : unsigned char {};`) has no such attribute,
+        # and only that one gets an entry (see the enum definitions below).
+        if contains(line, "DW_AT_declaration") && haskey(type_refs, "last_tag_offset")
+            tag_offset = type_refs["last_tag_offset"]
+            if get(offset_to_kind, tag_offset, nothing) === :enum &&
+               isa(get(type_refs, tag_offset, nothing), Dict)
+                type_refs[tag_offset]["declaration"] = true
+            end
+        end
+
         # DW_AT_calling_convention on a record DIE is clang's own answer to "is
         # this type trivial for the purposes of calls": 5 (DW_CC_pass_by_value)
         # travels in registers or on the stack like a C struct, 4
@@ -8395,6 +8415,20 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
     current_fn_accessibility = nothing
     current_fn_is_virtual = false
     declaration_facts = Dict{String,Dict{String,Any}}()
+    # The DIE's own `DW_AT_linkage_name`, before `DW_AT_specification` replaces
+    # it with the declaration's. Clang gives each emitted constructor and
+    # destructor VARIANT a definition DIE of its own, named for the variant
+    # (`C1`, `C2`, `D0`, `D1`, `D2`) and specifying the one declaration, whose
+    # name is the unified `C4`/`D4`. The base-object variants (`C2`, `D2`) of a
+    # class with a virtual base take one parameter more than the declaration
+    # has, the VTT, right after `this`; no other variant does.
+    current_function_own_linkage = nothing
+    # variant symbol => (key, params, count), and declaration key => its
+    # parameter count: read after the walk, where a variant with one parameter
+    # more than its declaration gets an entry of its own and the unified key
+    # keeps the declared list.
+    variant_definitions = Dict{String,Any}()
+    declared_param_counts = Dict{String,Int}()
     # Keys whose parameters came from a DEFINITION (named, `this` included). A
     # declaration of the same key that is read afterwards (a later unit's, or
     # the class's own when it follows the definition) has unnamed parameters
@@ -8428,6 +8462,16 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             # already-finished function (that is how a struct member landed on
             # free_opaque as a phantom second parameter).
             params = copy(params_for_this_function)
+
+            # What the post-pass needs to tell a base-object variant's VTT
+            # from a declared parameter (`variant_definitions`): how many
+            # parameters the declaration has, and each variant's own list.
+            if current_fn_is_declaration
+                declared_param_counts[function_key] = formal_params_in_die
+            elseif current_function_own_linkage !== nothing && current_function_own_linkage != function_key
+                variant_definitions[current_function_own_linkage] =
+                    (key = function_key, params = params, count = formal_params_in_die)
+            end
 
             die_param_counts[function_key] = max(get(die_param_counts, function_key, 0), formal_params_in_die)
 
@@ -8486,6 +8530,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         current_fn_is_virtual = false
         current_function_name = nothing
         current_function_linkage = nothing
+        current_function_own_linkage = nothing
         current_function_level = nothing
         function_processed = false
         params_for_this_function = []
@@ -8637,6 +8682,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                                           get(die_at_depth, current_level - 1, nothing)
                 current_function_name = nothing
                 current_function_linkage = nothing
+                current_function_own_linkage = nothing
                 function_processed = false  # Reset flag for new function
                 params_for_this_function = []  # Reset for the new function
                 formal_params_in_die = 0
@@ -8832,6 +8878,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             linkage_match = match(r":\s*([^:\s]+)\s*$", line)
             if !isnothing(linkage_match)
                 current_function_linkage = String(strip(linkage_match.captures[1]))  # Convert SubString to String
+                current_function_own_linkage = current_function_linkage
                 if !isnothing(current_function_offset)
                     linkage_by_offset[current_function_offset] = current_function_linkage
                 end
@@ -9084,6 +9131,37 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
 
     if isempty(return_types)
         @warn "No DWARF return type info found (compile with -g flag)"
+    end
+
+    # A constructor's or destructor's variants share one declaration and so
+    # one key, and every definition's parameters were merged into it: the last
+    # variant read decided what all of them took. A base-object variant of a
+    # class with a virtual base takes the VTT after `this`, so by the order
+    # clang emitted them in, a complete-object destructor that takes one
+    # argument was `(this, vtt)`, or a base-object constructor that takes two
+    # was `(this)`. Such a variant is the definition with exactly one
+    # parameter more than its declaration. It gets an entry under its own
+    # symbol, the declaration's facts with its own list and the VTT marked
+    # `artificial`, and the unified key keeps (or gets back) the declared
+    # list. After the walk, because a declaration may follow its definitions.
+    for own in sort!(collect(keys(variant_definitions)))
+        v = variant_definitions[own]
+        declared = get(declared_param_counts, v.key, nothing)
+        unified = get(return_types, v.key, nothing)
+        (declared === nothing || unified === nothing || haskey(return_types, own)) && continue
+        (v.count == declared + 1 && length(v.params) == v.count && v.count >= 2 &&
+         get(v.params[1], "name", "") == "this") || continue
+        vtt = copy(v.params[2])
+        vtt["artificial"] = true
+        entry = copy(unified)
+        entry["parameters"] = Any[v.params[1], vtt, v.params[3:end]...]
+        return_types[own] = entry
+        die_param_counts[own] = v.count
+        if length(get(unified, "parameters", [])) == v.count
+            unified["parameters"] = Any[(q = copy(p); q["position"] = i - 1; q) for (i, p) in
+                                        enumerate(p for (j, p) in enumerate(v.params) if j != 2)]
+        end
+        die_param_counts[v.key] = declared
     end
 
     # Every extracted signature must match the DIE tree it came from.
@@ -9420,6 +9498,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
     # name several enums.
     enum_defs = Dict{String,Dict{String,Any}}()
     enum_candidates = Dict{String,Vector{Dict{String,Any}}}()
+    toolchain_enum_candidates = Dict{String,Vector{Dict{String,Any}}}()   # by `__enum__<name>`
     enum_scopes_of = Dict{String,Vector{String}}()
     enum_decl_files_of = Dict{String,Vector{String}}()
     for offset in die_order
@@ -9438,8 +9517,24 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                 # Get enumerators
                 enumerators = get(type_info, "enumerators", [])
 
-                if !isempty(enumerators)
-                    push!(get!(() -> Dict{String,Any}[], enum_candidates, enum_name), Dict{String,Any}(
+                # An enum DEFINED with no enumerators is a type too: C++'s
+                # `enum class byte : unsigned char {};` (`std::byte`), a
+                # library's `enum class Handle : uint32_t {};`. It crosses a
+                # call as its underlying integer like any enum, and without an
+                # entry it was a record with no layout: `struct byte end` and
+                # an ABI trap. An opaque declaration (`enum class E : int;`)
+                # says neither what it is an integer of nor what it holds, and
+                # gets none. One a toolchain header declares is set aside like
+                # a toolchain record, and comes back only where the library
+                # names it (`_promote_toolchain_records!`).
+                empty_definition = isempty(enumerators) && !isnothing(underlying_type_ref) &&
+                                   get(type_info, "declaration", false) != true &&
+                                   !isnothing(get(type_info, "byte_size", nothing))
+                set_aside = empty_definition && drops_type(type_info)
+                if !isempty(enumerators) || empty_definition
+                    enum_key = set_aside ? "__enum__" * enum_name : enum_name
+                    push!(get!(() -> Dict{String,Any}[], set_aside ? toolchain_enum_candidates : enum_candidates,
+                               enum_key), Dict{String,Any}(
                         "kind" => "enum",
                         "underlying_type" => underlying_c_type,
                         "julia_type" => underlying_julia_type,
@@ -9449,10 +9544,10 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                     # Scope and header beside the definition (see the records above).
                     let sp = get(type_info, "scope_parent", missing)
                         sc = sp === missing ? nothing : _scope_of(sp, type_refs)
-                        sc === nothing || push!(get!(() -> String[], enum_scopes_of, enum_name), sc)
+                        sc === nothing || push!(get!(() -> String[], enum_scopes_of, enum_key), sc)
                     end
                     let p = String(get(type_info, "decl_file_path", ""))
-                        isempty(p) || push!(get!(() -> String[], enum_decl_files_of, enum_name), replace(p, '\\' => '/'))
+                        isempty(p) || push!(get!(() -> String[], enum_decl_files_of, enum_key), replace(p, '\\' => '/'))
                     end
                 end
             end
@@ -9462,6 +9557,13 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         enum_defs[enum_name] = _canonical_definition(defs)
         _record_provenance!(enum_defs[enum_name], get(enum_scopes_of, enum_name, String[]),
                             get(enum_decl_files_of, enum_name, String[]))
+    end
+    # The toolchain's enumerator-less enums wait beside its records, under the
+    # key they will have in `struct_defs`.
+    for (enum_key, defs) in toolchain_enum_candidates
+        toolchain_defs[enum_key] = _canonical_definition(defs)
+        _record_provenance!(toolchain_defs[enum_key], get(enum_scopes_of, enum_key, String[]),
+                            get(enum_decl_files_of, enum_key, String[]))
     end
 
 
@@ -10384,6 +10486,16 @@ whose type is a 1-byte empty record (`empty_records`; `_Storage`'s
 `_Empty_byte` beside a `std::optional`'s value): it overlaps the others and
 holds no bytes they do not.
 
+**A toolchain enum with no enumerators** (`std::byte`, `std::align_val_t`;
+`toolchain_defs["__enum__<name>"]`) comes back the same way, as
+`struct_defs["__enum__<name>"]` marked `"toolchain"`: reached by value it is
+the integer the call crosses, and a member of that type is complete. It is
+also put back where a seed or a walked record names it behind a pointer or
+reference, which a record is not: the enum is the type that pointer is typed
+with (`std::byte*` is `Ptr{byte}`), and it holds nothing whose layout could be
+missing. One no exported function, exported global or reached record names
+stays out. (A toolchain enum WITH enumerators was never set aside.)
+
 Never promoted: an STL container, which keeps its own path (pointer in, byte blob
 out; `stl_container_size`), and a name on `INTERNAL_TYPE_BLOCKLIST`, which no
 generator emits. A library record of the same name keeps its entry.
@@ -10437,7 +10549,7 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
         # `_complex_base_name`'s spellings, which only a sized base type gets.
         e in ("complex float", "complex double", "complex long double") && return true
         cuts = _scope_suffixes(e)
-        any(c -> haskey(struct_defs, "__enum__" * c), cuts) && return true
+        any(c -> haskey(struct_defs, "__enum__" * c) || haskey(toolchain_defs, "__enum__" * c), cuts) && return true
         stl_container_size(e) > 0 && return true
         _key_in(e, struct_defs) !== nothing && return true
         tk = _key_in(e, toolchain_defs)
@@ -10464,13 +10576,38 @@ function _promote_toolchain_records!(struct_defs::AbstractDict, toolchain_defs::
             reach(String(get(b, "type", "")))
         end
     end
+    # A toolchain enum with no enumerators that `e` names (`std::byte`): put
+    # back whole, since an enum holds nothing. `true` when `e` is an enum.
+    function reach_enum(e::AbstractString)
+        for c in _scope_suffixes(e)
+            ek = "__enum__" * c
+            haskey(struct_defs, ek) && return true
+            (haskey(toolchain_defs, ek) && !(c in INTERNAL_TYPE_BLOCKLIST)) || continue
+            def = Dict{String,Any}(toolchain_defs[ek])
+            def["toolchain"] = true
+            struct_defs[ek] = def
+            push!(promoted, ek)
+            return true
+        end
+        return false
+    end
     function reach(t::AbstractString)
         e = held(t)
-        (e === nothing || isempty(e)) && return
+        if e === nothing
+            # An address. A record behind it is not held, and stays out; an
+            # enum is the type the pointer is typed with (`std::byte*` is
+            # `Ptr{byte}`), which the wrapper can only spell if it emits it.
+            s = replace(String(t), r"\b(?:const|volatile)\b" => "")
+            s = replace(s, r"(?:\[\d*\])+\s*$" => "")
+            occursin('(', s) || reach_enum(strip(replace(s, r"[*&\s]+$" => "")))
+            return
+        end
+        isempty(e) && return
         stl_container_size(e) > 0 && return
         lk = _key_in(e, struct_defs)
         lk === nothing || return walk(lk)                # the library's own, or done
         tk = _key_in(e, toolchain_defs)
+        tk === nothing && reach_enum(e) && return
         (tk === nothing || !promotable(tk) || !complete(tk, String[])) && return
         def = _laid_out_from_bases(toolchain_defs[tk], k -> begin
                   bk = _key_in(k, toolchain_defs)
@@ -10522,7 +10659,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                                    "$(length(conflicted)) type names have", " distinct definitions, ",
                                    "one kept for each: ", join(first(conflicted, 8), ", "),
                                    length(conflicted) > 8 ? ", …" : "")
-    toolchain = sort!([k for (k, v) in struct_defs if get(v, "toolchain", false) == true])
+    toolchain = sort!([replace(k, r"^__enum__" => "enum ") for (k, v) in struct_defs
+                       if get(v, "toolchain", false) == true])
     isempty(toolchain) || println("  metadata: ", length(toolchain), " toolchain record(s) held or passed ",
                                   "by value, layout kept: ", join(first(toolchain, 6), ", "),
                                   length(toolchain) > 6 ? ", …" : "")
@@ -10555,6 +10693,11 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     functions = parse_function_signatures(symbols, sig_struct_names, sig_enum_names)
 
     # Merge DWARF return types and parameters into function metadata (overrides inference)
+    address_of = Dict{String,String}(String(s["mangled"]) => String(get(s, "address", "")) for s in symbols)
+    by_address = Dict{String,Vector{String}}()      # the exported functions at each address
+    for (name, address) in address_of
+        push!(get!(() -> String[], by_address, address), name)
+    end
     for func in functions
         mangled = func["mangled"]
         # Constructors and destructors are keyed differently on the two sides:
@@ -10562,6 +10705,14 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # unified C4/D4 into DW_AT_linkage_name. See `_structor_dwarf_key`.
         dwarf_key = haskey(dwarf_return_types, mangled) ? mangled :
                     _structor_dwarf_key(mangled, dwarf_return_types)
+        # A symbol no DIE describes is an alias when a described function has
+        # its address, and then has that function's signature
+        # (`_alias_signature_key`). Any other stays `inferred`, which both
+        # generators refuse to call (`Wrapper._lacks_debug_info`).
+        if dwarf_key === nothing
+            twin = _alias_signature_key(mangled, get(address_of, mangled, ""), by_address, dwarf_return_types)
+            twin === nothing || ((func["alias_of"], dwarf_key) = twin)
+        end
         if dwarf_key !== nothing
             dwarf_info = dwarf_return_types[dwarf_key]
 
@@ -10597,6 +10748,17 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             func["is_vararg"] = false
         end
     end
+    # Say which symbols had no DIE: the aliases that took a signature, and the
+    # ones the wrapper will refuse.
+    let aliases = sort!(["$(f["mangled"]) = $(f["alias_of"])" for f in functions if haskey(f, "alias_of")]),
+        refused = sort!([String(f["mangled"]) for f in functions if f["return_type_source"] == "inferred"])
+        isempty(aliases) || println("  metadata: ", length(aliases), " alias(es) with no debug information of their ",
+                                    "own take their aliasee's signature: ", join(first(aliases, 6), ", "),
+                                    length(aliases) > 6 ? ", …" : "")
+        isempty(refused) || println("  metadata: ", length(refused), " exported function(s) have no debug ",
+                                    "information, and the wrapper will refuse to call them: ",
+                                    join(first(refused, 6), ", "), length(refused) > 6 ? ", …" : "")
+    end
 
     # "Can an exception leave this function?" — the question the tier router asks
     # (DispatchLogic.is_ccall_safe) and the thunk generator asks (FunctionGen:
@@ -10616,6 +10778,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # nested enum, fmt's inferred constructor signatures). Widening is a separate
     # change, after those gaps are closed. No IR (ingest mode) means nothing is
     # noexcept, so all C++ goes to Tier 2, the router's documented safe default.
+    # A function with C linkage in a C++ library is routed by the proof alone
+    # (`nounwind`, which `_mark_noexcept!` records beside `is_noexcept`): ccall
+    # is where those already were, so that only narrows.
     candidates = config.wrap.language == :c ? Set{String}() :
                  _scan_noexcept_functions(source_files, get_include_dirs(config))
     _apply_default_argument_identity!(functions, bound_defaults)
@@ -10748,6 +10913,10 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # Older metadata spells every one `function_ptr(R)*`, so the generators
         # build a callback's `@cfunction` example from it only when this is set.
         "function_pointer_parameters" => true,
+        # A symbol with no DIE was looked up by address (`_alias_signature_key`),
+        # so one still `inferred` here is no alias of a described function.
+        # Older metadata never looked: the refusal says to rebuild.
+        "alias_signatures" => true,
 
         # STL container method symbols (for JIT thunk generation)
         "stl_methods" => stl_methods,
@@ -10801,6 +10970,46 @@ function _structor_dwarf_key(mangled::AbstractString, dwarf_table::AbstractDict)
 end
 
 """
+    _alias_signature_key(mangled, address, by_address, dwarf_table)
+        -> Union{Nothing,Tuple{String,String}}
+
+For a symbol no DIE describes: `(aliasee, key)`, a function at the same
+`address` that `dwarf_table` describes and its key there; `nothing` when no
+symbol at the address is described. `by_address` holds the library's exported
+functions (`extract_symbols_from_binary`).
+
+`int aliased_name(int) __attribute__((alias("aliased_real")))` is a second name
+for `aliased_real`'s code and clang writes no DIE for it. Its signature was
+then inferred from the demangled name, which for a C symbol is the name: no
+parameters and `Cint`, a call that passes nothing and returns whatever the
+callee computed from a stale register (2026-11-17). The code at an address is
+one function's whatever it is called, so the described function's signature is
+the alias's, exactly; that is the one use an address has here (a symbol's own
+two names are still paired by position, `_pair_nm_outputs`). Several described
+names at one address (constructor variants, identical functions a linker
+folded) are the same code too, and the smallest name is taken so the answer
+does not move. A constructor or destructor name is looked up as the merge
+does (`_structor_dwarf_key`).
+
+Only an exported name is a key into `dwarf_table`. A local symbol's is not:
+two files may each define a `static int impl`, with different signatures, and
+the table keeps one entry per name. So an alias whose aliasee is `static` (or
+hidden, or a static the in-process C build promoted to `__rb_<lib>_<name>`)
+finds nothing here and is refused, not given a namesake's signature. Matching
+those needs the DIE's own address (`DW_AT_low_pc`), which the parser does not
+read.
+"""
+function _alias_signature_key(mangled::AbstractString, address::AbstractString,
+                              by_address::AbstractDict, dwarf_table::AbstractDict)
+    for name in sort!(unique(get(by_address, address, String[])))
+        name == mangled && continue
+        key = haskey(dwarf_table, name) ? name : _structor_dwarf_key(name, dwarf_table)
+        key === nothing || return (String(name), String(key))
+    end
+    return nothing
+end
+
+"""
     _mark_noexcept!(functions, candidates, nounwind)
 
 Set `is_noexcept` on every function: `true` only when its bare `name` is a
@@ -10808,13 +11017,23 @@ Set `is_noexcept` on every function: `true` only when its bare `name` is a
 in the IR. `nounwind === nothing` (no IR, i.e. ingest) marks nothing, which sends
 all C++ to Tier 2. The reasoning is in `extract_compilation_metadata`, and the
 test is `test_noexcept_routing.jl`.
+
+The proof by itself is recorded too, as `nounwind`, whenever there was IR to
+read. It is what routes a function with C linkage in a C++ library
+(`DispatchLogic.is_ccall_safe`): `extern "C"` changes a function's name, not
+what its body may throw, and no source spelling says which of them can
+(`test_c_linkage_unwind.jl`). No IR writes no key, and a reader takes a missing
+key as "not proven". An alias (`alias_of`, `_alias_signature_key`) has no
+definition of its own: its code is its aliasee's, so the aliasee's is the one
+asked about.
 """
 function _mark_noexcept!(functions, candidates::Set{String},
                          nounwind::Union{Nothing,Set{String}})
     for func in functions
-        func["is_noexcept"] = nounwind !== nothing &&
-                              get(func, "name", "") in candidates &&
-                              get(func, "mangled", "") in nounwind
+        proven = nounwind !== nothing &&
+                 get(func, "alias_of", get(func, "mangled", "")) in nounwind
+        func["is_noexcept"] = proven && get(func, "name", "") in candidates
+        nounwind === nothing || (func["nounwind"] = proven)
     end
     return functions
 end
@@ -10829,12 +11048,13 @@ A function the IR only declares, and every function when there is no IR
 (`byval === nothing`: ingest), gets no key, which the generator reads as "not
 recorded" and decides from DWARF alone (`_c_byval_facts`). Metadata from
 before this key has the same effect, so an over-aligned record parameter is
-callable only after a rebuild.
+callable only after a rebuild. An alias (`alias_of`) takes its aliasee's
+definition, whose signature it has.
 """
 function _mark_byval_params!(functions, byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}})
     byval === nothing && return functions
     for func in functions
-        facts = get(byval, get(func, "mangled", ""), nothing)
+        facts = get(byval, get(func, "alias_of", get(func, "mangled", "")), nothing)
         facts === nothing || (func["byval_params"] = Any[copy(f) for f in facts])
     end
     return functions
@@ -11373,15 +11593,21 @@ const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
     "signed long long int" => "Clonglong",
     "unsigned long long int" => "Culonglong",
     "wchar_t" => "Cwchar_t",
+    "char8_t" => "UInt8",
     "char16_t" => "UInt16",
     "char32_t" => "UInt32",
     "time_t" => "Ctime_t",
 
-    # `__int128` / `__uint128_t` are INTEGER class and pass in a register pair,
-    # so `Int128`/`UInt128` are right. Only fmt uses them (4 params) and fmt has
-    # no build artifacts, so this is unexercised — correct by the ABI rules, not
-    # by a live test.
+    # `__int128` and `unsigned __int128` (GCC's DWARF: `__int128 unsigned`;
+    # `__int128_t`/`__uint128_t` are typedefs of them) are INTEGER class in
+    # both eightbytes. `Int128`/`UInt128` are the Julia types, and `ccall`
+    # passes one as C does only while both halves fit in registers; the C
+    # generator refuses the positions where it does not
+    # (`Wrapper._c_int128_misplaced`), and a thunk passes `i128`.
     "__int128" => "Int128",
+    "__int128_t" => "Int128",
+    "unsigned __int128" => "UInt128",
+    "__int128 unsigned" => "UInt128",
     "__uint128_t" => "UInt128",
 
     # `long double` is DELIBERATELY ABSENT. It is x87 80-bit, SysV class X87,
@@ -11502,10 +11728,14 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         end
     end
 
-    # Check for enums
-    if base_type in enum_names
-        # Enums are used directly by name (will be @enum in Julia)
-        return base_type
+    # An enum BY VALUE is used by name (the type the wrapper emits for it). A
+    # pointer or reference to one is an address, typed by the branches below
+    # like a pointer to any scalar: `E*` is `Ptr{E}`, `E**` `Ptr{Ptr{E}}`,
+    # `E&` and `const E&` `Ref{E}`. Returning the name for those too wrapped
+    # `void out(enum E *)` as taking the enum's VALUE, and C wrote through it
+    # as an address.
+    if cpp_type in enum_names
+        return String(cpp_type)
     end
 
     # Handle pointers (for non-struct types)
@@ -11513,8 +11743,9 @@ function cpp_to_julia_type(cpp_type::AbstractString,
         # Map the base type first, then wrap in Ptr{}
         base = strip(cpp_type[1:end-1])
         base_julia = cpp_to_julia_type(base, struct_names, enum_names)
-        # If base mapped to a specific type, use it; otherwise fall back to Ptr{Cvoid}
-        if base_julia != "Any" && base_julia != base
+        # If base mapped to a specific type, use it; otherwise fall back to Ptr{Cvoid}.
+        # An enum maps to its own name.
+        if base_julia != "Any" && (base_julia != base || base in enum_names)
             return "Ptr{$base_julia}"
         else
             return "Ptr{Cvoid}"

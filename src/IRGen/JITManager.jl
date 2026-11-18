@@ -365,6 +365,180 @@ throw (`test_aot_thunks.jl`, probe `throw_void`).
     return :(ccall(fptr, Cvoid, (Ptr{Ptr{Cvoid}},), inner_ptrs))
 end
 
+# =============================================================================
+# Pointer arguments: what a pointer position accepts
+#
+# A thunk loads a pointer parameter from its slot and hands it to C++. Nothing
+# below this point can check it, and the wrapper's signature for a pointer is
+# `::Any` (an owning object, a `Ref`, a `Ptr` all go there), so the argument is
+# checked once, here: a generated Tier 2 body converts every argument bound to
+# a pointer, a reference, a `this` or a `char*` with
+# `pointer_arg(<declared type>, x)`, as `ccall` converts to the type its tuple
+# declares. What is not a pointer to the declared thing is a `MethodError`
+# before any C++ runs. Until 2026-11-17 the argument went to `invoke` as it
+# came and was boxed: a struct value, a Julia function or a `Vector` passed for
+# an object was read as an address.
+# =============================================================================
+
+"""
+The pointee `pointer_arg` is told for a C++ object the wrapper has no Julia
+type for: an STL container or `std::string` behind a pointer or reference, a
+class only declared, the `this` of a class nothing emits (`Ptr{Opaque}`). No
+Julia array is one, so none passes there.
+"""
+abstract type Opaque end
+
+"The pointee `pointer_arg` is told for a function pointer (`Ptr{Code}`): a `Ptr` or a `@cfunction` closure."
+abstract type Code end
+
+"""
+    ByValue{V}
+
+What `pointer_arg` is told for a parameter C++ takes BY VALUE and the thunk
+takes by address: an STL container, which C++ passes as a pointer to the
+caller's temporary. `V` is the Julia value the wrapper returns such a container
+as (its bytes). The value itself passes, by the address of a copy of those
+bytes, and so does a pointer or `Ref` to an existing object.
+"""
+abstract type ByValue{V} end
+
+"""
+    PointerArg
+
+One pointer argument, converted: the address the thunk's slot holds, and
+`keep`, the Julia object that owns the storage behind it. `invoke` preserves
+the `PointerArg` across the call.
+"""
+struct PointerArg{K}
+    ptr::Ptr{Cvoid}
+    keep::K
+end
+
+# Plain C data a `Ref` may point at: bits stored inline, or a record the
+# wrapper emits as a `mutable struct` of its C bytes (a named union, a
+# bitfield record), whose address is the address of those bytes.
+_is_byte_record(::Type{T}) where {T} =
+    isconcretetype(T) && ismutabletype(T) && fieldcount(T) == 1 &&
+    fieldtype(T, 1) <: Tuple{Vararg{UInt8}} && sizeof(T) > 0
+_plain_data(::Type{T}) where {T} = (isbitstype(T) && sizeof(T) > 0) || _is_byte_record(T)
+
+# Arrays whose memory Base hands out a pointer to (`cconvert`/`unsafe_convert`).
+# An `AbstractArray` outside this set (an STL wrapper's `CppVector`) is an
+# object: it passes as what it converts to, never as data.
+const _MemoryArray = Union{DenseArray, SubArray, Base.ReshapedArray, Base.ReinterpretArray}
+
+# Whether an array of `E` is data for the declared type `P`: a `char*` takes
+# bytes of either sign, `T*` only `T`s, and `T**` pointers of any pointee, as a
+# pointer parameter takes them. (`void*` takes any array and never asks.)
+function _array_matches(::Type{P}, ::Type{E}) where {P, E}
+    bytes = E === UInt8 || E === Int8
+    P === Cstring && return bytes
+    P <: Ptr || return false
+    T = eltype(P)
+    return T === E || (bytes && (T === UInt8 || T === Int8)) || (T <: Ptr && E <: Ptr)
+end
+
+@noinline _refuse_pointer_arg(::Type{P}, x) where {P} = throw(MethodError(pointer_arg, (P, x)))
+
+# What a refusal means, printed under the `MethodError` it is.
+function _pointer_arg_hint(io, exc, argtypes, kwargs)
+    exc.f === pointer_arg || return nothing
+    print(io, "\nA wrapper refused this argument where C++ takes a pointer. A pointer parameter takes a `Ptr`, ",
+          "a `Ref` to plain data (`Ref(x)`, never the bare value), an object that owns one (a `Managed` ",
+          "object, a factory struct), or an array of the pointee's type where C++ reads data; a `char*` ",
+          "also takes a string.")
+    return nothing
+end
+
+function __init__()
+    Base.Experimental.register_error_hint(_pointer_arg_hint, MethodError)
+    return nothing
+end
+
+"""
+    pointer_arg(P, x) -> PointerArg
+
+The one answer to "may `x` be passed where C++ declares `P`", for every pointer
+position of a Tier 2 call, and the conversion when it may. `P` is what the
+wrapper says the position is: `Ptr{T}` for a pointer or reference to a `T` the
+wrapper emits (`this` included), `Ptr{Cvoid}` for `void*`, `Cstring` for a
+`char*`, `Ptr{Opaque}`, `Ptr{Code}`, or `ByValue{V}`.
+
+Accepted:
+
+  * a `Ptr`, of any pointee (`C_NULL`; a derived object's pointer for its
+    base's);
+  * a `Ref` or `Ref(array, i)` to plain C data: an isbits value or a record
+    held as its bytes (`_plain_data`). A `Ref{String}` or `Ref{Any}` holds a
+    Julia object, not C data. `void*` takes any `Ref`, as `ccall` does;
+  * an array of the pointee's type where the pointee is data (`T*` takes
+    `T`s, a `char*` bytes, `T**` pointers, `void*` anything), through Base's
+    own `cconvert`/`unsafe_convert`;
+  * a record held as its bytes (`mutable struct`), by the address of those
+    bytes;
+  * for `Cstring`, an `AbstractString` with Julia's `Cstring` semantics: a
+    `SubString` is copied and NUL-terminated, an embedded NUL is an
+    `ArgumentError`. A byte pointer that is not a C string (`unsigned char*`)
+    takes a string as `ccall` passes one to `Ptr{UInt8}`;
+  * for `ByValue{V}`, a `V`;
+  * anything else that converts with `Base.unsafe_convert(Ptr{Cvoid}, x)`: the
+    wrapper's owning types (`Managed*`, a factory struct), the STL wrappers,
+    a `@cfunction` closure. Never for a `char*`: an object is not a C string.
+
+Everything else is a `MethodError` of this function, with a hint under it
+that says what a pointer parameter takes (`_pointer_arg_hint`).
+"""
+pointer_arg(::Type{P}, x) where {P} = _pointer_arg(P, x)
+function pointer_arg(::Type{ByValue{V}}, x) where {V}
+    x isa V || return _pointer_arg(Ptr{Opaque}, x)
+    r = Ref{V}(x)
+    return PointerArg(Base.unsafe_convert(Ptr{Cvoid}, r), r)
+end
+
+_pointer_arg(::Type{P}, x::Ptr) where {P} = PointerArg(Ptr{Cvoid}(x), nothing)
+
+function _pointer_arg(::Type{P}, x::Union{Base.RefValue{T}, Base.RefArray{T}}) where {P, T}
+    (P === Ptr{Cvoid} || (P !== Ptr{Code} && _plain_data(T))) || _refuse_pointer_arg(P, x)
+    return PointerArg(Ptr{Cvoid}(Base.unsafe_convert(Ptr{Cvoid}, x)), x)
+end
+
+function _pointer_arg(::Type{P}, x::_MemoryArray) where {P}
+    E = eltype(x)
+    (P === Ptr{Cvoid} || (isbitstype(E) && sizeof(E) > 0 && _array_matches(P, E))) || _refuse_pointer_arg(P, x)
+    cx = Base.cconvert(Ptr{E}, x)
+    return PointerArg(Ptr{Cvoid}(Base.unsafe_convert(Ptr{E}, cx)), cx)
+end
+
+function _pointer_arg(::Type{P}, x::AbstractString) where {P}
+    if P === Cstring
+        cx = Base.cconvert(Cstring, x)
+        return PointerArg(Ptr{Cvoid}(pointer(Base.unsafe_convert(Cstring, cx))), cx)
+    elseif P === Ptr{UInt8} || P === Ptr{Int8}
+        cx = Base.cconvert(P, x)
+        return PointerArg(Ptr{Cvoid}(Base.unsafe_convert(P, cx)), cx)
+    end
+    _refuse_pointer_arg(P, x)
+end
+
+_pointer_arg(::Type{P}, x::Cstring) where {P} =
+    (P === Cstring || P === Ptr{UInt8} || P === Ptr{Int8}) ? PointerArg(Ptr{Cvoid}(pointer(x)), nothing) :
+                                                              _refuse_pointer_arg(P, x)
+
+# A `Symbol` is a C string to Julia (`ccall` passes one for `Cstring`).
+_pointer_arg(::Type{P}, x::Symbol) where {P} =
+    P === Cstring ? PointerArg(Ptr{Cvoid}(pointer(Base.unsafe_convert(Cstring, x))), x) : _refuse_pointer_arg(P, x)
+
+# Everything else: an object, by its bytes' address or by what it converts to.
+# `applicable` is decided when this is compiled for `typeof(x)`, so the test
+# costs a call nothing, and a value with no conversion is refused here, like
+# every other refusal, instead of as a `MethodError` of `unsafe_convert`.
+function _pointer_arg(::Type{P}, x) where {P}
+    (P === Cstring || (P === Ptr{Code} && !(x isa Base.CFunction))) && _refuse_pointer_arg(P, x)
+    _is_byte_record(typeof(x)) && return PointerArg(pointer_from_objref(x), x)
+    applicable(Base.unsafe_convert, Ptr{Cvoid}, x) || _refuse_pointer_arg(P, x)
+    return PointerArg(Ptr{Cvoid}(Base.unsafe_convert(Ptr{Cvoid}, x)), x)
+end
+
 """
     _arg_marshal_plan(argtypes) -> (setup, ptr_exprs, preserve_syms)
 
@@ -392,6 +566,14 @@ form and re-flattening it would strip the level the thunk needs.
 In both cases the original is GC-preserved across the call, since only a raw
 pointer into it reaches the slot.
 
+Those two flattenings guess from the argument alone, because the plan does not
+know what the position is. A wrapper generated since 2026-11-17 does not rely
+on them: it converts every pointer argument itself with [`pointer_arg`](@ref),
+which knows the declared type and refuses what is not a pointer to it, and
+hands the plan a `PointerArg`: the slot holds its address and the `PointerArg`
+(with the object it keeps) is preserved. The guesses stay for wrappers
+generated before that, which pass their arguments as they came.
+
 Kept as ONE plan consumed by both `invoke` methods — they carried byte-identical
 copies of this, which is how a fix to one silently misses the other.
 """
@@ -400,13 +582,16 @@ function _arg_marshal_plan(argtypes)
     ref_syms = [Symbol("r$i") for i in 1:N]
     src_syms = [Symbol("s$i") for i in 1:N]
 
+    is_ptr_arg(T)  = T <: PointerArg
     is_str(T)      = T <: AbstractString
     is_boxed_ref(T) = T <: Base.Ref && !(T <: Ptr)
-    indirect(T)    = is_str(T) || is_boxed_ref(T)
+    indirect(T)    = is_ptr_arg(T) || is_str(T) || is_boxed_ref(T)
 
     setup = map(1:N) do i
         T = argtypes[i]
-        if is_str(T)
+        if is_ptr_arg(T)
+            :($(src_syms[i]) = args[$i]; $(ref_syms[i]) = Ref($(src_syms[i]).ptr))
+        elseif is_str(T)
             :($(src_syms[i]) = args[$i]; $(ref_syms[i]) = Ref(pointer($(src_syms[i]))))
         elseif is_boxed_ref(T)
             :($(src_syms[i]) = args[$i];
@@ -834,7 +1019,10 @@ end
 
 The mangled symbols the thunk module for this library will call: the
 functions the manifest lists (every function in the metadata when there is no
-manifest) and the STL method table's members.
+manifest), the STL method table's members, and the constructors and
+destructors of the temporaries those functions' by-value class parameters
+need (`JLCSIRGenerator.lifetime_callees`), which the module names whether or
+not the manifest lists them.
 """
 function _module_callees(metadata, needed_symbols)::Set{String}
     out = Set{String}()
@@ -852,6 +1040,7 @@ function _module_callees(metadata, needed_symbols)::Set{String}
             isempty(s) || push!(out, s)
         end
     end
+    union!(out, JLCSIRGenerator.lifetime_callees(metadata, needed_symbols))
     return out
 end
 
@@ -887,6 +1076,35 @@ function _drop_stl_methods!(metadata, unresolved)
         filter!(m -> !(String(get(m, "mangled", "")) in gone), methods)
     end
     return metadata
+end
+
+"""
+Remove the function rows whose symbol is in `unresolved`, in place: a
+function the library's handle cannot resolve gets no thunk, and no thunk
+calls it as the constructor or destructor of a by-value temporary
+(`JLCSIRGenerator._collect_class_raii` reads these rows).
+"""
+function _drop_functions!(metadata, unresolved)
+    haskey(metadata, "functions") || return metadata
+    gone = Set{String}(unresolved)
+    filter!(f -> !(String(get(f, "mangled", "")) in gone), metadata["functions"])
+    return metadata
+end
+
+"""
+    _assert_callees_declared(ir_source, lib)
+
+Refuse a thunk module that calls a symbol it never declares
+(`JLCSIRGenerator.undeclared_callees`), naming each. MLIR's translation of
+such a module to LLVM IR dereferences null, so `create_jit` would end the
+process; as an error here it is one library's failed initialization.
+"""
+function _assert_callees_declared(ir_source::AbstractString, lib::AbstractString)
+    undeclared = JLCSIRGenerator.undeclared_callees(ir_source)
+    isempty(undeclared) && return nothing
+    error("the thunk module for $(lib) calls $(length(undeclared)) symbol(s) it never declares: " *
+          join(undeclared, ", ") * ". This is a bug in RepliBuild's thunk generator, not in the library; " *
+          "handing the module to the JIT would end the process.")
 end
 
 # Declarations the thunk module carries that no pre-flight owns: helpers
@@ -1070,11 +1288,15 @@ function initialize_global_jit(binary_path::String)
                       "wrapper's methods on them raise instead of hanging" unresolved = join(sort(unresolved), ", ")
                 needed_symbols === nothing || setdiff!(needed_symbols, unresolved)
                 _drop_stl_methods!(metadata, unresolved)
+                _drop_functions!(metadata, unresolved)
             end
 
             # 4. Generate MLIR Module for vtables + needed function thunks
             ir_source = JLCSIRGenerator.generate_jlcs_ir(eng.vtable_info, metadata;
                                                           needed_symbols=needed_symbols)
+            # A callee the module never declares would end the process in
+            # `create_jit`, not raise: refused here, it fails this library alone.
+            _assert_callees_declared(ir_source, basename(rp))
             # The declarations the module actually carries: every one must be
             # the library's, pre-flighted above, or a helper registered
             # globally, or the first call into it would block the process.

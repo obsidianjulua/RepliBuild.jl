@@ -230,7 +230,7 @@ JIT, which may compile it. Do that once in `__init__`, so the first GC pass is
 not where it happens. There is no public call for it yet: BoxWorld uses the
 internal `RepliBuild.JITManager._lookup_cached(name)`, with the thunk name the
 destructor wrapper passes to `JITManager.invoke`
-(`"_mlir_ciface__ZN7b2WorldD2Ev_thunk"`). Offer `destroy!(x)` for deterministic
+(`"_mlir_ciface__ZN7b2WorldD1Ev_thunk"`). Offer `destroy!(x)` for deterministic
 teardown; keep the finalizer as the safety net. Make destruction idempotent.
 
 Every layout fact your layer uses should come from the wrapper's own
