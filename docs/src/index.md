@@ -134,7 +134,7 @@ Running a command again when nothing changed does no work.
 
 - **Linux** (x86-64 or AArch64) or **Windows** (x86-64, with MSYS2). macOS is
   not supported.
-- **Julia 1.12** or newer.
+- **Julia 1.13 or 1.14.** For Julia 1.12, use the RepliBuild 4.5 releases.
 - For C++ libraries, `clang++` and LLVM 21 or newer.
 
 [Set up](install.md) has the details. This manual writes `.so` for a library

@@ -102,7 +102,7 @@ Choosing *between* the two direct tiers is a second, C-only step. `is_c_lto_safe
 3. **Parameter type safety:**
    - Union parameters → Tier 2
    - Packed struct parameters → Tier 2
-4. **Exception safety** — Per-function `is_noexcept` flag from DWARF. If absent (function may throw) and the module's `may_throw` setting is on, the function routes through `jlcs.try_call` rather than `ccall`.
+4. **Exception safety** — Per-function `is_noexcept` flag: a `noexcept` in the sources and a `nounwind` definition in the linked IR. If absent (function may throw) and the module's `may_throw` setting is on, the function routes through `jlcs.try_call` rather than `ccall`. A function with C linkage in a C++ library is routed by the `nounwind` fact alone (metadata `nounwind`): `extern "C"` code may throw too.
 
 Functions routed to Tier 2 are further divided between JIT dispatch (`JITManager.invoke()`) and AOT thunks (`ccall` to `_thunks.so`), controlled by the `aot_thunks` config flag.
 
@@ -111,7 +111,7 @@ Functions routed to Tier 2 are further divided between JIT dispatch (`JITManager
 Beyond raw `ccall` bindings, the C++ generator emits Julia types that own a C++ object and free it from a GC finalizer:
 
 1. **Deleters.** A class's deleter is the library's deleter function for it (a free function or static member, one `X*` parameter, a name that says delete, destroy or free), else its deleting destructor (D0). A class with neither has no deleter: its other destructors end the object's lifetime without freeing its storage, and a method that takes `this` is never a deleter.
-2. **`ManagedX`**, for every class with a deleter: a `mutable struct` holding a `Ptr{X}` whose finalizer calls the deleter by its mangled symbol, plus `<f>_safe` for each `ccall`-path function returning `X*`.
+2. **`ManagedX`**, for every class with a deleter: a `mutable struct` holding a `Ptr{X}` whose finalizer calls the deleter by its mangled symbol, plus `<f>_safe` for each `ccall`-path function, and each function with C linkage, returning `X*`.
 3. **Factory structs.** A free function named `create_`, `new_`, `make_`, `alloc_`, `init_` or `build_` returning a pointer to a known class (the pointee, or a class its name names that derives from the pointee) makes that class a `mutable struct` with a `Ptr{Cvoid}` handle, constructors that call the factories, and method proxies. Its finalizer is a deleter function for the class or the returned type, or the class's D0 when no class in the library derives from it. The struct replaces the class's layout struct and its `ManagedX`.
 
 ```@autodocs

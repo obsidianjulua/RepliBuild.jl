@@ -144,6 +144,18 @@ add_llvm_library(JLCS SHARED
 # Enable C++ exceptions for our code (must come after LLVM's -fno-exceptions)
 target_compile_options(JLCS PRIVATE -fexceptions)
 
+# The dialect's ABI version, one number in one file. libJLCS exports it
+# (jlcs_abi_version) and RepliBuild reads the same file, and refuses a library
+# that reports a different one.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/ABI_VERSION" JLCS_ABI_VERSION LIMIT_COUNT 1)
+string(STRIP "${JLCS_ABI_VERSION}" JLCS_ABI_VERSION)
+if(NOT JLCS_ABI_VERSION MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "src/mlir/ABI_VERSION must hold one integer, not '${JLCS_ABI_VERSION}'")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ABI_VERSION")
+target_compile_definitions(JLCS PRIVATE JLCS_ABI_VERSION=${JLCS_ABI_VERSION})
+message(STATUS "JLCS: dialect ABI version ${JLCS_ABI_VERSION}")
+
 if(JLCS_STATIC_LLVM)
   target_link_libraries(JLCS PRIVATE JLCSStaticLLVM)
   target_link_options(JLCS PRIVATE

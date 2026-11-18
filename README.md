@@ -2,7 +2,7 @@
 
 [![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/stable/)
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/dev/)
-[![Julia 1.12 | 1.13](https://img.shields.io/badge/julia-1.12%20%7C%201.13-9558B2?logo=julia)](https://julialang.org)
+[![Julia 1.13 | 1.14](https://img.shields.io/badge/julia-1.13%20%7C%201.14-9558B2?logo=julia)](https://julialang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Point RepliBuild at C or C++ source. It compiles the library, reads the ABI the
@@ -107,7 +107,8 @@ Julia module with a submodule per library
 
 - **Linux (x86-64 or AArch64) or Windows (x86-64, with MSYS2 CLANG64).** macOS
   is not supported.
-- **Julia 1.12 or newer.**
+- **Julia 1.13 or 1.14**, the versions CI tests. Julia 1.12 is served by the
+  4.5 line, whose last release is 4.5.1.
 - **C libraries:** on Linux, nothing but the C library's development files
   (`libc6-dev`, `glibc-devel`), which a machine with `gcc` already has. The
   C compiler, the linker, `readelf`, `nm`, `git`, `cmake` and `ninja` come with
@@ -126,7 +127,7 @@ steps for each system, including
 A machine that only runs a wrapper needs less than one that builds it:
 [Deployment](https://obsidianjulua.github.io/RepliBuild.jl/stable/using-wrappers/#Deployment).
 
-Releases up to 4.5.0 use the system's `readelf`, `nm` and `git`, and build
+The 4.5 releases use the system's `readelf`, `nm` and `git`, and build
 `libJLCS` against a system LLVM/MLIR; the Set up page says how.
 
 ## Documentation

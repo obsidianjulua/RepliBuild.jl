@@ -28,7 +28,8 @@ Wrapping C needs only the first line. Wrapping C++ needs all three.
 RepliBuild runs on **Linux** (x86-64 and AArch64) and **Windows** (x86-64, with
 MSYS2). macOS is not supported: `using RepliBuild` refuses to load there.
 
-**Julia 1.12 or newer.**
+**Julia 1.13 or 1.14.** Julia 1.12 is served by the RepliBuild 4.5 releases,
+the last of which is 4.5.1.
 
 A build runs a compiler, a linker and a handful of other programs. Some of
 them RepliBuild brings with it, and some it takes from your system:
@@ -41,6 +42,7 @@ them RepliBuild brings with it, and some it takes from your system:
 | Linker | Linking C libraries | Comes with RepliBuild | Your system |
 | Linker | Linking C++ libraries | Your system | Your system |
 | `readelf`, `nm`, `objdump` | Reading the built library | Comes with RepliBuild | Your system (MSYS2) |
+| `llvm-dwarfdump` | Wrapping a C++ library, and loading its wrapper | Your system's; RepliBuild's own copy when there is none | Your system's; RepliBuild's own copy when there is none |
 | `git` | Git dependencies | Comes with RepliBuild | Your system |
 | `cmake`, `ninja` | [CMake projects](graph.md) | Comes with RepliBuild | Your system (MSYS2) |
 | `pkg-config` | `system` dependencies only | Your system | Your system |
@@ -113,13 +115,13 @@ OK   libJLCS        prebuilt (JLCS artifact, LLVM and MLIR linked in)
 If the download was skipped (no network during `Pkg.add`), it is fetched the
 first time a C++ wrapper needs it, or by `Pkg.build("RepliBuild")`.
 
-!!! note "Releases up to 4.5.0 use the system's programs for everything"
-    `Pkg.add` installs the newest registered release, and this manual describes
-    the development version. Releases up to 4.5.0 bring only the C compiler:
-    they use the system's `readelf`, `nm`, `git`, `cmake`, `ninja` and linker,
-    and do not download `libJLCS`. On those, install `binutils` and `git` as
-    well, and build `libJLCS` as described under
-    [Building libJLCS yourself](#Building-libJLCS-yourself).
+!!! note "The 4.5 releases use the system's programs for everything"
+    This manual describes RepliBuild 4.6, which needs Julia 1.13. On Julia
+    1.12, `Pkg.add` installs a 4.5 release. Those bring only the C compiler:
+    they use the system's `readelf`, `nm`, `git`, `cmake`, `ninja`,
+    `llvm-dwarfdump` and linker, and do not download `libJLCS`. On those,
+    install `binutils` and `git` as well, and build `libJLCS` as described
+    under [Building libJLCS yourself](#Building-libJLCS-yourself).
     `pkgversion(RepliBuild)` says which version you have.
 
 ## Windows
@@ -261,7 +263,7 @@ for a normal setup.
 | Variable | Effect |
 |:---------|:-------|
 | `REPLIBUILD_TOOLS` | Which copy of `readelf`, `nm`, `objdump`, `git`, `cmake`, `ninja` and the C linker is tried first. `jll`: RepliBuild's own (the default on Linux). `system`: the one on `PATH` (the default on Windows). The other is used when the first is missing or cannot start. Any other value is an error. |
-| `REPLIBUILD_TOOL_<NAME>` | The path of one of those programs, used as given: `REPLIBUILD_TOOL_GIT`, `_CMAKE`, `_NINJA`, `_READELF`, `_NM`, `_OBJDUMP`. |
+| `REPLIBUILD_TOOL_<NAME>` | The path of one of those programs, used as given: `REPLIBUILD_TOOL_GIT`, `_CMAKE`, `_NINJA`, `_READELF`, `_NM`, `_OBJDUMP`, `_LLVM_DWARFDUMP`. |
 | `LLVM_CONFIG` | The path of the `llvm-config` whose LLVM compiles C++, when it is not on `PATH`. |
 | `REPLIBUILD_JLCS` | `artifact` for the prebuilt `libJLCS`, `local` for the one you built, or the path of a library file. |
 | `MSYS2_ROOT` | Windows: where MSYS2 is installed, when not `C:\msys64`. |

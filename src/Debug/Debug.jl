@@ -72,9 +72,10 @@ Base.print(io::IO, t::DebugText)             = print(io, t.text)
 # its newlines across the collection.
 Base.show(io::IO, ::MIME"text/plain", t::DebugText) = print(io, t.text)
 
-# `objdump`/`llvm-dwarfdump` come from the same binutils/LLVM install the build
-# already requires; they are resolved at call time so a missing tool names
-# itself rather than failing this module's load.
+# `objdump` comes from the binutils the build already requires and
+# `llvm-dwarfdump` from `Tools` (the bundled copy or PATH's); both are resolved
+# at call time so a missing tool names itself rather than failing this
+# module's load.
 # GNU binutils specifically. `disassemble` passes `--disassemble=<symbol>`, GNU
 # spelling that llvm-objdump rejects outright ("unknown argument") — and in a
 # CLANG64 shell the bare name IS llvm-objdump, so this resolved to a tool that
@@ -317,7 +318,7 @@ debugger and [`disassemble`](@ref) both read.
 function dwarf(path::AbstractString; section::AbstractString="info")
     obj = _require_object(path)
     try
-        return DebugText(read(`$_DWARFDUMP --debug-$section $obj`, String))
+        return DebugText(read(Tools.tool_cmd(`$_DWARFDUMP --debug-$section $obj`), String))
     catch e
         error("`$_DWARFDUMP --debug-$section` failed on $obj: $e")
     end

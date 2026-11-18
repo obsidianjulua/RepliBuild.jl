@@ -302,6 +302,18 @@ extern "C" {
         jlcs_diagnostics.clear();
     }
 
+    // The dialect's ABI version: src/mlir/ABI_VERSION, which CMake passes in
+    // and the Julia side reads from the same file. What Julia generates (the
+    // ops and their attributes, the thunk conventions) and what it calls (this
+    // C API) are for exactly one version, and it refuses a library that
+    // reports another before using it (RepliBuild.JLCSLibrary.verify_abi!).
+    #ifndef JLCS_ABI_VERSION
+    #error "JLCS_ABI_VERSION is not defined: CMakeLists.txt reads it from src/mlir/ABI_VERSION"
+    #endif
+    int jlcs_abi_version(void) {
+        return JLCS_ABI_VERSION;
+    }
+
     MlirModule jlcs_module_clone(MlirModule module) {
         mlir::ModuleOp mod = unwrap(module);
         mlir::ModuleOp cloned = llvm::cast<mlir::ModuleOp>(mod->clone());

@@ -17,6 +17,7 @@ a bug: a build that succeeds is not a complete wrapper.
 | `LLVM 18 — need 21+` | The system's LLVM is too old. On Debian and Ubuntu install a newer one from apt.llvm.org and put its `bin` folder first on `PATH`. |
 | `JLCS dialect library not found` | RepliBuild's C++ support library is missing. Linux: `Pkg.build("RepliBuild")` downloads it. Windows: [Set up, step 6](install.md#Windows). |
 | `libJLCS — built against LLVM X, but llvm-config is Y` | The system's LLVM was upgraded. `Pkg.build("RepliBuild")` again. |
+| `libJLCS — built for another dialect ABI` | The support library was built by a different RepliBuild version. `Pkg.build("RepliBuild")` again; for one you built yourself, rebuild it ([Set up](install.md#Building-libJLCS-yourself)). |
 | `Failed to initialize JIT for lib….so` when a C++ wrapper loads | The wrapper's C++ functions will not work. The reason is printed under the message; usually the support library is missing or `llvm-dwarfdump` is not on `PATH`. Run `check_environment()`. |
 | C works, C++ does not | Run `check_environment()` and read the `C++` section. |
 | Windows: every C file fails on its first `#include` | The MSYS2 CLANG64 toolchain is missing or was not found. Install it, or set `MSYS2_ROOT`. |
@@ -43,6 +44,7 @@ a bug: a build that succeeds is not a complete wrapper.
 | The `shim_headers` include resolved outside the project | A header of the same name is installed on the system and was found first. Give a longer path (`"c/blake3.h"`) or add the right folder to `include_dirs`. |
 | `wrappable surface … is EMPTY`, or functions `NOT reachable` | `[compile] visibility = "hidden"` on a library that does not mark its public functions. Remove it, or add the define that switches the marking on: [Leaving things out](toml.md#Leaving-things-out). |
 | A pattern `matched nothing` | An `exclude_symbols`, `surface_types_extra` or `[wrap.rename]` entry matches no name. Fix the pattern or delete it. |
+| `wrap` fails with `The wrapper module would be named …` | The project's name, in CamelCase, is a name the wrapper uses itself (`String`, `Ptr`). Set `[wrap] module_name` to something else. |
 | `Library not found: …/julia/lib….so` | Run `build` before `wrap`. |
 | `No compilation_metadata.json next to …` | The same: run `build`. |
 | An edit to a source file is not picked up | The file's timestamp is older than the cached result, which happens when the clock was set back. `build(toml; clean = true)`. |
@@ -65,6 +67,7 @@ a bug: a build that succeeds is not a complete wrapper.
 | Memory grows with every call that returns a string | [`[wrap.cstring_owned]`](toml.md#Strings-the-caller-must-free) |
 | A struct became raw bytes, with a warning | Julia cannot reproduce its layout. Use the accessor functions the wrapper defines for it. |
 | `UndefVarError` for a type the library defines | Its name is one Julia already uses, so it is not exported. Write `MyModule.Number`. |
+| A function or struct is missing under its own name | The wrapper needed that name itself and gave the library's a different one. Read the `names:` lines `wrap` printed: `String` is `String_`, `Integer` is `c_Integer` ([Find your way around](calling.md#Find-your-way-around)). |
 | The wrapper is full of internal functions | [Leaving things out](toml.md#Leaving-things-out) |
 | The module fails to load: a redefined constant, duplicate fields | Internal types are colliding: [`surface_types_only`](toml.md#Leaving-things-out) |
 | A function's name is hundreds of characters long | [`[wrap.rename]`](toml.md#Names) |

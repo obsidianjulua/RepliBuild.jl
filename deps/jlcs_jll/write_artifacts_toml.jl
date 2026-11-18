@@ -25,8 +25,11 @@ prefix = rstrip(ARGS[1], '/')
 products = joinpath(@__DIR__, "products")
 toml = normpath(joinpath(@__DIR__, "..", "..", "Artifacts.toml"))
 
-tarballs = filter(f -> startswith(f, "JLCS.v") && endswith(f, ".tar.gz"), readdir(products))
-isempty(tarballs) && error("no JLCS.v*.tar.gz in $products; run build_tarballs.jl first")
+# Only the dialect's current version (src/mlir/VERSION): ./products keeps
+# what earlier versions built.
+version = strip(read(normpath(joinpath(@__DIR__, "..", "..", "src", "mlir", "VERSION")), String))
+tarballs = filter(f -> startswith(f, "JLCS.v$version.") && endswith(f, ".tar.gz"), readdir(products))
+isempty(tarballs) && error("no JLCS.v$version.*.tar.gz in $products; run build_tarballs.jl first")
 
 for file in sort(tarballs)
     # JLCS.v<major>.<minor>.<patch>.<platform triplet>.tar.gz

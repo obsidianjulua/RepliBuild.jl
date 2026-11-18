@@ -151,14 +151,87 @@ holds one byte, and an `int` parameter reads three more past it (pugixml's
 2026-11-03). `ccall` converts to the declared C type itself; a thunk cannot,
 so the emitted body does — `Cint(def)` for a parameter in `_INTEGER_CTYPES`
 (the ones declared `::Integer`), and the `@enum`'s base type for an emitted
-enum, which the enum value and any Integer both convert to. Pointers,
-references, strings, `Bool`, floats (declared at their exact type) and records
-cross as they are.
+enum, which the enum value and any Integer both convert to. `Bool`, floats
+(declared at their exact type) and records by value cross as they are.
+
+A pointer position (`pointer_types[i]`, from `_pointer_arg_type`: a pointer, a
+reference, a `this`, a `char*`, a container the thunk takes by address) is
+converted too, with `JITManager.pointer_arg(<declared type>, x)`: the thunk
+dereferences what its slot holds, and `invoke` cannot tell a pointer position
+from a value's, so the body says which it is and the conversion refuses what
+is not a pointer to it.
 """
-function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base)
+function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base,
+                            pointer_types = fill(nothing, length(names)))
     [needs_conversion[i] ? "$(ctypes[i])($(names[i]))" :
-     haskey(enum_base, ctypes[i]) ? "$(enum_base[ctypes[i]])($(names[i]))" : names[i]
+     haskey(enum_base, ctypes[i]) ? "$(enum_base[ctypes[i]])($(names[i]))" :
+     pointer_types[i] !== nothing ? "RepliBuild.JITManager.pointer_arg($(pointer_types[i]), $(names[i]))" :
+     names[i]
      for i in eachindex(names)]
+end
+
+"""
+    _by_address_ctype(ctype, c_type) -> String
+
+The ccall type a parameter's SIGNATURE is spelled from. A container C++ takes
+by value and the thunk takes by address (`FunctionGen._stl_by_value`) is
+spelled as a pointer, so it relaxes to `::Any` like one, whatever its own name
+is bound to: the value such a container is returned as, a `Ref` and a `Ptr`
+all pass (`_pointer_arg_type`). Any other parameter keeps `ctype`. The
+function loop and the overload prediction both spell a position through this.
+"""
+_by_address_ctype(ctype::AbstractString, c_type::AbstractString) =
+    JLCSIRGenerator.FunctionGen._stl_by_value(c_type) ? "Ptr{Cvoid}" : String(ctype)
+
+"""
+    _pointer_arg_type(ctype, c_type; resolves) -> Union{String,Nothing}
+
+What a Tier 2 body tells `JITManager.pointer_arg` a parameter is, or `nothing`
+for a parameter that takes a value. `ctype` is the parameter's ccall type
+(`_ccall_param_type`), `c_type` its C spelling, and `resolves(name)` whether a
+Julia type name is bound in the wrapper. One derivation for every pointer
+position, `this` included:
+
+  * a container C++ takes by value and the thunk by address
+    (`FunctionGen._stl_by_value`): `ByValue{NTuple{N, UInt8}}`, the bytes the
+    wrapper returns one as;
+  * a function pointer: `Ptr{Code}`;
+  * a pointer to plain `char`: `Cstring`. Any other byte pointer (`unsigned
+    char*`, `int8_t*`) and a reference to a `char` are data: `Ptr{UInt8}`,
+    `Ptr{Int8}`;
+  * `void*`, and a pointer to a scalar Julia has no type for (`long double&`,
+    which the metadata spells `Ptr{Cvoid}`: the address of a caller's
+    buffer): `Ptr{Cvoid}`;
+  * a pointer or reference to a type the wrapper binds: `Ptr{T}`;
+  * a pointer or reference to anything else (an STL container, a class only
+    declared): `Ptr{Opaque}`.
+"""
+function _pointer_arg_type(ctype::AbstractString, c_type::AbstractString; resolves = _ -> true)
+    FG = JLCSIRGenerator.FunctionGen
+    jm = "RepliBuild.JITManager"
+    c = String(strip(c_type))
+    FG._stl_by_value(c) &&
+        return "$jm.ByValue{NTuple{$(get_stl_container_size(FG._strip_top_cv(c))), UInt8}}"
+    ctype == "Cstring" && return "Cstring"
+    m = match(r"^(?:Ptr|Ref)\{(.+)\}$", ctype)
+    m === nothing && return nothing
+    inner = String(m.captures[1])
+    (startswith(c, "function_ptr") || occursin("(*", c)) && inner == "Cvoid" && return "Ptr{$jm.Code}"
+    # What the C spelling points at: one declarator off, cv-qualifiers off.
+    t = FG._strip_top_cv(c)
+    is_pointer = endswith(t, "*")
+    pointee = endswith(t, "&&") ? FG._strip_top_cv(chop(t; tail = 2)) :
+              (is_pointer || endswith(t, "&")) ? FG._strip_top_cv(chop(t)) : ""
+    inner in ("UInt8", "Int8", "Cchar", "Cuchar") &&
+        return (is_pointer && pointee == "char") ? "Cstring" : "Ptr{$inner}"
+    if inner == "Cvoid"
+        pointee == "void" && return "Ptr{Cvoid}"
+        mapped = JLCSIRGenerator.TypeUtils.map_cpp_type(pointee)
+        scalar = !isempty(pointee) && mapped != "" && mapped != "!llvm.ptr" && !startswith(mapped, "!llvm.struct<\"")
+        return scalar ? "Ptr{Cvoid}" : "Ptr{$jm.Opaque}"
+    end
+    names = (String(tok.match) for tok in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", inner))
+    return all(resolves, names) ? "Ptr{$inner}" : "Ptr{$jm.Opaque}"
 end
 
 """
@@ -355,7 +428,11 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
         has_this = !isempty(raw) && get(raw[1], "name", "") == "this"
         injects = is_method && !isempty(class_name) && hop !== false && !has_this &&
                   (_cpp_this_param(class_name, func_name, struct_types) !== nothing || hop === true)
-        ctypes = String[ccall_param_type(String(get(p, "julia_type", "Any")), String(get(p, "c_type", "")))
+        # A container taken by value crosses by address and is spelled as a
+        # pointer, here as in the loop (`_by_address_ctype`).
+        ctypes = String[_by_address_ctype(ccall_param_type(String(get(p, "julia_type", "Any")),
+                                                           String(get(p, "c_type", ""))),
+                                          String(get(p, "c_type", "")))
                         for p in raw]
         # A `std::string` parameter the wrapper builds from a Julia string
         # (`_string_param_plan`) is spelled `_STD_STRING_PARAM` here as in the
@@ -423,6 +500,175 @@ function _rvalue_shadowed(functions)::Set{String}
         key(f) in lvalue && push!(out, String(get(f, "mangled", "")))
     end
     return out
+end
+
+import ..Compiler: _demangle, _param_list_paren, _matching_paren, _split_depth0_commas
+
+"""
+    _structor_variant(func) -> Union{Nothing,Tuple{Symbol,Char}}
+
+`(:ctor, v)` or `(:dtor, v)` for a constructor or destructor row of the
+metadata, `v` the Itanium variant its symbol names: a constructor's `C1`
+(complete object) or `C2` (base object), a destructor's `D0` (deleting), `D1`
+(complete object) or `D2` (base object). `nothing` for any other function, for
+a default-argument function standing under a constructor's name (its symbol is
+`replibuild_default::`'s), and for a symbol the marker cannot be read from.
+
+A destructor takes no parameters, so its marker closes the symbol (`…D1Ev`,
+as `_is_deleting_destructor` reads it). A constructor's is the one `C<digit>`
+before an `E`, `I` or `B`; where an identifier holds another (`C1Engine`), the
+marker is the one whose digit can change without changing what the symbol
+demangles to, which is what a variant is.
+"""
+function _structor_variant(func)
+    name = String(get(func, "name", ""))
+    _is_ctor_or_dtor_cpp(String(get(func, "class", "")), name) || return nothing
+    haskey(func, "default_arguments") && return nothing
+    sym = String(get(func, "mangled", ""))
+    if startswith(name, "~")
+        m = match(r"D([012])Ev$", sym)
+        return m === nothing ? nothing : (:dtor, m.captures[1][1])
+    end
+    cands = collect(eachmatch(r"C([123])(?=[EIB])", sym))
+    if length(cands) > 1
+        spelled = _demangle(sym)
+        cands = spelled === nothing ? empty(cands) : filter(cands) do c
+            other = c.captures[1] == "1" ? "2" : "1"
+            _demangle(sym[1:c.offset] * other * sym[c.offset + 2:end]) == spelled
+        end
+    end
+    return length(cands) == 1 ? (:ctor, cands[1].captures[1][1]) : nothing
+end
+
+"""
+    _has_virtual_base(class, dwarf_structs) -> Union{Bool,Nothing}
+
+Whether `class` has a virtual base, its own or one a base of it has: the
+classes whose base-object constructor and destructor take a VTT. `nothing`
+when the metadata cannot say: no `struct_definitions` entry for the class, or
+for a base on the way and no virtual base found elsewhere.
+"""
+function _has_virtual_base(class::AbstractString, dwarf_structs, seen = Set{String}())
+    FG = JLCSIRGenerator.FunctionGen
+    key = nothing
+    for cand in FG._scope_suffixes(String(class))
+        key = FG._fuzzy_struct_lookup(cand, dwarf_structs)
+        key === nothing || break
+    end
+    key === nothing && return nothing
+    key in seen && return false
+    push!(seen, key)
+    unknown = false
+    for base in get(dwarf_structs[key], "base_classes", Any[])
+        base isa AbstractDict || continue
+        get(base, "virtual", false) == true && return true
+        r = _has_virtual_base(replace(String(get(base, "type", "")), r"^(class|struct)\s+" => ""),
+                              dwarf_structs, seen)
+        r === true && return true
+        r === nothing && (unknown = true)
+    end
+    return unknown ? nothing : false
+end
+
+"""
+    _structor_parameters(func, kind) -> (declared, implicit)
+
+A constructor's or destructor's metadata parameters, split: the ones the
+declaration has (`this` and the written ones), and the implicit one a
+base-object variant of a class with a virtual base takes after `this`, the
+VTT. Metadata built since 2026-11-17 marks it `artificial`, and only a
+base-object variant's row has one. Before that every variant of a member
+shared the list of whichever definition the build read last, so in such
+metadata the VTT is what a destructor's list holds after `this`, and in a
+constructor's a `void**` named `vtt` there when the list is one longer than
+the demangled name's.
+"""
+function _structor_parameters(func, kind::Symbol)
+    params = collect(Any, get(func, "parameters", Any[]))
+    marked = findall(p -> get(p, "artificial", false) == true, params)
+    isempty(marked) || return (params[setdiff(eachindex(params), marked)], params[marked])
+    # Unmarked: only a list that names its receiver and goes on past it.
+    (length(params) >= 2 && get(params[1], "name", "") == "this") || return (params, Any[])
+    kind === :dtor && return (params[1:1], params[2:end])
+    (String(get(params[2], "name", "")) == "vtt" &&
+     replace(String(get(params[2], "c_type", "")), r"\s+" => "") == "void**") || return (params, Any[])
+    demangled = String(get(func, "demangled", ""))
+    (open, _) = _param_list_paren(demangled)
+    close = open == 0 ? 0 : _matching_paren(demangled, open)
+    close == 0 && return (params, Any[])
+    inner = strip(demangled[nextind(demangled, open):prevind(demangled, close)])
+    written = isempty(inner) ? 0 : length(_split_depth0_commas(inner))
+    length(params) - 1 == written + 1 || return (params, Any[])
+    return (params[setdiff(eachindex(params), 2)], params[2:2])
+end
+
+"""
+    _structor_bindings(functions, dwarf_structs) -> (skipped, refused)
+
+Which symbol stands behind `<Class>_<Class>(this, …)` and
+`<Class>_destroy_<Class>(this)`: the COMPLETE-object constructor (`C1`) and
+destructor (`D1`), the ones `T x;` and `x.~T()` run. `skipped` is the set of
+symbols not emitted because another variant of the same member is; `refused`
+maps a symbol to why its wrapper is a refusal.
+
+For a class with no virtual base, `C1` and `C2` (and `D1` and `D2`) are one
+function, and clang often emits only the base-object one (an abstract class's
+constructor, an inline destructor); either is bound, `C1`/`D1` when the
+library has both. For a class WITH a virtual base they are two: the
+base-object variant takes a VTT after `this` and leaves the virtual base
+alone, so a wrapper on it built half an object from a null VTT and crashed
+(`VBottom_VBottom(p)`), and `<X>_destroy_<X>` was `(this, vtt)`. Until
+2026-11-17 the two became one Julia method and `_dedup_method_chunks` kept
+the last in the metadata's order, which was `C2` and `D2` for every class.
+Such a class's base-object variant is never bound: with no complete-object
+variant in the library the wrapper says so. Whether the class has a virtual
+base is `_has_virtual_base`; where the metadata cannot say, a VTT in the
+variant's own parameters does (`_structor_parameters`).
+
+`D0` (deleting) is its own Julia function, `<X>_delete_<X>`, and never part
+of the choice. A complete-object or deleting variant whose list still holds
+a VTT is metadata from before each variant had its own list: refused, with
+the rebuild that fixes it, since the thunk would be built from the same list.
+"""
+function _structor_bindings(functions, dwarf_structs)
+    groups = Dict{Tuple{String,String,Symbol},Dict{Char,Any}}()
+    for f in functions
+        v = _structor_variant(f)
+        v === nothing && continue
+        g = get!(() -> Dict{Char,Any}(), groups,
+                 (String(get(f, "class", "")), String(get(f, "demangled", "")), v[1]))
+        get!(g, v[2], f)
+    end
+    skipped = Set{String}()
+    refused = Dict{String,String}()
+    virtual_base = Dict{String,Union{Bool,Nothing}}()      # asked once per class
+    for ((cls, demangled, kind), g) in groups
+        what = kind === :ctor ? "constructor" : "destructor"
+        complete = get(g, '1', nothing)
+        base = get(g, '2', nothing)
+        vbase = get!(() -> _has_virtual_base(cls, dwarf_structs), virtual_base, cls)
+        if complete !== nothing && base !== nothing
+            push!(skipped, String(base["mangled"]))
+        elseif base !== nothing &&
+               (vbase === true || (vbase === nothing && !isempty(_structor_parameters(base, kind)[2])))
+            refused[String(base["mangled"])] =
+                "The library defines only the base-object $what of `$cls` (`$(base["mangled"])`), and `$cls` " *
+                "has a virtual base: that variant takes a VTT and leaves the virtual base " *
+                (kind === :ctor ? "unconstructed, so it cannot build" : "alive, so it cannot end") *
+                " a whole object. The complete-object $what is not in the library (" *
+                (kind === :ctor ? "an abstract class, or " : "") *
+                "an inline $what nothing in the library runs on a whole object)."
+        end
+        vbase === false && continue
+        for f in (complete, get(g, '0', nothing))
+            (f === nothing || isempty(_structor_parameters(f, kind)[2])) && continue
+            refused[String(f["mangled"])] =
+                "The metadata lists a VTT among the parameters of `$demangled` (`$(f["mangled"])`), which " *
+                "only the base-object $what takes: it predates per-variant parameter lists. Rebuild the " *
+                "package (delete .replibuild_cache/project_hash) and wrap again."
+        end
+    end
+    return (skipped, refused)
 end
 
 """
@@ -728,6 +974,42 @@ function _record_name_as_emitted(julia_type::AbstractString, records)::String
     return julia_type in records ? _sanitize_cpp_type_name(String(julia_type)) : String(julia_type)
 end
 
+"""
+    _managed_safe_wrapper(julia_name, param_sig, param_names, julia_return_type, deleters, idiomatic_classes)
+        -> Union{Nothing,Tuple{String,String}}
+
+The `<f>_safe` wrapper of a function that returns a pointer to a class with a
+`Managed<X>` type, as `(chunk, name)`: the same call, its result owned by a
+`Managed<X>`. `nothing` when the return is no such pointer, or the class has an
+idiomatic wrapper instead. It calls the function's own wrapper, so it is the
+same text whichever tier that wrapper dispatches through.
+"""
+function _managed_safe_wrapper(julia_name::AbstractString, param_sig::AbstractString, param_names,
+                               julia_return_type::AbstractString, deleters, idiomatic_classes)
+    (startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")) || return nothing
+    target_struct = julia_return_type[5:end-1]
+    # Sanitize target struct name to match ManagedX keys
+    safe_target = _sanitize_cpp_type_name(target_struct)
+    ((haskey(deleters, safe_target) || haskey(deleters, target_struct)) &&
+     !haskey(idiomatic_classes, safe_target) && !haskey(idiomatic_classes, target_struct)) || return nothing
+    managed_name = "Managed$safe_target"
+    safe_func_name = "$(julia_name)_safe"
+    # Use original param_names (not ccall_args which may have converted names
+    # like "a_c" that don't exist in the safe wrapper's scope)
+    safe_call_args = join(param_names, ", ")
+    return ("""
+    \"""
+        $safe_func_name($param_sig) -> $managed_name
+
+    Safe wrapper for `$julia_name` that returns a managed object with automatic finalization.
+    \"""
+    function $safe_func_name($param_sig)::$managed_name
+        ptr = $julia_name($safe_call_args)
+        return $managed_name(ptr)
+    end
+    """, safe_func_name)
+end
+
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
@@ -769,16 +1051,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # loaded at all. A path is data; it has to be escaped for the language it is
     # being written into, not concatenated into it.
     const LIBRARY_PATH = let baked = $(repr(abspath(lib_path)))
-        sibling = joinpath(@__DIR__, basename(baked))
-        isfile(sibling) ? sibling : baked
+        sibling = Base.joinpath(@__DIR__, Base.basename(baked))
+        Base.isfile(sibling) ? sibling : baked
     end
     const THUNKS_LIBRARY_PATH = let baked = $(repr(thunks_lib_path))
-        sibling = isempty(baked) ? \"\" : joinpath(@__DIR__, basename(baked))
-        !isempty(sibling) && isfile(sibling) ? sibling : baked
+        sibling = Base.isempty(baked) ? \"\" : Base.joinpath(@__DIR__, Base.basename(baked))
+        !Base.isempty(sibling) && Base.isfile(sibling) ? sibling : baked
     end
 
     # Verify library exists
-    if !isfile(LIBRARY_PATH)
+    if !Base.isfile(LIBRARY_PATH)
         Base.error("Library not found: \$LIBRARY_PATH (no sibling copy in \$(@__DIR__) either)")
     end
 
@@ -817,13 +1099,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     unrecoverable at the call site, so the user gets told once.
     \"\"\"
     function _check_build_identity()
-        if !isempty(LIBRARY_SHA)
+        if !Base.isempty(LIBRARY_SHA)
             actual = try
-                bytes2hex(open(RepliBuild.SHA.sha256, LIBRARY_PATH))
+                Base.bytes2hex(Base.open(RepliBuild.SHA.sha256, LIBRARY_PATH))
             catch
                 \"\"                                   # unreadable: nothing to compare
             end
-            if !isempty(actual) && actual != LIBRARY_SHA
+            if !Base.isempty(actual) && actual != LIBRARY_SHA
                 @warn \"\"\"
                 $(module_name): the library loaded is NOT the build this wrapper was generated from.
                 Struct layouts, enum values, blob sizes and any sliced IR in this wrapper are a
@@ -833,13 +1115,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 \"\\n  generated for:   \$BUILD_TARGET by RepliBuild v\$BUILD_GENERATOR\"
             end
         end
-        if !isempty(BUILD_GENERATOR)
+        if !Base.isempty(BUILD_GENERATOR)
             running = try
-                string(pkgversion(RepliBuild))
+                Base.string(Base.pkgversion(RepliBuild))
             catch
                 \"\"                                   # RepliBuild absent: skip
             end
-            if !isempty(running) && running != BUILD_GENERATOR
+            if !Base.isempty(running) && running != BUILD_GENERATOR
                 @warn \"\"\"
                 $(module_name): this wrapper was generated by a different RepliBuild than the one loaded.
                 The library itself may be fine — but codegen (struct layout, dispatch tiers, ABI
@@ -898,6 +1180,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # branch below). Absent from metadata built before it existed: every
     # record outside `struct_definitions` is then untypable, which traps.
     record_abi = get(metadata, "record_abi", Dict{String,Any}())
+    # How each class's by-value temporary is made, the table the thunk
+    # generator builds too: a class no temporary can be made for traps here
+    # (`thunk_crossings`), where the thunk generator emits no thunk.
+    class_raii = JLCSIRGenerator._collect_class_raii(metadata)
 
     # Struct definitions
     # Collect all struct names from DWARF (excluding enums which have __enum__ prefix)
@@ -1327,6 +1613,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 push!(enum_chunks, _PendingEnum(enum_name,
                     "C++ enum: $enum_name (underlying type: $underlying_type)",
                     julia_underlying, members))
+            else
+                # Defined with no enumerators (`enum class byte : unsigned char
+                # {};`, `std::byte`): an integer type of its own. Never an
+                # alias of another empty enum, which the member-set dedup
+                # above would make it.
+                emitted_enum_base[enum_name] = julia_underlying
+                haskey(_C_PRIM_FIELD_LAYOUT, julia_underlying) &&
+                    (emitted_enum_layout[enum_name] = _C_PRIM_FIELD_LAYOUT[julia_underlying])
+                push!(enum_chunks, _PendingEnum(enum_name,
+                    "C++ enum: $enum_name (underlying type: $underlying_type, no enumerators)",
+                    julia_underlying, Pair{String,Any}[]))
             end
         end
 
@@ -1872,7 +2169,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # `_prove_julia_layout`: proven-exact structs, blobs, anonymous unions and
         # enums. Named unions are `mutable` and embed as a pointer.
         # Enums as emitted: an alias has its canonical's layout, not its own
-        # DWARF one, and an enum with no enumerators is not emitted at all.
+        # DWARF one.
         jl_layouts = Dict{String,Tuple{Int,Int}}(emitted_enum_layout)
         jl_mutable = Set{String}()
         # Every record emitted as a `mutable struct` of its C bytes (a named
@@ -2333,6 +2630,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         sanitized_type == julia_type && _stl_internal(julia_type) && return nothing
                     end
 
+                    # A pointer to an enum this module emitted keeps its type,
+                    # under the enum's emitted name: enums precede structs in
+                    # the file, so the name is defined.
+                    let pm = match(r"^((?:Ptr\{)+)([A-Za-z_][A-Za-z0-9_]*)(\}+)$", sanitized_type)
+                        if pm !== nothing && _is_enum_name(String(pm.captures[2]))
+                            en = _sanitize_cpp_type_name(String(pm.captures[2]))
+                            haskey(emitted_enum_base, en) && return pm.captures[1] * en * pm.captures[3]
+                        end
+                    end
+
                     # If the field is Ptr{X} and X hasn't been defined yet,
                     # substitute Ptr{Cvoid} to avoid UndefVarError (same ABI size).
                     sanitized_type = _resolve_forward_ptr(sanitized_type, defined_struct_names)
@@ -2785,7 +3092,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             var_info = global_vars[var_name]
             julia_type = get(var_info, "julia_type", "Any")
             # Sanitize name
-            safe_name = make_cpp_identifier(var_name)
+            safe_name = _screened_function_name(make_cpp_identifier(var_name), var_name)
 
             # ...and the TYPE too. Only the name was sanitized here, so a global
             # whose type is a C++ template kept its raw spelling and was emitted
@@ -3021,6 +3328,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             # Allow passing Managed object to ccall expecting Ptr
             unsafe_convert(::Type{Ptr{$safe_s_name}}, obj::$managed_name) = obj.handle
+            # ... and to a call through a thunk, which asks an owning object for an
+            # untyped pointer (`JITManager.pointer_arg`): a base class's `this` takes it too
+            unsafe_convert(::Type{Ptr{Cvoid}}, obj::$managed_name) = Ptr{Cvoid}(obj.handle)
             
             export $managed_name
 
@@ -3326,8 +3636,33 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # An rvalue-reference overload beside its lvalue twin is not emitted at
     # all (`_rvalue_shadowed`), so it takes no part in the prediction either.
     rvalue_shadowed = _rvalue_shadowed(functions)
+    # The member functions with a vtable slot, by symbol: the `virtual` rows
+    # the build writes for every member a library record declares
+    # (`record_abi`'s `methods`). Metadata without the rows has none, and a
+    # `noexcept` virtual keeps its `ccall` until a rebuild.
+    virtual_symbols = Set{String}(String(get(row, "symbol", ""))
+                                  for facts in values(record_abi) if facts isa AbstractDict
+                                  for row in get(facts, "methods", Any[])
+                                  if row isa AbstractDict && get(row, "virtual", false) == true)
+    # One constructor and one destructor binding per class, the complete-object
+    # variant (`_structor_bindings`): the other variant of a member is not
+    # emitted, and one the library cannot back is a refusal with its declared
+    # parameters, which is how the prediction sees it too.
+    (structor_skipped, structor_refused) = _structor_bindings(functions, dwarf_structs)
+    _declared_structor(f) = !haskey(structor_refused, String(get(f, "mangled", ""))) ? f :
+        merge(f, Dict{String,Any}("parameters" => _structor_parameters(
+            f, startswith(String(get(f, "name", "")), "~") ? :dtor : :ctor)[1]))
+    let classes = sort!(unique(String[String(get(f, "class", "")) for f in functions
+                                      if haskey(structor_refused, String(get(f, "mangled", "")))]))
+        isempty(classes) || println("  wrap: $(length(structor_refused)) constructor/destructor wrapper(s) of ",
+                                    "$(length(classes)) class(es) are refusals (a class with a virtual base ",
+                                    "whose complete-object variant the library lacks, or metadata to rebuild): ",
+                                    join(first(classes, 8), ", "), length(classes) > 8 ? ", …" : "")
+    end
     strict_int_positions = _integer_width_overloads(
-        [f for f in functions if !(String(get(f, "mangled", "")) in rvalue_shadowed)],
+        Any[_declared_structor(f) for f in functions
+            if !(String(get(f, "mangled", "")) in rvalue_shadowed) &&
+               !(String(get(f, "mangled", "")) in structor_skipped)],
         struct_types, _ccall_param_type;
         bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum,
         string_param = c -> _string_param_plan(c, record_abi) isa Tuple)
@@ -3335,6 +3670,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
     union!(typed_return_names, _imported_value_type_names(dwarf_structs, _sanitize_cpp_type_name))
+    # ...and with an enum this module emits: `Color*` and `Color&` are `Ptr{Color}`.
+    union!(typed_return_names, _pending_enum_type_names(enum_chunks))
 
     for func in functions
         func_name = func["name"]
@@ -3344,6 +3681,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # A move overload beside its copy overload: one Julia signature, and
         # the lvalue one is what a Julia caller means (`_rvalue_shadowed`).
         mangled in rvalue_shadowed && continue
+        # The base-object constructor or destructor beside the complete-object
+        # one: the same Julia name, and never the one a caller means.
+        mangled in structor_skipped && continue
 
         # =========================================================
         # TIERED DISPATCH DECISION
@@ -3366,14 +3706,35 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             _crosses_small_blob(func, dwarf_structs, record_abi, _blob_names) ||
                             any(p -> _string_param_plan(String(get(p, "c_type", "")), record_abi) isa Tuple,
                                 func["parameters"])
+        # A virtual member function is reached through the object's vtable,
+        # and only a thunk does that (`jlcs.vcall`). A `ccall` names the
+        # symbol, which is `p->Class::f()`: a `noexcept` virtual was routed
+        # there, and `Base_g(derived)` ran `Base::g`.
+        use_mlir_dispatch = use_mlir_dispatch || mangled in virtual_symbols
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
         return_type = copy(func["return_type"])
-        
+        # A refused constructor or destructor keeps its name and its declared
+        # parameters (no VTT), and raises the reason (`_structor_bindings`).
+        structor_refusal = get(structor_refused, mangled, nothing)
+        structor_refusal === nothing || (params = _declared_structor(func)["parameters"])
+
         is_method = get(func, "is_method", false)
         is_vararg = get(func, "is_vararg", false)
         class_name = get(func, "class", "")
+
+        # No DIE describes this symbol, and it is no alias of a function that
+        # has one: the signature in hand is a guess from the name, so the
+        # function is refused where it is defined (`_lacks_debug_info`), under
+        # the name the loop below would have given it.
+        if _lacks_debug_info(func)
+            stub_name = _julia_function_name(
+                is_method && !isempty(class_name) ? "$(class_name)_$(func_name)" : func_name, mangled)
+            push!(func_chunks, _no_debug_info_stub(stub_name, mangled, demangled, metadata, generate_docs))
+            push!(exports, stub_name)
+            continue
+        end
 
         # Constructors are emitted. The old `func_name == class_name` skip
         # only fired at global scope (`T::T`, where `class` is the bare name)
@@ -3491,13 +3852,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # A `long double` crossing is the same trap the plain path emits
             # below; this branch used to `continue` past it.
             va_x87 = _x87_crossings(func)
+            # ...and so is a fixed parameter the type map does not know.
+            va_fixed = [p for p in params if get(p, "name", "") != "varargs..."]
+            va_unmapped = _unmapped_crossings(va_fixed, String[String(get(p, "julia_type", "Any")) for p in va_fixed])
             va_code, va_exports = generate_vararg_wrappers(
                 func_name, mangled, va_julia_name,
                 params, return_type, overloads,
                 generate_docs, demangled, :cpp,
                 cstring_free=get(config.wrap.cstring_owned, func_name, ""),
                 conflicts=JLCSIRGenerator.FunctionGen.conflict_crossings(func, dwarf_structs),
-                trap=isempty(va_x87) ? nothing : (n -> _x87_trap_body(n, va_x87))
+                trap=!isempty(va_x87) ? (n -> _x87_trap_body(n, va_x87)) :
+                     !isempty(va_unmapped) ? (n -> _unmapped_trap_body(n, va_unmapped)) : nothing
             )
             push!(func_chunks, va_code)
             append!(exports, va_exports)
@@ -3510,6 +3875,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         julia_param_types = String[]  # Julia types for function signature (may differ)
         needs_conversion = Bool[]
         string_plans = Any[]          # per parameter: nothing, a plan Tuple, or a reason String
+        pointer_types = Union{Nothing,String}[]   # per parameter: what `pointer_arg` is told (`_pointer_arg_type`)
 
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
@@ -3537,12 +3903,20 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # spelling the prediction above used for this position.
             splan = _string_param_plan(String(get(param, "c_type", "")), record_abi)
             push!(string_plans, splan)
+            # A container taken by value crosses by address: spelled as a
+            # pointer (`_by_address_ctype`), as the prediction spelled it.
+            sig_c_type = _by_address_ctype(actual_c_type, String(get(param, "c_type", "")))
             push!(julia_param_types,
                   splan isa Tuple ? _STD_STRING_PARAM :
-                  strict ? _strict_param_spelling(actual_c_type; bound = _sig_type_bound,
+                  strict ? _strict_param_spelling(sig_c_type; bound = _sig_type_bound,
                                                   owners = _sig_owners, is_enum = _sig_is_enum) :
-                           _relaxed_param_kind(actual_c_type, _sig_type_bound))
+                           _relaxed_param_kind(sig_c_type, _sig_type_bound))
             push!(needs_conversion, actual_c_type in _INTEGER_CTYPES)
+            # What the Tier 2 body converts a pointer argument to. A `std::string`
+            # the wrapper builds is passed by the address `string_arg` gives.
+            push!(pointer_types, splan isa Tuple ? nothing :
+                  _pointer_arg_type(actual_c_type, String(get(param, "c_type", ""));
+                                    resolves = t -> _sig_type_bound(t) || _sig_is_enum(t)))
         end
 
         # Julia function name (avoid conflicts and sanitize)
@@ -3642,6 +4016,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             doc_comment = chomp(doc_parts)
         end
 
+        if structor_refusal !== nothing
+            push!(func_chunks, """
+            $doc_comment
+            function $julia_name($param_sig)
+                Base.error($(repr("ABI Safety Trap: cannot call '$julia_name' ($demangled). " * structor_refusal)))
+            end
+            """)
+            push!(exports, julia_name)
+            continue
+        end
+
         # =========================================================
         # BRANCH 1: MLIR DISPATCH (Robust Path)
         # =========================================================
@@ -3656,7 +4041,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # A record whose name several types share (`conflict_trap`) is
             # refused the same way: the thunk would lay out whichever one the
             # metadata kept.
-            crossings = JLCSIRGenerator.FunctionGen.thunk_crossings(func, dwarf_structs, record_abi)
+            crossings = JLCSIRGenerator.FunctionGen.thunk_crossings(func, dwarf_structs, record_abi; class_raii)
             if crossings.trap !== nothing
                 trap_msg = "ABI Safety Trap: cannot call '$julia_name' ($demangled)."
                 if crossings.layout_trap !== nothing
@@ -3716,7 +4101,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 "(try GC.@preserve $(join(string_syms, " ")) $call finally " *
                 join(("RepliBuild.StdStrings.release!($s)" for s in string_syms), "; ") * " end)"
             invoke_args = join(_tier2_invoke_args(invoke_names, param_types, needs_conversion,
-                                                  emitted_enum_base), ", ")
+                                                  emitted_enum_base, pointer_types), ", ")
             jit_ret_type = return_type["julia_type"]
             jit_c_ret = get(return_type, "c_type", "void")
 
@@ -3946,6 +4331,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(func_chunks, func_def)
             push!(exports, julia_name)
             is_cstring_ret && push!(exports, "$(julia_name)_ptr")
+            # A function with C linkage keeps its `<f>_safe` on this path. It
+            # had one while every unmangled name took ccall, and an `extern "C"`
+            # factory calls `new`, so it is never proven `nounwind`
+            # (`_is_nounwind`): which tier makes the call must not decide what
+            # the function offers. A mangled function has one on the ccall path
+            # alone, as before.
+            if !newly_typed_return && !_is_cpp_function(func)
+                safe = _managed_safe_wrapper(julia_name, param_sig, param_names,
+                                             String(return_type["julia_type"]), deleters, idiomatic_classes)
+                safe === nothing || (push!(func_chunks, safe[1]); push!(exports, safe[2]))
+            end
             continue # Skip the rest of the loop (ccall generation)
         end
 
@@ -4095,11 +4491,22 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                             is_unnameable_agg_return
 
         x87 = _x87_crossings(func)
+        # A parameter the type map has no Julia type for is still `Any` here,
+        # and a ccall declaring it would cost the whole wrapper
+        # (`_unmapped_crossings`, as in the C generator).
+        unmapped = _unmapped_crossings(params, param_types)
         if !isempty(x87)
             func_def = """
             $doc_comment
             function $julia_name($param_sig)
             $(_x87_trap_body(julia_name, x87))end
+
+            """
+        elseif !isempty(unmapped)
+            func_def = """
+            $doc_comment
+            function $julia_name($param_sig)
+            $(_unmapped_trap_body(julia_name, unmapped))end
 
             """
         elseif has_unknown_param || is_unknown_return
@@ -4257,33 +4664,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # Generate safe wrapper if return type is a managed struct. Not for a
         # return typed from its declaration alone: `GetIO()` hands back memory
         # the context owns, and a finalizer on it frees what imgui still uses.
-        if !newly_typed_return && startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")
-            target_struct = julia_return_type[5:end-1]
-            # Sanitize target struct name to match ManagedX keys
-            safe_target = _sanitize_cpp_type_name(target_struct)
-            
-            if (haskey(deleters, safe_target) || haskey(deleters, target_struct)) && !haskey(idiomatic_classes, safe_target) && !haskey(idiomatic_classes, target_struct)
-                managed_name = "Managed$safe_target"
-                safe_func_name = "$(julia_name)_safe"
-                
-                # Use original param_names (not ccall_args which may have converted names
-                # like "a_c" that don't exist in the safe wrapper's scope)
-                safe_call_args = join(param_names, ", ")
-                safe_wrapper = """
-                \"""
-                    $safe_func_name($param_sig) -> $managed_name
-
-                Safe wrapper for `$julia_name` that returns a managed object with automatic finalization.
-                \"""
-                function $safe_func_name($param_sig)::$managed_name
-                    ptr = $julia_name($safe_call_args)
-                    return $managed_name(ptr)
-                end
-                """
-                
-                push!(func_chunks, safe_wrapper)
-                push!(exports, safe_func_name)
-            end
+        if !newly_typed_return
+            safe = _managed_safe_wrapper(julia_name, param_sig, param_names, julia_return_type,
+                                         deleters, idiomatic_classes)
+            safe === nothing || (push!(func_chunks, safe[1]); push!(exports, safe[2]))
         end
 
         # Generate convenience wrappers for ergonomic APIs

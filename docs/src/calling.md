@@ -41,9 +41,27 @@ Everything is exported, with one exception: a name that Julia itself already
 uses. A C type called `Number` is `Mathlib.Number`, never plain `Number`.
 `wrap` prints those names when it writes the module.
 
-A function the wrapper cannot call safely is still defined. Calling it raises
-an error that starts with `ABI Safety Trap` and gives the reason; the rest of
-the module is unaffected. To list them:
+**A few names cannot be used as the library spells them**, and are given
+another. `wrap` prints each one, with the reason, on a line starting `names:`.
+
+| The library has | The wrapper has | Because |
+|:----------------|:----------------|:--------|
+| A function `String`, `Ptr`, `Cint` | `String_`, `Ptr_`, `Cint_` | The name is a Julia type |
+| A function `eval`, `include`, `ccall` | `eval_`, `include_`, `ccall_` | Julia reserves the name |
+| A function or method `nothing`, `LIBRARY_PATH` | `nothing_`, `LIBRARY_PATH_` | The wrapper's own code uses the name |
+| A struct `Integer`, `Bool` | `c_Integer`, `c_Bool`, with methods `c_Integer_get` | The wrapper's own code uses the name |
+| A value `Symbol` of `enum Kind` | `Kind_Symbol` | The wrapper's own code uses the name |
+
+Other names that Julia also has are kept: a function `length`, `open` or
+`string`, or a struct `Task`, is `M.length`, `M.open`, `M.string`, `M.Task`.
+To choose a function's name yourself, use [`[wrap.rename]`](toml.md#Names),
+with the library's name as the key (`String`, not `String_`).
+
+**A function the wrapper cannot call safely is still defined.** Calling it
+raises an error that starts with `ABI Safety Trap` and gives the reason: a
+`long double` passed by value, a struct whose layout could not be settled, a
+function the library has no debug information for. The rest of the module is
+unaffected. To list them:
 
 ```julia
 filter(l -> occursin("Safety Trap", l), readlines("julia/Mathlib.jl"))
@@ -257,8 +275,9 @@ Wrap a pointer only if you own the object and it came from the library's
 allocator. Do not wrap an object the library still owns (a body that belongs
 to a physics world, for example), and do not also free it yourself.
 
-For some functions that return a new object the wrapper adds
-`<function>_safe`, which returns the `Managed` type directly.
+For an `extern "C"` function, or a `noexcept` C++ function, that returns a
+pointer to such a class, the wrapper also defines `<function>_safe`, which
+returns the `Managed` object directly.
 
 A class has a `Managed` type when the library has a release function for it (a
 function taking a pointer to the class whose name contains delete, destroy or
@@ -305,6 +324,36 @@ wrapper may turn that class into a Julia type you construct directly:
 `M.Rect(2.0, 3.0)` calls the factory, the class's methods get short forms
 (`M.area(r)`), and the object is deleted by the garbage collector.
 `methods(M.Rect)` shows whether your wrapper has this.
+
+## What a pointer argument accepts
+
+In a C++ wrapper, every pointer parameter, every reference and the object of a
+method is checked before the C++ function runs. Each accepts:
+
+| You pass | Accepted for |
+|:---------|:-------------|
+| A `Ptr` of any type, including `C_NULL` | Everything |
+| `Ref(x)` or `Ref(array, i)`, where `x` is a number, a struct, a union or a bitfield record | Every pointer except a function pointer |
+| A `Managed` object, an object made by a factory, a container such as `CppVector`, or your own type that defines `Base.unsafe_convert(::Type{Ptr{Cvoid}}, x)` | A pointer to an object, and `void*` |
+| A union or bitfield record itself: `M.Flags_get_level(f)` | A pointer to an object, and `void*` |
+| An `Array`, or a contiguous view, of `T` | `T*` where `T` is data (`const int*`), and `void*` |
+| A string | `char*`, and byte pointers such as `unsigned char*` |
+| A `@cfunction` pointer | A function pointer |
+
+Anything else is a `MethodError`, before any C++ runs: a bare struct where the
+object goes, a Julia function where a function pointer goes, a
+`Vector{Float64}` for a `const int*`, a Julia `Vector` or a `Ref{String}` where
+a `std::vector` or `std::string` goes.
+
+A string passed for a `char*` must not contain a zero byte; one that does is an
+`ArgumentError`. A `std::string` parameter has no such limit.
+
+A `noexcept` function is called directly and is less strict about what it
+converts: pass it a `Ptr`, a `Ref`, an array, or the class's own `Managed`
+object.
+
+A wrapper written by an older RepliBuild does not make these checks. Run
+`wrap` again.
 
 ## Overloads and default arguments
 
@@ -364,6 +413,23 @@ shapes_total_area(v)                  # double total_area(const std::vector<doub
 `std::vector`, `std::string`, `std::map` and `std::unordered_map` are
 supported this way.
 
+### Containers passed by value
+
+A function that returns a `std::vector<int>` by value (or a map, a set, a
+`shared_ptr`) returns the container object as raw bytes. Pass that value back
+to a function that takes the container by value, or wrap it in a `Ref` for one
+that takes a reference:
+
+```julia
+v = M.vec_iota(5)            # std::vector<int> vec_iota(int)
+M.vec_sum_val(v)             # int vec_sum_val(std::vector<int>): 10
+M.vec_sum(Ref(v))            # int vec_sum(const std::vector<int>&)
+```
+
+No copy is made when you pass it by value: the function works on your
+container's storage. A function that changes its by-value argument (grows it,
+or moves from it) can leave your value unusable.
+
 ## Standard types passed by value
 
 When a function takes or returns one of these by value, the wrapper has a
@@ -388,7 +454,8 @@ pointer-returning functions.
 
 ## Exceptions
 
-A C++ exception becomes a Julia exception carrying the C++ message:
+A C++ exception becomes a Julia exception carrying the C++ message. That
+includes one thrown by an `extern "C"` function of a C++ library:
 
 ```julia
 try

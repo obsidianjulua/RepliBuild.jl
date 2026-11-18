@@ -407,9 +407,13 @@ passed as a **pointer to a caller-owned temporary**, destructed by the caller
 after the call — not as raw bits in registers. Passing the bits miscompiles
 those calls. The producer detects the case by *symbol presence* (a truly trivial
 destructor is never emitted as a symbol, so a class with one in the metadata is
-non-trivial for the purposes of calls), copy-constructs a temporary when a copy
-constructor is resolvable and bit-copies when the copy is trivial, and brackets
-the call in a `jlcs.scope`. Destructors fire in reverse order at scope exit.
+non-trivial for the purposes of calls), builds the temporary the way the class's
+declared constructors allow (`FunctionGen.value_temporary`: the copy
+constructor; the move constructor when the copy is deleted or not public; the
+bytes only when the copy is trivial), and brackets the call in a `jlcs.scope`.
+Destructors fire in reverse order at scope exit. A class no temporary can be
+made for gets no thunk and an ABI trap in the wrapper. The module declares every
+constructor and destructor a scope names, whether or not the wrapper binds it.
 
 `jlcs.scope` has no results, so a return value leaves through a stack slot —
 that is why the RAII path allocates `%raii_retslot`. Because `try_call` converts

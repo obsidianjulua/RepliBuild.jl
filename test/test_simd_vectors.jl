@@ -836,25 +836,28 @@ _vfns(rt) = Any[n == "take_rarr" ? _vfunc(n; byval = [("RArr", 16)], rt) : _vfun
         # `is_ccall_safe` is what a C-linkage or noexcept function in a C++
         # library goes through. It ignored vectors, so such a function was a
         # plain ccall: wrong registers on SysV, a fault on Win64 (audit of #60).
+        # Each function here is proven `nounwind`, so the exception gate lets
+        # it through and the vector decides.
         W = RepliBuild.Wrapper
-        @test !W.is_ccall_safe(_vfunc("take_v4f"), _VSD)      # a bare vector argument
-        @test !W.is_ccall_safe(_vfunc("make_v4f"), _VSD)      # a bare vector return
-        @test !W.is_ccall_safe(_vfunc("take_rv1f"), _VSD)     # a record holding one
-        @test !W.is_ccall_safe(_vfunc("take_rv8f"), _VSD)
-        @test !W.is_ccall_safe(_vfunc("make_rnest"), _VSD)    # at depth
-        @test W.is_ccall_safe(_vfunc("take_rplain"), _VSD)    # no vector anywhere
+        proven(args...; kw...) = merge!(_vfunc(args...; kw...), Dict{String,Any}("nounwind" => true))
+        @test !W.is_ccall_safe(proven("take_v4f"), _VSD)      # a bare vector argument
+        @test !W.is_ccall_safe(proven("make_v4f"), _VSD)      # a bare vector return
+        @test !W.is_ccall_safe(proven("take_rv1f"), _VSD)     # a record holding one
+        @test !W.is_ccall_safe(proven("take_rv8f"), _VSD)
+        @test !W.is_ccall_safe(proven("make_rnest"), _VSD)    # at depth
+        @test W.is_ccall_safe(proven("take_rplain"), _VSD)    # no vector anywhere
         # An aligned array, marked as looked at, is not a vector. RAl still goes
         # to the thunk, for its alignment: `aligned(16)` on the member is
         # DW_AT_alignment on the member alone, and a C++ record C aligns above 8
         # is Tier 2 (`_is_struct_unsafe` asks `_c_record_align`, 2026-11-10).
         @test !_VFG.holds_vector("RAl", _VSD)
         @test W._c_record_align(_VSD["RAl"], _VSD) == 16
-        @test !W.is_ccall_safe(_vfunc("take_ral"), _VSD)
+        @test !W.is_ccall_safe(proven("take_ral"), _VSD)
         # Old metadata cannot tell RAl's array from a vector: the thunk decides.
         old_sd, old_rt = _vstrip!(deepcopy(_VSD)), _vstrip!(deepcopy(_VRT))
-        @test !W.is_ccall_safe(_vfunc("take_ral"; rt = old_rt), old_sd)
-        @test !W.is_ccall_safe(_vfunc("take_v4f"; rt = old_rt), old_sd)
-        @test W.is_ccall_safe(_vfunc("take_rplain"; rt = old_rt), old_sd)
+        @test !W.is_ccall_safe(proven("take_ral"; rt = old_rt), old_sd)
+        @test !W.is_ccall_safe(proven("take_v4f"; rt = old_rt), old_sd)
+        @test W.is_ccall_safe(proven("take_rplain"; rt = old_rt), old_sd)
         @test _VFG.holds_vector("RV4F", _VSD) && _VFG.holds_vector("RNest", _VSD)
         @test !_VFG.holds_vector("RPlain", _VSD) && !_VFG.holds_vector("NoSuch", _VSD)
     end

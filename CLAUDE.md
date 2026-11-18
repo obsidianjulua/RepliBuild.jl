@@ -386,6 +386,20 @@ If you are asked to work on it:
   (`install = false` in a probe, which must not download). Splice the library
   into generated `ccall`s as `GlobalRef(MLIRNative, :libJLCS)`, never as a path.
   (`test_jlcs_library.jl`, devtests `test_jlcs_artifact_live.jl`.)
+  **The dialect has an ABI version, one integer in `src/mlir/ABI_VERSION`**:
+  CMake compiles it into `jlcs_abi_version()` and `JLCSLibrary.ABI_VERSION`
+  reads the same file, so a build from this checkout always agrees, and a
+  library from anywhere else that reports another (or none: `0`) is an error
+  before it is opened for a call (`verify_abi!`, in `path()` and
+  `check_library`; the doctor reports it). **Bump it with any change to what
+  Julia generates for the dialect or calls in it** (an op, an attribute or
+  statement, a thunk convention, a C API signature), together with
+  `src/mlir/VERSION` (the binary's own version, a new major), a rebuilt and
+  republished artifact and `Artifacts.toml`: a published library of the old
+  number is refused from that commit on. `deps/jlcs_jll/README.md` has the
+  publishing and Yggdrasil steps; `yggdrasil/build_tarballs.jl` is the same
+  build as the local recipe from a pinned commit. (`test_jlcs_abi_version.jl`,
+  devtests `test_jlcs_abi_live.jl`.)
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
 - `Builder/BuildGraph.jl` — the build-graph contract: a `TargetGraph` of targets
@@ -876,6 +890,32 @@ the test named when you touch the area.
   against a real readelf dump, not against llvm-dwarfdump's
   (`test_dwarf_attribution.jl`).
 
+- **A pointer or reference to an enum is an address** (2026-11-18,
+  `cpp_to_julia_type`: `E*` is `Ptr{E}`, `E&` `Ref{E}`; only by value is it the
+  enum). Mapped to the enum, `void out(enum E *)` took the value and C wrote
+  through it. A generator set built by scanning emitted text for type names
+  adds `_pending_enum_type_names(enum_chunks)`: the enum section is pending
+  records, not text. A parameter or return still `Any` after the mapper is one
+  trap stub naming the C type (`_unmapped_crossings`), on every ccall-emitting
+  path of both generators. An enum defined with no enumerators has an entry
+  (`std::byte`), a toolchain one only where the exported surface names it, and
+  such enums skip the member-set dedup. (`test_type_mapping.jl`, devtests
+  `test_type_mapping_live.jl`.)
+- **A base-object variant's VTT is that variant's own parameter** (2026-11-18):
+  the definition with one parameter more than its declaration gets an entry
+  under its own symbol, the VTT marked `artificial`, and the unified C4/D4 key
+  keeps the declared list in any DIE order. An artificial parameter after
+  `this` is not the test: an implicit copy constructor's source is artificial
+  too. (`test_structor_variants.jl`.)
+- **A symbol no DIE describes is never called with a guessed signature**
+  (2026-11-18). It takes the signature of a described exported function at its
+  address (`_alias_signature_key`, `alias_of`), or stays `return_type_source:
+  inferred`, which both generators emit as `_no_debug_info_stub`. An alias of a
+  `static`, hidden or `__rb_`-promoted function is refused: a local name is no
+  key into the function table. `parameters_source: inferred` alone (K&R) is
+  still called. (`test_alias_signatures.jl`, devtests
+  `test_alias_signatures_live.jl`.)
+
 ### Generators
 
 - **The STL screen is asked with the record's definition.** `_is_stl_internal_type`
@@ -1267,6 +1307,53 @@ the test named when you touch the area.
   requires the module name to be a Symbol, and `get_module_name` never starts
   one with a digit (abi_fuzz M1).
 
+- **Every top-level name a wrapper binds from a library identifier passes the
+  name screen** (2026-11-18, `Wrapper/NameScreen.jl`). It asks Julia
+  (`_function_name_refusal`: syntax, a binding every module owns such as `eval`
+  and `include`, a Base type whose constructor a method would extend) and the
+  wrapper's own text (`_name_uses`), and keeps no list. A function moves to
+  `<name>_`, a record to `c_<name>` in the metadata the generators read
+  (`_screen_records`; never in a type sanitizer, since the metadata spells a
+  library `struct Bool` and C's `bool` alike), an enumerator to
+  `<enum>_<name>`; a module name the text uses is a wrap error naming `[wrap]
+  module_name`. The first generation is a probe and a second may follow, so a
+  generator must not modify its metadata. `[wrap.rename]` wins. Text the
+  generators write calls Base as `Base.f`: a bare `f(` takes that name from
+  every library that has one. A new emitter goes through
+  `_julia_function_name` / `_screened_function_name`, never around them.
+  (`test_name_screen.jl`, devtests `test_name_screen_live.jl`.)
+- **A Tier 2 body converts every pointer argument and `this` with
+  `JITManager.pointer_arg(<declared type>, x)`** (2026-11-18). The positions
+  stay `::Any`, and `_arg_marshal_plan` cannot tell a pointer position from a
+  value's, so a struct value, a Julia function or a `Vector` was boxed and read
+  as an address. `_pointer_arg_type` names the position (`Ptr{T}`,
+  `Ptr{Cvoid}`, `Cstring` for a pointer to plain `char`, `Ptr{Opaque}`,
+  `Ptr{Code}`, `ByValue{V}` for an STL container taken by value, which the
+  thunk takes by address); `pointer_arg` alone says what is accepted, and the
+  rest is its `MethodError`. A new owning type defines
+  `Base.unsafe_convert(::Type{Ptr{Cvoid}}, x)`; a by-value parameter the thunk
+  takes by address is spelled through `_by_address_ctype` in the function loop
+  AND in `_integer_width_overloads`. The `ccall` path of a C++ wrapper does not
+  use it. (`test_tier2_pointer_args.jl`, devtests
+  `test_tier2_pointer_args_live.jl`.)
+- **`<X>_<X>` is the complete-object constructor (C1) and `<X>_destroy_<X>` the
+  complete-object destructor (D1)** (2026-11-18, `_structor_bindings`). C2/D2
+  stand in only for a class with no virtual base; with one and no C1/D1 the
+  wrapper is a refusal. The other variant gets no chunk and no thunk, so
+  nothing may rely on the order of variants in the metadata, and a consumer
+  that names a thunk reads the name from the wrapper. (`test_structor_variants.jl`,
+  devtests `test_virtual_classes_live.jl`.)
+- **A function with C linkage in a C++ library reaches `ccall` only when its
+  definition is `nounwind` in the linked IR** (2026-11-18, metadata `nounwind`
+  from `_mark_noexcept!`, `DispatchLogic._is_nounwind`). `extern "C"` changes
+  the name, not what the body throws, and a throw through `ccall` is
+  `std::terminate`. No key is "not proven" and takes the thunk, so a C++
+  package's C API runs through thunks until it is rebuilt. Its `<f>_safe` is
+  emitted on either path (`_managed_safe_wrapper`). Only a per-file `-O` moves
+  the count, never `[link] optimization_level` alone. A synthetic C-linkage
+  function in a test that means the ccall path states `"nounwind" => true`.
+  (`test_c_linkage_unwind.jl`, devtests `test_c_linkage_unwind_live.jl`.)
+
 ### JLCS dialect and ABI
 
 - **Thunk arg slots hold a pointer to the argument's storage.** One load gives the
@@ -1564,6 +1651,37 @@ the test named when you touch the area.
   `uwtable` is stamped on every function with a body, independent of landing pads.
   The landing pads are still required on Linux.
 
+- **A by-value class parameter's temporary is made from the class's
+  declarations, and the module declares what it calls** (2026-11-18).
+  `_collect_class_raii` (keyed by the `struct_definitions` key) and
+  `FunctionGen.value_temporary` decide: copy constructor; move constructor
+  where C++ has no copy; bytes only where the copy is trivial; else
+  `:uncopyable` and a trap. A symbol's absence never means "trivial", and a
+  temporary is ended by D1, or D2 where it takes no VTT, never by D0. Every
+  callee a `jlcs.scope` or `ctor_call` names is declared once by
+  `generate_function_thunks`, only where nothing else declared it (a second
+  `func.func private` kills the module), and pre-flighted
+  (`lifetime_callees`). `undeclared_callees` refuses a module before the JIT
+  and the AOT stage: MLIR's translation dereferences null for an undeclared
+  callee, which killed the process at `using`. A new op that names a callee
+  must be read by it. (`test_byvalue_class_temporaries.jl`, devtests
+  `test_byvalue_class_live.jl`.)
+- **Every virtual method with a slot is a `jlcs.vcall`** (2026-11-18). The
+  class gate is `_has_type_info` (a size, and members or virtual methods; `[]`
+  is not a field list the dialect parses), `DWARFParser._merge_class_dies`
+  keeps a class's definition when a later unit only declares it, and
+  GeneratorCpp sends every `virtual` row of `record_abi[...]["methods"]` to
+  Tier 2, `noexcept` or not: a `ccall` is a static call. (`test_virtual_dispatch.jl`.)
+- **`ccall` passes `Int128`/`UInt128` as two halves**, which is C's placement
+  only while both get registers (2026-11-18). `_c_int128_misplaced` traps in
+  the C generator, `is_ccall_safe` sends C++ to the thunk (`i128`), and
+  `thunk_crossings` refuses it under Win64, on a reading of clang's MinGW
+  output no Windows host has run. (`test_type_mapping_live.jl`.)
+- **A name that is a record of the library is that record**
+  (`map_cpp_type(t, records)`): the scalar map also answers Julia's spellings
+  of C types (`Bool`, `Cint`, `UInt8`), and a `struct Bool` by value was a
+  one-byte thunk return. (`test_name_screen.jl`.)
+
 ### Subprocesses
 
 - **The toolchain environment rides on the `Cmd`, never on `ENV`.**
@@ -1575,6 +1693,21 @@ the test named when you touch the area.
   called anywhere in `src/`. A key the toolchain maps to `""` is a force-clear: the
   child must get it empty, not inherit the parent's value. On Windows the merge is
   case-insensitive (`_overlay_env`). (`test_llvm_env_isolation.jl`.)
+
+- **`llvm-dwarfdump` is the system's first, and a bundled copy only from
+  LLVM 20** (2026-11-17, `Tools.PROVIDERS`: `system_first`, `min_llvm`).
+  `DWARFParser` reads the type NAMES the dumper prints, and they reach the
+  thunk IR (`jlcs.type_info` bodies and base names). LLVM 18 prints a typedef
+  without its scope (`__to_type` for `std::ctype_base::__to_type`): on the
+  Hub's 42 libraries Julia 1.13's bundled LLVM 20 dumper gave a system LLVM
+  23's classes exactly, and Julia 1.12's LLVM 18 differed on 11, with
+  different IR for 9 of 10 C++ packages. So the dumper of the LLVM that
+  compiled the library wins wherever it is on PATH, the bundled one is what a
+  machine with no LLVM has, and on a Julia whose LLVM is older there is none.
+  A tool that reads DWARF is not version-free because DWARF is: check what it
+  PRINTS at each bundled LLVM, on both supported Julias, before making a
+  bundled copy the default. (`test_tools_resolver.jl`, devtests
+  `test_bundled_dwarfdump_live.jl`.)
 
 ### Caching
 
@@ -1715,6 +1848,15 @@ Start here for any ABI question: register state is observable.
   `graph_mode_test/` (a CMake project; its test writes a `[graph]` TOML into a
   copy, since `test/*/*.toml` is untracked) are graph mode's live fixtures.
 
+- **A test that pins emitted text pins the part it is about** (the thunk and
+  the return type, the type of one position), not a whole call. Six tests went
+  red at one integration because another change respelled an argument
+  (2026-11-18). A clean textual merge says nothing: run the merged suites
+  before calling a set of branches done.
+- `.debug/mlir/` files are named by content and never rewritten: a test that
+  reads the module empties the directory first, never takes the newest by
+  mtime.
+
 ## Windows (`x86_64-w64-windows-gnu`, MSYS2 CLANG64) — since v4.0.0
 
 Linux (x86-64 and AArch64) and Windows (x86-64) are supported; macOS is refused
@@ -1726,8 +1868,8 @@ changes:
   by `MSYSTEM`: Julia usually runs outside any MSYS2 shell, and Git Bash sets
   `MSYSTEM=MINGW64`. A `libJLCS.dll` that will not load is a missing
   `clang64\bin` PATH entry as often as a gone LLVM (`_clang64_bin_off_path`).
-  JIT C++ wrappers run `llvm-dwarfdump` by its bare name at load
-  (`DWARFParser.parse_vtables`), so the doctor probes that name.
+  JIT C++ wrappers run `llvm-dwarfdump` at load (`DWARFParser.parse_vtables`),
+  resolved by `Tools` (below, under Subprocesses); the doctor reports that copy.
 - DWARF dumper: GNU `objdump` on Windows. `_is_gnu_binutils` must reject llvm-objdump
   (on PATH in CLANG64), which otherwise parses **zero functions** silently. Use
   `Compiler._gnu_objdump()` wherever GNU objdump specifically is needed. The
@@ -1929,6 +2071,41 @@ points into itself. libstdc++'s short `std::string` is one: its data pointer
 came back aimed at the thunk's frame, and its destructor then freed a stack
 address. Fixed by the caller's-buffer convention (JLCS invariants);
 `test_sret_in_caller_buffer.jl` fails without it.
+
+### Confirmed defects — 2026-11-17 audit
+
+Found by calling 22 library-free probe libraries through the whole pipeline
+from Julia. Fixed 2026-11-18, each with a regression test named in the
+invariants above: the load-time segfault for a by-value class with a
+destructor, enum pointers and references passed by value, Tier 2 pointer
+positions that dereferenced anything, base-object constructors bound for
+virtual-base classes, static calls for virtual methods, identifiers that broke
+the module or added methods to Base, `unsigned __int128`, the `char8/16/32_t`
+traps, `extern "C"` functions that throw, alias symbols. Still open:
+
+- **Signed bitfields read as unsigned**: `int c:7 = -3` reads 125, and the
+  setter rejects a negative. The metadata has the member's `c_type`.
+- **`char` parameters are `UInt8`** in both generators while `char` returns are
+  `Cchar`: a negative `char` is an `InexactError`, a `Cchar` a `MethodError`.
+- **Same-named enums in two scopes collapse** (`Mode`, `ns::Mode`): one's
+  enumerators are bound nowhere and its functions return the other type. The
+  bare-name problem above, with constants lost.
+- **`signed char*` returns become `String`** (`int8_t*` is right).
+- **C++ globals outside the global namespace are dropped**, static data
+  members and ABI-tagged globals included: `_drop_unresolvable_globals!` looks
+  the bare DWARF name up in dynsym, where the name is mangled.
+- **A pure virtual method has no wrapper**: no symbol, so no function row. It
+  needs rows for declared virtuals, a Tier-2-only emission exempt from R2, and
+  a thunk that is only a `jlcs.vcall`. No dialect change.
+- **Operator names**: `operator<` derives from its parameter list, and
+  `operator()` and `operator[]` are both `operator`.
+- **A value moved into a by-value parameter is stale afterwards.** The thunk
+  moves as C++ does, but the caller's Julia value is an immutable bits copy,
+  so using it again is a use-after-free. What owns a move-only object on the
+  Julia side is John's call.
+- **The `ccall` paths pass `const char*` as `Ptr{UInt8}`**, not `Cstring`: a
+  `SubString` is read past its end and an embedded NUL truncates, in a C
+  wrapper and on a C++ wrapper's `ccall` path.
 
 ## Not Yet Built (roadmap, not bugs)
 

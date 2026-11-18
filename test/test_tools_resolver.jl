@@ -35,7 +35,7 @@ end
 @testset "every tool resolves to the copy the order names, and it starts" begin
     checked = 0
     for r in _TR.report()
-        @test r.source === _tr_expected(r.name, _TR.order())
+        @test r.source === _tr_expected(r.name, _TR.order(r.name))
         if r.source === :missing
             # Neither copy on this host (`ld.lld` where the JLL's does not
             # start and none is installed): the bare name, to fail by name.
@@ -53,7 +53,7 @@ end
         end
         checked += 1
     end
-    @test checked == length(_TR.PROVIDERS) == 8
+    @test checked == length(_TR.PROVIDERS) == 9
 end
 
 @testset "the order is REPLIBUILD_TOOLS, and nothing else is accepted" begin
@@ -84,6 +84,80 @@ end
     end
     jll_first = withenv(() -> [r.name for r in _TR.report() if r.source === :jll], "REPLIBUILD_TOOLS" => "jll")
     @info "tools whose JLL copy starts on this host" jll_first
+end
+
+@testset "llvm-dwarfdump is the program beside a product the JLL declares" begin
+    # LLVM_unified_jll declares `opt` and `llc` and ships `llvm-dwarfdump` in
+    # the same directory without a binding: the provider names it as a sibling.
+    p = _TR.PROVIDERS["llvm-dwarfdump"]
+    @test p.sibling == "llvm-dwarfdump"
+    @test p.libpath                       # it loads Julia's libLLVM
+    # Every other provider is its own product, at any version, in the common order.
+    @test all(isempty(q.sibling) && q.min_llvm == 0 && !q.system_first
+              for (n, q) in _TR.PROVIDERS if n != "llvm-dwarfdump")
+    path = _TR._jll_path(p)
+    if path === nothing
+        @info "LLVM_unified_jll has no llvm-dwarfdump on this host"
+    else
+        exe = Sys.iswindows() ? ".exe" : ""
+        @test basename(path) == "llvm-dwarfdump" * exe
+        @test dirname(path) == dirname(String(_TR.LLVM_unified_jll.opt_path))
+        @test path != String(_TR.LLVM_unified_jll.opt_path)
+    end
+    # A sibling that is not there is no copy, never the product in its place.
+    @test _TR._jll_path(_TR.Provider(_TR.LLVM_unified_jll, :opt_path, "X", true; sibling = "no-such-program")) === nothing
+    # The four-argument form is the product itself.
+    @test _TR.Provider(_TR.Binutils_jll, :nm_path, "NM", true).sibling == ""
+    withenv("REPLIBUILD_TOOL_LLVM_DWARFDUMP" => "/nowhere/dwarfdump") do
+        @test _TR.resolve("llvm-dwarfdump") == _TR.Resolved("llvm-dwarfdump", "/nowhere/dwarfdump", :override)
+        @test _TR.tool_cmd(`llvm-dwarfdump --debug-info lib.so`).exec == ["/nowhere/dwarfdump", "--debug-info", "lib.so"]
+    end
+end
+
+@testset "llvm-dwarfdump: the system's copy first, a bundled one only from LLVM 20" begin
+    p = _TR.PROVIDERS["llvm-dwarfdump"]
+    # The dumper of the LLVM that compiled the library wins unless the order
+    # is asked for by name.
+    @test p.system_first
+    @test withenv(() -> _TR.order("llvm-dwarfdump"), "REPLIBUILD_TOOLS" => nothing) === :system
+    @test withenv(() -> _TR.order("llvm-dwarfdump"), "REPLIBUILD_TOOLS" => "jll") === :jll
+    @test withenv(() -> _TR.order("llvm-dwarfdump"), "REPLIBUILD_TOOLS" => "system") === :system
+    @test_throws ErrorException withenv(() -> _TR.order("llvm-dwarfdump"), "REPLIBUILD_TOOLS" => "both")
+    # Every other tool keeps the common default.
+    for name in ("nm", "readelf", "git", "ld.lld")
+        @test withenv(() -> _TR.order(name), "REPLIBUILD_TOOLS" => nothing) === _TR.order()
+    end
+    @test withenv(() -> _TR.order("not-a-tool"), "REPLIBUILD_TOOLS" => nothing) === _TR.order()
+
+    # `DWARFParser` reads the type names the dumper prints, and LLVM 18 prints
+    # a typedef without its scope: a bundled copy older than 20 is no copy.
+    @test p.min_llvm == 20
+    # The gate, over scripts that answer `--version` as a dumper of each age.
+    if !Sys.iswindows()
+        mktempdir() do dir
+            function dumper(major)
+                f = joinpath(dir, "dwarfdump-$major")
+                write(f, "#!/bin/sh\necho 'LLVM (http://llvm.org/):'\necho '  LLVM version $major.1.8jl'\n")
+                chmod(f, 0o755)
+                return f
+            end
+            @test !_TR._starts("llvm-dwarfdump", p, dumper(18))
+            @test !_TR._starts("llvm-dwarfdump", p, dumper(19))
+            @test _TR._starts("llvm-dwarfdump", p, dumper(20))
+            @test _TR._starts("llvm-dwarfdump", p, dumper(23))
+            # One that starts and says nothing of its version is not accepted.
+            silent = joinpath(dir, "silent")
+            write(silent, "#!/bin/sh\necho hello\n"); chmod(silent, 0o755)
+            @test !_TR._starts("llvm-dwarfdump", p, silent)
+            # A tool with no floor takes any answer.
+            @test _TR._starts("nm", _TR.PROVIDERS["nm"], silent)
+        end
+    end
+    # On this Julia: bundled exactly when its LLVM is 20 or newer (and the JLL has a build).
+    path = _TR._jll_path(p)
+    if path !== nothing
+        @test _TR._starts("llvm-dwarfdump", p, path) == (Base.libllvm_version.major >= 20)
+    end
 end
 
 @testset "an override is used as given" begin

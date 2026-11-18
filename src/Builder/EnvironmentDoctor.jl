@@ -123,7 +123,9 @@ end
 
 function _get_version(tool_path, args::Vector{String}=["--version"])::String
     try
-        output = read(`$tool_path $args`, String)
+        # `tool_cmd`: a bundled copy `Tools` handed out starts only with its
+        # own library path (LLVM_unified_jll's tools load Julia's libLLVM).
+        output = read(Tools.tool_cmd(`$tool_path $args`), String)
         m = match(r"(\d+\.\d+\.\d+)", output)
         m !== nothing && return m.captures[1]
         m = match(r"(\d+\.\d+)", output)
@@ -435,20 +437,25 @@ function _check_cmake()::ToolStatus
         "CMake $(_get_version(path))"; section=SEC_CPP)
 end
 
-# Every JIT C++ wrapper runs `llvm-dwarfdump` by this bare name when it loads:
-# `DWARFParser.parse_vtables`, from the engine's init. A versioned name on PATH
-# (`llvm-dwarfdump-21`) does not help it, so this probes exactly that name. A
-# miss fails the library's engine, leaving only its ccall functions.
+# Every JIT C++ wrapper runs `llvm-dwarfdump` when it loads:
+# `DWARFParser.parse_vtables`, from the engine's init. A miss fails the
+# library's engine, leaving only its ccall functions. The program is the one
+# `Tools` resolves (`_find_tool`): PATH's bare name, the dumper of the LLVM
+# that compiled the library, else the copy in LLVM_unified_jll where that is
+# LLVM 20 or newer, so a machine with no system LLVM still has one. A
+# versioned name on PATH (`llvm-dwarfdump-21`) is not looked for.
 function _check_llvm_dwarfdump()::ToolStatus
     found, path = _find_tool("llvm-dwarfdump")
     found || return ToolStatus("llvm-dwarfdump", false, false, "", "", false,
-        "not on PATH — C++ wrappers run it by this name when they load"; section=SEC_CPP,
+        "not on PATH, and no bundled copy at LLVM 20+ for this Julia — C++ wrappers run it when they load"; section=SEC_CPP,
         advice=Sys.iswindows() ?
             ["It is in C:\\msys64\\clang64\\bin: put that directory on the Windows PATH."] :
-            ["Put LLVM's bin directory on PATH (/usr/lib/llvm-<N>/bin for apt.llvm.org)."])
+            ["Put LLVM's bin directory on PATH (/usr/lib/llvm-<N>/bin for apt.llvm.org),",
+             "or name the program in REPLIBUILD_TOOL_LLVM_DWARFDUMP."])
     version = _get_version(path)
+    bundled = Tools.tool_source("llvm-dwarfdump") === :jll
     ToolStatus("llvm-dwarfdump", false, true, path, version, true,
-        "llvm-dwarfdump $version"; section=SEC_CPP)
+        "llvm-dwarfdump $version" * (bundled ? " $(DIM)(bundled)$(RESET)" : ""); section=SEC_CPP)
 end
 
 # "dialect compiled" used to mean "the file exists". A package-manager LLVM upgrade
@@ -475,6 +482,9 @@ function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
         h = Libdl.dlopen(lib_path, Libdl.RTLD_LAZY; throw_error=false)
         h === nothing && return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", false,
             "the prebuilt library does not load"; section=SEC_CPP, advice=rebuild)
+        mismatch = JLCSLibrary.abi_problem(loc)
+        mismatch === nothing || return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", false,
+            "the prebuilt library is for another dialect ABI"; section=SEC_CPP, advice=[mismatch])
         return ToolStatus("libJLCS", false, true, lib_path, "prebuilt", true,
             "prebuilt (JLCS artifact, LLVM and MLIR linked in)"; section=SEC_CPP)
     end
@@ -497,6 +507,11 @@ function _check_libJLCS(llvm_version::AbstractString="")::ToolStatus
             section=SEC_CPP, advice=rebuild)
     end
     Libdl.dlclose(h)
+    # A build left over from an older checkout loads and is not this
+    # RepliBuild's dialect: it must be rebuilt, like one against a gone LLVM.
+    mismatch = JLCSLibrary.abi_problem(loc)
+    mismatch === nothing || return ToolStatus("libJLCS", false, true, lib_path, built, false,
+        "built for another dialect ABI"; section=SEC_CPP, advice=vcat([mismatch], rebuild))
     ToolStatus("libJLCS", false, true, lib_path, built, true,
         isempty(built) ? "dialect compiled" : "dialect compiled against LLVM $built"; section=SEC_CPP)
 end

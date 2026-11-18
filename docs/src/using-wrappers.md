@@ -77,10 +77,12 @@ What a machine needs to **run** a wrapper it did not build:
 | Wrapper | Linux | Windows |
 |:--------|:------|:--------|
 | C | RepliBuild, as a Julia dependency | The same |
-| C++ | The same, plus `llvm-dwarfdump` on `PATH` (part of LLVM) unless the wrapper was built with `aot_thunks = true` | MSYS2 CLANG64 with the MLIR package, `C:\msys64\clang64\bin` on `PATH`, and `Pkg.build("RepliBuild")` ([Set up](install.md#Windows)) |
+| C++ | The same. Nothing else to install | MSYS2 CLANG64 with the MLIR package, `C:\msys64\clang64\bin` on `PATH`, and `Pkg.build("RepliBuild")` ([Set up](install.md#Windows)) |
 
-On Linux, RepliBuild downloads its C++ support library by itself. On Windows
-it is built on each machine.
+On Linux, RepliBuild downloads its C++ support library by itself, and brings
+a copy of `llvm-dwarfdump`, which a C++ wrapper runs when it loads, for
+machines that have no LLVM. On Windows the support library is built on each
+machine.
 
 Do not strip the library. A C++ wrapper reads information from it when it
 loads.
@@ -96,8 +98,7 @@ aot_thunks = true
 ```
 
 `wrap` then writes a second library, `lib<name>_thunks.so`, into `julia/`.
-Ship it with the rest. Loading is many times faster, calls are faster, and the
-user's machine does not need `llvm-dwarfdump`. [Make it fast](performance.md)
+Ship it with the rest. Loading is many times faster and calls are faster. [Make it fast](performance.md)
 has the measurements, and how to go further with a system image.
 
 ## A package that builds the library
@@ -121,7 +122,7 @@ Before the first build, edit the template recipe: name the sources
 (`[dependencies]` or `[compile] source_files`), set `[wrap] language`, and set
 `[link] enable_lto = false`.
 
-A package scaffolded by RepliBuild 4.5.0 or older has a `Project.toml` that
+A package scaffolded by a RepliBuild 4.5 release or older has a `Project.toml` that
 lists only RepliBuild, and fails to load once its wrapper exists. Add the
 missing dependency: `Pkg.activate("MyLibWrapper"); Pkg.add("Libdl")`.
 

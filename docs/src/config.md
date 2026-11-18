@@ -112,6 +112,10 @@ wrapper would give it, or by its symbol name in the library. The value must be
 a valid Julia name. A pattern that matches nothing, or a name already in use,
 is an error.
 
+A function that `wrap` reports under a changed name (`String` as `String_`) is
+keyed by the name the library gave it (`String`). The name you choose must not
+be a Julia type.
+
 ## `[types]`
 
 | Key | Default | Meaning |

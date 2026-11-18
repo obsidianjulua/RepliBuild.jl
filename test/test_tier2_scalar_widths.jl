@@ -11,8 +11,8 @@
 # so the emitted body now does (`_tier2_invoke_args`): `Cint(def)` for the
 # integer parameters, and the `@enum`'s base type for an emitted enum, which
 # the enum value and any Integer both convert to. Floats and Bool are declared
-# at their exact type; pointers, references, strings and records cross as
-# they are.
+# at their exact type and records cross as they are; a pointer argument is
+# converted too, by `JITManager.pointer_arg` (test_tier2_pointer_args.jl).
 #
 # Wrap-time facts about the generated text, so no toolchain is needed. The
 # live half is `test/cpp_routing_test`'s `scalar_widths` probe (devtests
@@ -86,10 +86,12 @@ _tsw_fn(name, mangled, demangled, params, ret_c, ret_jl) = Dict{String,Any}(
         @test occursin("primitive type Kind <: RepliBuild.OpenEnums.OpenEnum{Int16} 16 end", out)
         n = body("name_of")
         @test occursin(r"^function \w*name_of\(s::\w+, n::Integer\)"m, n)
-        @test occursin("invoke(\"_mlir_ciface__ZN2ns7name_ofEPKcl_thunk\", Cint, s, Clong(n))", n)
+        @test occursin("invoke(\"_mlir_ciface__ZN2ns7name_ofEPKcl_thunk\", Cint, " *
+                       "RepliBuild.JITManager.pointer_arg(Cstring, s), Clong(n))", n)
     end
 
     @testset "the conversion spelling is one function" begin
+        # (no pointer types given: the pointer positions are left to the caller)
         @test TSW_W._tier2_invoke_args(["this", "n", "k", "p"], ["Ptr{Cvoid}", "Cuint", "Kind", "Ptr{Cvoid}"],
                                        [false, true, false, false], Dict("Kind" => "Int16")) ==
               ["this", "Cuint(n)", "Int16(k)", "p"]

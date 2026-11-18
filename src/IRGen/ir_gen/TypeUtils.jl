@@ -80,6 +80,16 @@ function map_cpp_type(type_str::String)
         return "" # Void return usually means no value
     elseif type_str == "int" || type_str == "int32_t" || type_str == "int32" || type_str == "Cint" || type_str == "unsigned int" || type_str == "uint32_t" || type_str == "uint32" || type_str == "Cuint"
         return "i32"
+    # The Unicode character types are base types, as `wchar_t` is: unsigned
+    # integers of 8, 16 and 32 bits. Left out, each fell to the struct-name
+    # branch at the end (`!llvm.struct<"char16_t">`), and a function taking one
+    # by value was refused as a record with no layout.
+    elseif type_str == "char8_t"
+        return "i8"
+    elseif type_str == "char16_t"
+        return "i16"
+    elseif type_str == "char32_t"
+        return "i32"
     # `long` is the one integer spelling whose width moves with the platform:
     # 32 bits on Win64 (LLP64), 64 on Unix64 (LP64). It used to sit in the i64
     # bucket below with everything else, which silently widened every `long`
@@ -135,7 +145,7 @@ function map_cpp_type(type_str::String)
         return "!llvm.struct<(f64, f64)>"
     elseif type_str == "complex long double" || type_str == "_Complex long double"
         return "!llvm.struct<($C_LONG_DOUBLE_MLIR, $C_LONG_DOUBLE_MLIR)>"
-    elseif type_str == "__int128" || type_str == "unsigned __int128" ||
+    elseif type_str == "__int128" || type_str == "unsigned __int128" || type_str == "__int128 unsigned" ||
            type_str == "__int128_t" || type_str == "__uint128_t" || type_str == "Int128" || type_str == "UInt128"
         return "i128"
     elseif type_str == "_Float16" || type_str == "__fp16" || type_str == "Float16"
@@ -189,6 +199,23 @@ function map_cpp_type(type_str::String)
     # Fallback
     # @warn "Unknown C++ type encountered: $type_str. Defaulting to !llvm.ptr."
     return "!llvm.ptr" 
+end
+
+"""
+    map_cpp_type(type_str, records) -> String
+
+`map_cpp_type` for a spelling read against a library's records (its
+`struct_definitions`): a name that is one of them is that record or enum,
+before it is anything else. The scalar map also answers Julia's spellings of
+the C types (`Bool`, `Cint`, `UInt8`, `Cdouble`), and a library may declare a
+`struct Bool`. Read as C's `bool`, its by-value return was a thunk returning
+one byte where the wrapper took the record's sixteen (2026-11-17).
+"""
+function map_cpp_type(type_str::AbstractString, records)
+    t = String(type_str)
+    (records isa AbstractDict && occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", t) &&
+     (haskey(records, t) || haskey(records, "__enum__" * t))) && return mlir_struct_ref(t)
+    return map_cpp_type(t)
 end
 
 """
