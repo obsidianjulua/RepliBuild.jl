@@ -1109,6 +1109,25 @@ the test named when you touch the area.
   the object under the call (2026-11-10). Anything that passes a handle out of
   an owning type into Julia code, rather than straight into a `ccall`, needs
   the same. (`test_cpp_finalizers.jl`, devtests `test_cpp_finalizers_live.jl`.)
+- **A factory class a record's field names is defined before every record**
+  (2026-11-18, `_idiomatic_early_type`). The owning `mutable struct X` a
+  factory makes was written after every record while the struct loop counted
+  it defined at its DWARF position, so `struct Cage { Animal *pet; }` emitted
+  `pet::Ptr{Animal}` above `Animal` and `using` was `UndefVarError`. For a
+  class a field names (`Ptr{X}`, `Ptr{Ptr{X}}`, `NTuple{N, Ptr{X}}`), the type
+  goes in a slot ahead of the struct definitions with one inner constructor
+  that only stores the handle (`X(::Base.Val{:_rb_adopt}, ::Ptr{Cvoid})`), and
+  its factory constructors are OUTER constructors in the idiomatic section,
+  after every type: a constructor's argument types are evaluated where it is
+  defined, and a factory may take the record holding the pointer, so moving
+  the whole struct earlier only moves the failure. A class no field names
+  keeps its inner constructors byte for byte. **Julia evaluates a field type,
+  a type parameter's bound and a method's argument types at definition**:
+  `_assert_types_defined_before_use` (inside `_assert_wrapper_loadable`)
+  refuses a wrapper that names, in one of those positions, a type the module
+  binds only further down. A new emitter that writes a type or a typed
+  signature must place it after what it names. (`test_factory_field_order.jl`,
+  devtests `test_factory_field_order_live.jl`.)
 - **A pointer or reference return is typed from its declaration**
   (`_typed_pointer_return`, both generators): `T*`, `const T*`, `T&`, `T**` give
   `Ptr{T}`/`Ptr{Ptr{T}}` when `T` is a type the module emits
@@ -2187,8 +2206,8 @@ virtual-base classes, static calls for virtual methods, identifiers that broke
 the module or added methods to Base, `unsigned __int128`, the `char8/16/32_t`
 traps, `extern "C"` functions that throw, alias symbols; then signed
 bitfields, by-value `char`, `signed char*` returns, C strings on the `ccall`
-paths, C++ globals outside the global namespace, pure virtual methods and
-operator names. Still open:
+paths, C++ globals outside the global namespace, pure virtual methods,
+operator names, and a record's pointer to a factory class. Still open:
 
 - **Same-named enums in two scopes collapse** (`Mode`, `ns::Mode`): one's
   enumerators are bound nowhere and its functions return the other type. The
@@ -2197,10 +2216,12 @@ operator names. Still open:
   moves as C++ does, but the caller's Julia value is an immutable bits copy,
   so using it again is a use-after-free. What owns a move-only object on the
   Julia side is John's call.
-- **A record holding a pointer to a class that has a factory struct fails to
-  load** (found 2026-11-18): `struct Cage { Animal *pet; int n; };` beside
-  `Animal *make_animal(); void free_animal(Animal*);` emits `pet::Ptr{Animal}`
-  before `mutable struct Animal`, and `using` is `UndefVarError: Animal`.
+- **Two factories of one class with the same parameter types are one
+  constructor** (found 2026-11-18): `make_animal(int legs)` beside
+  `make_animal_doubled(int half)` emits `Animal(legs::Cint)` and
+  `Animal(half::Cint)` in the factory struct; the later overwrites the
+  earlier, so `Animal(4)` calls `make_animal_doubled`, and a precompiled
+  consumer refuses the overwrite. Both functions stay callable by name.
 - **A thread-local global gets a `cglobal` accessor** (found 2026-11-18).
   `cglobal` resolves once, in whichever thread calls the accessor first, so
   every other thread reads and writes that thread's instance (`tls_addr()`
