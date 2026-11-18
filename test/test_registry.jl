@@ -910,3 +910,65 @@ end
         @test RepliBuild.ConfigurationManager.wrapper_module_name(other) == "LuaRaw"
     end
 end
+
+# A package whose module includes a generated wrapper must declare every package
+# the wrapper loads, or Julia refuses the wrapper's import: "package X does not
+# have Libdl in its dependencies". The scaffold's Project.toml listed RepliBuild
+# alone, so a scaffolded package stopped loading the moment `Pkg.build` gave it
+# a wrapper, which is the only thing a scaffold is for (2026-11-17). Both
+# generated packages now take `[deps]` from `PR._wrapper_deps`.
+#
+# The imports are read out of the generators, so a new one in a wrapper's header
+# fails here until `_wrapper_deps` carries it. The question each package is asked
+# is the loader's own (`Base.identify_package`), the check that raised.
+function _generated_wrapper_imports()
+    names = Set{String}()
+    for (root, _, files) in walkdir(joinpath(PROJECT_ROOT, "src", "Wrapper")), f in files
+        endswith(f, ".jl") || continue
+        for line in eachline(joinpath(root, f))
+            # A line of a template (indented), or a string appended to one.
+            m = match(r"^\s+(?:using|import)\s+([A-Z]\w*)", line)
+            m === nothing && (m = match(r"\"(?:using|import)\s+([A-Z]\w*)", line))
+            m === nothing || push!(names, String(m.captures[1]))
+        end
+    end
+    return setdiff(names, ["Base", "Core"])
+end
+
+function _declares(project_dir::AbstractString, name::AbstractString)
+    proj = TOML.parsefile(joinpath(project_dir, "Project.toml"))
+    owner = Base.PkgId(Base.UUID(proj["uuid"]), proj["name"])
+    pushfirst!(LOAD_PATH, project_dir)
+    try
+        return Base.identify_package(owner, name) !== nothing
+    finally
+        popfirst!(LOAD_PATH)
+    end
+end
+
+@testset "generated packages declare what a wrapper loads" begin
+    imports = _generated_wrapper_imports()
+    @test "Libdl" in imports                 # the scan found the headers
+    @test "RepliBuild" in imports
+    @test Set(first.(PR._wrapper_deps())) == imports
+
+    mktempdir() do dir
+        pkg = RepliBuild.scaffold_package("ScaffoldDeps"; path=dir, from_registry=false)
+        proj = TOML.parsefile(joinpath(pkg, "Project.toml"))
+        @test proj["deps"] == Dict(PR._wrapper_deps())
+        asked = 0
+        for name in imports
+            @test _declares(pkg, name)
+            asked += 1
+        end
+        @test asked == length(imports) >= 2
+        @test !_declares(pkg, "Dates")       # the question can be answered no
+    end
+
+    with_temp_registry() do home
+        pkg = PR._write_package("RegDeps", uuid4(), v"0.1.0", joinpath(home, "RegDeps.jl"))
+        for name in imports
+            @test _declares(pkg, name)
+        end
+    end
+end
