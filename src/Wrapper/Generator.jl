@@ -1463,36 +1463,67 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     # register-class risk.
     emitted_facts = Dict{String,Any}()
 
-    # `[wrap.rename]` is active for exactly the generator run (`with_renames`),
-    # and checked against the text it produced: every key renamed something,
-    # and no chosen name collides with another binding.
-    ((wrapper_content, needed_thunks), rename_table) = with_renames(config.wrap.rename) do
-        if registry.language == :c
-            # C path: Julia's internal LLVM handles the C ABI.
-            # All dispatch goes through is_c_lto_safe() heuristics alone.
-            (generate_introspective_module_c(config, library_path, metadata,
-                                             module_name, registry, generate_docs, thunks_lib_path;
-                                             emitted_facts = emitted_facts), nothing)
-        else
-            # C++ path: Tier 2 is decided by is_ccall_safe alone.
-            try
-                generate_introspective_module_cpp(config, library_path, metadata,
-                                                  module_name, registry, generate_docs, thunks_lib_path;
-                                                  aot_stage = aot_stage, emitted_facts = emitted_facts)
-            catch e
-                e isa AOTStageFailed || rethrow()
-                # The stage logged why. JIT dispatch needs no companion library, and
-                # the generator does not modify `metadata`, so it can run again.
-                @warn "AOT thunks were not compiled, so $(basename(e.thunks_lib)) is absent; emitting JIT dispatch"
-                config = with_aot_thunks(config, false)
-                empty!(emitted_facts)
-                generate_introspective_module_cpp(config, library_path, metadata,
-                                                  module_name, registry, generate_docs, "";
-                                                  emitted_facts = emitted_facts)
-            end
-        end
+    # The name screen (NameScreen.jl) judges a generation by the text it
+    # produced, so the generator may run more than once. The first run is the
+    # probe: every library name Julia already knows moves aside, and what the
+    # text still uses of those names is the wrapper's own. A library with no
+    # such name, or with only names the wrapper's text does use, is generated
+    # once; otherwise a second run puts the unused ones back. The generator
+    # does not modify its metadata, the AOT stage runs once per thunk set, and
+    # what a run logs is held until its text stands.
+    if aot_stage !== nothing
+        stage = aot_stage
+        staged = Dict{Vector{String},Bool}()
+        aot_stage = needed -> get!(() -> stage(needed), staged, sort!(String[String(n) for n in needed]))
     end
+    type_sanitize = _type_sanitizer(registry.language == :c ? :c : :cpp)
+    ((wrapper_content, (needed_thunks, rename_table)), screen, wrap_metadata) =
+        _screened_generations(metadata, type_sanitize; what = module_name) do generation_metadata
+            # A record the screen moves carries its new name in this metadata,
+            # which this generation reads; `metadata` stays the library's own.
+            empty!(emitted_facts)
+            # `[wrap.rename]` is active for exactly the generator run (`with_renames`),
+            # and checked against the text it produced: every key renamed something,
+            # and no chosen name collides with another binding.
+            ((text, needed), renames) = with_renames(config.wrap.rename) do
+                if registry.language == :c
+                    # C path: Julia's internal LLVM handles the C ABI.
+                    # All dispatch goes through is_c_lto_safe() heuristics alone.
+                    (generate_introspective_module_c(config, library_path, generation_metadata,
+                                                     module_name, registry, generate_docs, thunks_lib_path;
+                                                     emitted_facts = emitted_facts), nothing)
+                else
+                    # C++ path: Tier 2 is decided by is_ccall_safe alone.
+                    try
+                        generate_introspective_module_cpp(config, library_path, generation_metadata,
+                                                          module_name, registry, generate_docs, thunks_lib_path;
+                                                          aot_stage = aot_stage, emitted_facts = emitted_facts)
+                    catch e
+                        e isa AOTStageFailed || rethrow()
+                        # The stage logged why. JIT dispatch needs no companion library, and
+                        # the generator does not modify `metadata`, so it can run again.
+                        @warn "AOT thunks were not compiled, so $(basename(e.thunks_lib)) is absent; emitting JIT dispatch"
+                        config = with_aot_thunks(config, false)
+                        thunks_lib_path = ""            # a later generation is a JIT one too
+                        aot_stage = nothing
+                        empty!(emitted_facts)
+                        generate_introspective_module_cpp(config, library_path, generation_metadata,
+                                                          module_name, registry, generate_docs, "";
+                                                          emitted_facts = emitted_facts)
+                    end
+                end
+            end
+            (text, (needed, renames))
+        end
     _check_renames(rename_table, wrapper_content, module_name)
+    _assert_module_name_free(wrapper_content, module_name, config.config_file)
+    let report = _screen_report(screen)
+        isempty(report) ||
+            println("  names: $(length(report)) library name(s) bound under another name:\n    ",
+                    join(report, "\n    "))
+    end
+    graph_imports === nothing ||
+        (imported_names = _imported_type_names(wrap_metadata["struct_definitions"], type_sanitize))
 
     # Write to file
     output_dir = get_output_path(config)
@@ -1506,9 +1537,11 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
     # thunk side needs for what it imported (`type_imports.json`, removed when
     # nothing was imported). Both derived from the final text and metadata.
     _write_type_manifest(output_dir,
-                         _type_manifest(metadata, wrapper_content, emitted_facts;
-                                        module_name = module_name, language = registry.language,
-                                        library = library_path))
+                         _library_named_manifest!(
+                             _type_manifest(wrap_metadata, wrapper_content, emitted_facts;
+                                            module_name = module_name, language = registry.language,
+                                            library = library_path),
+                             metadata, screen.moves))
     _write_type_imports(output_dir, type_imports)
 
     # Thunk manifest for dead-thunk elimination — read by JITManager to skip

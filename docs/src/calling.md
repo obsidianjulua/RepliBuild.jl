@@ -27,6 +27,23 @@ C union called `Number` is `MyProject.Number`, never plain `Number`. `wrap`
 prints those names, and the wrapper lists them in a "Withheld from `export`"
 comment.
 
+A name the wrapper cannot bind as the library spells it is bound under another,
+and `wrap` prints each with the reason (`names: … is bound as …`):
+
+| The library has | The wrapper binds | Because |
+|:--|:--|:--|
+| a function `String`, `Ptr`, `Cint` | `String_`, `Ptr_`, `Cint_` | the name is a Julia type, and a function of that name would change that type for every module |
+| a function `eval`, `include`, `ccall` | `eval_`, `include_`, `ccall_` | Julia keeps the name |
+| a function or a method named `nothing`, `LIBRARY_PATH` | `nothing_`, `LIBRARY_PATH_` | the wrapper's own code uses the name |
+| a struct `Integer`, `Bool` | `c_Integer`, `c_Bool` (its methods are `c_Integer_get`) | the wrapper's own code uses the name |
+| an enumerator `Symbol` of `enum Kind` | `Kind_Symbol` | the wrapper's own code uses the name |
+
+A name the wrapper's own code does not use keeps its spelling: a function
+`length`, `open` or `string`, or a struct `Task`, is `MyProject.length`,
+`MyProject.open`, `MyProject.string`, `MyProject.Task`. To choose a
+function's name yourself, use [`[wrap.rename]`](config.md#2.17-rename-—-a-name-of-your-own),
+keyed by the C name (`String`), not by the name in the table above.
+
 ## Types
 
 **Structs.** Named fields when Julia's layout reproduces every DWARF offset and

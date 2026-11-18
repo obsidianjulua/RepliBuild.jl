@@ -202,6 +202,23 @@ function map_cpp_type(type_str::String)
 end
 
 """
+    map_cpp_type(type_str, records) -> String
+
+`map_cpp_type` for a spelling read against a library's records (its
+`struct_definitions`): a name that is one of them is that record or enum,
+before it is anything else. The scalar map also answers Julia's spellings of
+the C types (`Bool`, `Cint`, `UInt8`, `Cdouble`), and a library may declare a
+`struct Bool`. Read as C's `bool`, its by-value return was a thunk returning
+one byte where the wrapper took the record's sixteen (2026-11-17).
+"""
+function map_cpp_type(type_str::AbstractString, records)
+    t = String(type_str)
+    (records isa AbstractDict && occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", t) &&
+     (haskey(records, t) || haskey(records, "__enum__" * t))) && return mlir_struct_ref(t)
+    return map_cpp_type(t)
+end
+
+"""
     get_llvm_signature(method) -> (String, String)
 
 Get LLVM return type and argument types string from a method object.
