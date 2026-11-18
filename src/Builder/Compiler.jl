@@ -11247,9 +11247,70 @@ function _find_toplevel_paren(s::String)::Int
     return 0
 end
 
+# ── Operator names in demangled text (2026-11-18) ────────────────────────────
+# Every overloadable operator as the GNU demangler spells it after `operator`,
+# longest first so `<<=` is never read as `<` and `->*` never as `-`.
+const _OPERATOR_SYMBOL_TOKENS = sort!(String[
+    "+", "-", "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ",",
+    "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "<<", ">>", "<<=", ">>=",
+    "==", "!=", "<=", ">=", "<=>", "&&", "||", "++", "--", "->", "->*", "()", "[]",
+]; by = length, rev = true)
+# The operators spelled as words, after a space: `operator new[]`.
+const _OPERATOR_WORD_TOKENS = ["new[]", "delete[]", "new", "delete", "co_await"]
+
+_is_ident_char(c::Char) = isletter(c) || isdigit(c) || c == '_' || c == '$'
+
+"""
+    _operator_token_at(s, i) -> Union{Nothing,Tuple{String,Int}}
+
+When the keyword `operator` starts at byte `i` of the demangled spelling `s`,
+as a whole word, the operator it names and the byte index of that token's last
+character; otherwise `nothing`. The token is one of `_OPERATOR_SYMBOL_TOKENS`,
+one of `_OPERATOR_WORD_TOKENS`, `"\\"\\""` for a literal operator (its suffix,
+`_km` in `operator"" _km`, follows and is not part of the token), or `""` with
+the keyword's own last byte: a conversion operator (`operator bool`, whose type
+follows), or `operator` with nothing after it, which is how the build spells
+every `operator()` (cut at its paren, `_param_list_paren`).
+
+A scan that tracks `<>` depth reads the `<` of `operator<` as a template
+bracket that never closes, so every such scan asks this first and steps over
+the token. GNU writes a space between an operator ending in `<` and its own
+template arguments (`operator< <int>`), which is what makes the longest match
+sound.
+"""
+function _operator_token_at(s::AbstractString, i::Int)::Union{Nothing,Tuple{String,Int}}
+    ncodeunits(s) - i + 1 >= 8 || return nothing
+    all(k -> codeunit(s, i + k - 1) == codeunit("operator", k), 1:8) || return nothing
+    i > firstindex(s) && _is_ident_char(s[prevind(s, i)]) && return nothing
+    kw_end = i + 7
+    j = nextind(s, kw_end)
+    j > lastindex(s) && return ("", kw_end)
+    _is_ident_char(s[j]) && return nothing
+    rest = SubString(s, j)
+    for t in _OPERATOR_SYMBOL_TOKENS
+        startswith(rest, t) && return (t, j + ncodeunits(t) - 1)
+    end
+    startswith(rest, "\"\"") && return ("\"\"", j + 1)
+    if s[j] == ' '
+        k = j
+        while k <= lastindex(s) && s[k] == ' '
+            k = nextind(s, k)
+        end
+        after = SubString(s, k)
+        for w in _OPERATOR_WORD_TOKENS
+            startswith(after, w) || continue
+            e = k + ncodeunits(w)
+            (e > lastindex(s) || !_is_ident_char(s[e])) && return (w, e - 1)
+        end
+    end
+    return ("", kw_end)
+end
+
 # First '(' at or after byte index `from` that is outside `<>` and `{}`. Angle
-# depth is unclamped, exactly as in `_find_toplevel_paren`, so `operator<` hides
-# every later '(' here too. Braces are what `{lambda(int)#1}` needs.
+# depth is unclamped, exactly as in `_find_toplevel_paren`. An operator's own
+# token is stepped over (`_operator_token_at`), so `operator<` no longer hides
+# every later '('; `operator()`'s paren is not, and is the one returned.
+# Braces are what `{lambda(int)#1}` needs.
 function _next_toplevel_paren(s::String, from::Int)::Int
     angle = 0
     brace = 0
@@ -11257,6 +11318,10 @@ function _next_toplevel_paren(s::String, from::Int)::Int
     n = lastindex(s)
     while i <= n
         c = s[i]
+        if c == 'o' && (t = _operator_token_at(s, i)) !== nothing && t[1] != "()"
+            i = nextind(s, t[2])
+            continue
+        end
         if c == '<'
             angle += 1
         elseif c == '>'
@@ -11322,9 +11387,13 @@ there is the group after it. The name still cuts at `operator(`, which is the
 spelling every `operator()` already has (name `"operator"`).
 
 Every other shape gets the first candidate back unchanged: a group followed by
-anything else, no later `(`, unbalanced parens, and `operator<`'s open `<`
-(0, as before). The first candidate is `_find_toplevel_paren`'s answer, except
-that a `(` inside `{…}` does not count. Only a name with a `{…}` scope before
+anything else, no later `(`, unbalanced parens. The first candidate is
+`_find_toplevel_paren`'s answer, except that a `(` inside `{…}` does not count,
+and an operator's token is stepped over (`_operator_token_at`): until
+2026-11-18 the open `<` of `operator<`, `<<`, `<=`, `<<=` and the `>` of
+`->`, `->*` hid the parameter list, so the name came out as
+`operator<(geo::Vec3 const&) const` and the Julia name was made from the
+parameters. Only a name with a `{…}` scope before
 any paren can tell the two apart (a namespace-scope lambda,
 `f::{lambda()#1}::operator()() const`). Hub names depend on that answer.
 """
@@ -11380,19 +11449,32 @@ last space outside `<>`/`()`/`{}`, which is enough even when it is itself qualif
 (`std::enable_if<std::is_integral<unsigned int>::value, bool>::type`), or is a
 `decltype (…)`. `{}` is for `{unnamed type#1}`.
 
-A **conversion operator** is the only C++ name that legitimately contains a
-top-level space (`operator bool`, `operator void (*)(…)`, `operator new`), and
-cutting at its space would eat the name. Those bail out unchanged, so the result
-is the historical behaviour rather than a new wrong answer — pugixml has 7.
+An **operator** is the only C++ name that legitimately contains a top-level
+space (`operator bool`, `operator void (*)(…)`, `operator new`, `operator< <int>`),
+and cutting at its space would eat the name. So when the name is an operator
+(`_own_operator_keyword`), only a space before its keyword can end a return
+type: `bool geo::V::operator< <int>` → `geo::V::operator< <int>`. Until
+2026-11-18 any prefix containing `operator` came back whole, and an operator
+template's class was `bool geo::V`, which no receiver gate recognises. A
+prefix holding `operator` in no operator position (`my_operator`, or inside
+template arguments only) still comes back whole, as it always has.
 """
 function _strip_return_type(prefix::AbstractString)::String
-    occursin("operator", prefix) && return String(prefix)
+    n = lastindex(prefix)
+    if occursin("operator", prefix)
+        k = _own_operator_keyword(prefix)
+        k == 0 && return String(prefix)
+        n = prevind(prefix, k)
+    end
     depth = 0
     cut = 0
     i = firstindex(prefix)
-    n = lastindex(prefix)
     while i <= n
         c = prefix[i]
+        if c == 'o' && (t = _operator_token_at(prefix, i)) !== nothing
+            i = nextind(prefix, t[2])
+            continue
+        end
         if c == '<' || c == '(' || c == '{'
             depth += 1
         elseif c == '>' || c == ')' || c == '}'
@@ -11404,6 +11486,38 @@ function _strip_return_type(prefix::AbstractString)::String
     end
     cut == 0 && return String(prefix)
     return String(strip(prefix[nextind(prefix, cut):end]))
+end
+
+"""
+    _own_operator_keyword(prefix) -> Int
+
+The byte index of the last `operator` keyword outside `<>`/`()`/`{}` in a
+demangled function-name prefix, 0 if there is none. In a prefix (the name cut
+before its own parameter list) that is the function's own name: no scope
+before it can be an operator except an enclosing function's, which
+`_qualified_name_parts` strips separately. Operator tokens are stepped over
+(`_operator_token_at`), so `<` in `operator<` does not open a bracket.
+"""
+function _own_operator_keyword(prefix::AbstractString)::Int
+    depth = 0
+    found = 0
+    i = firstindex(prefix)
+    n = lastindex(prefix)
+    while i <= n
+        c = prefix[i]
+        if c == 'o' && (t = _operator_token_at(prefix, i)) !== nothing
+            depth == 0 && (found = i)
+            i = nextind(prefix, t[2])
+            continue
+        end
+        if c == '<' || c == '(' || c == '{'
+            depth += 1
+        elseif c == '>' || c == ')' || c == '}'
+            depth = max(0, depth - 1)
+        end
+        i = nextind(prefix, i)
+    end
+    return found
 end
 
 """
@@ -11457,6 +11571,11 @@ function _qualified_name_parts(demangled::AbstractString)::Vector{String}
     n = lastindex(prefix)
     while i <= n
         c = prefix[i]
+        # An operator's token is not a bracket (`A::operator<(int) const::{lambda()#1}`).
+        if c == 'o' && (t = _operator_token_at(prefix, i)) !== nothing
+            i = nextind(prefix, t[2])
+            continue
+        end
         if c == '<' || c == '(' || c == '{'
             depth += 1
         elseif c == '>' || c == ')' || c == '}'

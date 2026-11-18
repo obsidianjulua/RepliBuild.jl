@@ -26,6 +26,8 @@ import .._glob_to_regex, .._glob_matcher   # package level: the Builder asks the
 # question there — see Builder/Compiler.jl's _pe_exported_names.
 import ..Compiler: _pe_exported_names, _nm_dynamic_names, _runtime_defined_names,
                    _pe_crt_dll, _link_dir_dlls, _canon_path
+# The operator-aware reading of a demangled name (`_operator_spelling`).
+import ..Compiler: _operator_token_at, _qualified_name_parts, _demangle
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -169,6 +171,13 @@ consumers call these names. What is new is that the function is total:
 - **A deleting destructor is `delete_`, not `destroy_`** (2026-11-14): `~` is
   spelled by the symbol's variant (`_is_deleting_destructor`), since D0 frees
   the object and D1/D2 do not. The curated list is otherwise frozen.
+- **Every operator's name is a function of the operator alone** (2026-11-18):
+  one whose curated spelling was shared or made from its parameter list
+  (`<`, `>`, `<=`, `>=`, shifts, `->`, `->*`, `()`, `[]`, `,`, `new[]`,
+  `delete[]`) is spelled with its word (`_OPERATOR_WORDS`, decided by the
+  symbol: `_operator_spelling`); every other keeps its curated name.
+  `operator()`, `operator[]` and `operator,` also keep their old shared
+  `Class_operator` (`_operator_legacy_aliases`).
 
 Not injective in general, on purpose. C++ overloads share one name, and Julia
 dispatches on argument types. The `_+` collapse, the trailing-`_` rstrip and
@@ -179,7 +188,49 @@ reported by `_dedup_method_chunks`. Anything keyed per symbol uses `mangled`
 """
 function _julia_function_name(raw::AbstractString, mangled::AbstractString = "";
                               rename::Bool = true)::String
-    n = String(raw)
+    # An operator whose curated spelling is not a function of the operator
+    # alone gets its word (`_OPERATOR_WORDS`); every other name, operators
+    # included, goes through the curated pass unchanged.
+    op = _operator_spelling(String(raw), mangled)
+    legacy = nothing
+    n = if op === nothing
+        _curated_function_name(String(raw), mangled)
+    else
+        (respelled, token) = op
+        token in _OPERATOR_LEGACY_ALIASED && (legacy = _curated_function_name(String(raw), mangled))
+        _curated_function_name(respelled, mangled)
+    end
+    # `[wrap.rename]`, the one hand-chosen name, applied here so the function
+    # loop, the overload prediction, both varargs paths and the proxy and
+    # deleter references all see it. Off (`rename = false`) only for a name
+    # that is not a binding of the symbol: the proxy's short method name. A
+    # key written against an operator's old shared name (`Vec3_operator`)
+    # still matches it.
+    rt = _RENAMES[]
+    if rename && rt !== nothing
+        chosen = _apply_rename!(rt, n, mangled; legacy = legacy)
+        chosen === nothing || return chosen
+    end
+    # The name screen (NameScreen.jl), last: a name Julia or the wrapper's own
+    # text already uses gets its alternative. A chosen name above wins, and is
+    # keyed by the name as it is here, before the screen (`String`).
+    src = isempty(mangled) ? raw : mangled
+    n = _screened_function_name(n, src)
+    rename && rt !== nothing &&
+        push!(get!(() -> Set{String}(), rt.derived, n), isempty(mangled) ? n : String(mangled))
+    if rename && legacy !== nothing
+        legacy = _screened_function_name(legacy, src)
+        legacy == n || (_OPERATOR_LEGACY[n] = legacy)
+        rt === nothing ||
+            push!(get!(() -> Set{String}(), rt.derived, legacy), isempty(mangled) ? legacy : String(mangled))
+    end
+    return n
+end
+
+# The curated pass: the replace-list, the catch-all and the fallbacks
+# `_julia_function_name` documents, before `[wrap.rename]` and the screen.
+function _curated_function_name(raw::String, mangled::AbstractString)::String
+    n = raw
     # A destructor. The deleting variant (Itanium D0) is `delete_`: it runs
     # `~X()` AND the class's `operator delete`, so a caller who frees the
     # storage after it double-frees. Named `destroy_` like D1 and D2, a class
@@ -224,22 +275,160 @@ function _julia_function_name(raw::AbstractString, mangled::AbstractString = "";
     end
     Base.is_id_start_char(first(n)) || (n = "_" * n)
     n in _JULIA_RESERVED_WORDS && (n *= "_")
-    # `[wrap.rename]`, the one hand-chosen name, applied here so the function
-    # loop, the overload prediction, both varargs paths and the proxy and
-    # deleter references all see it. Off (`rename = false`) only for a name
-    # that is not a binding of the symbol: the proxy's short method name.
-    rt = _RENAMES[]
-    if rename && rt !== nothing
-        chosen = _apply_rename!(rt, n, mangled)
-        chosen === nothing || return chosen
-    end
-    # The name screen (NameScreen.jl), last: a name Julia or the wrapper's own
-    # text already uses gets its alternative. A chosen name above wins, and is
-    # keyed by the name as it is here, before the screen (`String`).
-    n = _screened_function_name(n, isempty(mangled) ? raw : mangled)
-    rename && rt !== nothing &&
-        push!(get!(() -> Set{String}(), rt.derived, n), isempty(mangled) ? n : String(mangled))
     return n
+end
+
+# ── Operators (2026-11-18) ──────────────────────────────────────────────────
+
+"""
+    _OPERATOR_WORDS
+
+The word an operator's Julia name takes after `operator`, for each operator
+whose curated spelling was not a function of the operator alone. The curated
+list gives `<` and `>` as `_`, and drops `(`, `)`, `[`, `]` and `,`, so before
+2026-11-18 `operator()`, `operator[]` and `operator,` were all `Class_operator`,
+`<=`/`>=` and `<<=`/`>>=` came out alike, `->` was `operatorminus` like unary
+`-`, `new[]` was `operator_new` like `new`, and every operator with an open
+`<` or a `>` was named from its parameter list (the build read the `<` as a
+template bracket; `_param_list_paren`). Words follow the curated ones, one per
+character (`+` plus, `=` assign, so `<=` is `lessassign`). Every operator not
+listed keeps its curated name exactly (`operatorplus`, `operatorassignassign`,
+`operator!assign`, `operatordestroy` for `~`, `operator_assign` for `<=>`,
+`operator_new`, `operator_co_await`, a literal's `operator_km`, a conversion's
+`operator_bool`): each was already the operator's alone, and unique.
+"""
+const _OPERATOR_WORDS = Dict{String,String}(
+    "<" => "less", ">" => "greater", "<=" => "lessassign", ">=" => "greaterassign",
+    "<<" => "lessless", ">>" => "greatergreater",
+    "<<=" => "lesslessassign", ">>=" => "greatergreaterassign",
+    "->" => "minusgreater", "->*" => "minusgreatermul",
+    "()" => "call", "[]" => "index", "," => "comma",
+    "new[]" => "_new_array", "delete[]" => "_delete_array",
+)
+
+# The operators whose old shared name (`Class_operator`) stays bound, beside the
+# new one, to exactly the methods it had (`_operator_legacy_aliases`).
+const _OPERATOR_LEGACY_ALIASED = ("()", "[]", ",")
+
+# New name => old shared name, for each such operator the derivation named in
+# the generator run in progress; read and emptied by `_operator_legacy_aliases`.
+const _OPERATOR_LEGACY = Dict{String,String}()
+
+"""
+    _operator_spelling(raw, mangled) -> Union{Nothing,Tuple{String,String}}
+
+When the function is an operator listed in `_OPERATOR_WORDS`, `raw` with the
+operator spelled as its word, and the operator; otherwise `nothing`, and the
+curated pass names it as it always has.
+
+Which operator it is comes from the symbol, never from `raw`: `raw` is
+`Class_name` joined with `_`, so `Cls_operator` could be `Cls::operator()` or a
+method `Cls::foo_operator` of a class `Cls_foo`, and old metadata spells
+`operator<` with its parameter list. The symbol is demangled
+(`Compiler._demangle`) and its own name read by `_qualified_name_parts` and
+`_operator_token_at`, so template arguments, ABI tags and a return type
+elsewhere in the name cannot confuse it. Without a symbol (the method proxy's
+short name) `raw` is the member's own name and is read directly. A symbol that
+is not Itanium (a C function, which may be named `operator`) is never an
+operator.
+
+The operator is then found in `raw` as its last `operator` followed by that
+token, and anything after the token up to a parameter list (old metadata) is
+dropped; template arguments are kept (`operator< <int>` → `operatorless_int`).
+"""
+function _operator_spelling(raw::String, mangled::AbstractString)::Union{Nothing,Tuple{String,String}}
+    occursin("operator", raw) || return nothing
+    own = if isempty(mangled)
+        raw
+    elseif startswith(mangled, "_Z")
+        dem = _demangle(mangled)
+        dem === nothing && return nothing
+        String(strip(_qualified_name_parts(dem)[end]))
+    else
+        return nothing
+    end
+    t = _operator_token_at(own, firstindex(own))
+    t === nothing && return nothing
+    token = isempty(t[1]) ? (t[2] == lastindex(own) ? "()" : "") : t[1]
+    haskey(_OPERATOR_WORDS, token) || return nothing
+    for r in reverse(findall("operator", raw))
+        after = last(r) + 1
+        tail = after > ncodeunits(raw) ? "" : SubString(raw, after)
+        rest = if token == "()"
+            isempty(tail) ? "" : startswith(tail, "()") ? SubString(tail, 3) : nothing
+        elseif token in _OPERATOR_WORD_TOKENS_JL
+            lt = lstrip(tail, ' ')
+            startswith(lt, token) ? SubString(lt, ncodeunits(token) + 1) : nothing
+        else
+            startswith(tail, token) ? SubString(tail, ncodeunits(token) + 1) : nothing
+        end
+        rest === nothing && continue
+        return (raw[1:prevind(raw, first(r))] * "operator" * _OPERATOR_WORDS[token] *
+                _before_parameter_list(rest), token)
+    end
+    return nothing
+end
+
+const _OPERATOR_WORD_TOKENS_JL = ("new[]", "delete[]")
+
+# `s` up to its first `(` outside `<>`: the template arguments after an
+# operator's token, without the parameter list old metadata carries there.
+function _before_parameter_list(s::AbstractString)::String
+    depth = 0
+    for i in eachindex(s)
+        c = s[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif c == '(' && depth == 0
+            return String(SubString(s, 1, prevind(s, i)))
+        end
+    end
+    return String(s)
+end
+
+"""
+    _operator_legacy_aliases(chunks) -> (chunks, names)
+
+`chunks` with, after each chunk that binds an operator `_OPERATOR_LEGACY`
+renamed from its old shared name, a copy binding the old name instead
+(`Vec3_operatorcall` → `Vec3_operator`, a `_ptr` or `_safe` sibling likewise),
+and the names the copies bind, to export. GeneratorCpp runs it just before
+`_dedup_method_chunks`. Since `Class_operator` gets the same chunks in the
+same order as before, the dedup keeps for it exactly the methods it kept
+before 2026-11-18: callers of the old name see no change, and the operators
+are reachable apart under their own names.
+
+A chunk that binds anything else besides is not copied (a copy would define
+that twice). The table is emptied: it belongs to one generator run.
+"""
+function _operator_legacy_aliases(chunks::Vector{String})
+    isempty(_OPERATOR_LEGACY) && return (chunks, String[])
+    table = copy(_OPERATOR_LEGACY)
+    empty!(_OPERATOR_LEGACY)
+    news = sort!(collect(keys(table)); by = k -> (-ncodeunits(k), k))
+    renamer(nm) = Regex("(?<![A-Za-z0-9_!])\\Q" * nm * "\\E(?=_|[^A-Za-z0-9_!]|\$)")
+    out = String[]
+    names = String[]
+    for c in chunks
+        push!(out, c)
+        hits = filter(nm -> occursin(nm, c), news)
+        isempty(hits) && continue
+        defs = _defined_bindings(c)
+        isempty(defs) && continue
+        owner(d) = findfirst(nm -> d == nm || startswith(d, nm * "_"), hits)
+        all(((d, kind, _),) -> kind === :function && owner(d) !== nothing, defs) || continue
+        alias = c
+        for nm in hits
+            alias = replace(alias, renamer(nm) => table[nm])
+        end
+        push!(out, alias)
+        for (d, _, _) in _defined_bindings(alias)
+            d in names || push!(names, d)
+        end
+    end
+    return (out, names)
 end
 
 # ── [wrap.rename] ───────────────────────────────────────────────────────────
@@ -291,6 +480,7 @@ table, and return its result with the table for `_check_renames`. An empty
 table installs nothing and returns `nothing` for it.
 """
 function with_renames(f, table::AbstractDict)
+    empty!(_OPERATOR_LEGACY)      # one generator run's (`_operator_legacy_aliases`)
     isempty(table) && return (f(), nothing)
     rt = _RenameTable(table)
     _RENAMES[] !== nothing && error("RepliBuild: with_renames nested; a wrap runs one generator at a time")
@@ -304,11 +494,13 @@ end
 
 # The chosen name, or `nothing` when no key names this symbol: the caller then
 # records the name it binds (`rt.derived`), which the name screen may still move.
-function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractString)::Union{Nothing,String}
+function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractString;
+                        legacy::Union{Nothing,String} = nothing)::Union{Nothing,String}
     symbol = isempty(mangled) ? derived : String(mangled)
     chosen = Dict{String,Vector{String}}()      # Julia name => keys that chose it
     for (key, re, value) in rt.entries
-        (occursin(re, derived) || (!isempty(mangled) && occursin(re, mangled))) || continue
+        (occursin(re, derived) || (!isempty(mangled) && occursin(re, mangled)) ||
+         (legacy !== nothing && occursin(re, legacy))) || continue
         rt.hit[key] += 1
         push!(get!(() -> String[], chosen, value), key)
     end

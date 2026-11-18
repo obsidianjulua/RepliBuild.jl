@@ -73,9 +73,10 @@ const PINNED = [
     "Vec_operator=="           => "Vec_operatorassignassign",
     "Vec_operator<="           => "Vec_operator_assign",
     "Cls_operator!"            => "Cls_operator!",       # `!` is an identifier char
-    # Known pre-existing collision, kept deliberately. `()` and `[]` both land
-    # on `Vec_operator`; `_dedup_method_chunks` reports it when the signatures
-    # also match. Renaming either would rename a shipped function.
+    # Without a symbol a `Class_name` spelling cannot say it is an operator
+    # (`Vec_operator` is also `Vec::foo_operator` of a class `Vec_foo`), so it
+    # gets the curated answer. With the symbol `()` and `[]` are apart and keep
+    # this shared name beside their own ("operators", below).
     "Vec_operator()"           => "Vec_operator",
     "Vec_operator[]"           => "Vec_operator",
     "Box<double>_get"          => "Box_double_get",
@@ -485,4 +486,256 @@ end
     end
     @test_throws ErrorException W._assert_wrapper_parses("module 3cCallF21\nf() = 1\nend\n", "Synth3c")
     @test (W._assert_wrapper_parses("module _3cCallF21\nf() = 1\nend\n", "Synth3c"); true)
+end
+
+# ── Operators (2026-11-18, audit B22) ───────────────────────────────────────
+# The curated list spells `<` and `>` as `_` and drops `(`, `)`, `[`, `]`, `,`,
+# and the build read the `<` of `operator<` as a template bracket, so the name
+# kept its parameter list: `Vec3::operator<(Vec3 const&) const` was
+# `geo_Vec3_operator_geo_Vec3_constref_const`, `operator()` and `operator[]`
+# were both `geo_Vec3_operator`, and pugixml's `<`/`>` and `<=`/`>=` pairs
+# derived alike, so one of each was dropped. Each operator now has a name that
+# is a function of the operator alone; a name that already was one, and
+# unique, is unchanged.
+#
+# Vendored from a clang 23 `-std=c++20` build of every overloadable operator
+# (`nm -p`, `nm -pC`). The derivation only demangles these strings, so they
+# hold on every host. Rows: symbol, demangled (as the build reads it), the
+# Julia name before 2026-11-18, the name now.
+const OPS = [
+    ("_ZNK3geo1VplERKS0_", "geo::V::operator+(geo::V const&) const",   "geo_V_operatorplus",          "geo_V_operatorplus"),
+    ("_ZNK3geo1VpsEv",     "geo::V::operator+() const",                "geo_V_operatorplus",          "geo_V_operatorplus"),
+    ("_ZNK3geo1VmiERKS0_", "geo::V::operator-(geo::V const&) const",   "geo_V_operatorminus",         "geo_V_operatorminus"),
+    ("_ZNK3geo1VngEv",     "geo::V::operator-() const",                "geo_V_operatorminus",         "geo_V_operatorminus"),
+    ("_ZNK3geo1VmlEd",     "geo::V::operator*(double) const",          "geo_V_operatormul",           "geo_V_operatormul"),
+    ("_ZN3geo1VdeEv",      "geo::V::operator*()",                      "geo_V_operatormul",           "geo_V_operatormul"),
+    ("_ZNK3geo1VdvEd",     "geo::V::operator/(double) const",          "geo_V_operatordiv",           "geo_V_operatordiv"),
+    ("_ZNK3geo1VrmEi",     "geo::V::operator%(int) const",             "geo_V_operatormod",           "geo_V_operatormod"),
+    ("_ZNK3geo1VeoEi",     "geo::V::operator^(int) const",             "geo_V_operatorxor",           "geo_V_operatorxor"),
+    ("_ZNK3geo1VanEi",     "geo::V::operator&(int) const",             "geo_V_operatorref",           "geo_V_operatorref"),
+    ("_ZN3geo1VadEv",      "geo::V::operator&()",                      "geo_V_operatorref",           "geo_V_operatorref"),
+    ("_ZNK3geo1VorEi",     "geo::V::operator|(int) const",             "geo_V_operatoror",            "geo_V_operatoror"),
+    ("_ZNK3geo1VcoEv",     "geo::V::operator~() const",                "geo_V_operatordestroy",       "geo_V_operatordestroy"),
+    ("_ZNK3geo1VntEv",     "geo::V::operator!() const",                "geo_V_operator!",             "geo_V_operator!"),
+    ("_ZN3geo1VaSERKS0_",  "geo::V::operator=(geo::V const&)",         "geo_V_operatorassign",        "geo_V_operatorassign"),
+    ("_ZN3geo1VpLERKS0_",  "geo::V::operator+=(geo::V const&)",        "geo_V_operatorplusassign",    "geo_V_operatorplusassign"),
+    ("_ZN3geo1VmIERKS0_",  "geo::V::operator-=(geo::V const&)",        "geo_V_operatorminusassign",   "geo_V_operatorminusassign"),
+    ("_ZN3geo1VmLEd",      "geo::V::operator*=(double)",               "geo_V_operatormulassign",     "geo_V_operatormulassign"),
+    ("_ZN3geo1VdVEd",      "geo::V::operator/=(double)",               "geo_V_operatordivassign",     "geo_V_operatordivassign"),
+    ("_ZN3geo1VrMEi",      "geo::V::operator%=(int)",                  "geo_V_operatormodassign",     "geo_V_operatormodassign"),
+    ("_ZN3geo1VeOEi",      "geo::V::operator^=(int)",                  "geo_V_operatorxorassign",     "geo_V_operatorxorassign"),
+    ("_ZN3geo1VaNEi",      "geo::V::operator&=(int)",                  "geo_V_operatorrefassign",     "geo_V_operatorrefassign"),
+    ("_ZN3geo1VoREi",      "geo::V::operator|=(int)",                  "geo_V_operatororassign",      "geo_V_operatororassign"),
+    ("_ZNK3geo1VeqERKS0_", "geo::V::operator==(geo::V const&) const",  "geo_V_operatorassignassign",  "geo_V_operatorassignassign"),
+    ("_ZNK3geo1VneERKS0_", "geo::V::operator!=(geo::V const&) const",  "geo_V_operator!assign",       "geo_V_operator!assign"),
+    ("_ZNK3geo1VssEi",     "geo::V::operator<=>(int) const",           "geo_V_operator_assign",       "geo_V_operator_assign"),
+    ("_ZNK3geo1VaaEi",     "geo::V::operator&&(int) const",            "geo_V_operatorrefref",        "geo_V_operatorrefref"),
+    ("_ZNK3geo1VooEi",     "geo::V::operator||(int) const",            "geo_V_operatororor",          "geo_V_operatororor"),
+    ("_ZN3geo1VppEv",      "geo::V::operator++()",                     "geo_V_operatorplusplus",      "geo_V_operatorplusplus"),
+    ("_ZN3geo1VppEi",      "geo::V::operator++(int)",                  "geo_V_operatorplusplus",      "geo_V_operatorplusplus"),
+    ("_ZN3geo1VmmEv",      "geo::V::operator--()",                     "geo_V_operatorminusminus",    "geo_V_operatorminusminus"),
+    ("_ZN3geo1VnwEm",      "geo::V::operator new(unsigned long)",      "geo_V_operator_new",          "geo_V_operator_new"),
+    ("_ZN3geo1VdlEPv",     "geo::V::operator delete(void*)",           "geo_V_operator_delete",       "geo_V_operator_delete"),
+    ("_ZN3geo1VawEv",      "geo::V::operator co_await()",              "geo_V_operator_co_await",     "geo_V_operator_co_await"),
+    ("_ZNK3geo1VcvbEv",    "geo::V::operator bool() const",            "geo_V_operator_bool",         "geo_V_operator_bool"),
+    ("_ZNK3geo1VcvdEv",    "geo::V::operator double() const",          "geo_V_operator_double",       "geo_V_operator_double"),
+    ("_ZNK3geo1VcvPKcEv",  "geo::V::operator char const*() const",     "geo_V_operator_char_constmul", "geo_V_operator_char_constmul"),
+    ("_ZN3geomlEdRKNS_1VE", "geo::operator*(double, geo::V const&)",   "geo_operatormul",             "geo_operatormul"),
+    ("_ZN3geoli3_kmEy",    "geo::operator\"\" _km(unsigned long long)", "geo_operator_km",            "geo_operator_km"),
+    # Named from the parameter list, or shared, before; their own word now.
+    ("_ZNK3geo1VltERKS0_", "geo::V::operator<(geo::V const&) const",   "geo_V_operator_geo_V_constref_const",        "geo_V_operatorless"),
+    ("_ZNK3geo1VgtERKS0_", "geo::V::operator>(geo::V const&) const",   "geo_V_operator_geo_V_constref_const",        "geo_V_operatorgreater"),
+    ("_ZNK3geo1VleERKS0_", "geo::V::operator<=(geo::V const&) const",  "geo_V_operator_assign_geo_V_constref_const", "geo_V_operatorlessassign"),
+    ("_ZNK3geo1VgeERKS0_", "geo::V::operator>=(geo::V const&) const",  "geo_V_operator_assign_geo_V_constref_const", "geo_V_operatorgreaterassign"),
+    ("_ZNK3geo1VlsEi",     "geo::V::operator<<(int) const",            "geo_V_operator_int_const",    "geo_V_operatorlessless"),
+    ("_ZNK3geo1VrsEi",     "geo::V::operator>>(int) const",            "geo_V_operator_int_const",    "geo_V_operatorgreatergreater"),
+    ("_ZN3geo1VlSEi",      "geo::V::operator<<=(int)",                 "geo_V_operator_assign_int",   "geo_V_operatorlesslessassign"),
+    ("_ZN3geo1VrSEi",      "geo::V::operator>>=(int)",                 "geo_V_operator_assign_int",   "geo_V_operatorgreatergreaterassign"),
+    ("_ZN3geo1VptEv",      "geo::V::operator->()",                     "geo_V_operatorminus",         "geo_V_operatorminusgreater"),
+    ("_ZN3geo1VpmEi",      "geo::V::operator->*(int)",                 "geo_V_operatorminus_mul_int", "geo_V_operatorminusgreatermul"),
+    ("_ZNK3geo1VcmEi",     "geo::V::operator,(int) const",             "geo_V_operator",              "geo_V_operatorcomma"),
+    ("_ZNK3geo1VclEd",     "geo::V::operator()(double) const",         "geo_V_operator",              "geo_V_operatorcall"),
+    ("_ZNK3geo1VclEPFddE", "geo::V::operator()(double (*)(double)) const", "geo_V_operator",          "geo_V_operatorcall"),
+    ("_ZNK3geo1VclB5cxx11Ei", "geo::V::operator()[abi:cxx11](int) const", "geo_V_operator",           "geo_V_operatorcall"),
+    ("_ZNK3geo1VixEi",     "geo::V::operator[](int) const",            "geo_V_operator",              "geo_V_operatorindex"),
+    ("_ZN3geo1VnaEm",      "geo::V::operator new[](unsigned long)",    "geo_V_operator_new",          "geo_V_operator_new_array"),
+    ("_ZN3geo1VdaEPv",     "geo::V::operator delete[](void*)",         "geo_V_operator_delete",       "geo_V_operator_delete_array"),
+    # Template arguments around the operator: a class template, member and free
+    # operator templates (GNU writes `operator< <int>`), a template return type.
+    ("_ZNK3geo3FooIiEltERKS1_", "geo::Foo<int>::operator<(geo::Foo<int> const&) const", "geo_Foo_int_operator_geo_Foo_int_constref_const", "geo_Foo_int_operatorless"),
+    ("_ZNK3geo3FooIiEleERKS1_", "geo::Foo<int>::operator<=(geo::Foo<int> const&) const", "geo_Foo_int_operator_assign_geo_Foo_int_constref_const", "geo_Foo_int_operatorlessassign"),
+    ("_ZNK3geo3FooIiElsEi",     "geo::Foo<int>::operator<<(int) const",  "geo_Foo_int_operator_int_const", "geo_Foo_int_operatorlessless"),
+    ("_ZNK3geo3FooIiEclEi",     "geo::Foo<int>::operator()(int) const",  "geo_Foo_int_operator",       "geo_Foo_int_operatorcall"),
+    ("_ZNK3geo1VltIiEEbRKT_",   "bool geo::V::operator< <int>(int const&) const",  "bool_geo_V_operator_int_int_constref_const", "geo_V_operatorless_int"),
+    ("_ZNK3geo1VlsIiEEbRKT_",   "bool geo::V::operator<< <int>(int const&) const", "bool_geo_V_operator_int_int_constref_const", "geo_V_operatorlessless_int"),
+    ("_ZN3geoltIiEENS_3FooIT_EES3_i", "geo::Foo<int> geo::operator< <int>(geo::Foo<int>, int)", "geo_Foo_int_geo_operator_int_geo_Foo_int_int", "geo_operatorless_int"),
+    ("_ZN3geoltEiRKNS_1VE",     "geo::operator<(int, geo::V const&)",    "geo_operator_int_geo_V_constref", "geo_operatorless"),
+    ("_ZN3geolsENS_1VEi",       "geo::operator<<(geo::V, int)",          "geo_operator_geo_V_int",     "geo_operatorlessless"),
+]
+
+# The raw spelling the generators hand the derivation, from a row the build made.
+function _op_raw(mangled, demangled)
+    row = only(RepliBuild.Compiler.parse_function_signatures(
+        [Dict{String,Any}("mangled" => mangled, "demangled" => demangled)]))
+    cls = String(row["class"]); nm = String(row["name"])
+    return (row["is_method"] && !isempty(cls)) ? "$(cls)_$(nm)" : nm
+end
+
+_op_fn(name, class, mangled, params) =
+    _fn(name = name, class = class, is_method = true, mangled = mangled,
+        params = Any[_p("this", "Ptr{Cvoid}", "$(class)*"), params...])
+
+@testset "operators" begin
+    C = RepliBuild.Compiler
+
+    @testset "the build splits at the operator's own parameter list" begin
+        checked = 0
+        for (m, dem, _, _) in OPS
+            nm = C.extract_function_name(dem)
+            cls = C.extract_class_name(dem)
+            @test startswith(nm, "operator")
+            # `operator()` is cut at its paren, as it always was.
+            @test !occursin('(', nm)
+            # No return type in the scope (an operator template's was there).
+            @test !occursin(' ', cls)
+            checked += 1
+        end
+        @test checked == length(OPS)
+        @test (C.extract_class_name("bool geo::V::operator< <int>(int const&) const"),
+               C.extract_function_name("bool geo::V::operator< <int>(int const&) const")) ==
+              ("geo::V", "operator< <int>")
+        @test C.extract_function_name("geo::V::operator<=>(int) const") == "operator<=>"
+        @test C.extract_function_name("geo::V::operator->*(int)") == "operator->*"
+        @test C.extract_function_name("geo::V::operator()(double (*)(double)) const") == "operator"
+        # A local entity inside an operator keeps that operator in its scope.
+        @test C.extract_class_name("A::operator<(int) const::{lambda()#1}::operator()() const") ==
+              "A::operator<(int) const::{lambda()#1}"
+        # A name that only contains the letters is not an operator.
+        @test C.extract_class_name("bool my_operator<int>(int)") == ""
+        @test C.extract_function_name("ns::Foo::foo_operator(int)") == "foo_operator"
+    end
+
+    @testset "each operator has its own name; names that were already its own are kept" begin
+        checked = 0
+        for (m, dem, before, now) in OPS
+            jl = F(_op_raw(m, dem), m)
+            @test (dem, jl) == (dem, now)
+            @test _is_fn_name(jl)
+            # A name that was the operator's alone is byte-identical.
+            before == now && @test jl == before
+            checked += 1
+        end
+        @test checked == length(OPS)
+        # Total over the set: two rows share a name only when they are one
+        # operator (overloads, which Julia dispatches between).
+        op_of(dem) = (n = C.extract_function_name(dem); n == "operator" ? "operator()" : n)
+        by_name = Dict{String,Set{String}}()
+        for (m, dem, _, now) in OPS
+            push!(get!(Set{String}, by_name, now), op_of(dem))
+        end
+        @test all(s -> length(s) == 1, values(by_name))
+        @test length(by_name) ==
+              length(unique(op_of(d) * "|" * C.extract_class_name(d) for (_, d, _, _) in OPS))
+    end
+
+    @testset "old metadata re-wraps to the same names" begin
+        # The build's spelling before 2026-11-18, as compilation_metadata.json
+        # holds it until a rebuild: the parameter list in the name.
+        for (raw, m, want) in [
+                ("geo::V_operator<(geo::V const&) const", "_ZNK3geo1VltERKS0_", "geo_V_operatorless"),
+                ("geo::V_operator>=(geo::V const&) const", "_ZNK3geo1VgeERKS0_", "geo_V_operatorgreaterassign"),
+                ("geo::V_operator->()",                   "_ZN3geo1VptEv",       "geo_V_operatorminusgreater"),
+                ("geo::V_operator->*(int)",               "_ZN3geo1VpmEi",       "geo_V_operatorminusgreatermul"),
+                ("geo::V_operator",                       "_ZNK3geo1VclEd",      "geo_V_operatorcall"),
+                ("geo::V_operator[]",                     "_ZNK3geo1VixEi",      "geo_V_operatorindex"),
+                # The class is the old build's (a return type in it); the operator is right.
+                ("bool geo::V_operator< <int>(int const&) const", "_ZNK3geo1VltIiEEbRKT_", "bool_geo_V_operatorless_int")]
+            @test (raw, F(raw, m)) == (raw, want)
+        end
+    end
+
+    @testset "only an operator symbol makes an operator" begin
+        # `Cls_foo_operator` spells `Cls::foo_operator` and also an
+        # `operator()` of a class `Cls_foo`; only the symbol tells them apart.
+        @test F("Cls_foo_operator", "_ZN3Cls12foo_operatorEv") == "Cls_foo_operator"
+        @test F("Cls_foo_operator", "_ZN7Cls_fooclEv") == "Cls_foo_operatorcall"
+        # A C function may be named `operator`; its symbol is its name.
+        @test F("operator", "operator") == "operator"
+        @test F("operator_less", "operator_less") == "operator_less"
+        # No symbol: the method proxy's short name, which is the member's own.
+        @test F("operator"; rename = false) == "operatorcall"
+        @test F("operator[]"; rename = false) == "operatorindex"
+        @test F("operator<(geo::V const&) const"; rename = false) == "operatorless"
+        @test F("operator+="; rename = false) == "operatorplusassign"
+        @test F("operator bool"; rename = false) == "operator_bool"
+    end
+
+    vec3 = "geo::Vec3"
+    call_d = _op_fn("operator",   vec3, "_ZNK3geo4Vec3clEd", [_p("t", "Cdouble", "double")])
+    index_i = _op_fn("operator[]", vec3, "_ZNK3geo4Vec3ixEi", [_p("i", "Cint", "int")])
+    less = _op_fn("operator<",  vec3, "_ZNK3geo4Vec3ltERKS0_", [_p("o", "Ptr{Cvoid}", "geo::Vec3 const&")])
+    sigs(code, name) = sort!([k for k in W._method_sig_keys(code) if startswith(k, name * "(")])
+    renamed(keys, from, to) = sort!([to * k[ncodeunits(from)+1:end] for k in keys])
+
+    @testset "operator() and operator[] keep their old shared name too" begin
+        code = _generate(:cpp, Any[call_d, index_i, less])
+        @test (W._assert_wrapper_parses(code, "NameSynth_ops"); true)
+        defined = W._defined_names(code)
+        exported = W._exported_names(code)
+        for n in ("geo_Vec3_operatorcall", "geo_Vec3_operatorindex", "geo_Vec3_operatorless",
+                  "geo_Vec3_operator")
+            @test n in defined
+            @test n in exported
+        end
+        @test length(sigs(code, "geo_Vec3_operatorcall")) == 1
+        @test length(sigs(code, "geo_Vec3_operatorindex")) == 1
+        # The old name has exactly the methods it had: one per operator here.
+        @test sigs(code, "geo_Vec3_operator") ==
+              sort!(vcat(renamed(sigs(code, "geo_Vec3_operatorcall"), "geo_Vec3_operatorcall", "geo_Vec3_operator"),
+                         renamed(sigs(code, "geo_Vec3_operatorindex"), "geo_Vec3_operatorindex", "geo_Vec3_operator")))
+        # `operator<` was named from its parameters; it has no old name to keep.
+        @test !occursin("geo_Vec3_operator_geo_Vec3", code)
+        @test isempty(W._OPERATOR_LEGACY)              # consumed by the run
+    end
+
+    @testset "where the two collided, the old name keeps one, as before" begin
+        call_i = _op_fn("operator", vec3, "_ZNK3geo4Vec3clEi", [_p("t", "Cint", "int")])
+        code = _generate(:cpp, Any[call_i, index_i])
+        @test (W._assert_wrapper_parses(code, "NameSynth_ops2"); true)
+        @test length(sigs(code, "geo_Vec3_operatorcall")) == 1
+        @test length(sigs(code, "geo_Vec3_operatorindex")) == 1
+        @test sigs(code, "geo_Vec3_operator") ==
+              renamed(sigs(code, "geo_Vec3_operatorindex"), "geo_Vec3_operatorindex", "geo_Vec3_operator")
+    end
+
+    @testset "the overload prediction sees the names the loop binds" begin
+        # `()` taking `int` and `long long` is one overload set disagreeing in
+        # width, so both positions are typed and both methods survive. Predicted
+        # under another name than the loop's, both would be `::Integer` and one
+        # would be dropped.
+        call_i = _op_fn("operator", vec3, "_ZNK3geo4Vec3clEi", [_p("t", "Cint", "int")])
+        call_x = _op_fn("operator", vec3, "_ZNK3geo4Vec3clEx", [_p("t", "Clonglong", "long long")])
+        code = _generate(:cpp, Any[call_i, call_x, index_i])
+        @test length(sigs(code, "geo_Vec3_operatorcall")) == 2
+        @test length(sigs(code, "geo_Vec3_operatorindex")) == 1
+    end
+
+    @testset "[wrap.rename] keyed on the old shared name still renames both" begin
+        code = _generate(:cpp, Any[call_d, index_i];
+                         extra = "[wrap.rename]\ngeo_Vec3_operator = \"vapply\"\n")
+        defined = W._defined_names(code)
+        @test "vapply" in defined
+        @test length(sigs(code, "vapply")) == 2
+        for n in ("geo_Vec3_operatorcall", "geo_Vec3_operatorindex", "geo_Vec3_operator")
+            @test !(n in defined)
+        end
+        # Keyed on the new name, it renames that operator alone.
+        code = _generate(:cpp, Any[call_d, index_i];
+                         extra = "[wrap.rename]\ngeo_Vec3_operatorindex = \"at\"\n")
+        defined = W._defined_names(code)
+        @test "at" in defined && "geo_Vec3_operatorcall" in defined
+        @test !("geo_Vec3_operatorindex" in defined)
+        @test sigs(code, "geo_Vec3_operator") ==
+              renamed(sigs(code, "geo_Vec3_operatorcall"), "geo_Vec3_operatorcall", "geo_Vec3_operator")
+    end
 end
