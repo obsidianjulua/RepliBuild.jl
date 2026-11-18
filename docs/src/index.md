@@ -4,130 +4,138 @@
 CurrentModule = RepliBuild
 ```
 
-Point RepliBuild at C or C++ source. It compiles the library, reads the ABI the
-compiler actually emitted, and writes a Julia module you can call. You drive it
-with a few verbs and a `replibuild.toml`. You do not write `ccall`s, and you do
-not maintain generated bindings.
+RepliBuild turns the source of a C or C++ library into a Julia module that
+calls it. It fetches the source, compiles the library, works out every
+function, struct, enum and class from the result, and writes the module.
 
-It wraps a library from its source, on your machine. It is not a replacement for
-BinaryBuilder and JLL packages, which ship prebuilt binaries for every platform.
-
-This site is the user manual. It has two halves, because using RepliBuild
-is two jobs:
-
-- **The recipe.** `replibuild.toml` is the whole interface: every fact about a
-  library that the compiler cannot tell RepliBuild — where the source comes
-  from and at which pin, the flags its build system would pass, its macros and
-  variadic functions, who frees what, which symbols are not API, what a
-  function should be called — is one key in that file, and nothing else is
-  ever written by hand. [The recipe](toml.md) explains the model and maps
-  everything a recipe can do.
-- **The wrapper.** What `wrap` writes is an ordinary Julia module. [Call a
-  wrapper](calling.md) is how C and C++ types, objects, overloads, strings and
-  standard-library values look from Julia, and [Ship a package](using-wrappers.md)
-  is how to build a Julia package on one.
-
-## I want to…
-
-| Goal | Page |
-|:-----|:-----|
-| Check the toolchain | [Install](install.md) |
-| Wrap a C/C++ project, start to finish | [Wrap a library](guide.md) |
-| Understand what the TOML is and what it can do | [The recipe](toml.md) |
-| Fill in macros, varargs, ownership, flags, excludes, renames | [Edit the TOML](config.md) |
-| Build from a pinned git tag, a tarball, or a Boost submodule set | [Dependencies](dependencies.md) |
-| Wrap a CMake project of several libraries as one module | [Graph mode](graph.md) |
-| Call the generated functions, structs, and C++ classes | [Call a wrapper](calling.md) |
-| Ship a Julia package on top of a wrapper | [Ship a package](using-wrappers.md) |
-| Reload a project you already wrapped | [Registry](use.md) |
-| Look up a function | [API](api.md) |
-| Something failed or is missing | [Troubleshooting](troubleshooting.md) |
-
-How RepliBuild is built — the dialect, the inheritance ABI, the pipeline — is
-under [Developer](developer.md). You do not need it to wrap a library.
-
-## First wrap
+**It does everything except what has to be stated, and what has to be stated
+goes in one file, `replibuild.toml`.** That is the design: where the source
+is, how the library is meant to be built, and the few things no compiler can
+know. Using RepliBuild well is knowing what to put in that file.
 
 ```julia
 using RepliBuild
 
-toml = RepliBuild.discover("path/to/project")   # writes replibuild.toml
-RepliBuild.build(toml)                          # clang → .so
-RepliBuild.wrap(toml)                           # .so → julia/MyProject.jl
+toml = RepliBuild.discover("path/to/mylib")     # writes replibuild.toml
+RepliBuild.build(toml)                          # compiles the library
+RepliBuild.wrap(toml)                           # writes julia/Mylib.jl
 
-include("path/to/project/julia/MyProject.jl")
-using .MyProject
+include("path/to/mylib/julia/Mylib.jl")
+using .Mylib
 ```
 
-Or all at once: `RepliBuild.discover("path/to/project", build=true, wrap=true)`.
-Then see what the wrapper is missing, fill in what discovery cannot see, and
-build and wrap again. That edit is the whole skill.
-[Wrap a library](guide.md) walks it; [Edit the TOML](config.md) is the
-reference.
+It builds from source, on your machine. It does not replace Julia's prebuilt
+binary packages (JLLs); it is for a library you build yourself, at the version
+and with the flags you choose.
 
-The project builds where it lives. `RepliBuild.register(toml)` then vendors the
-build to `~/.replibuild/` and adds a Julia package around it to your Julia
-environment, so `RepliBuild.use("myproject")` (`[project].name`) or
-`using MyProject` loads it in any session. The one-shot `discover` above ends by
-registering. A fresh install has an empty registry — `use("cjson")` does not work
-until you have registered that name yourself. See [Registry](use.md).
+## The manual
 
-## The verbs
+There are three things to do, and the manual is in that order.
 
-| Function | What it does |
-|:---------|:---------------|
-| `discover(path)` | Scan a source tree, write `replibuild.toml`. An existing one is kept unless `force=true`. With `build=true, wrap=true`, also build, wrap and `register`. |
-| `build(toml)` | Compile to a `.so` plus debug metadata, in the project. |
-| `wrap(toml)` | Emit `julia/<Module>.jl`, in the project. |
-| `register(toml)` | Build and wrap in place, vendor the build to `~/.replibuild/`, and add it to the Julia environment as a package. |
-| `use("name")` | Load a **registered** project: its vendored build, or a fresh one after an edit. |
-| `list_registry()` / `unregister("name")` | Inspect / drop registry entries. |
-| `search("xml")` | Browse Hub config *names* (does not install or register). |
-| `clean(toml)` | Remove `build/`, `julia/`, caches. `deps=false` keeps the vendored git clones. |
-| `info(toml)` | Print whether the library and wrapper exist. |
-| `check_environment()` | Report which toolchains this machine has. |
-| `scaffold_package("Name")` | Skeleton of a distributable Julia package. |
-| `ingest(so; headers=…)` | Experimental. Wrap a prebuilt **C** `.so`. |
+**1. [Set up](install.md).** Install the package and run
+`RepliBuild.check_environment()`. RepliBuild brings some of its tools and
+takes the rest from your system; the page says which. C libraries need almost
+nothing installed. C++ libraries need `clang++`.
 
-Every path takes a `replibuild.toml` (or a directory that contains one) and is
-idempotent: unchanged inputs hit the cache and return.
+**2. Write the recipe.** `replibuild.toml` is the only file you write.
 
-## What you edit
+| | |
+|:--|:--|
+| [Wrap your first library](guide.md) | The whole process once, on a small example. Start here. |
+| [What goes in the TOML](toml.md) | **The main page.** What to look for in your library, and the entry each thing needs. |
+| [Every key](config.md) | The lookup table: every key, its default, what it does. |
+| [Where the source comes from](dependencies.md) | How to feed it source: files in your project, a folder on disk, a git repository, a tarball, or several at once. Each behaves differently. |
+| [Several libraries](libraries.md) | Many sources into one library, a CMake project of several libraries with shared types, or two wrappers that link each other. |
+| [CMake projects](graph.md) | The `[graph]` section in detail. |
+| [Header-only libraries](header-only.md) | Libraries, or parts of an API, that live in headers. |
 
-`replibuild.toml` is the interface. Discovery writes the shape of the tree.
-You add the things it cannot see:
+**3. Use the wrapper.**
 
-- preprocessor macros and the headers they live in
-- typed overloads for variadic functions
-- which `char*` returns you own, and which free function releases them
-- compile flags, `-D` defines, include dirs, link libraries
-- paths that must not compile (tests, examples, CLIs)
-- C++ template instantiations you actually want in the wrapper
-- the pinned upstream the library comes from, and the parts of it that are not
-  the library
-- a short name for a function whose derived one is not usable
+| | |
+|:--|:--|
+| [Call the wrapper](calling.md) | How C and C++ functions, structs, strings, objects and containers look in Julia. |
+| [Load it anywhere](use.md) | `register` a finished wrapper and load it by name. |
+| [Build a package on it](using-wrappers.md) | Ship a Julia package that contains a wrapper. |
+| [Make it fast](performance.md) | What a call costs, C++ stubs compiled ahead of time, precompiling, and compiling a wrapper into a system image. |
+| [Debug it](debugging.md) | Step from Julia into the library's own source, and through the generated C++ call stubs. |
 
-Omit one of those and the build usually *succeeds* — the wrapper is just missing
-the thing, or leaks, or wraps an empty struct. [The recipe](toml.md) maps
-every key to what it does; the symptom → key table is in
-[Troubleshooting](troubleshooting.md).
+When something goes wrong: [Troubleshooting](troubleshooting.md), which is
+indexed by error message.
+
+## What you get
+
+The wrapper is a Julia module generated for one build of one library, and
+checked against that build. It is more than a list of foreign calls:
+
+- **It is correct by construction.** Every struct's layout, every signature and
+  every enum value comes from the compiled library, not from reading headers.
+  A struct Julia cannot lay out exactly is not guessed at. A function that
+  cannot be called safely becomes one that raises, never one that corrupts
+  memory.
+- **It speaks C++.** Methods, virtual dispatch, constructors and destructors,
+  overloads, default arguments, classes passed by value, `std::string`,
+  containers, inheritance. A C++ exception arrives as a Julia exception.
+  Objects can be owned by Julia's garbage collector.
+- **It is fast.** A C function is called directly, at the cost of a
+  hand-written call. C++ call stubs can be compiled ahead of time, the module
+  precompiles inside a package, and the package can be compiled into a system
+  image, so a program that calls C++ starts in about the time Julia does
+  ([Make it fast](performance.md)).
+- **It can be debugged, all the way down.** The library is built with its
+  debug information, so a crash names the C or C++ source line and a debugger
+  stops in the library's own code. The generated C++ call stubs have readable
+  source too, and a debugger steps through them between your Julia call and
+  the C++ method ([Debug it](debugging.md)).
+- **It documents itself.** Every function has a docstring with its Julia
+  signature and C types, and the module answers questions about sizes and
+  offsets.
+
+## What you put in the TOML
+
+RepliBuild finds the library's functions and types by itself. The recipe holds
+what it cannot find:
+
+- where the source is: files in the project, a folder, a git repository at a
+  commit, a tarball with a hash;
+- which of those files are tests, examples or tools, and not the library;
+- whether it is one library or several;
+- the flags and defines the library's own build would pass;
+- macros that are part of the API;
+- which extra arguments a `printf`-style function should accept;
+- which returned strings the caller must free, and with what;
+- C++ templates you want to use, such as `std::vector<double>`;
+- what to leave out, and what to rename.
+
+A missing entry usually does not fail the build. It gives a wrapper that is
+missing that thing. [What goes in the TOML](toml.md) is the checklist to go
+through for each library.
+
+## The commands
+
+| Command | Does |
+|:--------|:-----|
+| `check_environment()` | Checks the tools on this machine and says how to install what is missing. |
+| `discover(path)` | Scans a source folder and writes `replibuild.toml`. Keeps an existing one. |
+| `build(toml)` | Compiles the library. |
+| `wrap(toml)` | Writes the Julia module, `julia/<Name>.jl`. |
+| `info(toml)` | Says whether the library and the module exist. |
+| `clean(toml)` | Deletes everything built. |
+| `register(toml)` | Makes a finished wrapper loadable by name in any session. |
+| `use("name")` | Loads a registered wrapper, rebuilding it if the project changed. |
+| `list_registry()`, `unregister("name")` | Lists and removes registered wrappers. |
+| `search("xml")` | Lists ready-made recipes in RepliBuild-Hub. |
+| `scaffold_package("Name")` | Creates a Julia package that builds a library when installed. |
+
+Each takes the path of a `replibuild.toml`, or of the folder holding one.
+Running a command again when nothing changed does no work.
+[API](api.md) has the full signatures.
 
 ## Requirements
 
-- **Linux (x86-64 or AArch64) or Windows (x86-64).** Linux is ELF `.so`;
-  Windows is PE `.dll` under `x86_64-w64-windows-gnu` (mingw, MSYS2 CLANG64),
-  not MSVC. Both read DWARF through GNU binutils. macOS is refused at load — its
-  Mach-O plumbing and Apple's arm64 calling convention are not built.
-- **Julia 1.12 or 1.13**, the versions CI tests, and what `Project.toml`
-  admits (`julia = "1.12"`).
-- **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every
-  distribution has. Clang ships as a JLL; link/optimize/assemble run on Julia's
-  own libLLVM. On Windows that JLL borrows the MSYS2 CLANG64 sysroot for its
-  headers and CRT, and DWARF extraction needs GNU `objdump`.
-- **C++ libraries:** system LLVM/MLIR 21+, CMake 3.20+, and the JLCS dialect
-  library built against that LLVM. See [Install](install.md). Every machine
-  that *runs* a C++ wrapper needs the LLVM/MLIR and the dialect too, not only
-  the one that generated it ([Ship a package](using-wrappers.md#Deployment)).
-- **git**, for a `[dependencies]` entry of `type = "git"`.
+- **Linux** (x86-64 or AArch64) or **Windows** (x86-64, with MSYS2). macOS is
+  not supported.
+- **Julia 1.13 or 1.14.** For Julia 1.12, use the RepliBuild 4.5 releases.
+- For C++ libraries, `clang++` and LLVM 21 or newer.
 
-This manual writes `.so`; on Windows read `.dll`.
+[Set up](install.md) has the details. This manual writes `.so` for a library
+file; on Windows it is `.dll`.

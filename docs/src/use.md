@@ -1,159 +1,137 @@
-# Registry
+# Load it anywhere
 
-A project builds where it lives. You develop it there with `discover`, `build`
-and `wrap`, and load `julia/<Module>.jl` with `include`. When the wrapper is
-ready, `register` makes it loadable from anywhere: it vendors the build to
-`~/.replibuild/` and adds a Julia package around it to your Julia environment.
-Then either of these loads it, in any session:
+While you are working on a wrapper you load it with `include` and a path.
+`register` makes a finished one loadable by name, from any Julia session:
 
 ```julia
-M = RepliBuild.use("myproject")   # by registry name ([project].name)
-using MyProject                   # as a package, from the Julia environment
+RepliBuild.register("path/to/mathlib/replibuild.toml")
 ```
-
-A fresh install has an empty registry. `use` does not fetch Hub packages, and
-`search` does not register anything.
-
-## Register a project
 
 ```julia
-RepliBuild.register("path/to/project/replibuild.toml")
+# any later session
+using RepliBuild
+M = RepliBuild.use("mathlib")       # by the project's name
+
+using Mathlib                       # or as a package
 ```
 
-That:
+Nothing is registered until you register it. A new installation has no
+wrappers, and `use` does not download any.
 
-1. runs `build` and `wrap` on the project itself. When its build is current, the
-   build is a cache hit.
-2. copies the result (the wrapper, the library, its metadata) to
-   `~/.replibuild/builds/<hash>/`, where the hash covers the TOML, the sources,
-   the headers, the toolchain and RepliBuild itself;
-3. writes a Julia package around that build, `~/.replibuild/packages/<Module>/`,
-   and adds it to a Julia environment — by default the `@v#.#` environment, which
-   every session can load from.
+## What `register` does
 
-`discover(path; build=true, wrap=true)` does all of that in one call: it builds
-and wraps the project, then registers it. A bare `discover(path)` registers
-nothing, because there is no build to vendor yet.
+1. It runs `build` and `wrap` on the project, where the project is. If the
+   build is up to date this takes no time.
+2. It copies the result to `~/.replibuild/builds/`, so the registered copy
+   does not change while you keep working on the project.
+3. It adds the wrapper to a Julia environment as a package, by default the
+   environment every session loads from (`@v1.x`). That is what makes
+   `using Mathlib` work.
 
-Choose the environment with `env`:
+`discover(path; build = true, wrap = true)` ends by doing the same.
+
+### Choose the Julia environment
 
 ```julia
-RepliBuild.register(toml; env=:default)            # the @v#.# environment (default)
-RepliBuild.register(toml; env=:active)             # the active environment
-RepliBuild.register(toml; env="path/to/env")       # a specific environment
-RepliBuild.register(toml; env=nothing)             # none; `use` still loads it
+RepliBuild.register(toml)                          # the default environment
+RepliBuild.register(toml; env = :active)           # the active environment
+RepliBuild.register(toml; env = "path/to/env")     # a specific environment
+RepliBuild.register(toml; env = nothing)           # none: only `use` loads it
 ```
 
-`ENV["REPLIBUILD_JULIA_ENV"]` (`default`, `active`, `none`, or a path) changes
-the default. `register` only adds to environments: it never changes a package's
-own Project.toml. An environment without RepliBuild gets the copy that built the
-wrapper; one that already has RepliBuild keeps it.
+`ENV["REPLIBUILD_JULIA_ENV"]` sets the default: `default`, `active`, `none`,
+or a path. Set it to `none` while experimenting, so trial wrappers stay out of
+your environment.
 
-`register(toml; build=false)` records the project without building it. The
-first `use` builds and vendors it.
+## What `use` does
 
-A [graph](graph.md) project registers as one unit: the graph module, its
-manifest and every library's directory are vendored together, and `use(name)`
-returns the graph module (`use("libwebp").Webp`). Its hash covers every file of
-the CMake project, since CMake files decide every flag.
+`use("name")` checks whether the project changed since it was registered.
 
-## What `use` loads
-
-`use("name")` compares the project's inputs with the build it vendored:
-
-- **Unchanged:** it loads the vendored build. No compiler runs.
-- **Edited** (sources, headers, TOML, dependencies, the toolchain, or a new
-  RepliBuild): it builds and wraps the project where it lives, vendors the new
-  build, points the package at it, and loads it. You do not register again.
-- **The project moved or was deleted:** it loads the last vendored build, with
-  a warning. Register the project again from its new place to rebuild it.
-
-A project registered by an earlier RepliBuild points at the copy of its sources
-that version made inside the registry, and `use` keeps building that copy.
-Register the project again, from the project, to move it to the new scheme.
+- **Not changed:** it loads the registered copy. Nothing is compiled.
+- **Changed** (the TOML, the sources, the compiler, or RepliBuild itself): it
+  builds and wraps the project again, registers the new result and loads it.
+  You do not call `register` again.
+- **The project folder is gone:** it loads the last registered copy and warns.
 
 ```julia
-RepliBuild.use("myproject"; force_rebuild=true)
+RepliBuild.use("mathlib"; force_rebuild = true)    # rebuild from nothing first
 ```
 
-`force_rebuild=true` builds the project from nothing first: it deletes the
-project's `build/`, `julia/` and `.replibuild_cache/`, so git dependencies are
-fetched again. Use it once after an upgrade whose notes say a fix needs a
-rebuild ([Changelog](release-notes.md)).
+`force_rebuild = true` deletes the project's `build/`, `julia/` and
+`.replibuild_cache/` first, so fetched sources are downloaded again. Use it
+after a RepliBuild upgrade whose [changelog](release-notes.md) says a fix needs
+a rebuild.
 
-`using MyProject` loads whatever build was vendored last: after an edit, run
-`use("myproject")` (or `register` again) to vendor the new one, then start a new
-session. Each build is vendored to a folder of its own, so a session that has the
-old one loaded keeps it, and on Windows no open library is ever overwritten.
+`using Mathlib` loads the copy registered last. After you edit the project,
+call `use("mathlib")` once to register the new build, then start a new session.
 
-Call `use` at top level. It defines the module while your code runs, so a
-function that calls `use` and then calls into the module fails with
-`method too new to be called from this world context`. Inside such a function,
-write `Base.@invokelatest M.f(x)`.
+Call `use` at the top level, not inside a function that then calls into the
+module ([Call the wrapper](calling.md#Load-it)).
 
-**Iterating in one session.** `use` is also the REPL loop. Edit the project or
-its TOML, call `use` again, and in the same session it rebuilds, vendors the
-new build to a folder of its own and returns a new module: about 2.5 s after an
-edit on a one-header C library, 3 s on a C++ one. Keep the module it returns
-(`M = RepliBuild.use("myproject")`). One you got earlier keeps calling the
-build it was loaded from, so nothing you hold breaks. Including the project's
-own `julia/MyProject.jl` cannot iterate like this: the rebuild in place has to
-replace a library the session has loaded, which Windows refuses. Each edit
-leaves its vendored build under `~/.replibuild/builds/`, and nothing deletes
-the older ones (`unregister` removes the last), so clear them out by hand now
-and then.
+## Edit and reload in one session
 
-## Inspect and remove
+`use` is also the fastest way to iterate. Edit the TOML or the sources, call
+`use` again, and it rebuilds and returns a **new** module in a few seconds:
 
 ```julia
-RepliBuild.list_registry()          # each project, its vendored build, its environment
-RepliBuild.unregister("myproject")
+M = RepliBuild.use("mathlib")
+# edit replibuild.toml …
+M = RepliBuild.use("mathlib")       # rebuilt; M is the new module
 ```
 
-`unregister` removes what the registry made: the vendored build, the package,
-and the package's place in the Julia environment. It never touches the project.
-On Windows, a session that has loaded the vendored build (through `use`, or
-`using` the package) still has its DLL open, so `unregister` there warns and
-leaves that build's folder behind; delete it after the session ends.
+Keep the module `use` returns. One you got earlier keeps working with the
+build it was loaded from.
 
-`ENV["REPLIBUILD_HOME"]` relocates the whole tree (`registry/`, `builds/`,
-`packages/`).
+Each rebuild leaves a folder under `~/.replibuild/builds/`. Nothing deletes
+the old ones, so clear that folder out now and then.
 
-Missing name:
+## List and remove
+
+```julia
+RepliBuild.list_registry()
+RepliBuild.unregister("mathlib")
+```
+
+`unregister` removes the registered copy and the package. It never touches
+your project. On Windows, a session that has the wrapper loaded keeps its
+library open: `unregister` then warns and leaves that folder, which you can
+delete once the session has ended.
+
+`ENV["REPLIBUILD_HOME"]` moves `~/.replibuild` somewhere else.
+
+A name that is not registered gives:
 
 ```
 Package 'cjson' not in registry. Use RepliBuild.list_registry() to see available packages,
-or RepliBuild.register("path/to/replibuild.toml") to add one. A RepliBuild-Hub config is
-registered the same way, from a clone: <clone>/packages/<name>/replibuild.toml.
+or RepliBuild.register("path/to/replibuild.toml") to add one.
 ```
 
-That is the empty-registry case. Wrap the library, or `register` its TOML.
+## Ready-made recipes
 
-## Hub catalog (optional)
-
-[RepliBuild-Hub](https://github.com/obsidianjulua/RepliBuild-Hub) is a collection
-of ready-made `replibuild.toml` files — lua, sqlite, cjson, zlib, box2d, and
-others. `search` lists them. It does **not** install them.
+[RepliBuild-Hub](https://github.com/obsidianjulua/RepliBuild-Hub) is a
+collection of finished `replibuild.toml` files: lua, sqlite, cJSON, zlib,
+box2d and others.
 
 ```julia
-RepliBuild.search()          # names, versions, tags
-RepliBuild.search("xml")
+RepliBuild.search()              # list them
+RepliBuild.search("xml")         # by keyword
 ```
 
-To load one, register its TOML from a clone of the Hub, then `use` it or
-`using` it. `search` prints the same steps:
+`search` only lists. To use one, clone the Hub and register the recipe:
+
+```bash
+git clone https://github.com/obsidianjulua/RepliBuild-Hub
+```
 
 ```julia
-RepliBuild.register("path/to/RepliBuild-Hub/packages/cjson/replibuild.toml")
+RepliBuild.register("RepliBuild-Hub/packages/cjson/replibuild.toml")
 C = RepliBuild.use("cjson")
 ```
 
-`register` builds the package where its TOML lives, in the Hub clone: it fetches
-the library's source at the pinned commit and compiles it, which can take
-minutes.
+`register` downloads the library's source at the commit the recipe names and
+compiles it, which can take minutes for a large library.
 
-`ENV["REPLIBUILD_HUB_URL"]` points `search` at a private mirror of that index.
-It does not change `use`.
+## CMake projects
 
-What the generated functions look like: [Call a wrapper](calling.md).
-The wrap path if you are starting from source: [Wrap a library](guide.md).
+A [CMake project](graph.md) registers as one unit, and `use` returns its top
+module: `RepliBuild.use("libwebp").Webp`.

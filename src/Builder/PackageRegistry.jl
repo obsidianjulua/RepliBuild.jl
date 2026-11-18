@@ -380,6 +380,21 @@ function _replibuild_compat()::String
 end
 
 """
+    _wrapper_deps() -> Vector{Pair{String,String}}
+
+The packages a generated wrapper loads, name to UUID, sorted by name: `using
+Libdl` and `import RepliBuild` in both generators' headers. A package whose
+module includes a wrapper must declare every one of them, or Julia refuses the
+wrapper's import ("package X does not have Libdl in its dependencies"). The
+registry's packages and `scaffold_package` take their `[deps]` from here; the
+scaffold listed RepliBuild alone and could not load the wrapper it built
+(2026-11-17). `test_registry.jl` reads the import lines out of the generators
+and holds them equal to this list.
+"""
+_wrapper_deps() = ["Libdl" => string(Base.PkgId(Libdl).uuid),
+                   "RepliBuild" => _replibuild_uuid()]
+
+"""
 Write `packages/<Module>/`: a Julia package whose `src/<Module>.jl` includes
 the vendored wrapper in `builds/<hash>/`.
 
@@ -395,10 +410,7 @@ function _write_package(module_name::String, uuid::UUID, version::VersionNumber,
         "name" => module_name,
         "uuid" => string(uuid),
         "version" => string(version),
-        "deps" => Dict{String,Any}(
-            "Libdl" => string(Base.PkgId(Libdl).uuid),
-            "RepliBuild" => _replibuild_uuid(),
-        ),
+        "deps" => Dict{String,Any}(_wrapper_deps()),
         # Caret compat: at least the RepliBuild that generated the wrapper.
         "compat" => Dict{String,Any}(
             "RepliBuild" => _replibuild_compat(),
@@ -1206,14 +1218,16 @@ function _replibuild_uuid()::String
 end
 
 function _project_toml(name::String, uuid::UUID)::String
-    rb_uuid = _replibuild_uuid()
+    # Joined with a bare newline: the block's indentation is stripped from the
+    # literal only, never from an interpolated value.
+    deps = join(("$pkg = \"$id\"" for (pkg, id) in _wrapper_deps()), "\n")
     """
     name = "$name"
     uuid = "$uuid"
     version = "0.1.0"
 
     [deps]
-    RepliBuild = "$rb_uuid"
+    $deps
 
     [compat]
     julia = "1.10"

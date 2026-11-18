@@ -16,23 +16,27 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
-        "Install" => "install.md",
-        "Wrap a library" => "guide.md",
-        "The recipe" => [
-            "What it is for" => "toml.md",
-            "Edit the TOML" => "config.md",
-            "Dependencies" => "dependencies.md",
-            "Graph mode" => "graph.md",
+        "Set up" => "install.md",
+        "Write the recipe" => [
+            "Wrap your first library" => "guide.md",
+            "What goes in the TOML" => "toml.md",
+            "Every key" => "config.md",
+            "Where the source comes from" => "dependencies.md",
+            "Several libraries" => "libraries.md",
+            "CMake projects" => "graph.md",
+            "Header-only libraries" => "header-only.md",
         ],
-        "The wrapper" => [
-            "Call a wrapper" => "calling.md",
-            "Ship a package" => "using-wrappers.md",
-            "Registry" => "use.md",
+        "Use the wrapper" => [
+            "Call the wrapper" => "calling.md",
+            "Load it anywhere" => "use.md",
+            "Build a package on it" => "using-wrappers.md",
+            "Make it fast" => "performance.md",
+            "Debug it" => "debugging.md",
         ],
-        "API" => "api.md",
         "Troubleshooting" => "troubleshooting.md",
+        "API" => "api.md",
         "Changelog" => "release-notes.md",
-        "Developer" => [
+        "Internals (contributors)" => [
             "Overview" => "developer.md",
             "JLCS / MLIR" => "mlir.md",
             "The inheritance ABI" => "inheritance-abi.md",
