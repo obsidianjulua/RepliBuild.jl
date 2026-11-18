@@ -179,6 +179,20 @@ entry came from.
 _sorted_classes(vtinfo) = sort!(collect(vtinfo.classes); by = first)
 
 """
+    _has_type_info(class_info) -> Bool
+
+Whether a class gets a `jlcs.type_info`, and so virtual dispatch for its
+methods (a `jlcs.vcall` names its class's type_info): a class the DWARF
+defines (it has a size) that has data members or virtual methods. The test
+was "has data members", which left out every class that adds only methods to
+its base, and their virtual methods were called by symbol: `Dog_name(puppy)`
+ran `Dog::name` (2026-11-17). An empty tag type and a declaration still get
+none.
+"""
+_has_type_info(class_info) =
+    class_info.size != 0 && (!isempty(class_info.members) || !isempty(class_info.virtual_methods))
+
+"""
     _sanitize_mlir_symbol(name) -> String
 
 C++ type name → valid MLIR symbol identifier (shared by type_info emission
@@ -242,6 +256,16 @@ function generate_type_info_ir(class_name::String, info::DWARFParser.ClassInfo, 
     # Our DWARFParser handles it.
     # If not found in members, and we expect one...
     # Let's rely on what DWARFParser gives us.
+    #
+    # Except for a class that adds no data members at all (a subclass adding
+    # only methods, an interface implementation): its DIE has no member, the
+    # vptr is its primary base's, and `[]` is not a field list the dialect
+    # parses. Such a class is described by the one field it is dispatched
+    # through, the vptr (`_has_type_info`).
+    if isempty(field_types) && has_vptr
+        push!(field_types, "!llvm.ptr")
+        push!(field_offsets, info.vtable_ptr_offset)
+    end
 
     field_types_str = join(field_types, ", ")
     # fieldOffsets is an ArrayAttr — parser calls FieldParser<ArrayAttr>::parse after consuming
@@ -424,7 +448,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
 
     gen_pre = Set{String}()
     for (class_name, class_info) in _sorted_classes(vtinfo)
-        (class_info.size == 0 || isempty(class_info.members)) && continue
+        _has_type_info(class_info) || continue
         for method in class_info.virtual_methods
             get(vtinfo.method_addresses, method.mangled_name, UInt64(0)) == 0 && continue
             method.mangled_name in wrappable && continue
@@ -501,9 +525,9 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
     generated_symbols = Set{String}()
 
     for (class_name, class_info) in _sorted_classes(vtinfo)
-        if class_info.size == 0; continue; end
-        # Skip classes with no members (empty tag types, stdlib internals, etc.)
-        if isempty(class_info.members); continue; end
+        # Declarations and classes with neither members nor virtual methods
+        # (empty tag types, stdlib internals, etc.) get none.
+        _has_type_info(class_info) || continue
 
         # vtable_addr might be useful metadata, but TypeInfoOp doesn't store it in the new format.
         # We could add it as an attribute if needed.
@@ -576,7 +600,7 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
         # not dynamic dispatch.
         vcall_info = Dict{String, NamedTuple{(:class, :slot, :vtable_offset), Tuple{String,Int,Int}}}()
         for (class_name, class_info) in _sorted_classes(vtinfo)
-            (class_info.size == 0 || isempty(class_info.members)) && continue
+            _has_type_info(class_info) || continue
             cls_sym = _sanitize_mlir_symbol(class_name)
             for method in class_info.virtual_methods
                 method.slot < 0 && continue
