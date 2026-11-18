@@ -6241,7 +6241,7 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
 
     # Character types
     "char" => "Cchar",
-    "signed char" => "Cchar",
+    "signed char" => "Int8",
     "unsigned char" => "Cuchar",
     "wchar_t" => "Cwchar_t",
     "char8_t" => "UInt8",
@@ -11579,7 +11579,7 @@ const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
     "signed" => "Cint",
     "signed int" => "Cint",
     "unsigned" => "Cuint",
-    "signed char" => "Cchar",
+    "signed char" => "Int8",
     "short int" => "Cshort",
     "signed short" => "Cshort",
     "signed short int" => "Cshort",

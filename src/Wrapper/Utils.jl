@@ -3043,7 +3043,121 @@ enumerator. GeneratorC and the C arm of the varargs path read this one list.
 """
 const _C_INTEGER_PARAM_CTYPES = ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
                                  "Clonglong", "Culonglong", "Csize_t", "Cssize_t",
-                                 "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64")
+                                 "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64",
+                                 "Cchar")
+
+"""
+    _char_param_ctype(julia_type, c_type) -> String
+
+The ccall type of a parameter taken BY VALUE as a character type, from its C
+spelling: plain `char` is `Cchar`, the host's `char` (`Int8` on x86-64,
+`UInt8` on AArch64), and `signed char` is `Int8` on every host. The metadata
+spells a plain `char` parameter `UInt8` (the parameter map's answer, which
+`char*` positions rely on) and `signed char` `Cchar`, and `ccall` extends an
+`i8` by the Julia type's sign: a `UInt8` is passed `zeroext` where clang's
+callee reads a `char` `signext` on x86-64. Any other parameter keeps
+`julia_type`, a pointer to `char` included. Both generators' parameter step
+(`_ccall_param_type`) asks this, so a re-wrap fixes old metadata.
+"""
+function _char_param_ctype(julia_type::AbstractString, c_type::AbstractString)::String
+    ct = strip(replace(String(c_type), r"\b(?:const|volatile)\b" => ""))
+    ct == "char" && julia_type in ("UInt8", "Int8", "Cchar") && return "Cchar"
+    ct == "signed char" && julia_type in ("Int8", "Cchar") && return "Int8"
+    return String(julia_type)
+end
+
+"""
+    _integer_arg_conversion(ctype, name) -> String
+
+The expression a wrapper body converts an integer argument `name` to its C
+type `ctype` with. `Cint(x)` for every integer but plain `char`: C converts
+any integer to a `char` implicitly, and `char` is signed on one host and
+unsigned on another, so `0x41`, `65` and `Cchar(65)` are one argument, and so
+are `250` and `Cchar(-6)` on a signed-`char` host. Any value that is a valid
+`char` or a valid byte (-128..255) is taken as its byte; anything else is an
+`InexactError`. An enum passes through `Integer`, as `Cint(e)` does. The C
+generator, the C arm of the varargs path, and both C++ bodies (`ccall` and
+Tier 2) convert through this.
+"""
+_integer_arg_conversion(ctype::AbstractString, name::AbstractString) =
+    ctype == "Cchar" ?
+        "(let v = Base.Integer($name); -128 <= v <= 255 || Base.throw(Base.InexactError(:Cchar, Cchar, $name)); v % Cchar end)" :
+        "$ctype($name)"
+
+"""
+    _open_enum_type_names(chunks) -> Set{String}
+
+The enum types of an enum section (`_EnumChunk`s) that are open enums
+(`_open_enum_chunk`), an alias of one included: every pending enum but a
+bitmask, which is an integer alias (`_is_bitflag_enum`, decided on the same
+values the renderer decides on).
+"""
+function _open_enum_type_names(chunks)::Set{String}
+    open = Set{String}(c.name for c in chunks
+                       if c isa _PendingEnum && !_is_bitflag_enum(last.(c.members)))
+    for c in chunks
+        c isa _PendingEnumAlias && c.canonical in open && push!(open, c.name)
+    end
+    return open
+end
+
+"""
+    _bitfield_signed_type(member, dwarf_structs) -> Union{Nothing,String}
+
+The Julia type a SIGNED bitfield is read as, or `nothing` for one read as
+unsigned. A bitfield's value is its declared type's: `int c:7` holds
+-64..63, `unsigned d:17` 0..131071. The type is the member's declared one
+(`Cint`, `Int64`), plain `char` the host's (`Cchar`), and an enum's its
+underlying integer's (`__enum__<name>`'s `julia_type`), which is how the
+compiler reads an enum bitfield. A width the type cannot hold (C++ allows
+`int x:40`) is `nothing`, as are `bool` and every unsigned type.
+"""
+function _bitfield_signed_type(member, dwarf_structs)::Union{Nothing,String}
+    bits = get(member, "bit_size", 0)
+    bits isa Integer || return nothing
+    ct = String(strip(replace(String(get(member, "c_type", "")), r"\b(?:const|volatile)\b" => "")))
+    t = if ct == "char"
+        "Cchar"
+    elseif ct == "signed char"
+        "Int8"
+    else
+        name = replace(ct, r"^enum\s+" => "")
+        key = "__enum__" * name
+        haskey(dwarf_structs, key) || (key = "__enum__" * last(split(name, "::")))
+        haskey(dwarf_structs, key) ? String(get(dwarf_structs[key], "julia_type", "")) :
+                                     String(get(member, "julia_type", ""))
+    end
+    width = get(Dict("Int8" => 8, "Int16" => 16, "Int32" => 32, "Int64" => 64), _concrete_ctype(t), 0)
+    return 1 <= bits <= width ? t : nothing
+end
+
+"""
+    _bitfield_sign_extend(raw, bits, T) -> String
+
+The expression reading a signed bitfield from `raw`, the field's `bits` bits
+as an unsigned integer: shifted to the top of 64 bits and back as `Int64`,
+an arithmetic shift, then narrowed to `T` (which holds it:
+`_bitfield_signed_type`).
+"""
+_bitfield_sign_extend(raw::AbstractString, bits::Integer, T::AbstractString) =
+    "(Base.reinterpret(Int64, Base.UInt64($raw) << $(64 - bits)) >> $(64 - bits)) % $T"
+
+"""
+    _bitfield_signed_store(setter, bits, T) -> String
+
+The first lines of a signed bitfield's setter: a value outside the field's
+range (-2^(bits-1) .. 2^(bits-1)-1) is an `InexactError`, as a conversion
+to a type that narrow would be, and one inside is rebound to its two's
+complement bits, which the setter's unsigned store takes as it takes an
+unsigned field's value.
+"""
+function _bitfield_signed_store(setter::AbstractString, bits::Integer, T::AbstractString)
+    lo = -(Int128(1) << (bits - 1))
+    hi = (Int128(1) << (bits - 1)) - 1
+    mask = (UInt128(1) << bits) - 1
+    return "    ($lo <= v <= $hi) || Base.throw(Base.InexactError(:$setter, $T, v))\n" *
+           "    v = (v % UInt64) & Base.UInt64($mask)\n"
+end
 
 """
     _method_sig_keys(chunk) -> Vector{String}
